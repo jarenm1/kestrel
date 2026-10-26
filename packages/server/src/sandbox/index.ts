@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { spawn } from "node:child_process"
 import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 
 /** Where the per-task home is mounted inside the sandbox. */
@@ -65,6 +65,22 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     opts.gitCommonDir,
     opts.gitCommonDir,
   ]
+  // The agent commits through the shared git dir, but must not control what host-side git runs:
+  // repo config (fsmonitor, filters, diff drivers, ...) and hooks stay read-only, other tasks'
+  // worktree admin dirs are read-only, and this task's admin dir keeps its `commondir`/`gitdir`
+  // pointers read-only so they cannot redirect host git to an agent-made git dir.
+  for (const name of ["config", "hooks"]) {
+    const path = join(opts.gitCommonDir, name)
+    if (existsSync(path)) argv.push("--ro-bind", path, path)
+  }
+  const adminRoot = join(opts.gitCommonDir, "worktrees")
+  const adminDir = join(adminRoot, basename(opts.worktreePath))
+  if (existsSync(adminRoot)) argv.push("--ro-bind", adminRoot, adminRoot)
+  if (existsSync(adminDir)) argv.push("--bind", adminDir, adminDir)
+  for (const name of ["commondir", "gitdir"]) {
+    const path = join(adminDir, name)
+    if (existsSync(path)) argv.push("--ro-bind", path, path)
+  }
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
   for (const file of SYSTEM_RO_FILES) {
     if (existsSync(file)) argv.push("--ro-bind", file, file)
@@ -103,6 +119,11 @@ export interface LaunchRequest {
   readonly homeDir: string
   /** X display string (e.g. ":101") of the task desktop, or null. */
   readonly display: string | null
+  /**
+   * Git common dir of the task's repo, derived from server state (never from the worktree,
+   * whose `.git` file the agent can rewrite).
+   */
+  readonly gitCommonDir: string
   /** Variables beyond the base allowlist (CLOUDAGENTS_*, broker env). Never host env. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -198,18 +219,9 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       return { file: "sh", args: ["-c", req.command], env, cwd: req.worktreePath, home }
     }
 
-    const common = yield* runProcess("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      cwd: req.worktreePath,
-      env: { PATH: process.env.PATH ?? "" },
-    })
-    if (common.exitCode !== 0) {
-      return yield* Effect.fail(
-        new InternalError({ message: `cannot resolve git common dir: ${(common.stderr || common.stdout).trim()}` }),
-      )
-    }
     const argv = buildBwrapArgv({
       worktreePath: req.worktreePath,
-      gitCommonDir: common.stdout.trim(),
+      gitCommonDir: req.gitCommonDir,
       homeDir: req.homeDir,
       display: displayNumber(req.display),
       env,

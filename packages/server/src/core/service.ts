@@ -332,7 +332,7 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const diff = yield* workspace
-            .diff(task.worktreePath, task.baseBranch)
+            .diff({ repoPath: join(config.reposDir, task.repoId), worktreePath: task.worktreePath, baseBranch: task.baseBranch })
             .pipe(Effect.mapError(toInternal("diff")))
           return { baseBranch: task.baseBranch, diff }
         }),
@@ -406,6 +406,7 @@ export const CoreLive = Layer.effect(
           const launch = yield* prepareLaunch({
             settings: sandboxSettings,
             worktreePath: task.worktreePath,
+            gitCommonDir: join(config.reposDir, task.repoId, ".git"),
             homeDir: join(config.homesDir, task.id),
             display: desktopNow.display,
             env: { CLOUDAGENTS_TASK_ID: task.id },

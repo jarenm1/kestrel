@@ -185,6 +185,7 @@ export const AgentHarnessLive = Layer.effect(
             const launch = yield* prepareLaunch({
               settings,
               worktreePath: task.worktreePath,
+              gitCommonDir: join(config.reposDir, task.repoId, ".git"),
               homeDir,
               display,
               env: {
