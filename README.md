@@ -31,3 +31,5 @@ Checks: `nix develop -c bun run typecheck`.
 - **Production box:** runs on the host machine with `nix run .#box`, which reads `CLOUDAGENTS_CONTROL_URL` and `CLOUDAGENTS_BOX_TOKEN` from `.box.env` (gitignored). It does not update itself: after server changes land on `main`, `git pull` on the host and restart it.
 
 Don't run a box against production with the production token from your machine: the control plane keeps one box and a new connection replaces the live one.
+
+Pull requests get a Workers Builds preview deployment; the link appears in the PR checks.
