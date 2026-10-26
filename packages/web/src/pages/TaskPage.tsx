@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { useParams } from "react-router-dom"
+import { BoxOfflineBanner } from "../components/BoxStatus"
 import { ChatPanel } from "../components/ChatPanel"
 import { DesktopViewer } from "../components/DesktopViewer"
 import { DiffPanel } from "../components/DiffPanel"
@@ -20,39 +21,42 @@ function TaskView({ taskId }: { taskId: string }) {
   const { task } = state
 
   return (
-    <div className="split">
-      <section className="pane">
-        <header className="pane-header">
-          <strong>{task?.title ?? "Loading…"}</strong>
-          {task && <StatusBadge status={task.status} />}
-          {task && <span className="muted mono">{task.branch}</span>}
-        </header>
-        {state.error && <div className="error">{state.error}</div>}
-        <ChatPanel
-          taskId={taskId}
-          messages={state.messages}
-          runs={state.runs}
-          output={state.output}
-          onMessage={state.upsertMessage}
-          onRun={state.upsertRun}
-        />
-      </section>
-      <section className="pane">
-        <nav className="tabs">
-          <button className={tab === "desktop" ? "tab active" : "tab"} onClick={() => setTab("desktop")}>
-            Desktop
-          </button>
-          <button className={tab === "diff" ? "tab active" : "tab"} onClick={() => setTab("diff")}>
-            Diff
-          </button>
-        </nav>
-        <div className="tab-body" hidden={tab !== "desktop"}>
-          <DesktopViewer taskId={taskId} />
-        </div>
-        <div className="tab-body" hidden={tab !== "diff"}>
-          <DiffPanel taskId={taskId} />
-        </div>
-      </section>
-    </div>
+    <>
+      <BoxOfflineBanner />
+      <div className="split">
+        <section className="pane">
+          <header className="pane-header">
+            <strong>{task?.title ?? "Loading…"}</strong>
+            {task && <StatusBadge status={task.status} />}
+            {task && <span className="muted mono">{task.branch}</span>}
+          </header>
+          {state.error && <div className="error">{state.error}</div>}
+          <ChatPanel
+            taskId={taskId}
+            messages={state.messages}
+            runs={state.runs}
+            output={state.output}
+            onMessage={state.upsertMessage}
+            onRun={state.upsertRun}
+          />
+        </section>
+        <section className="pane">
+          <nav className="tabs">
+            <button className={tab === "desktop" ? "tab active" : "tab"} onClick={() => setTab("desktop")}>
+              Desktop
+            </button>
+            <button className={tab === "diff" ? "tab active" : "tab"} onClick={() => setTab("diff")}>
+              Diff
+            </button>
+          </nav>
+          <div className="tab-body" hidden={tab !== "desktop"}>
+            <DesktopViewer taskId={taskId} />
+          </div>
+          <div className="tab-body" hidden={tab !== "diff"}>
+            <DiffPanel taskId={taskId} />
+          </div>
+        </section>
+      </div>
+    </>
   )
 }

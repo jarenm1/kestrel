@@ -1,11 +1,17 @@
 import { Effect, Either, Schema } from "effect"
 import {
+  BoxStatus,
+  Connection,
+  ControlPaths,
   CreateRepoBody,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  GithubRepo,
+  Me,
   Message,
   Paths,
+  PutApiKeyBody,
   Repo,
   Run,
   SendMessageResponse,
@@ -17,6 +23,17 @@ export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
     this.name = "ApiError"
+  }
+}
+
+type UnauthorizedListener = () => void
+const unauthorizedListeners = new Set<UnauthorizedListener>()
+
+/** Fires whenever any API call is rejected with 401 (session missing or expired). */
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener)
+  return () => {
+    unauthorizedListeners.delete(listener)
   }
 }
 
@@ -34,7 +51,7 @@ function errorMessage(text: string, fallback: string): string {
 
 const request = <A, I>(
   schema: Schema.Schema<A, I>,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Effect.Effect<A, ApiError> =>
@@ -43,6 +60,7 @@ const request = <A, I>(
       try: () =>
         fetch(SERVER_URL + path, {
           method,
+          credentials: "include",
           headers: body === undefined ? undefined : { "content-type": "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
         }),
@@ -52,11 +70,15 @@ const request = <A, I>(
       try: () => res.text(),
       catch: (e) => new ApiError(res.status, String(e)),
     })
+    if (res.status === 401) {
+      unauthorizedListeners.forEach((listener) => listener())
+    }
     if (!res.ok) {
       return yield* Effect.fail(new ApiError(res.status, errorMessage(text, res.statusText)))
     }
+    // 204 and other empty bodies carry no JSON; they decode as `undefined`.
     const json = yield* Effect.try({
-      try: () => JSON.parse(text) as unknown,
+      try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
       catch: () => new ApiError(res.status, "Server returned invalid JSON"),
     })
     return yield* Schema.decodeUnknown(schema)(json).pipe(
@@ -71,6 +93,18 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
   })
 
 export const api = {
+  // Control plane (served by the Worker).
+  me: () => run(request(Me, "GET", ControlPaths.me)),
+  logout: () => run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.logout))),
+  connections: () => run(request(Schema.Array(Connection), "GET", ControlPaths.connections)),
+  putApiKey: (provider: string, body: PutApiKeyBody) =>
+    run(request(Connection, "PUT", ControlPaths.connection(provider), body)),
+  deleteConnection: (provider: string) =>
+    run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
+  githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
+  box: () => run(request(BoxStatus, "GET", ControlPaths.box)),
+
+  // Agent box (relayed by the Worker).
   listRepos: () => run(request(Schema.Array(Repo), "GET", Paths.repos)),
   addRepo: (body: CreateRepoBody) => run(request(Repo, "POST", Paths.repos, body)),
   getRepo: (repoId: string) => run(request(Repo, "GET", Paths.repo(repoId))),

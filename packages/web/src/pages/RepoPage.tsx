@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react"
 import { Link, useParams } from "react-router-dom"
 import type { Repo, Task } from "@cloudagents/protocol"
 import { api } from "../api/client"
+import { BoxOfflineBanner } from "../components/BoxStatus"
 import { StatusBadge } from "../components/StatusBadge"
 import { errorText, formatTime } from "../util"
 
@@ -71,6 +72,7 @@ export function RepoPage() {
   return (
     <div className="page">
       <h1>{repo?.name ?? "Repository"}</h1>
+      <BoxOfflineBanner />
       {repo && <div className="muted mono">{repo.url}</div>}
       <form className="row-form" onSubmit={(e) => void createTask(e)}>
         <input placeholder="Task title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
