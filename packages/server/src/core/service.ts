@@ -18,6 +18,7 @@ import {
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
+import { prepareLaunch, runProcess, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -103,6 +104,7 @@ export const CoreLive = Layer.effect(
     const desktop = yield* DesktopManager
     const workspace = yield* WorkspaceService
     const credentials = yield* CredentialStore
+    const sandboxSettings = sandboxSettingsOf(config)
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
@@ -400,9 +402,20 @@ export const CoreLive = Layer.effect(
       execInTask: (taskId, command, timeoutMs) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          return yield* workspace
-            .exec(task.worktreePath, command, { timeoutMs })
-            .pipe(Effect.mapError(toInternal("exec")))
+          const desktopNow = yield* desktop.status(taskId)
+          const launch = yield* prepareLaunch({
+            settings: sandboxSettings,
+            worktreePath: task.worktreePath,
+            homeDir: join(config.homesDir, task.id),
+            display: desktopNow.display,
+            env: { CLOUDAGENTS_TASK_ID: task.id },
+            command,
+          }).pipe(Effect.mapError(toInternal("exec")))
+          return yield* runProcess(launch.file, launch.args, {
+            cwd: launch.cwd,
+            env: launch.env,
+            timeoutMs,
+          }).pipe(Effect.mapError(toInternal("exec")))
         }),
 
       shutdown: () =>

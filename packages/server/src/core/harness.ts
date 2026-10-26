@@ -5,7 +5,9 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { join } from "node:path"
 import { InternalError, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
+import { CredentialBroker } from "../broker"
 import { Config } from "../config"
+import { agentHome, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable } from "./state"
 
@@ -39,15 +41,6 @@ interface ActiveRun {
   resultText: string | null
 }
 
-const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
-  if (pid === undefined) return
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    // group already gone
-  }
-}
-
 const KILL_GRACE_MS = 3000
 
 export const AgentHarnessLive = Layer.effect(
@@ -56,6 +49,8 @@ export const AgentHarnessLive = Layer.effect(
     const config = yield* Config
     const store = yield* StateStore
     const hub = yield* EventHub
+    const broker = yield* CredentialBroker
+    const settings = sandboxSettingsOf(config)
     const runtime = yield* Effect.runtime<never>()
     const runFork = Runtime.runFork(runtime)
     const active = new Map<string, ActiveRun>()
@@ -84,6 +79,8 @@ export const AgentHarnessLive = Layer.effect(
 
     const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
       Effect.gen(function* () {
+        // The run's broker token dies with the run, whatever the outcome.
+        yield* broker.revoke(runId)
         const entry = active.get(runId)
         if (!entry) return
         active.delete(runId)
@@ -165,60 +162,73 @@ export const AgentHarnessLive = Layer.effect(
       spawn: (task, run, prompt, display) =>
         Effect.gen(function* () {
           const runDir = join(config.runsDir, run.id)
-          const mcpConfig = join(runDir, "mcp.json")
+          const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
-          yield* Effect.tryPromise({
-            try: async () => {
-              await mkdir(runDir, { recursive: true })
-              await writeFile(
-                mcpConfig,
-                JSON.stringify({ mcpServers: { cloudagents: { type: "http", url: mcpUrl } } }, null, 2),
-                "utf8",
-              )
-            },
-            catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
-          })
+          const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
+          const mcpConfigAgent = join(agentHome(settings, homeDir), ".cloudagents", "mcp.json")
 
-          const env: Record<string, string | undefined> = {
-            ...process.env,
-            CLOUDAGENTS_PROMPT: prompt,
-            CLOUDAGENTS_MCP_CONFIG: mcpConfig,
-            CLOUDAGENTS_MCP_URL: mcpUrl,
-            CLOUDAGENTS_TASK_ID: task.id,
-            CLOUDAGENTS_RUN_ID: run.id,
-          }
-          if (display) env.DISPLAY = display
-          else delete env.DISPLAY
+          const started = yield* Effect.gen(function* () {
+            yield* Effect.tryPromise({
+              try: async () => {
+                await mkdir(runDir, { recursive: true })
+                await mkdir(join(homeDir, ".cloudagents"), { recursive: true })
+                await writeFile(
+                  mcpConfigHost,
+                  JSON.stringify({ mcpServers: { cloudagents: { type: "http", url: mcpUrl } } }, null, 2),
+                  "utf8",
+                )
+              },
+              catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
+            })
 
-          const started = yield* Effect.try({
-            try: () => {
-              const child = spawn("sh", ["-c", config.agentCommand], {
-                cwd: task.worktreePath,
-                env,
-                detached: true,
-                stdio: ["ignore", "pipe", "pipe"],
-              })
-              const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
-              const entry: ActiveRun = {
-                child,
-                log,
-                taskId: task.id,
-                stdoutLines: [],
-                stderrLines: [],
-                resultText: null,
-              }
-              active.set(run.id, entry)
-              createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
-              createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
-              child.on("error", (err) => {
-                runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
-              })
-              child.on("close", (code) => {
-                runFork(finish(run.id, code, null))
-              })
-              return null
-            },
-            catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
+            const brokerEnv = yield* broker.issue(run.id)
+            const launch = yield* prepareLaunch({
+              settings,
+              worktreePath: task.worktreePath,
+              homeDir,
+              display,
+              env: {
+                CLOUDAGENTS_PROMPT: prompt,
+                CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
+                CLOUDAGENTS_MCP_URL: mcpUrl,
+                CLOUDAGENTS_TASK_ID: task.id,
+                CLOUDAGENTS_RUN_ID: run.id,
+                ...brokerEnv,
+              },
+              command: config.agentCommand,
+              roBinds: config.fakeAgentRoBinds,
+            })
+
+            return yield* Effect.try({
+              try: () => {
+                const child = spawn(launch.file, [...launch.args], {
+                  cwd: launch.cwd,
+                  env: { ...launch.env },
+                  detached: true,
+                  stdio: ["ignore", "pipe", "pipe"],
+                })
+                const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
+                const entry: ActiveRun = {
+                  child,
+                  log,
+                  taskId: task.id,
+                  stdoutLines: [],
+                  stderrLines: [],
+                  resultText: null,
+                }
+                active.set(run.id, entry)
+                createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
+                createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
+                child.on("error", (err) => {
+                  runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
+                })
+                child.on("close", (code) => {
+                  runFork(finish(run.id, code, null))
+                })
+                return null
+              },
+              catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
+            })
           }).pipe(Effect.either)
 
           if (Either.isLeft(started)) {
@@ -229,11 +239,12 @@ export const AgentHarnessLive = Layer.effect(
 
       cancel: (runId) =>
         Effect.gen(function* () {
+          yield* broker.revoke(runId)
           const entry = active.get(runId)
           if (entry) {
-            killGroup(entry.child.pid, "SIGTERM")
+            killProcessGroup(entry.child.pid, "SIGTERM")
             const timer = setTimeout(() => {
-              if (active.has(runId)) killGroup(entry.child.pid, "SIGKILL")
+              if (active.has(runId)) killProcessGroup(entry.child.pid, "SIGKILL")
             }, KILL_GRACE_MS)
             timer.unref()
           }
@@ -248,6 +259,7 @@ export const AgentHarnessLive = Layer.effect(
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
+          yield* broker.revoke(runId)
           const now = nowIso()
           const outcome = yield* store.update((s) => {
             const run = s.runs.find((r) => r.id === runId)

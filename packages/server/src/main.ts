@@ -7,15 +7,20 @@ import { EventHubLive } from "./core/events"
 import { AgentHarnessLive } from "./core/harness"
 import { StateLive } from "./core/state"
 import { WorkspaceLive } from "./core/workspace"
+import { CredentialBroker, CredentialBrokerLive } from "./broker"
+import { BROKER_PREFIX, handleBroker } from "./broker/handler"
+import { CredentialStoreLive } from "./credentials"
 import { DesktopManager, DesktopManagerLive } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
 import { attachWebSockets } from "./http/ws"
 import type { WsServices } from "./http/streams"
 import { runRelay } from "./relay/client"
-import { CredentialStoreLive } from "./credentials"
 
-const BaseLive = Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive, CredentialStoreLive)
+const BaseLive = Layer.provideMerge(
+  CredentialBrokerLive,
+  Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive, CredentialStoreLive),
+)
 const StateWithBase = Layer.provideMerge(StateLive, BaseLive)
 const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
 const AppLive = Layer.provideMerge(CoreLive, HarnessWithBase)
@@ -94,6 +99,7 @@ const program = Effect.gen(function* () {
   const config = yield* Config
   const core = yield* CoreService
   const desktop = yield* DesktopManager
+  const broker = yield* CredentialBroker
   const runtime = yield* Effect.runtime<WsServices>()
   const webHandler = yield* makeWebHandler(core)
 
@@ -111,9 +117,12 @@ const program = Effect.gen(function* () {
   })
 
   const server = createServer((req, res) => {
-    const handled = req.url?.startsWith(MCP_PREFIX)
-      ? mcpHandler(req, res)
-      : toWebRequest(req).then((web) => webHandler(web)).then((response) => writeWebResponse(res, response))
+    // The broker only answers sandboxed runs holding a live token; it is routed first on purpose.
+    const handled = req.url?.startsWith(BROKER_PREFIX)
+      ? handleBroker(broker, req, res)
+      : req.url?.startsWith(MCP_PREFIX)
+        ? mcpHandler(req, res)
+        : toWebRequest(req).then((web) => webHandler(web)).then((response) => writeWebResponse(res, response))
     handled.catch((error: unknown) => failResponse(res, error))
   })
 

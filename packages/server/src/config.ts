@@ -22,6 +22,16 @@ export interface ServerConfig {
   readonly fakeAgent: boolean
   /** Control plane relay (outbound box connection). Null when `CLOUDAGENTS_CONTROL_URL` is unset. */
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
+  /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
+  readonly homesDir: string
+  /** False when CLOUDAGENTS_SANDBOX=0: agent runs and MCP exec then run unsandboxed via `sh -c`. */
+  readonly sandboxEnabled: boolean
+  /** Toolchain dir (CLOUDAGENTS_SANDBOX_PATH) used as PATH inside the sandbox. */
+  readonly sandboxPath: string | null
+  /** CA bundle exposed inside the sandbox (CLOUDAGENTS_SANDBOX_SSL). */
+  readonly sandboxSslCertFile: string | null
+  /** Extra read-only binds the fake agent needs; empty for real agents. */
+  readonly fakeAgentRoBinds: readonly string[]
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -41,6 +51,11 @@ export const loadConfig = (): ServerConfig => {
   const agentCommand = fakeAgent
     ? `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
     : (process.env.CLOUDAGENTS_AGENT_COMMAND ?? DEFAULT_AGENT_COMMAND)
+  const sandboxEnabled = process.env.CLOUDAGENTS_SANDBOX !== "0"
+  if (!sandboxEnabled) console.warn("CLOUDAGENTS_SANDBOX=0: agent runs are NOT sandboxed")
+  const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
+  const sandboxSsl = process.env.CLOUDAGENTS_SANDBOX_SSL?.trim() || null
+  const fakeAgentRoBinds = fakeAgent ? [process.execPath, join(repoRoot, "packages/server"), join(repoRoot, "node_modules")] : []
   return {
     port,
     host,
@@ -53,6 +68,11 @@ export const loadConfig = (): ServerConfig => {
     stateFile: join(dataDir, "state.json"),
     agentCommand,
     fakeAgent,
+    homesDir: join(dataDir, "homes"),
+    sandboxEnabled,
+    sandboxPath,
+    sandboxSslCertFile: sandboxSsl,
+    fakeAgentRoBinds,
   }
 }
 

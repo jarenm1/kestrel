@@ -9,3 +9,4 @@ result
 .env.local
 .dev.vars
 .envrc
+.box.env
