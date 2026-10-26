@@ -7,4 +7,5 @@ result
 *.log
 .env
 .env.local
+.dev.vars
 .envrc

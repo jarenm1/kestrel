@@ -1,0 +1,6 @@
+# Copy to packages/web/.dev.vars for `wrangler dev`. Never commit .dev.vars.
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+BOX_TOKEN=
+# Dev only: enables GET /auth/dev-login as this GitHub login. Never set in production.
+# DEV_SESSION_LOGIN=jarenm1
