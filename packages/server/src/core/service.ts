@@ -17,6 +17,7 @@ import {
 } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
+import { CredentialStore } from "../credentials"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -101,6 +102,7 @@ export const CoreLive = Layer.effect(
     const harness = yield* AgentHarness
     const desktop = yield* DesktopManager
     const workspace = yield* WorkspaceService
+    const credentials = yield* CredentialStore
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
@@ -272,7 +274,10 @@ export const CoreLive = Layer.effect(
           if (url.trim() === "") return yield* Effect.fail(new BadRequest({ message: "url is required" }))
           const id = newId()
           const localPath = join(config.reposDir, id)
-          yield* workspace.cloneRepo(url, localPath).pipe(Effect.mapError(toInternal("clone")))
+          const creds = yield* credentials.get
+          yield* workspace
+            .cloneRepo(url, localPath, { githubToken: creds?.github })
+            .pipe(Effect.mapError(toInternal("clone")))
           const defaultBranch = yield* workspace
             .defaultBranch(localPath)
             .pipe(Effect.mapError(toInternal("read default branch")))

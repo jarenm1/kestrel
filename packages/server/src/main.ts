@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
 import { CoreLive, CoreService } from "./core/service"
@@ -10,9 +10,12 @@ import { WorkspaceLive } from "./core/workspace"
 import { DesktopManager, DesktopManagerLive } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
-import { attachWebSockets, type WsServices } from "./http/ws"
+import { attachWebSockets } from "./http/ws"
+import type { WsServices } from "./http/streams"
+import { runRelay } from "./relay/client"
+import { CredentialStoreLive } from "./credentials"
 
-const BaseLive = Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive)
+const BaseLive = Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive, CredentialStoreLive)
 const StateWithBase = Layer.provideMerge(StateLive, BaseLive)
 const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
 const AppLive = Layer.provideMerge(CoreLive, HarnessWithBase)
@@ -119,8 +122,17 @@ const program = Effect.gen(function* () {
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
 
+  let relayFiber: Fiber.RuntimeFiber<void> | null = null
+  if (config.relay) {
+    relayFiber = yield* Effect.forkDaemon(
+      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
+    )
+    yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
+  }
+
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
+  if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* core.shutdown()
   yield* closeServer(server)
 }).pipe(Effect.provide(AppLive))

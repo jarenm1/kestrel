@@ -18,7 +18,7 @@ export interface ExecOptions {
 }
 
 export interface WorkspaceShape {
-  readonly cloneRepo: (url: string, destDir: string) => Effect.Effect<void, WorkspaceError>
+  readonly cloneRepo: (url: string, destDir: string, opts?: { readonly githubToken?: string }) => Effect.Effect<void, WorkspaceError>
   /** Branch currently checked out in a fresh clone (the remote default branch). */
   readonly defaultBranch: (repoPath: string) => Effect.Effect<string, WorkspaceError>
   readonly createWorktree: (args: {
@@ -111,14 +111,54 @@ const git = (cwd: string, args: ReadonlyArray<string>): Effect.Effect<string, Wo
     return res.stdout
   })
 
+/** Host whose HTTPS clones are authenticated with the signed-in user's GitHub token. */
+const GITHUB_HOST = "github.com"
+
+/**
+ * Git config supplied through env (never argv, never written to .git/config) that sends the GitHub
+ * token as basic auth, and only for HTTPS clones from github.com.
+ */
+const githubAuthEnv = (url: string, token: string | undefined): Readonly<Record<string, string>> => {
+  if (token === undefined || token === "") return {}
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return {}
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname !== GITHUB_HOST) return {}
+  return {
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: `http.https://${GITHUB_HOST}/.extraheader`,
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`,
+  }
+}
+
+/** Removes the token and its basic-auth encoding from text that may reach logs or errors. */
+const redactSecret = (text: string, token: string | undefined): string => {
+  if (token === undefined || token === "") return text
+  const basic = Buffer.from(`x-access-token:${token}`).toString("base64")
+  return text.split(token).join("***").split(basic).join("***")
+}
+
 const make: WorkspaceShape = {
-  cloneRepo: (url, destDir) =>
+  cloneRepo: (url, destDir, opts) =>
     Effect.gen(function* () {
       yield* Effect.tryPromise({
         try: () => mkdir(dirname(destDir), { recursive: true }),
         catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
       })
-      yield* git(dirname(destDir), ["clone", "--", url, destDir])
+      const githubToken = opts?.githubToken
+      const res = yield* runProcess(
+        "git",
+        ["clone", "--", url, destDir],
+        { cwd: dirname(destDir), env: githubAuthEnv(url, githubToken) },
+        "git clone",
+      )
+      if (res.exitCode !== 0) {
+        const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
+        return yield* Effect.fail(new WorkspaceError({ message: `git clone ${url} failed: ${detail}` }))
+      }
     }),
 
   defaultBranch: (repoPath) =>

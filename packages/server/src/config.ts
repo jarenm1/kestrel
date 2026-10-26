@@ -20,6 +20,8 @@ export interface ServerConfig {
   /** Shell command run (via `sh -c`) for each agent run, cwd = task worktree. */
   readonly agentCommand: string
   readonly fakeAgent: boolean
+  /** Control plane relay (outbound box connection). Null when `CLOUDAGENTS_CONTROL_URL` is unset. */
+  readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -42,6 +44,7 @@ export const loadConfig = (): ServerConfig => {
   return {
     port,
     host,
+    relay: loadRelay(),
     mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
     dataDir,
     reposDir: join(dataDir, "repos"),
@@ -51,6 +54,23 @@ export const loadConfig = (): ServerConfig => {
     agentCommand,
     fakeAgent,
   }
+}
+
+const loadRelay = (): ServerConfig["relay"] => {
+  const controlUrl = process.env.CLOUDAGENTS_CONTROL_URL?.trim() ?? ""
+  if (controlUrl === "") return null
+  let protocol: string
+  try {
+    protocol = new URL(controlUrl).protocol
+  } catch {
+    throw new Error(`CLOUDAGENTS_CONTROL_URL must be an absolute URL, got "${controlUrl}"`)
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(protocol)) {
+    throw new Error(`CLOUDAGENTS_CONTROL_URL must use http(s) or ws(s), got "${controlUrl}"`)
+  }
+  const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
+  if (boxToken === "") throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set")
+  return { controlUrl, boxToken }
 }
 
 export const ConfigLive = Layer.sync(Config, loadConfig)
