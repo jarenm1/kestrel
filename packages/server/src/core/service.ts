@@ -32,35 +32,36 @@ export interface ReportInput {
 export interface CoreShape {
   readonly health: () => Effect.Effect<void>
 
-  readonly listRepos: () => Effect.Effect<ReadonlyArray<Repo>>
-  readonly getRepo: (id: string) => Effect.Effect<Repo, NotFound>
-  readonly createRepo: (url: string, name?: string) => Effect.Effect<Repo, BadRequest | InternalError>
-  readonly deleteRepo: (id: string) => Effect.Effect<void, NotFound | InternalError>
+  // Every browser-facing operation takes the signed-in `user`. A project and its tasks, runs and
+  // desktops exist only for the project's owner: anyone else gets NotFound, never a hint it exists.
+  readonly listRepos: (user: string) => Effect.Effect<ReadonlyArray<Repo>>
+  readonly getRepo: (user: string, id: string) => Effect.Effect<Repo, NotFound>
+  readonly createRepo: (user: string, url: string, name?: string) => Effect.Effect<Repo, BadRequest | InternalError>
+  readonly deleteRepo: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
 
-  readonly listTasks: (repoId: string) => Effect.Effect<ReadonlyArray<Task>, NotFound>
+  readonly listTasks: (user: string, repoId: string) => Effect.Effect<ReadonlyArray<Task>, NotFound>
   readonly createTask: (
+    user: string,
     repoId: string,
     input: { readonly title?: string; readonly baseBranch?: string },
   ) => Effect.Effect<Task, NotFound | InternalError>
-  readonly getTask: (id: string) => Effect.Effect<Task, NotFound>
-  readonly deleteTask: (id: string) => Effect.Effect<void, NotFound | InternalError>
-  readonly diff: (taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
+  readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
+  readonly deleteTask: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
+  readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
 
-  readonly listMessages: (taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
+  readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
   readonly sendMessage: (
+    user: string,
     taskId: string,
     text: string,
-    user: string | null,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
-  readonly listRuns: (taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
-  readonly cancelRun: (runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
+  readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
+  readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
 
-  readonly desktopStatus: (taskId: string) => Effect.Effect<DesktopStatus, NotFound>
-  readonly desktopStart: (
-    taskId: string,
-  ) => Effect.Effect<DesktopStatus, NotFound | InternalError>
-  readonly desktopStop: (taskId: string) => Effect.Effect<void, NotFound>
+  readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
+  readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
+  readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
 
   /** Used by the MCP handler: agent-reported status and optional message. */
   readonly report: (taskId: string, input: ReportInput) => Effect.Effect<void, NotFound | InternalError>
@@ -147,11 +148,23 @@ export const CoreLive = Layer.effect(
         onRight: (t) => Effect.succeed({ ...t }),
       }))
 
-    const requireRepo = (repoId: string): Effect.Effect<Repo, NotFound> =>
+    /** `user`'s project; someone else's is reported exactly like a missing one. */
+    const ownedRepo = (user: string, repoId: string): Effect.Effect<Repo, NotFound> =>
       Effect.flatMap(store.read, (state) => {
-        const repo = state.repos.find((r) => r.id === repoId)
+        const repo = state.repos.find((r) => r.id === repoId && r.owner === user)
         return repo ? Effect.succeed({ ...repo }) : Effect.fail(new NotFound({ message: `repo ${repoId} not found` }))
       })
+
+    const ownsTask = (state: Readonly<StoreState>, user: string, taskId: string): boolean => {
+      const task = state.tasks.find((t) => t.id === taskId)
+      return task !== undefined && state.repos.some((r) => r.id === task.repoId && r.owner === user)
+    }
+
+    /** A task in one of `user`'s projects; anything else is NotFound. */
+    const ownedTask = (user: string, taskId: string): Effect.Effect<Task, NotFound> =>
+      Effect.flatMap(store.read, (state) =>
+        ownsTask(state, user, taskId) ? requireTask(taskId) : Effect.fail(new NotFound({ message: `task ${taskId} not found` })),
+      )
 
     const requireRun = (runId: string): Effect.Effect<Run, NotFound> =>
       Effect.flatMap(store.read, (state) => {
@@ -194,9 +207,9 @@ export const CoreLive = Layer.effect(
         yield* removeTaskState(taskId)
       })
 
-    const createTask: CoreShape["createTask"] = (repoId, input) =>
+    const createTask: CoreShape["createTask"] = (user, repoId, input) =>
       Effect.gen(function* () {
-        const repo = yield* requireRepo(repoId)
+        const repo = yield* ownedRepo(user, repoId)
         const title = input.title?.trim() || "Untitled task"
         const baseBranch = input.baseBranch?.trim() || repo.defaultBranch
         const id = newId()
@@ -224,8 +237,9 @@ export const CoreLive = Layer.effect(
         return { ...task }
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (taskId, text, user) =>
+    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text) =>
       Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
         if (text.trim() === "") {
           return yield* Effect.fail(new BadRequest({ message: "message text is required" }))
         }
@@ -298,16 +312,17 @@ export const CoreLive = Layer.effect(
     const shape: CoreShape = {
       health: () => Effect.void,
 
-      listRepos: () => Effect.map(store.read, (s) => s.repos.map((r) => ({ ...r }))),
+      listRepos: (user) => Effect.map(store.read, (s) => s.repos.filter((r) => r.owner === user).map((r) => ({ ...r }))),
 
-      getRepo: (id) => requireRepo(id),
+      getRepo: ownedRepo,
 
-      createRepo: (url, name) =>
+      createRepo: (user, url, name) =>
         Effect.gen(function* () {
           if (url.trim() === "") return yield* Effect.fail(new BadRequest({ message: "url is required" }))
           const id = newId()
           const localPath = join(config.reposDir, id)
-          const creds = yield* credentials.get
+          // The clone authenticates as the requester, so GitHub decides which repositories they can import.
+          const creds = yield* credentials.get(user)
           yield* workspace
             .cloneRepo(url, localPath, { githubToken: creds?.github })
             .pipe(Effect.mapError(toInternal("clone")))
@@ -321,6 +336,7 @@ export const CoreLive = Layer.effect(
             localPath,
             defaultBranch,
             createdAt: nowIso(),
+            owner: user,
           }
           yield* store.update((s): Either.Either<void, never> => {
             s.repos.push(repo)
@@ -329,9 +345,9 @@ export const CoreLive = Layer.effect(
           return { ...repo }
         }),
 
-      deleteRepo: (id) =>
+      deleteRepo: (user, id) =>
         Effect.gen(function* () {
-          const repo = yield* requireRepo(id)
+          const repo = yield* ownedRepo(user, id)
           const state = yield* store.read
           for (const task of state.tasks) {
             if (task.repoId === id) yield* deleteTask(task.id)
@@ -346,47 +362,51 @@ export const CoreLive = Layer.effect(
           })
         }),
 
-      listTasks: (repoId) =>
+      listTasks: (user, repoId) =>
         Effect.gen(function* () {
-          yield* requireRepo(repoId)
+          yield* ownedRepo(user, repoId)
           const state = yield* store.read
           return state.tasks.filter((t) => t.repoId === repoId).map((t) => ({ ...t }))
         }),
 
       createTask,
 
-      getTask: (id) => requireTask(id),
+      getTask: ownedTask,
 
-      deleteTask,
+      deleteTask: (user, id) => Effect.zipRight(ownedTask(user, id), deleteTask(id)),
 
-      diff: (taskId) =>
+      diff: (user, taskId) =>
         Effect.gen(function* () {
-          const task = yield* requireTask(taskId)
+          const task = yield* ownedTask(user, taskId)
           const diff = yield* workspace
             .diff({ repoPath: join(config.reposDir, task.repoId), worktreePath: task.worktreePath, baseBranch: task.baseBranch })
             .pipe(Effect.mapError(toInternal("diff")))
           return { baseBranch: task.baseBranch, diff }
         }),
 
-      listMessages: (taskId) =>
+      listMessages: (user, taskId) =>
         Effect.gen(function* () {
-          yield* requireTask(taskId)
+          yield* ownedTask(user, taskId)
           const state = yield* store.read
           return state.messages.filter((m) => m.taskId === taskId).map((m) => ({ ...m }))
         }),
 
       sendMessage,
 
-      listRuns: (taskId) =>
+      listRuns: (user, taskId) =>
         Effect.gen(function* () {
-          yield* requireTask(taskId)
+          yield* ownedTask(user, taskId)
           const state = yield* store.read
           return state.runs.filter((r) => r.taskId === taskId).map((r) => ({ ...r }))
         }),
 
-      cancelRun: (runId) =>
+      cancelRun: (user, runId) =>
         Effect.gen(function* () {
           const run = yield* requireRun(runId)
+          const state = yield* store.read
+          if (!ownsTask(state, user, run.taskId)) {
+            return yield* Effect.fail(new NotFound({ message: `run ${runId} not found` }))
+          }
           if (run.status !== "running") {
             return yield* Effect.fail(new Conflict({ message: `run ${runId} is ${run.status}` }))
           }
@@ -394,17 +414,17 @@ export const CoreLive = Layer.effect(
           return yield* requireRun(runId)
         }),
 
-      desktopStatus: (taskId) => Effect.zipRight(requireTask(taskId), desktop.status(taskId)),
+      desktopStatus: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.status(taskId)),
 
-      desktopStart: (taskId) =>
+      desktopStart: (user, taskId) =>
         Effect.gen(function* () {
-          const task = yield* requireTask(taskId)
+          const task = yield* ownedTask(user, taskId)
           return yield* startDesktop(task).pipe(
             Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
           )
         }),
 
-      desktopStop: (taskId) => Effect.zipRight(requireTask(taskId), desktop.stop(taskId)),
+      desktopStop: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.stop(taskId)),
 
       report: (taskId, input) =>
         Effect.gen(function* () {

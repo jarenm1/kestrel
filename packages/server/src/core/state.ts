@@ -7,12 +7,18 @@ import { Config } from "../config"
 export const newId = (): string => randomUUID()
 export const nowIso = (): string => new Date().toISOString()
 
+/** Projects saved before ownership existed have no `owner`; `loadFile` assigns one. */
+const PersistedRepo = Schema.Struct({ ...Repo.fields, owner: Schema.optional(Schema.String) })
+
 const PersistedState = Schema.Struct({
-  repos: Schema.Array(Repo),
+  repos: Schema.Array(PersistedRepo),
   tasks: Schema.Array(Task),
   messages: Schema.Array(Message),
   runs: Schema.Array(Run),
 })
+
+/** Login no user can have: an unowned project stays invisible until `CLOUDAGENTS_LEGACY_OWNER` claims it. */
+const NO_OWNER = ""
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 
@@ -42,7 +48,7 @@ const writeAtomic = async (file: string, data: string): Promise<void> => {
   await rename(tmp, file)
 }
 
-const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
+const loadFile = (file: string, legacyOwner: string | null): Effect.Effect<StoreState, InternalError> =>
   Effect.gen(function* () {
     const raw = yield* Effect.tryPromise({
       try: () => readFile(file, "utf8"),
@@ -58,7 +64,12 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
     const decoded = yield* Schema.decodeUnknown(Schema.parseJson(PersistedState))(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
-    return { repos: [...decoded.repos], tasks: [...decoded.tasks], messages: [...decoded.messages], runs: [...decoded.runs] }
+    const repos = decoded.repos.map((r) => ({ ...r, owner: r.owner || legacyOwner || NO_OWNER }))
+    const unowned = repos.filter((r) => r.owner === NO_OWNER).length
+    if (unowned > 0) {
+      yield* Effect.logWarning(`${unowned} project(s) have no owner; set CLOUDAGENTS_LEGACY_OWNER to assign them`)
+    }
+    return { repos, tasks: [...decoded.tasks], messages: [...decoded.messages], runs: [...decoded.runs] }
   })
 
 /**
@@ -89,7 +100,7 @@ export const StateLive = Layer.effect(
       },
       catch: (e) => new InternalError({ message: `cannot create data dirs: ${String(e)}` }),
     })
-    const state = yield* loadFile(config.stateFile)
+    const state = yield* loadFile(config.stateFile, config.legacyOwner)
     reconcile(state)
 
     // Writes are serialized; a failed write does not poison later ones.

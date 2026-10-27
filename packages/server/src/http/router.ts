@@ -99,72 +99,75 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.logout(user, provider)))),
     ),
   ).pipe(
-    HttpRouter.get("/api/repos", respond(core.listRepos())),
+    // Projects and everything under them belong to one user; core answers NotFound for anyone else's.
+    HttpRouter.get("/api/repos", respond(signedIn((user) => core.listRepos(user)))),
     HttpRouter.post(
       "/api/repos",
-      respond(Effect.flatMap(jsonBody(CreateRepoBody), (body) => core.createRepo(body.url, body.name))),
+      respond(signedIn((user) => Effect.flatMap(jsonBody(CreateRepoBody), (body) => core.createRepo(user, body.url, body.name)))),
     ),
     HttpRouter.get(
       "/api/repos/:id",
-      Effect.flatMap(pathId, (id) => respond(core.getRepo(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.getRepo(user, id)))),
     ),
     HttpRouter.del(
       "/api/repos/:id",
-      Effect.flatMap(pathId, (id) => noContent(core.deleteRepo(id))),
+      Effect.flatMap(pathId, (id) => noContent(signedIn((user) => core.deleteRepo(user, id)))),
     ),
     HttpRouter.get(
       "/api/repos/:id/tasks",
-      Effect.flatMap(pathId, (id) => respond(core.listTasks(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listTasks(user, id)))),
     ),
     HttpRouter.post(
       "/api/repos/:id/tasks",
       Effect.flatMap(pathId, (id) =>
-        respond(Effect.flatMap(jsonBody(CreateTaskBody), (body) => core.createTask(id, body))),
+        respond(signedIn((user) => Effect.flatMap(jsonBody(CreateTaskBody), (body) => core.createTask(user, id, body)))),
       ),
     ),
 
     HttpRouter.get(
       "/api/tasks/:id",
-      Effect.flatMap(pathId, (id) => respond(core.getTask(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.getTask(user, id)))),
     ),
     HttpRouter.del(
       "/api/tasks/:id",
-      Effect.flatMap(pathId, (id) => noContent(core.deleteTask(id))),
+      Effect.flatMap(pathId, (id) => noContent(signedIn((user) => core.deleteTask(user, id)))),
     ),
     HttpRouter.get(
       "/api/tasks/:id/messages",
-      Effect.flatMap(pathId, (id) => respond(core.listMessages(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listMessages(user, id)))),
     ),
     HttpRouter.post(
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) =>
-        respond(Effect.flatMap(jsonBody(SendMessageBody), (body) => Effect.flatMap(requestUser, (user) => core.sendMessage(id, body.text, user)))),
+        respond(signedIn((user) => Effect.flatMap(jsonBody(SendMessageBody), (body) => core.sendMessage(user, id, body.text)))),
       ),
     ),
     HttpRouter.get(
       "/api/tasks/:id/runs",
-      Effect.flatMap(pathId, (id) => respond(core.listRuns(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listRuns(user, id)))),
     ),
     HttpRouter.post(
       "/api/runs/:id/cancel",
-      Effect.flatMap(pathId, (id) => respond(core.cancelRun(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
     ),
     HttpRouter.get(
       "/api/tasks/:id/diff",
-      Effect.flatMap(pathId, (id) => respond(core.diff(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.diff(user, id)))),
     ),
 
     HttpRouter.get(
       "/api/tasks/:id/desktop",
-      Effect.flatMap(pathId, (id) => respond(core.desktopStatus(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.desktopStatus(user, id)))),
     ),
     HttpRouter.post(
       "/api/tasks/:id/desktop",
-      Effect.flatMap(pathId, (id) => respond(core.desktopStart(id))),
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.desktopStart(user, id)))),
     ),
     HttpRouter.del(
       "/api/tasks/:id/desktop",
-      Effect.flatMap(pathId, (id) => respond(core.desktopStop(id).pipe(Effect.zipRight(core.desktopStatus(id))))),
+      Effect.flatMap(pathId, (id) =>
+        respond(signedIn((user) => core.desktopStop(user, id).pipe(Effect.zipRight(core.desktopStatus(user, id))))),
+      ),
     ),
   )
 

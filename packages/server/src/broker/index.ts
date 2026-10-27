@@ -12,15 +12,21 @@ export const UPSTREAM_BASE: Record<BrokerProvider, string> = {
   openai: "https://api.openai.com",
 }
 
+/** A live broker token: the run it was minted for and the user who started that run. */
+export interface BrokerGrant {
+  readonly runId: string
+  readonly user: string
+}
+
 export interface CredentialBrokerShape {
   /** Mints a per-run token and returns the env the sandboxed agent uses to reach the broker. */
-  readonly issue: (runId: string) => Effect.Effect<Record<string, string>>
+  readonly issue: (runId: string, user: string) => Effect.Effect<Record<string, string>>
   /** Invalidates the run's token. Idempotent. */
   readonly revoke: (runId: string) => Effect.Effect<void>
-  /** Run id for a live token; null when unknown or revoked. */
-  readonly runForToken: (token: string) => Effect.Effect<string | null>
-  /** Real upstream key: control-plane credential first, then the host's env var. */
-  readonly upstreamKey: (provider: BrokerProvider) => Effect.Effect<string | null>
+  /** Grant for a live token; null when unknown or revoked. */
+  readonly grantForToken: (token: string) => Effect.Effect<BrokerGrant | null>
+  /** Real upstream key: the run user's control-plane credential first, then the host's env var. */
+  readonly upstreamKey: (provider: BrokerProvider, user: string) => Effect.Effect<string | null>
 }
 
 export class CredentialBroker extends Context.Tag("cloudagents/CredentialBroker")<
@@ -38,22 +44,22 @@ export const CredentialBrokerLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config
     const store = yield* CredentialStore
-    const runByToken = new Map<string, string>()
+    const grantByToken = new Map<string, BrokerGrant>()
     const tokenByRun = new Map<string, string>()
 
     const revokeSync = (runId: string) => {
       const token = tokenByRun.get(runId)
       if (token === undefined) return
       tokenByRun.delete(runId)
-      runByToken.delete(token)
+      grantByToken.delete(token)
     }
 
     const broker: CredentialBrokerShape = {
-      issue: (runId) =>
+      issue: (runId, user) =>
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
-          runByToken.set(token, runId)
+          grantByToken.set(token, { runId, user })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.port}/broker/${token}`
           return {
@@ -64,10 +70,10 @@ export const CredentialBrokerLive = Layer.effect(
           }
         }),
       revoke: (runId) => Effect.sync(() => revokeSync(runId)),
-      runForToken: (token) => Effect.sync(() => runByToken.get(token) ?? null),
-      upstreamKey: (provider) =>
+      grantForToken: (token) => Effect.sync(() => grantByToken.get(token) ?? null),
+      upstreamKey: (provider, user) =>
         Effect.gen(function* () {
-          const creds = yield* store.get
+          const creds = yield* store.get(user)
           const fromStore = creds?.[provider]
           if (fromStore) return fromStore
           const fromEnv = process.env[HOST_ENV_KEY[provider]]

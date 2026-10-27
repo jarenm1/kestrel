@@ -7,8 +7,8 @@ import { DesktopManager } from "../desktop"
 export type WsServices = CoreService | DesktopManager | EventHub
 
 /**
- * One bidirectional stream to a browser: a node `ws` socket on the local listener, or a stream
- * tunnelled through the control plane relay. Sends on a closed socket are dropped.
+ * One bidirectional stream to a browser, tunnelled through the control plane relay.
+ * Sends on a closed socket are dropped.
  */
 export interface StreamSocket {
   readonly sendText: (data: string) => void
@@ -37,19 +37,21 @@ export const streamRoute = (pathname: string): StreamRoute | null => {
   return null
 }
 
-/** Close code sent when the task does not exist. */
+/** Close code sent when the task does not exist or belongs to someone else. */
 export const CLOSE_NOT_FOUND = 4404
+/** Close code sent when a stream arrives without a signed-in user. */
+export const CLOSE_UNAUTHORIZED = 4401
 /** Close code sent when the desktop cannot be attached. */
 const CLOSE_INTERNAL = 1011
 
 const closeWith = (socket: StreamSocket, code: number, message: string) =>
   Effect.sync(() => socket.close(code, message.slice(0, 120)))
 
-const serveEvents = (socket: StreamSocket, taskId: string): Effect.Effect<void, never, CoreService | EventHub> =>
+const serveEvents = (socket: StreamSocket, user: string, taskId: string): Effect.Effect<void, never, CoreService | EventHub> =>
   Effect.gen(function* () {
     const core = yield* CoreService
     const hub = yield* EventHub
-    const found = yield* core.getTask(taskId).pipe(Effect.either)
+    const found = yield* core.getTask(user, taskId).pipe(Effect.either)
     if (found._tag === "Left") {
       return yield* closeWith(socket, CLOSE_NOT_FOUND, found.left.message)
     }
@@ -60,13 +62,13 @@ const serveEvents = (socket: StreamSocket, taskId: string): Effect.Effect<void, 
     )
   })
 
-const serveDesktop = (socket: StreamSocket, taskId: string): Effect.Effect<void, never, WsServices> =>
+const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effect.Effect<void, never, WsServices> =>
   Effect.gen(function* () {
     const core = yield* CoreService
     const desktop = yield* DesktopManager
     const runtime = yield* Effect.runtime<WsServices>()
     const fork = Runtime.runFork(runtime)
-    const found = yield* core.getTask(taskId).pipe(Effect.either)
+    const found = yield* core.getTask(user, taskId).pipe(Effect.either)
     if (found._tag === "Left") {
       return yield* closeWith(socket, CLOSE_NOT_FOUND, found.left.message)
     }
@@ -98,6 +100,6 @@ const serveDesktop = (socket: StreamSocket, taskId: string): Effect.Effect<void,
     ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
   })
 
-/** Runs the handler for a stream route against one socket. Never fails: errors close the socket. */
-export const serveStream = (route: StreamRoute, socket: StreamSocket): Effect.Effect<void, never, WsServices> =>
-  route.kind === "events" ? serveEvents(socket, route.taskId) : serveDesktop(socket, route.taskId)
+/** Runs the handler for a stream route against one socket for the signed-in `user`. Never fails: errors close the socket. */
+export const serveStream = (route: StreamRoute, user: string, socket: StreamSocket): Effect.Effect<void, never, WsServices> =>
+  route.kind === "events" ? serveEvents(socket, user, route.taskId) : serveDesktop(socket, user, route.taskId)

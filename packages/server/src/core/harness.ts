@@ -15,15 +15,15 @@ import { StateStore, newId, nowIso, type Mutable } from "./state"
 export interface AgentHarnessShape {
   /**
    * Starts the harness for a run that is already persisted as `running` (see Core.sendMessage).
-   * On spawn failure the run is aborted before the error is returned. `user` is the box user the
-   * run is for; their CLI logins, when they have any, replace the broker's API keys.
+   * On spawn failure the run is aborted before the error is returned. `user` is the signed-in user
+   * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
    */
   readonly spawn: (
     task: Task,
     run: Run,
     prompt: string,
     display: string | null,
-    user: string | null,
+    user: string,
   ) => Effect.Effect<void, InternalError>
   /** Kills a running run and marks it cancelled. Idempotent for already-finished runs. */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
@@ -198,7 +198,7 @@ export const AgentHarnessLive = Layer.effect(
             })
 
             // A user's own CLI logins replace the broker's API keys for that provider.
-            const logins = user === null ? [] : yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+            const logins = yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
             const loginDirs = logins.map((login) => ({
               provider: login.provider,
               host: login.dir,
@@ -206,7 +206,7 @@ export const AgentHarnessLive = Layer.effect(
               inside: settings.enabled ? join(SANDBOX_HOME, ".kestrel", basename(login.dir)) : login.dir,
             }))
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
-            const brokerEnv = yield* broker.issue(run.id)
+            const brokerEnv = yield* broker.issue(run.id, user)
             const keptBroker = Object.fromEntries(Object.entries(brokerEnv).filter(([key]) => !dropped.has(key)))
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
             const launch = yield* prepareLaunch({

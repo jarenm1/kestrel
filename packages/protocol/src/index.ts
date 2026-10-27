@@ -19,6 +19,11 @@ export const Repo = Schema.Struct({
   localPath: Schema.String,
   defaultBranch: Schema.String,
   createdAt: Schema.String, // ISO-8601
+  /**
+   * GitHub login of the user who added the project. Only the owner can see or change it and its
+   * tasks; access to the upstream repository is GitHub's (the clone uses the owner's token).
+   */
+  owner: Schema.String,
 })
 export type Repo = typeof Repo.Type
 

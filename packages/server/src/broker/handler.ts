@@ -62,13 +62,13 @@ export const handleBroker = async (
   if (!match) return sendJson(res, 404, { _tag: "NotFound", message: "no such broker route" })
   const [, token = "", providerRaw = "", rest = "", query = ""] = match
 
-  const runId = await Effect.runPromise(broker.runForToken(token))
-  if (runId === null) return sendJson(res, 401, { _tag: "Unauthorized", message: "unknown or revoked broker token" })
+  const grant = await Effect.runPromise(broker.grantForToken(token))
+  if (grant === null) return sendJson(res, 401, { _tag: "Unauthorized", message: "unknown or revoked broker token" })
 
   const provider = BROKER_PROVIDERS.find((p) => p === providerRaw)
   if (provider === undefined) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${providerRaw}` })
 
-  const key = await Effect.runPromise(broker.upstreamKey(provider))
+  const key = await Effect.runPromise(broker.upstreamKey(provider, grant.user))
   if (key === null) {
     return sendJson(res, 424, { _tag: "MissingCredential", message: `no ${provider} credential is configured` })
   }

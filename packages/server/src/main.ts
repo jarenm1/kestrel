@@ -14,8 +14,6 @@ import { CredentialStoreLive } from "./credentials"
 import { DesktopManager, DesktopManagerLive } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
-import { attachWebSockets } from "./http/ws"
-import type { WsServices } from "./http/streams"
 import { BOX_USER_HEADER, runRelay } from "./relay/client"
 
 const BaseLive = Layer.provideMerge(
@@ -105,7 +103,6 @@ const program = Effect.gen(function* () {
   const desktop = yield* DesktopManager
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
-  const runtime = yield* Effect.runtime<WsServices>()
   const webHandler = yield* makeWebHandler(core, cliAuth)
 
   const mcpHandler = createMcpHandler({
@@ -131,7 +128,7 @@ const program = Effect.gen(function* () {
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
-  attachWebSockets(server, runtime)
+  // Task streams only come through the relay, which knows the signed-in user; the local listener has no upgrades.
 
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)

@@ -12,7 +12,7 @@ import {
 import { WebSocket } from "ws"
 import { VERSION } from "../config"
 import { CredentialStore } from "../credentials"
-import { CLOSE_NOT_FOUND, serveStream, streamRoute, type WsServices } from "../http/streams"
+import { CLOSE_NOT_FOUND, CLOSE_UNAUTHORIZED, serveStream, streamRoute, type WsServices } from "../http/streams"
 import { RelayStream } from "./stream"
 
 export interface RelayOptions {
@@ -129,11 +129,15 @@ const connectOnce = (
             send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_NOT_FOUND, reason: "not found" }))
             return
           }
-          absorbCredentials(frame.headers, store)
+          const user = absorbCredentials(frame.headers, store)
+          if (user === null) {
+            send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_UNAUTHORIZED, reason: "no signed-in user" }))
+            return
+          }
           const stream = new RelayStream(frame.id, send)
           streams.set(frame.id, stream)
           stream.onClose(() => streams.delete(frame.id))
-          runFork(serveStream(route, stream))
+          runFork(serveStream(route, user, stream))
           return
         }
         case "ws-text":
