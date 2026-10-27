@@ -59,8 +59,6 @@ export const Connection = Schema.Struct({
   account: Schema.NullOr(Schema.String),
   /** OAuth: false when the Worker lacks client id/secret. CLI: false when the box cannot report login status. */
   available: Schema.Boolean,
-  /** CLI: command to run on the devbox to sign in. Null for other kinds. */
-  loginCommand: Schema.NullOr(Schema.String),
 })
 export type Connection = typeof Connection.Type
 
