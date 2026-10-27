@@ -31,7 +31,14 @@ export interface ApiKeyProvider extends ProviderBase {
   readonly kind: "apikey"
 }
 
-export type Provider = OAuthProvider | ApiKeyProvider
+/** CLI provider: the user signs in with the CLI on the devbox; the box reports the login state. Nothing is stored here. */
+export interface CliProvider extends ProviderBase {
+  readonly kind: "cli"
+  /** Command the user runs on the devbox to sign in. */
+  readonly loginCommand: string
+}
+
+export type Provider = OAuthProvider | ApiKeyProvider | CliProvider
 
 const githubAccount = async (token: string): Promise<Account> => {
   const res = await fetch("https://api.github.com/user", {
@@ -70,10 +77,12 @@ export const PROVIDERS: readonly Provider[] = [
   },
   { id: "anthropic", label: "Anthropic", kind: "apikey" },
   { id: "openai", label: "OpenAI", kind: "apikey" },
+  { id: "claude-cli", label: "Claude subscription", kind: "cli", loginCommand: "claude auth login" },
+  { id: "codex-cli", label: "ChatGPT subscription", kind: "cli", loginCommand: "codex login --device-auth" },
 ]
 
 export const findProvider = (id: string): Provider | undefined => PROVIDERS.find((p) => p.id === id)
 
-/** OAuth providers need both client id and secret; API-key providers are always available. */
-export const isAvailable = (provider: Provider, env: Env): boolean =>
+/** Stored-credential providers: OAuth needs client id and secret; API-key providers are always available. */
+export const isAvailable = (provider: OAuthProvider | ApiKeyProvider, env: Env): boolean =>
   provider.kind === "oauth" ? Boolean(env[provider.clientIdEnv] && env[provider.clientSecretEnv]) : true

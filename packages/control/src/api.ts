@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import {
   CREDENTIALS_HEADER,
+  CliAuthStatus,
   ControlPaths,
   PutApiKeyBody,
   type BoxStatus,
@@ -8,25 +9,58 @@ import {
   type GithubRepo,
   type Me,
 } from "@cloudagents/protocol"
-import { PROVIDERS, findProvider, isAvailable, type Provider } from "./providers"
+import {
+  PROVIDERS,
+  findProvider,
+  isAvailable,
+  type ApiKeyProvider,
+  type CliProvider,
+  type OAuthProvider,
+  type Provider,
+} from "./providers"
 import { UpstreamError, errorResponse, json, maskKey } from "./http"
 import { hub, type Env } from "./env"
 import { sessionLogin } from "./auth"
 
 type ConnectionRow = { provider: string; account: string | null }
 
-const connectionView = (provider: Provider, row: ConnectionRow | undefined, env: Env): Connection => ({
+const storedView = (provider: OAuthProvider | ApiKeyProvider, row: ConnectionRow | undefined, env: Env): Connection => ({
   provider: provider.id,
   label: provider.label,
   kind: provider.kind,
   connected: row !== undefined,
   account: row?.account ?? null,
   available: isAvailable(provider, env),
+  loginCommand: null,
 })
 
+const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
+  provider: provider.id,
+  label: provider.label,
+  kind: provider.kind,
+  connected: status?.loggedIn ?? false,
+  account: status?.loggedIn ? status.account : null,
+  available: status !== undefined,
+  loginCommand: provider.loginCommand,
+})
+
+/** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */
+const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
+  const creds = await hub(env).credentials(login)
+  const headers = new Headers({ [CREDENTIALS_HEADER]: JSON.stringify(creds) })
+  const res = await hub(env).fetch(new Request(`https://hub${ControlPaths.cliAuth}`, { headers }))
+  if (!res.ok) return []
+  const body: unknown = await res.json().catch(() => null)
+  return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
+}
+
 const listConnections = async (login: string, env: Env): Promise<Connection[]> => {
-  const rows = await hub(env).connections(login)
-  return PROVIDERS.map((p) => connectionView(p, rows.find((r) => r.provider === p.id), env))
+  const [rows, cli] = await Promise.all([hub(env).connections(login), fetchCliAuth(login, env)])
+  return PROVIDERS.map((p) =>
+    p.kind === "cli"
+      ? cliView(p, cli.find((s) => s.provider === p.id))
+      : storedView(p, rows.find((r) => r.provider === p.id), env),
+  )
 }
 
 const putApiKey = async (request: Request, env: Env, login: string, provider: Provider): Promise<Response> => {
@@ -44,7 +78,7 @@ const putApiKey = async (request: Request, env: Env, login: string, provider: Pr
   }
   const account = maskKey(body.apiKey)
   await hub(env).putConnection(login, provider.id, body.apiKey, account)
-  return json(connectionView(provider, { provider: provider.id, account }, env))
+  return json(storedView(provider, { provider: provider.id, account }, env))
 }
 
 const listRepos = async (env: Env, login: string): Promise<Response> => {
@@ -113,6 +147,9 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (connection && connection[1] !== undefined) {
     const provider = findProvider(connection[1])
     if (!provider) return errorResponse(404, "NotFound", `unknown provider ${connection[1]}`)
+    if (provider.kind === "cli") {
+      return errorResponse(400, "BadRequest", `${provider.label} signs in on the devbox: run \`${provider.loginCommand}\` there`)
+    }
     if (method === "PUT") return putApiKey(request, env, login, provider)
     if (method === "DELETE") {
       await hub(env).deleteConnection(login, provider.id)
