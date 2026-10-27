@@ -18,7 +18,7 @@ import {
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, type LaunchKind } from "../sandbox"
+import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -74,7 +74,7 @@ export interface CoreShape {
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<void, NotFound | InternalError>
 
-  /** Cancels active runs and stops desktops. */
+  /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
 }
 
@@ -193,6 +193,7 @@ export const CoreLive = Layer.effect(
           }
         }
         yield* desktop.stop(taskId)
+        stopTaskNet(taskId)
         if (sandboxSettings.systemd) {
           yield* removeTask(sandboxSettings.systemd, taskId).pipe(
             Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: ${e.message}`)),
@@ -481,6 +482,7 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           yield* harness.stopAll()
           yield* desktop.stopAll()
+          stopAllTaskNets()
         }),
     }
     return shape

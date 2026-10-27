@@ -24,6 +24,8 @@
           git
           # Agent sandbox: every agent run and MCP exec runs inside bubblewrap
           bubblewrap
+          passt         # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
+          util-linux    # `nsenter`: sandbox launches join their task's network namespace
           # Remote desktop stack (one virtual X display per task)
           xvfb         # virtual X server (xorg.xvfb is deprecated)
           openbox       # minimal window manager

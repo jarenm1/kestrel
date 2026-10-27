@@ -4,8 +4,10 @@ import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
+import { ensureTaskNet, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
 
+export { stopAllTaskNets, stopTaskNet } from "./netns"
 export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./systemd"
 
 /** Where the per-task home is mounted inside the sandbox. */
@@ -52,7 +54,13 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "--die-with-parent",
     "--new-session",
     "--unshare-all",
+    // The network is the task's own namespace, which the launch joins before bwrap (see netns.ts).
     "--share-net",
+    // That namespace maps the box user to root; keep the agent on the box user's own ids (agent CLIs refuse root).
+    "--uid",
+    String(process.getuid?.() ?? 0),
+    "--gid",
+    String(process.getgid?.() ?? 0),
     "--clearenv",
     "--ro-bind",
     "/nix/store",
@@ -164,6 +172,8 @@ export interface SandboxSettings {
   readonly sslCertFile: string | null
   /** Per-task systemd resource limits; null only with `CLOUDAGENTS_SYSTEMD=0`. */
   readonly systemd: SystemdSettings | null
+  /** Box HTTP port, forwarded into each task's network namespace for the broker and MCP. */
+  readonly boxPort: number
 }
 
 export interface LaunchRequest {
@@ -206,11 +216,13 @@ export const sandboxSettingsOf = (config: {
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
   readonly systemd: SystemdSettings | null
+  readonly port: number
 }): SandboxSettings => ({
   enabled: config.sandboxEnabled,
   binPath: config.sandboxPath,
   sslCertFile: config.sandboxSslCertFile,
   systemd: config.systemd,
+  boxPort: config.port,
 })
 
 const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
@@ -239,10 +251,11 @@ export const findExecutable = (name: string): string | null => {
 }
 
 /**
- * Turns a launch request into the concrete process to spawn. Sandboxed launches go through
- * bubblewrap; the env inside is exactly the base allowlist plus `req.env`. With systemd limits on,
- * the process starts through `systemd-run --scope` in the task's slice (systemd-run execs in place,
- * so the spawned pid is still the sandbox's and process-group signals reach it).
+ * Turns a launch request into the concrete process to spawn. Sandboxed launches join the task's
+ * network namespace (`nsenter`, started on first use) and run in bubblewrap; the env inside is
+ * exactly the base allowlist plus `req.env`. With systemd limits on, the process starts through
+ * `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned
+ * pid is still the sandbox's and process-group signals reach it.
  */
 export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, InternalError> =>
   Effect.gen(function* () {
@@ -267,6 +280,14 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         new InternalError({ message: "systemd-run not found on PATH (set CLOUDAGENTS_SYSTEMD=0 to run without limits)" }),
       )
     }
+    const pasta = settings.enabled ? findExecutable("pasta") : null
+    const nsenter = settings.enabled ? findExecutable("nsenter") : null
+    if (settings.enabled && (pasta === null || nsenter === null)) {
+      return yield* Effect.fail(
+        new InternalError({ message: "pasta (passt) and nsenter (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+      )
+    }
+    if (settings.systemd) yield* applyTaskLimits(settings.systemd, req.taskId)
     yield* Effect.tryPromise({
       try: () => mkdir(req.homeDir, { recursive: true }),
       catch: (e) => new InternalError({ message: `cannot create home ${req.homeDir}: ${String(e)}` }),
@@ -284,24 +305,33 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     }
 
     const inner: { file: string; args: string[] } = settings.enabled
-      ? {
-          file: bwrap as string,
-          args: buildBwrapArgv({
-            worktreePath: req.worktreePath,
-            gitCommonDir: req.gitCommonDir,
-            homeDir: req.homeDir,
-            display: displayNumber(req.display),
-            env,
-            command: req.command,
-            roBinds: req.roBinds,
-            binds: req.binds,
-          }).slice(1),
-        }
+      ? yield* Effect.map(
+          ensureTaskNet({
+            taskId: req.taskId,
+            boxPort: settings.boxPort,
+            pastaPath: pasta as string,
+            sleepPath: join(settings.binPath as string, "sleep"),
+            systemd: settings.systemd ? { settings: settings.systemd, systemdRun: systemdRun as string } : null,
+          }),
+          (holder) => {
+            const [file, ...args] = joinTaskNet(nsenter as string, holder)
+            const bwrapArgs = buildBwrapArgv({
+              worktreePath: req.worktreePath,
+              gitCommonDir: req.gitCommonDir,
+              homeDir: req.homeDir,
+              display: displayNumber(req.display),
+              env,
+              command: req.command,
+              roBinds: req.roBinds,
+              binds: req.binds,
+            }).slice(1)
+            return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs] }
+          },
+        )
       : { file: "sh", args: ["-c", req.command] }
 
     if (settings.systemd === null) return { ...inner, env, cwd: req.worktreePath, home }
 
-    yield* applyTaskLimits(settings.systemd, req.taskId)
     return {
       file: systemdRun as string,
       args: [...scopeArgs(settings.systemd, req.taskId, req.kind), inner.file, ...inner.args],

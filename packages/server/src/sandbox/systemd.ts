@@ -25,7 +25,8 @@ export interface SystemdSettings {
   readonly limits: TaskLimits
 }
 
-export type LaunchKind = "run" | "exec" | "desktop"
+/** `net` is the task's network namespace holder (pasta); the rest are sandboxed processes. */
+export type LaunchKind = "run" | "exec" | "desktop" | "net"
 
 /** Variables systemd-run/systemctl need to reach the user manager; never passed into bwrap. */
 export const busEnv = (): Record<string, string> => {
