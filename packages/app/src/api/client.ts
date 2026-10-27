@@ -1,6 +1,10 @@
 import { Effect, Either, Schema } from "effect"
 import {
   BoxStatus,
+  CliAuthStatus,
+  CliLoginCodeBody,
+  CliLoginStart,
+  CliProvider,
   Connection,
   ControlPaths,
   CreateRepoBody,
@@ -103,6 +107,11 @@ export const api = {
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
   box: () => run(request(BoxStatus, "GET", ControlPaths.box)),
+  cliLoginStart: (provider: CliProvider) => run(request(CliLoginStart, "POST", ControlPaths.cliLogin(provider))),
+  cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
+    run(request(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body)),
+  cliLogout: (provider: CliProvider) =>
+    run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)))),
 
   // Agent box (relayed by the Worker).
   listRepos: () => run(request(Schema.Array(Repo), "GET", Paths.repos)),

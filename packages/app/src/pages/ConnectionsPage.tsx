@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ControlPaths, type Connection } from "@cloudagents/protocol"
+import { CliProvider, ControlPaths, type CliLoginStart, type Connection } from "@cloudagents/protocol"
+import { Schema } from "effect"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
@@ -13,6 +14,9 @@ import { errorText } from "@/util"
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8
+
+/** While a codex sign-in is pending, connections are re-read at this interval until the box reports the login. */
+const CLI_POLL_MS = 3000
 
 export function ConnectionsPage() {
   const connections = useQuery(queries.connections())
@@ -28,9 +32,13 @@ export function ConnectionsPage() {
       {connections.data && (
         <Card className="py-0">
           <CardContent className="divide-y px-0">
-            {connections.data.map((connection) => (
-              <ConnectionRow key={connection.provider} connection={connection} />
-            ))}
+            {connections.data.map((connection) =>
+              connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
+                <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
+              ) : (
+                <ConnectionRow key={connection.provider} connection={connection} />
+              ),
+            )}
           </CardContent>
         </Card>
       )}
@@ -61,35 +69,8 @@ function ConnectionRow({ connection }: { connection: Connection }) {
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
-      <div className="flex items-center gap-2">
-        <strong>{connection.label}</strong>
-        <Badge variant={connection.connected ? "success" : "neutral"}>
-          {connection.connected ? "connected" : "not connected"}
-        </Badge>
-        {connection.connected && connection.account && (
-          <span className="font-mono text-xs text-muted-foreground">{connection.account}</span>
-        )}
-      </div>
-      {connection.kind === "cli" ? (
-        <div className="flex flex-col gap-2">
-          {!connection.available ? (
-            <p className="text-muted-foreground">Agent box is offline, so devbox login status is unknown.</p>
-          ) : connection.connected ? (
-            <p className="text-muted-foreground">Signed in on the devbox.</p>
-          ) : (
-            <p className="text-muted-foreground">
-              Sign in on the devbox: run <code className="font-mono">{connection.loginCommand}</code> in a terminal there.
-            </p>
-          )}
-          <Button
-            variant="outline"
-            className="w-fit"
-            onClick={() => void queryClient.invalidateQueries({ queryKey: keys.connections })}
-          >
-            Check again
-          </Button>
-        </div>
-      ) : connection.kind === "oauth" ? (
+      <ConnectionHeader label={connection.label} connected={connection.connected} account={connection.account} />
+      {connection.kind === "oauth" ? (
         connection.available ? (
           <Button asChild variant="outline" className="w-fit">
             <a href={SERVER_URL + ControlPaths.connectOAuth(connection.provider)}>
@@ -119,6 +100,188 @@ function ConnectionRow({ connection }: { connection: Connection }) {
           )}
         </form>
       )}
+      {error && <Alert>{errorText(error)}</Alert>}
+    </div>
+  )
+}
+
+function ConnectionHeader({ label, connected, account }: { label: string; connected: boolean; account?: string | null }) {
+  return (
+    <div className="flex items-center gap-2">
+      <strong>{label}</strong>
+      <Badge variant={connected ? "success" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>
+      {connected && account && <span className="font-mono text-xs text-muted-foreground">{account}</span>}
+    </div>
+  )
+}
+
+/** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */
+function CliConnectionRow({ connection, provider }: { connection: Connection; provider: CliProvider }) {
+  const queryClient = useQueryClient()
+  const [login, setLogin] = useState<CliLoginStart | null>(null)
+  const [expired, setExpired] = useState(false)
+  const [code, setCode] = useState("")
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.connections })
+
+  const start = useMutation({
+    mutationFn: () => api.cliLoginStart(provider),
+    onSuccess: (next) => {
+      setLogin(next)
+      setExpired(false)
+      setCode("")
+    },
+  })
+  const submitCode = useMutation({
+    mutationFn: (value: string) => api.cliLoginCode(provider, { code: value }),
+    onSuccess: () => {
+      setLogin(null)
+      setCode("")
+      refresh()
+    },
+  })
+  const logout = useMutation({
+    mutationFn: () => api.cliLogout(provider),
+    onSuccess: () => {
+      setLogin(null)
+      refresh()
+    },
+  })
+  const busy = start.isPending || submitCode.isPending || logout.isPending
+  const error = start.error ?? submitCode.error ?? logout.error
+
+  useEffect(() => {
+    if (connection.connected) setLogin(null)
+  }, [connection.connected])
+
+  useEffect(() => {
+    if (!login) return
+    const id = setTimeout(() => setExpired(true), Math.max(0, Date.parse(login.expiresAt) - Date.now()))
+    return () => clearTimeout(id)
+  }, [login])
+
+  const polling = login?.provider === "codex-cli" && !expired && !connection.connected
+  useEffect(() => {
+    if (!polling) return
+    const id = setInterval(() => void queryClient.invalidateQueries({ queryKey: keys.connections }), CLI_POLL_MS)
+    return () => clearInterval(id)
+  }, [polling, queryClient])
+
+  function cancel() {
+    setLogin(null)
+    setCode("")
+  }
+
+  function body() {
+    if (!connection.available) {
+      return (
+        <>
+          <p className="text-muted-foreground">Agent box is offline.</p>
+          <Button variant="outline" className="w-fit" onClick={refresh}>
+            Check again
+          </Button>
+        </>
+      )
+    }
+    if (connection.connected) {
+      return (
+        <>
+          <p className="text-muted-foreground">
+            {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
+          </p>
+          <Button
+            variant="outline"
+            className="w-fit"
+            disabled={busy}
+            onClick={() => {
+              if (window.confirm("Disconnect this subscription? Agent runs will stop using it.")) logout.mutate()
+            }}
+          >
+            Disconnect
+          </Button>
+        </>
+      )
+    }
+    if (login && expired) {
+      return (
+        <>
+          <p className="text-muted-foreground">This sign-in expired.</p>
+          <Button className="w-fit" disabled={busy} onClick={() => start.mutate()}>
+            Try again
+          </Button>
+        </>
+      )
+    }
+    if (login?.needsCode) {
+      return (
+        <>
+          <Button asChild variant="outline" className="w-fit">
+            <a href={login.url} target="_blank" rel="noopener noreferrer">
+              Open sign-in page
+            </a>
+          </Button>
+          <p className="text-muted-foreground">Sign in on Anthropic's page, then paste the code it shows you.</p>
+          <form
+            className="flex flex-wrap gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              submitCode.mutate(code.trim())
+            }}
+          >
+            <Input
+              className="max-w-xs"
+              autoComplete="off"
+              placeholder="Code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+            />
+            <Button type="submit" disabled={busy || code.trim().length === 0}>
+              Submit code
+            </Button>
+            <Button type="button" variant="outline" onClick={cancel}>
+              Cancel
+            </Button>
+          </form>
+        </>
+      )
+    }
+    if (login) {
+      return (
+        <>
+          <Button asChild variant="outline" className="w-fit">
+            <a href={login.url} target="_blank" rel="noopener noreferrer">
+              Open sign-in page
+            </a>
+          </Button>
+          <p className="text-muted-foreground">Enter this code on the OpenAI page:</p>
+          <div className="flex items-center gap-2">
+            <code className="font-mono text-lg font-semibold tracking-widest">{login.userCode}</code>
+            <Button variant="outline" size="sm" onClick={() => void navigator.clipboard.writeText(login.userCode ?? "")}>
+              Copy
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancel}>
+              Cancel
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Waiting for you to approve the sign-in…</p>
+        </>
+      )
+    }
+    return (
+      <>
+        <p className="text-muted-foreground">
+          {provider === "claude-cli" ? "Use your own Claude Pro or Max subscription." : "Use your own ChatGPT subscription."}
+        </p>
+        <Button className="w-fit" disabled={busy} onClick={() => start.mutate()}>
+          Connect
+        </Button>
+      </>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5 px-5 py-4">
+      <ConnectionHeader label={connection.label} connected={connection.connected} />
+      <div className="flex flex-col gap-2">{body()}</div>
       {error && <Alert>{errorText(error)}</Alert>}
     </div>
   )
