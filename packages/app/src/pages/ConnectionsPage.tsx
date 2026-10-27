@@ -70,7 +70,26 @@ function ConnectionRow({ connection }: { connection: Connection }) {
           <span className="font-mono text-xs text-muted-foreground">{connection.account}</span>
         )}
       </div>
-      {connection.kind === "oauth" ? (
+      {connection.kind === "cli" ? (
+        <div className="flex flex-col gap-2">
+          {!connection.available ? (
+            <p className="text-muted-foreground">Agent box is offline, so devbox login status is unknown.</p>
+          ) : connection.connected ? (
+            <p className="text-muted-foreground">Signed in on the devbox.</p>
+          ) : (
+            <p className="text-muted-foreground">
+              Sign in on the devbox: run <code className="font-mono">{connection.loginCommand}</code> in a terminal there.
+            </p>
+          )}
+          <Button
+            variant="outline"
+            className="w-fit"
+            onClick={() => void queryClient.invalidateQueries({ queryKey: keys.connections })}
+          >
+            Check again
+          </Button>
+        </div>
+      ) : connection.kind === "oauth" ? (
         connection.available ? (
           <Button asChild variant="outline" className="w-fit">
             <a href={SERVER_URL + ControlPaths.connectOAuth(connection.provider)}>
