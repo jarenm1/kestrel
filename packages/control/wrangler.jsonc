@@ -18,7 +18,7 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
   "vars": {
-    "ALLOWED_GITHUB_LOGINS": "jarenm1"
+    "ALLOWED_GITHUB_LOGINS": "jarenm1,caayd,StinkyCat0"
   },
   // PR/branch Previews (`wrangler preview`). Each Preview gets its own Hub Durable Object
   // namespace, so it never shares sessions, connections or the box slot with production.
@@ -28,7 +28,7 @@
       "bindings": [{ "name": "HUB", "class_name": "Hub" }]
     },
     "vars": {
-      "ALLOWED_GITHUB_LOGINS": "jarenm1"
+      "ALLOWED_GITHUB_LOGINS": "jarenm1,caayd,StinkyCat0"
     }
   }
 }
