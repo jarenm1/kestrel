@@ -26,8 +26,11 @@ const CODE_TIMEOUT_MS = 60_000
 /** A sign-in that is not finished within this is killed. */
 const PENDING_TTL_MS = 15 * 60_000
 const CODE_MAX = 512
-/** The CLI's reply to a code it will not accept: it asks again instead of exiting. */
-const CODE_REJECTED = /\b(invalid|incorrect|expired|error)\b/i
+/**
+ * The CLI's reply to a code it will not accept (it asks again instead of exiting). Observed: "Invalid code. Please make
+ * sure the full code was copied."; anything else counts as success only once the CLI exits 0.
+ */
+const CODE_REJECTED = /\b(Invalid code|OAuth error)\b/i
 const MESSAGE_MAX = 200
 
 const PROVIDERS: ReadonlyArray<CliProvider> = ["claude-cli", "codex-cli"]
@@ -407,6 +410,11 @@ export const CliAuthLive = Layer.effect(
               s.loggedIn
                 ? Effect.map(providerDir(user, provider), (dir): CliLoginDir | null => ({ provider, dir }))
                 : Effect.succeed(null),
+            ).pipe(
+              // A status check that fails must not block runs: the run falls back to the broker's keys.
+              Effect.catchAll((e) =>
+                Effect.as(Effect.logWarning(`${provider} status for ${user} failed: ${e.message}`), null),
+              ),
             ),
           ),
           { concurrency: "unbounded" },

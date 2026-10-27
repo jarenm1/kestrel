@@ -1,10 +1,10 @@
-import { Effect, Either, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BadRequest, CREDENTIALS_HEADER, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
+import { BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
-import { Credentials } from "../relay/client"
+import { BOX_USER_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
@@ -55,12 +55,10 @@ const jsonBody = <A, I>(schema: Schema.Schema<A, I, never>): Effect.Effect<A, Ba
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
 
-/** The box user the relay signed in for this request; null when the credentials header is absent or malformed. */
+/** The user the relay signed in for this request (relay-set header, stripped on the box's own port); null otherwise. */
 const requestUser = Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
-  const raw = req.headers[CREDENTIALS_HEADER]
-  if (raw === undefined) return null
-  const decoded = Schema.decodeUnknownEither(Credentials)(raw)
-  return Either.isRight(decoded) ? decoded.right.user : null
+  const user = req.headers[BOX_USER_HEADER]
+  return user === undefined || user === "" ? null : user
 })
 
 /** Runs `f` for the signed-in user; a request without one is refused. */

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { Effect, Fiber, Layer } from "effect"
-import { InternalError } from "@cloudagents/protocol"
+import { CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -16,7 +16,7 @@ import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
 import { attachWebSockets } from "./http/ws"
 import type { WsServices } from "./http/streams"
-import { runRelay } from "./relay/client"
+import { BOX_USER_HEADER, runRelay } from "./relay/client"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -35,6 +35,8 @@ const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
   const headers = new Headers()
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue
+    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user.
+    if (name === BOX_USER_HEADER || name === CREDENTIALS_HEADER) continue
     if (Array.isArray(value)) for (const v of value) headers.append(name, v)
     else headers.set(name, value)
   }

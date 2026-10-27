@@ -42,7 +42,13 @@ const HOP_HEADERS: Record<string, true> = {
   [CREDENTIALS_HEADER]: true,
 }
 
-export const Credentials = Schema.parseJson(
+/**
+ * Signed-in user of a relayed request, set by the relay client only (after it drops any copy the browser sent).
+ * The box's own HTTP listener strips it, so a local caller (e.g. a sandboxed agent) cannot claim a user.
+ */
+export const BOX_USER_HEADER = "x-kestrel-box-user"
+
+const Credentials = Schema.parseJson(
   Schema.Struct({
     user: Schema.String,
     github: Schema.optional(Schema.String),
@@ -173,16 +179,17 @@ const connectOnce = (
     })
   })
 
-/** Stores the signed-in user's credentials from a tunnelled request; malformed values are ignored. */
-const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Store) => {
+/** Stores the signed-in user's credentials from a tunnelled request; returns the user, null when absent or malformed. */
+const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Store): string | null => {
   const raw = headers[CREDENTIALS_HEADER]
-  if (raw === undefined) return
+  if (raw === undefined) return null
   const decoded = Schema.decodeUnknownEither(Credentials)(raw)
   if (Either.isLeft(decoded)) {
     Effect.runSync(Effect.logWarning("relay: credentials header is malformed; ignored"))
-    return
+    return null
   }
   Effect.runSync(store.set(decoded.right))
+  return decoded.right.user
 }
 
 const serveHttp = async (
@@ -191,13 +198,15 @@ const serveHttp = async (
   store: Store,
   send: (data: string | Uint8Array) => void,
 ) => {
-  absorbCredentials(frame.headers, store)
+  const user = absorbCredentials(frame.headers, store)
   let res: Response
   try {
     const headers = new Headers()
     for (const [name, value] of Object.entries(frame.headers)) {
       if (HOP_HEADERS[name.toLowerCase()] !== true) headers.set(name, value)
     }
+    headers.delete(BOX_USER_HEADER)
+    if (user !== null) headers.set(BOX_USER_HEADER, user)
     const body = frame.body === undefined ? undefined : new Uint8Array(fromBase64(frame.body))
     const req = new Request(new URL(frame.path, BOX_ORIGIN), { method: frame.method, headers, body })
     res = await handle(req)
