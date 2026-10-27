@@ -96,11 +96,13 @@
                 ${preflight}
                 # Separate from a production box on the same machine.
                 export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DEV_DATA_DIR:-$PWD/.data-dev}"
-                # Several people can run this on one shared machine: each Linux user gets its own
-                # block of ports (offset 10 per uid above 1000). The box never takes 8787, which
-                # belongs to the production box.
+                # Several people (and several worktrees per person) can run this on one machine.
+                # Each Linux user gets a block of 100 ports above uid 1000; KESTREL_DEV_SLOT (0-9)
+                # picks a sub-block of 10 inside it, one per worktree running at the same time.
+                # The box never takes 8787, which belongs to the production box.
                 uid=$(id -u)
-                offset="''${KESTREL_DEV_OFFSET:-$(( uid >= 1000 ? (uid - 1000) * 10 : 0 ))}"
+                slot="''${KESTREL_DEV_SLOT:-0}"
+                offset="''${KESTREL_DEV_OFFSET:-$(( (uid >= 1000 ? (uid - 1000) * 100 : 0) + slot * 10 ))}"
                 control_port=$((8788 + offset))
                 export KESTREL_CONTROL_PORT=$control_port
                 export KESTREL_APP_PORT=$((5173 + offset))

@@ -25,12 +25,14 @@ Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run crea
 
 ### Shared dev machine
 
-Several people can run `nix run` on one machine, each from their own clone under their own Linux user. Ports are offset by `(uid - 1000) * 10` (override with `KESTREL_DEV_OFFSET`): uid 1001 gets app 5183, Worker 8798, box 8807. `nix run` prints the ports. From your laptop, forward the app port and open it locally:
+Several people can run `nix run` on one machine, each from their own clone under their own Linux user, and each person can run several worktrees at once. Ports are offset by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10` (slot 0-9, default 0; `KESTREL_DEV_OFFSET` overrides the whole offset): uid 1001 slot 0 gets app 5273, Worker 8888, box 8897; slot 1 adds 10 to each. `nix run` prints the ports. From your laptop, forward the app port and open it locally:
 
 ```sh
-ssh -L 5183:localhost:5183 <you>@<dev-machine>
-# then open http://localhost:5183/auth/dev-login
+ssh -L 5273:localhost:5273 <you>@<dev-machine>
+# then open http://localhost:5273/auth/dev-login
 ```
+
+Working with agents or in parallel: see [AGENTS.md](AGENTS.md) (one git worktree and one PR per change).
 
 Agents need a model key: add one on the Connections page, or export `ANTHROPIC_API_KEY` before `nix run` (the box's broker uses it as a fallback; the sandbox only ever sees a per-run token).
 
