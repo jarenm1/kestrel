@@ -1,42 +1,13 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { useQuery } from "@tanstack/react-query"
 import type { BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
-import { api } from "../api/client"
+import { queries } from "@/api/queries"
+import { Alert } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 
-const BOX_POLL_MS = 10_000
-
-const BoxContext = createContext<BoxStatusInfo | null>(null)
-
-/** Polls `/api/box` and shares the result with the top bar and pages that need the agent box. */
-export function BoxProvider({ children }: { children: ReactNode }) {
-  const [status, setStatus] = useState<BoxStatusInfo | null>(null)
-
-  useEffect(() => {
-    let active = true
-    const refresh = () => {
-      api.box().then(
-        (box) => {
-          if (active) setStatus(box)
-        },
-        () => {
-          // Unreachable box status is shown as "unknown" (null); auth failures are handled app-wide.
-          if (active) setStatus(null)
-        },
-      )
-    }
-    refresh()
-    const timer = window.setInterval(refresh, BOX_POLL_MS)
-    return () => {
-      active = false
-      window.clearInterval(timer)
-    }
-  }, [])
-
-  return <BoxContext.Provider value={status}>{children}</BoxContext.Provider>
-}
-
-/** Latest box status, or null before the first successful poll. */
+/** Latest box status, or null while unknown (first poll pending or the last poll failed). */
 export function useBox(): BoxStatusInfo | null {
-  return useContext(BoxContext)
+  const box = useQuery(queries.box())
+  return box.isError ? null : (box.data ?? null)
 }
 
 /** True only once the box is known to be offline. */
@@ -46,16 +17,16 @@ export function useBoxOffline(): boolean {
 
 export function BoxPill() {
   const box = useBox()
-  if (box === null) return <span className="pill">box …</span>
-  return <span className={box.online ? "pill pill-online" : "pill pill-offline"}>box {box.online ? "online" : "offline"}</span>
+  if (box === null) return <Badge>box …</Badge>
+  return <Badge variant={box.online ? "success" : "destructive"}>box {box.online ? "online" : "offline"}</Badge>
 }
 
 export function BoxOfflineBanner() {
   const offline = useBoxOffline()
   if (!offline) return null
   return (
-    <div className="banner">
-      Agent box offline — start it with <code className="mono">nix run .#box</code>
-    </div>
+    <Alert variant="warning">
+      Agent box offline. Start it with <code className="font-mono text-foreground">nix run .#box</code>
+    </Alert>
   )
 }

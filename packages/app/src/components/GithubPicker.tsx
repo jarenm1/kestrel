@@ -1,76 +1,61 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import type { GithubRepo } from "@cloudagents/protocol"
-import { api } from "../api/client"
-import { errorText } from "../util"
-
-type PickerState =
-  | { status: "loading" }
-  | { status: "not-connected" }
-  | { status: "error"; message: string }
-  | { status: "ready"; repos: readonly GithubRepo[] }
+import { queries } from "@/api/queries"
+import { Alert } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { errorText } from "@/util"
 
 export function GithubPicker({ disabled, onPick }: { disabled: boolean; onPick: (repo: GithubRepo) => void }) {
-  const [state, setState] = useState<PickerState>({ status: "loading" })
+  const connections = useQuery(queries.connections())
+  const connected = connections.data?.some((c) => c.provider === "github" && c.connected) ?? false
+  const repos = useQuery({ ...queries.githubRepos(), enabled: connected })
   const [filter, setFilter] = useState("")
 
-  useEffect(() => {
-    let active = true
-    api
-      .connections()
-      .then(async (connections): Promise<PickerState> => {
-        const github = connections.find((c) => c.provider === "github")
-        if (!github?.connected) return { status: "not-connected" }
-        return { status: "ready", repos: await api.githubRepos() }
-      })
-      .then(
-        (next) => {
-          if (active) setState(next)
-        },
-        (e: unknown) => {
-          if (active) setState({ status: "error", message: errorText(e) })
-        },
-      )
-    return () => {
-      active = false
-    }
-  }, [])
-
-  if (state.status === "loading") return <div className="muted">Loading GitHub repositories…</div>
-  if (state.status === "not-connected") {
+  const error = connections.error ?? repos.error
+  if (error) return <Alert>{errorText(error)}</Alert>
+  if (connections.isPending) return <div className="text-muted-foreground">Loading GitHub repositories…</div>
+  if (!connected) {
     return (
-      <div className="muted">
-        GitHub is not connected. <Link to="/connections">Connect GitHub</Link> to pick repositories from your account.
+      <div className="text-muted-foreground">
+        GitHub is not connected.{" "}
+        <Link to="/connections" className="text-primary hover:underline">
+          Connect GitHub
+        </Link>{" "}
+        to pick repositories from your account.
       </div>
     )
   }
-  if (state.status === "error") return <div className="error">{state.message}</div>
+  if (!repos.data) return <div className="text-muted-foreground">Loading GitHub repositories…</div>
 
   const needle = filter.trim().toLowerCase()
-  const matches = state.repos.filter((repo) => repo.fullName.toLowerCase().includes(needle))
+  const matches = repos.data.filter((repo) => repo.fullName.toLowerCase().includes(needle))
 
   return (
-    <div className="picker">
-      <input
+    <div className="flex flex-col gap-2">
+      <Input
+        className="max-w-sm"
         type="search"
-        placeholder={`Filter ${state.repos.length} GitHub repositories`}
+        placeholder={`Filter ${repos.data.length} GitHub repositories`}
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
       />
-      {matches.length === 0 && <div className="muted">No matching repositories.</div>}
-      <ul className="list picker-list">
+      {matches.length === 0 && <div className="text-muted-foreground">No matching repositories.</div>}
+      <ul className="max-h-80 divide-y overflow-auto rounded-md border px-3">
         {matches.map((repo) => (
-          <li key={repo.cloneUrl}>
-            <span className="picker-name">{repo.fullName}</span>
-            {repo.private && <span className="badge">private</span>}
-            <span className="muted">{repo.defaultBranch}</span>
-            <button type="button" className="small" disabled={disabled} onClick={() => onPick(repo)}>
+          <li key={repo.cloneUrl} className="flex items-center gap-3 py-1.5">
+            <span className="min-w-0 flex-1 truncate">{repo.fullName}</span>
+            {repo.private && <Badge>private</Badge>}
+            <span className="text-muted-foreground">{repo.defaultBranch}</span>
+            <Button variant="outline" size="sm" disabled={disabled} onClick={() => onPick(repo)}>
               Add
-            </button>
+            </Button>
           </li>
         ))}
       </ul>
-      <div className="muted">Showing your 100 most recently updated repositories.</div>
     </div>
   )
 }

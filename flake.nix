@@ -110,7 +110,8 @@
                   bun run build:app
                 fi
                 trap 'kill 0' EXIT
-                bun run --filter @cloudagents/control dev &
+                # PATH wrangler from Nix: the npm workerd binary does not run on NixOS.
+                (cd packages/control && wrangler dev --port 8788 --ip 127.0.0.1) &
                 bun run --filter @cloudagents/server dev &
                 bun run --filter @cloudagents/app dev &
                 echo "open http://localhost:5173/auth/dev-login to sign in" >&2

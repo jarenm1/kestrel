@@ -1,111 +1,92 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useState, type FormEvent } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useParams } from "react-router-dom"
-import type { Repo, Task } from "@cloudagents/protocol"
-import { api } from "../api/client"
-import { BoxOfflineBanner } from "../components/BoxStatus"
-import { StatusBadge } from "../components/StatusBadge"
-import { errorText, formatTime } from "../util"
-
-/** Task statuses change from agent runs with no repo-level event stream, so the list is polled. */
-const TASK_POLL_MS = 2000
+import type { Task } from "@cloudagents/protocol"
+import { api } from "@/api/client"
+import { keys, queries } from "@/api/queries"
+import { BoxOfflineBanner } from "@/components/BoxStatus"
+import { StatusBadge } from "@/components/StatusBadge"
+import { Alert } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { errorText, formatTime } from "@/util"
 
 export function RepoPage() {
   const { repoId = "" } = useParams()
-  const [repo, setRepo] = useState<Repo | null>(null)
-  const [tasks, setTasks] = useState<readonly Task[]>([])
+  const queryClient = useQueryClient()
+  const repo = useQuery(queries.repo(repoId))
+  const tasks = useQuery(queries.repoTasks(repoId))
   const [title, setTitle] = useState("")
-  const [creating, setCreating] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    let active = true
-    api.getRepo(repoId).then(
-      (r) => {
-        if (active) setRepo(r)
-      },
-      (e: unknown) => {
-        if (active) setError(errorText(e))
-      },
-    )
-    return () => {
-      active = false
-    }
-  }, [repoId])
-
-  useEffect(() => {
-    let active = true
-    const refresh = () => {
-      api.listRepoTasks(repoId).then(
-        (list) => {
-          if (!active) return
-          setTasks(list)
-          setError(null)
-        },
-        (e: unknown) => {
-          if (active) setError(errorText(e))
-        },
-      )
-    }
-    refresh()
-    const timer = window.setInterval(refresh, TASK_POLL_MS)
-    return () => {
-      active = false
-      window.clearInterval(timer)
-    }
-  }, [repoId])
-
-  async function createTask(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    setCreating(true)
-    setError(null)
-    try {
-      const task = await api.createTask(repoId, { title: title.trim() || undefined })
-      setTasks((list) => [task, ...list.filter((t) => t.id !== task.id)])
+  const createTask = useMutation({
+    mutationFn: (taskTitle: string) => api.createTask(repoId, { title: taskTitle || undefined }),
+    onSuccess: (task) => {
+      queryClient.setQueryData(keys.repoTasks(repoId), (list: readonly Task[] | undefined) => [
+        task,
+        ...(list ?? []).filter((t) => t.id !== task.id),
+      ])
       setTitle("")
-    } catch (err) {
-      setError(errorText(err))
-    } finally {
-      setCreating(false)
-    }
+    },
+  })
+
+  function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    createTask.mutate(title.trim())
   }
 
+  const error = createTask.error ?? repo.error ?? tasks.error
+
   return (
-    <div className="page">
-      <h1>{repo?.name ?? "Repository"}</h1>
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 overflow-auto p-6">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight">{repo.data?.name ?? "Repository"}</h1>
+        {repo.data && <div className="font-mono text-xs text-muted-foreground">{repo.data.url}</div>}
+      </div>
       <BoxOfflineBanner />
-      {repo && <div className="muted mono">{repo.url}</div>}
-      <form className="row-form" onSubmit={(e) => void createTask(e)}>
-        <input placeholder="Task title (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
-        <button type="submit" disabled={creating}>
-          {creating ? "Creating…" : "New task"}
-        </button>
+      <form className="flex gap-2" onSubmit={submit}>
+        <Input
+          className="max-w-md"
+          placeholder="Task title (optional)"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        <Button type="submit" disabled={createTask.isPending}>
+          {createTask.isPending ? "Creating…" : "New task"}
+        </Button>
       </form>
-      {error && <div className="error">{error}</div>}
-      {tasks.length === 0 && <div className="muted">No tasks yet.</div>}
-      <table className="tasks">
-        <thead>
-          <tr>
-            <th>Status</th>
-            <th>Title</th>
-            <th>Branch</th>
-            <th>Updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((task) => (
-            <tr key={task.id}>
-              <td>
-                <StatusBadge status={task.status} />
-              </td>
-              <td>
-                <Link to={`/tasks/${task.id}`}>{task.title}</Link>
-              </td>
-              <td className="mono muted">{task.branch}</td>
-              <td className="muted">{formatTime(task.updatedAt)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {error && <Alert>{errorText(error)}</Alert>}
+      {tasks.data?.length === 0 && <div className="text-muted-foreground">No tasks yet.</div>}
+      {tasks.data && tasks.data.length > 0 && (
+        <div className="rounded-lg border bg-card">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Status</TableHead>
+                <TableHead>Title</TableHead>
+                <TableHead>Branch</TableHead>
+                <TableHead>Updated</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {tasks.data.map((task) => (
+                <TableRow key={task.id}>
+                  <TableCell>
+                    <StatusBadge status={task.status} />
+                  </TableCell>
+                  <TableCell>
+                    <Link to={`/tasks/${task.id}`} className="font-medium text-primary hover:underline">
+                      {task.title}
+                    </Link>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">{task.branch}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatTime(task.updatedAt)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   )
 }

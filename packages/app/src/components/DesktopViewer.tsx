@@ -1,37 +1,26 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
-import { api } from "../api/client"
-import { openDesktopStream, type DesktopConnection } from "../api/events"
-import { MseSink } from "../desktop/mseSink"
-import { keyInput, mouseButton, normalizePoint } from "../desktop/input"
-import { errorText } from "../util"
+import { api } from "@/api/client"
+import { openDesktopStream, type DesktopConnection } from "@/api/events"
+import { keys, queries } from "@/api/queries"
+import { Alert } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
+import { MseSink } from "@/desktop/mseSink"
+import { errorText } from "@/util"
 import { StatusBadge } from "./StatusBadge"
 
 const RECONNECT_MS = 2000
 
 export function DesktopViewer({ taskId }: { taskId: string }) {
+  const queryClient = useQueryClient()
   const videoRef = useRef<HTMLVideoElement>(null)
   const connRef = useRef<DesktopConnection | null>(null)
-  const [status, setStatus] = useState<DesktopStatus | null>(null)
+  const desktop = useQuery(queries.desktop(taskId))
+  const status = desktop.data ?? null
   const [streamError, setStreamError] = useState<string | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
   const [generation, setGeneration] = useState(0)
-
-  useEffect(() => {
-    let active = true
-    api.getDesktop(taskId).then(
-      (s) => {
-        if (active) setStatus(s)
-      },
-      (e: unknown) => {
-        if (active) setActionError(errorText(e))
-      },
-    )
-    return () => {
-      active = false
-    }
-  }, [taskId])
 
   useEffect(() => {
     const video = videoRef.current
@@ -43,7 +32,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
 
     const conn = openDesktopStream(taskId, {
       onStatus: (s) => {
-        setStatus(s)
+        queryClient.setQueryData(keys.desktop(taskId), s)
         if (s.state === "running") {
           mime = s.mime
           setStreamError(null)
@@ -86,27 +75,19 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       sink?.close()
       connRef.current = null
     }
-  }, [taskId, generation])
+  }, [taskId, generation, queryClient])
 
   const running = status?.state === "running"
+  const active = status?.state === "running" || status?.state === "starting"
 
-  async function toggle() {
-    if (!status) return
-    setBusy(true)
-    setActionError(null)
-    try {
-      if (status.state === "running" || status.state === "starting") {
-        await api.stopDesktop(taskId)
-        setStatus(await api.getDesktop(taskId))
-      } else {
-        setStatus(await api.startDesktop(taskId))
-      }
-    } catch (e) {
-      setActionError(errorText(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const toggle = useMutation({
+    mutationFn: async (): Promise<DesktopStatus> => {
+      if (!active) return api.startDesktop(taskId)
+      await api.stopDesktop(taskId)
+      return api.getDesktop(taskId)
+    },
+    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+  })
 
   function send(input: DesktopInput) {
     connRef.current?.send(input)
@@ -146,26 +127,32 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     send(keyInput(e.nativeEvent, down))
   }
 
-  const error = actionError ?? status?.error ?? streamError
+  const actionError = toggle.error ?? desktop.error
+  const error = actionError ? errorText(actionError) : (status?.error ?? streamError)
 
   return (
-    <div className="desktop">
-      <div className="desktop-toolbar">
-        <button onClick={() => void toggle()} disabled={busy || !status}>
-          {status?.state === "running" || status?.state === "starting" ? "Stop" : "Start"}
-        </button>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-2 border-b px-3 py-1.5">
+        <Button
+          variant={active ? "outline" : "default"}
+          size="sm"
+          onClick={() => toggle.mutate()}
+          disabled={toggle.isPending || !status}
+        >
+          {active ? "Stop" : "Start"}
+        </Button>
         {status && <StatusBadge status={status.state} />}
         {status && status.state === "running" && (
-          <span className="muted mono">
+          <span className="font-mono text-xs text-muted-foreground">
             {status.width}×{status.height} · {status.fps} fps · {status.display}
           </span>
         )}
       </div>
-      {error && <div className="error">{error}</div>}
-      <div className="desktop-stage">
+      {error && <Alert className="m-2 w-auto">{error}</Alert>}
+      <div className="relative min-h-0 flex-1 bg-black">
         <video
           ref={videoRef}
-          className="desktop-video"
+          className="absolute inset-0 size-full cursor-default object-contain outline-none focus:shadow-[inset_0_0_0_1px_var(--ring)]"
           muted
           autoPlay
           playsInline
@@ -178,7 +165,11 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           onKeyUp={(e) => onKey(e, false)}
           onContextMenu={(e) => e.preventDefault()}
         />
-        {!running && <div className="desktop-overlay">{status?.state ?? "loading"}</div>}
+        {!running && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
+            {status?.state ?? "loading"}
+          </div>
+        )}
       </div>
     </div>
   )

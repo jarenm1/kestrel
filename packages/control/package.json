@@ -4,8 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 8788 --ip 127.0.0.1",
-    "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {

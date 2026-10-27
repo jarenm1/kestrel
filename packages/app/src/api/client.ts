@@ -17,7 +17,7 @@ import {
   SendMessageResponse,
   Task,
 } from "@cloudagents/protocol"
-import { SERVER_URL } from "../config"
+import { SERVER_URL } from "@/config"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {

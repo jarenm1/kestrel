@@ -9,7 +9,6 @@
     "typecheck": "bun run --filter '*' typecheck",
     "dev:server": "bun run --filter @cloudagents/server dev",
     "dev:app": "bun run --filter @cloudagents/app dev",
-    "dev:control": "bun run --filter @cloudagents/control dev",
     "build:app": "bun run --filter @cloudagents/app build"
   },
   "devDependencies": {
