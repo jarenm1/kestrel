@@ -317,10 +317,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const boot = (s: Session) =>
       Effect.gen(function* () {
         yield* Effect.try({
+          // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the
+          // abstract socket (`local`) would let every task's agent reach every display.
           try: () =>
-            spawnTracked(s, "Xvfb", [s.display, "-screen", "0", `${WIDTH}x${HEIGHT}x24`, "-nolisten", "tcp"], {
-              critical: true,
-            }),
+            spawnTracked(
+              s,
+              "Xvfb",
+              [s.display, "-screen", "0", `${WIDTH}x${HEIGHT}x24`, "-nolisten", "tcp", "-nolisten", "local"],
+              { critical: true },
+            ),
           catch: toErr,
         })
         yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
