@@ -49,6 +49,8 @@ Everything an agent controls runs in bubblewrap inside a transient systemd scope
 
 The box needs the user's systemd manager (`systemd-run --user`) with the memory, cpu and pids controllers delegated (the default on systemd distros). It checks this at startup and refuses to start otherwise; a box that outlives your login session (the production box) needs `loginctl enable-linger <user>`. At startup the box also stops its own slice, killing sandboxes a previous instance left behind; deleting a task stops its slice and drops its limits. Inspect live sandboxes with `systemd-cgls --user-unit kestrel.slice`.
 
+Signed-in users can instead run agents on their own Claude or ChatGPT subscription: sign in on the Connections page (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
+
 Checks: `nix develop -c bun run typecheck`. Marketing site: `bun run dev:site` (Astro on http://localhost:4321).
 
 ## Deploys
