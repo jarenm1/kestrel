@@ -30,7 +30,7 @@ Install Bun and Node 22 yourself. That is enough for the app, the control plane,
 ```sh
 bun install --frozen-lockfile
 bun run build:app                      # once; the Worker serves packages/app/dist
-printf 'BOX_TOKEN=%s\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n' "$(openssl rand -hex 32)" > packages/control/.dev.vars
+printf 'BOX_TOKEN=%s\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n' "$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" > packages/control/.dev.vars
 
 (cd packages/control && bunx wrangler dev --port 8788 --ip 127.0.0.1)   # Worker
 CLOUDAGENTS_PORT=8797 CLOUDAGENTS_DATA_DIR=$PWD/.data-dev CLOUDAGENTS_CONTROL_URL=http://127.0.0.1:8788 \
