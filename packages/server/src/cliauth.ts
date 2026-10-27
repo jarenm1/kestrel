@@ -10,7 +10,7 @@ import {
   type CliProvider,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
-import { killProcessGroup } from "./sandbox"
+import { cliBwrapArgs, findExecutable, killProcessGroup } from "./sandbox"
 
 /*
  * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). Each signed-in user's
@@ -89,16 +89,19 @@ interface Output {
   readonly stderr: string
 }
 
-/** Runs a CLI with `env`. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
-const runCli = (
-  bin: string,
-  args: ReadonlyArray<string>,
-  env: NodeJS.ProcessEnv,
-): Effect.Effect<Output | null, InternalError> =>
+/** A concrete process to run: the CLI itself, or bwrap wrapping it. */
+interface Invocation {
+  readonly file: string
+  readonly args: ReadonlyArray<string>
+  readonly env: Readonly<Record<string, string>>
+}
+
+/** Runs a CLI. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
+const runCli = (inv: Invocation, label: string): Effect.Effect<Output | null, InternalError> =>
   Effect.async<Output | null, InternalError>((resume) => {
-    execFile(bin, [...args], { env, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
+    execFile(inv.file, [...inv.args], { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return resume(Effect.succeed(null))
-      if (err && err.killed) return resume(Effect.fail(new InternalError({ message: `${bin} ${args[0] ?? ""}: timed out` })))
+      if (err && err.killed) return resume(Effect.fail(new InternalError({ message: `${label}: timed out` })))
       resume(Effect.succeed({ stdout, stderr }))
     })
   })
@@ -242,7 +245,7 @@ export const CliAuthLive = Layer.effect(
       })
 
     /** Environment for running a CLI as `user`: their HOME and config dirs, never the box user's login. */
-    const cliEnv = (user: string): Effect.Effect<NodeJS.ProcessEnv, BadRequest | InternalError> =>
+    const cliEnv = (user: string): Effect.Effect<Record<string, string>, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const root = yield* rootOf(user)
         const path = config.sandboxPath ?? (config.sandboxEnabled ? null : (process.env.PATH ?? "/usr/bin:/bin"))
@@ -263,14 +266,32 @@ export const CliAuthLive = Layer.effect(
         }
       })
 
+    /**
+     * How to run `bin args` for `user`: inside bwrap with only the user's dir writable, so it dies with the box and
+     * sees nothing else of the host; directly only when the sandbox is disabled (local debugging).
+     */
+    const invoke = (
+      user: string,
+      bin: string,
+      args: ReadonlyArray<string>,
+    ): Effect.Effect<Invocation, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        const env = yield* cliEnv(user)
+        if (!config.sandboxEnabled) return { file: bin, args, env }
+        const bwrap = findExecutable("bwrap")
+        if (bwrap === null) return yield* Effect.fail(new InternalError({ message: "bwrap (bubblewrap) not found on PATH" }))
+        const root = yield* rootOf(user)
+        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args]), env: {} }
+      })
+
     const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest | InternalError> =>
       Effect.gen(function* () {
         // No directory means no login: skip spawning the CLI.
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         if (!present) return { provider, loggedIn: false, account: null }
-        const env = yield* cliEnv(user)
-        const out = yield* runCli(SPECS[provider].bin, SPECS[provider].status, env)
+        const inv = yield* invoke(user, SPECS[provider].bin, SPECS[provider].status)
+        const out = yield* runCli(inv, `${SPECS[provider].bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
         return provider === "claude-cli" ? yield* parseClaudeStatus(out) : yield* parseCodexStatus(out)
       })
@@ -288,9 +309,9 @@ export const CliAuthLive = Layer.effect(
         const key = keyOf(user, provider)
         const previous = pending.get(key)
         if (previous) killEntry(previous)
-        const env = yield* cliEnv(user)
+        const inv = yield* invoke(user, spec.bin, spec.login)
         const child = yield* Effect.try({
-          try: () => spawn(spec.bin, [...spec.login], { env, stdio: ["pipe", "pipe", "pipe"], detached: true }),
+          try: () => spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: true }),
           catch: () => new InternalError({ message: `${spec.bin} could not be started` }),
         })
         child.stdin?.on("error", () => {})
@@ -393,8 +414,8 @@ export const CliAuthLive = Layer.effect(
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         // Revoke with the CLI when there is a login to revoke; a failed revoke still removes the local login.
         if (present) {
-          const env = yield* cliEnv(user)
-          yield* runCli(SPECS[provider].bin, SPECS[provider].logout, env).pipe(Effect.ignore)
+          const inv = yield* invoke(user, SPECS[provider].bin, SPECS[provider].logout)
+          yield* runCli(inv, `${SPECS[provider].bin} logout`).pipe(Effect.ignore)
         }
         yield* Effect.tryPromise({
           try: () => rm(dir, { recursive: true, force: true }),

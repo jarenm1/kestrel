@@ -106,6 +106,45 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   return argv
 }
 
+/**
+ * bwrap args (without the executable) that run `command` with only `homeDir` writable: for the agent CLIs' own
+ * sign-in/status/logout on the box. The process dies with the box (--die-with-parent) and sees nothing of the host
+ * beyond /nix/store and the DNS/TLS files.
+ */
+export const cliBwrapArgs = (
+  homeDir: string,
+  env: Readonly<Record<string, string>>,
+  command: ReadonlyArray<string>,
+): string[] => {
+  const argv = [
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-all",
+    "--share-net",
+    "--clearenv",
+    "--ro-bind",
+    "/nix/store",
+    "/nix/store",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--tmpfs",
+    "/home",
+    "--bind",
+    homeDir,
+    homeDir,
+  ]
+  for (const file of SYSTEM_RO_FILES) {
+    if (existsSync(file)) argv.push("--ro-bind", file, file)
+  }
+  for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
+  argv.push("--chdir", homeDir, "--", ...command)
+  return argv
+}
+
 export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display}`
 
 /** Parses ":101" into 101 when the desktop socket exists on the host. */
@@ -185,7 +224,7 @@ const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
 
 export const killProcessGroup = killGroup
 
-const findExecutable = (name: string): string | null => {
+export const findExecutable = (name: string): string | null => {
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (dir === "") continue
     const candidate = join(dir, name)
