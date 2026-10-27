@@ -96,7 +96,15 @@
                 ${preflight}
                 # Separate from a production box on the same machine.
                 export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DEV_DATA_DIR:-$PWD/.data-dev}"
-                export CLOUDAGENTS_PORT="''${CLOUDAGENTS_PORT:-8787}"
+                # Several people can run this on one shared machine: each Linux user gets its own
+                # block of ports (offset 10 per uid above 1000). The box never takes 8787, which
+                # belongs to the production box.
+                uid=$(id -u)
+                offset="''${KESTREL_DEV_OFFSET:-$(( uid >= 1000 ? (uid - 1000) * 10 : 0 ))}"
+                control_port=$((8788 + offset))
+                export KESTREL_CONTROL_PORT=$control_port
+                export KESTREL_APP_PORT=$((5173 + offset))
+                export CLOUDAGENTS_PORT="''${CLOUDAGENTS_PORT:-$((8797 + offset))}"
                 vars=packages/control/.dev.vars
                 if [ ! -f "$vars" ]; then
                   token=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
@@ -105,16 +113,17 @@
                 fi
                 CLOUDAGENTS_BOX_TOKEN=$(sed -n 's/^BOX_TOKEN=//p' "$vars")
                 export CLOUDAGENTS_BOX_TOKEN
-                export CLOUDAGENTS_CONTROL_URL=http://127.0.0.1:8788
+                export CLOUDAGENTS_CONTROL_URL="http://127.0.0.1:$control_port"
                 if [ ! -d packages/app/dist ]; then
                   bun run build:app
                 fi
                 trap 'kill 0' EXIT
                 # PATH wrangler from Nix: the npm workerd binary does not run on NixOS.
-                (cd packages/control && wrangler dev --port 8788 --ip 127.0.0.1) &
+                (cd packages/control && wrangler dev --port "$control_port" --inspector-port $((9229 + offset)) --ip 127.0.0.1) &
                 bun run --filter @cloudagents/server dev &
                 bun run --filter @cloudagents/app dev &
-                echo "open http://localhost:5173/auth/dev-login to sign in" >&2
+                echo "ports: app $KESTREL_APP_PORT, worker $control_port, box $CLOUDAGENTS_PORT" >&2
+                echo "open http://localhost:$KESTREL_APP_PORT/auth/dev-login to sign in" >&2
                 wait -n
               '';
             };

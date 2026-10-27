@@ -16,12 +16,21 @@ Needs Nix with flakes. Nothing in the cloud is required.
 nix run
 ```
 
-This starts:
+This starts (ports for uid 1000; see below):
 - the Worker on http://127.0.0.1:8788 (`wrangler dev`, local Durable Object state in `packages/control/.wrangler`),
-- a box on 127.0.0.1:8787 connected to that Worker (data in `.data-dev/`),
+- a box on 127.0.0.1:8797 connected to that Worker (data in `.data-dev/`); 8787 is left to the production box,
 - Vite on http://localhost:5173.
 
-Open http://localhost:5173/auth/dev-login to sign in as `dev`. The first run creates `packages/control/.dev.vars` with a random local box token. Use `CLOUDAGENTS_PORT=8797 nix run` if 8787 is taken.
+Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run creates `packages/control/.dev.vars` with a random local box token.
+
+### Shared dev machine
+
+Several people can run `nix run` on one machine, each from their own clone under their own Linux user. Ports are offset by `(uid - 1000) * 10` (override with `KESTREL_DEV_OFFSET`): uid 1001 gets app 5183, Worker 8798, box 8807. `nix run` prints the ports. From your laptop, forward the app port and open it locally:
+
+```sh
+ssh -L 5183:localhost:5183 <you>@<dev-machine>
+# then open http://localhost:5183/auth/dev-login
+```
 
 Agents need a model key: add one on the Connections page, or export `ANTHROPIC_API_KEY` before `nix run` (the box's broker uses it as a fallback; the sandbox only ever sees a per-run token).
 
