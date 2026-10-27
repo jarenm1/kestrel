@@ -1,17 +1,12 @@
 import { Effect } from "effect"
 import { execFile } from "node:child_process"
-import { InternalError } from "@cloudagents/protocol"
+import { InternalError, type CliAuthStatus } from "@cloudagents/protocol"
 
-/**
+/*
  * Whether the agent CLIs are logged in on the box itself, as the box's own user (where a
  * subscription login lives; never the sandbox home). Only a login flag and an account label leave
  * this module: never tokens, key fragments or file contents.
  */
-export interface CliAuthStatus {
-  readonly provider: "claude-cli" | "codex-cli"
-  readonly loggedIn: boolean
-  readonly account: string | null
-}
 
 const TIMEOUT_MS = 15_000
 
