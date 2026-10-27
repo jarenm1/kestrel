@@ -16,30 +16,43 @@ parallel on one shared machine, so the workflow below is mandatory.
 
 ## Worktree flow
 
+Start a change (from the main clone, e.g. `~/kestrel`):
+
 ```sh
-scripts/wt new <topic>        # worktree + branch <github-login>/<topic> from origin/main, deps installed
+git fetch origin
+git worktree add ../kestrel-worktrees/<topic> -b <github-login>/<topic> origin/main
 cd ../kestrel-worktrees/<topic>
+nix develop -c bun install --frozen-lockfile
+```
 
-# ... work, commit small logical commits ...
+Work and open the PR:
 
+```sh
+# ... small logical commits ...
 git fetch origin && git rebase origin/main      # keep up to date; force-push your own branch only
 git push -u origin HEAD                          # or: git push --force-with-lease after a rebase
 gh pr create --fill                              # title: what changed; body: why + how you verified
-
-scripts/wt list              # your worktrees and their PR state
-scripts/wt clean             # after merges: removes worktrees + local branches whose PR is MERGED, pulls main
 ```
 
-- Run `scripts/wt clean` after every merge (yours or one you were asked to do). It skips worktrees with
-  uncommitted changes, and it uses the PR state on GitHub because squash merges never show up in git history.
-  Stop that worktree's `nix run` first.
+Clean up after the PR is merged (yours, or one you were asked to merge). Stop that worktree's `nix run` first,
+and run this from the main clone, not from inside the worktree:
+
+```sh
+gh pr view <github-login>/<topic> --json state -q .state   # must print MERGED; squash merges never show in git history
+git worktree remove ../kestrel-worktrees/<topic>           # refuses if there are uncommitted changes: check, don't --force
+git branch -D <github-login>/<topic>
+git pull --ff-only origin main
+```
+
+`git worktree list` shows what is still around; clean up every merged one.
+
 - Branch names: `<github-login>/<topic>`, e.g. `caayd/install-link`.
 - Every PR gets a Preview: `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (app; its own
   empty Hub, no secrets, no box, so UI review only) and `...-kestrel-site.jarenmchugh.workers.dev` (site).
 - Each worktree has its own `node_modules`, `.data-dev/`, `packages/control/.dev.vars` and `.wrangler/` state.
 - Dependencies are shared, not duplicated: bun hardlinks every package from its global cache
   (`~/.bun/install/cache`), and Nix tools come from `/nix/store`, so a new worktree installs in about a second
-  and costs almost no disk. Don't copy `node_modules` between worktrees or symlink them; just let `wt new` install.
+  and costs almost no disk. Don't copy or symlink `node_modules` between worktrees; run `bun install` in each.
 
 ## Running the stack from a worktree
 
