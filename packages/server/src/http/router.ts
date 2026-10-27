@@ -1,9 +1,10 @@
-import { Effect, Schema } from "effect"
+import { Effect, Either, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BadRequest, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
+import { BadRequest, CREDENTIALS_HEADER, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
 import { VERSION } from "../config"
-import { cliAuthStatus } from "../cliauth"
+import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
+import { Credentials } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
@@ -54,15 +55,52 @@ const jsonBody = <A, I>(schema: Schema.Schema<A, I, never>): Effect.Effect<A, Ba
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
 
-export const makeRouter = (core: CoreShape) =>
+/** The box user the relay signed in for this request; null when the credentials header is absent or malformed. */
+const requestUser = Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
+  const raw = req.headers[CREDENTIALS_HEADER]
+  if (raw === undefined) return null
+  const decoded = Schema.decodeUnknownEither(Credentials)(raw)
+  return Either.isRight(decoded) ? decoded.right.user : null
+})
+
+/** Runs `f` for the signed-in user; a request without one is refused. */
+const signedIn = <A, R>(f: (user: string) => Effect.Effect<A, ApiError, R>) =>
+  Effect.flatMap(requestUser, (user) =>
+    user === null ? Effect.fail(new BadRequest({ message: "no signed-in user" })) : f(user),
+  )
+
+/** The provider named in the path; anything else is refused. */
+const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
+  Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
+)
+
+export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
       Effect.succeed(HttpServerResponse.unsafeJson(Schema.decodeSync(Health)({ ok: true, version: VERSION }))),
     ),
-    // Agent CLI logins on the box itself (Connections page); never tokens.
-    HttpRouter.get("/api/cli-auth", respond(cliAuthStatus())),
-
+    // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
+    HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/login",
+      respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),
+    ),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/code",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(CliLoginCodeBody), (body) => cliAuth.submitCode(user, provider, body.code)),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.del(
+      "/api/cli-auth/:provider",
+      noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.logout(user, provider)))),
+    ),
+  ).pipe(
     HttpRouter.get("/api/repos", respond(core.listRepos())),
     HttpRouter.post(
       "/api/repos",
@@ -102,7 +140,7 @@ export const makeRouter = (core: CoreShape) =>
     HttpRouter.post(
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) =>
-        respond(Effect.flatMap(jsonBody(SendMessageBody), (body) => core.sendMessage(id, body.text))),
+        respond(Effect.flatMap(jsonBody(SendMessageBody), (body) => Effect.flatMap(requestUser, (user) => core.sendMessage(id, body.text, user)))),
       ),
     ),
     HttpRouter.get(
@@ -136,9 +174,9 @@ export const makeRouter = (core: CoreShape) =>
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape) =>
+export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

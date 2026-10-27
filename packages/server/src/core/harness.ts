@@ -3,24 +3,27 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream, type WriteStream } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
-import { join } from "node:path"
-import { InternalError, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
+import { basename, join } from "node:path"
+import { InternalError, type CliProvider, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
+import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { Config } from "../config"
-import { agentHome, initBox, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
+import { SANDBOX_HOME, agentHome, initBox, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable } from "./state"
 
 export interface AgentHarnessShape {
   /**
    * Starts the harness for a run that is already persisted as `running` (see Core.sendMessage).
-   * On spawn failure the run is aborted before the error is returned.
+   * On spawn failure the run is aborted before the error is returned. `user` is the box user the
+   * run is for; their CLI logins, when they have any, replace the broker's API keys.
    */
   readonly spawn: (
     task: Task,
     run: Run,
     prompt: string,
     display: string | null,
+    user: string | null,
   ) => Effect.Effect<void, InternalError>
   /** Kills a running run and marks it cancelled. Idempotent for already-finished runs. */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
@@ -43,6 +46,12 @@ interface ActiveRun {
 
 const KILL_GRACE_MS = 3000
 
+/** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
+const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
+  "claude-cli": { env: "CLAUDE_CONFIG_DIR", broker: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
+  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
+}
+
 export const AgentHarnessLive = Layer.effect(
   AgentHarness,
   Effect.gen(function* () {
@@ -50,6 +59,7 @@ export const AgentHarnessLive = Layer.effect(
     const store = yield* StateStore
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
+    const cliAuth = yield* CliAuth
     const settings = sandboxSettingsOf(config)
     if (settings.systemd) {
       yield* initBox(settings.systemd)
@@ -165,7 +175,7 @@ export const AgentHarnessLive = Layer.effect(
     }
 
     const shape: AgentHarnessShape = {
-      spawn: (task, run, prompt, display) =>
+      spawn: (task, run, prompt, display, user) =>
         Effect.gen(function* () {
           const runDir = join(config.runsDir, run.id)
           const homeDir = join(config.homesDir, task.id)
@@ -187,7 +197,18 @@ export const AgentHarnessLive = Layer.effect(
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
 
+            // A user's own CLI logins replace the broker's API keys for that provider.
+            const logins = user === null ? [] : yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+            const loginDirs = logins.map((login) => ({
+              provider: login.provider,
+              host: login.dir,
+              // Sandboxed runs see the login under their home; unsandboxed runs read it in place.
+              inside: settings.enabled ? join(SANDBOX_HOME, ".kestrel", basename(login.dir)) : login.dir,
+            }))
+            const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
             const brokerEnv = yield* broker.issue(run.id)
+            const keptBroker = Object.fromEntries(Object.entries(brokerEnv).filter(([key]) => !dropped.has(key)))
+            const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
@@ -202,10 +223,12 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_MCP_URL: mcpUrl,
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
-                ...brokerEnv,
+                ...keptBroker,
+                ...loginEnv,
               },
               command: config.agentCommand,
               roBinds: config.fakeAgentRoBinds,
+              binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
 
             return yield* Effect.try({

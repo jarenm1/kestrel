@@ -42,7 +42,7 @@ const HOP_HEADERS: Record<string, true> = {
   [CREDENTIALS_HEADER]: true,
 }
 
-const Credentials = Schema.parseJson(
+export const Credentials = Schema.parseJson(
   Schema.Struct({
     user: Schema.String,
     github: Schema.optional(Schema.String),

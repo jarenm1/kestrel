@@ -50,6 +50,7 @@ export interface CoreShape {
   readonly sendMessage: (
     taskId: string,
     text: string,
+    user: string | null,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
@@ -223,7 +224,7 @@ export const CoreLive = Layer.effect(
         return { ...task }
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (taskId, text) =>
+    const sendMessage: CoreShape["sendMessage"] = (taskId, text, user) =>
       Effect.gen(function* () {
         if (text.trim() === "") {
           return yield* Effect.fail(new BadRequest({ message: "message text is required" }))
@@ -290,7 +291,7 @@ export const CoreLive = Layer.effect(
           publishMessage(notice)
         }
 
-        yield* harness.spawn(taskNow, reserved.run, text, display)
+        yield* harness.spawn(taskNow, reserved.run, text, display, user)
         return { message: reserved.message, run: reserved.run }
       })
 

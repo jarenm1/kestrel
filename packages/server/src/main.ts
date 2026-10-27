@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Effect, Fiber, Layer } from "effect"
 import { InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
+import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
 import { EventHubLive } from "./core/events"
 import { AgentHarnessLive } from "./core/harness"
@@ -21,7 +22,8 @@ const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
   Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive, CredentialStoreLive),
 )
-const StateWithBase = Layer.provideMerge(StateLive, BaseLive)
+const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
+const StateWithBase = Layer.provideMerge(StateLive, CliAuthWithBase)
 const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
 const AppLive = Layer.provideMerge(CoreLive, HarnessWithBase)
 
@@ -100,8 +102,9 @@ const program = Effect.gen(function* () {
   const core = yield* CoreService
   const desktop = yield* DesktopManager
   const broker = yield* CredentialBroker
+  const cliAuth = yield* CliAuth
   const runtime = yield* Effect.runtime<WsServices>()
-  const webHandler = yield* makeWebHandler(core)
+  const webHandler = yield* makeWebHandler(core, cliAuth)
 
   const mcpHandler = createMcpHandler({
     desktop: {
@@ -142,6 +145,7 @@ const program = Effect.gen(function* () {
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
+  yield* cliAuth.shutdown()
   yield* core.shutdown()
   yield* closeServer(server)
 }).pipe(Effect.provide(AppLive))
