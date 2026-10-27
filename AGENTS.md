@@ -22,7 +22,7 @@ Start a change (from the main clone, e.g. `~/kestrel`):
 git fetch origin
 git worktree add ../kestrel-worktrees/<topic> -b <github-login>/<topic> origin/main
 cd ../kestrel-worktrees/<topic>
-nix develop -c bun install --frozen-lockfile
+bun install --frozen-lockfile
 ```
 
 Work and open the PR:
@@ -51,8 +51,10 @@ git pull --ff-only origin main
   empty Hub, no secrets, no box, so UI review only) and `...-kestrel-site.jarenmchugh.workers.dev` (site).
 - Each worktree has its own `node_modules`, `.data-dev/`, `packages/control/.dev.vars` and `.wrangler/` state.
 - Dependencies are shared, not duplicated: bun hardlinks every package from its global cache
-  (`~/.bun/install/cache`), and Nix tools come from `/nix/store`, so a new worktree installs in about a second
+  (`~/.bun/install/cache`), and the flake's tools come from `/nix/store`, so a new worktree installs in about a second
   and costs almost no disk. Don't copy or symlink `node_modules` between worktrees; run `bun install` in each.
+- Nix is optional. The flake pins the toolchain and gives you `nix run`; without Nix, install Bun and Node 22 and
+  follow "Without Nix" in `README.md`.
 
 ## Running the stack from a worktree
 
@@ -61,6 +63,7 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run
 ```
 
 - `nix run` starts the Worker, a dev box and Vite, and prints its ports. It installs dependencies on first run.
+  Without Nix, start the three processes by hand as in `README.md` and pick ports that no other stack uses.
 - Ports are unique per Linux user and per `KESTREL_DEV_SLOT` (0-9). **Give every worktree that runs at the same
   time its own slot**, or the second `nix run` fails on a busy port.
 - **At most one `nix run` per worktree.** The local Worker state (`.wrangler/`) is per directory; a second stack
@@ -74,9 +77,9 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run
 ## Before opening a PR
 
 ```sh
-nix develop -c bun run typecheck      # all 5 packages, must pass
-nix develop -c bun run build:app      # if packages/app changed
-nix develop -c bun run build:site     # if packages/site changed
+bun run typecheck      # all 5 packages, must pass
+bun run build:app      # if packages/app changed
+bun run build:site     # if packages/site changed
 ```
 
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and

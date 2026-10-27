@@ -10,7 +10,7 @@ Run your own agent harness in a sandboxed box with a live desktop.
 
 ## Local development
 
-Needs Nix with flakes. Nothing in the cloud is required.
+Nothing in the cloud is required. Nix is optional: the flake is a convenience that pins the toolchain and starts the whole stack with one command.
 
 ```sh
 nix run
@@ -23,6 +23,24 @@ This starts (ports for uid 1000; see below):
 
 Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run creates `packages/control/.dev.vars` with a random local box token.
 
+### Without Nix
+
+Install Bun and Node 22 yourself. That is enough for the app, the control plane, the site, `bun run typecheck` and the builds. The box's desktop also needs Xvfb, openbox, xterm, xdotool and an ffmpeg built with x11grab. Then run what `nix run` would, the last three commands each in its own terminal:
+
+```sh
+bun install --frozen-lockfile
+bun run build:app                      # once; the Worker serves packages/app/dist
+printf 'BOX_TOKEN=%s\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n' "$(openssl rand -hex 32)" > packages/control/.dev.vars
+
+(cd packages/control && bunx wrangler dev --port 8788 --ip 127.0.0.1)   # Worker
+CLOUDAGENTS_PORT=8797 CLOUDAGENTS_DATA_DIR=$PWD/.data-dev CLOUDAGENTS_CONTROL_URL=http://127.0.0.1:8788 \
+  CLOUDAGENTS_BOX_TOKEN=$(sed -n 's/^BOX_TOKEN=//p' packages/control/.dev.vars) \
+  CLOUDAGENTS_SANDBOX=0 bun run dev:server                               # box; keep it off 8787
+bun run dev:app                                                          # Vite on :5173
+```
+
+The agent sandbox is the one part that still depends on Nix: it exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake). Without Nix, run the box with `CLOUDAGENTS_SANDBOX=0` as above, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager. On NixOS use the flake: the npm `workerd` binary that `bunx wrangler` runs does not start there.
+
 ### Shared dev machine
 
 Several people can run `nix run` on one machine, each from their own clone under their own Linux user, and each person can run several worktrees at once. Ports are offset by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10` (slot 0-9, default 0; `KESTREL_DEV_OFFSET` overrides the whole offset): uid 1001 slot 0 gets app 5273, Worker 8888, box 8897; slot 1 adds 10 to each. `nix run` prints the ports. From your laptop, forward the app port and open it locally:
@@ -34,7 +52,7 @@ ssh -L 5273:localhost:5273 <you>@<dev-machine>
 
 Working with agents or in parallel: see [AGENTS.md](AGENTS.md) (one git worktree and one PR per change).
 
-Agents need a model key: add one on the Connections page, or export `ANTHROPIC_API_KEY` before `nix run` (the box's broker uses it as a fallback; the sandbox only ever sees a per-run token).
+Agents need a model key: add one on the Connections page, or export `ANTHROPIC_API_KEY` before starting the box (the box's broker uses it as a fallback; the sandbox only ever sees a per-run token).
 
 ### Agent sandbox
 
@@ -51,7 +69,7 @@ The box needs the user's systemd manager (`systemd-run --user`) with the memory,
 
 Signed-in users can instead run agents on their own Claude or ChatGPT subscription: sign in on the Connections page (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
 
-Checks: `nix develop -c bun run typecheck`. Marketing site: `bun run dev:site` (Astro on http://localhost:4321).
+Checks: `bun run typecheck`. Marketing site: `bun run dev:site` (Astro on http://localhost:4321).
 
 ## Deploys
 
