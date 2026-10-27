@@ -11,3 +11,4 @@ result
 .dev.vars
 .envrc
 .box.env
+.astro/

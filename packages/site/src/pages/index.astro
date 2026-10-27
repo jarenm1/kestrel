@@ -1,0 +1,144 @@
+---
+import Base from "../layouts/Base.astro"
+import { APP_URL } from "../config"
+
+const steps = [
+  {
+    title: "Rent a box",
+    body: "Sign in with GitHub and get a dedicated agent box. No VPS to provision, no machine of yours left running overnight.",
+  },
+  {
+    title: "Point it at a repo",
+    body: "Pick a repository. Every task gets its own git worktree and branch, so agents never step on each other.",
+  },
+  {
+    title: "Watch it work",
+    body: "Chat with the agent, stream its desktop live, take over the mouse when you need to, and review the diff.",
+  },
+]
+
+const features = [
+  {
+    title: "Live desktop streaming",
+    body: "Every task can run a full desktop. Watch browsers and GUI apps in real time and take control with your own keyboard and mouse.",
+  },
+  {
+    title: "Sandboxed by default",
+    body: "Agents run in a locked-down sandbox with a private home and only their task's worktree mounted. Nothing else on the box is visible.",
+  },
+  {
+    title: "Keys never enter the sandbox",
+    body: "Your model keys stay with the host. Agents get a short-lived per-run token through a credential broker, never the real key.",
+  },
+  {
+    title: "Bring your harness",
+    body: "Runs Claude Code out of the box. The harness is just a command, so any CLI agent that speaks stream-json can drive the box.",
+  },
+  {
+    title: "Tools the agent actually needs",
+    body: "Built-in MCP server: screenshots, mouse and keyboard, shell in the worktree, and status reports back to you.",
+  },
+  {
+    title: "Your box, reachable anywhere",
+    body: "The box dials out to the control plane, so there is nothing to expose. Open the app from any browser and you're connected.",
+  },
+]
+---
+
+<Base
+  title="Kestrel: rent a cloud box for your coding agent"
+  description="Give your agent its own sandboxed machine with a live desktop. Rent the compute, skip the VPS."
+>
+  <section class="relative overflow-hidden border-b">
+    <div
+      class="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgb(91_140_255/0.18),transparent_60%)]"
+    >
+    </div>
+    <div class="relative mx-auto flex max-w-6xl flex-col items-center gap-6 px-6 py-24 text-center">
+      <span class="rounded-full border px-3 py-1 text-xs text-muted-foreground">Agent boxes, streamed to your browser</span>
+      <h1 class="max-w-3xl text-4xl font-semibold tracking-tight text-balance sm:text-6xl">
+        Give your agent its own machine.
+      </h1>
+      <p class="max-w-2xl text-lg text-balance text-muted-foreground">
+        Kestrel rents you a sandboxed box with a full desktop. Your agent gets every tool it needs, you watch and steer it
+        live, and you never think about servers.
+      </p>
+      <div class="flex flex-wrap justify-center gap-3">
+        <a href={APP_URL} class="btn btn-primary">Get started</a>
+        <a href="/pricing" class="btn btn-outline">See pricing</a>
+      </div>
+      <div class="mt-10 w-full max-w-4xl overflow-hidden rounded-xl border bg-card text-left shadow-2xl shadow-primary/5">
+        <div class="flex items-center gap-2 border-b px-4 py-2.5 text-xs text-muted-foreground">
+          <span class="size-2.5 rounded-full bg-muted"></span>
+          <span class="size-2.5 rounded-full bg-muted"></span>
+          <span class="size-2.5 rounded-full bg-muted"></span>
+          <span class="ml-3 min-w-0 truncate font-mono">app.kestrel-agent.com/tasks/fix-login-flow</span>
+          <span class="ml-auto shrink-0 rounded-full border border-success/60 px-2 py-0.5 text-success">box online</span>
+        </div>
+        <div class="grid sm:grid-cols-2">
+          <div class="flex flex-col gap-3 border-b p-4 text-sm sm:border-r sm:border-b-0">
+            <div class="self-end rounded-lg border border-primary/50 bg-primary/10 px-3 py-2">
+              Fix the login redirect and check it in the browser.
+            </div>
+            <div class="self-start rounded-lg border bg-background px-3 py-2">
+              Patched <span class="font-mono text-xs">auth/callback.ts</span>, started the dev server, and verified the
+              redirect in Firefox. Diff is ready.
+            </div>
+            <div class="mt-auto flex items-center gap-2 text-xs text-muted-foreground">
+              <span class="rounded-full border border-success/60 px-2 py-0.5 text-success">succeeded</span>
+              exit 0
+            </div>
+          </div>
+          <div class="flex aspect-[16/10] flex-col bg-black">
+            <div class="m-6 flex flex-1 flex-col rounded-md border border-white/10 bg-[#1b1e27]">
+              <div class="border-b border-white/10 px-3 py-1.5 font-mono text-[10px] text-muted-foreground">
+                localhost:3000/dashboard
+              </div>
+              <div class="flex flex-1 items-center justify-center text-sm text-muted-foreground">Signed in ✓</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mx-auto max-w-6xl px-6 py-20">
+    <h2 class="text-center text-2xl font-semibold tracking-tight sm:text-3xl">How it works</h2>
+    <ol class="mt-10 grid gap-6 sm:grid-cols-3">
+      {
+        steps.map((step, i) => (
+          <li class="rounded-xl border bg-card p-6">
+            <span class="font-mono text-sm text-primary">0{i + 1}</span>
+            <h3 class="mt-2 font-semibold">{step.title}</h3>
+            <p class="mt-2 text-sm text-muted-foreground">{step.body}</p>
+          </li>
+        ))
+      }
+    </ol>
+  </section>
+
+  <section id="features" class="scroll-mt-14 border-y bg-card/40">
+    <div class="mx-auto max-w-6xl px-6 py-20">
+      <h2 class="text-center text-2xl font-semibold tracking-tight sm:text-3xl">Everything the agent needs</h2>
+      <p class="mx-auto mt-3 max-w-2xl text-center text-muted-foreground">
+        Like a game server you rent and mod, except the player is your coding agent.
+      </p>
+      <div class="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        {
+          features.map((feature) => (
+            <div class="rounded-xl border bg-background p-6">
+              <h3 class="font-semibold">{feature.title}</h3>
+              <p class="mt-2 text-sm text-muted-foreground">{feature.body}</p>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="mx-auto flex max-w-6xl flex-col items-center gap-5 px-6 py-24 text-center">
+    <h2 class="text-3xl font-semibold tracking-tight">Stop babysitting a VPS.</h2>
+    <p class="max-w-xl text-muted-foreground">Sign in with GitHub, add a repo, and hand your agent its first task.</p>
+    <a href={APP_URL} class="btn btn-primary">Open the app</a>
+  </section>
+</Base>

@@ -3,6 +3,10 @@
   "name": "kestrel",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-01",
+  // The app is served on app.kestrel-agent.com; workers.dev stays on because boxes dial it
+  // (CLOUDAGENTS_CONTROL_URL) and PR Previews use workers.dev URLs.
+  "routes": [{ "pattern": "app.kestrel-agent.com", "custom_domain": true }],
+  "workers_dev": true,
   "assets": {
     "directory": "../app/dist",
     "binding": "ASSETS",
