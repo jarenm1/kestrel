@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BadRequest, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
 import { VERSION } from "../config"
+import { cliAuthStatus } from "../cliauth"
 import type { CoreShape } from "../core/service"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
@@ -59,6 +60,8 @@ export const makeRouter = (core: CoreShape) =>
       "/api/health",
       Effect.succeed(HttpServerResponse.unsafeJson(Schema.decodeSync(Health)({ ok: true, version: VERSION }))),
     ),
+    // Agent CLI logins on the box itself (Connections page); never tokens.
+    HttpRouter.get("/api/cli-auth", respond(cliAuthStatus())),
 
     HttpRouter.get("/api/repos", respond(core.listRepos())),
     HttpRouter.post(
