@@ -31,7 +31,6 @@ const storedView = (provider: OAuthProvider | ApiKeyProvider, row: ConnectionRow
   connected: row !== undefined,
   account: row?.account ?? null,
   available: isAvailable(provider, env),
-  loginCommand: null,
 })
 
 const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
@@ -41,7 +40,6 @@ const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Conn
   connected: status?.loggedIn ?? false,
   account: status?.loggedIn ? status.account : null,
   available: status !== undefined,
-  loginCommand: provider.loginCommand,
 })
 
 /** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */
@@ -148,7 +146,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     const provider = findProvider(connection[1])
     if (!provider) return errorResponse(404, "NotFound", `unknown provider ${connection[1]}`)
     if (provider.kind === "cli") {
-      return errorResponse(400, "BadRequest", `${provider.label} signs in on the devbox: run \`${provider.loginCommand}\` there`)
+      return errorResponse(400, "BadRequest", `${provider.label} connects from the Connections page`)
     }
     if (method === "PUT") return putApiKey(request, env, login, provider)
     if (method === "DELETE") {

@@ -1,3 +1,4 @@
+import type { CliProvider as CliProviderId } from "@cloudagents/protocol"
 import { UpstreamError } from "./http"
 import type { Env } from "./env"
 
@@ -31,11 +32,10 @@ export interface ApiKeyProvider extends ProviderBase {
   readonly kind: "apikey"
 }
 
-/** CLI provider: the user signs in with the CLI on the devbox; the box reports the login state. Nothing is stored here. */
+/** CLI provider: the user signs in with the CLI on the box; the box reports the login state. Nothing is stored here. */
 export interface CliProvider extends ProviderBase {
+  readonly id: CliProviderId
   readonly kind: "cli"
-  /** Command the user runs on the devbox to sign in. */
-  readonly loginCommand: string
 }
 
 export type Provider = OAuthProvider | ApiKeyProvider | CliProvider
@@ -77,8 +77,8 @@ export const PROVIDERS: readonly Provider[] = [
   },
   { id: "anthropic", label: "Anthropic", kind: "apikey" },
   { id: "openai", label: "OpenAI", kind: "apikey" },
-  { id: "claude-cli", label: "Claude subscription", kind: "cli", loginCommand: "claude auth login" },
-  { id: "codex-cli", label: "ChatGPT subscription", kind: "cli", loginCommand: "codex login --device-auth" },
+  { id: "claude-cli", label: "Claude subscription", kind: "cli" },
+  { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
 ]
 
 export const findProvider = (id: string): Provider | undefined => PROVIDERS.find((p) => p.id === id)
