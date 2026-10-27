@@ -8,8 +8,9 @@
   "scripts": {
     "typecheck": "bun run --filter '*' typecheck",
     "dev:server": "bun run --filter @cloudagents/server dev",
-    "dev:web": "bun run --filter @cloudagents/web dev",
-    "build:web": "bun run --filter @cloudagents/web build"
+    "dev:app": "bun run --filter @cloudagents/app dev",
+    "dev:control": "bun run --filter @cloudagents/control dev",
+    "build:app": "bun run --filter @cloudagents/app build"
   },
   "devDependencies": {
     "@types/bun": "latest",

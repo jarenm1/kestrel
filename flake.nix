@@ -97,7 +97,7 @@
                 # Separate from a production box on the same machine.
                 export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DEV_DATA_DIR:-$PWD/.data-dev}"
                 export CLOUDAGENTS_PORT="''${CLOUDAGENTS_PORT:-8787}"
-                vars=packages/web/.dev.vars
+                vars=packages/control/.dev.vars
                 if [ ! -f "$vars" ]; then
                   token=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
                   printf 'BOX_TOKEN=%s\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n' "$token" > "$vars"
@@ -106,13 +106,13 @@
                 CLOUDAGENTS_BOX_TOKEN=$(sed -n 's/^BOX_TOKEN=//p' "$vars")
                 export CLOUDAGENTS_BOX_TOKEN
                 export CLOUDAGENTS_CONTROL_URL=http://127.0.0.1:8788
-                if [ ! -d packages/web/dist ]; then
-                  bun run build:web
+                if [ ! -d packages/app/dist ]; then
+                  bun run build:app
                 fi
                 trap 'kill 0' EXIT
-                (cd packages/web && wrangler dev --port 8788 --ip 127.0.0.1) &
+                bun run --filter @cloudagents/control dev &
                 bun run --filter @cloudagents/server dev &
-                bun run --filter @cloudagents/web dev &
+                bun run --filter @cloudagents/app dev &
                 echo "open http://localhost:5173/auth/dev-login to sign in" >&2
                 wait -n
               '';

@@ -1,4 +1,4 @@
-# Copy to packages/web/.dev.vars for `wrangler dev`. Never commit .dev.vars.
+# Copy to packages/control/.dev.vars for `wrangler dev`. Never commit .dev.vars.
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 BOX_TOKEN=
