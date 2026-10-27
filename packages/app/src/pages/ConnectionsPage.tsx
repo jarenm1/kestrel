@@ -126,6 +126,8 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
     onSuccess: (next) => {
+      submitCode.reset()
+      logout.reset()
       setLogin(next)
       setExpired(false)
       setCode("")
@@ -133,9 +135,12 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   })
   const submitCode = useMutation({
     mutationFn: (value: string) => api.cliLoginCode(provider, { code: value }),
-    onSuccess: () => {
-      setLogin(null)
-      setCode("")
+    onSuccess: (status) => {
+      // Keep the pending sign-in unless the box confirms it took; the user can retry or cancel.
+      if (status.loggedIn) {
+        setLogin(null)
+        setCode("")
+      }
       refresh()
     },
   })
@@ -167,6 +172,9 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   }, [polling, queryClient])
 
   function cancel() {
+    start.reset()
+    submitCode.reset()
+    logout.reset()
     setLogin(null)
     setCode("")
   }
@@ -231,6 +239,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
               className="max-w-xs"
               autoComplete="off"
               placeholder="Code"
+              aria-label="Code from the Claude sign-in page"
               value={code}
               onChange={(e) => setCode(e.target.value)}
             />
