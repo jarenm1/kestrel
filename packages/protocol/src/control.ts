@@ -27,8 +27,17 @@ export const ControlPaths = {
   githubRepos: "/api/github/repos",
   /** GET -> BoxStatus */
   box: "/api/box",
-  /** GET -> CliAuthStatus[] served by the box (relayed, not Worker-served); merged into connections. */
+  /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
   cliAuth: "/api/cli-auth",
+  /**
+   * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
+   * user, replacing any login already pending for them. Relayed to the box.
+   */
+  cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
+  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Relayed. */
+  cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
+  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
+  cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
 } as const
 
 export const Me = Schema.Struct({
@@ -50,21 +59,41 @@ export const Connection = Schema.Struct({
   account: Schema.NullOr(Schema.String),
   /** OAuth: false when the Worker lacks client id/secret. CLI: false when the box cannot report login status. */
   available: Schema.Boolean,
-  /** CLI: command to run on the devbox to sign in. Null for other kinds. */
-  loginCommand: Schema.NullOr(Schema.String),
 })
 export type Connection = typeof Connection.Type
 
 export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.minLength(8)) })
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
-/** One CLI login on the devbox, as reported by the box for `cliAuth`. Carries no secrets. */
+/** Subscription logins of the official agent CLIs, held per user on the box. */
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli")
+export type CliProvider = typeof CliProvider.Type
+
+/** One user's CLI login on the box, as reported by the box for `cliAuth`. Carries no secrets. */
 export const CliAuthStatus = Schema.Struct({
-  provider: Schema.Literal("claude-cli", "codex-cli"),
+  provider: CliProvider,
   loggedIn: Schema.Boolean,
   account: Schema.NullOr(Schema.String),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
+
+/**
+ * A sign-in the box started with the unmodified CLI. The user finishes it on the provider's own page:
+ * - claude-cli: open `url`, sign in, then send the code Anthropic shows to `cliLoginCode` (`needsCode`).
+ * - codex-cli: open `url` and enter `userCode`; the box notices completion itself (poll `cliAuth`).
+ */
+export const CliLoginStart = Schema.Struct({
+  provider: CliProvider,
+  url: Schema.String,
+  userCode: Schema.NullOr(Schema.String),
+  needsCode: Schema.Boolean,
+  /** ISO time after which the box abandons the pending login. */
+  expiresAt: Schema.String,
+})
+export type CliLoginStart = typeof CliLoginStart.Type
+
+export const CliLoginCodeBody = Schema.Struct({ code: Schema.String.pipe(Schema.minLength(1)) })
+export type CliLoginCodeBody = typeof CliLoginCodeBody.Type
 
 export const GithubRepo = Schema.Struct({
   fullName: Schema.String, // "owner/name"
