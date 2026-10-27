@@ -108,7 +108,7 @@ const program = Effect.gen(function* () {
       status: (taskId) => desktop.status(taskId),
       screenshot: (taskId) => desktop.screenshot(taskId),
       input: (taskId, event) => desktop.input(taskId, event),
-      launch: (taskId, command) => desktop.launch(taskId, command),
+      launch: (taskId, command) => core.desktopLaunch(taskId, command),
     },
     workspace: {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),

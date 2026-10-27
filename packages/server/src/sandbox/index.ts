@@ -4,6 +4,9 @@ import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
+import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
+
+export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./systemd"
 
 /** Where the per-task home is mounted inside the sandbox. */
 export const SANDBOX_HOME = "/home/agent"
@@ -111,10 +114,15 @@ export interface SandboxSettings {
   readonly binPath: string | null
   /** `CLOUDAGENTS_SANDBOX_SSL`: CA bundle path, exposed as SSL_CERT_FILE. */
   readonly sslCertFile: string | null
+  /** Per-task systemd resource limits; null only with `CLOUDAGENTS_SYSTEMD=0`. */
+  readonly systemd: SystemdSettings | null
 }
 
 export interface LaunchRequest {
   readonly settings: SandboxSettings
+  /** Task the process belongs to; its systemd slice carries the resource limits. */
+  readonly taskId: string
+  readonly kind: LaunchKind
   readonly worktreePath: string
   readonly homeDir: string
   /** X display string (e.g. ":101") of the task desktop, or null. */
@@ -147,10 +155,12 @@ export const sandboxSettingsOf = (config: {
   readonly sandboxEnabled: boolean
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
+  readonly systemd: SystemdSettings | null
 }): SandboxSettings => ({
   enabled: config.sandboxEnabled,
   binPath: config.sandboxPath,
   sslCertFile: config.sandboxSslCertFile,
+  systemd: config.systemd,
 })
 
 const killGroup = (pid: number | undefined, signal: NodeJS.Signals) => {
@@ -180,7 +190,9 @@ const findExecutable = (name: string): string | null => {
 
 /**
  * Turns a launch request into the concrete process to spawn. Sandboxed launches go through
- * bubblewrap; the env is exactly the base allowlist plus `req.env`.
+ * bubblewrap; the env inside is exactly the base allowlist plus `req.env`. With systemd limits on,
+ * the process starts through `systemd-run --scope` in the task's slice (systemd-run execs in place,
+ * so the spawned pid is still the sandbox's and process-group signals reach it).
  */
 export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, InternalError> =>
   Effect.gen(function* () {
@@ -199,6 +211,12 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         new InternalError({ message: "bwrap (bubblewrap) not found on PATH; run inside `nix develop` or `nix run .#box`" }),
       )
     }
+    const systemdRun = settings.systemd ? findExecutable("systemd-run") : null
+    if (settings.systemd && systemdRun === null) {
+      return yield* Effect.fail(
+        new InternalError({ message: "systemd-run not found on PATH (set CLOUDAGENTS_SYSTEMD=0 to run without limits)" }),
+      )
+    }
     yield* Effect.tryPromise({
       try: () => mkdir(req.homeDir, { recursive: true }),
       catch: (e) => new InternalError({ message: `cannot create home ${req.homeDir}: ${String(e)}` }),
@@ -215,20 +233,32 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       ...req.env,
     }
 
-    if (!settings.enabled) {
-      return { file: "sh", args: ["-c", req.command], env, cwd: req.worktreePath, home }
-    }
+    const inner: { file: string; args: string[] } = settings.enabled
+      ? {
+          file: bwrap as string,
+          args: buildBwrapArgv({
+            worktreePath: req.worktreePath,
+            gitCommonDir: req.gitCommonDir,
+            homeDir: req.homeDir,
+            display: displayNumber(req.display),
+            env,
+            command: req.command,
+            roBinds: req.roBinds,
+          }).slice(1),
+        }
+      : { file: "sh", args: ["-c", req.command] }
 
-    const argv = buildBwrapArgv({
-      worktreePath: req.worktreePath,
-      gitCommonDir: req.gitCommonDir,
-      homeDir: req.homeDir,
-      display: displayNumber(req.display),
-      env,
-      command: req.command,
-      roBinds: req.roBinds,
-    })
-    return { file: bwrap as string, args: argv.slice(1), env, cwd: req.worktreePath, home }
+    if (settings.systemd === null) return { ...inner, env, cwd: req.worktreePath, home }
+
+    yield* applyTaskLimits(settings.systemd, req.taskId)
+    return {
+      file: systemdRun as string,
+      args: [...scopeArgs(settings.systemd, req.taskId, req.kind), inner.file, ...inner.args],
+      // systemd-run needs the user bus; bwrap's --clearenv keeps it out of the sandbox.
+      env: { ...env, ...busEnv() },
+      cwd: req.worktreePath,
+      home,
+    }
   })
 
 export interface ProcessResult {

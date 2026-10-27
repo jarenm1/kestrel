@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { InternalError, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
 import { CredentialBroker } from "../broker"
 import { Config } from "../config"
-import { agentHome, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
+import { agentHome, initBox, killProcessGroup, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable } from "./state"
 
@@ -51,6 +51,12 @@ export const AgentHarnessLive = Layer.effect(
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
     const settings = sandboxSettingsOf(config)
+    if (settings.systemd) {
+      yield* initBox(settings.systemd)
+      yield* Effect.logInfo(
+        `agent sandboxes run in systemd slice ${settings.systemd.boxSlice}.slice, per task: MemoryMax=${settings.systemd.limits.memoryMax} CPUQuota=${settings.systemd.limits.cpuQuota} TasksMax=${settings.systemd.limits.tasksMax}`,
+      )
+    }
     const runtime = yield* Effect.runtime<never>()
     const runFork = Runtime.runFork(runtime)
     const active = new Map<string, ActiveRun>()
@@ -184,6 +190,8 @@ export const AgentHarnessLive = Layer.effect(
             const brokerEnv = yield* broker.issue(run.id)
             const launch = yield* prepareLaunch({
               settings,
+              taskId: task.id,
+              kind: "run",
               worktreePath: task.worktreePath,
               gitCommonDir: join(config.reposDir, task.repoId, ".git"),
               homeDir,

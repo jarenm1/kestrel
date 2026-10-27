@@ -25,7 +25,7 @@ flowchart TB
     HARN["Harness<br/>runs claude / other CLI agents<br/>core/harness.ts, config.ts<br/>👤 Person 3"]
     MCP["MCP server /mcp/:taskId<br/>desktop_*, workspace_exec, task_report<br/>mcp/handler.ts<br/>👤 Person 3"]
     BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
-    SB["bwrap sandbox<br/>agent process + worktree<br/>sandbox/*<br/>👤 Jaren"]
+    SB["bwrap sandbox in a systemd scope<br/>per-task memory/CPU/pids limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
     DESK["Desktop manager<br/>Xvfb + ffmpeg (NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
     STATE[("state.json, worktrees<br/>core/state.ts")]
   end
@@ -63,7 +63,7 @@ flowchart TB
 
 - The browser only talks to Cloudflare. `kestrel-agent.com` is the static marketing site; `app.kestrel-agent.com` is the app, served by the same Worker as the API.
 - The Hub Durable Object relays app requests to the box over the WebSocket the box dials out to, so nothing on the box is exposed to the internet.
-- The agent runs inside a bubblewrap sandbox. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys.
+- The agent runs inside a bubblewrap sandbox, in a transient systemd scope whose task slice caps memory, CPU and process count. Everything the agent can start (runs, `workspace_exec`, the desktop terminal, `desktop_launch` apps) goes through the same path. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys.
 - Dotted WebRTC line: planned direct video path from the box to the browser, replacing today's stream relayed through the Hub.
 
 ## Owners

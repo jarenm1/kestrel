@@ -52,6 +52,7 @@
             nodejs_22
             bun
             claude-code
+            xterm # the task desktop's terminal and what the agent launches on it run sandboxed
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";

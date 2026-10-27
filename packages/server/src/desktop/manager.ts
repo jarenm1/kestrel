@@ -11,15 +11,29 @@ export interface DesktopSink {
   onMedia(chunk: Uint8Array): void
 }
 
+/** A process prepared by the caller (sandboxed); the desktop only spawns and tracks it. */
+export interface ProcessSpec {
+  readonly file: string
+  readonly args: ReadonlyArray<string>
+  readonly env: Readonly<Record<string, string>>
+  readonly cwd: string
+}
+
+export interface DesktopStartOptions {
+  /** Builds the terminal opened on a fresh desktop, given its X display (e.g. ":101"). */
+  readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
+}
+
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
   DesktopManager,
   {
-    readonly start: (taskId: string, opts?: { cwd?: string }) => Effect.Effect<DesktopStatus, DesktopError>
+    readonly start: (taskId: string, opts: DesktopStartOptions) => Effect.Effect<DesktopStatus, DesktopError>
     readonly stop: (taskId: string) => Effect.Effect<void>
     readonly status: (taskId: string) => Effect.Effect<DesktopStatus>
     readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, DesktopError>
     readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, DesktopError>
-    readonly launch: (taskId: string, command: string) => Effect.Effect<void, DesktopError>
+    /** Spawns an app on the live desktop; it is killed with the desktop. */
+    readonly launch: (taskId: string, process: ProcessSpec) => Effect.Effect<void, DesktopError>
     readonly subscribe: (taskId: string, sink: DesktopSink) => Effect.Effect<Effect.Effect<void>, DesktopError>
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
     readonly stopAll: () => Effect.Effect<void>
@@ -40,7 +54,7 @@ interface Session {
   readonly taskId: string
   readonly num: number
   readonly display: string
-  readonly cwd: string | undefined
+  readonly terminal: DesktopStartOptions["terminal"]
   /** Completes when the init segment has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
@@ -263,12 +277,17 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s: Session,
       command: string,
       args: readonly string[],
-      opts: { critical: boolean; cwd?: string; onStdout?: (d: Buffer) => void },
+      opts: {
+        critical: boolean
+        cwd?: string
+        env?: Readonly<Record<string, string>>
+        onStdout?: (d: Buffer) => void
+      },
     ) => {
       const child = spawn(command, args, {
         cwd: opts.cwd,
         detached: true,
-        env: { ...process.env, DISPLAY: s.display },
+        env: opts.env ? { ...opts.env } : { ...process.env, DISPLAY: s.display },
         stdio: ["ignore", opts.onStdout ? "pipe" : "ignore", "pipe"],
       })
       s.procs.add(child)
@@ -308,7 +327,6 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         yield* Effect.try({
           try: () => {
             spawnTracked(s, "openbox", ["--sm-disable"], { critical: false })
-            spawnTracked(s, "xterm", ["-geometry", "100x30+40+40"], { critical: false, cwd: s.cwd })
             spawnTracked(s, "ffmpeg", ffmpegArgs(s.display), {
               critical: true,
               onStdout: (d) => onMediaBytes(s, d),
@@ -316,6 +334,16 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           },
           catch: toErr,
         })
+        // The terminal is a convenience: a desktop without one still serves the agent.
+        yield* s.terminal(s.display).pipe(
+          Effect.flatMap((term) =>
+            Effect.try({
+              try: () => spawnTracked(s, term.file, term.args, { critical: false, cwd: term.cwd, env: term.env }),
+              catch: toErr,
+            }),
+          ),
+          Effect.catchAll((e) => Effect.logWarning(`desktop ${s.display}: no terminal: ${e.message}`)),
+        )
         yield* Deferred.await(s.ready).pipe(
           Effect.timeoutFail({
             duration: READY_TIMEOUT_MS,
@@ -376,7 +404,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 taskId,
                 num,
                 display: `:${num}`,
-                cwd: opts?.cwd,
+                terminal: opts.terminal,
                 ready,
                 procs: new Set(),
                 sinks: new Set(),
@@ -448,12 +476,12 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           }
         }),
 
-      launch: (taskId, command) =>
+      launch: (taskId, proc) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
           yield* Effect.try({
             try: () => {
-              spawnTracked(s, "sh", ["-c", command], { critical: false, cwd: s.cwd })
+              spawnTracked(s, proc.file, proc.args, { critical: false, cwd: proc.cwd, env: proc.env })
             },
             catch: toErr,
           })

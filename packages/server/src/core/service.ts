@@ -18,7 +18,7 @@ import {
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { prepareLaunch, runProcess, sandboxSettingsOf } from "../sandbox"
+import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, type LaunchKind } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -69,6 +69,8 @@ export interface CoreShape {
     command: string,
     timeoutMs: number,
   ) => Effect.Effect<{ exitCode: number; stdout: string; stderr: string }, NotFound | InternalError>
+  /** Used by the MCP handler: starts a sandboxed app on the task's live desktop. */
+  readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<void, NotFound | InternalError>
 
   /** Cancels active runs and stops desktops. */
   readonly shutdown: () => Effect.Effect<void>
@@ -108,6 +110,29 @@ export const CoreLive = Layer.effect(
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
+
+    /** Every agent-controlled process goes through here: bubblewrap inside the task's systemd slice. */
+    const launchFor = (task: Task, kind: LaunchKind, display: string | null, command: string) =>
+      prepareLaunch({
+        settings: sandboxSettings,
+        taskId: task.id,
+        kind,
+        worktreePath: task.worktreePath,
+        gitCommonDir: join(config.reposDir, task.repoId, ".git"),
+        homeDir: join(config.homesDir, task.id),
+        display,
+        env: { CLOUDAGENTS_TASK_ID: task.id },
+        command,
+      })
+
+    /** The desktop's terminal runs in the sandbox too: the agent can type into it. */
+    const startDesktop = (task: Task) =>
+      desktop.start(task.id, {
+        terminal: (display) =>
+          launchFor(task, "desktop", display, "exec xterm -geometry 100x30+40+40 -e bash").pipe(
+            Effect.mapError((e) => new DesktopError({ message: e.message })),
+          ),
+      })
 
     const findTask = (state: Readonly<StoreState>, taskId: string) =>
       Either.fromNullable(
@@ -154,6 +179,11 @@ export const CoreLive = Layer.effect(
           }
         }
         yield* desktop.stop(taskId)
+        if (sandboxSettings.systemd) {
+          yield* removeTask(sandboxSettings.systemd, taskId).pipe(
+            Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: ${e.message}`)),
+          )
+        }
         if (repo) {
           yield* workspace
             .removeWorktree(repo.localPath, task.worktreePath)
@@ -234,7 +264,7 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
-        const started = yield* desktop.start(taskId, { cwd: taskNow.worktreePath }).pipe(Effect.either)
+        const started = yield* startDesktop(taskNow).pipe(Effect.either)
         let display: string | null = null
         const desktopProblem: string | null = Either.isLeft(started)
           ? started.left.message
@@ -368,9 +398,9 @@ export const CoreLive = Layer.effect(
       desktopStart: (taskId) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          return yield* desktop
-            .start(taskId, { cwd: task.worktreePath })
-            .pipe(Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })))
+          return yield* startDesktop(task).pipe(
+            Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
+          )
         }),
 
       desktopStop: (taskId) => Effect.zipRight(requireTask(taskId), desktop.stop(taskId)),
@@ -403,20 +433,27 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const desktopNow = yield* desktop.status(taskId)
-          const launch = yield* prepareLaunch({
-            settings: sandboxSettings,
-            worktreePath: task.worktreePath,
-            gitCommonDir: join(config.reposDir, task.repoId, ".git"),
-            homeDir: join(config.homesDir, task.id),
-            display: desktopNow.display,
-            env: { CLOUDAGENTS_TASK_ID: task.id },
-            command,
-          }).pipe(Effect.mapError(toInternal("exec")))
+          const launch = yield* launchFor(task, "exec", desktopNow.display, command).pipe(
+            Effect.mapError(toInternal("exec")),
+          )
           return yield* runProcess(launch.file, launch.args, {
             cwd: launch.cwd,
             env: launch.env,
             timeoutMs,
           }).pipe(Effect.mapError(toInternal("exec")))
+        }),
+
+      desktopLaunch: (taskId, command) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const desktopNow = yield* desktop.status(taskId)
+          if (desktopNow.display === null) {
+            return yield* Effect.fail(new InternalError({ message: `desktop for task ${taskId} is not running` }))
+          }
+          const launch = yield* launchFor(task, "desktop", desktopNow.display, command).pipe(
+            Effect.mapError(toInternal("desktop launch")),
+          )
+          yield* desktop.launch(taskId, launch).pipe(Effect.mapError(toInternal("desktop launch")))
         }),
 
       shutdown: () =>

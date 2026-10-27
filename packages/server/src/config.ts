@@ -1,6 +1,7 @@
 import { Context, Layer } from "effect"
 import { join, resolve } from "node:path"
 import pkg from "../package.json"
+import type { SystemdSettings } from "./sandbox/systemd"
 
 export const VERSION: string = pkg.version
 
@@ -32,6 +33,8 @@ export interface ServerConfig {
   readonly sandboxSslCertFile: string | null
   /** Extra read-only binds the fake agent needs; empty for real agents. */
   readonly fakeAgentRoBinds: readonly string[]
+  /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
+  readonly systemd: SystemdSettings | null
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -56,6 +59,19 @@ export const loadConfig = (): ServerConfig => {
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandboxSsl = process.env.CLOUDAGENTS_SANDBOX_SSL?.trim() || null
   const fakeAgentRoBinds = fakeAgent ? [process.execPath, join(repoRoot, "packages/server"), join(repoRoot, "node_modules")] : []
+  const systemdEnabled = process.env.CLOUDAGENTS_SYSTEMD !== "0"
+  if (!systemdEnabled) console.warn("CLOUDAGENTS_SYSTEMD=0: agent runs have NO resource limits")
+  // One slice per box (ports are unique per box on a machine); task slices nest under it.
+  const systemd: SystemdSettings | null = systemdEnabled
+    ? {
+        boxSlice: `kestrel-box${port}`,
+        limits: {
+          memoryMax: limitEnv("CLOUDAGENTS_TASK_MEMORY_MAX", "4G"),
+          cpuQuota: limitEnv("CLOUDAGENTS_TASK_CPU_QUOTA", "200%"),
+          tasksMax: limitEnv("CLOUDAGENTS_TASK_TASKS_MAX", "1024"),
+        },
+      }
+    : null
   return {
     port,
     host,
@@ -73,7 +89,15 @@ export const loadConfig = (): ServerConfig => {
     sandboxPath,
     sandboxSslCertFile: sandboxSsl,
     fakeAgentRoBinds,
+    systemd,
   }
+}
+
+/** systemd validates the value itself (the box probes the limits at startup); only shape is checked here. */
+const limitEnv = (name: string, fallback: string): string => {
+  const value = process.env[name]?.trim() || fallback
+  if (!/^[A-Za-z0-9.%]+$/.test(value)) throw new Error(`${name} must be a systemd limit value, got "${value}"`)
+  return value
 }
 
 const loadRelay = (): ServerConfig["relay"] => {
