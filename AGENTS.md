@@ -17,9 +17,7 @@ parallel on one shared machine, so the workflow below is mandatory.
 ## Worktree flow
 
 ```sh
-# from your main clone (e.g. ~/kestrel)
-git fetch origin
-git worktree add ../kestrel-worktrees/<topic> -b <you>/<topic> origin/main
+scripts/wt new <topic>        # worktree + branch <github-login>/<topic> from origin/main, deps installed
 cd ../kestrel-worktrees/<topic>
 
 # ... work, commit small logical commits ...
@@ -28,14 +26,20 @@ git fetch origin && git rebase origin/main      # keep up to date; force-push yo
 git push -u origin HEAD                          # or: git push --force-with-lease after a rebase
 gh pr create --fill                              # title: what changed; body: why + how you verified
 
-# after the PR is merged
-cd ~/kestrel && git worktree remove ../kestrel-worktrees/<topic> && git branch -D <you>/<topic>
+scripts/wt list              # your worktrees and their PR state
+scripts/wt clean             # after merges: removes worktrees + local branches whose PR is MERGED, pulls main
 ```
 
+- Run `scripts/wt clean` after every merge (yours or one you were asked to do). It skips worktrees with
+  uncommitted changes, and it uses the PR state on GitHub because squash merges never show up in git history.
+  Stop that worktree's `nix run` first.
 - Branch names: `<github-login>/<topic>`, e.g. `caayd/install-link`.
 - Every PR gets a Preview: `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (app; its own
   empty Hub, no secrets, no box, so UI review only) and `...-kestrel-site.jarenmchugh.workers.dev` (site).
 - Each worktree has its own `node_modules`, `.data-dev/`, `packages/control/.dev.vars` and `.wrangler/` state.
+- Dependencies are shared, not duplicated: bun hardlinks every package from its global cache
+  (`~/.bun/install/cache`), and Nix tools come from `/nix/store`, so a new worktree installs in about a second
+  and costs almost no disk. Don't copy `node_modules` between worktrees or symlink them; just let `wt new` install.
 
 ## Running the stack from a worktree
 

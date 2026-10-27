@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Worktree helper for the one-change-one-worktree-one-PR flow (see AGENTS.md).
+#
+#   scripts/wt new <topic>   worktree + branch <github-login>/<topic> from origin/main, deps installed
+#   scripts/wt list          worktrees with their PR state
+#   scripts/wt clean         remove worktrees (and local branches) whose PR was merged
+#
+# Works from the main clone or from any worktree. Worktrees live next to the main clone in
+# <parent>/kestrel-worktrees/<topic>.
+set -euo pipefail
+
+main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+root="$(dirname "$main")/kestrel-worktrees"
+
+login() {
+  gh api user -q .login 2>/dev/null || id -un
+}
+
+# Dependencies are cheap per worktree: bun hardlinks packages from its global cache (~/.bun/install/cache)
+# and Nix shares everything through /nix/store, so a new worktree installs in about a second.
+install_deps() {
+  (cd "$1" && nix develop -c bun install --frozen-lockfile)
+}
+
+cmd_new() {
+  local topic=${1:?usage: scripts/wt new <topic>}
+  local branch dir
+  branch="$(login)/$topic"
+  dir="$root/$topic"
+  [ -e "$dir" ] && { echo "already exists: $dir" >&2; exit 1; }
+  git -C "$main" fetch -q origin main
+  git -C "$main" worktree add -q "$dir" -b "$branch" origin/main
+  install_deps "$dir"
+  echo "$dir  [$branch]"
+  echo "next: cd $dir   (run the stack with KESTREL_DEV_SLOT=<0-9> nix run; one slot per running worktree)"
+}
+
+# A branch counts as merged when its PR is merged on GitHub (squash merges never show up in git history).
+pr_state() {
+  gh pr list --head "$1" --state all --json state -q '.[0].state // "none"' 2>/dev/null || echo "unknown"
+}
+
+cmd_list() {
+  git -C "$main" worktree list --porcelain | awk '/^worktree /{d=$2} /^branch /{sub("refs/heads/","",$2); print d, $2}' |
+    while read -r dir branch; do
+      [ "$dir" = "$main" ] && continue
+      printf '%-50s %-40s %s\n' "$dir" "$branch" "$(pr_state "$branch")"
+    done
+}
+
+cmd_clean() {
+  git -C "$main" fetch -q --prune origin
+  local removed=0
+  while read -r dir branch; do
+    [ "$dir" = "$main" ] && continue
+    [ "$(pr_state "$branch")" = "MERGED" ] || continue
+    if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+      echo "skip $dir: merged but has uncommitted changes" >&2
+      continue
+    fi
+    git -C "$main" worktree remove "$dir"
+    git -C "$main" branch -D -q "$branch"
+    echo "removed $dir [$branch]"
+    removed=$((removed + 1))
+  done < <(git -C "$main" worktree list --porcelain |
+    awk '/^worktree /{d=$2} /^branch /{sub("refs/heads/","",$2); print d, $2}')
+  git -C "$main" worktree prune
+  # Keep the main clone current so the next `new` starts from the merged code.
+  if [ "$(git -C "$main" branch --show-current)" = "main" ] && [ -z "$(git -C "$main" status --porcelain)" ]; then
+    git -C "$main" pull -q --ff-only origin main
+  fi
+  echo "cleaned $removed worktree(s)"
+}
+
+case "${1:-}" in
+  new) shift; cmd_new "$@" ;;
+  list) cmd_list ;;
+  clean) cmd_clean ;;
+  *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
