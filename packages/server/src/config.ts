@@ -35,8 +35,6 @@ export interface ServerConfig {
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
   readonly systemd: SystemdSettings | null
-  /** CLOUDAGENTS_LEGACY_OWNER: GitHub login that owns projects created before projects had owners. */
-  readonly legacyOwner: string | null
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -92,7 +90,6 @@ export const loadConfig = (): ServerConfig => {
     sandboxSslCertFile: sandboxSsl,
     fakeAgentRoBinds,
     systemd,
-    legacyOwner: process.env.CLOUDAGENTS_LEGACY_OWNER?.trim() || null,
   }
 }
 

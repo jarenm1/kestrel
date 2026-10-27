@@ -69,7 +69,7 @@ The box needs the user's systemd manager (`systemd-run --user`) with the memory,
 
 Signed-in users can instead run agents on their own Claude or ChatGPT subscription: sign in on the Connections page (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
 
-Projects are private to the user who added them: the box answers every project, task, run, diff and desktop route (REST and WebSocket) only for the project's owner and returns `404` to anyone else. The box clones with the adding user's own GitHub token, so GitHub decides which repositories someone can import, and the broker pays for a run with the keys of the user who started it. Projects created before owners existed get the owner named by `CLOUDAGENTS_LEGACY_OWNER` on box start (a GitHub login); without it they stay hidden from everyone.
+Projects are private to the user who added them: the box answers every project, task, run, diff and desktop route (REST and WebSocket) only for the project's owner and returns `404` to anyone else. The box clones with the adding user's own GitHub token, so GitHub decides which repositories someone can import, and the broker pays for a run with the keys of the user who started it. Projects saved before owners existed are dropped from the box state at startup (logged; their files stay on disk).
 
 Checks: `bun run typecheck`. Marketing site: `bun run dev:site` (Astro on http://localhost:4321).
 
