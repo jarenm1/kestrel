@@ -128,6 +128,7 @@ const program = Effect.gen(function* () {
       kill: (taskId, id) => desktop.kill(taskId, id),
     },
     workspace: {
+      checkout: core.checkout,
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
     report: core.report,
@@ -138,7 +139,7 @@ const program = Effect.gen(function* () {
       reviewPullRequest: core.reviewPullRequest,
     },
     ask: core.ask,
-    automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskRepo: core.taskRepo },
+    automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskOwner: core.taskOwner },
     inbox: core.inbox,
   })
 

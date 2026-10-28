@@ -1,8 +1,8 @@
 import { Context, Data, Effect, Layer } from "effect"
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
-import { mkdir } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
+import { randomUUID } from "node:crypto"
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { dirname, join, sep } from "node:path"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 
 export class WorkspaceError extends Data.TaggedError("WorkspaceError")<{ readonly message: string }> {}
@@ -13,61 +13,64 @@ export interface ExecResult {
   readonly stderr: string
 }
 
-export interface WorkspaceShape {
-  readonly cloneRepo: (url: string, destDir: string, opts?: { readonly githubToken?: string }) => Effect.Effect<void, WorkspaceError>
-  /** Branch currently checked out in a fresh clone (the remote default branch). */
-  readonly defaultBranch: (repoPath: string) => Effect.Effect<string, WorkspaceError>
-  readonly createWorktree: (args: {
-    readonly repoPath: string
-    readonly branch: string
-    readonly baseBranch: string
-    readonly worktreePath: string
-  }) => Effect.Effect<void, WorkspaceError>
-  readonly removeWorktree: (repoPath: string, worktreePath: string) => Effect.Effect<void, WorkspaceError>
-  readonly deleteBranch: (repoPath: string, branch: string) => Effect.Effect<void, WorkspaceError>
-  /** Diff of the worktree against baseRef (a commit or ref), including uncommitted and untracked files. */
-  readonly diff: (opts: {
-    readonly repoPath: string
-    readonly worktreePath: string
-    readonly baseRef: string
-  }) => Effect.Effect<string, WorkspaceError>
-  /** Points `ref` at `target` (a branch, ref or commit), creating it when needed. Pins a task's fork point. */
-  readonly updateRef: (opts: {
-    readonly repoPath: string
-    readonly ref: string
-    readonly target: string
-  }) => Effect.Effect<void, WorkspaceError>
-  /** Deletes `ref`; succeeds when it is already gone. */
-  readonly deleteRef: (repoPath: string, ref: string) => Effect.Effect<void, WorkspaceError>
-  /** Whether `ref` resolves in the clone. */
-  readonly refExists: (repoPath: string, ref: string) => Effect.Effect<boolean, WorkspaceError>
-  /**
-   * Pushes `refs/heads/<branch>` from a task worktree to `remoteUrl`. Never forced; hooks and
-   * agent-writable config (credential helpers, ssh command, askpass) are not honoured.
-   */
-  readonly pushBranch: (opts: {
-    readonly repoPath: string
-    readonly worktreePath: string
-    readonly remoteUrl: string
-    readonly branch: string
-    readonly githubToken?: string
-  }) => Effect.Effect<void, WorkspaceError>
-  /**
-   * Fetches `refspec` from `remoteUrl` into the clone at `repoPath`. Never forced unless the refspec says so
-   * (`+`). `--update-head-ok` lets the clone's checked-out default branch advance; its working tree is unused.
-   */
-  readonly fetchRef: (opts: {
-    readonly repoPath: string
-    readonly remoteUrl: string
-    readonly refspec: string
-    readonly githubToken?: string
-  }) => Effect.Effect<void, WorkspaceError>
+/** A bare mirror of one remote repository. Only the host writes it; sandboxes see it read-only. */
+export interface MirrorTarget {
+  readonly mirrorPath: string
+  readonly url: string
+  readonly githubToken?: string
 }
 
-export class WorkspaceService extends Context.Tag("cloudagents/WorkspaceService")<
-  WorkspaceService,
-  WorkspaceShape
->() {}
+/**
+ * One checkout: a clone inside a thread's workspace (`dir`), and the host-only shadow git dir (`shadowPath`) that
+ * every host-side git command on it runs against. The checkout's own `.git` is agent-writable, so the host never
+ * reads its config, hooks, refs or index through git; only its objects (via alternates) and HEAD (by file read).
+ */
+export interface CheckoutSpec {
+  readonly threadDir: string
+  readonly dir: string
+  readonly shadowPath: string
+}
+
+export interface WorkspaceShape {
+  /** Imports refs from a local clone into the mirror, with no network. Used by the legacy-state migration only. */
+  readonly importClone: (args: {
+    readonly mirrorPath: string
+    readonly cloneDir: string
+    readonly refspecs: ReadonlyArray<string>
+  }) => Effect.Effect<void, WorkspaceError>
+  /** Creates the mirror when missing and fetches every branch from `url`. Returns the remote's default branch. */
+  readonly syncMirror: (target: MirrorTarget) => Effect.Effect<string, WorkspaceError>
+  /** Fetches `refs/pull/<number>/head` into the mirror. Returns the commit it points at. */
+  readonly fetchPullRequest: (target: MirrorTarget & { readonly number: number }) => Effect.Effect<string, WorkspaceError>
+  /** Commit a ref names in the mirror, or null when it does not exist. */
+  readonly resolveRef: (mirrorPath: string, ref: string) => Effect.Effect<string | null, WorkspaceError>
+  /**
+   * Clones the mirror into `spec.dir` (sharing its objects), creates `branch` at `startSha`, creates the shadow
+   * git dir and pins `pinRef` to `baseSha` in it. `spec.dir` must not exist yet.
+   */
+  readonly createCheckout: (
+    args: CheckoutSpec & {
+      readonly mirrorPath: string
+      readonly url: string
+      readonly branch: string
+      readonly startSha: string
+      readonly baseSha: string
+      readonly pinRef: string
+    },
+  ) => Effect.Effect<void, WorkspaceError>
+  /** The commit the checkout's HEAD points at, read from its files. */
+  readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
+  /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
+  readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
+  /** Pushes `head` to `refs/heads/<branch>` on `url`. Never forced. */
+  readonly pushBranch: (
+    spec: CheckoutSpec & { readonly url: string; readonly branch: string; readonly head: string; readonly githubToken?: string },
+  ) => Effect.Effect<void, WorkspaceError>
+  /** Removes a directory tree (a thread's workspace or shadow dirs). Succeeds when it is already gone. */
+  readonly removePath: (path: string) => Effect.Effect<void, WorkspaceError>
+}
+
+export class WorkspaceService extends Context.Tag("cloudagents/WorkspaceService")<WorkspaceService, WorkspaceShape>() {}
 
 /** Spawns a process in its own process group; interruption kills the whole group. */
 const runProcess = (
@@ -124,70 +127,23 @@ const runProcess = (
   })
 
 /**
- * Agent sandboxes can write to task worktrees and the shared git dir, so host-side git never runs
- * hooks or fsmonitor commands, whatever the repo says.
+ * Host-side git never runs hooks or fsmonitor commands, whatever the repo says. Remote operations (push, fetch)
+ * also ignore config that could run host commands or helpers.
  */
 const SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const
-
-/** Host-side remote operations (push, fetch) also override agent-writable config that could run host commands or helpers. */
 const REMOTE_GIT = [...SAFE_GIT, "-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.sshCommand=ssh"] as const
 
-const PUSH_TIMEOUT_MS = 120_000
+const REMOTE_TIMEOUT_MS = 120_000
 
-/** Git's own messages for the common push failures, so the agent sees an actionable reason. */
-const pushFailureMessage = (branch: string, detail: string): string => {
-  if (/non-fast-forward|fetch first/.test(detail)) {
-    return `git push ${branch} rejected: the remote branch has commits this worktree does not have (git_push never force-pushes): ${detail}`
-  }
-  if (/Permission to .* denied|\b403\b|\b401\b|could not read Username|Authentication failed|Invalid username or password/.test(detail)) {
-    return `GitHub rejected the push of ${branch} (the connected token lacks write access or has expired): ${detail}`
-  }
-  return `git push ${branch} failed: ${detail}`
-}
+/** Plain unified diff with fixed `a/` `b/` prefixes, whatever the (agent-writable) repo config says. */
+const DIFF_FLAGS = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"] as const
 
-/** Git's own messages for the common fetch failures; a missing GitHub connection is the usual cause for private repos. */
-const fetchFailureMessage = (refspec: string, hasToken: boolean, detail: string): string => {
-  if (/non-fast-forward/.test(detail)) {
-    return `git fetch ${refspec} rejected: the local branch has commits origin does not have, and fetch never overwrites it: ${detail}`
-  }
-  if (/could not read Username|Authentication failed|terminal prompts disabled|Repository not found|\b40[13]\b/.test(detail)) {
-    return hasToken
-      ? `GitHub refused to fetch ${refspec} (the connected token lacks read access or has expired): ${detail}`
-      : `GitHub refused to fetch ${refspec}; private repositories need a GitHub connection with read access (connect GitHub under Connections, then retry): ${detail}`
-  }
-  return `git fetch ${refspec} failed: ${detail}`
-}
-
-const git = (
-  cwd: string,
-  args: ReadonlyArray<string>,
-  env?: Readonly<Record<string, string>>,
-): Effect.Effect<string, WorkspaceError> =>
-  Effect.gen(function* () {
-    const res = yield* runProcess("git", [...SAFE_GIT, ...args], { cwd, env }, `git ${args[0]}`)
-    if (res.exitCode !== 0) {
-      const detail = (res.stderr || res.stdout).trim()
-      return yield* Effect.fail(new WorkspaceError({ message: `git ${args.join(" ")} failed: ${detail}` }))
-    }
-    return res.stdout
-  })
-
-/**
- * Git env for operating on a task worktree from the host. Pins the admin and common dirs from
- * trusted paths so a rewritten worktree `.git` file or `commondir` file is ignored.
- */
-const worktreeGitEnv = (repoPath: string, worktreePath: string): Readonly<Record<string, string>> => ({
-  GIT_DIR: join(repoPath, ".git", "worktrees", basename(worktreePath)),
-  GIT_COMMON_DIR: join(repoPath, ".git"),
-  GIT_WORK_TREE: worktreePath,
-})
-
-/** Host whose HTTPS clones are authenticated with the signed-in user's GitHub token. */
+/** Host whose HTTPS remotes are authenticated with the owner's GitHub token. */
 const GITHUB_HOST = "github.com"
 
 /**
- * Git config supplied through env (never argv, never written to .git/config) that sends the GitHub
- * token as basic auth, and only for HTTPS clones from github.com.
+ * Git config supplied through env (never argv, never written to disk) that sends the GitHub token as basic auth,
+ * and only for HTTPS remotes on github.com.
  */
 const githubAuthEnv = (url: string, token: string | undefined): Readonly<Record<string, string>> => {
   if (token === undefined || token === "") return {}
@@ -212,42 +168,146 @@ const redactSecret = (text: string, token: string | undefined): string => {
   return text.split(token).join("***").split(basic).join("***")
 }
 
-/**
- * The ref that pins a task's fork point. It lives outside `refs/heads` so fetches that move a base branch,
- * or a later task fetching the same pull request, never change the diff base of an existing task.
- */
-export const taskBaseRef = (taskId: string): string => `refs/kestrel/base/${taskId}`
+/** Git's own messages for the common push failures, so the agent sees an actionable reason. */
+const pushFailureMessage = (branch: string, detail: string): string => {
+  if (/non-fast-forward|fetch first/.test(detail)) {
+    return `git push ${branch} rejected: the remote branch has commits this checkout does not have (git_push never force-pushes): ${detail}`
+  }
+  if (/Permission to .* denied|\b403\b|\b401\b|could not read Username|Authentication failed|Invalid username or password/.test(detail)) {
+    return `GitHub rejected the push of ${branch} (the connected token lacks write access or has expired): ${detail}`
+  }
+  return `git push ${branch} failed: ${detail}`
+}
 
-/**
- * Plain unified diff with fixed `a/` `b/` prefixes, whatever the (agent-writable) repo config says, so the app can
- * parse it into per-file sections.
- */
-const DIFF_FLAGS = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"] as const
+/** Git's own messages for the common fetch failures; a missing GitHub connection is the usual cause for private repos. */
+const fetchFailureMessage = (refspec: string, hasToken: boolean, detail: string): string => {
+  if (/could not read Username|Authentication failed|terminal prompts disabled|Repository not found|\b40[13]\b/.test(detail)) {
+    return hasToken
+      ? `GitHub refused to fetch ${refspec} (the connected token lacks read access or has expired): ${detail}`
+      : `GitHub refused to fetch ${refspec}; private repositories need a GitHub connection with read access (connect GitHub under Connections, then retry): ${detail}`
+  }
+  return `git fetch ${refspec} failed: ${detail}`
+}
+
+/** Runs a host git command (with the safe config) in `cwd`, failing on a non-zero exit. */
+const git = (
+  cwd: string,
+  args: ReadonlyArray<string>,
+  env?: Readonly<Record<string, string>>,
+): Effect.Effect<string, WorkspaceError> =>
+  Effect.gen(function* () {
+    const res = yield* runProcess("git", [...SAFE_GIT, ...args], { cwd, env }, `git ${args[0]}`)
+    if (res.exitCode !== 0) {
+      return yield* Effect.fail(new WorkspaceError({ message: `git ${args[0]} failed: ${(res.stderr || res.stdout).trim()}` }))
+    }
+    return res.stdout
+  })
+
+/** Git against a shadow dir: the checkout is the work tree, its own `.git` is never consulted. */
+const shadowGit = (
+  shadowPath: string,
+  workTree: string,
+  args: ReadonlyArray<string>,
+  env?: Readonly<Record<string, string>>,
+): Effect.Effect<string, WorkspaceError> =>
+  git(workTree, args, { GIT_DIR: shadowPath, GIT_WORK_TREE: workTree, ...env })
+
+/** A checkout's directory must be a real directory inside the thread workspace, with a real `.git` dir and objects. */
+const verifyCheckout = (spec: CheckoutSpec): Effect.Effect<string, WorkspaceError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const real = await realpath(spec.dir)
+      const root = await realpath(spec.threadDir)
+      if (!real.startsWith(root + sep)) throw new Error("the checkout is outside its thread workspace")
+      if (!(await lstat(real)).isDirectory()) throw new Error("the checkout is not a directory")
+      if (!(await lstat(join(real, ".git"))).isDirectory()) throw new Error(".git is not a real directory")
+      if (!(await lstat(join(real, ".git", "objects"))).isDirectory()) throw new Error(".git/objects is not a real directory")
+      return real
+    },
+    catch: (e) => new WorkspaceError({ message: `checkout ${spec.dir} refused: ${e instanceof Error ? e.message : String(e)}` }),
+  })
+
+const SHA = /^[0-9a-f]{40}$/
+
+/** Reads a ref from a checkout's `.git` by file: loose ref first, then packed-refs. Empty string when absent. */
+const readRefSha = (gitDir: string, ref: string): Effect.Effect<string, WorkspaceError> =>
+  Effect.tryPromise({
+    try: async () => {
+      if (!/^refs\/[A-Za-z0-9._/-]+$/.test(ref) || ref.includes("..")) throw new Error(`HEAD names an unsupported ref ${ref}`)
+      try {
+        return (await readFile(join(gitDir, ref), "utf8")).trim()
+      } catch {
+        const packed = await readFile(join(gitDir, "packed-refs"), "utf8").catch(() => "")
+        for (const line of packed.split("\n")) {
+          const [sha, name] = line.trim().split(" ")
+          if (name === ref && sha !== undefined) return sha
+        }
+        return ""
+      }
+    },
+    catch: (e) => new WorkspaceError({ message: `cannot read ${ref}: ${String(e)}` }),
+  })
+
+/** Creates the bare mirror at `mirrorPath` when it does not exist yet. Mirrors never hold checkout data. */
+const ensureMirror = (mirrorPath: string): Effect.Effect<void, WorkspaceError> =>
+  Effect.gen(function* () {
+    const exists = yield* Effect.tryPromise({
+      try: () => lstat(mirrorPath).then(() => true, () => false),
+      catch: (e) => new WorkspaceError({ message: `stat ${mirrorPath}: ${String(e)}` }),
+    })
+    if (exists) return
+    yield* Effect.tryPromise({
+      try: () => mkdir(dirname(mirrorPath), { recursive: true }),
+      catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
+    })
+    yield* git(dirname(mirrorPath), ["init", "--bare", "-q", mirrorPath])
+    yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "config", "gc.auto", "0"])
+  })
 
 const make: WorkspaceShape = {
-  pushBranch: ({ repoPath, worktreePath, remoteUrl, branch, githubToken }) =>
+  importClone: ({ mirrorPath, cloneDir, refspecs }) =>
     Effect.gen(function* () {
-      const res = yield* runProcess(
-        "git",
-        [...REMOTE_GIT, "push", remoteUrl, `refs/heads/${branch}:refs/heads/${branch}`],
-        {
-          cwd: worktreePath,
-          env: { ...worktreeGitEnv(repoPath, worktreePath), ...githubAuthEnv(remoteUrl, githubToken) },
-          timeoutMs: PUSH_TIMEOUT_MS,
-        },
-        "git push",
-      )
-      if (res.exitCode !== 0) {
-        const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
-        return yield* Effect.fail(new WorkspaceError({ message: pushFailureMessage(branch, detail) }))
-      }
+      yield* ensureMirror(mirrorPath)
+      yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "fetch", "--no-tags", "--quiet", "--", cloneDir, ...refspecs])
     }),
-  fetchRef: ({ repoPath, remoteUrl, refspec, githubToken }) =>
+  syncMirror: ({ mirrorPath, url, githubToken }) =>
     Effect.gen(function* () {
+      yield* ensureMirror(mirrorPath)
+      const env = githubAuthEnv(url, githubToken)
+      const fetched = yield* runProcess(
+        "git",
+        [...REMOTE_GIT, "--git-dir", mirrorPath, "fetch", "--prune", "--no-tags", "--quiet", "--", url, "+refs/heads/*:refs/heads/*"],
+        { cwd: dirname(mirrorPath), env, timeoutMs: REMOTE_TIMEOUT_MS },
+        "git fetch",
+      )
+      if (fetched.exitCode !== 0) {
+        const detail = redactSecret((fetched.stderr || fetched.stdout).trim(), githubToken)
+        return yield* Effect.fail(
+          new WorkspaceError({ message: fetchFailureMessage("refs/heads/*", githubToken !== undefined && githubToken !== "", detail) }),
+        )
+      }
+      const listed = yield* runProcess(
+        "git",
+        [...REMOTE_GIT, "--git-dir", mirrorPath, "ls-remote", "--symref", "--", url, "HEAD"],
+        { cwd: dirname(mirrorPath), env, timeoutMs: REMOTE_TIMEOUT_MS },
+        "git ls-remote",
+      )
+      if (listed.exitCode !== 0) {
+        const detail = redactSecret((listed.stderr || listed.stdout).trim(), githubToken)
+        return yield* Effect.fail(new WorkspaceError({ message: `git ls-remote ${url} failed: ${detail}` }))
+      }
+      const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(listed.stdout)
+      if (match?.[1] === undefined) return yield* Effect.fail(new WorkspaceError({ message: `${url} has no default branch` }))
+      return match[1]
+    }),
+
+  fetchPullRequest: ({ mirrorPath, url, number, githubToken }) =>
+    Effect.gen(function* () {
+      const refspec = `+refs/pull/${number}/head:refs/kestrel/pr/${number}`
       const res = yield* runProcess(
         "git",
-        [...REMOTE_GIT, "fetch", "--no-tags", "--update-head-ok", remoteUrl, refspec],
-        { cwd: repoPath, env: githubAuthEnv(remoteUrl, githubToken), timeoutMs: PUSH_TIMEOUT_MS },
+        [...REMOTE_GIT, "--git-dir", mirrorPath, "fetch", "--no-tags", "--quiet", "--", url, refspec],
+        { cwd: dirname(mirrorPath), env: githubAuthEnv(url, githubToken), timeoutMs: REMOTE_TIMEOUT_MS },
         "git fetch",
       )
       if (res.exitCode !== 0) {
@@ -256,87 +316,95 @@ const make: WorkspaceShape = {
           new WorkspaceError({ message: fetchFailureMessage(refspec, githubToken !== undefined && githubToken !== "", detail) }),
         )
       }
+      const sha = yield* make.resolveRef(mirrorPath, `refs/kestrel/pr/${number}`)
+      if (sha === null) return yield* Effect.fail(new WorkspaceError({ message: `pull request #${number} has no head commit` }))
+      return sha
     }),
-  cloneRepo: (url, destDir, opts) =>
+
+  resolveRef: (mirrorPath, ref) =>
+    runProcess(
+      "git",
+      [...SAFE_GIT, "--git-dir", mirrorPath, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+      { cwd: dirname(mirrorPath) },
+      "git rev-parse",
+    ).pipe(Effect.map((res) => (res.exitCode === 0 ? res.stdout.trim() : null))),
+
+  createCheckout: ({ threadDir, dir, shadowPath, mirrorPath, url, branch, startSha, baseSha, pinRef }) =>
     Effect.gen(function* () {
       yield* Effect.tryPromise({
-        try: () => mkdir(dirname(destDir), { recursive: true }),
+        try: () => mkdir(threadDir, { recursive: true }),
         catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
       })
-      const githubToken = opts?.githubToken
+      yield* git(threadDir, ["clone", "--shared", "--no-checkout", "--", mirrorPath, dir])
+      yield* git(dir, ["remote", "set-url", "origin", url])
+      yield* git(dir, ["checkout", "-q", "-b", branch, startSha])
+      yield* Effect.tryPromise({
+        try: () => mkdir(dirname(shadowPath), { recursive: true }),
+        catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
+      })
+      yield* git(dirname(shadowPath), ["init", "--bare", "-q", shadowPath])
+      yield* Effect.tryPromise({
+        try: () =>
+          writeFile(join(shadowPath, "objects", "info", "alternates"), `${join(mirrorPath, "objects")}\n${join(dir, ".git", "objects")}\n`),
+        catch: (e) => new WorkspaceError({ message: `write alternates failed: ${String(e)}` }),
+      })
+      yield* git(shadowPath, ["--git-dir", shadowPath, "update-ref", pinRef, baseSha])
+    }),
+
+  headSha: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const gitDir = join(real, ".git")
+      const head = yield* Effect.tryPromise({
+        try: () => readFile(join(gitDir, "HEAD"), "utf8"),
+        catch: (e) => new WorkspaceError({ message: `cannot read HEAD: ${String(e)}` }),
+      })
+      const trimmed = head.trim()
+      const sha = trimmed.startsWith("ref: ") ? yield* readRefSha(gitDir, trimmed.slice(5).trim()) : trimmed
+      if (!SHA.test(sha)) return yield* Effect.fail(new WorkspaceError({ message: "the checkout has no commit yet" }))
+      return sha
+    }),
+
+  diff: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const index = join(spec.shadowPath, `index-${randomUUID()}.tmp`)
+      const env = { GIT_INDEX_FILE: index }
+      try {
+        yield* shadowGit(spec.shadowPath, real, ["add", "-A"], env)
+        return yield* shadowGit(spec.shadowPath, real, [...DIFF_FLAGS, "--cached", "--find-renames", spec.baseRef], env)
+      } finally {
+        yield* Effect.promise(() => rm(index, { force: true }))
+      }
+    }),
+
+  pushBranch: ({ shadowPath, dir, threadDir, url, branch, head, githubToken }) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout({ threadDir, dir, shadowPath })
       const res = yield* runProcess(
         "git",
-        ["clone", "--", url, destDir],
-        { cwd: dirname(destDir), env: githubAuthEnv(url, githubToken) },
-        "git clone",
+        [...REMOTE_GIT, "push", "--", url, `${head}:refs/heads/${branch}`],
+        {
+          cwd: real,
+          env: { GIT_DIR: shadowPath, GIT_WORK_TREE: real, ...githubAuthEnv(url, githubToken) },
+          timeoutMs: REMOTE_TIMEOUT_MS,
+        },
+        "git push",
       )
       if (res.exitCode !== 0) {
         const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
-        return yield* Effect.fail(new WorkspaceError({ message: `git clone ${url} failed: ${detail}` }))
+        return yield* Effect.fail(new WorkspaceError({ message: pushFailureMessage(branch, detail) }))
       }
     }),
 
-  defaultBranch: (repoPath) =>
-    git(repoPath, ["symbolic-ref", "--short", "HEAD"]).pipe(Effect.map((s) => s.trim())),
-
-  createWorktree: ({ repoPath, branch, baseBranch, worktreePath }) =>
-    Effect.gen(function* () {
-      yield* Effect.tryPromise({
-        try: () => mkdir(dirname(worktreePath), { recursive: true }),
-        catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
-      })
-      yield* git(repoPath, ["worktree", "add", "-b", branch, worktreePath, baseBranch])
-    }),
-
-  removeWorktree: (repoPath, worktreePath) =>
-    Effect.gen(function* () {
-      const res = yield* runProcess(
-        "git",
-        [...SAFE_GIT, "worktree", "remove", "--force", worktreePath],
-        { cwd: repoPath },
-        "git worktree remove",
-      )
-      if (res.exitCode === 0) return
-      if (existsSync(worktreePath)) {
-        return yield* Effect.fail(
-          new WorkspaceError({ message: `git worktree remove failed: ${(res.stderr || res.stdout).trim()}` }),
-        )
-      }
-      // Directory already gone (removed by hand): drop the stale registration.
-      yield* git(repoPath, ["worktree", "prune"])
-    }),
-
-  deleteBranch: (repoPath, branch) => git(repoPath, ["branch", "-D", branch]).pipe(Effect.asVoid),
-
-  updateRef: ({ repoPath, ref, target }) => git(repoPath, ["update-ref", ref, target]).pipe(Effect.asVoid),
-  deleteRef: (repoPath, ref) => git(repoPath, ["update-ref", "-d", ref]).pipe(Effect.asVoid),
-  refExists: (repoPath, ref) =>
-    runProcess("git", [...SAFE_GIT, "rev-parse", "--verify", "--quiet", ref], { cwd: repoPath }, "git rev-parse").pipe(
-      Effect.map((res) => res.exitCode === 0),
-    ),
-
-  diff: ({ repoPath, worktreePath, baseRef }) =>
-    Effect.gen(function* () {
-      const env = worktreeGitEnv(repoPath, worktreePath)
-      const tracked = yield* git(worktreePath, [...DIFF_FLAGS, "--find-renames", baseRef], env)
-      const untrackedList = yield* git(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], env)
-      let untracked = ""
-      for (const file of untrackedList.split("\0")) {
-        if (file === "") continue
-        // `git diff --no-index` exits 1 when the files differ, which is the normal case here.
-        const res = yield* runProcess(
-          "git",
-          [...SAFE_GIT, ...DIFF_FLAGS, "--no-index", "--", "/dev/null", file],
-          { cwd: worktreePath, env },
-          "git diff --no-index",
-        )
-        if (res.exitCode !== 0 && res.exitCode !== 1) {
-          return yield* Effect.fail(new WorkspaceError({ message: `diff of ${file} failed: ${res.stderr.trim()}` }))
-        }
-        untracked += res.stdout
-      }
-      return tracked + untracked
+  removePath: (path) =>
+    Effect.tryPromise({
+      try: () => rm(path, { recursive: true, force: true }),
+      catch: (e) => new WorkspaceError({ message: `remove ${path} failed: ${String(e)}` }),
     }),
 }
+
+/** Ref that pins a checkout's fork point in its shadow. Outside `refs/heads`, so later fetches never move it. */
+export const checkoutPinRef = (taskId: string, checkoutId: string): string => `refs/kestrel/base/${taskId}/${checkoutId}`
 
 export const WorkspaceLive = Layer.succeed(WorkspaceService, make)

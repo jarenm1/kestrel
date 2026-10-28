@@ -11,23 +11,26 @@ import {
   Message,
   type Attachment,
   NotFound,
-  PullRequestLink,
-  Repo,
+  type PullRequestLink,
   Run,
   SendMessageResponse,
   Task,
   type TaskStatus,
+  type Checkout,
+  type CheckoutRequest,
+  type CreateTaskBody,
 } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, parseGitHubRepo, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus } from "../github/api"
+import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
 import { agentHome, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
-import { WorkspaceService, taskBaseRef } from "./workspace"
+import { parseRepoRef, type RepoRef } from "./repo-ref"
+import { checkoutPinRef, WorkspaceService, type CheckoutSpec } from "./workspace"
 
 /** Bytes an agent attaches to a message (e.g. a desktop screenshot); core stores them and serves them over REST. */
 export interface AttachmentInput {
@@ -52,11 +55,15 @@ export interface OpenPullRequestInput {
   readonly title: string
   readonly body: string
   readonly draft: boolean
+  /** Checkout to open the pull request from; required when the thread has several. */
+  readonly checkoutId?: string
 }
 
 export interface ReviewPullRequestInput extends NewReview {
-  /** Number of the pull request in the task's GitHub repository. */
+  /** Number of the pull request in the checkout's GitHub repository. */
   readonly number: number
+  /** Checkout whose repository holds the pull request; required when the thread has several. */
+  readonly checkoutId?: string
 }
 
 export interface OpenedPullRequest {
@@ -80,25 +87,22 @@ type AskOutcome = { readonly _tag: "answered"; readonly text: string } | { reado
 export interface CoreShape {
   readonly health: () => Effect.Effect<void>
 
-  // Every browser-facing operation takes the signed-in `user`. A project and its tasks, runs and
-  // desktops exist only for the project's owner: anyone else gets NotFound, never a hint it exists.
-  readonly listRepos: (user: string) => Effect.Effect<ReadonlyArray<Repo>>
-  readonly getRepo: (user: string, id: string) => Effect.Effect<Repo, NotFound>
-  readonly createRepo: (user: string, url: string, name?: string) => Effect.Effect<Repo, BadRequest | InternalError>
-  readonly deleteRepo: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
-
-  readonly listTasks: (user: string, repoId: string) => Effect.Effect<ReadonlyArray<Task>, NotFound>
+  // Every browser-facing operation takes the signed-in `user`. A thread and its runs, checkouts and desktop exist
+  // only for the thread's owner: anyone else gets NotFound, never a hint it exists.
+  /** Every thread of `user`, archived ones included, newest `updatedAt` first. */
+  readonly listTasks: (user: string) => Effect.Effect<ReadonlyArray<Task>>
+  /** Creates a thread; with `checkout`, the repository is checked out before this returns. */
   readonly createTask: (
     user: string,
-    repoId: string,
-    input: { readonly title?: string; readonly baseBranch?: string; readonly fetch?: boolean; readonly pullRequest?: number },
-  ) => Effect.Effect<Task, NotFound | BadRequest | InternalError>
+    input: CreateTaskBody,
+  ) => Effect.Effect<Task, BadRequest | Conflict | NotFound | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
   readonly deleteTask: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
-  /** Tears down the thread's runtime (running runs, desktop, sandbox) and hides it from the active list; history and worktree stay. */
+  /** Tears down the thread's runtime (running runs, desktop, sandbox) and hides it from the active list; history and workspace stay. */
   readonly archiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
   /** Lifts the archive; nothing restarts on its own. */
   readonly unarchiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
+  /** One entry per checkout: everything on its branch and in its working tree, against its fork point. */
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
 
   readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
@@ -139,26 +143,34 @@ export interface CoreShape {
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
-  /** Used by the MCP handler: runs a shell command in the task worktree. */
+  /** Used by the MCP handler: runs a shell command at the thread workspace root. */
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
-  /** Used by the MCP handler: pushes the task branch to its GitHub remote (never forced). Returns the branch. */
-  readonly gitPush: (taskId: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
-  /** Used by the MCP handler: pushes the task branch and opens its pull request, or returns the open one. */
+  /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
+  readonly checkout: (
+    taskId: string,
+    input: CheckoutRequest,
+  ) => Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError>
+  /** Used by the MCP handler: pushes a checkout's branch to its GitHub remote (never forced). Returns the branch. */
+  readonly gitPush: (taskId: string, checkoutId?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: pushes the checkout's branch and opens its pull request, or returns the open one. */
   readonly openPullRequest: (
     taskId: string,
     input: OpenPullRequestInput,
   ) => Effect.Effect<OpenedPullRequest, NotFound | BadRequest | InternalError>
-  /** Used by the MCP handler: live GitHub status of the task's pull request. */
-  readonly pullRequestStatus: (taskId: string) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
-  /** Used by the MCP handler: posts a review on a pull request of the task's GitHub repository. APPROVE is never sent. */
+  /** Used by the MCP handler: live GitHub status of a checkout's pull request. */
+  readonly pullRequestStatus: (
+    taskId: string,
+    checkoutId?: string,
+  ) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: posts a review on a pull request of a checkout's GitHub repository. APPROVE is never sent. */
   readonly reviewPullRequest: (
     taskId: string,
     input: ReviewPullRequestInput,
   ) => Effect.Effect<PostedReview, NotFound | BadRequest | InternalError>
-  /** Used by the MCP handler: the project a task belongs to. Its owner is the user the task's automations act for. */
-  readonly taskRepo: (taskId: string) => Effect.Effect<Repo, NotFound>
+  /** Used by the automations: the user a thread belongs to, whom its automations act for. */
+  readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
 
   /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
@@ -180,10 +192,50 @@ const slugify = (title: string): string => {
   return slug === "" ? "task" : slug
 }
 
-const repoNameFromUrl = (url: string): string => {
-  const last = url.replace(/\/+$/, "").split(/[/:]/).pop() ?? ""
-  const name = last.replace(/\.git$/, "")
-  return name === "" ? "repo" : name
+/** `name`, or `name-2`, `name-3`, ... when a checkout of the thread already uses it. */
+const freeDirName = (taken: ReadonlyArray<string>, name: string): string => {
+  let candidate = name
+  for (let n = 2; taken.includes(candidate); n++) candidate = `${name}-${n}`
+  return candidate
+}
+
+/** Validates a checkout request before anything is created for it. */
+const parseCheckoutRequest = (request: CheckoutRequest): Effect.Effect<RepoRef, BadRequest> => {
+  const ref = parseRepoRef(request.repo)
+  if (ref === null) {
+    return Effect.fail(
+      new BadRequest({ message: "repo must be owner/name on github.com or an https clone URL" }),
+    )
+  }
+  if (request.pullRequest !== undefined && ref.github === null) {
+    return Effect.fail(new BadRequest({ message: `${ref.repo} is not a github.com repository; pull requests need one` }))
+  }
+  return Effect.succeed(ref)
+}
+
+/** The repository a stored checkout names. Stored values were validated on the way in. */
+const checkoutRepoRef = (checkout: Checkout): Effect.Effect<RepoRef, InternalError> => {
+  const ref = parseRepoRef(checkout.repo)
+  return ref === null
+    ? Effect.fail(new InternalError({ message: `checkout ${checkout.id} has an invalid repo ${checkout.repo}` }))
+    : Effect.succeed(ref)
+}
+
+/** The checkout a tool call means: the one it names, or the thread's only checkout. */
+const pickCheckout = (task: Task, checkoutId: string | undefined): Effect.Effect<Checkout, NotFound | BadRequest> => {
+  if (checkoutId !== undefined) {
+    const found = task.checkouts.find((c) => c.id === checkoutId)
+    return found
+      ? Effect.succeed(found)
+      : Effect.fail(new NotFound({ message: `checkout ${checkoutId} not found in this thread` }))
+  }
+  const [only] = task.checkouts
+  if (task.checkouts.length === 0) {
+    return Effect.fail(new BadRequest({ message: "this thread has no checkouts; call repo_checkout first" }))
+  }
+  if (task.checkouts.length === 1 && only) return Effect.succeed(only)
+  const ids = task.checkouts.map((c) => `${c.id} (${c.repo})`).join(", ")
+  return Effect.fail(new BadRequest({ message: `this thread has several checkouts; pass checkout as one of: ${ids}` }))
 }
 
 export const CoreLive = Layer.effect(
@@ -198,9 +250,18 @@ export const CoreLive = Layer.effect(
     const credentials = yield* CredentialStore
     const github = yield* GitHub
     const sandboxSettings = sandboxSettingsOf(config)
+    /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
+    const checkoutLock = yield* Effect.makeSemaphore(1)
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
+
+    const threadDirOf = (taskId: string) => join(config.threadsDir, taskId)
+    const shadowPathOf = (taskId: string, checkoutId: string) => join(config.shadowsDir, taskId, `${checkoutId}.git`)
+    const checkoutSpec = (taskId: string, checkout: Checkout): CheckoutSpec => {
+      const threadDir = threadDirOf(taskId)
+      return { threadDir, dir: join(threadDir, checkout.dir), shadowPath: shadowPathOf(taskId, checkout.id) }
+    }
 
     /** Every agent-controlled process goes through here: bubblewrap inside the task's systemd slice. */
     const launchFor = (task: Task, kind: LaunchKind, display: string | null, command: string) =>
@@ -208,8 +269,8 @@ export const CoreLive = Layer.effect(
         settings: sandboxSettings,
         taskId: task.id,
         kind,
-        worktreePath: task.worktreePath,
-        gitCommonDir: join(config.reposDir, task.repoId, ".git"),
+        workspacePath: threadDirOf(task.id),
+        mirrorDir: join(config.mirrorsDir, task.owner),
         homeDir: join(config.homesDir, task.id),
         display,
         env: { CLOUDAGENTS_TASK_ID: task.id },
@@ -237,19 +298,10 @@ export const CoreLive = Layer.effect(
         onRight: (t) => Effect.succeed({ ...t }),
       }))
 
-    /** `user`'s project; someone else's is reported exactly like a missing one. */
-    const ownedRepo = (user: string, repoId: string): Effect.Effect<Repo, NotFound> =>
-      Effect.flatMap(store.read, (state) => {
-        const repo = state.repos.find((r) => r.id === repoId && r.owner === user)
-        return repo ? Effect.succeed({ ...repo }) : Effect.fail(new NotFound({ message: `repo ${repoId} not found` }))
-      })
+    const ownsTask = (state: Readonly<StoreState>, user: string, taskId: string): boolean =>
+      state.tasks.some((t) => t.id === taskId && t.owner === user)
 
-    const ownsTask = (state: Readonly<StoreState>, user: string, taskId: string): boolean => {
-      const task = state.tasks.find((t) => t.id === taskId)
-      return task !== undefined && state.repos.some((r) => r.id === task.repoId && r.owner === user)
-    }
-
-    /** A task in one of `user`'s projects; anything else is NotFound. */
+    /** A thread of `user`; anything else is NotFound. */
     const ownedTask = (user: string, taskId: string): Effect.Effect<Task, NotFound> =>
       Effect.flatMap(store.read, (state) =>
         ownsTask(state, user, taskId) ? requireTask(taskId) : Effect.fail(new NotFound({ message: `task ${taskId} not found` })),
@@ -263,70 +315,52 @@ export const CoreLive = Layer.effect(
 
     const publishMessage = (message: Message) => hub.publish({ _tag: "message.created", message })
 
-    const requireRepo = (repoId: string): Effect.Effect<Repo, NotFound> =>
-      Effect.flatMap(store.read, (state) => {
-        const repo = state.repos.find((r) => r.id === repoId)
-        return repo ? Effect.succeed({ ...repo }) : Effect.fail(new NotFound({ message: `repo ${repoId} not found` }))
+    /** The owner's GitHub token, or undefined when they have not connected GitHub. It never reaches a sandbox. */
+    const githubTokenOf = (owner: string): Effect.Effect<string | undefined> =>
+      Effect.map(credentials.get(owner), (creds) => creds?.github || undefined)
+
+    const requiredGithubToken = (owner: string): Effect.Effect<string, BadRequest> =>
+      Effect.flatMap(githubTokenOf(owner), (token) =>
+        token === undefined
+          ? Effect.fail(
+              new BadRequest({ message: "no GitHub connection for this account: connect GitHub under Connections, then retry" }),
+            )
+          : Effect.succeed(token),
+      )
+
+    /** owner/name of a github.com repo plus the owner's token; pull request tools need both. */
+    const githubAccess = (owner: string, ref: RepoRef): Effect.Effect<{ readonly slug: RepoSlug; readonly token: string }, BadRequest> =>
+      Effect.gen(function* () {
+        if (ref.github === null) {
+          return yield* Effect.fail(new BadRequest({ message: `${ref.repo} is not a github.com repository; pull requests need one` }))
+        }
+        return { slug: ref.github, token: yield* requiredGithubToken(owner) }
       })
 
-    /** GitHub token of the repo owner; the token stays host-side and never reaches a sandbox. */
-    const githubToken = (repo: Repo) =>
+    /** Pushes the checkout's branch from its shadow repo (never forced). The token is set for github.com remotes only. */
+    const pushCheckout = (task: Task, checkout: Checkout): Effect.Effect<void, BadRequest | InternalError> =>
       Effect.gen(function* () {
-        const token = (yield* credentials.get(repo.owner))?.github
-        if (token === undefined || token === "") {
-          return yield* Effect.fail(
-            new BadRequest({ message: "no GitHub connection for this account: connect GitHub under Connections, then retry" }),
-          )
-        }
-        return token
-      })
-
-    /** owner/name of a github.com repo plus its token; pull request tools need both. */
-    const githubAccess = (repo: Repo) =>
-      Effect.gen(function* () {
-        const slug = parseGitHubRepo(repo.url)
-        if (slug === null) {
-          return yield* Effect.fail(new BadRequest({ message: `${repo.name} is not a github.com repository; pull requests need one` }))
-        }
-        return { slug, token: yield* githubToken(repo) }
-      })
-
-    /** Pushes the task branch (never forced; base branches refused). `token` is set for github.com remotes. */
-    const pushTask = (repo: Repo, task: Task, token: string | undefined) =>
-      Effect.gen(function* () {
-        if (task.branch === task.baseBranch || task.branch === repo.defaultBranch) {
-          return yield* Effect.fail(new BadRequest({ message: `refusing to push ${task.branch}: it is a base branch, not this task's branch` }))
-        }
+        const ref = yield* checkoutRepoRef(checkout)
+        const token = ref.github === null ? undefined : yield* requiredGithubToken(task.owner)
+        const spec = checkoutSpec(task.id, checkout)
+        const head = yield* workspace.headSha(spec).pipe(Effect.mapError(toInternal("read checkout head")))
         yield* workspace
-          .pushBranch({
-            repoPath: repo.localPath,
-            worktreePath: task.worktreePath,
-            remoteUrl: repo.url,
-            branch: task.branch,
-            githubToken: token,
-          })
-          .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+          .pushBranch({ ...spec, url: ref.url, branch: checkout.branch, head, githubToken: token })
+          .pipe(Effect.mapError(toInternal("push")))
       })
 
-    /** Fetches `refspec` from the repo's remote into its clone. The owner's token authenticates github.com remotes; public repos need none. */
-    const fetchFromOrigin = (repo: Repo, refspec: string) =>
-      Effect.gen(function* () {
-        const token = parseGitHubRepo(repo.url) === null ? undefined : (yield* credentials.get(repo.owner))?.github
-        yield* workspace
-          .fetchRef({ repoPath: repo.localPath, remoteUrl: repo.url, refspec, githubToken: token || undefined })
-          .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
-      })
-
-    /** Stores the pull request on the task; `announce` also posts a chat note (used when it was just opened). */
-    const recordPullRequest = (taskId: string, link: PullRequestLink, announce: boolean) =>
+    /** Stores the pull request on the checkout; `announce` also posts a chat note (used when it was just opened). */
+    const recordPullRequest = (taskId: string, checkoutId: string, link: PullRequestLink, announce: boolean) =>
       Effect.gen(function* () {
         const updated = yield* store.update(
           (s): Either.Either<{ task: Task; message: Message | null }, NotFound> => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
             const task = found.right
+            const checkout = task.checkouts.find((c) => c.id === checkoutId)
+            if (!checkout) return Either.left(new NotFound({ message: `checkout ${checkoutId} not found in this thread` }))
             const now = nowIso()
-            task.pullRequest = link
+            task.checkouts = task.checkouts.map((c) => (c.id === checkoutId ? { ...c, pullRequest: link } : c))
             task.updatedAt = now
             let message: Message | null = null
             if (announce) {
@@ -334,7 +368,7 @@ export const CoreLive = Layer.effect(
                 id: newId(),
                 taskId,
                 role: "system",
-                text: `Opened pull request #${link.number}: ${link.url}`,
+                text: `Opened pull request #${link.number} for ${checkout.repo}: ${link.url}`,
                 runId: null,
                 createdAt: now,
               }
@@ -441,17 +475,11 @@ export const CoreLive = Layer.effect(
 
     const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
       Effect.gen(function* () {
-        const task = yield* requireTask(taskId)
-        const state = yield* store.read
-        const repo = state.repos.find((r) => r.id === task.repoId)
+        yield* requireTask(taskId)
         yield* teardownRuntime(taskId)
-        if (repo) {
-          yield* workspace
-            .removeWorktree(repo.localPath, task.worktreePath)
-            .pipe(Effect.mapError(toInternal("remove worktree")))
-          yield* workspace.deleteBranch(repo.localPath, task.branch).pipe(Effect.mapError(toInternal("delete branch")))
-          yield* workspace.deleteRef(repo.localPath, taskBaseRef(taskId)).pipe(Effect.mapError(toInternal("delete base ref")))
-        }
+        yield* workspace.removePath(threadDirOf(taskId)).pipe(Effect.mapError(toInternal("remove workspace")))
+        yield* workspace.removePath(join(config.shadowsDir, taskId)).pipe(Effect.mapError(toInternal("remove shadow repos")))
+        yield* workspace.removePath(join(config.homesDir, taskId)).pipe(Effect.mapError(toInternal("remove thread home")))
         yield* removeTaskState(taskId)
       })
 
@@ -491,51 +519,121 @@ export const CoreLive = Layer.effect(
         return restored
       })
 
-    const createTask: CoreShape["createTask"] = (user, repoId, input) =>
+    /**
+     * Checks a repository out into a thread: refreshes the owner's mirror, clones it into the workspace on a new branch
+     * and pins the fork point in the checkout's shadow repo. A repo already checked out in the thread returns that checkout.
+     */
+    const addCheckout = (
+      taskId: string,
+      request: CheckoutRequest,
+    ): Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError> =>
+      checkoutLock.withPermits(1)(
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          if (task.archivedAt !== undefined) {
+            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
+          }
+          const ref = yield* parseCheckoutRequest(request)
+          const existing = task.checkouts.find((c) => c.repo === ref.repo)
+          if (existing) return existing
+          const checkout = yield* cloneCheckout(task, request, ref)
+          const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
+            const found = findTask(s, taskId)
+            if (Either.isLeft(found)) return Either.left(found.left)
+            const stored = found.right
+            stored.checkouts = [...stored.checkouts, checkout]
+            stored.updatedAt = nowIso()
+            return Either.right({ ...stored })
+          })
+          hub.publish({ _tag: "task.updated", task: updated })
+          return checkout
+        }),
+      )
+
+    /** Clones the repo's mirror into a new checkout dir of `task`. Runs under `checkoutLock`; removes what it made on failure. */
+    const cloneCheckout = (
+      task: Task,
+      request: CheckoutRequest,
+      ref: RepoRef,
+    ): Effect.Effect<Checkout, BadRequest | InternalError> => {
+      const id = newId()
+      const threadDir = threadDirOf(task.id)
+      const dir = freeDirName(
+        task.checkouts.map((c) => c.dir),
+        ref.name,
+      )
+      const removeOnFailure = Effect.ignore(
+        Effect.all([workspace.removePath(join(threadDir, dir)), workspace.removePath(shadowPathOf(task.id, id))], {
+          discard: true,
+        }),
+      )
+      return Effect.gen(function* () {
+        const spec: CheckoutSpec = { threadDir, dir: join(threadDir, dir), shadowPath: shadowPathOf(task.id, id) }
+        const mirrorPath = join(config.mirrorsDir, task.owner, ref.mirrorRel)
+        // Only github.com remotes ever receive the owner's token.
+        const token = ref.github === null ? undefined : yield* githubTokenOf(task.owner)
+        const target = { mirrorPath, url: ref.url, githubToken: token }
+        const pullRequest = request.pullRequest
+        const fork = yield* Effect.gen(function* () {
+          if (pullRequest === undefined) {
+            const defaultBranch = yield* workspace.syncMirror(target).pipe(Effect.mapError(toInternal("fetch repo")))
+            const baseBranch = request.baseBranch ?? defaultBranch
+            const sha = yield* workspace
+              .resolveRef(mirrorPath, `refs/heads/${baseBranch}`)
+              .pipe(Effect.mapError(toInternal("resolve base branch")))
+            if (sha === null) {
+              return yield* Effect.fail(new BadRequest({ message: `branch ${baseBranch} not found in ${ref.repo}` }))
+            }
+            return { baseBranch, startSha: sha }
+          }
+          // The checkout starts at the pull request's head; its base is the pull request's base unless named.
+          const access = yield* githubAccess(task.owner, ref)
+          const status = yield* github
+            .getPullRequestStatus(access.token, access.slug, pullRequest)
+            .pipe(Effect.mapError(fromGitHub))
+          yield* workspace.syncMirror(target).pipe(Effect.mapError(toInternal("fetch repo")))
+          const sha = yield* workspace
+            .fetchPullRequest({ ...target, githubToken: access.token, number: pullRequest })
+            .pipe(Effect.mapError(toInternal("fetch pull request")))
+          return { baseBranch: request.baseBranch ?? status.baseRef, startSha: sha }
+        })
+        const branch = `cloudagents/${slugify(task.title)}-${task.id.replace(/-/g, "").slice(0, 6)}`
+        yield* workspace
+          .createCheckout({
+            ...spec,
+            mirrorPath,
+            url: ref.url,
+            branch,
+            startSha: fork.startSha,
+            baseSha: fork.startSha,
+            pinRef: checkoutPinRef(task.id, id),
+          })
+          .pipe(Effect.mapError(toInternal("create checkout")))
+        return { id, repo: ref.repo, dir, branch, baseBranch: fork.baseBranch, createdAt: nowIso() }
+      }).pipe(Effect.tapError(() => removeOnFailure))
+    }
+
+    const createTask: CoreShape["createTask"] = (user, input) =>
       Effect.gen(function* () {
-        const repo = yield* ownedRepo(user, repoId)
         const title = input.title?.trim() || "Untitled task"
-        const pullRequest = input.pullRequest
-        if (pullRequest !== undefined && parseGitHubRepo(repo.url) === null) {
-          return yield* Effect.fail(new BadRequest({ message: `${repo.name} is not a github.com repository; pull requests need one` }))
-        }
-        const baseBranch = input.baseBranch?.trim() || repo.defaultBranch
+        const request = input.checkout
+        if (request !== undefined) yield* parseCheckoutRequest(request)
         const id = newId()
-        const baseRef = taskBaseRef(id)
-        if (input.fetch || pullRequest !== undefined) {
-          yield* fetchFromOrigin(repo, `refs/heads/${baseBranch}:refs/heads/${baseBranch}`)
-        }
-        // The fork point is pinned per task, so later fetches that move a base branch or a pull request ref leave this task's diff alone.
-        if (pullRequest !== undefined) {
-          yield* fetchFromOrigin(repo, `+refs/pull/${pullRequest}/head:${baseRef}`)
-        } else {
-          yield* workspace
-            .updateRef({ repoPath: repo.localPath, ref: baseRef, target: baseBranch })
-            .pipe(Effect.mapError(toInternal("pin base")))
-        }
-        const branch = `cloudagents/${slugify(title)}-${id.replace(/-/g, "").slice(0, 6)}`
-        const worktreePath = join(config.worktreesDir, id)
-        yield* workspace.createWorktree({ repoPath: repo.localPath, branch, baseBranch: baseRef, worktreePath }).pipe(
-          Effect.mapError(toInternal("create worktree")),
-          Effect.tapError(() => workspace.deleteRef(repo.localPath, baseRef).pipe(Effect.ignore)),
-        )
         const now = nowIso()
-        const task: Task = {
-          id,
-          repoId,
-          title,
-          branch,
-          baseBranch,
-          worktreePath,
-          status: "idle",
-          createdAt: now,
-          updatedAt: now,
-        }
+        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [] }
+        yield* Effect.tryPromise({
+          try: () => mkdir(threadDirOf(id), { recursive: true }),
+          catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),
+        })
         yield* store.update((s): Either.Either<void, never> => {
           s.tasks.push(task)
           return Either.right(undefined)
         })
-        return { ...task }
+        if (request !== undefined) {
+          // A checkout that fails leaves no thread behind: the request is all-or-nothing from the caller's view.
+          yield* addCheckout(id, request).pipe(Effect.tapError(() => deleteTask(id).pipe(Effect.ignore)))
+        }
+        return yield* requireTask(id)
       })
 
     const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds) =>
@@ -803,62 +901,13 @@ export const CoreLive = Layer.effect(
       upload,
       health: () => Effect.void,
 
-      listRepos: (user) => Effect.map(store.read, (s) => s.repos.filter((r) => r.owner === user).map((r) => ({ ...r }))),
-
-      getRepo: ownedRepo,
-
-      createRepo: (user, url, name) =>
-        Effect.gen(function* () {
-          if (url.trim() === "") return yield* Effect.fail(new BadRequest({ message: "url is required" }))
-          const id = newId()
-          const localPath = join(config.reposDir, id)
-          // The clone authenticates as the requester, so GitHub decides which repositories they can import.
-          const creds = yield* credentials.get(user)
-          yield* workspace
-            .cloneRepo(url, localPath, { githubToken: creds?.github })
-            .pipe(Effect.mapError(toInternal("clone")))
-          const defaultBranch = yield* workspace
-            .defaultBranch(localPath)
-            .pipe(Effect.mapError(toInternal("read default branch")))
-          const repo: Repo = {
-            id,
-            name: name?.trim() || repoNameFromUrl(url),
-            url,
-            localPath,
-            defaultBranch,
-            createdAt: nowIso(),
-            owner: user,
-          }
-          yield* store.update((s): Either.Either<void, never> => {
-            s.repos.push(repo)
-            return Either.right(undefined)
-          })
-          return { ...repo }
-        }),
-
-      deleteRepo: (user, id) =>
-        Effect.gen(function* () {
-          const repo = yield* ownedRepo(user, id)
-          const state = yield* store.read
-          for (const task of state.tasks) {
-            if (task.repoId === id) yield* deleteTask(task.id)
-          }
-          yield* Effect.tryPromise({
-            try: () => rm(repo.localPath, { recursive: true, force: true }),
-            catch: (e) => new InternalError({ message: `remove clone: ${String(e)}` }),
-          })
-          yield* store.update((s): Either.Either<void, never> => {
-            s.repos = s.repos.filter((r) => r.id !== id)
-            return Either.right(undefined)
-          })
-        }),
-
-      listTasks: (user, repoId) =>
-        Effect.gen(function* () {
-          yield* ownedRepo(user, repoId)
-          const state = yield* store.read
-          return state.tasks.filter((t) => t.repoId === repoId).map((t) => ({ ...t }))
-        }),
+      listTasks: (user) =>
+        Effect.map(store.read, (state) =>
+          state.tasks
+            .filter((t) => t.owner === user)
+            .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+            .map((t) => ({ ...t })),
+        ),
 
       createTask,
 
@@ -871,15 +920,21 @@ export const CoreLive = Layer.effect(
       diff: (user, taskId) =>
         Effect.gen(function* () {
           const task = yield* ownedTask(user, taskId)
-          const repoPath = join(config.reposDir, task.repoId)
-          // Tasks created before the pin existed have no ref: their base is the branch they were forked from.
-          const pinned = taskBaseRef(task.id)
-          const pinnedExists = yield* workspace.refExists(repoPath, pinned).pipe(Effect.mapError(toInternal("diff")))
-          const baseRef = pinnedExists ? pinned : task.baseBranch
-          const diff = yield* workspace
-            .diff({ repoPath, worktreePath: task.worktreePath, baseRef })
-            .pipe(Effect.mapError(toInternal("diff")))
-          return { baseBranch: task.baseBranch, diff }
+          const checkouts = yield* Effect.forEach(task.checkouts, (checkout) =>
+            workspace
+              .diff({ ...checkoutSpec(task.id, checkout), baseRef: checkoutPinRef(task.id, checkout.id) })
+              .pipe(
+                Effect.map((diff) => ({
+                  checkoutId: checkout.id,
+                  repo: checkout.repo,
+                  dir: checkout.dir,
+                  baseBranch: checkout.baseBranch,
+                  diff,
+                })),
+                Effect.mapError(toInternal("diff")),
+              ),
+          )
+          return { checkouts }
         }),
 
       listMessages: (user, taskId) =>
@@ -1000,14 +1055,17 @@ export const CoreLive = Layer.effect(
           const app = yield* desktop.launch(taskId, command, launch).pipe(Effect.mapError(toInternal("desktop launch")))
           return app.id
         }),
-      taskRepo: (taskId) => Effect.flatMap(requireTask(taskId), (task) => requireRepo(task.repoId)),
-      gitPush: (taskId) =>
+
+      checkout: (taskId, input) => addCheckout(taskId, input),
+
+      taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),
+
+      gitPush: (taskId, checkoutId) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          const repo = yield* requireRepo(task.repoId)
-          const token = parseGitHubRepo(repo.url) === null ? undefined : yield* githubToken(repo)
-          yield* pushTask(repo, task, token)
-          return task.branch
+          const checkout = yield* pickCheckout(task, checkoutId)
+          yield* pushCheckout(task, checkout)
+          return checkout.branch
         }),
 
       openPullRequest: (taskId, input) =>
@@ -1015,39 +1073,41 @@ export const CoreLive = Layer.effect(
           const title = input.title.trim()
           if (title === "") return yield* Effect.fail(new BadRequest({ message: "pull request title is required" }))
           const task = yield* requireTask(taskId)
-          const repo = yield* requireRepo(task.repoId)
-          const { slug, token } = yield* githubAccess(repo)
-          yield* pushTask(repo, task, token)
-          const existing = yield* github.findOpenPullRequest(token, slug, task.branch).pipe(Effect.mapError(fromGitHub))
+          const checkout = yield* pickCheckout(task, input.checkoutId)
+          const ref = yield* checkoutRepoRef(checkout)
+          const { slug, token } = yield* githubAccess(task.owner, ref)
+          yield* pushCheckout(task, checkout)
+          const existing = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
           const pullRequest =
             existing ??
             (yield* github
               .createPullRequest(token, slug, {
                 title,
                 body: input.body,
-                head: task.branch,
-                base: task.baseBranch,
+                head: checkout.branch,
+                base: checkout.baseBranch,
                 draft: input.draft,
               })
               .pipe(Effect.mapError(fromGitHub)))
-          yield* recordPullRequest(taskId, { number: pullRequest.number, url: pullRequest.url }, existing === null)
+          yield* recordPullRequest(taskId, checkout.id, { number: pullRequest.number, url: pullRequest.url }, existing === null)
           return { pullRequest, created: existing === null }
         }),
 
-      pullRequestStatus: (taskId) =>
+      pullRequestStatus: (taskId, checkoutId) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          const repo = yield* requireRepo(task.repoId)
-          const { slug, token } = yield* githubAccess(repo)
-          let number = task.pullRequest?.number
+          const checkout = yield* pickCheckout(task, checkoutId)
+          const ref = yield* checkoutRepoRef(checkout)
+          const { slug, token } = yield* githubAccess(task.owner, ref)
+          let number = checkout.pullRequest?.number
           if (number === undefined) {
-            const found = yield* github.findOpenPullRequest(token, slug, task.branch).pipe(Effect.mapError(fromGitHub))
+            const found = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
             if (found === null) {
               return yield* Effect.fail(
-                new NotFound({ message: `no open pull request for ${task.branch}; open one with github_pr_create` }),
+                new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }),
               )
             }
-            yield* recordPullRequest(taskId, { number: found.number, url: found.url }, false)
+            yield* recordPullRequest(taskId, checkout.id, { number: found.number, url: found.url }, false)
             number = found.number
           }
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
@@ -1056,8 +1116,9 @@ export const CoreLive = Layer.effect(
       reviewPullRequest: (taskId, input) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          const repo = yield* requireRepo(task.repoId)
-          const { slug, token } = yield* githubAccess(repo)
+          const checkout = yield* pickCheckout(task, input.checkoutId)
+          const ref = yield* checkoutRepoRef(checkout)
+          const { slug, token } = yield* githubAccess(task.owner, ref)
           return yield* github
             .createReview(token, slug, input.number, { body: input.body, event: input.event, comments: input.comments })
             .pipe(Effect.mapError(fromGitHub))

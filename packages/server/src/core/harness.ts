@@ -274,8 +274,8 @@ export const AgentHarnessLive = Layer.effect(
               settings,
               taskId: task.id,
               kind: "run",
-              worktreePath: task.worktreePath,
-              gitCommonDir: join(config.reposDir, task.repoId, ".git"),
+              workspacePath: join(config.threadsDir, task.id),
+              mirrorDir: join(config.mirrorsDir, task.owner),
               homeDir,
               display,
               env: {
