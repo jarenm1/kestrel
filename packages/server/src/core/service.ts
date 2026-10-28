@@ -24,7 +24,7 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
-import { agentHome, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
+import { agentHome, desktopNamespace, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -284,6 +284,9 @@ export const CoreLive = Layer.effect(
           launchFor(task, "desktop", display, "exec xterm -geometry 100x30+40+40 -e bash").pipe(
             Effect.mapError((e) => new DesktopError({ message: e.message })),
           ),
+        ipcNamespace: desktopNamespace(sandboxSettings, task.id).pipe(
+          Effect.mapError((e) => new DesktopError({ message: e.message })),
+        ),
       })
 
     const findTask = (state: Readonly<StoreState>, taskId: string) =>

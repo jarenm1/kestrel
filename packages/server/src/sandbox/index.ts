@@ -5,7 +5,7 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
-import { ensureTaskNet, joinTaskNet } from "./netns"
+import { ensureTaskNet, joinTaskIpc, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
 
 export { stopAllTaskNets, stopTaskNet } from "./netns"
@@ -55,9 +55,12 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "bwrap",
     "--die-with-parent",
     "--new-session",
-    "--unshare-all",
-    // The network is the task's own namespace, which the launch joins before bwrap (see netns.ts).
-    "--share-net",
+    // Every namespace bwrap's --unshare-all would make except network and IPC: both are the task's own, which the
+    // launch joins before bwrap (see netns.ts). The shared IPC namespace lets X clients use MIT-SHM with the desktop.
+    "--unshare-user-try",
+    "--unshare-pid",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
     // That namespace maps the box user to root; keep the agent on the box user's own ids (agent CLIs refuse root).
     "--uid",
     String(process.getuid?.() ?? 0),
@@ -223,9 +226,61 @@ export const findExecutable = (name: string): string | null => {
   return null
 }
 
+const requireSystemdRun = (settings: SandboxSettings): Effect.Effect<string | null, InternalError> => {
+  if (!settings.systemd) return Effect.succeed(null)
+  const systemdRun = findExecutable("systemd-run")
+  return systemdRun === null
+    ? Effect.fail(new InternalError({ message: "systemd-run not found on PATH (set CLOUDAGENTS_SYSTEMD=0 to run without limits)" }))
+    : Effect.succeed(systemdRun)
+}
+
+/** Holder pid of the task's namespaces (started on first use) and the nsenter that joins them. Sandbox enabled only. */
+const taskNamespaces = (
+  settings: SandboxSettings,
+  taskId: string,
+  systemdRun: string | null,
+): Effect.Effect<{ readonly holder: number; readonly nsenter: string }, InternalError> =>
+  Effect.gen(function* () {
+    if (settings.binPath === null) {
+      return yield* Effect.fail(new InternalError({ message: "CLOUDAGENTS_SANDBOX_PATH is not set" }))
+    }
+    const pasta = findExecutable("pasta")
+    const nsenter = findExecutable("nsenter")
+    const unshare = findExecutable("unshare")
+    if (pasta === null || nsenter === null || unshare === null) {
+      return yield* Effect.fail(
+        new InternalError({
+          message: "pasta (passt), nsenter and unshare (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`",
+        }),
+      )
+    }
+    const holder = yield* ensureTaskNet({
+      taskId,
+      boxPort: settings.boxPort,
+      pastaPath: pasta,
+      sleepPath: join(settings.binPath, "sleep"),
+      unsharePath: unshare,
+      systemd: settings.systemd && systemdRun ? { settings: settings.systemd, systemdRun } : null,
+    })
+    return { holder, nsenter }
+  })
+
+/**
+ * Argv prefix for the task desktop's X server and the box's MIT-SHM clients of it (capture, screenshots): the
+ * task's IPC namespace, shared with its sandboxes. Empty without the sandbox, where everything shares the host's.
+ */
+export const desktopNamespace = (settings: SandboxSettings, taskId: string): Effect.Effect<string[], InternalError> =>
+  Effect.gen(function* () {
+    if (!settings.enabled) return []
+    const systemdRun = yield* requireSystemdRun(settings)
+    if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
+    const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
+    return joinTaskIpc(nsenter, holder)
+  })
+
 /**
  * Turns a launch request into the concrete process to spawn. Sandboxed launches join the task's
- * network namespace (`nsenter`, started on first use) and run in bubblewrap; the env inside is
+ * network and IPC namespaces (`nsenter`, started on first use) and run in bubblewrap; the env inside is
  * exactly the base allowlist plus `req.env`. With systemd limits on, the process starts through
  * `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned
  * pid is still the sandbox's and process-group signals reach it.
@@ -247,19 +302,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         new InternalError({ message: "bwrap (bubblewrap) not found on PATH; run inside `nix develop` or `nix run .#box`" }),
       )
     }
-    const systemdRun = settings.systemd ? findExecutable("systemd-run") : null
-    if (settings.systemd && systemdRun === null) {
-      return yield* Effect.fail(
-        new InternalError({ message: "systemd-run not found on PATH (set CLOUDAGENTS_SYSTEMD=0 to run without limits)" }),
-      )
-    }
-    const pasta = settings.enabled ? findExecutable("pasta") : null
-    const nsenter = settings.enabled ? findExecutable("nsenter") : null
-    if (settings.enabled && (pasta === null || nsenter === null)) {
-      return yield* Effect.fail(
-        new InternalError({ message: "pasta (passt) and nsenter (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`" }),
-      )
-    }
+    const systemdRun = yield* requireSystemdRun(settings)
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, req.taskId)
     yield* Effect.forEach(
       [req.homeDir, req.mirrorDir],
@@ -285,15 +328,9 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
 
     const inner: { file: string; args: string[] } = settings.enabled
       ? yield* Effect.map(
-          ensureTaskNet({
-            taskId: req.taskId,
-            boxPort: settings.boxPort,
-            pastaPath: pasta as string,
-            sleepPath: join(settings.binPath as string, "sleep"),
-            systemd: settings.systemd ? { settings: settings.systemd, systemdRun: systemdRun as string } : null,
-          }),
-          (holder) => {
-            const [file, ...args] = joinTaskNet(nsenter as string, holder)
+          taskNamespaces(settings, req.taskId, systemdRun),
+          ({ holder, nsenter }) => {
+            const [file, ...args] = joinTaskNet(nsenter, holder)
             const bwrapArgs = buildBwrapArgv({
               workspacePath: req.workspacePath,
               mirrorDir: req.mirrorDir,

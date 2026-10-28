@@ -47,6 +47,11 @@ export interface DesktopApp {
 export interface DesktopStartOptions {
   /** Builds the terminal opened on a fresh desktop, given its X display (e.g. ":101"). */
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
+  /**
+   * Argv prefix that puts a process in the IPC namespace the task's sandboxes share; empty for the box's own. The X
+   * server and the box's MIT-SHM clients (capture, screenshots) run in it, so sandboxed apps can use MIT-SHM too.
+   */
+  readonly ipcNamespace: Effect.Effect<ReadonlyArray<string>, DesktopError>
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -147,6 +152,9 @@ interface Session {
   readonly num: number
   readonly display: string
   readonly terminal: DesktopStartOptions["terminal"]
+  readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
+  /** The resolved `ipcNamespace` prefix; set by boot before the X server starts. */
+  ipc: ReadonlyArray<string>
   /** Completes when the init segment has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
@@ -366,9 +374,11 @@ const waitForSocket = async (s: Session) => {
   }
 }
 
-const runCommand = (command: string, args: readonly string[], display: string) => {
+/** `prefix` (an IPC namespace join, or empty) runs before the command. */
+const runCommand = (command: string, args: readonly string[], display: string, prefix: ReadonlyArray<string> = []) => {
   const { promise, resolve, reject } = Promise.withResolvers<{ exitCode: number; stdout: Buffer; stderr: string }>()
-  const child = spawn(command, args, {
+  const [file = command, ...argv] = [...prefix, command, ...args]
+  const child = spawn(file, argv, {
     env: { ...process.env, DISPLAY: display },
     stdio: ["ignore", "pipe", "pipe"],
   })
@@ -416,6 +426,7 @@ const grabFrame = (s: Session): Effect.Effect<RgbFrame, DesktopError> =>
             "pipe:1",
           ],
           s.display,
+          s.ipc,
         ),
       catch: toErr,
     })
@@ -565,6 +576,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.awaiting = new Set(s.sinks)
       enc.child = spawnTracked(s, "xdamage-capture", [String(WIDTH), String(HEIGHT), "ffmpeg", ...ffmpegArgs(kind)], {
         critical: false,
+        taskIpc: true,
         onStdout: (d) => onEncoderBytes(s, enc, d),
         onStderr: (d) => {
           enc.stderr = (enc.stderr + d.toString()).slice(-2000)
@@ -617,6 +629,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         critical: boolean
         /** Gives the child a stdin pipe to write commands to. */
         stdin?: boolean
+        /** Runs it in the task's IPC namespace (`s.ipc`): the X server and MIT-SHM clients. */
+        taskIpc?: boolean
         cwd?: string
         env?: Readonly<Record<string, string>>
         onStdout?: (d: Buffer) => void
@@ -625,8 +639,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit?: (reason: string) => void
       },
     ) => {
+      const [file = command, ...argv] = opts.taskIpc ? [...s.ipc, command, ...args] : [command, ...args]
       const child = ownGroup(
-        spawn(command, args, {
+        spawn(file, argv, {
           cwd: opts.cwd,
           detached: NEW_PROCESS_GROUP,
           env: opts.env ? { ...opts.env } : { ...process.env, DISPLAY: s.display },
@@ -696,6 +711,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     const boot = (s: Session) =>
       Effect.gen(function* () {
+        s.ipc = yield* s.ipcNamespace
         yield* Effect.try({
           // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the
           // abstract socket (`local`) would let every task's agent reach every display.
@@ -704,7 +720,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               s,
               "Xvfb",
               [s.display, "-screen", "0", `${WIDTH}x${HEIGHT}x24`, "-nolisten", "tcp", "-nolisten", "local"],
-              { critical: true },
+              { critical: true, taskIpc: true },
             ),
           catch: toErr,
         })
@@ -792,6 +808,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 num,
                 display: `:${num}`,
                 terminal: opts.terminal,
+                ipcNamespace: opts.ipcNamespace,
+                ipc: [],
                 ready,
                 procs: new Set(),
                 sinks: new Set(),

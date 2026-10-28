@@ -5,14 +5,17 @@ import { InternalError } from "@cloudagents/protocol"
 import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
 
 /**
- * One network namespace per task, shared by every sandbox of that task (agent run, workspace_exec,
+ * One network and IPC namespace per task, shared by every sandbox of that task (agent run, workspace_exec,
  * desktop apps), so a browser on the task desktop reaches the agent's dev server on localhost.
  *
  * `pasta` creates a user + network namespace around a `sleep infinity` holder and gives it outbound
- * internet through user-space NAT. Sandboxes join it with `nsenter --user --net`. Inside, loopback
- * is the task's own: host services on 127.0.0.1 and other X servers' abstract sockets are out of
- * reach. The one way back to the host is the box port, forwarded with `-T` (broker and MCP).
- * `--no-map-gw` keeps pasta from mapping its gateway address to the host's loopback.
+ * internet through user-space NAT. The holder runs under `unshare --ipc`, so the task also has its own
+ * SysV IPC namespace: the task's X server and capture join it too (`joinTaskIpc`), which lets X clients
+ * share MIT-SHM images with the server without seeing another task's segments. Sandboxes join with
+ * `nsenter --user --net --ipc`. Inside, loopback is the task's own: host services on 127.0.0.1 and other
+ * X servers' abstract sockets are out of reach. The one way back to the host is the box port, forwarded
+ * with `-T` (broker and MCP). `--no-map-gw` keeps pasta from mapping its gateway address to the host's
+ * loopback.
  */
 interface TaskNet {
   readonly pasta: ChildProcess
@@ -74,6 +77,8 @@ export interface TaskNetOptions {
   readonly pastaPath: string
   /** `sleep` from the sandbox toolchain. */
   readonly sleepPath: string
+  /** `unshare` (util-linux): gives the holder its own IPC namespace. */
+  readonly unsharePath: string
   /** With systemd, pasta and the holder live in the task slice, so task removal and box restarts kill them. */
   readonly systemd: { readonly settings: SystemdSettings; readonly systemdRun: string } | null
 }
@@ -95,6 +100,8 @@ const startNet = async (opts: TaskNetOptions): Promise<TaskNet> => {
     "-q",
     "-f",
     "--",
+    opts.unsharePath,
+    "--ipc",
     opts.sleepPath,
     "infinity",
   ]
@@ -151,13 +158,28 @@ export const ensureTaskNet = (opts: TaskNetOptions): Effect.Effect<number, Inter
     catch: (e) => new InternalError({ message: `task network did not come up: ${e instanceof Error ? e.message : String(e)}` }),
   })
 
-/** Argv prefix that runs the following command inside the task's namespace with the box user's own uid. */
+/** Argv prefix that runs the following command inside the task's namespaces with the box user's own uid. */
 export const joinTaskNet = (nsenterPath: string, holder: number): string[] => [
   nsenterPath,
   "--target",
   String(holder),
   "--user",
   "--net",
+  "--ipc",
+  "--preserve-credentials",
+  "--",
+]
+
+/**
+ * Argv prefix for the task's X server and its box-side clients that use MIT-SHM (capture, screenshots): the task's
+ * IPC namespace (joining it needs its user namespace), but the host network, so the box still reaches them.
+ */
+export const joinTaskIpc = (nsenterPath: string, holder: number): string[] => [
+  nsenterPath,
+  "--target",
+  String(holder),
+  "--user",
+  "--ipc",
   "--preserve-credentials",
   "--",
 ]
