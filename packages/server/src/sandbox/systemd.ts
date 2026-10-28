@@ -74,6 +74,9 @@ export const scopeArgs = (settings: SystemdSettings, taskId: string, kind: Launc
   "--collect",
   `--unit=${settings.boxSlice}-${kind}-${randomUUID()}`,
   `--slice=${taskSlice(settings, taskId)}`,
+  // The namespace holder is PID 1 of pasta's PID namespace, which ignores SIGTERM sent from outside it, so a stop
+  // would wait out the 90 s stop timeout before SIGKILL. pasta and the holder keep no state, so they are killed outright.
+  ...(kind === "net" ? ["--property=KillSignal=SIGKILL"] : []),
   "--",
 ]
 
