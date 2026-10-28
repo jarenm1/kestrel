@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
+import { StringDecoder } from "node:string_decoder"
 import { Context, Data, Deferred, Effect, Layer } from "effect"
 import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
@@ -20,6 +21,25 @@ export interface ProcessSpec {
   readonly cwd: string
 }
 
+/** A rectangle of the desktop, in the same pixel coordinates the rest of the desktop API uses. */
+export interface DesktopRegion {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+/** An app started with `launch`. `output` is the tail of its stdout and stderr. */
+export interface DesktopApp {
+  readonly id: string
+  readonly command: string
+  readonly running: boolean
+  readonly exitCode: number | null
+  /** Signal that ended the process, if any. */
+  readonly signal: string | null
+  readonly output: string
+}
+
 export interface DesktopStartOptions {
   /** Builds the terminal opened on a fresh desktop, given its X display (e.g. ":101"). */
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
@@ -31,10 +51,20 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly start: (taskId: string, opts: DesktopStartOptions) => Effect.Effect<DesktopStatus, DesktopError>
     readonly stop: (taskId: string) => Effect.Effect<void>
     readonly status: (taskId: string) => Effect.Effect<DesktopStatus>
-    readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, DesktopError>
+    /** `crop` is in desktop pixels; `scale` multiplies the output size (1 = unchanged). */
+    readonly screenshot: (
+      taskId: string,
+      crop?: DesktopRegion,
+      scale?: number,
+    ) => Effect.Effect<Uint8Array, DesktopError>
+    readonly cursor: (taskId: string) => Effect.Effect<{ readonly x: number; readonly y: number }, DesktopError>
     readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, DesktopError>
-    /** Spawns an app on the live desktop; it is killed with the desktop. */
-    readonly launch: (taskId: string, process: ProcessSpec) => Effect.Effect<void, DesktopError>
+    /** Starts an app on the live desktop and returns it. Killed with the desktop. `command` is what was asked for. */
+    readonly launch: (taskId: string, command: string, process: ProcessSpec) => Effect.Effect<DesktopApp, DesktopError>
+    /** Every app launched on the desktop, exited ones included, oldest first. */
+    readonly processes: (taskId: string) => Effect.Effect<ReadonlyArray<DesktopApp>, DesktopError>
+    /** Terminates an app (SIGTERM, then SIGKILL) and returns its final state. */
+    readonly kill: (taskId: string, id: string) => Effect.Effect<DesktopApp, DesktopError>
     readonly subscribe: (taskId: string, sink: DesktopSink) => Effect.Effect<Effect.Effect<void>, DesktopError>
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
     readonly stopAll: () => Effect.Effect<void>
@@ -50,6 +80,8 @@ const X_SOCKET_TIMEOUT_MS = 10_000
 const READY_TIMEOUT_MS = 20_000
 const TERM_GRACE_MS = 2_000
 const COMMAND_TIMEOUT_MS = 15_000
+/** Output kept per launched app; older text is dropped. */
+const OUTPUT_TAIL_CHARS = 32 * 1024
 
 interface Session {
   readonly taskId: string
@@ -61,6 +93,8 @@ interface Session {
   /** Live child processes; each is a process-group leader (detached). */
   readonly procs: Set<ChildProcess>
   readonly sinks: Set<DesktopSink>
+  /** Apps started with launch(), in launch order. */
+  readonly apps: Map<string, AppRecord>
   readonly splitter: Mp4Splitter
   state: DesktopState
   error: string | null
@@ -69,6 +103,37 @@ interface Session {
   stderrTail: string
 }
 
+/** Keeps the tail of a launched app's output. Decodes per stream so UTF-8 split across chunks survives. */
+class OutputTail {
+  private text = ""
+  private readonly decoders = { stdout: new StringDecoder("utf8"), stderr: new StringDecoder("utf8") }
+
+  push(stream: "stdout" | "stderr", data: Buffer): void {
+    this.text = (this.text + this.decoders[stream].write(data)).slice(-OUTPUT_TAIL_CHARS)
+  }
+
+  get value(): string {
+    return this.text
+  }
+}
+
+interface AppRecord {
+  readonly id: string
+  readonly command: string
+  readonly child: ChildProcess
+  readonly output: OutputTail
+  exit: { readonly code: number | null; readonly signal: string | null } | null
+}
+
+const appView = (a: AppRecord): DesktopApp => ({
+  id: a.id,
+  command: a.command,
+  running: a.exit === null,
+  exitCode: a.exit?.code ?? null,
+  signal: a.exit?.signal ?? null,
+  output: a.output.value,
+})
+
 const toErr = (e: unknown): DesktopError =>
   e instanceof DesktopError ? e : new DesktopError({ message: e instanceof Error ? e.message : String(e) })
 
@@ -76,6 +141,12 @@ const pixel = (v: number, max: number) => Math.min(max - 1, Math.max(0, Math.rou
 
 /** One click per 50 units of wheel delta, between 1 and 10 clicks. */
 const wheelClicks = (delta: number) => Math.min(10, Math.max(1, Math.round(Math.abs(delta) / 50)))
+
+/** "ctrl+c" -> ["ctrl", "c"]. The plus key is named "plus", so "+" and "ctrl++" both name it. */
+const keyParts = (key: string): string[] => {
+  const named = key === "+" ? "plus" : key.endsWith("++") ? `${key.slice(0, -2)}+plus` : key
+  return named.length > 1 ? named.split("+").filter((p) => p.length > 0) : [named]
+}
 
 const xdotoolArgs = (e: DesktopInput): string[] => {
   switch (e._tag) {
@@ -98,7 +169,7 @@ const xdotoolArgs = (e: DesktopInput): string[] => {
     }
     case "key": {
       // "ctrl+c" presses ctrl then c, releases in reverse order.
-      const parts = e.key.length > 1 ? e.key.split("+").filter((p) => p.length > 0) : [e.key]
+      const parts = keyParts(e.key)
       const ordered = e.down ? parts : [...parts].reverse()
       return ordered.flatMap((p) => [e.down ? "keydown" : "keyup", p])
     }
@@ -274,6 +345,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         cwd?: string
         env?: Readonly<Record<string, string>>
         onStdout?: (d: Buffer) => void
+        onStderr?: (d: Buffer) => void
       },
     ) => {
       const child = ownGroup(
@@ -287,6 +359,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.procs.add(child)
       child.stderr?.on("data", (d: Buffer) => {
         s.stderrTail = (s.stderrTail + d.toString()).slice(-4000)
+        opts.onStderr?.(d)
       })
       child.stdout?.on("data", (d: Buffer) => opts.onStdout?.(d))
       child.on("error", (e) => {
@@ -410,6 +483,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 ready,
                 procs: new Set(),
                 sinks: new Set(),
+                apps: new Map(),
                 splitter: new Mp4Splitter(),
                 state: "starting",
                 error: null,
@@ -432,9 +506,13 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
       status: (taskId) => Effect.sync(() => toStatus(taskId, sessions.get(taskId))),
 
-      screenshot: (taskId) =>
+      screenshot: (taskId, crop, scale) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
+          const filters = [
+            ...(crop ? [`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`] : []),
+            ...(scale !== undefined && scale !== 1 ? [`scale=round(iw*${scale}):round(ih*${scale})`] : []),
+          ]
           const r = yield* Effect.tryPromise({
             try: () =>
               runCommand(
@@ -451,6 +529,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                   s.display,
                   "-frames:v",
                   "1",
+                  ...(filters.length > 0 ? ["-vf", filters.join(",")] : []),
                   "-f",
                   "image2pipe",
                   "-c:v",
@@ -467,6 +546,21 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           return r.stdout
         }),
 
+      cursor: (taskId) =>
+        Effect.gen(function* () {
+          const s = yield* requireLive(taskId)
+          const r = yield* Effect.tryPromise({
+            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display),
+            catch: toErr,
+          })
+          const x = /^X=(\d+)$/m.exec(r.stdout.toString())
+          const y = /^Y=(\d+)$/m.exec(r.stdout.toString())
+          if (r.exitCode !== 0 || x === null || y === null) {
+            return yield* Effect.fail(new DesktopError({ message: `cursor position failed: ${r.stderr.trim()}` }))
+          }
+          return { x: Number(x[1]), y: Number(y[1]) }
+        }),
+
       input: (taskId, event) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
@@ -478,15 +572,42 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           }
         }),
 
-      launch: (taskId, proc) =>
+      launch: (taskId, command, proc) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
-          yield* Effect.try({
-            try: () => {
-              spawnTracked(s, proc.file, proc.args, { critical: false, cwd: proc.cwd, env: proc.env })
-            },
+          const output = new OutputTail()
+          const child = yield* Effect.try({
+            try: () =>
+              spawnTracked(s, proc.file, proc.args, {
+                critical: false,
+                cwd: proc.cwd,
+                env: proc.env,
+                onStdout: (d) => output.push("stdout", d),
+                onStderr: (d) => output.push("stderr", d),
+              }),
             catch: toErr,
           })
+          const app: AppRecord = { id: `app-${s.apps.size + 1}`, command, child, output, exit: null }
+          child.once("exit", (code, signal) => {
+            app.exit = { code, signal }
+          })
+          s.apps.set(app.id, app)
+          return appView(app)
+        }),
+
+      processes: (taskId) => Effect.map(lookup(taskId), (s) => [...s.apps.values()].map(appView)),
+
+      kill: (taskId, id) =>
+        Effect.gen(function* () {
+          const s = yield* lookup(taskId)
+          const app = s.apps.get(id)
+          if (!app) {
+            return yield* Effect.fail(new DesktopError({ message: `no process ${id} on the desktop for task ${taskId}` }))
+          }
+          if (app.exit === null) {
+            yield* Effect.promise(() => terminate([app.child]).then(() => waitExit(app.child, TERM_GRACE_MS)))
+          }
+          return appView(app)
         }),
 
       subscribe: (taskId, sink) =>

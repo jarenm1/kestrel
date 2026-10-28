@@ -117,9 +117,12 @@ const program = Effect.gen(function* () {
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
     desktop: {
       status: (taskId) => desktop.status(taskId),
-      screenshot: (taskId) => desktop.screenshot(taskId),
+      screenshot: (taskId, crop, scale) => desktop.screenshot(taskId, crop, scale),
+      cursor: (taskId) => desktop.cursor(taskId),
       input: (taskId, event) => desktop.input(taskId, event),
       launch: (taskId, command) => core.desktopLaunch(taskId, command),
+      processes: (taskId) => desktop.processes(taskId),
+      kill: (taskId, id) => desktop.kill(taskId, id),
     },
     workspace: {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),

@@ -83,8 +83,8 @@ export interface CoreShape {
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command in the task worktree. */
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
-  /** Used by the MCP handler: starts a sandboxed app on the task's live desktop. */
-  readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<void, NotFound | InternalError>
+  /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
+  readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler: pushes the task branch to its GitHub remote (never forced). Returns the branch. */
   readonly gitPush: (taskId: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: pushes the task branch and opens its pull request, or returns the open one. */
@@ -583,7 +583,8 @@ export const CoreLive = Layer.effect(
           const launch = yield* launchFor(task, "desktop", desktopNow.display, command).pipe(
             Effect.mapError(toInternal("desktop launch")),
           )
-          yield* desktop.launch(taskId, launch).pipe(Effect.mapError(toInternal("desktop launch")))
+          const app = yield* desktop.launch(taskId, command, launch).pipe(Effect.mapError(toInternal("desktop launch")))
+          return app.id
         }),
       gitPush: (taskId) =>
         Effect.gen(function* () {
