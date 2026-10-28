@@ -110,7 +110,7 @@ export interface CoreShape {
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
   /** Used by the MCP handler: starts the task's desktop, or returns the one already running. */
-  readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
+  readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
 
   /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
   readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
@@ -600,7 +600,7 @@ export const CoreLive = Layer.effect(
         const desktopNow = yield* desktop.status(taskId)
         const display = desktopNow.state === "running" ? desktopNow.display : null
 
-        // Archiving may have landed while the desktop started: it cancelled this run and tore the task down,
+        // Archiving may have landed since the run was reserved: it cancelled this run and tore the task down,
         // so nothing may be spawned, and a desktop started meanwhile goes too.
         const stateNow = yield* store.read
         const runNow = stateNow.runs.find((r) => r.id === reserved.run.id)
@@ -839,6 +839,10 @@ export const CoreLive = Layer.effect(
       desktopOpen: (taskId) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
+          // A tool call still in flight from a run that archiving cancelled must not bring the desktop back.
+          if (task.archivedAt !== undefined) {
+            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
+          }
           return yield* startDesktop(task).pipe(
             Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
           )
