@@ -4,6 +4,7 @@ import { NavLink, Route, Routes } from "react-router-dom"
 import { api, ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
 import { BoxPill } from "@/components/BoxStatus"
+import { KestrelMark } from "@/components/KestrelMark"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -16,8 +17,8 @@ import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   cn(
-    "rounded-md px-2.5 py-1 text-muted-foreground transition-colors hover:text-foreground",
-    isActive && "bg-secondary text-foreground",
+    "rounded-full px-3 py-1.5 text-muted-foreground transition-colors duration-200 hover:text-foreground",
+    isActive && "bg-white/[0.07] text-foreground",
   )
 
 export function App() {
@@ -39,9 +40,13 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-11 shrink-0 items-center gap-4 border-b bg-card px-4">
-        <NavLink to="/" className="font-semibold tracking-tight">
-          Kestrel
+      <header className="flex h-14 shrink-0 items-center gap-5 px-5">
+        <NavLink
+          to="/"
+          aria-label="Kestrel home"
+          className="rounded-full text-foreground/90 transition-colors duration-200 hover:text-foreground"
+        >
+          <KestrelMark className="h-6" />
         </NavLink>
         <nav className="flex gap-1">
           <NavLink to="/" end className={navLinkClass}>
@@ -51,10 +56,16 @@ export function App() {
             Connections
           </NavLink>
         </nav>
-        <div className="ml-auto flex items-center gap-2.5">
+        <div className="ml-auto flex items-center gap-3">
           <BoxPill />
-          <img className="rounded-full" src={me.data.avatarUrl} alt="" width={20} height={20} />
-          <span className="text-muted-foreground">{me.data.login}</span>
+          <img
+            className="rounded-full shadow-soft"
+            src={me.data.avatarUrl}
+            alt={me.data.login}
+            title={me.data.login}
+            width={24}
+            height={24}
+          />
           <SignOutButton />
         </div>
       </header>
@@ -79,7 +90,7 @@ function SignOutButton() {
   })
 
   return (
-    <Button variant="soft" size="sm" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
+    <Button variant="ghost" size="sm" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
       Sign out
     </Button>
   )
