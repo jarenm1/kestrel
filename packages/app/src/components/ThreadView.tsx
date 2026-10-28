@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { GitCompare, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
+import { GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { DiffPanel } from "@/components/DiffPanel"
@@ -29,6 +29,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setOpen(true)
   }
 
+  const pullRequest = state.task?.pullRequest
+
   return (
     <div
       className={cn(
@@ -38,7 +40,13 @@ export function ThreadView({ taskId }: { taskId: string }) {
     >
       <section className="flex min-h-0 min-w-0 flex-col">
         {state.error && <Alert className="mx-5 mt-3 w-auto">{state.error}</Alert>}
-        <ChatPanel taskId={taskId} messages={state.messages} runs={state.runs} output={state.output} />
+        <ChatPanel
+          taskId={taskId}
+          taskStatus={state.task?.status}
+          messages={state.messages}
+          runs={state.runs}
+          output={state.output}
+        />
       </section>
       {open ? (
         <aside className="m-2 ml-0 flex min-h-0 min-w-0 animate-in flex-col overflow-hidden rounded-xl bg-background/60 shadow-well duration-300 fade-in slide-in-from-right-4">
@@ -55,10 +63,18 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 {t.label}
               </Button>
             ))}
+            {pullRequest && (
+              <Button asChild variant="ghost" size="sm" className="ml-auto">
+                <a href={pullRequest.url} target="_blank" rel="noreferrer">
+                  <GitPullRequest />
+                  PR #{pullRequest.number}
+                </a>
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
-              className="ml-auto"
+              className={pullRequest ? undefined : "ml-auto"}
               aria-label="Collapse sidebar"
               onClick={() => setOpen(false)}
             >
@@ -84,6 +100,13 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <t.icon />
             </Button>
           ))}
+          {pullRequest && (
+            <Button asChild variant="ghost" size="icon" title={`PR #${pullRequest.number}`}>
+              <a href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={`Pull request #${pullRequest.number}`}>
+                <GitPullRequest />
+              </a>
+            </Button>
+          )}
         </aside>
       )}
     </div>

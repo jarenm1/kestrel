@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, type ReactNode } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import type { Message, Run, SendMessageBody } from "@cloudagents/protocol"
-import { api } from "@/api/client"
+import type { Message, Run, SendMessageBody, TaskStatus } from "@cloudagents/protocol"
+import { api, taskAttachmentUrl } from "@/api/client"
 import { keys, upsert } from "@/api/queries"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { formatClock } from "@/util"
 import { Composer } from "./Composer"
@@ -12,6 +13,7 @@ import { StatusIcon } from "./StatusIcon"
 
 interface Props {
   taskId: string
+  taskStatus: TaskStatus | undefined
   messages: readonly Message[]
   runs: readonly Run[]
   output: Record<string, string[]>
@@ -32,7 +34,16 @@ function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?
   )
 }
 
-function ThreadItem({ message, turn }: { message: Message; turn: Run["status"] | undefined }) {
+/** `children`: what hangs off a message (attachments, answer buttons), shown under its text. */
+function ThreadItem({
+  message,
+  turn,
+  children,
+}: {
+  message: Message
+  turn: Run["status"] | undefined
+  children?: ReactNode
+}) {
   switch (message.role) {
     case "user":
       return (
@@ -52,6 +63,7 @@ function ThreadItem({ message, turn }: { message: Message; turn: Run["status"] |
       return (
         <div className={ENTER_CLASS}>
           <Markdown text={message.text} />
+          {children}
           <TurnFooter status={turn} time={formatClock(message.createdAt)} />
         </div>
       )
@@ -59,13 +71,14 @@ function ThreadItem({ message, turn }: { message: Message; turn: Run["status"] |
       return (
         <div className={cn("self-center text-xs text-muted-foreground italic", ENTER_CLASS)}>
           {message.text}
+          {children}
           <TurnFooter status={turn} />
         </div>
       )
   }
 }
 
-export function ChatPanel({ taskId, messages, runs, output }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, output }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
 
@@ -75,6 +88,9 @@ export function ChatPanel({ taskId, messages, runs, output }: Props) {
   // The last message of each run carries that turn's status.
   const lastMessageOfRun = new Map<string, string>()
   for (const m of sortedMessages) if (m.runId) lastMessageOfRun.set(m.runId, m.id)
+  // The latest question with options gets answer buttons, but only while the agent is blocked waiting for one.
+  const lastAsk = [...sortedMessages].reverse().find((m) => (m.options ?? []).length > 0)
+  const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined
 
   useEffect(() => {
     const el = threadRef.current
@@ -107,7 +123,31 @@ export function ChatPanel({ taskId, messages, runs, output }: Props) {
               key={m.id}
               message={m}
               turn={m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined}
-            />
+            >
+              {(m.attachments ?? []).map((a) => (
+                <img
+                  key={a.id}
+                  src={taskAttachmentUrl(taskId, a.id)}
+                  alt="Attachment"
+                  className="mt-2 max-h-80 rounded-xl shadow-soft"
+                />
+              ))}
+              {m.id === pendingAsk?.id && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(m.options ?? []).map((option, i) => (
+                    <Button
+                      key={i}
+                      variant="soft"
+                      size="sm"
+                      disabled={send.isPending}
+                      onClick={() => send.mutate({ text: option })}
+                    >
+                      {option}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </ThreadItem>
           ))}
         </div>
       </div>

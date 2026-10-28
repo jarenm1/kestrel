@@ -87,7 +87,10 @@ interface Props {
   onSend: (body: SendMessageBody) => Promise<unknown>
   pending: boolean
   error: unknown
-  /** Stops the active turn; when set, the send button becomes a stop button. */
+  /**
+   * Stops the active turn. While set, an empty box shows a stop button; typing turns it back into send, and the
+   * message joins the running turn (the model/thinking picks apply from the next turn).
+   */
   onStop?: (() => void) | undefined
   stopping?: boolean
   placeholder?: string
@@ -104,10 +107,9 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const body = text.trim()
-    // Enter submits via requestSubmit, which ignores the disabled button, so guard here too; a turn that is
-    // still running must be stopped before the next message.
+    // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text stays so it can be resent.
-    if (body && !pending && !onStop) onSend({ text: body, model, effort }).then(() => setText(""), () => {})
+    if (body && !pending) onSend({ text: body, model, effort }).then(() => setText(""), () => {})
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -136,7 +138,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
         <div className="flex items-center gap-1">
           <PillPicker label="Model" value={model} options={MODEL_OPTIONS} onChange={setModel} />
           <PillPicker label="Thinking" value={effort} options={EFFORT_OPTIONS} onChange={setEffort} />
-          {onStop ? (
+          {onStop && text.trim() === "" ? (
             <Button
               type="button"
               size="icon"
