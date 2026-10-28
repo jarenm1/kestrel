@@ -1,7 +1,12 @@
 import { isInitSegment, parseFragment, parseInit, type Sample, type VideoInit } from "./fmp4"
 
-/** Deltas are dropped (until the next keyframe) once the decoder holds more than this many chunks. */
-const MAX_DECODE_QUEUE = 4
+/**
+ * Deltas are dropped (until the next keyframe) once the decoder holds more than this many chunks. A joining
+ * viewer receives the server's cached GOP (keyframe + up to 4 s of deltas) in one burst, which decodes in a
+ * fraction of a second; a low cap would throw that replay away and freeze on the keyframe until the next one.
+ * This only guards against a decoder that is falling behind for good.
+ */
+const MAX_DECODE_QUEUE = 300
 
 export interface RenderStats {
   /** Frames drawn to the canvas over the last second. */
