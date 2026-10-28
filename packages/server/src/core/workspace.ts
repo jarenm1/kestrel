@@ -3,7 +3,7 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
-import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, shell } from "../process"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 
 export class WorkspaceError extends Data.TaggedError("WorkspaceError")<{ readonly message: string }> {}
 
@@ -11,11 +11,6 @@ export interface ExecResult {
   readonly exitCode: number
   readonly stdout: string
   readonly stderr: string
-}
-
-export interface ExecOptions {
-  readonly env?: Readonly<Record<string, string>>
-  readonly timeoutMs?: number
 }
 
 export interface WorkspaceShape {
@@ -36,8 +31,6 @@ export interface WorkspaceShape {
     readonly worktreePath: string
     readonly baseBranch: string
   }) => Effect.Effect<string, WorkspaceError>
-  /** Runs `command` via `sh -c` in `cwd`. Fails on timeout; non-zero exit is a result. */
-  readonly exec: (cwd: string, command: string, opts?: ExecOptions) => Effect.Effect<ExecResult, WorkspaceError>
   /**
    * Pushes `refs/heads/<branch>` from a task worktree to `remoteUrl`. Never forced; hooks and
    * agent-writable config (credential helpers, ssh command, askpass) are not honoured.
@@ -277,9 +270,6 @@ const make: WorkspaceShape = {
       }
       return tracked + untracked
     }),
-
-  exec: (cwd, command, opts) =>
-    runProcess(shell(), ["-c", command], { cwd, env: opts?.env, timeoutMs: opts?.timeoutMs }, "command"),
 }
 
 export const WorkspaceLive = Layer.succeed(WorkspaceService, make)

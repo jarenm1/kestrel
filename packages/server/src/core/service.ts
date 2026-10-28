@@ -20,7 +20,7 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, parseGitHubRepo, type PullRequest, type PullRequestStatus } from "../github/api"
-import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind } from "../sandbox"
+import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -82,11 +82,7 @@ export interface CoreShape {
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command in the task worktree. */
-  readonly execInTask: (
-    taskId: string,
-    command: string,
-    timeoutMs: number,
-  ) => Effect.Effect<{ exitCode: number; stdout: string; stderr: string }, NotFound | InternalError>
+  readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<void, NotFound | InternalError>
   /** Used by the MCP handler: pushes the task branch to its GitHub remote (never forced). Returns the branch. */
