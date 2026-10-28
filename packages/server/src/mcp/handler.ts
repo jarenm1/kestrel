@@ -1,60 +1,32 @@
 import { randomUUID } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
-import type { DesktopInput, DesktopStatus, TaskStatus } from "@cloudagents/protocol"
+import type { Run } from "@cloudagents/protocol"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
-import { type CallToolResult, isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit } from "effect"
-import { z } from "zod"
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
+import { Effect } from "effect"
+import type { BrokerGrant } from "../broker"
+import { type RunContext, describeError } from "./tools/common"
+import { type DesktopToolDeps, registerDesktopTools } from "./tools/desktop"
+import { type TaskToolDeps, registerTaskTools } from "./tools/task"
+import { type WorkspaceToolDeps, registerWorkspaceTools } from "./tools/workspace"
 
-export interface McpDeps {
-  readonly desktop: {
-    readonly status: (taskId: string) => Effect.Effect<DesktopStatus, unknown>
-    readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, unknown> // PNG
-    readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, unknown>
-    readonly launch: (taskId: string, command: string) => Effect.Effect<void, unknown>
+export interface McpAuthDeps {
+  readonly auth: {
+    /** Grant for a live broker token; null when unknown or revoked. */
+    readonly grantFor: (token: string) => Effect.Effect<BrokerGrant | null>
+    /** The run with this id, if it exists. */
+    readonly runFor: (runId: string) => Effect.Effect<Run | null, unknown>
+    /** Calls the listener with the run id whenever that run's token is revoked. Returns the unsubscribe. */
+    readonly onRevoke: (listener: (runId: string) => void) => () => void
   }
-  readonly workspace: {
-    readonly exec: (
-      taskId: string,
-      command: string,
-      timeoutMs: number,
-    ) => Effect.Effect<{ exitCode: number; stdout: string; stderr: string }, unknown>
-  }
-  readonly report: (taskId: string, input: { status: TaskStatus; message: string }) => Effect.Effect<void, unknown>
 }
 
-const MAX_OUTPUT_CHARS = 20_000
+export type McpDeps = McpAuthDeps & DesktopToolDeps & WorkspaceToolDeps & TaskToolDeps
+
 const MCP_PATH = /^\/mcp\/([^/?#]+)/
 
-const BUTTONS = { left: 1, middle: 2, right: 3 } as const
-
-const describeError = (e: unknown): string => {
-  if (typeof e === "object" && e !== null && "message" in e && typeof e.message === "string") return e.message
-  if (e instanceof Error) return e.message
-  return String(e)
-}
-
-/** Runs an Effect, rejecting with the underlying error (not a FiberFailure wrapper). */
-const runTool = (effect: Effect.Effect<CallToolResult, unknown>): Promise<CallToolResult> =>
-  Effect.runPromiseExit(effect).then((exit) => {
-    if (Exit.isSuccess(exit)) return exit.value
-    throw Cause.squash(exit.cause)
-  })
-
-const text = (value: string): CallToolResult => ({ content: [{ type: "text", text: value }] })
-
-/** Any failure becomes an MCP tool error (isError), never a server crash. */
-const guard = (fn: () => Promise<CallToolResult>): Promise<CallToolResult> =>
-  fn().catch((e: unknown) => ({
-    content: [{ type: "text", text: describeError(e) }],
-    isError: true,
-  }))
-
-const truncate = (s: string): string =>
-  s.length <= MAX_OUTPUT_CHARS ? s : `${s.slice(0, MAX_OUTPUT_CHARS)}\n[truncated ${s.length - MAX_OUTPUT_CHARS} chars]`
-
-const buildServer = (taskId: string, deps: McpDeps): McpServer => {
+const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   const server = new McpServer(
     { name: "cloudagents", version: "0.1.0" },
     {
@@ -64,210 +36,9 @@ const buildServer = (taskId: string, deps: McpDeps): McpServer => {
         "desktop and its size. Use task_report to tell the user when you are done or need input.",
     },
   )
-
-  /** Converts pixel coordinates to the normalized [0,1) coordinates DesktopInput uses. */
-  const normalize = (x: number, y: number): Effect.Effect<{ nx: number; ny: number }, unknown> =>
-    Effect.gen(function* () {
-      const status = yield* deps.desktop.status(taskId)
-      if (status.width <= 0 || status.height <= 0) {
-        return yield* Effect.fail(new Error("the desktop has no size; it may not be running"))
-      }
-      if (x < 0 || y < 0 || x >= status.width || y >= status.height) {
-        return yield* Effect.fail(new Error(`(${x}, ${y}) is outside the ${status.width} x ${status.height} desktop`))
-      }
-      return { nx: x / status.width, ny: y / status.height }
-    })
-
-  const input = (event: DesktopInput): Effect.Effect<void, unknown> => deps.desktop.input(taskId, event)
-
-  server.registerTool(
-    "desktop_screenshot",
-    {
-      description:
-        "Take a screenshot of the task desktop. Returns a PNG image and the desktop size as 'width x height'. " +
-        "Coordinates for the other desktop_* tools are pixels within that size.",
-    },
-    () =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const status = yield* deps.desktop.status(taskId)
-            const png = yield* deps.desktop.screenshot(taskId)
-            const result: CallToolResult = {
-              content: [
-                { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
-                { type: "text", text: `${status.width} x ${status.height}` },
-              ],
-            }
-            return result
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "desktop_mouse_move",
-    {
-      description: "Move the mouse pointer on the task desktop to pixel (x, y), origin at top-left.",
-      inputSchema: {
-        x: z.number().describe("Pixel x coordinate, 0 to width-1"),
-        y: z.number().describe("Pixel y coordinate, 0 to height-1"),
-      },
-    },
-    ({ x, y }: { x: number; y: number }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const { nx, ny } = yield* normalize(x, y)
-            yield* input({ _tag: "mouse.move", x: nx, y: ny })
-            return text(`moved mouse to (${x}, ${y})`)
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "desktop_click",
-    {
-      description: "Click on the task desktop at pixel (x, y). Moves the pointer there first.",
-      inputSchema: {
-        x: z.number().describe("Pixel x coordinate, 0 to width-1"),
-        y: z.number().describe("Pixel y coordinate, 0 to height-1"),
-        button: z.enum(["left", "middle", "right"]).optional().describe("Mouse button, default left"),
-        double: z.boolean().optional().describe("Double-click when true, default false"),
-      },
-    },
-    ({ x, y, button, double }: { x: number; y: number; button?: "left" | "middle" | "right"; double?: boolean }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const buttonName = button ?? "left"
-            const buttonId = BUTTONS[buttonName]
-            const { nx, ny } = yield* normalize(x, y)
-            yield* input({ _tag: "mouse.move", x: nx, y: ny })
-            const clicks = double ? 2 : 1
-            for (let i = 0; i < clicks; i++) {
-              yield* input({ _tag: "mouse.button", x: nx, y: ny, button: buttonId, down: true })
-              yield* input({ _tag: "mouse.button", x: nx, y: ny, button: buttonId, down: false })
-            }
-            return text(`${double ? "double-clicked" : "clicked"} ${buttonName} button at (${x}, ${y})`)
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "desktop_type",
-    {
-      description: "Type text into whatever has keyboard focus on the task desktop.",
-      inputSchema: {
-        text: z.string().describe("Text to type"),
-      },
-    },
-    ({ text: value }: { text: string }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            yield* input({ _tag: "text", text: value })
-            return text(`typed ${value.length} characters`)
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "desktop_key",
-    {
-      description:
-        "Press and release a key or key combination on the task desktop. Uses xdotool keysym names, " +
-        "e.g. 'Return', 'Escape', 'Tab', 'a', 'ctrl+s', 'alt+F4'.",
-      inputSchema: {
-        key: z.string().describe("xdotool keysym or combination, e.g. 'Return' or 'ctrl+s'"),
-      },
-    },
-    ({ key }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            yield* input({ _tag: "key", key, down: true })
-            yield* input({ _tag: "key", key, down: false })
-            return text(`pressed ${key}`)
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "desktop_launch",
-    {
-      description:
-        "Launch a GUI or terminal command on the task desktop, detached, so it appears on the desktop " +
-        "(e.g. 'firefox', 'xterm'). Does not wait for it to exit.",
-      inputSchema: {
-        command: z.string().describe("Shell command to launch on the desktop"),
-      },
-    },
-    ({ command }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            yield* deps.desktop.launch(taskId, command)
-            return text(`launched: ${command}`)
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "workspace_exec",
-    {
-      description:
-        "Run a shell command in the task's git worktree (the agent's working directory). Returns the exit code, " +
-        "stdout and stderr (each truncated to 20000 characters). A non-zero exit code is reported in the output, " +
-        "not as a tool error.",
-      inputSchema: {
-        command: z.string().describe("Shell command, run with sh -c in the worktree"),
-        timeoutSec: z.number().positive().optional().describe("Timeout in seconds, default 120"),
-      },
-    },
-    ({ command, timeoutSec }: { command: string; timeoutSec?: number }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const timeoutMs = Math.round((timeoutSec ?? 120) * 1000)
-            const result = yield* deps.workspace.exec(taskId, command, timeoutMs)
-            return text(
-              `exit code: ${result.exitCode}\n--- stdout ---\n${truncate(result.stdout)}\n` +
-                `--- stderr ---\n${truncate(result.stderr)}`,
-            )
-          }),
-        ),
-      ),
-  )
-
-  server.registerTool(
-    "task_report",
-    {
-      description:
-        "Report the task's state to the user. Use 'working' while making progress, 'needs_input' when you need " +
-        "an answer from the user, 'done' when the work is complete, or 'failed' if you cannot complete it.",
-      inputSchema: {
-        status: z.enum(["working", "needs_input", "done", "failed"]).describe("Current task state"),
-        message: z.string().describe("Short message for the user"),
-      },
-    },
-    ({ status, message }: { status: "working" | "needs_input" | "done" | "failed"; message: string }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const mapped: TaskStatus = status === "working" ? "running" : status
-            yield* deps.report(taskId, { status: mapped, message })
-            return text(`reported ${mapped}`)
-          }),
-        ),
-      ),
-  )
-
+  registerDesktopTools(server, ctx, deps)
+  registerWorkspaceTools(server, ctx, deps)
+  registerTaskTools(server, ctx, deps)
   return server
 }
 
@@ -296,17 +67,47 @@ const readJsonBody = (req: IncomingMessage): Promise<ParsedBody> => {
   return promise
 }
 
+const bearerToken = (req: IncomingMessage): string | null => {
+  const match = /^Bearer (\S+)$/i.exec(req.headers.authorization ?? "")
+  return match?.[1] ?? null
+}
+
 interface Session {
-  readonly taskId: string
+  readonly runId: string
   readonly transport: StreamableHTTPServerTransport
 }
 
 /**
  * Returns a node http handler for every request whose URL starts with /mcp/<taskId>.
  * Stateful streamable HTTP: one McpServer + transport per session, keyed by Mcp-Session-Id.
+ * Every request must carry the bearer token of a live run of that task; a session belongs to the run that opened it
+ * and is closed when that run's token is revoked.
  */
 export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const sessions = new Map<string, Session>()
+
+  const closeSession = (id: string): void => {
+    const session = sessions.get(id)
+    if (session === undefined) return
+    sessions.delete(id)
+    void session.transport.close()
+  }
+
+  deps.auth.onRevoke((runId) => {
+    for (const [id, session] of sessions) {
+      if (session.runId === runId) closeSession(id)
+    }
+  })
+
+  /** The run a request speaks for: the token is live, the run belongs to `taskId`, and the run is still running. */
+  const authorize = async (token: string | null, taskId: string): Promise<string | null> => {
+    if (token === null) return null
+    const grant = await Effect.runPromise(deps.auth.grantFor(token))
+    if (grant === null) return null
+    const run = await Effect.runPromise(deps.auth.runFor(grant.runId))
+    if (run === null || run.taskId !== taskId || run.status !== "running") return null
+    return run.id
+  }
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const match = MCP_PATH.exec(req.url ?? "")
@@ -323,12 +124,20 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
       return
     }
 
+    const token = bearerToken(req)
+    const runId = await authorize(token, taskId)
+    if (runId === null) {
+      res.setHeader("www-authenticate", "Bearer")
+      sendJsonRpcError(res, 401, -32001, "Unauthorized")
+      return
+    }
+
     const header = req.headers["mcp-session-id"]
     const sessionId = Array.isArray(header) ? header[0] : header
 
     if (sessionId !== undefined) {
       const session = sessions.get(sessionId)
-      if (!session || session.taskId !== taskId) {
+      if (!session || session.runId !== runId) {
         sendJsonRpcError(res, 404, -32001, "Session not found")
         return
       }
@@ -362,14 +171,18 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { taskId, transport })
+        sessions.set(id, { runId, transport })
       },
     })
     transport.onclose = () => {
-      if (transport.sessionId !== undefined) sessions.delete(transport.sessionId)
+      const id = transport.sessionId
+      if (id !== undefined && sessions.get(id)?.transport === transport) sessions.delete(id)
     }
-    await buildServer(taskId, deps).connect(transport)
+    await buildServer({ taskId, runId }, deps).connect(transport)
     await transport.handleRequest(req, res, body.value)
+    // A revoke that landed while this session was being set up could not see it; close it now.
+    const id = transport.sessionId
+    if (id !== undefined && (await authorize(token, taskId)) !== runId) closeSession(id)
   }
 
   return async (req, res) => {

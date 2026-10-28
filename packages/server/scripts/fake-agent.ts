@@ -7,15 +7,18 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 const mcpUrl = process.env.CLOUDAGENTS_MCP_URL
+const mcpToken = process.env.CLOUDAGENTS_MCP_TOKEN
 const prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
 
-if (!mcpUrl) {
-  console.error("fake-agent: CLOUDAGENTS_MCP_URL is not set")
+if (!mcpUrl || !mcpToken) {
+  console.error("fake-agent: CLOUDAGENTS_MCP_URL or CLOUDAGENTS_MCP_TOKEN is not set")
   process.exit(1)
 }
 
 const client = new Client({ name: "cloudagents-fake-agent", version: "0.1.0" })
-const transport = new StreamableHTTPClientTransport(new URL(mcpUrl))
+const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
+  requestInit: { headers: { Authorization: `Bearer ${mcpToken}` } },
+})
 
 const call = async (name: string, args: Record<string, unknown>): Promise<{ failed: boolean; text: string }> => {
   console.log(`fake-agent: call ${name} ${JSON.stringify(args).slice(0, 200)}`)
