@@ -5,7 +5,7 @@ import { api } from "@/api/client"
 import { keys, upsert } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
-import { errorText, formatTime } from "@/util"
+import { errorText, formatClock } from "@/util"
 import { StatusIcon } from "./StatusIcon"
 
 interface Props {
@@ -60,7 +60,7 @@ export function RunPanel({ taskId, runs, output }: Props) {
             <span className="min-w-0 flex-1 truncate" title={run.prompt}>
               {run.prompt}
             </span>
-            <span className="text-muted-foreground">{formatTime(run.startedAt)}</span>
+            <span className="text-muted-foreground">{formatClock(run.startedAt)}</span>
             {run.exitCode !== null && (
               <span className="font-mono text-xs text-muted-foreground">exit {run.exitCode}</span>
             )}
