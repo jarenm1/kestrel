@@ -191,7 +191,20 @@ export const CreateTaskBody = Schema.Struct({
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
-export const SendMessageBody = Schema.Struct({ text: Schema.String })
+/** Model alias passed to the agent CLI (`--model`). */
+export const AgentModel = Schema.Literal("opus", "sonnet", "haiku")
+export type AgentModel = typeof AgentModel.Type
+
+/** Thinking level passed to the agent CLI (`--effort`). */
+export const AgentEffort = Schema.Literal("low", "medium", "high", "xhigh", "max")
+export type AgentEffort = typeof AgentEffort.Type
+
+export const SendMessageBody = Schema.Struct({
+  text: Schema.String,
+  /** Omitted = the harness default. */
+  model: Schema.optional(AgentModel),
+  effort: Schema.optional(AgentEffort),
+})
 export type SendMessageBody = typeof SendMessageBody.Type
 
 export const SendMessageResponse = Schema.Struct({ message: Message, run: Run })
