@@ -1,7 +1,7 @@
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
-import { InternalError, Message, Run, Task } from "@cloudagents/protocol"
+import { InternalError, Message, Run, Task, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
@@ -11,8 +11,13 @@ export const nowIso = (): string => new Date().toISOString()
 
 /** A `task_ask` question still waiting for the user. Kept across restarts; at most one per task. */
 const PendingAskRecord = Schema.Struct({ taskId: Schema.String, runId: Schema.String, messageId: Schema.String })
-/** The agent session a run started, so the task's next run can resume it. */
-const RunSessionRecord = Schema.Struct({ runId: Schema.String, sessionId: Schema.String })
+/** The agent session a run started, and its provider, so the task's next run can resume it. */
+const RunSessionRecord = Schema.Struct({
+  runId: Schema.String,
+  sessionId: Schema.String,
+  // State files written before model switching hold Claude Code sessions only.
+  provider: Schema.optionalWith(ModelProvider, { default: () => DEFAULT_MODEL_PROVIDER }),
+})
 /** A user upload waiting for a message to name it; its bytes sit under the attachments dir until then. */
 const PendingUploadRecord = Schema.Struct({
   id: Schema.String,
@@ -44,6 +49,7 @@ export interface PendingAsk {
 export interface RunSession {
   readonly runId: string
   readonly sessionId: string
+  readonly provider: ModelProvider
 }
 
 /** A user upload waiting to be sent with a message. */

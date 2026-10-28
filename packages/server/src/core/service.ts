@@ -4,6 +4,7 @@ import { dirname, join } from "node:path"
 import {
   BadRequest,
   Conflict,
+  DEFAULT_MODEL_PROVIDER,
   DesktopStatus,
   DiffResponse,
   InternalError,
@@ -20,6 +21,7 @@ import {
   type Checkout,
   type CheckoutRequest,
   type CreateTaskBody,
+  modelInfo,
 } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
@@ -28,6 +30,7 @@ import { GitHub, GitHubError, type NewReview, type PostedReview, type PullReques
 import { agentHome, desktopNamespace, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
+import { formatHandoff } from "./handoff"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
@@ -685,6 +688,7 @@ export const CoreLive = Layer.effect(
     const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
+        const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
         if (text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
@@ -763,10 +767,16 @@ export const CoreLive = Layer.effect(
             }
             // No run is going. The new run continues the agent session of the task's latest run, so the agent keeps the
             // thread's context. Only the latest run counts: a resume that failed before naming its session makes the next
-            // run start fresh instead of retrying the same broken session forever.
+            // run start fresh instead of retrying the same broken session forever. A session belongs to one provider's
+            // CLI, so when the latest run ran on the other provider this run starts fresh and carries the conversation.
             const question = ask ? (s.messages.find((m) => m.id === ask.messageId)?.text ?? "") : null
             const latest = s.runs.filter((r) => r.taskId === taskId).at(-1)
-            const resumeSession = latest ? (s.runSessions.find((x) => x.runId === latest.id)?.sessionId ?? null) : null
+            const latestSession = latest ? s.runSessions.find((x) => x.runId === latest.id) : undefined
+            const resumeSession = latestSession?.provider === provider ? latestSession.sessionId : null
+            const earlier =
+              latestSession !== undefined && latestSession.provider !== provider
+                ? s.messages.filter((m) => m.taskId === taskId)
+                : null
             const run: Run = {
               id: newId(),
               taskId,
@@ -783,10 +793,11 @@ export const CoreLive = Layer.effect(
             s.messages.push(message)
             // The prompt is what the run starts with, not mail for its inbox.
             seenFor(run.id).add(message.id)
-            const prompt =
+            const asked =
               question === null
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
+            const prompt = earlier === null ? asked : formatHandoff(earlier, asked)
             return Either.right({
               task: { ...task },
               message,

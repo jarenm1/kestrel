@@ -7,11 +7,14 @@ import { basename, join } from "node:path"
 import {
   InternalError,
   RunItems,
+  DEFAULT_MODEL_PROVIDER,
+  modelInfo,
   type AgentEffort,
   type AgentItem,
   type AgentModel,
   type CliProvider,
   type Message,
+  type ModelProvider,
   type Run,
   type ServerEvent,
   type Task,
@@ -89,7 +92,7 @@ const KILL_GRACE_MS = 3000
 /** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
 const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
   "claude-cli": { env: "CLAUDE_CONFIG_DIR", broker: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
-  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
+  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"] },
 }
 
 export const AgentHarnessLive = Layer.effect(
@@ -188,11 +191,11 @@ export const AgentHarnessLive = Layer.effect(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
 
-    /** Remembers the agent session a run runs under, so the task's next run can resume it. */
-    const recordSession = (runId: string, sessionId: string) =>
+    /** Remembers the agent session a run runs under and its provider, so the task's next run can resume it. */
+    const recordSession = (runId: string, sessionId: string, provider: ModelProvider) =>
       store
         .update((s) => {
-          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), { runId, sessionId }]
+          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), { runId, sessionId, provider }]
           return Either.right(null)
         })
         .pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: could not record its session: ${e.message}`)))
@@ -241,8 +244,8 @@ export const AgentHarnessLive = Layer.effect(
             entry.items.set(item.id, item)
             publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
           }
-          const sessionId = sessionIdOf(parsed)
-          if (sessionId !== null) runFork(recordSession(runId, sessionId))
+          const session = sessionOf(parsed)
+          if (session !== null) runFork(recordSession(runId, session.sessionId, session.provider))
           publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
           return
         } catch {
@@ -324,6 +327,7 @@ export const AgentHarnessLive = Layer.effect(
     const shape: AgentHarnessShape = {
       spawn: (task, run, prompt, display, user, resumeSession, choice) =>
         Effect.gen(function* () {
+          const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
           const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
@@ -383,7 +387,7 @@ export const AgentHarnessLive = Layer.effect(
                 ...keptBroker,
                 ...loginEnv,
               },
-              command: config.agentCommand,
+              command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
@@ -465,17 +469,17 @@ export const AgentHarnessLive = Layer.effect(
 )
 
 /**
- * The agent session a JSON output line names, or null. Claude Code's stream-json opens with
- * `{"type":"system","subtype":"init","session_id":…}`; `codex exec --json` opens with
+ * The agent session a JSON output line names, and the provider that minted it, or null. Claude Code's stream-json
+ * opens with `{"type":"system","subtype":"init","session_id":…}`; `codex exec --json` opens with
  * `{"type":"thread.started","thread_id":…}`.
  */
-const sessionIdOf = (event: unknown): string | null => {
+const sessionOf = (event: unknown): { readonly sessionId: string; readonly provider: ModelProvider } | null => {
   if (typeof event !== "object" || event === null || !("type" in event)) return null
   if (event.type === "system" && "subtype" in event && event.subtype === "init" && "session_id" in event) {
-    return typeof event.session_id === "string" ? event.session_id : null
+    return typeof event.session_id === "string" ? { sessionId: event.session_id, provider: "anthropic" } : null
   }
   if (event.type === "thread.started" && "thread_id" in event) {
-    return typeof event.thread_id === "string" ? event.thread_id : null
+    return typeof event.thread_id === "string" ? { sessionId: event.thread_id, provider: "openai" } : null
   }
   return null
 }

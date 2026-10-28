@@ -1,12 +1,21 @@
 import { Context, Layer } from "effect"
 import { join, resolve } from "node:path"
+import type { ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
 import type { SystemdSettings } from "./sandbox/systemd"
 
 export const VERSION: string = pkg.version
 
-const DEFAULT_AGENT_COMMAND =
+const DEFAULT_ANTHROPIC_COMMAND =
   'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
+
+/**
+ * Codex reads `openai_base_url` from config, not from `OPENAI_BASE_URL`, so the broker URL is passed through
+ * explicitly; its base includes `/v1` because codex appends `/responses`. Kestrel's bwrap sandbox replaces codex's
+ * own, and `tool_timeout_sec` is ~2^31 ms in seconds, so a `task_ask` waits as long as the user takes.
+ */
+const DEFAULT_OPENAI_COMMAND =
+  'codex exec ${CLOUDAGENTS_RESUME_SESSION:+resume "$CLOUDAGENTS_RESUME_SESSION"} --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} ${CLOUDAGENTS_MODEL:+-m "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+-c model_reasoning_effort="\\"$CLOUDAGENTS_EFFORT\\""} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647 -- "$CLOUDAGENTS_PROMPT"'
 
 export interface ServerConfig {
   readonly port: number
@@ -24,15 +33,16 @@ export interface ServerConfig {
   readonly attachmentsDir: string
   readonly stateFile: string
   /**
-   * Shell command run (via `sh -c`) for each agent run, cwd = task worktree
-   * (`CLOUDAGENTS_AGENT_COMMAND` overrides the default). It reads the prompt from
-   * `CLOUDAGENTS_PROMPT`, and `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose
-   * them; the default command turns the latter two into Claude Code's `--model` / `--effort`.
-   * Every run after a task's first gets `CLOUDAGENTS_RESUME_SESSION`, the session the task's previous
-   * run printed (Claude's stream-json `init` event, or codex's `thread.started`); the command must
-   * resume it (`claude --resume`, `codex exec resume`) for the agent to keep the thread's context.
+   * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
+   * cwd = task worktree (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
+   * They read the prompt from `CLOUDAGENTS_PROMPT`, and `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the
+   * message chose them; the defaults turn the latter two into Claude Code's `--model` / `--effort` or codex's
+   * `-m` / `model_reasoning_effort`. Every run after a task's first gets `CLOUDAGENTS_RESUME_SESSION`, the session
+   * the task's previous run printed (Claude's stream-json `init` event, or codex's `thread.started`); the command
+   * must resume it (`claude --resume`, `codex exec resume`) for the agent to keep the thread's context. An
+   * OpenAI run reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
    */
-  readonly agentCommand: string
+  readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
   /** Control plane relay (outbound box connection). Null when `CLOUDAGENTS_CONTROL_URL` is unset. */
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
@@ -66,9 +76,13 @@ export const loadConfig = (): ServerConfig => {
   const mcpHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host
   const dataDir = resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
-  const agentCommand = fakeAgent
-    ? `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
-    : (process.env.CLOUDAGENTS_AGENT_COMMAND ?? DEFAULT_AGENT_COMMAND)
+  const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
+  const agentCommands: Record<ModelProvider, string> = fakeAgent
+    ? { anthropic: fakeCommand, openai: fakeCommand }
+    : {
+        anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        openai: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
+      }
   const sandboxEnabled = process.env.CLOUDAGENTS_SANDBOX !== "0"
   if (!sandboxEnabled) console.warn("CLOUDAGENTS_SANDBOX=0: agent runs are NOT sandboxed")
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
@@ -99,7 +113,7 @@ export const loadConfig = (): ServerConfig => {
     runsDir: join(dataDir, "runs"),
     attachmentsDir: join(dataDir, "attachments"),
     stateFile: join(dataDir, "state.json"),
-    agentCommand,
+    agentCommands,
     fakeAgent,
     homesDir: join(dataDir, "homes"),
     sandboxEnabled,
