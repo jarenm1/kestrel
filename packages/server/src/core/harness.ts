@@ -161,7 +161,7 @@ export const AgentHarnessLive = Layer.effect(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
 
-    /** Remembers the agent session a run runs under, so a run that answers a question can resume it. */
+    /** Remembers the agent session a run runs under, so the task's next run can resume it. */
     const recordSession = (runId: string, sessionId: string) =>
       store
         .update((s) => {
@@ -219,18 +219,8 @@ export const AgentHarnessLive = Layer.effect(
           ) {
             entry.resultText = parsed.result
           }
-          if (
-            typeof parsed === "object" &&
-            parsed !== null &&
-            "type" in parsed &&
-            parsed.type === "system" &&
-            "subtype" in parsed &&
-            parsed.subtype === "init" &&
-            "session_id" in parsed &&
-            typeof parsed.session_id === "string"
-          ) {
-            runFork(recordSession(runId, parsed.session_id))
-          }
+          const sessionId = sessionIdOf(parsed)
+          if (sessionId !== null) runFork(recordSession(runId, sessionId))
           publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
           return
         } catch {
@@ -300,7 +290,7 @@ export const AgentHarnessLive = Layer.effect(
                 // Claude Code's MCP tool-call timeout (ms). task_ask has no timeout of its own: the largest timer
                 // delay lets a question wait as long as the user takes to answer.
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
-                // Continues the agent session of the run that asked, when this run answers its question.
+                // Continues the agent session of the task's previous run, so the agent keeps the thread's context.
                 ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
                 ...keptBroker,
                 ...loginEnv,
@@ -391,3 +381,19 @@ export const AgentHarnessLive = Layer.effect(
     return shape
   }),
 )
+
+/**
+ * The agent session a JSON output line names, or null. Claude Code's stream-json opens with
+ * `{"type":"system","subtype":"init","session_id":…}`; `codex exec --json` opens with
+ * `{"type":"thread.started","thread_id":…}`.
+ */
+const sessionIdOf = (event: unknown): string | null => {
+  if (typeof event !== "object" || event === null || !("type" in event)) return null
+  if (event.type === "system" && "subtype" in event && event.subtype === "init" && "session_id" in event) {
+    return typeof event.session_id === "string" ? event.session_id : null
+  }
+  if (event.type === "thread.started" && "thread_id" in event) {
+    return typeof event.thread_id === "string" ? event.thread_id : null
+  }
+  return null
+}

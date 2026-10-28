@@ -155,11 +155,9 @@ const askAndListen = async (): Promise<{ answer: string; inbox: string } | null>
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
-  if (resumeSession !== undefined) {
-    console.log(`fake-agent: resumed session ${resumeSession} with prompt: ${prompt}`)
-    await call("task_report", { status: "done", message: "Resumed after the user's answer." })
-    return 0
-  }
+  // A resumed run (every run after a task's first) behaves like a fresh one; its report names the session it continued.
+  if (resumeSession !== undefined) console.log(`fake-agent: resumed session ${resumeSession} with prompt: ${prompt}`)
+  const resumed = resumeSession === undefined ? "" : ` Resumed session ${resumeSession}.`
   if (prompt.trim() === "exec-probe") return runExecProbes()
   const [probe, foreignId] = prompt.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(foreignId)
@@ -193,7 +191,7 @@ const main = async (): Promise<number> => {
 
   await call("task_report", {
     status: "done",
-    message: `Wrote AGENT_NOTES.md from the prompt.${choice === "" ? "" : ` (${choice})`}`,
+    message: `Wrote AGENT_NOTES.md from the prompt.${choice === "" ? "" : ` (${choice})`}${resumed}`,
   })
   return 0
 }

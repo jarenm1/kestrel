@@ -498,9 +498,12 @@ export const CoreLive = Layer.effect(
               s.messages.push(message)
               return Either.right({ task: { ...task }, message, run: { ...running }, answer, start: null })
             }
-            // No run is going. An answer to a question starts a run that resumes the session of the run that asked.
+            // No run is going. The new run continues the agent session of the task's latest run, so the agent keeps the
+            // thread's context. Only the latest run counts: a resume that failed before naming its session makes the next
+            // run start fresh instead of retrying the same broken session forever.
             const question = ask ? (s.messages.find((m) => m.id === ask.messageId)?.text ?? "") : null
-            const resumeSession = ask ? (s.runSessions.find((x) => x.runId === ask.runId)?.sessionId ?? null) : null
+            const latest = s.runs.filter((r) => r.taskId === taskId).at(-1)
+            const resumeSession = latest ? (s.runSessions.find((x) => x.runId === latest.id)?.sessionId ?? null) : null
             const run: Run = {
               id: newId(),
               taskId,

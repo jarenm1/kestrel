@@ -13,7 +13,7 @@ const PersistedRepo = Schema.Struct({ ...Repo.fields, owner: Schema.optional(Sch
 
 /** A `task_ask` question still waiting for the user. Kept across restarts; at most one per task. */
 const PendingAskRecord = Schema.Struct({ taskId: Schema.String, runId: Schema.String, messageId: Schema.String })
-/** The agent session a run started, so a run that answers a question can resume it. */
+/** The agent session a run started, so the task's next run can resume it. */
 const RunSessionRecord = Schema.Struct({ runId: Schema.String, sessionId: Schema.String })
 
 const PersistedState = Schema.Struct({

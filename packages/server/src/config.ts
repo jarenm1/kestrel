@@ -24,6 +24,9 @@ export interface ServerConfig {
    * (`CLOUDAGENTS_AGENT_COMMAND` overrides the default). It reads the prompt from
    * `CLOUDAGENTS_PROMPT`, and `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose
    * them; the default command turns the latter two into Claude Code's `--model` / `--effort`.
+   * Every run after a task's first gets `CLOUDAGENTS_RESUME_SESSION`, the session the task's previous
+   * run printed (Claude's stream-json `init` event, or codex's `thread.started`); the command must
+   * resume it (`claude --resume`, `codex exec resume`) for the agent to keep the thread's context.
    */
   readonly agentCommand: string
   readonly fakeAgent: boolean
