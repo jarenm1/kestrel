@@ -9,6 +9,7 @@ import {
   InternalError,
   Message,
   NotFound,
+  PullRequestLink,
   Repo,
   Run,
   SendMessageResponse,
@@ -18,6 +19,7 @@ import {
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
+import { GitHub, GitHubError, parseGitHubRepo, type PullRequest, type PullRequestStatus } from "../github/api"
 import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
@@ -27,6 +29,18 @@ import { WorkspaceService } from "./workspace"
 export interface ReportInput {
   readonly status: TaskStatus
   readonly message: string
+}
+
+export interface OpenPullRequestInput {
+  readonly title: string
+  readonly body: string
+  readonly draft: boolean
+}
+
+export interface OpenedPullRequest {
+  readonly pullRequest: PullRequest
+  /** False when an open pull request for the branch already existed and was returned instead. */
+  readonly created: boolean
 }
 
 export interface CoreShape {
@@ -75,6 +89,15 @@ export interface CoreShape {
   ) => Effect.Effect<{ exitCode: number; stdout: string; stderr: string }, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<void, NotFound | InternalError>
+  /** Used by the MCP handler: pushes the task branch to its GitHub remote (never forced). Returns the branch. */
+  readonly gitPush: (taskId: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: pushes the task branch and opens its pull request, or returns the open one. */
+  readonly openPullRequest: (
+    taskId: string,
+    input: OpenPullRequestInput,
+  ) => Effect.Effect<OpenedPullRequest, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: live GitHub status of the task's pull request. */
+  readonly pullRequestStatus: (taskId: string) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
 
   /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
@@ -84,6 +107,8 @@ export class CoreService extends Context.Tag("cloudagents/CoreService")<CoreServ
 
 const toInternal = (what: string) => (e: { readonly message: string }) =>
   new InternalError({ message: `${what}: ${e.message}` })
+
+const fromGitHub = (e: GitHubError) => new InternalError({ message: e.message })
 
 const slugify = (title: string): string => {
   const slug = title
@@ -110,6 +135,7 @@ export const CoreLive = Layer.effect(
     const desktop = yield* DesktopManager
     const workspace = yield* WorkspaceService
     const credentials = yield* CredentialStore
+    const github = yield* GitHub
     const sandboxSettings = sandboxSettingsOf(config)
 
     // Desktop status changes are pushed to every task's event stream.
@@ -175,6 +201,81 @@ export const CoreLive = Layer.effect(
       })
 
     const publishMessage = (message: Message) => hub.publish({ _tag: "message.created", message })
+
+    const requireRepo = (repoId: string): Effect.Effect<Repo, NotFound> =>
+      Effect.flatMap(store.read, (state) => {
+        const repo = state.repos.find((r) => r.id === repoId)
+        return repo ? Effect.succeed({ ...repo }) : Effect.fail(new NotFound({ message: `repo ${repoId} not found` }))
+      })
+
+    /** GitHub token of the repo owner; the token stays host-side and never reaches a sandbox. */
+    const githubToken = (repo: Repo) =>
+      Effect.gen(function* () {
+        const token = (yield* credentials.get(repo.owner))?.github
+        if (token === undefined || token === "") {
+          return yield* Effect.fail(
+            new BadRequest({ message: "no GitHub connection for this account: connect GitHub under Connections, then retry" }),
+          )
+        }
+        return token
+      })
+
+    /** owner/name of a github.com repo plus its token; pull request tools need both. */
+    const githubAccess = (repo: Repo) =>
+      Effect.gen(function* () {
+        const slug = parseGitHubRepo(repo.url)
+        if (slug === null) {
+          return yield* Effect.fail(new BadRequest({ message: `${repo.name} is not a github.com repository; pull requests need one` }))
+        }
+        return { slug, token: yield* githubToken(repo) }
+      })
+
+    /** Pushes the task branch (never forced; base branches refused). `token` is set for github.com remotes. */
+    const pushTask = (repo: Repo, task: Task, token: string | undefined) =>
+      Effect.gen(function* () {
+        if (task.branch === task.baseBranch || task.branch === repo.defaultBranch) {
+          return yield* Effect.fail(new BadRequest({ message: `refusing to push ${task.branch}: it is a base branch, not this task's branch` }))
+        }
+        yield* workspace
+          .pushBranch({
+            repoPath: repo.localPath,
+            worktreePath: task.worktreePath,
+            remoteUrl: repo.url,
+            branch: task.branch,
+            githubToken: token,
+          })
+          .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+      })
+
+    /** Stores the pull request on the task; `announce` also posts a chat note (used when it was just opened). */
+    const recordPullRequest = (taskId: string, link: PullRequestLink, announce: boolean) =>
+      Effect.gen(function* () {
+        const updated = yield* store.update(
+          (s): Either.Either<{ task: Task; message: Message | null }, NotFound> => {
+            const found = findTask(s, taskId)
+            if (Either.isLeft(found)) return Either.left(found.left)
+            const task = found.right
+            const now = nowIso()
+            task.pullRequest = link
+            task.updatedAt = now
+            let message: Message | null = null
+            if (announce) {
+              message = {
+                id: newId(),
+                taskId,
+                role: "system",
+                text: `Opened pull request #${link.number}: ${link.url}`,
+                runId: null,
+                createdAt: now,
+              }
+              s.messages.push(message)
+            }
+            return Either.right({ task: { ...task }, message })
+          },
+        )
+        hub.publish({ _tag: "task.updated", task: updated.task })
+        if (updated.message) publishMessage(updated.message)
+      })
 
     const removeTaskState = (taskId: string) =>
       store.update((s): Either.Either<void, never> => {
@@ -487,6 +588,57 @@ export const CoreLive = Layer.effect(
             Effect.mapError(toInternal("desktop launch")),
           )
           yield* desktop.launch(taskId, launch).pipe(Effect.mapError(toInternal("desktop launch")))
+        }),
+      gitPush: (taskId) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const repo = yield* requireRepo(task.repoId)
+          const token = parseGitHubRepo(repo.url) === null ? undefined : yield* githubToken(repo)
+          yield* pushTask(repo, task, token)
+          return task.branch
+        }),
+
+      openPullRequest: (taskId, input) =>
+        Effect.gen(function* () {
+          const title = input.title.trim()
+          if (title === "") return yield* Effect.fail(new BadRequest({ message: "pull request title is required" }))
+          const task = yield* requireTask(taskId)
+          const repo = yield* requireRepo(task.repoId)
+          const { slug, token } = yield* githubAccess(repo)
+          yield* pushTask(repo, task, token)
+          const existing = yield* github.findOpenPullRequest(token, slug, task.branch).pipe(Effect.mapError(fromGitHub))
+          const pullRequest =
+            existing ??
+            (yield* github
+              .createPullRequest(token, slug, {
+                title,
+                body: input.body,
+                head: task.branch,
+                base: task.baseBranch,
+                draft: input.draft,
+              })
+              .pipe(Effect.mapError(fromGitHub)))
+          yield* recordPullRequest(taskId, { number: pullRequest.number, url: pullRequest.url }, existing === null)
+          return { pullRequest, created: existing === null }
+        }),
+
+      pullRequestStatus: (taskId) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const repo = yield* requireRepo(task.repoId)
+          const { slug, token } = yield* githubAccess(repo)
+          let number = task.pullRequest?.number
+          if (number === undefined) {
+            const found = yield* github.findOpenPullRequest(token, slug, task.branch).pipe(Effect.mapError(fromGitHub))
+            if (found === null) {
+              return yield* Effect.fail(
+                new NotFound({ message: `no open pull request for ${task.branch}; open one with github_pr_create` }),
+              )
+            }
+            yield* recordPullRequest(taskId, { number: found.number, url: found.url }, false)
+            number = found.number
+          }
+          return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
         }),
 
       shutdown: () =>

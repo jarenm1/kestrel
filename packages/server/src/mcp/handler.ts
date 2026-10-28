@@ -8,6 +8,7 @@ import { Effect } from "effect"
 import type { BrokerGrant } from "../broker"
 import { type RunContext, describeError } from "./tools/common"
 import { type DesktopToolDeps, registerDesktopTools } from "./tools/desktop"
+import { type GitHubToolDeps, registerGitHubTools } from "./tools/github"
 import { type TaskToolDeps, registerTaskTools } from "./tools/task"
 import { type WorkspaceToolDeps, registerWorkspaceTools } from "./tools/workspace"
 
@@ -22,7 +23,7 @@ export interface McpAuthDeps {
   }
 }
 
-export type McpDeps = McpAuthDeps & DesktopToolDeps & WorkspaceToolDeps & TaskToolDeps
+export type McpDeps = McpAuthDeps & DesktopToolDeps & WorkspaceToolDeps & TaskToolDeps & GitHubToolDeps
 
 const MCP_PATH = /^\/mcp\/([^/?#]+)/
 
@@ -39,6 +40,7 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   registerDesktopTools(server, ctx, deps)
   registerWorkspaceTools(server, ctx, deps)
   registerTaskTools(server, ctx, deps)
+  registerGitHubTools(server, ctx, deps)
   return server
 }
 

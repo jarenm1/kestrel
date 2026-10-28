@@ -11,6 +11,7 @@ import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
 import { CredentialStoreLive } from "./credentials"
+import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
@@ -18,7 +19,14 @@ import { BOX_USER_HEADER, runRelay } from "./relay/client"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
-  Layer.mergeAll(ConfigLive, WorkspaceLive, EventHubLive, DesktopManagerLive, CredentialStoreLive),
+  Layer.mergeAll(
+    ConfigLive,
+    WorkspaceLive,
+    EventHubLive,
+    DesktopManagerLive,
+    CredentialStoreLive,
+    Layer.provide(GitHubLive, ConfigLive),
+  ),
 )
 const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
 const StateWithBase = Layer.provideMerge(StateLive, CliAuthWithBase)
@@ -117,6 +125,7 @@ const program = Effect.gen(function* () {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
     report: core.report,
+    github: { push: core.gitPush, openPullRequest: core.openPullRequest, pullRequestStatus: core.pullRequestStatus },
   })
 
   const server = createServer((req, res) => {
