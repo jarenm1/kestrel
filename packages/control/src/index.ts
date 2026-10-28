@@ -1,8 +1,9 @@
-import { RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { ControlPaths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { errorResponse, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
+import { handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
 
@@ -21,6 +22,7 @@ export default {
     const url = new URL(request.url)
     try {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
+      if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
       if (url.pathname.startsWith("/api/")) return await handleApi(request, env, url)
       return env.ASSETS.fetch(request)

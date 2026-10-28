@@ -21,6 +21,7 @@ import {
 import { UpstreamError, errorResponse, json, maskKey } from "./http"
 import { hub, type Env } from "./env"
 import { sessionLogin } from "./auth"
+import { handleAutomations } from "./automations"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -163,6 +164,10 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.box && method === "GET") {
     const status: BoxStatus = await hub(env).boxStatus()
     return json(status)
+  }
+
+  if (path === ControlPaths.automations || path.startsWith(`${ControlPaths.automations}/`)) {
+    return handleAutomations(request, env, login, url)
   }
 
   return relayToBox(request, env, login, url)
