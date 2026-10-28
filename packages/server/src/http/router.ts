@@ -154,6 +154,16 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/diff",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.diff(user, id)))),
     ),
+    // Bytes of a file the agent attached to one of the owner's task messages; the MIME type is the content type.
+    HttpRouter.get(
+      "/api/tasks/:id/attachments/:attachmentId",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        signedIn((user) => core.attachment(user, p.id ?? "", p.attachmentId ?? "")).pipe(
+          Effect.map((a) => HttpServerResponse.uint8Array(a.bytes, { contentType: a.mimeType })),
+          Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
+        ),
+      ),
+    ),
 
     HttpRouter.get(
       "/api/tasks/:id/desktop",

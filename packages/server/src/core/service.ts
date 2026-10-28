@@ -1,5 +1,5 @@
-import { Context, Effect, Either, Layer } from "effect"
-import { rm } from "node:fs/promises"
+import { Context, Data, Deferred, Duration, Effect, Either, Layer } from "effect"
+import { readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
   BadRequest,
@@ -8,6 +8,7 @@ import {
   DiffResponse,
   InternalError,
   Message,
+  type Attachment,
   NotFound,
   PullRequestLink,
   Repo,
@@ -26,9 +27,16 @@ import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { WorkspaceService } from "./workspace"
 
+/** Bytes an agent attaches to a message (e.g. a desktop screenshot); core stores them and serves them over REST. */
+export interface AttachmentInput {
+  readonly mimeType: string
+  readonly bytes: Uint8Array
+}
+
 export interface ReportInput {
   readonly status: TaskStatus
   readonly message: string
+  readonly attachments?: ReadonlyArray<AttachmentInput>
 }
 
 export interface OpenPullRequestInput {
@@ -42,6 +50,20 @@ export interface OpenedPullRequest {
   /** False when an open pull request for the branch already existed and was returned instead. */
   readonly created: boolean
 }
+
+export interface AskInput {
+  readonly question: string
+  readonly options: ReadonlyArray<string>
+  readonly attachments?: ReadonlyArray<AttachmentInput>
+  /** How long to wait for the user's answer before the ask fails. */
+  readonly timeoutMs: number
+}
+
+/** The question's wait ended without an answer: the run ended first, or no reply came within the timeout. */
+export class AskError extends Data.TaggedError("AskError")<{ readonly message: string }> {}
+
+/** How a question's wait ended: the user's reply, or the run ended first. */
+type AskOutcome = { readonly _tag: "answered"; readonly text: string } | { readonly _tag: "ended" }
 
 export interface CoreShape {
   readonly health: () => Effect.Effect<void>
@@ -68,7 +90,7 @@ export interface CoreShape {
     user: string,
     taskId: string,
     text: string,
-  ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
+  ) => Effect.Effect<SendMessageResponse, NotFound | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
@@ -79,6 +101,20 @@ export interface CoreShape {
 
   /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
   readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  /** Used by the MCP handler: posts a question with options and waits for the user's answer. */
+  readonly ask: (
+    taskId: string,
+    runId: string,
+    input: AskInput,
+  ) => Effect.Effect<string, NotFound | Conflict | InternalError | AskError>
+  /** Used by the MCP handler: the run's user messages it has not seen yet; the returned messages are marked read. */
+  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<Message>>
+  /** Bytes of an attachment on one of the signed-in user's task messages. */
+  readonly attachment: (
+    user: string,
+    taskId: string,
+    attachmentId: string,
+  ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command in the task worktree. */
@@ -273,6 +309,42 @@ export const CoreLive = Layer.effect(
         if (updated.message) publishMessage(updated.message)
       })
 
+    /** Open `task_ask` calls by run: the next user message sent to that run answers its question. */
+    const pendingAsks = new Map<string, Deferred.Deferred<AskOutcome>>()
+    /** User messages each run has taken, from its inbox or as an answer. Forgotten once the run ends. */
+    const seenByRun = new Map<string, Set<string>>()
+    const seenFor = (runId: string): Set<string> => {
+      const seen = seenByRun.get(runId) ?? new Set<string>()
+      seenByRun.set(runId, seen)
+      return seen
+    }
+
+    /** Writes attachment bytes under the attachments dir; the message only carries their metadata. */
+    const storeAttachments = (
+      inputs: ReadonlyArray<AttachmentInput> | undefined,
+    ): Effect.Effect<Attachment[], InternalError> =>
+      Effect.forEach(inputs ?? [], (input) => {
+        const id = newId()
+        return Effect.tryPromise({
+          try: () => writeFile(join(config.attachmentsDir, id), input.bytes),
+          catch: (e) => new InternalError({ message: `store attachment: ${String(e)}` }),
+        }).pipe(Effect.as({ id, mimeType: input.mimeType }))
+      })
+
+    /** A task waiting on `task_ask` goes back to running once its run is still going. */
+    const resumeTask = (taskId: string, runId: string) =>
+      Effect.gen(function* () {
+        const resumed = yield* store.update((s): Either.Either<Task | null, never> => {
+          const task = s.tasks.find((t) => t.id === taskId)
+          const run = s.runs.find((r) => r.id === runId)
+          if (!task || task.status !== "needs_input" || !run || run.status !== "running") return Either.right(null)
+          task.status = "running"
+          task.updatedAt = nowIso()
+          return Either.right({ ...task })
+        })
+        if (resumed) hub.publish({ _tag: "task.updated", task: resumed })
+      })
+
     const removeTaskState = (taskId: string) =>
       store.update((s): Either.Either<void, never> => {
         s.tasks = s.tasks.filter((t) => t.id !== taskId)
@@ -347,16 +419,28 @@ export const CoreLive = Layer.effect(
           (
             s,
           ): Either.Either<
-            { task: Task; message: Message; run: Run },
-            NotFound | Conflict
+            { task: Task; message: Message; run: Run; answer: Deferred.Deferred<AskOutcome> | null; joined: boolean },
+            NotFound
           > => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
             const task = found.right
-            if (s.runs.some((r) => r.taskId === taskId && r.status === "running")) {
-              return Either.left(new Conflict({ message: "a run is already in progress for this task" }))
-            }
             const now = nowIso()
+            const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
+            if (running) {
+              // Mid-run: the text joins the running run. If the run is waiting in task_ask, it is the answer;
+              // otherwise it waits in the run's inbox for task_inbox.
+              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now }
+              const answer = pendingAsks.get(running.id) ?? null
+              if (answer) {
+                pendingAsks.delete(running.id)
+                seenFor(running.id).add(message.id)
+              }
+              if (task.status === "needs_input") task.status = "running"
+              task.updatedAt = now
+              s.messages.push(message)
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, joined: true })
+            }
             const run: Run = {
               id: newId(),
               taskId,
@@ -371,11 +455,15 @@ export const CoreLive = Layer.effect(
             task.updatedAt = now
             s.runs.push(run)
             s.messages.push(message)
-            return Either.right({ task: { ...task }, message, run: { ...run } })
+            // The prompt is what the run starts with, not mail for its inbox.
+            seenFor(run.id).add(message.id)
+            return Either.right({ task: { ...task }, message, run: { ...run }, answer: null, joined: false })
           },
         )
         hub.publish({ _tag: "task.updated", task: reserved.task })
         publishMessage(reserved.message)
+        if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text })
+        if (reserved.joined) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
@@ -409,7 +497,108 @@ export const CoreLive = Layer.effect(
         return { message: reserved.message, run: reserved.run }
       })
 
+    /** Posts a question for the running run and waits for the user's answer, or fails after `input.timeoutMs`. */
+    const ask: CoreShape["ask"] = (taskId, runId, input) =>
+      Effect.gen(function* () {
+        const answer = yield* Deferred.make<AskOutcome>()
+        // Subscribed before posting, so a run that ends in the meantime cannot be missed.
+        const unsubscribe = hub.subscribe(taskId, (event) => {
+          if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") {
+            Deferred.unsafeDone(answer, Effect.succeed<AskOutcome>({ _tag: "ended" }))
+          }
+        })
+        return yield* Effect.gen(function* () {
+          const attachments = yield* storeAttachments(input.attachments)
+          const posted = yield* store.update(
+            (s): Either.Either<{ task: Task; message: Message }, NotFound | Conflict> => {
+              const found = findTask(s, taskId)
+              if (Either.isLeft(found)) return Either.left(found.left)
+              const run = s.runs.find((r) => r.id === runId)
+              if (!run || run.taskId !== taskId || run.status !== "running") {
+                return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
+              }
+              if (pendingAsks.has(runId)) {
+                return Either.left(new Conflict({ message: "a question is already waiting for an answer" }))
+              }
+              const task = found.right
+              const now = nowIso()
+              task.status = "needs_input"
+              task.updatedAt = now
+              pendingAsks.set(runId, answer)
+              const message: Message = {
+                id: newId(),
+                taskId,
+                role: "agent",
+                text: input.question.trim(),
+                runId,
+                createdAt: now,
+                options: [...input.options],
+                attachments,
+              }
+              s.messages.push(message)
+              return Either.right({ task: { ...task }, message })
+            },
+          )
+          hub.publish({ _tag: "task.updated", task: posted.task })
+          publishMessage(posted.message)
+          const outcome = yield* Deferred.await(answer).pipe(
+            Effect.timeoutTo({
+              duration: Duration.millis(input.timeoutMs),
+              onSuccess: (found) => found,
+              onTimeout: () => ({ _tag: "timeout" }) as const,
+            }),
+          )
+          if (outcome._tag === "answered") return outcome.text
+          if (outcome._tag === "ended") {
+            return yield* Effect.fail(new AskError({ message: "the run ended before the user answered" }))
+          }
+          return yield* Effect.fail(
+            new AskError({ message: `the user did not answer within ${Math.round(input.timeoutMs / 1000)} seconds` }),
+          )
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              unsubscribe()
+              if (pendingAsks.get(runId) === answer) pendingAsks.delete(runId)
+            }).pipe(Effect.zipRight(resumeTask(taskId, runId))),
+          ),
+        )
+      })
+
+    const inbox: CoreShape["inbox"] = (taskId, runId) =>
+      Effect.map(store.read, (state) => {
+        // Read state of runs that have ended is no longer needed.
+        for (const id of seenByRun.keys()) {
+          if (state.runs.find((r) => r.id === id)?.status !== "running") seenByRun.delete(id)
+        }
+        const seen = seenFor(runId)
+        const unread = state.messages.filter(
+          (m) => m.taskId === taskId && m.role === "user" && m.runId === runId && !seen.has(m.id),
+        )
+        for (const m of unread) seen.add(m.id)
+        return unread.map((m) => ({ ...m }))
+      })
+
+    const attachment: CoreShape["attachment"] = (user, taskId, attachmentId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        const state = yield* store.read
+        const stored = state.messages
+          .filter((m) => m.taskId === taskId)
+          .flatMap((m) => m.attachments ?? [])
+          .find((a) => a.id === attachmentId)
+        if (!stored) return yield* Effect.fail(new NotFound({ message: `attachment ${attachmentId} not found` }))
+        const bytes = yield* Effect.tryPromise({
+          try: () => readFile(join(config.attachmentsDir, stored.id)),
+          catch: (e) => new InternalError({ message: `read attachment: ${String(e)}` }),
+        })
+        return { mimeType: stored.mimeType, bytes }
+      })
+
     const shape: CoreShape = {
+      ask,
+      inbox,
+      attachment,
       health: () => Effect.void,
 
       listRepos: (user) => Effect.map(store.read, (s) => s.repos.filter((r) => r.owner === user).map((r) => ({ ...r }))),
@@ -528,6 +717,7 @@ export const CoreLive = Layer.effect(
 
       report: (taskId, runId, input) =>
         Effect.gen(function* () {
+          const attachments = yield* storeAttachments(input.attachments)
           const updated = yield* store.update(
             (s): Either.Either<{ task: Task; message: Message | null }, NotFound | Conflict> => {
               const found = findTask(s, taskId)
@@ -543,8 +733,8 @@ export const CoreLive = Layer.effect(
               task.updatedAt = now
               const trimmed = input.message.trim()
               let message: Message | null = null
-              if (trimmed !== "") {
-                message = { id: newId(), taskId, role: "agent", text: trimmed, runId, createdAt: now }
+              if (trimmed !== "" || attachments.length > 0) {
+                message = { id: newId(), taskId, role: "agent", text: trimmed, runId, createdAt: now, attachments }
                 s.messages.push(message)
               }
               return Either.right({ task: { ...task }, message })

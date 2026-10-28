@@ -100,6 +100,7 @@ export const StateLive = Layer.effect(
         await mkdir(config.reposDir, { recursive: true })
         await mkdir(config.worktreesDir, { recursive: true })
         await mkdir(config.runsDir, { recursive: true })
+        await mkdir(config.attachmentsDir, { recursive: true })
       },
       catch: (e) => new InternalError({ message: `cannot create data dirs: ${String(e)}` }),
     })

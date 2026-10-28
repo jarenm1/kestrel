@@ -17,6 +17,7 @@ export interface ServerConfig {
   readonly reposDir: string
   readonly worktreesDir: string
   readonly runsDir: string
+  readonly attachmentsDir: string
   readonly stateFile: string
   /** Shell command run (via `sh -c`) for each agent run, cwd = task worktree. */
   readonly agentCommand: string
@@ -83,6 +84,7 @@ export const loadConfig = (): ServerConfig => {
     reposDir: join(dataDir, "repos"),
     worktreesDir: join(dataDir, "worktrees"),
     runsDir: join(dataDir, "runs"),
+    attachmentsDir: join(dataDir, "attachments"),
     stateFile: join(dataDir, "state.json"),
     agentCommand,
     fakeAgent,
