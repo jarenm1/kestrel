@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
-import { keys, queries, upsert } from "@/api/queries"
+import { keys, queries, storeTask, upsert } from "@/api/queries"
 import { errorText } from "@/util"
 
 const MAX_LOG_LINES = 2000
@@ -36,7 +36,7 @@ export function useTaskState(taskId: string) {
       onEvent: (event) => {
         switch (event._tag) {
           case "task.updated":
-            queryClient.setQueryData(keys.task(taskId), event.task)
+            storeTask(queryClient, event.task)
             break
           case "message.created":
             queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>

@@ -8,16 +8,13 @@ import {
   CliProvider,
   Connection,
   ControlPaths,
-  CreateRepoBody,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
-  GithubRepo,
   Me,
   Message,
   Paths,
   PutApiKeyBody,
-  Repo,
   Run,
   SendMessageBody,
   SendMessageResponse,
@@ -112,7 +109,6 @@ export const api = {
     run(request(Connection, "PUT", ControlPaths.connection(provider), body)),
   deleteConnection: (provider: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
-  githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
   box: () => run(request(BoxStatus, "GET", ControlPaths.box)),
   cliLoginStart: (provider: CliProvider) => run(request(CliLoginStart, "POST", ControlPaths.cliLogin(provider))),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
@@ -126,11 +122,8 @@ export const api = {
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.automation(id)))),
 
   // Agent box (relayed by the Worker).
-  listRepos: () => run(request(Schema.Array(Repo), "GET", Paths.repos)),
-  addRepo: (body: CreateRepoBody) => run(request(Repo, "POST", Paths.repos, body)),
-  getRepo: (repoId: string) => run(request(Repo, "GET", Paths.repo(repoId))),
-  listRepoTasks: (repoId: string) => run(request(Schema.Array(Task), "GET", Paths.repoTasks(repoId))),
-  createTask: (repoId: string, body: CreateTaskBody) => run(request(Task, "POST", Paths.repoTasks(repoId), body)),
+  listTasks: () => run(request(Schema.Array(Task), "GET", Paths.tasks)),
+  createTask: (body: CreateTaskBody) => run(request(Task, "POST", Paths.tasks, body)),
   getTask: (taskId: string) => run(request(Task, "GET", Paths.task(taskId))),
   archiveTask: (taskId: string) => run(request(Task, "POST", Paths.taskArchive(taskId))),
   unarchiveTask: (taskId: string) => run(request(Task, "DELETE", Paths.taskArchive(taskId))),

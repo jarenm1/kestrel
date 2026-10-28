@@ -1,10 +1,10 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
-import type { Message, Run } from "@cloudagents/protocol"
+import type { Message, Run, Task } from "@cloudagents/protocol"
 import { api } from "./client"
 
 /** Agent box status poll; it feeds the top bar pill and the offline banner. */
 const BOX_POLL_MS = 10_000
-/** Task statuses change from agent runs with no repo-level event stream, so the list is polled. */
+/** Task statuses change from agent runs with no list-level event stream, so the thread list is polled. */
 const TASK_POLL_MS = 2000
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000
@@ -21,11 +21,9 @@ export const keys = {
   me: ["me"] as const,
   box: ["box"] as const,
   connections: ["connections"] as const,
-  githubRepos: ["github", "repos"] as const,
-  repos: ["repos"] as const,
   automations: ["automations"] as const,
-  repo: (repoId: string) => ["repos", repoId] as const,
-  repoTasks: (repoId: string) => ["repos", repoId, "tasks"] as const,
+  /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
+  tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
@@ -52,20 +50,21 @@ function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonl
   return [...byId.values()]
 }
 
+/**
+ * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
+ * stays unloaded; its query fetches it, so no partial list is ever cached.
+ */
+export function storeTask(client: QueryClient, task: Task): void {
+  client.setQueryData(keys.task(task.id), task)
+  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task))
+}
+
 export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.box, refetchInterval: BOX_POLL_MS }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
-  githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
-  repos: () => queryOptions({ queryKey: keys.repos, queryFn: api.listRepos }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
-  repo: (repoId: string) => queryOptions({ queryKey: keys.repo(repoId), queryFn: () => api.getRepo(repoId) }),
-  repoTasks: (repoId: string) =>
-    queryOptions({
-      queryKey: keys.repoTasks(repoId),
-      queryFn: () => api.listRepoTasks(repoId),
-      refetchInterval: TASK_POLL_MS,
-    }),
+  tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks, refetchInterval: TASK_POLL_MS }),
   task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
   messages: (taskId: string) =>
     queryOptions({
