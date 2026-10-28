@@ -1,4 +1,4 @@
-import type { Message, TaskStatus } from "@cloudagents/protocol"
+import type { TaskStatus } from "@cloudagents/protocol"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js"
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js"
@@ -28,7 +28,7 @@ export interface TaskToolDeps {
     input: { status: TaskStatus; message: string; attachments: ReadonlyArray<TaskAttachmentInput> },
   ) => Effect.Effect<void, unknown>
   readonly ask: (taskId: string, runId: string, input: AskToolInput) => Effect.Effect<string, unknown>
-  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<Message>, unknown>
+  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>, unknown>
   readonly desktop: { readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, unknown> }
 }
 
@@ -167,7 +167,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
           Effect.gen(function* () {
             const messages = yield* deps.inbox(ctx.taskId, ctx.runId)
             if (messages.length === 0) return text("No new messages from the user.")
-            return text(messages.map((m) => m.text).join("\n\n"))
+            return text(messages.join("\n\n"))
           }),
         ),
       ),

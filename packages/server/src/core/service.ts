@@ -1,12 +1,13 @@
 import { Context, Data, Deferred, Effect, Either, Layer } from "effect"
-import { readFile, rm, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import {
   BadRequest,
   Conflict,
   DesktopStatus,
   DiffResponse,
   InternalError,
+  MAX_ATTACHMENT_BYTES,
   Message,
   type Attachment,
   NotFound,
@@ -21,10 +22,11 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, parseGitHubRepo, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus } from "../github/api"
-import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
+import { agentHome, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
+import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { WorkspaceService, taskBaseRef } from "./workspace"
 
 /** Bytes an agent attaches to a message (e.g. a desktop screenshot); core stores them and serves them over REST. */
@@ -33,8 +35,12 @@ export interface AttachmentInput {
   readonly bytes: Uint8Array
 }
 
-/** Larger attachments are refused: they are kept on the box disk and served from it. */
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+/** A file the user uploads for a task's next message. */
+export interface UploadInput {
+  readonly mimeType: string
+  readonly name?: string | undefined
+  readonly bytes: Uint8Array
+}
 
 export interface ReportInput {
   readonly status: TaskStatus
@@ -101,6 +107,7 @@ export interface CoreShape {
     taskId: string,
     text: string,
     choice: AgentChoice,
+    attachmentIds: ReadonlyArray<string>,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
@@ -120,14 +127,16 @@ export interface CoreShape {
     runId: string,
     input: AskInput,
   ) => Effect.Effect<string, NotFound | Conflict | BadRequest | InternalError | AskError>
-  /** Used by the MCP handler: the run's user messages it has not seen yet; the returned messages are marked read. */
-  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<Message>>
+  /** Used by the MCP handler: the agent-facing text of the run's user messages it has not seen yet; those messages are marked read. */
+  readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>>
   /** Bytes of an attachment on one of the signed-in user's task messages. */
   readonly attachment: (
     user: string,
     taskId: string,
     attachmentId: string,
   ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
+  /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
+  readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command in the task worktree. */
@@ -367,15 +376,35 @@ export const CoreLive = Layer.effect(
       })
     }
 
+    /** Checks that each id is a pending upload of `taskId`, named once. Returns the attachments in the order named. */
+    const pendingUploads = (
+      s: Readonly<StoreState>,
+      taskId: string,
+      ids: ReadonlyArray<string>,
+    ): Either.Either<Attachment[], BadRequest> => {
+      const picked: Attachment[] = []
+      for (const id of ids) {
+        if (picked.some((a) => a.id === id)) return Either.left(new BadRequest({ message: `attachment ${id} is named twice` }))
+        const upload = s.uploads.find((u) => u.id === id && u.taskId === taskId)
+        if (!upload) return Either.left(new BadRequest({ message: `attachment ${id} is not a pending upload of this task` }))
+        picked.push({ id: upload.id, mimeType: upload.mimeType, name: upload.name })
+      }
+      return Either.right(picked)
+    }
+
     const removeTaskState = (taskId: string) =>
       Effect.gen(function* () {
         const attachmentIds = yield* store.update((s): Either.Either<string[], never> => {
-          const ids = s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id))
+          const ids = [
+            ...s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id)),
+            ...s.uploads.filter((u) => u.taskId === taskId).map((u) => u.id),
+          ]
           const runIds = new Set(s.runs.filter((r) => r.taskId === taskId).map((r) => r.id))
           s.tasks = s.tasks.filter((t) => t.id !== taskId)
           s.messages = s.messages.filter((m) => m.taskId !== taskId)
           s.runs = s.runs.filter((r) => r.taskId !== taskId)
           s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+          s.uploads = s.uploads.filter((u) => u.taskId !== taskId)
           s.runSessions = s.runSessions.filter((x) => !runIds.has(x.runId))
           return Either.right(ids)
         })
@@ -509,12 +538,30 @@ export const CoreLive = Layer.effect(
         return { ...task }
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice) =>
+    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds) =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
-        if (text.trim() === "") {
-          return yield* Effect.fail(new BadRequest({ message: "message text is required" }))
+        if (text.trim() === "" && attachmentIds.length === 0) {
+          return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
+        // The files reach the task home before the message can, so the agent finds them when it reads the message.
+        const uploads = yield* Effect.flatMap(store.read, (state) => {
+          const picked = pendingUploads(state, taskId, attachmentIds)
+          return Either.isLeft(picked) ? Effect.fail(picked.left) : Effect.succeed(picked.right)
+        })
+        yield* Effect.forEach(
+          uploads,
+          (a) =>
+            Effect.tryPromise({
+              try: async () => {
+                const dest = attachmentPath(join(config.homesDir, taskId), a)
+                await mkdir(dirname(dest), { recursive: true })
+                await copyFile(join(config.attachmentsDir, a.id), dest)
+              },
+              catch: (e) => new InternalError({ message: `place upload ${a.id}: ${String(e)}` }),
+            }),
+          { discard: true },
+        )
         const reserved = yield* store.update(
           (
             s,
@@ -525,8 +572,9 @@ export const CoreLive = Layer.effect(
               run: Run
               answer: Deferred.Deferred<AskOutcome> | null
               start: { readonly prompt: string; readonly resumeSession: string | null } | null
+              delivered: string
             },
-            NotFound | Conflict
+            NotFound | Conflict | BadRequest
           > => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
@@ -534,6 +582,12 @@ export const CoreLive = Layer.effect(
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
             }
+            const picked = pendingUploads(s, taskId, attachmentIds)
+            if (Either.isLeft(picked)) return Either.left(picked.left)
+            const attachments = picked.right
+            s.uploads = s.uploads.filter((u) => !attachmentIds.includes(u.id))
+            const delivered = agentText(text, attachments, agentHome(sandboxSettings, join(config.homesDir, taskId)))
+            const attached = attachments.length === 0 ? {} : { attachments }
             const now = nowIso()
             // Any message settles the task's question: it is the answer, or it is ignored once the question's run is gone.
             const ask = s.pendingAsks.find((a) => a.taskId === taskId) ?? null
@@ -542,7 +596,7 @@ export const CoreLive = Layer.effect(
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
               // the answer; otherwise it waits in the run's inbox for task_inbox.
-              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now }
+              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
                 liveAsks.delete(running.id)
@@ -551,7 +605,7 @@ export const CoreLive = Layer.effect(
               if (task.status === "needs_input") task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
-              return Either.right({ task: { ...task }, message, run: { ...running }, answer, start: null })
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null })
             }
             // No run is going. The new run continues the agent session of the task's latest run, so the agent keeps the
             // thread's context. Only the latest run counts: a resume that failed before naming its session makes the next
@@ -568,7 +622,7 @@ export const CoreLive = Layer.effect(
               endedAt: null,
               exitCode: null,
             }
-            const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now }
+            const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached }
             task.status = "running"
             task.updatedAt = now
             s.runs.push(run)
@@ -577,20 +631,21 @@ export const CoreLive = Layer.effect(
             seenFor(run.id).add(message.id)
             const prompt =
               question === null
-                ? text
-                : `You asked the user: ${question}\nThe user answered: ${text}\nContinue the task from there.`
+                ? delivered
+                : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
             return Either.right({
               task: { ...task },
               message,
               run: { ...run },
               answer: null,
+              delivered,
               start: { prompt, resumeSession },
             })
           },
         )
         hub.publish({ _tag: "task.updated", task: reserved.task })
         publishMessage(reserved.message)
-        if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text })
+        if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
         if (reserved.start === null) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
@@ -687,7 +742,8 @@ export const CoreLive = Layer.effect(
           (m) => m.taskId === taskId && m.role === "user" && m.runId === runId && !seen.has(m.id),
         )
         for (const m of unread) seen.add(m.id)
-        return unread.map((m) => ({ ...m }))
+        const home = agentHome(sandboxSettings, join(config.homesDir, taskId))
+        return unread.map((m) => agentText(m.text, m.attachments ?? [], home))
       })
 
     const attachment: CoreShape["attachment"] = (user, taskId, attachmentId) =>
@@ -706,10 +762,45 @@ export const CoreLive = Layer.effect(
         return { mimeType: stored.mimeType, bytes }
       })
 
+    /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
+    const upload: CoreShape["upload"] = (user, taskId, input) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        if (input.bytes.byteLength === 0) return yield* Effect.fail(new BadRequest({ message: "upload is empty" }))
+        if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
+          return yield* Effect.fail(
+            new BadRequest({ message: `upload is ${input.bytes.byteLength} bytes; the limit is ${MAX_ATTACHMENT_BYTES}` }),
+          )
+        }
+        const id = newId()
+        const name = sanitizeUploadName(input.name)
+        yield* Effect.tryPromise({
+          try: () => writeFile(join(config.attachmentsDir, id), input.bytes),
+          catch: (e) => new InternalError({ message: `store upload: ${String(e)}` }),
+        })
+        yield* store
+          .update((s): Either.Either<void, NotFound | Conflict> => {
+            const found = findTask(s, taskId)
+            if (Either.isLeft(found)) return Either.left(found.left)
+            if (found.right.archivedAt !== undefined) {
+              return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
+            }
+            s.uploads.push({ id, taskId, mimeType: input.mimeType, name, createdAt: nowIso() })
+            return Either.right(undefined)
+          })
+          .pipe(
+            Effect.tapError(() =>
+              Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(Effect.ignore),
+            ),
+          )
+        return { id, mimeType: input.mimeType, name }
+      })
+
     const shape: CoreShape = {
       ask,
       inbox,
       attachment,
+      upload,
       health: () => Effect.void,
 
       listRepos: (user) => Effect.map(store.read, (s) => s.repos.filter((r) => r.owner === user).map((r) => ({ ...r }))),

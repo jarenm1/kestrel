@@ -64,12 +64,20 @@ export const Task = Schema.Struct({
 })
 export type Task = typeof Task.Type
 
-/** A file the agent attached to a message; bytes are served by `Paths.taskAttachment`. */
+/**
+ * A file on a message: one the agent attached (e.g. a desktop screenshot) or one the user uploaded with
+ * `Paths.taskUploads` and sent with `SendMessageBody.attachments`. Bytes are served by `Paths.taskAttachment`.
+ */
 export const Attachment = Schema.Struct({
   id: Schema.String,
   mimeType: Schema.String,
+  /** File name the user uploaded it under; absent for agent attachments. */
+  name: Schema.optional(Schema.String),
 })
 export type Attachment = typeof Attachment.Type
+
+/** Largest attachment the box stores, agent or user; a larger upload is refused with 400. */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 export const Message = Schema.Struct({
   id: Schema.String,
@@ -211,10 +219,16 @@ export const AgentEffort = Schema.Literal("low", "medium", "high", "xhigh", "max
 export type AgentEffort = typeof AgentEffort.Type
 
 export const SendMessageBody = Schema.Struct({
+  /** May be empty when `attachments` is not. */
   text: Schema.String,
   /** Omitted = the harness default. */
   model: Schema.optional(AgentModel),
   effort: Schema.optional(AgentEffort),
+  /**
+   * Ids of attachments uploaded to this task with `Paths.taskUploads` and not yet sent. They move onto the new
+   * message in this order; the agent gets each as a file in its sandbox, named in its prompt or `task_inbox`.
+   */
+  attachments: Schema.optional(Schema.Array(Schema.String)),
 })
 export type SendMessageBody = typeof SendMessageBody.Type
 
@@ -264,6 +278,12 @@ export const Paths = {
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
   taskAttachment: (taskId: string, attachmentId: string) => `/api/tasks/${taskId}/attachments/${attachmentId}`,
+  /**
+   * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the
+   * optional `name` query parameter -> `Attachment`. The upload waits, unsent, until a `SendMessageBody.attachments`
+   * names it; it is deleted with its task. At most `MAX_ATTACHMENT_BYTES`.
+   */
+  taskUploads: (id: string) => `/api/tasks/${id}/uploads`,
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
   /** WebSocket: JSON `ServerEvent` text frames. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,

@@ -16,6 +16,15 @@ const PendingAskRecord = Schema.Struct({ taskId: Schema.String, runId: Schema.St
 /** The agent session a run started, so the task's next run can resume it. */
 const RunSessionRecord = Schema.Struct({ runId: Schema.String, sessionId: Schema.String })
 
+/** A user upload waiting for a message to name it; its bytes sit under the attachments dir until then. */
+const PendingUploadRecord = Schema.Struct({
+  id: Schema.String,
+  mimeType: Schema.String,
+  name: Schema.optional(Schema.String),
+  taskId: Schema.String,
+  createdAt: Schema.String,
+})
+
 const PersistedState = Schema.Struct({
   repos: Schema.Array(PersistedRepo),
   tasks: Schema.Array(Task),
@@ -24,6 +33,7 @@ const PersistedState = Schema.Struct({
   // Absent in state files written before these existed; `loadFile` reads them as empty.
   pendingAsks: Schema.optional(Schema.Array(PendingAskRecord)),
   runSessions: Schema.optional(Schema.Array(RunSessionRecord)),
+  uploads: Schema.optional(Schema.Array(PendingUploadRecord)),
 })
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -40,6 +50,15 @@ export interface RunSession {
   readonly sessionId: string
 }
 
+/** A user upload waiting to be sent with a message. */
+export interface PendingUpload {
+  readonly id: string
+  readonly mimeType: string
+  readonly name?: string | undefined
+  readonly taskId: string
+  readonly createdAt: string
+}
+
 export interface StoreState {
   repos: Mutable<Repo>[]
   tasks: Mutable<Task>[]
@@ -47,6 +66,7 @@ export interface StoreState {
   runs: Mutable<Run>[]
   pendingAsks: PendingAsk[]
   runSessions: RunSession[]
+  uploads: PendingUpload[]
 }
 
 export interface StoreShape {
@@ -93,7 +113,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
           : Effect.fail(new InternalError({ message: `cannot read ${file}: ${String(e)}` })),
       ),
     )
-    if (raw === null) return { repos: [], tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [] }
+    if (raw === null) return { repos: [], tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [] }
     const decoded = yield* Schema.decodeUnknown(Schema.parseJson(PersistedState))(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
@@ -112,6 +132,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
       runs,
       pendingAsks: (decoded.pendingAsks ?? []).filter((a) => taskIds.has(a.taskId)),
       runSessions: (decoded.runSessions ?? []).filter((s) => runIds.has(s.runId)),
+      uploads: (decoded.uploads ?? []).filter((u) => taskIds.has(u.taskId)),
     }
   })
 

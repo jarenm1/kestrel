@@ -52,6 +52,21 @@ const jsonBody = <A, I>(schema: Schema.Schema<A, I, never>): Effect.Effect<A, Ba
     )
   })
 
+/**
+ * The raw bytes of an uploaded file: the body, its `Content-Type` (required; parameters such as `charset` are
+ * dropped), and the optional `name` query parameter. Read whole; the core refuses anything over `MAX_ATTACHMENT_BYTES`.
+ */
+const uploadInput = Effect.gen(function* () {
+  const req = yield* HttpServerRequest.HttpServerRequest
+  const mimeType = (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase()
+  if (mimeType === "") {
+    return yield* Effect.fail(new BadRequest({ message: "content-type is required" }))
+  }
+  const bytes = yield* req.arrayBuffer.pipe(Effect.mapError(() => new BadRequest({ message: "cannot read request body" })))
+  const name = new URL(req.url, "http://localhost").searchParams.get("name") ?? undefined
+  return { mimeType, name, bytes: new Uint8Array(bytes) }
+})
+
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
 
 /** The user the relay signed in for this request (relay-set header, stripped on the box's own port); null otherwise. */
@@ -149,10 +164,16 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         respond(
           signedIn((user) =>
             Effect.flatMap(jsonBody(SendMessageBody), (body) =>
-              core.sendMessage(user, id, body.text, { model: body.model, effort: body.effort }),
+              core.sendMessage(user, id, body.text, { model: body.model, effort: body.effort }, body.attachments ?? []),
             ),
           ),
         ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/tasks/:id/uploads",
+      Effect.flatMap(pathId, (id) =>
+        respond(signedIn((user) => Effect.flatMap(uploadInput, (input) => core.upload(user, id, input)))),
       ),
     ),
     HttpRouter.get(
@@ -167,12 +188,18 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/diff",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.diff(user, id)))),
     ),
-    // Bytes of a file the agent attached to one of the owner's task messages; the MIME type is the content type.
+    // Bytes of a file attached to one of the owner's task messages; the MIME type is the content type. Users upload
+    // any type, so the response may not run as a page on the app's origin (e.g. an uploaded text/html).
     HttpRouter.get(
       "/api/tasks/:id/attachments/:attachmentId",
       Effect.flatMap(HttpRouter.params, (p) =>
         signedIn((user) => core.attachment(user, p.id ?? "", p.attachmentId ?? "")).pipe(
-          Effect.map((a) => HttpServerResponse.uint8Array(a.bytes, { contentType: a.mimeType })),
+          Effect.map((a) =>
+            HttpServerResponse.uint8Array(a.bytes, {
+              contentType: a.mimeType,
+              headers: { "content-security-policy": "sandbox", "x-content-type-options": "nosniff" },
+            }),
+          ),
           Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
         ),
       ),
