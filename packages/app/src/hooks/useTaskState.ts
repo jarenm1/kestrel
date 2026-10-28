@@ -45,6 +45,8 @@ export function useTaskState(taskId: string) {
             break
           case "run.updated":
             queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, event.run))
+            // A run starting or ending is when the worktree changes; the diff has no events of its own.
+            void queryClient.invalidateQueries({ queryKey: keys.diff(taskId) })
             break
           case "agent.output":
             setOutput((prev) => ({

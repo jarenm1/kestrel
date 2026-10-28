@@ -218,6 +218,12 @@ const redactSecret = (text: string, token: string | undefined): string => {
  */
 export const taskBaseRef = (taskId: string): string => `refs/kestrel/base/${taskId}`
 
+/**
+ * Plain unified diff with fixed `a/` `b/` prefixes, whatever the (agent-writable) repo config says, so the app can
+ * parse it into per-file sections.
+ */
+const DIFF_FLAGS = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"] as const
+
 const make: WorkspaceShape = {
   pushBranch: ({ repoPath, worktreePath, remoteUrl, branch, githubToken }) =>
     Effect.gen(function* () {
@@ -312,7 +318,7 @@ const make: WorkspaceShape = {
   diff: ({ repoPath, worktreePath, baseRef }) =>
     Effect.gen(function* () {
       const env = worktreeGitEnv(repoPath, worktreePath)
-      const tracked = yield* git(worktreePath, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", baseRef], env)
+      const tracked = yield* git(worktreePath, [...DIFF_FLAGS, "--find-renames", baseRef], env)
       const untrackedList = yield* git(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], env)
       let untracked = ""
       for (const file of untrackedList.split("\0")) {
@@ -320,7 +326,7 @@ const make: WorkspaceShape = {
         // `git diff --no-index` exits 1 when the files differ, which is the normal case here.
         const res = yield* runProcess(
           "git",
-          [...SAFE_GIT, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", file],
+          [...SAFE_GIT, ...DIFF_FLAGS, "--no-index", "--", "/dev/null", file],
           { cwd: worktreePath, env },
           "git diff --no-index",
         )

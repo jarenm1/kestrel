@@ -6,6 +6,8 @@ import { api } from "./client"
 const BOX_POLL_MS = 10_000
 /** Task statuses change from agent runs with no repo-level event stream, so the list is polled. */
 const TASK_POLL_MS = 2000
+/** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
+const DIFF_POLL_MS = 3000
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -77,7 +79,12 @@ export const queries = {
       queryFn: async (): Promise<Run[]> =>
         mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(keys.runs(taskId))),
     }),
-  diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
+  diff: (taskId: string, running = false) =>
+    queryOptions({
+      queryKey: keys.diff(taskId),
+      queryFn: () => api.getDiff(taskId),
+      refetchInterval: running ? DIFF_POLL_MS : false,
+    }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
 }

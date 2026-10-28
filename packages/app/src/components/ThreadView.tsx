@@ -90,7 +90,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <PanelRightClose />
             </Button>
           </div>
-          <SidebarBody tab={tab} taskId={taskId} archived={archivedTask !== undefined} />
+          <SidebarBody
+            tab={tab}
+            taskId={taskId}
+            archived={archivedTask !== undefined}
+            running={state.task?.status === "running"}
+          />
         </aside>
       ) : (
         <aside className="flex flex-col items-center gap-1 py-2">
@@ -122,7 +127,17 @@ export function ThreadView({ taskId }: { taskId: string }) {
   )
 }
 
-function SidebarBody({ tab, taskId, archived }: { tab: TabId; taskId: string; archived: boolean }) {
+function SidebarBody({
+  tab,
+  taskId,
+  archived,
+  running,
+}: {
+  tab: TabId
+  taskId: string
+  archived: boolean
+  running: boolean
+}) {
   switch (tab) {
     case "desktop":
       if (archived) {
@@ -130,6 +145,6 @@ function SidebarBody({ tab, taskId, archived }: { tab: TabId; taskId: string; ar
       }
       return <DesktopViewer taskId={taskId} />
     case "diff":
-      return <DiffPanel taskId={taskId} />
+      return <DiffPanel taskId={taskId} running={running} />
   }
 }
