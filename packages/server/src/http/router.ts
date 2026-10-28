@@ -139,7 +139,13 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     HttpRouter.post(
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) =>
-        respond(signedIn((user) => Effect.flatMap(jsonBody(SendMessageBody), (body) => core.sendMessage(user, id, body.text)))),
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(SendMessageBody), (body) =>
+              core.sendMessage(user, id, body.text, { model: body.model, effort: body.effort }),
+            ),
+          ),
+        ),
       ),
     ),
     HttpRouter.get(

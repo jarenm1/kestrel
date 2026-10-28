@@ -10,6 +10,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 const mcpUrl = process.env.CLOUDAGENTS_MCP_URL
 const mcpToken = process.env.CLOUDAGENTS_MCP_TOKEN
 const prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
+const model = process.env.CLOUDAGENTS_MODEL
+const effort = process.env.CLOUDAGENTS_EFFORT
+const choice = [model === undefined ? null : `model: ${model}`, effort === undefined ? null : `effort: ${effort}`]
+  .filter((part): part is string => part !== null)
+  .join(", ")
 
 if (!mcpUrl || !mcpToken) {
   console.error("fake-agent: CLOUDAGENTS_MCP_URL or CLOUDAGENTS_MCP_TOKEN is not set")
@@ -153,7 +158,10 @@ const main = async (): Promise<number> => {
     return 0
   }
 
-  await call("task_report", { status: "done", message: "Wrote AGENT_NOTES.md from the prompt." })
+  await call("task_report", {
+    status: "done",
+    message: `Wrote AGENT_NOTES.md from the prompt.${choice === "" ? "" : ` (${choice})`}`,
+  })
   return 0
 }
 

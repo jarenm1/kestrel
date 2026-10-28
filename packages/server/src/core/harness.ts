@@ -4,7 +4,16 @@ import { createWriteStream, type WriteStream } from "node:fs"
 import { chmod, mkdir, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
-import { InternalError, type CliProvider, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
+import {
+  InternalError,
+  type AgentEffort,
+  type AgentModel,
+  type CliProvider,
+  type Message,
+  type Run,
+  type ServerEvent,
+  type Task,
+} from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { Config } from "../config"
@@ -19,6 +28,7 @@ export interface AgentHarnessShape {
    * On spawn failure the run is aborted before the error is returned. `user` is the signed-in user
    * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
    * `resumeSession` is the agent session this run continues, or null for a fresh run.
+   * `choice` is the model/effort the user picked for this message; omitted fields use the harness default.
    */
   readonly spawn: (
     task: Task,
@@ -27,6 +37,7 @@ export interface AgentHarnessShape {
     display: string | null,
     user: string,
     resumeSession: string | null,
+    choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /** Kills a running run and marks it cancelled; a cancelled run's question is dropped. */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
@@ -37,6 +48,12 @@ export interface AgentHarnessShape {
 }
 
 export class AgentHarness extends Context.Tag("cloudagents/AgentHarness")<AgentHarness, AgentHarnessShape>() {}
+
+/** Per-message agent choice; omitted fields leave the harness default. */
+export interface AgentChoice {
+  readonly model?: AgentModel
+  readonly effort?: AgentEffort
+}
 
 interface ActiveRun {
   readonly child: ChildProcess
@@ -225,7 +242,7 @@ export const AgentHarnessLive = Layer.effect(
     }
 
     const shape: AgentHarnessShape = {
-      spawn: (task, run, prompt, display, user, resumeSession) =>
+      spawn: (task, run, prompt, display, user, resumeSession, choice) =>
         Effect.gen(function* () {
           const runDir = join(config.runsDir, run.id)
           const homeDir = join(config.homesDir, task.id)
@@ -273,6 +290,8 @@ export const AgentHarnessLive = Layer.effect(
               display,
               env: {
                 CLOUDAGENTS_PROMPT: prompt,
+                ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
+                ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
                 CLOUDAGENTS_MCP_URL: mcpUrl,
                 CLOUDAGENTS_TASK_ID: task.id,

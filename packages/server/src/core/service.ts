@@ -23,7 +23,7 @@ import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, parseGitHubRepo, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus } from "../github/api"
 import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
-import { AgentHarness } from "./harness"
+import { AgentHarness, type AgentChoice } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { WorkspaceService, taskBaseRef } from "./workspace"
 
@@ -96,6 +96,7 @@ export interface CoreShape {
     user: string,
     taskId: string,
     text: string,
+    choice: AgentChoice,
   ) => Effect.Effect<SendMessageResponse, NotFound | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
@@ -454,7 +455,7 @@ export const CoreLive = Layer.effect(
         return { ...task }
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text) =>
+    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice) =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
         if (text.trim() === "") {
@@ -560,7 +561,7 @@ export const CoreLive = Layer.effect(
           publishMessage(notice)
         }
 
-        yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession)
+        yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
       })
 

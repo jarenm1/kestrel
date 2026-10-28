@@ -6,7 +6,7 @@ import type { SystemdSettings } from "./sandbox/systemd"
 export const VERSION: string = pkg.version
 
 const DEFAULT_AGENT_COMMAND =
-  'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose'
+  'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
 
 export interface ServerConfig {
   readonly port: number
@@ -19,7 +19,12 @@ export interface ServerConfig {
   readonly runsDir: string
   readonly attachmentsDir: string
   readonly stateFile: string
-  /** Shell command run (via `sh -c`) for each agent run, cwd = task worktree. */
+  /**
+   * Shell command run (via `sh -c`) for each agent run, cwd = task worktree
+   * (`CLOUDAGENTS_AGENT_COMMAND` overrides the default). It reads the prompt from
+   * `CLOUDAGENTS_PROMPT`, and `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose
+   * them; the default command turns the latter two into Claude Code's `--model` / `--effort`.
+   */
   readonly agentCommand: string
   readonly fakeAgent: boolean
   /** Control plane relay (outbound box connection). Null when `CLOUDAGENTS_CONTROL_URL` is unset. */
