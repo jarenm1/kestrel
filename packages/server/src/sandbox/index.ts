@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import { spawn } from "node:child_process"
 import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
 import { ensureTaskNet, joinTaskNet } from "./netns"
@@ -32,9 +32,10 @@ export interface SandboxBind {
 }
 
 export interface BwrapOptions {
-  readonly worktreePath: string
-  /** Git common dir of the task's repo (worktrees need it for index/refs). Absolute. */
-  readonly gitCommonDir: string
+  /** The thread workspace: the agent's working directory, bound read-write. Absolute. */
+  readonly workspacePath: string
+  /** The owner's mirror directory, bound read-only: checkouts read their git objects from it. Absolute. */
+  readonly mirrorDir: string
   /** Host dir for the persisted per-task home, bound rw at /home/agent. */
   readonly homeDir: string
   /** X display number of the task desktop; its socket is bound when given. */
@@ -72,36 +73,20 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "/dev",
     "--tmpfs",
     "/tmp",
-    // Nothing under /home is visible except the task home and the worktree binds below.
+    // Nothing under /home is visible except the task home and the workspace binds below.
     "--tmpfs",
     "/home",
     "--bind",
     opts.homeDir,
     SANDBOX_HOME,
     "--bind",
-    opts.worktreePath,
-    opts.worktreePath,
-    "--bind",
-    opts.gitCommonDir,
-    opts.gitCommonDir,
+    opts.workspacePath,
+    opts.workspacePath,
+    "--ro-bind",
+    opts.mirrorDir,
+    opts.mirrorDir,
   ]
   for (const bind of opts.binds ?? []) argv.push("--bind", bind.host, bind.sandbox)
-  // The agent commits through the shared git dir, but must not control what host-side git runs:
-  // repo config (fsmonitor, filters, diff drivers, ...) and hooks stay read-only, other tasks'
-  // worktree admin dirs are read-only, and this task's admin dir keeps its `commondir`/`gitdir`
-  // pointers read-only so they cannot redirect host git to an agent-made git dir.
-  for (const name of ["config", "hooks"]) {
-    const path = join(opts.gitCommonDir, name)
-    if (existsSync(path)) argv.push("--ro-bind", path, path)
-  }
-  const adminRoot = join(opts.gitCommonDir, "worktrees")
-  const adminDir = join(adminRoot, basename(opts.worktreePath))
-  if (existsSync(adminRoot)) argv.push("--ro-bind", adminRoot, adminRoot)
-  if (existsSync(adminDir)) argv.push("--bind", adminDir, adminDir)
-  for (const name of ["commondir", "gitdir"]) {
-    const path = join(adminDir, name)
-    if (existsSync(path)) argv.push("--ro-bind", path, path)
-  }
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
   for (const file of SYSTEM_RO_FILES) {
     if (existsSync(file)) argv.push("--ro-bind", file, file)
@@ -111,7 +96,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     argv.push("--bind", socket, socket)
   }
   for (const [name, value] of Object.entries(opts.env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", opts.worktreePath, "--", "sh", "-c", opts.command)
+  argv.push("--chdir", opts.workspacePath, "--", "sh", "-c", opts.command)
   return argv
 }
 
@@ -182,15 +167,13 @@ export interface LaunchRequest {
   /** Task the process belongs to; its systemd slice carries the resource limits. */
   readonly taskId: string
   readonly kind: LaunchKind
-  readonly worktreePath: string
+  /** The thread workspace: the agent's working directory. */
+  readonly workspacePath: string
+  /** The owner's mirror directory, bound read-only into the sandbox. */
+  readonly mirrorDir: string
   readonly homeDir: string
   /** X display string (e.g. ":101") of the task desktop, or null. */
   readonly display: string | null
-  /**
-   * Git common dir of the task's repo, derived from server state (never from the worktree,
-   * whose `.git` file the agent can rewrite).
-   */
-  readonly gitCommonDir: string
   /** Variables beyond the base allowlist (CLOUDAGENTS_*, broker env). Never host env. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -278,10 +261,15 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       )
     }
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, req.taskId)
-    yield* Effect.tryPromise({
-      try: () => mkdir(req.homeDir, { recursive: true }),
-      catch: (e) => new InternalError({ message: `cannot create home ${req.homeDir}: ${String(e)}` }),
-    })
+    yield* Effect.forEach(
+      [req.homeDir, req.mirrorDir],
+      (dir) =>
+        Effect.tryPromise({
+          try: () => mkdir(dir, { recursive: true }),
+          catch: (e) => new InternalError({ message: `cannot create ${dir}: ${String(e)}` }),
+        }),
+      { discard: true },
+    )
     const home = agentHome(settings, req.homeDir)
     const env: Record<string, string> = {
       ...(settings.enabled ? {} : platformEnv()),
@@ -307,8 +295,8 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
           (holder) => {
             const [file, ...args] = joinTaskNet(nsenter as string, holder)
             const bwrapArgs = buildBwrapArgv({
-              worktreePath: req.worktreePath,
-              gitCommonDir: req.gitCommonDir,
+              workspacePath: req.workspacePath,
+              mirrorDir: req.mirrorDir,
               homeDir: req.homeDir,
               display: displayNumber(req.display),
               env,
@@ -321,14 +309,14 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         )
       : { file: shell(), args: ["-c", req.command] }
 
-    if (settings.systemd === null) return { ...inner, env, cwd: req.worktreePath, home }
+    if (settings.systemd === null) return { ...inner, env, cwd: req.workspacePath, home }
 
     return {
       file: systemdRun as string,
       args: [...scopeArgs(settings.systemd, req.taskId, req.kind), inner.file, ...inner.args],
       // systemd-run needs the user bus; bwrap's --clearenv keeps it out of the sandbox.
       env: { ...env, ...busEnv() },
-      cwd: req.worktreePath,
+      cwd: req.workspacePath,
       home,
     }
   })

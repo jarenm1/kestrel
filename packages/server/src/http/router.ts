@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
@@ -113,29 +113,11 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.logout(user, provider)))),
     ),
   ).pipe(
-    // Projects and everything under them belong to one user; core answers NotFound for anyone else's.
-    HttpRouter.get("/api/repos", respond(signedIn((user) => core.listRepos(user)))),
+    // Threads of the signed-in user, archived ones included; core answers NotFound for anyone else's.
+    HttpRouter.get("/api/tasks", respond(signedIn((user) => core.listTasks(user)))),
     HttpRouter.post(
-      "/api/repos",
-      respond(signedIn((user) => Effect.flatMap(jsonBody(CreateRepoBody), (body) => core.createRepo(user, body.url, body.name)))),
-    ),
-    HttpRouter.get(
-      "/api/repos/:id",
-      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.getRepo(user, id)))),
-    ),
-    HttpRouter.del(
-      "/api/repos/:id",
-      Effect.flatMap(pathId, (id) => noContent(signedIn((user) => core.deleteRepo(user, id)))),
-    ),
-    HttpRouter.get(
-      "/api/repos/:id/tasks",
-      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listTasks(user, id)))),
-    ),
-    HttpRouter.post(
-      "/api/repos/:id/tasks",
-      Effect.flatMap(pathId, (id) =>
-        respond(signedIn((user) => Effect.flatMap(jsonBody(CreateTaskBody), (body) => core.createTask(user, id, body)))),
-      ),
+      "/api/tasks",
+      respond(signedIn((user) => Effect.flatMap(jsonBody(CreateTaskBody), (body) => core.createTask(user, body)))),
     ),
 
     HttpRouter.get(
