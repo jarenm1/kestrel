@@ -63,11 +63,32 @@ export interface NewPullRequest {
   readonly draft: boolean
 }
 
+/** A line comment on a pull request diff. GitHub's `side` defaults to RIGHT (the new file). */
+export interface NewReviewComment {
+  readonly path: string
+  readonly line: number
+  readonly side?: "LEFT" | "RIGHT"
+  readonly body: string
+}
+
+/** A review on a pull request. APPROVE is deliberately not offered to agents. */
+export interface NewReview {
+  readonly body: string
+  readonly event: "COMMENT" | "REQUEST_CHANGES"
+  readonly comments: readonly NewReviewComment[]
+}
+
+export interface PostedReview {
+  readonly url: string
+  readonly state: string
+}
+
 export interface GitHubShape {
   /** Open pull request whose head branch is `head` in `repo`, or null. */
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
   readonly createPullRequest: (token: string, repo: RepoSlug, input: NewPullRequest) => Effect.Effect<PullRequest, GitHubError>
   readonly getPullRequestStatus: (token: string, repo: RepoSlug, number: number) => Effect.Effect<PullRequestStatus, GitHubError>
+  readonly createReview: (token: string, repo: RepoSlug, number: number, review: NewReview) => Effect.Effect<PostedReview, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
@@ -112,6 +133,11 @@ const ReviewCommentsBody = Schema.Array(
     user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
   }),
 )
+
+const ReviewPostedBody = Schema.Struct({
+  html_url: Schema.String,
+  state: Schema.String,
+})
 
 const PASSING_CONCLUSIONS = ["success", "neutral", "skipped"]
 
@@ -255,6 +281,15 @@ export const GitHubLive = Layer.effect(
               }),
             ),
           ),
+        ),
+      createReview: (token, repo, number, review) =>
+        call(token, repo, "POST", `${repoPath(repo)}/pulls/${number}/reviews`, {
+          body: review.body,
+          event: review.event,
+          comments: review.comments,
+        }).pipe(
+          Effect.flatMap(decode(ReviewPostedBody, "review")),
+          Effect.map((posted): PostedReview => ({ url: posted.html_url, state: posted.state })),
         ),
     }
     return service

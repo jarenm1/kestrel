@@ -20,7 +20,7 @@ import {
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, parseGitHubRepo, type PullRequest, type PullRequestStatus } from "../github/api"
+import { GitHub, GitHubError, parseGitHubRepo, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus } from "../github/api"
 import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
@@ -46,6 +46,11 @@ export interface OpenPullRequestInput {
   readonly title: string
   readonly body: string
   readonly draft: boolean
+}
+
+export interface ReviewPullRequestInput extends NewReview {
+  /** Number of the pull request in the task's GitHub repository. */
+  readonly number: number
 }
 
 export interface OpenedPullRequest {
@@ -80,8 +85,8 @@ export interface CoreShape {
   readonly createTask: (
     user: string,
     repoId: string,
-    input: { readonly title?: string; readonly baseBranch?: string },
-  ) => Effect.Effect<Task, NotFound | InternalError>
+    input: { readonly title?: string; readonly baseBranch?: string; readonly fetch?: boolean; readonly pullRequest?: number },
+  ) => Effect.Effect<Task, NotFound | BadRequest | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
   readonly deleteTask: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
@@ -131,6 +136,11 @@ export interface CoreShape {
   ) => Effect.Effect<OpenedPullRequest, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: live GitHub status of the task's pull request. */
   readonly pullRequestStatus: (taskId: string) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: posts a review on a pull request of the task's GitHub repository. APPROVE is never sent. */
+  readonly reviewPullRequest: (
+    taskId: string,
+    input: ReviewPullRequestInput,
+  ) => Effect.Effect<PostedReview, NotFound | BadRequest | InternalError>
 
   /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
@@ -280,6 +290,15 @@ export const CoreLive = Layer.effect(
           .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
       })
 
+    /** Fetches `refspec` from the repo's remote into its clone. The owner's token authenticates github.com remotes; public repos need none. */
+    const fetchFromOrigin = (repo: Repo, refspec: string) =>
+      Effect.gen(function* () {
+        const token = parseGitHubRepo(repo.url) === null ? undefined : (yield* credentials.get(repo.owner))?.github
+        yield* workspace
+          .fetchRef({ repoPath: repo.localPath, remoteUrl: repo.url, refspec, githubToken: token || undefined })
+          .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+      })
+
     /** Stores the pull request on the task; `announce` also posts a chat note (used when it was just opened). */
     const recordPullRequest = (taskId: string, link: PullRequestLink, announce: boolean) =>
       Effect.gen(function* () {
@@ -391,7 +410,18 @@ export const CoreLive = Layer.effect(
       Effect.gen(function* () {
         const repo = yield* ownedRepo(user, repoId)
         const title = input.title?.trim() || "Untitled task"
-        const baseBranch = input.baseBranch?.trim() || repo.defaultBranch
+        const pullRequest = input.pullRequest
+        if (pullRequest !== undefined && parseGitHubRepo(repo.url) === null) {
+          return yield* Effect.fail(new BadRequest({ message: `${repo.name} is not a github.com repository; pull requests need one` }))
+        }
+        const requestedBase = input.baseBranch?.trim() || repo.defaultBranch
+        if (input.fetch || pullRequest !== undefined) {
+          yield* fetchFromOrigin(repo, `refs/heads/${requestedBase}:refs/heads/${requestedBase}`)
+        }
+        if (pullRequest !== undefined) {
+          yield* fetchFromOrigin(repo, `+refs/pull/${pullRequest}/head:refs/heads/kestrel/pr-${pullRequest}`)
+        }
+        const baseBranch = pullRequest === undefined ? requestedBase : `kestrel/pr-${pullRequest}`
         const id = newId()
         const branch = `cloudagents/${slugify(title)}-${id.replace(/-/g, "").slice(0, 6)}`
         const worktreePath = join(config.worktreesDir, id)
@@ -851,6 +881,16 @@ export const CoreLive = Layer.effect(
             number = found.number
           }
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      reviewPullRequest: (taskId, input) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const repo = yield* requireRepo(task.repoId)
+          const { slug, token } = yield* githubAccess(repo)
+          return yield* github
+            .createReview(token, slug, input.number, { body: input.body, event: input.event, comments: input.comments })
+            .pipe(Effect.mapError(fromGitHub))
         }),
 
       shutdown: () =>

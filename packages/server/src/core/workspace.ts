@@ -42,6 +42,16 @@ export interface WorkspaceShape {
     readonly branch: string
     readonly githubToken?: string
   }) => Effect.Effect<void, WorkspaceError>
+  /**
+   * Fetches `refspec` from `remoteUrl` into the clone at `repoPath`. Never forced unless the refspec says so
+   * (`+`). `--update-head-ok` lets the clone's checked-out default branch advance; its working tree is unused.
+   */
+  readonly fetchRef: (opts: {
+    readonly repoPath: string
+    readonly remoteUrl: string
+    readonly refspec: string
+    readonly githubToken?: string
+  }) => Effect.Effect<void, WorkspaceError>
 }
 
 export class WorkspaceService extends Context.Tag("cloudagents/WorkspaceService")<
@@ -109,8 +119,8 @@ const runProcess = (
  */
 const SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const
 
-/** Host-side push also overrides agent-writable config that could run host commands or helpers. */
-const PUSH_GIT = [...SAFE_GIT, "-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.sshCommand=ssh"] as const
+/** Host-side remote operations (push, fetch) also override agent-writable config that could run host commands or helpers. */
+const REMOTE_GIT = [...SAFE_GIT, "-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.sshCommand=ssh"] as const
 
 const PUSH_TIMEOUT_MS = 120_000
 
@@ -123,6 +133,19 @@ const pushFailureMessage = (branch: string, detail: string): string => {
     return `GitHub rejected the push of ${branch} (the connected token lacks write access or has expired): ${detail}`
   }
   return `git push ${branch} failed: ${detail}`
+}
+
+/** Git's own messages for the common fetch failures; a missing GitHub connection is the usual cause for private repos. */
+const fetchFailureMessage = (refspec: string, hasToken: boolean, detail: string): string => {
+  if (/non-fast-forward/.test(detail)) {
+    return `git fetch ${refspec} rejected: the local branch has commits origin does not have, and fetch never overwrites it: ${detail}`
+  }
+  if (/could not read Username|Authentication failed|terminal prompts disabled|Repository not found|\b40[13]\b/.test(detail)) {
+    return hasToken
+      ? `GitHub refused to fetch ${refspec} (the connected token lacks read access or has expired): ${detail}`
+      : `GitHub refused to fetch ${refspec}; private repositories need a GitHub connection with read access (connect GitHub under Connections, then retry): ${detail}`
+  }
+  return `git fetch ${refspec} failed: ${detail}`
 }
 
 const git = (
@@ -184,7 +207,7 @@ const make: WorkspaceShape = {
     Effect.gen(function* () {
       const res = yield* runProcess(
         "git",
-        [...PUSH_GIT, "push", remoteUrl, `refs/heads/${branch}:refs/heads/${branch}`],
+        [...REMOTE_GIT, "push", remoteUrl, `refs/heads/${branch}:refs/heads/${branch}`],
         {
           cwd: worktreePath,
           env: { ...worktreeGitEnv(repoPath, worktreePath), ...githubAuthEnv(remoteUrl, githubToken) },
@@ -195,6 +218,21 @@ const make: WorkspaceShape = {
       if (res.exitCode !== 0) {
         const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
         return yield* Effect.fail(new WorkspaceError({ message: pushFailureMessage(branch, detail) }))
+      }
+    }),
+  fetchRef: ({ repoPath, remoteUrl, refspec, githubToken }) =>
+    Effect.gen(function* () {
+      const res = yield* runProcess(
+        "git",
+        [...REMOTE_GIT, "fetch", "--no-tags", "--update-head-ok", remoteUrl, refspec],
+        { cwd: repoPath, env: githubAuthEnv(remoteUrl, githubToken), timeoutMs: PUSH_TIMEOUT_MS },
+        "git fetch",
+      )
+      if (res.exitCode !== 0) {
+        const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
+        return yield* Effect.fail(
+          new WorkspaceError({ message: fetchFailureMessage(refspec, githubToken !== undefined && githubToken !== "", detail) }),
+        )
       }
     }),
   cloneRepo: (url, destDir, opts) =>

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect } from "effect"
 import { z } from "zod"
-import type { PullRequest, PullRequestStatus } from "../../github/api"
+import type { NewReview, PostedReview, PullRequest, PullRequestStatus } from "../../github/api"
 import { type RunContext, guard, runTool, text, truncate } from "./common"
 
 export interface GitHubToolDeps {
@@ -12,6 +12,10 @@ export interface GitHubToolDeps {
       input: { readonly title: string; readonly body: string; readonly draft: boolean },
     ) => Effect.Effect<{ readonly pullRequest: PullRequest; readonly created: boolean }, unknown>
     readonly pullRequestStatus: (taskId: string) => Effect.Effect<PullRequestStatus, unknown>
+    readonly reviewPullRequest: (
+      taskId: string,
+      input: NewReview & { readonly number: number },
+    ) => Effect.Effect<PostedReview, unknown>
   }
 }
 
@@ -101,6 +105,56 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
           Effect.gen(function* () {
             const status = yield* deps.github.pullRequestStatus(ctx.taskId)
             return text(truncate(formatStatus(status)))
+          }),
+        ),
+      ),
+  )
+
+  server.registerTool(
+    "github_pr_review",
+    {
+      description:
+        "Post a review on a pull request of this task's GitHub repository, as the repository owner. event is COMMENT " +
+        "(default) or REQUEST_CHANGES; approval is not offered. Line comments go on the pull request's diff: give the " +
+        "file path, the line, and side (RIGHT for the new code, the default; LEFT for the old code).",
+      inputSchema: {
+        number: z.number().int().positive().describe("Pull request number in this task's repository"),
+        body: z.string().describe("Review summary"),
+        event: z.enum(["COMMENT", "REQUEST_CHANGES"]).optional().describe("Review event (default COMMENT)"),
+        comments: z
+          .array(
+            z.object({
+              path: z.string().describe("File path in the pull request"),
+              line: z.number().int().positive().describe("Line the comment applies to"),
+              side: z.enum(["LEFT", "RIGHT"]).optional().describe("Diff side (default RIGHT)"),
+              body: z.string().describe("Comment text"),
+            }),
+          )
+          .optional()
+          .describe("Line comments on the diff"),
+      },
+    },
+    ({
+      number,
+      body,
+      event,
+      comments,
+    }: {
+      number: number
+      body: string
+      event?: "COMMENT" | "REQUEST_CHANGES"
+      comments?: ReadonlyArray<{ path: string; line: number; side?: "LEFT" | "RIGHT"; body: string }>
+    }) =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const review = yield* deps.github.reviewPullRequest(ctx.taskId, {
+              number,
+              body,
+              event: event ?? "COMMENT",
+              comments: comments ?? [],
+            })
+            return text(`posted review on pull request #${number}: ${review.url}`)
           }),
         ),
       ),

@@ -128,7 +128,12 @@ const program = Effect.gen(function* () {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
     report: core.report,
-    github: { push: core.gitPush, openPullRequest: core.openPullRequest, pullRequestStatus: core.pullRequestStatus },
+    github: {
+      push: core.gitPush,
+      openPullRequest: core.openPullRequest,
+      pullRequestStatus: core.pullRequestStatus,
+      reviewPullRequest: core.reviewPullRequest,
+    },
     ask: core.ask,
     inbox: core.inbox,
   })
