@@ -197,7 +197,7 @@ export const AutomationRun = Schema.Struct({
   firedAt: Schema.String, // ISO-8601
   /** "schedule", "manual", "manual #12", or the webhook event, e.g. "pull_request.opened #12". */
   reason: Schema.String,
-  status: Schema.Literal("started", "failed", "skipped"),
+  status: Schema.Literal("started", "failed"),
   taskId: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
 })
