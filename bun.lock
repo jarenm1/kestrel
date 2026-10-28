@@ -58,9 +58,11 @@
       "name": "@cloudagents/mobile",
       "version": "0.0.1",
       "dependencies": {
+        "@cloudagents/protocol": "workspace:*",
         "@expo/vector-icons": "^15.0.2",
         "@react-navigation/native": "^7.0.0",
         "@tanstack/react-query": "^5.62.0",
+        "effect": "^3",
         "expo": "~58.0.0",
         "expo-asset": "^58.0.18",
         "expo-auth-session": "~58.0.15",
@@ -491,9 +493,9 @@
 
     "@expo/metro-runtime": ["@expo/metro-runtime@58.0.15", "", { "dependencies": { "@expo/log-box": "^58.0.13", "anser": "^1.4.9", "pretty-format": "^29.7.0", "stacktrace-parser": "^0.1.10", "whatwg-fetch": "^3.0.0" }, "peerDependencies": { "expo": "*", "react": "*", "react-dom": "*", "react-native": "*" }, "optionalPeers": ["react-dom"] }, "sha512-csALn54hZUkHFM3FofWlU5MQcJB62deCt+JtHOhQogRT+k/VTtTuhLQCrCUOtO2MAUsyhrcRRa6Nh79e1bkvfg=="],
 
-    "@expo/modules-macros-linux-arm64": ["@expo/modules-macros-linux-arm64@0.24.0", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-pSjuli8PFrDKjf1Cikl8IbX8CmF/OyiyQaEjOgQwspB8UbM+aZtviDYquEWxkMFWggHaCsPSzTcZxsf7AY6myQ=="],
+    "@expo/modules-macros-linux-arm64": ["@expo/modules-macros-linux-arm64@0.24.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-pSjuli8PFrDKjf1Cikl8IbX8CmF/OyiyQaEjOgQwspB8UbM+aZtviDYquEWxkMFWggHaCsPSzTcZxsf7AY6myQ=="],
 
-    "@expo/modules-macros-linux-x64": ["@expo/modules-macros-linux-x64@0.24.0", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-B/w/mojEJ5Q0vkRSoraWj5r1C/AUgXc8t2tHAc18rcPoi/QGSQLNc1cWk7zF7Avbdi4hR8jOzAxxTEbcAkUjKg=="],
+    "@expo/modules-macros-linux-x64": ["@expo/modules-macros-linux-x64@0.24.0", "", { "os": "linux", "cpu": "x64" }, "sha512-B/w/mojEJ5Q0vkRSoraWj5r1C/AUgXc8t2tHAc18rcPoi/QGSQLNc1cWk7zF7Avbdi4hR8jOzAxxTEbcAkUjKg=="],
 
     "@expo/modules-macros-win32-arm64": ["@expo/modules-macros-win32-arm64@0.24.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-gfoUROUyMqSs6W53FzVJUgGv7pVACab9I1DLD7YlICNtIvkZWyUHDitAdfu5pc0R9l8ypqqGni5MvLGjXgJqNg=="],
 
@@ -633,13 +635,13 @@
 
     "@noxcturnal/noxcturnal-darwin-x64": ["@noxcturnal/noxcturnal-darwin-x64@0.1.11", "", { "os": "darwin", "cpu": "x64" }, "sha512-V2HXkK5iKFBSc2GmeZE2I2wGxBc0kMQUHxxIUBSjuO8enKIby6cEQj8WW5EAuIli622Sqw1V7f0IIz8mXB4M9g=="],
 
-    "@noxcturnal/noxcturnal-linux-arm64-gnu": ["@noxcturnal/noxcturnal-linux-arm64-gnu@0.1.11", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-Vf9Qbke9Hq5ToFt88XicQN0FJJuepOnPKspcKDICeYYXS2b5wQnU7uhf33QWzr1KPQhn0L0IWUCwBNhMVn6E6w=="],
+    "@noxcturnal/noxcturnal-linux-arm64-gnu": ["@noxcturnal/noxcturnal-linux-arm64-gnu@0.1.11", "", { "os": "linux", "cpu": "arm64" }, "sha512-Vf9Qbke9Hq5ToFt88XicQN0FJJuepOnPKspcKDICeYYXS2b5wQnU7uhf33QWzr1KPQhn0L0IWUCwBNhMVn6E6w=="],
 
-    "@noxcturnal/noxcturnal-linux-arm64-musl": ["@noxcturnal/noxcturnal-linux-arm64-musl@0.1.11", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-HlwlrcfBE7JBiwWaq32R8eN4APJHQCDoQlapeK+t0wxY9s9YDMDtAnG+v7RrEz05nu7Aci21x/s8qIAA5jE+NA=="],
+    "@noxcturnal/noxcturnal-linux-arm64-musl": ["@noxcturnal/noxcturnal-linux-arm64-musl@0.1.11", "", { "os": "linux", "cpu": "arm64" }, "sha512-HlwlrcfBE7JBiwWaq32R8eN4APJHQCDoQlapeK+t0wxY9s9YDMDtAnG+v7RrEz05nu7Aci21x/s8qIAA5jE+NA=="],
 
-    "@noxcturnal/noxcturnal-linux-x64-gnu": ["@noxcturnal/noxcturnal-linux-x64-gnu@0.1.11", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-kIzTkH4rEIn8vFl42lzfK8qmKaXMwHM7txbI+XkhYKjS+2WV08yslBpwHaPGtGLXPEfx+xUTUgY5K3KVET7HKw=="],
+    "@noxcturnal/noxcturnal-linux-x64-gnu": ["@noxcturnal/noxcturnal-linux-x64-gnu@0.1.11", "", { "os": "linux", "cpu": "x64" }, "sha512-kIzTkH4rEIn8vFl42lzfK8qmKaXMwHM7txbI+XkhYKjS+2WV08yslBpwHaPGtGLXPEfx+xUTUgY5K3KVET7HKw=="],
 
-    "@noxcturnal/noxcturnal-linux-x64-musl": ["@noxcturnal/noxcturnal-linux-x64-musl@0.1.11", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-KpC0H+v+y/v0j4EmGiopzZ2OKo01JIBrHTjTi+veYAhZbpUfwZfShdTTHEj5OjdQ5VgaJU8yaBXmX48jgAACOg=="],
+    "@noxcturnal/noxcturnal-linux-x64-musl": ["@noxcturnal/noxcturnal-linux-x64-musl@0.1.11", "", { "os": "linux", "cpu": "x64" }, "sha512-KpC0H+v+y/v0j4EmGiopzZ2OKo01JIBrHTjTi+veYAhZbpUfwZfShdTTHEj5OjdQ5VgaJU8yaBXmX48jgAACOg=="],
 
     "@noxcturnal/noxcturnal-win32-arm64-msvc": ["@noxcturnal/noxcturnal-win32-arm64-msvc@0.1.11", "", { "os": "win32", "cpu": "arm64" }, "sha512-Q0Q0ll/qPzakp/GBmVDB/XthqyCkfM2CE5gZ78t9Ix/bkZDe5O0G7OyNkXRsGu49VcorxoGbBgSyF6CK+OaYlQ=="],
 
