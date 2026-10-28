@@ -11,9 +11,7 @@
     "dev:server": "bun run --filter @cloudagents/server dev",
     "dev:app": "bun run --filter @cloudagents/app dev",
     "build:app": "bun run --filter @cloudagents/app build",
-    "dev:mobile": "bun run --filter @cloudagents/mobile start",
-    "dev:site": "bun run --filter @cloudagents/site dev",
-    "build:site": "bun run --filter @cloudagents/site build"
+    "dev:mobile": "bun run --filter @cloudagents/mobile start"
   },
   "devDependencies": {
     "@types/bun": "latest",

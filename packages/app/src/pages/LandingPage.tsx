@@ -10,7 +10,10 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { SERVER_URL } from "@/config"
+import { APP_HOME } from "@/routes"
 import "@/stylesfrontend.css"
+
+export const GITHUB_URL = "https://github.com/jarenm1/kestrel"
 
 export function KestrelIcon({ className }: { className?: string }) {
   return (
@@ -142,8 +145,8 @@ const slideInRight = { hidden: { opacity: 0, x: 40 }, visible: { opacity: 1, x: 
 const staggerContainer = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } }
 
 export function LandingPage() {
-  // Public pages are always the entry point; after GitHub auth the app home is `/repos`.
-  const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent("/repos")}`
+  // Public pages are always the entry point; after GitHub auth the app home is APP_HOME.
+  const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent(APP_HOME)}`
 
   const [activeFeature, setActiveFeature] = useState<number | null>(null)
   const featuresRef = useRef<HTMLDivElement>(null)
@@ -192,7 +195,7 @@ export function LandingPage() {
     <div className="flex items-center gap-6">
     <button onClick={scrollToFeatures} className="text-sm text-zinc-400 hover:text-white transition-colors">Product</button>
     <Link to="/pricing" className="text-sm text-zinc-400 hover:text-white transition-colors">Pricing</Link>
-    <a href="https://github.com/StinkyCat0/kestrel" target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
+    <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
     <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
     <a href="/auth/dev-login">Dev Login</a>
     </Button>
@@ -220,7 +223,7 @@ export function LandingPage() {
     <a href={loginUrl}>Get Started <ArrowRight className="ml-2 h-4 w-4" /></a>
     </Button>
     <Button asChild variant="soft" size="lg" className="h-10 px-6 text-sm border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
-    <a href="https://github.com/StinkyCat0/kestrel" target="_blank" rel="noopener noreferrer">Read the Docs</a>
+    <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">Read the Docs</a>
     </Button>
     </div>
     </motion.div>

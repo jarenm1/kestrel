@@ -47,8 +47,8 @@ git pull --ff-only origin main
 `git worktree list` shows what is still around; clean up every merged one.
 
 - Branch names: `<github-login>/<topic>`, e.g. `caayd/install-link`.
-- Every PR gets a Preview: `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (app; its own
-  empty Hub, no secrets, no box, so UI review only) and `...-kestrel-site.jarenmchugh.workers.dev` (site).
+- Every PR gets a Preview: `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (app and public
+  pages; its own empty Hub, no secrets, no box, so UI review only).
 - Each worktree has its own `node_modules`, `.data-dev/`, `packages/control/.dev.vars` and `.wrangler/` state.
 - Dependencies are shared, not duplicated: bun hardlinks every package from its global cache
   (`~/.bun/install/cache`), and the flake's tools come from `/nix/store`, so a new worktree installs in about a second
@@ -72,15 +72,12 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
   when you need a real agent (`ANTHROPIC_API_KEY=... bun run dev`, never committed).
 - Sign in at `http://localhost:<app port>/auth/dev-login`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
-- Marketing site only: `cd packages/site && bunx astro dev --port <n>` (default 4321). It runs in the background;
-  stop it with `bunx astro dev stop` from the same directory.
 
 ## Before opening a PR
 
 ```sh
-bun run typecheck      # all 5 packages, must pass
+bun run typecheck      # all packages, must pass
 bun run build:app      # if packages/app changed
-bun run build:site     # if packages/site changed
 ```
 
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and
@@ -90,9 +87,8 @@ say in the PR what you ran and what you saw. There is no CI; the PR description 
 
 | Path | What | Notes |
 |---|---|---|
-| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
+| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. Public pages (`/` landing, `/pricing`, `/login`) render without a session; everything signed-in sits behind `RequireAuth` in `App.tsx` (home `/threads`, see `src/routes.ts`). UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
 | `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
-| `packages/site` | Astro static marketing site | App links go through `APP_URL` in `src/config.ts`. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
 | `docs/architecture.md` | Diagram and who owns what | Read it before touching an area you don't own. |

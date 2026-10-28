@@ -5,7 +5,8 @@ import { ArrowRight, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { SERVER_URL } from "@/config"
-import { KestrelIcon } from "./LandingPage"
+import { APP_HOME } from "@/routes"
+import { GITHUB_URL, KestrelIcon } from "./LandingPage"
 import "@/stylesfrontend.css"
 
 const fadeInUp = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.5 } } }
@@ -66,8 +67,8 @@ const faqs = [
 ]
 
 export function PricingPage() {
-    // Public pages are always the entry point; after GitHub auth the app home is `/repos`.
-    const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent("/repos")}`
+    // Public pages are always the entry point; after GitHub auth the app home is APP_HOME.
+    const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent(APP_HOME)}`
 
     return (
         <div className="public-page flex min-h-screen flex-col relative overflow-x-hidden bg-gradient-to-b from-zinc-950 via-[#0a0a0f] to-black">
@@ -94,7 +95,7 @@ export function PricingPage() {
         <div className="flex items-center gap-6">
         <Link to="/" className="text-sm text-zinc-400 hover:text-white transition-colors">Product</Link>
         <Link to="/pricing" className="text-sm text-white transition-colors">Pricing</Link>
-        <a href="https://github.com/StinkyCat0/kestrel" target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
+        <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
         <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
         <a href="/auth/dev-login">Dev Login</a>
         </Button>
