@@ -1,4 +1,4 @@
-import { Context, Data, Deferred, Duration, Effect, Either, Layer } from "effect"
+import { Context, Data, Deferred, Effect, Either, Layer } from "effect"
 import { readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
@@ -58,11 +58,9 @@ export interface AskInput {
   readonly question: string
   readonly options: ReadonlyArray<string>
   readonly attachments?: ReadonlyArray<AttachmentInput>
-  /** How long to wait for the user's answer before the ask fails. */
-  readonly timeoutMs: number
 }
 
-/** The question's wait ended without an answer: the run ended first, or no reply came within the timeout. */
+/** The question's wait ended without an answer because the run ended first. */
 export class AskError extends Data.TaggedError("AskError")<{ readonly message: string }> {}
 
 /** How a question's wait ended: the user's reply, or the run ended first. */
@@ -312,8 +310,8 @@ export const CoreLive = Layer.effect(
         if (updated.message) publishMessage(updated.message)
       })
 
-    /** Open `task_ask` calls by run: the next user message sent to that run answers its question. */
-    const pendingAsks = new Map<string, Deferred.Deferred<AskOutcome>>()
+    /** Live `task_ask` calls by run, each waiting for the user's answer. A question persists in `pendingAsks` regardless. */
+    const liveAsks = new Map<string, Deferred.Deferred<AskOutcome>>()
     /** User messages each run has taken, from its inbox or as an answer. Forgotten once the run ends. */
     const seenByRun = new Map<string, Set<string>>()
     const seenFor = (runId: string): Set<string> => {
@@ -341,27 +339,16 @@ export const CoreLive = Layer.effect(
       })
     }
 
-    /** A task waiting on `task_ask` goes back to running once its run is still going. */
-    const resumeTask = (taskId: string, runId: string) =>
-      Effect.gen(function* () {
-        const resumed = yield* store.update((s): Either.Either<Task | null, never> => {
-          const task = s.tasks.find((t) => t.id === taskId)
-          const run = s.runs.find((r) => r.id === runId)
-          if (!task || task.status !== "needs_input" || !run || run.status !== "running") return Either.right(null)
-          task.status = "running"
-          task.updatedAt = nowIso()
-          return Either.right({ ...task })
-        })
-        if (resumed) hub.publish({ _tag: "task.updated", task: resumed })
-      })
-
     const removeTaskState = (taskId: string) =>
       Effect.gen(function* () {
         const attachmentIds = yield* store.update((s): Either.Either<string[], never> => {
           const ids = s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id))
+          const runIds = new Set(s.runs.filter((r) => r.taskId === taskId).map((r) => r.id))
           s.tasks = s.tasks.filter((t) => t.id !== taskId)
           s.messages = s.messages.filter((m) => m.taskId !== taskId)
           s.runs = s.runs.filter((r) => r.taskId !== taskId)
+          s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+          s.runSessions = s.runSessions.filter((x) => !runIds.has(x.runId))
           return Either.right(ids)
         })
         yield* Effect.forEach(
@@ -440,28 +427,40 @@ export const CoreLive = Layer.effect(
           (
             s,
           ): Either.Either<
-            { task: Task; message: Message; run: Run; answer: Deferred.Deferred<AskOutcome> | null; joined: boolean },
+            {
+              task: Task
+              message: Message
+              run: Run
+              answer: Deferred.Deferred<AskOutcome> | null
+              start: { readonly prompt: string; readonly resumeSession: string | null } | null
+            },
             NotFound
           > => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
             const task = found.right
             const now = nowIso()
+            // Any message settles the task's question: it is the answer, or it is ignored once the question's run is gone.
+            const ask = s.pendingAsks.find((a) => a.taskId === taskId) ?? null
+            s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
-              // Mid-run: the text joins the running run. If the run is waiting in task_ask, it is the answer;
-              // otherwise it waits in the run's inbox for task_inbox.
+              // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
+              // the answer; otherwise it waits in the run's inbox for task_inbox.
               const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now }
-              const answer = pendingAsks.get(running.id) ?? null
+              const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
-                pendingAsks.delete(running.id)
+                liveAsks.delete(running.id)
                 seenFor(running.id).add(message.id)
               }
               if (task.status === "needs_input") task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
-              return Either.right({ task: { ...task }, message, run: { ...running }, answer, joined: true })
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, start: null })
             }
+            // No run is going. An answer to a question starts a run that resumes the session of the run that asked.
+            const question = ask ? (s.messages.find((m) => m.id === ask.messageId)?.text ?? "") : null
+            const resumeSession = ask ? (s.runSessions.find((x) => x.runId === ask.runId)?.sessionId ?? null) : null
             const run: Run = {
               id: newId(),
               taskId,
@@ -478,13 +477,23 @@ export const CoreLive = Layer.effect(
             s.messages.push(message)
             // The prompt is what the run starts with, not mail for its inbox.
             seenFor(run.id).add(message.id)
-            return Either.right({ task: { ...task }, message, run: { ...run }, answer: null, joined: false })
+            const prompt =
+              question === null
+                ? text
+                : `You asked the user: ${question}\nThe user answered: ${text}\nContinue the task from there.`
+            return Either.right({
+              task: { ...task },
+              message,
+              run: { ...run },
+              answer: null,
+              start: { prompt, resumeSession },
+            })
           },
         )
         hub.publish({ _tag: "task.updated", task: reserved.task })
         publishMessage(reserved.message)
         if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text })
-        if (reserved.joined) return { message: reserved.message, run: reserved.run }
+        if (reserved.start === null) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
@@ -514,11 +523,11 @@ export const CoreLive = Layer.effect(
           publishMessage(notice)
         }
 
-        yield* harness.spawn(taskNow, reserved.run, text, display, user)
+        yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession)
         return { message: reserved.message, run: reserved.run }
       })
 
-    /** Posts a question for the running run and waits for the user's answer, or fails after `input.timeoutMs`. */
+    /** Posts a question for the running run and waits for the user's answer. The question persists until it is answered. */
     const ask: CoreShape["ask"] = (taskId, runId, input) =>
       Effect.gen(function* () {
         const answer = yield* Deferred.make<AskOutcome>()
@@ -538,14 +547,13 @@ export const CoreLive = Layer.effect(
               if (!run || run.taskId !== taskId || run.status !== "running") {
                 return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
               }
-              if (pendingAsks.has(runId)) {
+              // A question is replaced only when its call has gone (the call was dropped); a waiting one blocks.
+              const pending = s.pendingAsks.find((a) => a.taskId === taskId)
+              if (pending && (pending.runId !== runId || liveAsks.has(runId))) {
                 return Either.left(new Conflict({ message: "a question is already waiting for an answer" }))
               }
               const task = found.right
               const now = nowIso()
-              task.status = "needs_input"
-              task.updatedAt = now
-              pendingAsks.set(runId, answer)
               const message: Message = {
                 id: newId(),
                 taskId,
@@ -557,34 +565,27 @@ export const CoreLive = Layer.effect(
                 attachments,
               }
               s.messages.push(message)
+              s.pendingAsks = [
+                ...s.pendingAsks.filter((a) => a.taskId !== taskId),
+                { taskId, runId, messageId: message.id },
+              ]
+              task.status = "needs_input"
+              task.updatedAt = now
+              liveAsks.set(runId, answer)
               return Either.right({ task: { ...task }, message })
             },
           )
           hub.publish({ _tag: "task.updated", task: posted.task })
           publishMessage(posted.message)
-          const outcome = yield* Deferred.await(answer).pipe(
-            Effect.timeoutTo({
-              duration: Duration.millis(input.timeoutMs),
-              onSuccess: (found) => found,
-              onTimeout: () => ({ _tag: "timeout" }) as const,
-            }),
-          )
+          const outcome = yield* Deferred.await(answer)
           if (outcome._tag === "answered") return outcome.text
-          if (outcome._tag === "ended") {
-            return yield* Effect.fail(new AskError({ message: "the run ended before the user answered" }))
-          }
-          return yield* Effect.fail(
-            new AskError({ message: `the user did not answer within ${Math.round(input.timeoutMs / 1000)} seconds` }),
-          )
+          return yield* Effect.fail(new AskError({ message: "the run ended before the user answered" }))
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => {
               unsubscribe()
-              if (pendingAsks.get(runId) === answer) pendingAsks.delete(runId)
-            }).pipe(
-              Effect.zipRight(resumeTask(taskId, runId)),
-              Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: could not resume after ask: ${e.message}`)),
-            ),
+              if (liveAsks.get(runId) === answer) liveAsks.delete(runId)
+            }),
           ),
         )
       })

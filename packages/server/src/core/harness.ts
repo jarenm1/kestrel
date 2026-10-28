@@ -10,15 +10,15 @@ import { CredentialBroker } from "../broker"
 import { Config } from "../config"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
-import { MAX_ASK_TIMEOUT_SEC } from "../mcp/tools/task"
 import { EventHub } from "./events"
-import { StateStore, newId, nowIso, type Mutable } from "./state"
+import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
 
 export interface AgentHarnessShape {
   /**
    * Starts the harness for a run that is already persisted as `running` (see Core.sendMessage).
    * On spawn failure the run is aborted before the error is returned. `user` is the signed-in user
    * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
+   * `resumeSession` is the agent session this run continues, or null for a fresh run.
    */
   readonly spawn: (
     task: Task,
@@ -26,12 +26,13 @@ export interface AgentHarnessShape {
     prompt: string,
     display: string | null,
     user: string,
+    resumeSession: string | null,
   ) => Effect.Effect<void, InternalError>
-  /** Kills a running run and marks it cancelled. Idempotent for already-finished runs. */
+  /** Kills a running run and marks it cancelled; a cancelled run's question is dropped. */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
-  /** Cancels every active run; used at shutdown. */
+  /** Stops every active run at shutdown; their questions stay pending for the next start. */
   readonly stopAll: () => Effect.Effect<void>
 }
 
@@ -78,7 +79,7 @@ export const AgentHarnessLive = Layer.effect(
     /** Applies `f` to a run and its task inside one state update; publishes what changed. */
     const patchRunAndTask = (
       runId: string,
-      f: (run: Mutable<Run>, task: Mutable<Task>) => void,
+      f: (run: Mutable<Run>, task: Mutable<Task>, s: StoreState) => void,
     ): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
         const changed = yield* store.update((s) => {
@@ -86,7 +87,7 @@ export const AgentHarnessLive = Layer.effect(
           if (!run) return Either.right(null)
           const task = s.tasks.find((t) => t.id === run.taskId)
           if (!task) return Either.right(null)
-          f(run, task)
+          f(run, task, s)
           task.updatedAt = nowIso()
           return Either.right({ run: { ...run }, task: { ...task } })
         })
@@ -143,6 +144,41 @@ export const AgentHarnessLive = Layer.effect(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
 
+    /** Remembers the agent session a run runs under, so a run that answers a question can resume it. */
+    const recordSession = (runId: string, sessionId: string) =>
+      store
+        .update((s) => {
+          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), { runId, sessionId }]
+          return Either.right(null)
+        })
+        .pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: could not record its session: ${e.message}`)))
+
+    /**
+     * Kills a running run and marks it cancelled. A cancel also drops the run's question. At shutdown (`shutdown`),
+     * a run that waits on a question keeps it, and its task keeps waiting, for the next start.
+     */
+    const stopRun = (runId: string, shutdown: boolean): Effect.Effect<void, InternalError> =>
+      Effect.gen(function* () {
+        yield* broker.revoke(runId)
+        const entry = active.get(runId)
+        if (entry) {
+          killProcessGroup(entry.child.pid, "SIGTERM")
+          const timer = setTimeout(() => {
+            if (active.has(runId)) killProcessGroup(entry.child.pid, "SIGKILL")
+          }, KILL_GRACE_MS)
+          timer.unref()
+        }
+        yield* patchRunAndTask(runId, (run, task, s) => {
+          if (run.status !== "running") return
+          run.status = "cancelled"
+          run.exitCode = null
+          run.endedAt = nowIso()
+          if (shutdown && s.pendingAsks.some((a) => a.runId === runId)) return
+          s.pendingAsks = s.pendingAsks.filter((a) => a.runId !== runId)
+          task.status = "idle"
+        })
+      })
+
     const handleLine = (runId: string, stream: "stdout" | "stderr", line: string) => {
       const entry = active.get(runId)
       if (!entry) return
@@ -166,6 +202,18 @@ export const AgentHarnessLive = Layer.effect(
           ) {
             entry.resultText = parsed.result
           }
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            "type" in parsed &&
+            parsed.type === "system" &&
+            "subtype" in parsed &&
+            parsed.subtype === "init" &&
+            "session_id" in parsed &&
+            typeof parsed.session_id === "string"
+          ) {
+            runFork(recordSession(runId, parsed.session_id))
+          }
           publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
           return
         } catch {
@@ -177,7 +225,7 @@ export const AgentHarnessLive = Layer.effect(
     }
 
     const shape: AgentHarnessShape = {
-      spawn: (task, run, prompt, display, user) =>
+      spawn: (task, run, prompt, display, user, resumeSession) =>
         Effect.gen(function* () {
           const runDir = join(config.runsDir, run.id)
           const homeDir = join(config.homesDir, task.id)
@@ -230,8 +278,11 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
                 CLOUDAGENTS_MCP_TOKEN: lease.token,
-                // Claude Code's MCP tool-call timeout (ms): task_ask can block for up to MAX_ASK_TIMEOUT_SEC.
-                MCP_TOOL_TIMEOUT: String((MAX_ASK_TIMEOUT_SEC + 60) * 1000),
+                // Claude Code's MCP tool-call timeout (ms). task_ask has no timeout of its own: the largest timer
+                // delay lets a question wait as long as the user takes to answer.
+                MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
+                // Continues the agent session of the run that asked, when this run answers its question.
+                ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
                 ...keptBroker,
                 ...loginEnv,
               },
@@ -280,25 +331,7 @@ export const AgentHarnessLive = Layer.effect(
           }
         }),
 
-      cancel: (runId) =>
-        Effect.gen(function* () {
-          yield* broker.revoke(runId)
-          const entry = active.get(runId)
-          if (entry) {
-            killProcessGroup(entry.child.pid, "SIGTERM")
-            const timer = setTimeout(() => {
-              if (active.has(runId)) killProcessGroup(entry.child.pid, "SIGKILL")
-            }, KILL_GRACE_MS)
-            timer.unref()
-          }
-          yield* patchRunAndTask(runId, (run, task) => {
-            if (run.status !== "running") return
-            run.status = "cancelled"
-            run.exitCode = null
-            run.endedAt = nowIso()
-            task.status = "idle"
-          })
-        }),
+      cancel: (runId) => stopRun(runId, false),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
@@ -332,7 +365,7 @@ export const AgentHarnessLive = Layer.effect(
         }),
 
       stopAll: () =>
-        Effect.forEach([...active.keys()], (runId) => shape.cancel(runId).pipe(Effect.ignore), {
+        Effect.forEach([...active.keys()], (runId) => stopRun(runId, true).pipe(Effect.ignore), {
           discard: true,
         }),
     }
