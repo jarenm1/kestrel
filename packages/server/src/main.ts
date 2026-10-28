@@ -117,6 +117,7 @@ const program = Effect.gen(function* () {
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
     desktop: {
+      open: (taskId) => core.desktopOpen(taskId),
       status: (taskId) => desktop.status(taskId),
       screenshot: (taskId: string, crop?: DesktopRegion, scale?: number) => desktop.screenshot(taskId, crop, scale),
       grab: (taskId) => desktop.grab(taskId),

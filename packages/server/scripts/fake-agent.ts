@@ -72,7 +72,9 @@ const sleepMs = (ms: number): Promise<void> => {
 
 // Drives the desktop tools against a live desktop: an xterm to type into, and a ticking app for output.
 const runDesktopProbes = async (): Promise<number> => {
+  // Before desktop_open the desktop is not running: the tool refuses, then the probe opens it.
   await call("desktop_screenshot", {})
+  await call("desktop_open", {})
   const term = await call("desktop_launch", { command: "xterm -geometry 100x30+40+40 -e bash" })
   const ticker = await call("desktop_launch", {
     command: "sh -c 'echo probe-started; i=0; while :; do i=$((i+1)); echo tick-$i; sleep 1; done'",
@@ -133,6 +135,8 @@ const runAutomationProbes = async (foreignId: string | undefined): Promise<numbe
 
 // Asks the user a question with options and a screenshot, then polls the inbox for a message sent during the run.
 const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
+  // The question attaches the desktop, so it has to be running.
+  await call("desktop_open", {})
   const asked = await call(
     "task_ask",
     { question: "Which colour should the notes use?", options: ["Blue", "Red"], attachScreenshot: true },
@@ -163,7 +167,7 @@ const main = async (): Promise<number> => {
   if (probe === "automation-probe") return runAutomationProbes(foreignId)
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
-  // Screenshot is best-effort: the desktop may not be running.
+  // The desktop starts only when the agent opens it: until then the desktop tools refuse.
   await call("desktop_screenshot", {})
 
   const encoded = Buffer.from(prompt, "utf8").toString("base64")

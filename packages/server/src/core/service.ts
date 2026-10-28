@@ -105,6 +105,8 @@ export interface CoreShape {
   readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
+  /** Used by the MCP handler: starts the task's desktop, or returns the one already running. */
+  readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
 
   /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
   readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
@@ -540,31 +542,10 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
-        const started = yield* startDesktop(taskNow).pipe(Effect.either)
-        let display: string | null = null
-        const desktopProblem: string | null = Either.isLeft(started)
-          ? started.left.message
-          : started.right.state === "failed"
-            ? (started.right.error ?? "desktop failed to start")
-            : null
-        if (desktopProblem === null && Either.isRight(started)) {
-          display = started.right.display
-        } else {
-          // The run still goes ahead without a display; the user is told why.
-          const notice = yield* store.update((s): Either.Either<Message, never> => {
-            const message: Message = {
-              id: newId(),
-              taskId,
-              role: "system",
-              text: `Desktop unavailable: ${desktopProblem ?? "unknown error"}`,
-              runId: reserved.run.id,
-              createdAt: nowIso(),
-            }
-            s.messages.push(message)
-            return Either.right(message)
-          })
-          publishMessage(notice)
-        }
+        // The desktop is not started with the run: the agent opens it with desktop_open when it needs one. A desktop the
+        // user already has running is passed on, so the run's sandbox can reach it.
+        const desktopNow = yield* desktop.status(taskId)
+        const display = desktopNow.state === "running" ? desktopNow.display : null
 
         yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
@@ -787,6 +768,14 @@ export const CoreLive = Layer.effect(
         }),
 
       desktopStop: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.stop(taskId)),
+
+      desktopOpen: (taskId) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          return yield* startDesktop(task).pipe(
+            Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
+          )
+        }),
 
       report: (taskId, runId, input) =>
         Effect.gen(function* () {

@@ -9,6 +9,8 @@ import { type RunContext, guard, runTool, text, truncate } from "./common"
 
 export interface DesktopToolDeps {
   readonly desktop: {
+    /** Starts the task's desktop, or returns the one already running, once it is up. */
+    readonly open: (taskId: string) => Effect.Effect<DesktopStatus, unknown>
     readonly status: (taskId: string) => Effect.Effect<DesktopStatus, unknown>
     /** The whole desktop as raw RGB24, grabbed now. */
     readonly grab: (taskId: string) => Effect.Effect<RgbFrame, unknown>
@@ -117,6 +119,14 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
 
   const input = (event: DesktopInput): Effect.Effect<void, unknown> => deps.desktop.input(ctx.taskId, event)
 
+  /** Desktop tools act on a running desktop; otherwise they fail and say how to get one. */
+  const runDesktopTool = (effect: Effect.Effect<CallToolResult, unknown>): Promise<CallToolResult> =>
+    runTool(
+      Effect.flatMap(deps.desktop.status(ctx.taskId), (status) =>
+        status.state === "running" ? effect : Effect.fail(new Error(`the desktop is ${status.state}; call desktop_open first`)),
+      ),
+    )
+
   let previous: RgbFrame | null = null
 
   /** Captures the desktop or a region as blocks. With `changes`, only the parts that differ from this session's previous capture. */
@@ -164,6 +174,25 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     })
 
   server.registerTool(
+    "desktop_open",
+    {
+      description:
+        "Start the task's desktop (a virtual screen with a terminal) and wait until it is running. The desktop tools " +
+        "need a running desktop, so call this before them. If the desktop is already running, this returns it. The user " +
+        "can watch it in the Desktop tab.",
+    },
+    () =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const status = yield* deps.desktop.open(ctx.taskId)
+            return text(`desktop is running at ${status.width} x ${status.height}`)
+          }),
+        ),
+      ),
+  )
+
+  server.registerTool(
     "desktop_screenshot",
     {
       description:
@@ -197,7 +226,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       },
     },
     ({ region, scale, changes }: Look) =>
-      guard(() => runTool(look({ region, scale, changes }).pipe(Effect.map((content): CallToolResult => ({ content }))))),
+      guard(() => runDesktopTool(look({ region, scale, changes }).pipe(Effect.map((content): CallToolResult => ({ content }))))),
   )
 
   server.registerTool(
@@ -207,7 +236,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     () =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const pointer = yield* deps.desktop.cursor(ctx.taskId)
             return text(`pointer at (${pointer.x}, ${pointer.y})`)
@@ -228,7 +257,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     ({ x, y, ...settle }: { x: number; y: number } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const { nx, ny } = yield* normalize(x, y)
             yield* input({ _tag: "mouse.move", x: nx, y: ny })
@@ -258,7 +287,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       ...settle
     }: { x: number; y: number; button?: keyof typeof BUTTONS; double?: boolean } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const buttonName = button ?? "left"
             const buttonId = BUTTONS[buttonName]
@@ -311,7 +340,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       steps?: number
     } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const buttonName = button ?? "left"
             const buttonId = BUTTONS[buttonName]
@@ -365,7 +394,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       amount?: number
     } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const clicks = amount ?? 3
             const { nx, ny } = yield* normalize(x, y)
@@ -393,7 +422,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     ({ text: value, ...settle }: { text: string } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             yield* input({ _tag: "text", text: value })
             return yield* finish(`typed ${value.length} characters`, settle)
@@ -423,7 +452,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       ...settle
     }: { key: string; repeat?: number; holdMs?: number } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const presses = repeat ?? 1
             for (let i = 0; i < presses; i++) {
@@ -451,7 +480,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     ({ command, ...settle }: { command: string } & Settle) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const id = yield* deps.desktop.launch(ctx.taskId, command)
             return yield* finish(`launched ${id}: ${command}`, settle)
@@ -472,7 +501,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     ({ lines }: { lines?: number }) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const apps = yield* deps.desktop.processes(ctx.taskId)
             if (apps.length === 0) return text("no apps launched on the desktop")
@@ -500,7 +529,7 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     },
     ({ id }: { id: string }) =>
       guard(() =>
-        runTool(
+        runDesktopTool(
           Effect.gen(function* () {
             const app = yield* deps.desktop.kill(ctx.taskId, id)
             return text(describeApp(app))

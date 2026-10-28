@@ -83,7 +83,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
       description:
         "Report the task's state to the user. Use 'working' while making progress, 'needs_input' when you need " +
         "an answer from the user (prefer task_ask, which waits for the answer), 'done' when the work is complete, " +
-        "or 'failed' if you cannot complete it. Set attachScreenshot to attach a PNG of the current desktop.",
+        "or 'failed' if you cannot complete it. Set attachScreenshot to attach a PNG of the current desktop (it must be running; see desktop_open).",
       inputSchema: {
         status: z.enum(["working", "needs_input", "done", "failed"]).describe("Current task state"),
         message: z.string().describe("Short message for the user"),
@@ -119,7 +119,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
         "The question appears in the chat with the options as buttons; the user can also type a reply. The call " +
         "waits until the user answers, however long that takes, then returns the answer text. If the call is dropped " +
         "before an answer, the question stays open: the user's next message answers it and resumes this task. " +
-        "Set attachScreenshot to show the user the current desktop with the question.",
+        "Set attachScreenshot to show the user the current desktop with the question (it must be running; see desktop_open).",
       inputSchema: {
         question: z.string().min(1).describe("The question to ask the user"),
         options: z
