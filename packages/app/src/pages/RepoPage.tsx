@@ -5,7 +5,7 @@ import type { Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { BoxOfflineBanner } from "@/components/BoxStatus"
-import { StatusBadge } from "@/components/StatusBadge"
+import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -72,7 +72,7 @@ export function RepoPage() {
               {tasks.data.map((task) => (
                 <TableRow key={task.id}>
                   <TableCell>
-                    <StatusBadge status={task.status} />
+                    <StatusIcon status={task.status} />
                   </TableCell>
                   <TableCell>
                     <Link to={`/tasks/${task.id}`} className="font-medium text-primary hover:underline">

@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query"
 import type { BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
-import { Badge } from "@/components/ui/badge"
 
 /** Latest box status, or null while unknown (first poll pending or the last poll failed). */
 export function useBox(): BoxStatusInfo | null {
@@ -13,12 +12,6 @@ export function useBox(): BoxStatusInfo | null {
 /** True only once the box is known to be offline. */
 export function useBoxOffline(): boolean {
   return useBox()?.online === false
-}
-
-export function BoxPill() {
-  const box = useBox()
-  if (box === null) return <Badge>box …</Badge>
-  return <Badge variant={box.online ? "success" : "destructive"}>box {box.online ? "online" : "offline"}</Badge>
 }
 
 export function BoxOfflineBanner({ className }: { className?: string }) {

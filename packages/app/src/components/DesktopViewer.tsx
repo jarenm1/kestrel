@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
-import { StatusBadge } from "./StatusBadge"
+import { StatusIcon } from "./StatusIcon"
 
 const RECONNECT_MS = 2000
 
@@ -141,7 +141,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         >
           {active ? "Stop" : "Start"}
         </Button>
-        {status && <StatusBadge status={status.state} />}
+        {status && <StatusIcon status={status.state} />}
         {status && status.state === "running" && (
           <span className="font-mono text-xs text-muted-foreground">
             {status.width}×{status.height} · {stats?.fps ?? 0} fps · {(stats?.decodeMs ?? 0).toFixed(1)} ms decode ·{" "}

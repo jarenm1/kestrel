@@ -3,7 +3,6 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 import { NavLink, Route, Routes } from "react-router-dom"
 import { api, ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
-import { BoxPill } from "@/components/BoxStatus"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -57,7 +56,6 @@ export function App() {
           </NavLink>
         </nav>
         <div className="ml-auto flex items-center gap-3">
-          <BoxPill />
           <img
             className="rounded-full shadow-soft"
             src={me.data.avatarUrl}

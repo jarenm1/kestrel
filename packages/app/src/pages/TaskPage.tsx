@@ -5,7 +5,7 @@ import { BoxOfflineBanner } from "@/components/BoxStatus"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { DiffPanel } from "@/components/DiffPanel"
-import { StatusBadge } from "@/components/StatusBadge"
+import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
@@ -49,8 +49,8 @@ function TaskView({ taskId }: { taskId: string }) {
       >
         <section className="flex min-h-0 min-w-0 flex-col">
           <header className="flex min-w-0 items-center gap-2.5 px-5 py-2.5">
+            {task && <StatusIcon status={task.status} />}
             <strong className="truncate">{task?.title ?? "Loading…"}</strong>
-            {task && <StatusBadge status={task.status} />}
             {task && <span className="truncate font-mono text-xs text-muted-foreground">{task.branch}</span>}
           </header>
           {state.error && <Alert className="mx-5 mb-2 w-auto">{state.error}</Alert>}

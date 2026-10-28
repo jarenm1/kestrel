@@ -6,7 +6,7 @@ import { keys, upsert } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { errorText, formatTime } from "@/util"
-import { StatusBadge } from "./StatusBadge"
+import { StatusIcon } from "./StatusIcon"
 
 interface Props {
   taskId: string
@@ -38,7 +38,7 @@ export function RunPanel({ taskId, runs, output }: Props) {
       {current && (
         <details open={current.status === "running"}>
           <summary className="mb-2 flex cursor-pointer list-none items-center gap-2 text-muted-foreground transition-colors duration-200 hover:text-foreground [&::-webkit-details-marker]:hidden">
-            Live log <StatusBadge status={current.status} />
+            <StatusIcon status={current.status} /> Live log
             <span className="font-mono text-xs">{current.id}</span>
           </summary>
           <pre
@@ -56,7 +56,7 @@ export function RunPanel({ taskId, runs, output }: Props) {
             key={run.id}
             className="-mx-2 flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 transition-colors duration-200 hover:bg-white/[0.03]"
           >
-            <StatusBadge status={run.status} />
+            <StatusIcon status={run.status} />
             <span className="min-w-0 flex-1 truncate" title={run.prompt}>
               {run.prompt}
             </span>
