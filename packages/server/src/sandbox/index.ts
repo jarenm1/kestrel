@@ -333,13 +333,68 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     }
   })
 
-export interface ProcessResult {
-  readonly exitCode: number
-  readonly stdout: string
-  readonly stderr: string
+/** Bytes kept at each end of a stream by `workspace_exec`; whatever lies between is counted, not held. */
+const EXEC_WINDOW_BYTES = 10_000
+
+/** A stream's first and last bytes, and the number of bytes dropped between them. */
+export interface CapturedOutput {
+  readonly head: string
+  readonly tail: string
+  readonly omittedBytes: number
 }
 
-/** Runs a process in its own process group; timeout or interruption kills the whole group. */
+export interface ProcessResult {
+  /** -1 when the process ended by signal or was killed at the timeout. */
+  readonly exitCode: number
+  readonly timedOut: boolean
+  readonly stdout: CapturedOutput
+  readonly stderr: CapturedOutput
+}
+
+/** Pipe output still arriving once the main process has exited is read for this long, then the pipes are dropped. */
+const DRAIN_GRACE_MS = 250
+
+/** Holds the first and last `EXEC_WINDOW_BYTES` of a stream; the middle is counted and discarded as it arrives. */
+class OutputWindow {
+  private readonly head: Buffer[] = []
+  private headBytes = 0
+  private tail: Buffer = Buffer.alloc(0)
+  private omitted = 0
+
+  push(chunk: Buffer): void {
+    let rest = chunk
+    if (this.headBytes < EXEC_WINDOW_BYTES) {
+      const take = Math.min(EXEC_WINDOW_BYTES - this.headBytes, rest.length)
+      this.head.push(Buffer.from(rest.subarray(0, take)))
+      this.headBytes += take
+      rest = rest.subarray(take)
+    }
+    if (rest.length === 0) return
+    const joined = Buffer.concat([this.tail, rest])
+    const excess = joined.length - EXEC_WINDOW_BYTES
+    if (excess > 0) {
+      this.omitted += excess
+      this.tail = Buffer.from(joined.subarray(excess))
+    } else {
+      this.tail = joined
+    }
+  }
+
+  result(): CapturedOutput {
+    return {
+      head: Buffer.concat(this.head).toString("utf8"),
+      tail: this.tail.toString("utf8"),
+      omittedBytes: this.omitted,
+    }
+  }
+}
+
+/**
+ * Runs a process in its own process group and captures bounded output. A timeout kills the whole group and
+ * returns what was printed, flagged `timedOut`. The result is reported once the main process has exited and
+ * its pipes drained for a short grace: a backgrounded child that still holds the pipes is not waited for, so
+ * its later writes to them fail (redirect its output to keep it running).
+ */
 export const runProcess = (
   file: string,
   args: ReadonlyArray<string>,
@@ -347,12 +402,24 @@ export const runProcess = (
 ): Effect.Effect<ProcessResult, InternalError> =>
   Effect.async<ProcessResult, InternalError>((resume) => {
     let done = false
+    let timedOut = false
+    let exitCode = -1
     let timer: NodeJS.Timeout | undefined
-    const finish = (effect: Effect.Effect<ProcessResult, InternalError>) => {
+    let grace: NodeJS.Timeout | undefined
+    const stdout = new OutputWindow()
+    const stderr = new OutputWindow()
+    const settle = (effect: Effect.Effect<ProcessResult, InternalError>) => {
       if (done) return
       done = true
       clearTimeout(timer)
+      clearTimeout(grace)
+      child.stdout.destroy()
+      child.stderr.destroy()
       resume(effect)
+    }
+    const finish = () => settle(Effect.succeed({ exitCode, timedOut, stdout: stdout.result(), stderr: stderr.result() }))
+    const drainThenFinish = () => {
+      grace ??= setTimeout(finish, DRAIN_GRACE_MS)
     }
     const child = ownGroup(
       spawn(file, [...args], {
@@ -362,32 +429,31 @@ export const runProcess = (
         stdio: ["ignore", "pipe", "pipe"],
       }),
     )
-    let stdout = ""
-    let stderr = ""
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk
-    })
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk
-    })
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
     if (opts.timeoutMs !== undefined) {
       timer = setTimeout(() => {
+        timedOut = true
         killProcessGroup(child.pid, "SIGKILL")
-        finish(Effect.fail(new InternalError({ message: `timed out after ${opts.timeoutMs}ms` })))
+        drainThenFinish()
       }, opts.timeoutMs)
     }
     child.on("error", (err) => {
-      finish(Effect.fail(new InternalError({ message: `${file} failed to start: ${err.message}` })))
+      settle(Effect.fail(new InternalError({ message: `${file} failed to start: ${err.message}` })))
+    })
+    child.once("exit", (code) => {
+      exitCode = code ?? -1
+      drainThenFinish()
     })
     child.on("close", (code) => {
-      finish(Effect.succeed({ exitCode: code ?? -1, stdout, stderr }))
+      exitCode = code ?? -1
+      finish()
     })
     return Effect.sync(() => {
       if (done) return
       done = true
       clearTimeout(timer)
+      clearTimeout(grace)
       killProcessGroup(child.pid, "SIGKILL")
     })
   })
