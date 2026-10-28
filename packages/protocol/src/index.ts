@@ -5,6 +5,7 @@
  * Pure Effect Schema: no Node/DOM-specific imports here.
  */
 import { Schema } from "effect"
+import { BranchName, RepoRef } from "./refs"
 
 // ---------------------------------------------------------------------------
 // Domain
@@ -199,9 +200,9 @@ export type ServerEvent = typeof ServerEvent.Type
  * so a checkout starts from the remote tip.
  */
 export const CheckoutRequest = Schema.Struct({
-  repo: Schema.String.pipe(Schema.minLength(1)),
+  repo: RepoRef,
   /** Branch to fork from. Defaults to the repository's default branch; with `pullRequest`, the pull request's base. */
-  baseBranch: Schema.optional(Schema.String),
+  baseBranch: Schema.optional(BranchName),
   /**
    * Start at the head of this GitHub pull request (`refs/pull/<n>/head`) instead of `baseBranch`. `baseBranch`
    * stays the pull request's base (for opening a pull request); the checkout's diff is against the head it started at.
@@ -315,3 +316,4 @@ export const Paths = {
 
 export * from "./relay"
 export * from "./control"
+export * from "./refs"

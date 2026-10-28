@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { GithubRepoSlug } from "./refs"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -186,11 +187,13 @@ export type Automation = typeof Automation.Type
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),
   /** GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules. */
-  repo: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
+  repo: Schema.optional(GithubRepoSlug),
   prompt: Schema.String.pipe(Schema.minLength(1)),
   trigger: AutomationTrigger,
   enabled: Schema.optional(Schema.Boolean),
-})
+}).pipe(
+  Schema.filter((body) => body.trigger._tag !== "github" || body.repo !== undefined || "github triggers need a repo"),
+)
 export type CreateAutomationBody = typeof CreateAutomationBody.Type
 
 /** Every field optional; `repo` cannot change. */
