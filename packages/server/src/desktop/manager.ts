@@ -9,9 +9,12 @@ import { encodePng, resample, type RgbFrame } from "./frames"
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
 
+/** What a media chunk is: the init segment, a keyframe (decodable on its own), or a delta that needs its predecessors. */
+export type MediaKind = "init" | "key" | "delta"
+
 export interface DesktopSink {
   onStatus(s: DesktopStatus): void
-  onMedia(chunk: Uint8Array): void
+  onMedia(chunk: Uint8Array, kind: MediaKind): void
 }
 
 /** A process prepared by the caller (sandboxed); the desktop only spawns and tracks it. */
@@ -519,7 +522,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           s.mime = `video/mp4; codecs="${piece.codec}"`
           s.state = "running"
           Deferred.unsafeDone(s.ready, Effect.void)
-          for (const sink of s.sinks) sink.onMedia(piece.bytes)
+          for (const sink of s.sinks) sink.onMedia(piece.bytes, "init")
           publish(s)
           scheduleStop(s)
           continue
@@ -536,7 +539,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
             s.gopBytes = 0
           }
         }
-        for (const sink of s.sinks) if (piece.keyframe || !s.awaiting.has(sink)) sink.onMedia(piece.bytes)
+        const kind: MediaKind = piece.keyframe ? "key" : "delta"
+        for (const sink of s.sinks) if (piece.keyframe || !s.awaiting.has(sink)) sink.onMedia(piece.bytes, kind)
       }
     }
 
@@ -912,10 +916,10 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
             )
           } else if (s.init !== null && s.gop !== null) {
             // Live encoder with a cached GOP: the keyframe and its deltas bring this viewer straight to live.
-            sink.onMedia(s.init)
-            for (const fragment of s.gop) sink.onMedia(fragment)
+            sink.onMedia(s.init, "init")
+            for (const [i, fragment] of s.gop.entries()) sink.onMedia(fragment, i === 0 ? "key" : "delta")
           } else {
-            if (s.init !== null) sink.onMedia(s.init)
+            if (s.init !== null) sink.onMedia(s.init, "init")
             s.awaiting.add(sink)
           }
           return Effect.sync(() => {
