@@ -14,6 +14,20 @@
           config.allowUnfree = true;
         };
 
+        # Damage-driven X capture (packages/server/native): one raw frame per screen change for ffmpeg.
+        xdamageCapture = pkgs.stdenv.mkDerivation {
+          pname = "xdamage-capture";
+          version = "0.1.0";
+          src = ./packages/server/native;
+          buildInputs = with pkgs; [ libX11 libXext libXdamage libXfixes ];
+          buildPhase = ''
+            $CC -std=gnu11 -O2 -Wall -Wextra -Werror -o xdamage-capture xdamage-capture.c -lX11 -lXext -lXdamage -lXfixes
+          '';
+          installPhase = ''
+            install -Dm755 xdamage-capture $out/bin/xdamage-capture
+          '';
+        };
+
         # Native / system dependencies. npm dependencies are pinned by bun.lock
         # and installed with `bun install` inside the dev shell.
         systemDeps = with pkgs; [
@@ -32,6 +46,7 @@
           xterm         # default app on agent desktops
           xdotool       # input injection (mouse/keyboard) from the web client / MCP
           ffmpeg-full   # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
+          xdamageCapture # frames from the X damage/cursor events -> ffmpeg rawvideo
           # Local control plane (`wrangler dev`); nixpkgs' build runs workerd on NixOS
           wrangler
         ];
