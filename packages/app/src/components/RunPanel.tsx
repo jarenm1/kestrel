@@ -34,25 +34,28 @@ export function RunPanel({ taskId, runs, output }: Props) {
   if (runs.length === 0) return null
 
   return (
-    <div className="max-h-[45%] overflow-auto border-t px-4 py-2">
+    <div className="mx-auto max-h-[45%] w-full max-w-[calc(48rem+2.5rem)] overflow-auto px-5 py-2">
       {current && (
         <details open={current.status === "running"}>
-          <summary className="mb-1.5 flex cursor-pointer items-center gap-2 text-muted-foreground">
+          <summary className="mb-2 flex cursor-pointer list-none items-center gap-2 text-muted-foreground transition-colors duration-200 hover:text-foreground [&::-webkit-details-marker]:hidden">
             Live log <StatusBadge status={current.status} />
             <span className="font-mono text-xs">{current.id}</span>
           </summary>
           <pre
             ref={logRef}
-            className="m-0 max-h-56 overflow-auto rounded-md border bg-code px-2.5 py-2 font-mono text-xs break-all whitespace-pre-wrap"
+            className="m-0 max-h-56 overflow-auto rounded-xl bg-code px-3.5 py-3 font-mono text-xs break-all whitespace-pre-wrap shadow-well"
           >
             {lines.length === 0 ? <span className="text-muted-foreground">No output yet.</span> : lines.join("\n")}
           </pre>
         </details>
       )}
-      {cancel.error && <Alert className="mt-1.5">{errorText(cancel.error)}</Alert>}
-      <ul className="mt-1.5">
+      {cancel.error && <Alert className="mt-2">{errorText(cancel.error)}</Alert>}
+      <ul className="mt-2">
         {[...runs].reverse().map((run) => (
-          <li key={run.id} className="flex min-w-0 items-center gap-2 py-1">
+          <li
+            key={run.id}
+            className="-mx-2 flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 transition-colors duration-200 hover:bg-white/[0.03]"
+          >
             <StatusBadge status={run.status} />
             <span className="min-w-0 flex-1 truncate" title={run.prompt}>
               {run.prompt}

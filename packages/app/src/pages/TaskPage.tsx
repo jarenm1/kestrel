@@ -40,45 +40,29 @@ function TaskView({ taskId }: { taskId: string }) {
 
   return (
     <>
-      <BoxOfflineBanner />
+      <BoxOfflineBanner className="mx-5 mb-2 w-auto" />
       <div
         className={cn(
           "grid min-h-0 flex-1",
-          open ? "grid-cols-[minmax(320px,1fr)_minmax(320px,1fr)]" : "grid-cols-[minmax(0,1fr)_2.75rem]",
+          open ? "grid-cols-[minmax(320px,1fr)_minmax(320px,1fr)]" : "grid-cols-[minmax(0,1fr)_3.5rem]",
         )}
       >
         <section className="flex min-h-0 min-w-0 flex-col">
-          <header className="flex min-w-0 items-center gap-2 border-b bg-card px-4 py-2.5">
+          <header className="flex min-w-0 items-center gap-2.5 px-5 py-2.5">
             <strong className="truncate">{task?.title ?? "Loading…"}</strong>
             {task && <StatusBadge status={task.status} />}
             {task && <span className="truncate font-mono text-xs text-muted-foreground">{task.branch}</span>}
-            {task?.pullRequest && (
-              <a
-                href={task.pullRequest.url}
-                target="_blank"
-                rel="noreferrer"
-                className="shrink-0 text-xs font-medium text-primary underline-offset-4 hover:underline"
-              >
-                PR #{task.pullRequest.number}
-              </a>
-            )}
           </header>
-          {state.error && <Alert className="rounded-none border-x-0 border-t-0">{state.error}</Alert>}
-          <ChatPanel
-            taskId={taskId}
-            taskStatus={task?.status}
-            messages={state.messages}
-            runs={state.runs}
-            output={state.output}
-          />
+          {state.error && <Alert className="mx-5 mb-2 w-auto">{state.error}</Alert>}
+          <ChatPanel taskId={taskId} messages={state.messages} runs={state.runs} output={state.output} />
         </section>
         {open ? (
-          <aside className="flex min-h-0 min-w-0 flex-col border-l">
-            <div className="flex items-center gap-1.5 border-b bg-card px-2 py-1.5">
+          <aside className="mr-3 mb-3 flex min-h-0 min-w-0 animate-in flex-col overflow-hidden rounded-2xl bg-card shadow-soft duration-300 fade-in slide-in-from-right-4">
+            <div className="flex items-center gap-1.5 p-2">
               {SIDEBAR_TABS.map((t) => (
                 <Button
                   key={t.id}
-                  variant={tab === t.id ? "secondary" : "ghost"}
+                  variant={tab === t.id ? "soft" : "ghost"}
                   size="sm"
                   aria-pressed={tab === t.id}
                   onClick={() => setTab(t.id)}
@@ -100,7 +84,7 @@ function TaskView({ taskId }: { taskId: string }) {
             <SidebarBody tab={tab} taskId={taskId} />
           </aside>
         ) : (
-          <aside className="flex flex-col items-center gap-1 border-l bg-card py-2">
+          <aside className="mr-3 mb-3 flex flex-col items-center gap-1 rounded-2xl bg-card py-2 shadow-soft">
             <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => setOpen(true)}>
               <PanelRightOpen />
             </Button>

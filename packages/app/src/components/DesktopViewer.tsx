@@ -132,7 +132,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 border-b px-3 py-1.5">
+      <div className="flex items-center gap-2 px-4 pb-2">
         <Button
           variant={active ? "soft" : "default"}
           size="sm"
@@ -149,8 +149,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           </span>
         )}
       </div>
-      {error && <Alert className="m-2 w-auto">{error}</Alert>}
-      <div className="relative min-h-0 flex-1 bg-black">
+      {error && <Alert className="mx-3 mb-2 w-auto">{error}</Alert>}
+      <div className="relative mx-3 mb-3 min-h-0 flex-1 overflow-hidden rounded-xl bg-black shadow-well">
         <canvas
           ref={canvasRef}
           className="absolute inset-0 size-full cursor-default object-contain outline-none focus:shadow-[inset_0_0_0_1px_var(--ring)]"

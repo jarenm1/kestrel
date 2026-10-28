@@ -18,14 +18,14 @@ export function DiffPanel({ taskId }: { taskId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-2 border-b px-3 py-1.5">
+      <div className="flex items-center gap-2 px-4 pb-2">
         <span className="text-muted-foreground">{diff.data ? `vs ${diff.data.baseBranch}` : "diff"}</span>
         <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
           {diff.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
-      {diff.error && <Alert className="m-2 w-auto">{errorText(diff.error)}</Alert>}
-      <pre className="m-0 min-h-0 flex-1 overflow-auto bg-code py-1.5 font-mono text-xs">
+      {diff.error && <Alert className="mx-3 mb-2 w-auto">{errorText(diff.error)}</Alert>}
+      <pre className="mx-3 mb-3 min-h-0 flex-1 overflow-auto rounded-xl bg-code py-2.5 font-mono text-xs shadow-well">
         {diff.isSuccess && text.trim() === "" ? (
           <span className="px-3 text-muted-foreground">No changes.</span>
         ) : (

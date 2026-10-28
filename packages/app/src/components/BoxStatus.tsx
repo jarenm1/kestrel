@@ -21,11 +21,11 @@ export function BoxPill() {
   return <Badge variant={box.online ? "success" : "destructive"}>box {box.online ? "online" : "offline"}</Badge>
 }
 
-export function BoxOfflineBanner() {
+export function BoxOfflineBanner({ className }: { className?: string }) {
   const offline = useBoxOffline()
   if (!offline) return null
   return (
-    <Alert variant="warning">
+    <Alert variant="warning" className={className}>
       Agent box offline. Start it with <code className="font-mono text-foreground">nix run .#box</code>
     </Alert>
   )
