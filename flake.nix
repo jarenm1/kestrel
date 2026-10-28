@@ -51,6 +51,13 @@
           wrangler
         ];
 
+        # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
+        sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
+        sandboxFirefox = pkgs.writeShellScriptBin "firefox" ''
+          export FONTCONFIG_FILE=${sandboxFontsConf}
+          exec ${pkgs.firefox}/bin/firefox "$@"
+        '';
+
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
         sandboxEnv = pkgs.buildEnv {
           name = "cloudagents-sandbox-env";
@@ -71,6 +78,7 @@
             claude-code
             codex
             xterm # the task desktop's terminal and what the agent launches on it run sandboxed
+            sandboxFirefox # a browser for desktop_launch
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";

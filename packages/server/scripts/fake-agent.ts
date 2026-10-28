@@ -79,6 +79,8 @@ const runDesktopProbes = async (): Promise<number> => {
   const ticker = await call("desktop_launch", {
     command: "sh -c 'echo probe-started; i=0; while :; do i=$((i+1)); echo tick-$i; sleep 1; done'",
   })
+  const missing = await call("desktop_launch", { command: "no-such-app" })
+  console.log(`fake-agent: probe missing-app failed=${missing.failed}`)
   const termId = /launched (app-\d+)/.exec(term.text)?.[1]
   const tickerId = /launched (app-\d+)/.exec(ticker.text)?.[1]
   if (!termId || !tickerId) {

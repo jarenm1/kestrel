@@ -33,6 +33,9 @@ const DEFAULT_SETTLE_MS = 300
 /** Wheel delta per click; the manager turns each event's delta back into clicks. */
 const WHEEL_DELTA_PER_CLICK = 50
 const MAX_CLICKS_PER_EVENT = 10
+/** How long desktop_launch watches a new app before reporting it, so one that fails at once is reported as failed. */
+const LAUNCH_CHECK_MS = 500
+const DEFAULT_OUTPUT_LINES = 20
 
 /** Shared by the action tools: optionally return a screenshot once the UI has had time to react. */
 const settleSchema = {
@@ -56,6 +59,12 @@ const describeApp = (app: DesktopApp): string => {
       ? `killed by ${app.signal}`
       : `exited with code ${app.exitCode}`
   return `${app.id}  ${status}  ${app.command}`
+}
+
+/** An app's status line, then the last `lines` lines of its output. */
+const appReport = (app: DesktopApp, lines: number): string => {
+  const tail = app.output === "" || lines === 0 ? [] : app.output.replace(/\n$/, "").split("\n").slice(-lines)
+  return [describeApp(app), ...tail.map((line) => `  ${line}`)].join("\n")
 }
 
 /** What the image pixels mean in desktop pixels, so the agent can turn a point in the image into a click. */
@@ -179,14 +188,18 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       description:
         "Start the task's desktop (a virtual screen with a terminal) and wait until it is running. The desktop tools " +
         "need a running desktop, so call this before them. If the desktop is already running, this returns it. The user " +
-        "can watch it in the Desktop tab.",
+        "can watch it in the Desktop tab. Start apps on it with desktop_launch: your own shell reaches the desktop only " +
+        "if it was already running when this run started.",
     },
     () =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
             const status = yield* deps.desktop.open(ctx.taskId)
-            return text(`desktop is running at ${status.width} x ${status.height}`)
+            return text(
+              `desktop is running at ${status.width} x ${status.height}. Start apps on it with desktop_launch; your own ` +
+                "shell may not have its DISPLAY.",
+            )
           }),
         ),
       ),
@@ -472,7 +485,8 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
       description:
         "Start a GUI or terminal command on the task desktop, detached, so it appears on the desktop " +
         "(e.g. 'firefox', 'xterm'). Returns an app id for desktop_processes and desktop_kill. " +
-        "Does not wait for it to exit.",
+        `Does not wait for it to exit, but an app that exits within ${LAUNCH_CHECK_MS} ms is reported with its ` +
+        "exit status and output; a non-zero exit is a tool error.",
       inputSchema: {
         command: z.string().describe("Shell command to launch on the desktop"),
         ...settleSchema,
@@ -483,6 +497,13 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
         runDesktopTool(
           Effect.gen(function* () {
             const id = yield* deps.desktop.launch(ctx.taskId, command)
+            yield* Effect.sleep(LAUNCH_CHECK_MS)
+            const app = (yield* deps.desktop.processes(ctx.taskId)).find((a) => a.id === id)
+            if (app !== undefined && !app.running) {
+              const report = truncate(appReport(app, DEFAULT_OUTPUT_LINES))
+              if (app.exitCode !== 0) return yield* Effect.fail(new Error(`${id} failed to start:\n${report}`))
+              return yield* finish(`${id} exited at once (it may have handed off to another process):\n${report}`, settle)
+            }
             return yield* finish(`launched ${id}: ${command}`, settle)
           }),
         ),
@@ -505,13 +526,8 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
           Effect.gen(function* () {
             const apps = yield* deps.desktop.processes(ctx.taskId)
             if (apps.length === 0) return text("no apps launched on the desktop")
-            const shown = lines ?? 20
-            const blocks = apps.map((app) => {
-              const tail =
-                app.output === "" || shown === 0 ? [] : app.output.replace(/\n$/, "").split("\n").slice(-shown)
-              return [describeApp(app), ...tail.map((line) => `  ${line}`)].join("\n")
-            })
-            return text(truncate(blocks.join("\n\n")))
+            const shown = lines ?? DEFAULT_OUTPUT_LINES
+            return text(truncate(apps.map((app) => appReport(app, shown)).join("\n\n")))
           }),
         ),
       ),
