@@ -25,7 +25,7 @@ import { prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNe
 import { EventHub } from "./events"
 import { AgentHarness } from "./harness"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
-import { WorkspaceService } from "./workspace"
+import { WorkspaceService, taskBaseRef } from "./workspace"
 
 /** Bytes an agent attaches to a message (e.g. a desktop screenshot); core stores them and serves them over REST. */
 export interface AttachmentInput {
@@ -402,6 +402,7 @@ export const CoreLive = Layer.effect(
             .removeWorktree(repo.localPath, task.worktreePath)
             .pipe(Effect.mapError(toInternal("remove worktree")))
           yield* workspace.deleteBranch(repo.localPath, task.branch).pipe(Effect.mapError(toInternal("delete branch")))
+          yield* workspace.deleteRef(repo.localPath, taskBaseRef(taskId)).pipe(Effect.mapError(toInternal("delete base ref")))
         }
         yield* removeTaskState(taskId)
       })
@@ -414,20 +415,26 @@ export const CoreLive = Layer.effect(
         if (pullRequest !== undefined && parseGitHubRepo(repo.url) === null) {
           return yield* Effect.fail(new BadRequest({ message: `${repo.name} is not a github.com repository; pull requests need one` }))
         }
-        const requestedBase = input.baseBranch?.trim() || repo.defaultBranch
-        if (input.fetch || pullRequest !== undefined) {
-          yield* fetchFromOrigin(repo, `refs/heads/${requestedBase}:refs/heads/${requestedBase}`)
-        }
-        if (pullRequest !== undefined) {
-          yield* fetchFromOrigin(repo, `+refs/pull/${pullRequest}/head:refs/heads/kestrel/pr-${pullRequest}`)
-        }
-        const baseBranch = pullRequest === undefined ? requestedBase : `kestrel/pr-${pullRequest}`
+        const baseBranch = input.baseBranch?.trim() || repo.defaultBranch
         const id = newId()
+        const baseRef = taskBaseRef(id)
+        if (input.fetch || pullRequest !== undefined) {
+          yield* fetchFromOrigin(repo, `refs/heads/${baseBranch}:refs/heads/${baseBranch}`)
+        }
+        // The fork point is pinned per task, so later fetches that move a base branch or a pull request ref leave this task's diff alone.
+        if (pullRequest !== undefined) {
+          yield* fetchFromOrigin(repo, `+refs/pull/${pullRequest}/head:${baseRef}`)
+        } else {
+          yield* workspace
+            .updateRef({ repoPath: repo.localPath, ref: baseRef, target: baseBranch })
+            .pipe(Effect.mapError(toInternal("pin base")))
+        }
         const branch = `cloudagents/${slugify(title)}-${id.replace(/-/g, "").slice(0, 6)}`
         const worktreePath = join(config.worktreesDir, id)
-        yield* workspace
-          .createWorktree({ repoPath: repo.localPath, branch, baseBranch, worktreePath })
-          .pipe(Effect.mapError(toInternal("create worktree")))
+        yield* workspace.createWorktree({ repoPath: repo.localPath, branch, baseBranch: baseRef, worktreePath }).pipe(
+          Effect.mapError(toInternal("create worktree")),
+          Effect.tapError(() => workspace.deleteRef(repo.localPath, baseRef).pipe(Effect.ignore)),
+        )
         const now = nowIso()
         const task: Task = {
           id,
@@ -722,8 +729,13 @@ export const CoreLive = Layer.effect(
       diff: (user, taskId) =>
         Effect.gen(function* () {
           const task = yield* ownedTask(user, taskId)
+          const repoPath = join(config.reposDir, task.repoId)
+          // Tasks created before the pin existed have no ref: their base is the branch they were forked from.
+          const pinned = taskBaseRef(task.id)
+          const pinnedExists = yield* workspace.refExists(repoPath, pinned).pipe(Effect.mapError(toInternal("diff")))
+          const baseRef = pinnedExists ? pinned : task.baseBranch
           const diff = yield* workspace
-            .diff({ repoPath: join(config.reposDir, task.repoId), worktreePath: task.worktreePath, baseBranch: task.baseBranch })
+            .diff({ repoPath, worktreePath: task.worktreePath, baseRef })
             .pipe(Effect.mapError(toInternal("diff")))
           return { baseBranch: task.baseBranch, diff }
         }),

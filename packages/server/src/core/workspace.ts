@@ -25,12 +25,22 @@ export interface WorkspaceShape {
   }) => Effect.Effect<void, WorkspaceError>
   readonly removeWorktree: (repoPath: string, worktreePath: string) => Effect.Effect<void, WorkspaceError>
   readonly deleteBranch: (repoPath: string, branch: string) => Effect.Effect<void, WorkspaceError>
-  /** Diff of the worktree against baseBranch, including uncommitted and untracked files. */
+  /** Diff of the worktree against baseRef (a commit or ref), including uncommitted and untracked files. */
   readonly diff: (opts: {
     readonly repoPath: string
     readonly worktreePath: string
-    readonly baseBranch: string
+    readonly baseRef: string
   }) => Effect.Effect<string, WorkspaceError>
+  /** Points `ref` at `target` (a branch, ref or commit), creating it when needed. Pins a task's fork point. */
+  readonly updateRef: (opts: {
+    readonly repoPath: string
+    readonly ref: string
+    readonly target: string
+  }) => Effect.Effect<void, WorkspaceError>
+  /** Deletes `ref`; succeeds when it is already gone. */
+  readonly deleteRef: (repoPath: string, ref: string) => Effect.Effect<void, WorkspaceError>
+  /** Whether `ref` resolves in the clone. */
+  readonly refExists: (repoPath: string, ref: string) => Effect.Effect<boolean, WorkspaceError>
   /**
    * Pushes `refs/heads/<branch>` from a task worktree to `remoteUrl`. Never forced; hooks and
    * agent-writable config (credential helpers, ssh command, askpass) are not honoured.
@@ -202,6 +212,12 @@ const redactSecret = (text: string, token: string | undefined): string => {
   return text.split(token).join("***").split(basic).join("***")
 }
 
+/**
+ * The ref that pins a task's fork point. It lives outside `refs/heads` so fetches that move a base branch,
+ * or a later task fetching the same pull request, never change the diff base of an existing task.
+ */
+export const taskBaseRef = (taskId: string): string => `refs/kestrel/base/${taskId}`
+
 const make: WorkspaceShape = {
   pushBranch: ({ repoPath, worktreePath, remoteUrl, branch, githubToken }) =>
     Effect.gen(function* () {
@@ -286,10 +302,17 @@ const make: WorkspaceShape = {
 
   deleteBranch: (repoPath, branch) => git(repoPath, ["branch", "-D", branch]).pipe(Effect.asVoid),
 
-  diff: ({ repoPath, worktreePath, baseBranch }) =>
+  updateRef: ({ repoPath, ref, target }) => git(repoPath, ["update-ref", ref, target]).pipe(Effect.asVoid),
+  deleteRef: (repoPath, ref) => git(repoPath, ["update-ref", "-d", ref]).pipe(Effect.asVoid),
+  refExists: (repoPath, ref) =>
+    runProcess("git", [...SAFE_GIT, "rev-parse", "--verify", "--quiet", ref], { cwd: repoPath }, "git rev-parse").pipe(
+      Effect.map((res) => res.exitCode === 0),
+    ),
+
+  diff: ({ repoPath, worktreePath, baseRef }) =>
     Effect.gen(function* () {
       const env = worktreeGitEnv(repoPath, worktreePath)
-      const tracked = yield* git(worktreePath, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", baseBranch], env)
+      const tracked = yield* git(worktreePath, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", baseRef], env)
       const untrackedList = yield* git(worktreePath, ["ls-files", "--others", "--exclude-standard", "-z"], env)
       let untracked = ""
       for (const file of untrackedList.split("\0")) {

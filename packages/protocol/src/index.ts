@@ -179,11 +179,14 @@ export type CreateRepoBody = typeof CreateRepoBody.Type
 
 export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
-  /** Base branch to fork the worktree from. Defaults to repo.defaultBranch. */
+  /** Base branch the task is for. Defaults to repo.defaultBranch. With `pullRequest`, the pull request's base branch. */
   baseBranch: Schema.optional(Schema.String),
-  /** Fetch `baseBranch` (default: repo.defaultBranch) from origin with the owner's token before forking, so the task starts from the remote tip. */
+  /** Fetch `baseBranch` (default: repo.defaultBranch) from origin with the owner's token before forking, so the task starts from the remote tip. The fork point is pinned for the task's lifetime. */
   fetch: Schema.optional(Schema.Boolean),
-  /** Start the task at the head of this GitHub pull request (fetched from origin `refs/pull/<n>/head`). Implies fetch. */
+  /**
+   * Start the task at the head of this GitHub pull request (fetched from origin `refs/pull/<n>/head`). Implies fetch.
+   * `baseBranch` stays the pull request's base branch (for opening a pull request); the task diff is against the head it started at.
+   */
   pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
