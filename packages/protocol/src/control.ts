@@ -46,9 +46,18 @@ export const ControlPaths = {
   automationRuns: (id: string) => `/api/automations/${id}/runs`,
   /** POST TriggerAutomationBody -> AutomationRun: "run now". */
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
+  /**
+   * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user). Requires
+   * `Authorization: Bearer <box token>` and the acting user's login in BOX_USER_HEADER. Never reached from a browser.
+   */
+  boxAutomations: "/box/automations",
+  boxAutomation: (id: string) => `/box/automations/${id}`,
   /** POST: GitHub repository webhook receiver. No session; authenticated by X-Hub-Signature-256. */
   githubWebhook: "/webhooks/github",
 } as const
+
+/** Header the control plane's box routes read the acting user's login from; the box sets it, never a browser. */
+export const BOX_USER_HEADER = "x-kestrel-box-user"
 
 export const Me = Schema.Struct({
   login: Schema.String,

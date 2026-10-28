@@ -167,7 +167,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   }
 
   if (path === ControlPaths.automations || path.startsWith(`${ControlPaths.automations}/`)) {
-    return handleAutomations(request, env, login, url)
+    return handleAutomations(request, env, login, url, ControlPaths.automations)
   }
 
   return relayToBox(request, env, login, url)

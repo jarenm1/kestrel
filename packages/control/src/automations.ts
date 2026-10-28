@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import {
+  BOX_USER_HEADER,
   ControlPaths,
   CreateAutomationBody,
   Paths,
@@ -185,16 +186,25 @@ const triggerAutomation = async (request: Request, env: Env, login: string, id: 
   return run === null ? notFound() : json(run, 201)
 }
 
-/** Every `/api/automations` route. Called after the session check; the webhook route is outside this. */
-export const handleAutomations = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
+/**
+ * Every automation route under `base` (`/api/automations` for the browser, `/box/automations` for the box). Called
+ * after the caller's auth check; the webhook route is outside this.
+ */
+export const handleAutomations = async (
+  request: Request,
+  env: Env,
+  login: string,
+  url: URL,
+  base: string,
+): Promise<Response> => {
   const method = request.method
-  if (url.pathname === ControlPaths.automations) {
+  if (url.pathname === base) {
     if (method === "GET") return json(await hub(env).automations(login))
     if (method === "POST") return createAutomation(request, env, login, url)
     return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
   }
-  const match = /^\/api\/automations\/([^/]+)(\/runs|\/trigger)?$/.exec(url.pathname)
-  if (match === null) return errorResponse(404, "NotFound", "no such route")
+  const match = new RegExp(`^${base}/([^/]+)(/runs|/trigger)?$`).exec(url.pathname)
+   if (match === null) return errorResponse(404, "NotFound", "no such route")
   const [, id = "", suffix] = match
   if (suffix === "/runs" && method === "GET") {
     const runs = await hub(env).automationRuns(login, id)
@@ -208,4 +218,15 @@ export const handleAutomations = async (request: Request, env: Env, login: strin
   if (suffix === undefined && method === "PATCH") return updateAutomation(request, env, login, url, id)
   if (suffix === undefined && method === "DELETE") return deleteAutomation(env, login, id)
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
+/**
+ * Every `/box/automations` route. The box holds BOX_TOKEN (checked by the caller) and names the user it acts for in
+ * BOX_USER_HEADER; that user must exist. Ownership is then enforced by the same handlers the browser uses.
+ */
+export const handleBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const login = request.headers.get(BOX_USER_HEADER) ?? ""
+  if (login === "") return errorResponse(400, "BadRequest", `${BOX_USER_HEADER} header is required`)
+  if ((await hub(env).getUser(login)) === null) return errorResponse(401, "Unauthorized", "unknown user")
+  return handleAutomations(request, env, login, url, ControlPaths.boxAutomations)
 }
