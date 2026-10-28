@@ -40,8 +40,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
   });
 
-  // Build a minimal HTML page that connects to the desktop WebSocket stream.
-  // This runs MediaSource Extensions inside the WebView which supports them.
+  // Minimal MSE page for the desktop fMP4 stream. Every binary frame (init or fragment) goes into one
+  // FIFO that is drained only while the SourceBuffer is idle: dropping a fragment corrupts H.264 decoding.
   const desktopHtml = useMemo(() => {
     if (!serverUrl || !status || status.state !== "running") return null;
 
@@ -63,11 +63,65 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   <video id="v" muted autoplay playsinline></video>
   <div id="s" class="status"></div>
   <script>
+    const KEEP_BEHIND_S = 10;
+    const LIVE_EDGE_S = 0.5;
     const ws = new WebSocket("${wsUrl}");
     ws.binaryType = "arraybuffer";
     const video = document.getElementById("v");
     const statusEl = document.getElementById("s");
-    let ms, sb, mime, inited = false;
+    let ms = null, sb = null, mime = null;
+    const queue = [];
+
+    function pump() {
+      if (!sb || sb.updating) return;
+      const ranges = sb.buffered;
+      if (ranges.length > 0 && video.currentTime - KEEP_BEHIND_S > ranges.start(0)) {
+        sb.remove(0, video.currentTime - KEEP_BEHIND_S);
+        return;
+      }
+      const chunk = queue.shift();
+      if (!chunk) return;
+      try {
+        sb.appendBuffer(chunk);
+      } catch (e) {
+        queue.unshift(chunk);
+        const from = ranges.length > 0 ? ranges.start(0) : 0;
+        if (video.currentTime - 1 > from) sb.remove(from, video.currentTime - 1);
+        else statusEl.textContent = String(e);
+      }
+    }
+
+    // Chase the live edge and recover from timestamp gaps. Underrun at the end of the last range is
+    // left alone: the playhead then waits for more data.
+    function follow() {
+      if (!sb || sb.buffered.length === 0) return;
+      const b = sb.buffered;
+      const last = b.length - 1;
+      const t = video.currentTime;
+      let inside = false;
+      for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t < b.end(i)) inside = true;
+      if (!inside) {
+        for (let i = 0; i < b.length; i++) {
+          if (b.start(i) > t) { video.currentTime = b.start(i); return; }
+        }
+      }
+      if (b.end(last) - t > LIVE_EDGE_S) video.currentTime = b.end(last) - 0.05;
+    }
+
+    function start() {
+      if (ms || !mime) return;
+      if (!MediaSource.isTypeSupported(mime)) {
+        statusEl.textContent = "cannot play " + mime;
+        return;
+      }
+      ms = new MediaSource();
+      video.src = URL.createObjectURL(ms);
+      ms.addEventListener("sourceopen", function() {
+        sb = ms.addSourceBuffer(mime);
+        sb.addEventListener("updateend", function() { follow(); pump(); });
+        pump();
+      });
+    }
 
     ws.onmessage = function(e) {
       if (typeof e.data === "string") {
@@ -76,31 +130,24 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           if (st.state === "running" && st.mime) {
             mime = st.mime;
             statusEl.textContent = "";
+            start();
           } else {
             statusEl.textContent = st.state || "";
           }
-        } catch(e) {}
+        } catch (err) {}
         return;
       }
-      if (!inited && mime && MediaSource.isTypeSupported(mime)) {
-        inited = true;
-        ms = new MediaSource();
-        video.src = URL.createObjectURL(ms);
-        ms.addEventListener("sourceopen", function() {
-          sb = ms.addSourceBuffer(mime);
-          sb.mode = "sequence";
-          sb.appendBuffer(new Uint8Array(e.data));
-        });
-        return;
-      }
-      if (sb && !sb.updating) {
-        try { sb.appendBuffer(new Uint8Array(e.data)); } catch(e) {}
-      }
+      queue.push(new Uint8Array(e.data));
+      start();
+      pump();
     };
 
     ws.onclose = function() {
       statusEl.textContent = "disconnected";
     };
+
+    video.addEventListener("waiting", follow);
+    setInterval(follow, 100);
   </script>
 </body>
 </html>`;
