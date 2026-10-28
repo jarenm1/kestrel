@@ -52,6 +52,16 @@ function TaskView({ taskId }: { taskId: string }) {
             <strong className="truncate">{task?.title ?? "Loading…"}</strong>
             {task && <StatusBadge status={task.status} />}
             {task && <span className="truncate font-mono text-xs text-muted-foreground">{task.branch}</span>}
+            {task?.pullRequest && (
+              <a
+                href={task.pullRequest.url}
+                target="_blank"
+                rel="noreferrer"
+                className="shrink-0 text-xs font-medium text-primary underline-offset-4 hover:underline"
+              >
+                PR #{task.pullRequest.number}
+              </a>
+            )}
           </header>
           {state.error && <Alert className="rounded-none border-x-0 border-t-0">{state.error}</Alert>}
           <ChatPanel taskId={taskId} messages={state.messages} runs={state.runs} output={state.output} />
