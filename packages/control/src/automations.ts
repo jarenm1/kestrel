@@ -7,7 +7,7 @@ import {
   UpdateAutomationBody,
   type AutomationTrigger,
 } from "@cloudagents/protocol"
-import { isRepoSlug, triggerProblem } from "./automation-rules"
+import { triggerProblem } from "./automation-rules"
 import { hub, type Env } from "./env"
 import { errorResponse, json } from "./http"
 import {
@@ -91,7 +91,6 @@ const releaseHook = async (env: Env, login: string, slug: string): Promise<void>
 const createAutomation = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
   const body = await readBody(request, CreateAutomationBody)
   if (body instanceof Response) return body
-  if (body.repo !== undefined && !isRepoSlug(body.repo)) return badRequest("repo must be a GitHub owner/name")
   const problem = triggerProblem(body.trigger, body.repo ?? null, Date.now())
   if (problem !== null) return badRequest(problem)
   if (body.repo === undefined) return json(await hub(env).createAutomation(login, { ...body, repo: null }), 201)

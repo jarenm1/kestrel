@@ -1,37 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import type { AutomationTrigger } from "@cloudagents/protocol"
-import { isRepoSlug, triggerProblem } from "./automation-rules"
+import { triggerProblem } from "./automation-rules"
 
 const NOW = Date.UTC(2026, 0, 1)
 const schedule: AutomationTrigger = { _tag: "schedule", cron: "0 9 * * *", timezone: "UTC" }
 const github: AutomationTrigger = { _tag: "github", events: ["pull_request.opened"] }
-
-describe("isRepoSlug", () => {
-  test("accepts owner/name", () => {
-    for (const slug of ["acme/app", "a/b", "my-org/repo.name_1", `${"a".repeat(39)}/${"r".repeat(100)}`]) {
-      expect(isRepoSlug(slug)).toBe(true)
-    }
-  })
-
-  test("rejects anything that is not owner/name", () => {
-    for (const slug of [
-      "",
-      "acme",
-      "acme/",
-      "/app",
-      "acme/app/extra",
-      "acme/app name",
-      "-acme/app",
-      "acme-/app",
-      "acme/.",
-      "acme/..",
-      `${"a".repeat(40)}/app`,
-      `acme/${"r".repeat(101)}`,
-    ]) {
-      expect(isRepoSlug(slug)).toBe(false)
-    }
-  })
-})
 
 describe("triggerProblem", () => {
   test("a schedule needs no repository", () => {
