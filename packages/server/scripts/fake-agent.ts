@@ -20,9 +20,16 @@ const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
   requestInit: { headers: { Authorization: `Bearer ${mcpToken}` } },
 })
 
-const call = async (name: string, args: Record<string, unknown>): Promise<{ failed: boolean; text: string }> => {
+const DEFAULT_CALL_TIMEOUT_MS = 60_000
+const ASK_TIMEOUT_MS = 330_000
+
+const call = async (
+  name: string,
+  args: Record<string, unknown>,
+  timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
+): Promise<{ failed: boolean; text: string }> => {
   console.log(`fake-agent: call ${name} ${JSON.stringify(args).slice(0, 200)}`)
-  const result = (await client.callTool({ name, arguments: args })) as CallToolResult
+  const result = (await client.callTool({ name, arguments: args }, undefined, { timeout: timeoutMs })) as CallToolResult
   const text = result.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n")
   console.log(`fake-agent: ${name} ${result.isError ? "error" : "ok"}: ${text.slice(0, 200)}`)
   return { failed: result.isError === true, text }
@@ -77,6 +84,27 @@ const runDesktopProbes = async (): Promise<number> => {
   return 0
 }
 
+// Asks the user a question with options and a screenshot, then polls the inbox for a message sent during the run.
+const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
+  const asked = await call(
+    "task_ask",
+    { question: "Which colour should the notes use?", options: ["Blue", "Red"], attachScreenshot: true, timeoutSec: 300 },
+    ASK_TIMEOUT_MS,
+  )
+  if (asked.failed) return null
+  let inbox = ""
+  for (let attempt = 0; attempt < 30 && inbox === ""; attempt++) {
+    const checked = await call("task_inbox", {})
+    if (!checked.text.startsWith("No new messages")) inbox = checked.text
+    else {
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 2000)
+      await promise
+    }
+  }
+  return { answer: asked.text, inbox }
+}
+
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
@@ -93,6 +121,20 @@ const main = async (): Promise<number> => {
   if (write.failed || !write.text.startsWith("exit code: 0")) {
     await call("task_report", { status: "failed", message: "fake agent could not write AGENT_NOTES.md" })
     return 1
+  }
+
+  // Prompts that mention "ask" exercise task_ask (with options and a screenshot) and task_inbox.
+  if (/\bask\b/i.test(prompt)) {
+    const outcome = await askAndListen()
+    if (outcome === null) {
+      await call("task_report", { status: "failed", message: "fake agent question was not answered" })
+      return 1
+    }
+    await call("task_report", {
+      status: "done",
+      message: `Answer: ${outcome.answer}. Inbox: ${outcome.inbox || "empty"}`,
+    })
+    return 0
   }
 
   await call("task_report", { status: "done", message: "Wrote AGENT_NOTES.md from the prompt." })
