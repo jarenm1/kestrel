@@ -3,7 +3,7 @@
 ```mermaid
 flowchart TB
   subgraph Browser["Browser"]
-    APP["App SPA<br/>app.kestrel-agent.com: public landing + pricing, signed-in app<br/>packages/app (React, TanStack Query)<br/>👤 caayd"]
+    APP["App SPA<br/>app.kestrel-agent.com: the app<br/>kestrel-agent.com: landing + pricing<br/>packages/app (React, TanStack Query)<br/>👤 caayd"]
     VIEW["Desktop viewer + input<br/>DesktopViewer.tsx, desktop/*<br/>👤 Jaren (streaming)"]
   end
 
@@ -57,7 +57,7 @@ flowchart TB
 
 ## How it fits together
 
-- The browser only talks to Cloudflare. `app.kestrel-agent.com` serves the public landing and pricing pages and the signed-in app, from the same Worker as the API.
+- The browser only talks to Cloudflare. One Worker serves the API and one SPA build on two hosts: `app.kestrel-agent.com` is the app, and `kestrel-agent.com` (and `www.`) shows only its public landing and pricing pages, sending every other path, sign-in and the API to the app host.
 - The Hub Durable Object relays app requests to the box over the WebSocket the box dials out to, so nothing on the box is exposed to the internet.
 - The control plane signs users in; the box decides what they can see. Each thread is owned by the user who started it, and the box serves a thread and its runs, diffs and desktop only to that user (identity comes from the relay; the box's own port has no user and gets no thread data).
 - A thread starts in an empty workspace directory with no repository. The agent checks repositories out on demand with the `repo_checkout` MCP tool (a GitHub `owner/name` the owner's token can read, or a public `https://` URL; never local paths), at most one checkout per repository, each on its own thread branch. The box keeps one bare mirror per user and repository, fetched on the host with the owner's token before every checkout; a checkout is a clone that borrows the mirror's objects, so the sandbox sees that user's mirrors read-only and its own workspace read-write. Host-side git (diff, push) never runs inside a checkout's agent-writable git directory: it works from a host-owned shadow repository per checkout, so repository config the agent writes cannot make the host run commands.

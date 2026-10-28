@@ -3,9 +3,14 @@
   "name": "kestrel",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-01",
-  // The app is served on app.kestrel-agent.com; workers.dev stays on because boxes dial it
-  // (CLOUDAGENTS_CONTROL_URL) and PR Previews use workers.dev URLs.
-  "routes": [{ "pattern": "app.kestrel-agent.com", "custom_domain": true }],
+  // The app is served on app.kestrel-agent.com and its public pages (landing, pricing) on the apex and www, from one
+  // build: the SPA picks by hostname. workers.dev stays on because boxes dial it (CLOUDAGENTS_CONTROL_URL) and PR
+  // Previews use workers.dev URLs.
+  "routes": [
+    { "pattern": "app.kestrel-agent.com", "custom_domain": true },
+    { "pattern": "kestrel-agent.com", "custom_domain": true },
+    { "pattern": "www.kestrel-agent.com", "custom_domain": true }
+  ],
   "workers_dev": true,
   "assets": {
     "directory": "../app/dist",

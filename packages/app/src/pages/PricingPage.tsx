@@ -1,11 +1,9 @@
 import { motion } from "framer-motion"
 import { Link } from "react-router-dom"
-import { ControlPaths } from "@cloudagents/protocol"
 import { ArrowRight, Check } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { SERVER_URL } from "@/config"
-import { APP_HOME } from "@/routes"
+import { APP_ORIGIN } from "@/routes"
 import { GITHUB_URL, KestrelIcon } from "./LandingPage"
 import "@/stylesfrontend.css"
 
@@ -67,8 +65,8 @@ const faqs = [
 ]
 
 export function PricingPage() {
-    // Public pages are always the entry point; after GitHub auth the app home is APP_HOME.
-    const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent(APP_HOME)}`
+    // The app lives on its own host; its root is the new chat, and signed-out visitors are sent to sign in first.
+    const appUrl = `${APP_ORIGIN}/`
 
     return (
         <div className="public-page flex min-h-screen flex-col relative overflow-x-hidden bg-gradient-to-b from-zinc-950 via-[#0a0a0f] to-black">
@@ -97,10 +95,10 @@ export function PricingPage() {
         <Link to="/pricing" className="text-sm text-white transition-colors">Pricing</Link>
         <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
         <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
-        <a href="/auth/dev-login">Dev Login</a>
+        <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
         </Button>
         <Button asChild className="h-8 px-5 text-xs bg-white text-black hover:bg-zinc-200 rounded-md">
-        <a href={loginUrl}>Get Started</a>
+        <a href={appUrl}>Get Started</a>
         </Button>
         </div>
         </nav>
@@ -168,7 +166,7 @@ export function PricingPage() {
                 : "bg-white/[0.05] text-white border border-white/10 hover:bg-white/[0.1]"
             )}
             >
-            <a href={loginUrl}>{plan.cta} <ArrowRight className="ml-2 h-4 w-4" /></a>
+            <a href={appUrl}>{plan.cta} <ArrowRight className="ml-2 h-4 w-4" /></a>
             </Button>
             </motion.div>
         ))}

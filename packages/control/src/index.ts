@@ -24,6 +24,13 @@ const connectBox = async (request: Request, env: Env): Promise<Response> => {
 const isBoxAutomationPath = (pathname: string): boolean =>
   pathname === ControlPaths.boxAutomations || pathname.startsWith(`${ControlPaths.boxAutomations}/`)
 
+/**
+ * The marketing hosts serve only the app's public pages. Sessions live on the app host, so sign-in and API calls
+ * that land here (e.g. an old bookmark) move there with the same path.
+ */
+const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "www.kestrel-agent.com": true }
+const APP_ORIGIN = "https://app.kestrel-agent.com"
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
@@ -34,6 +41,9 @@ export default {
         return await handleBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
+      if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
+        return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
+      }
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
       if (url.pathname.startsWith("/api/")) return await handleApi(request, env, url)
       return env.ASSETS.fetch(request)

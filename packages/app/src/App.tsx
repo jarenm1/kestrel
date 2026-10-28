@@ -24,7 +24,7 @@ import { NewThreadPage } from "@/pages/NewThreadPage"
 import { PricingPage } from "@/pages/PricingPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
-import { APP_HOME, threadPath } from "@/routes"
+import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
 import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -34,11 +34,19 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   )
 
 export function App() {
+  if (IS_SITE_HOST) {
+    return (
+      <Routes>
+        {/* The public site never mounts the session query; everything else belongs to the app host. */}
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/pricing" element={<PricingPage />} />
+        <Route path="*" element={<AppHostRedirect />} />
+      </Routes>
+    )
+  }
+
   return (
     <Routes>
-      {/* Public routes. They never mount the session query, so they render immediately. */}
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/pricing" element={<PricingPage />} />
       <Route path="/login" element={<LoginPage />} />
 
       {/* Protected routes. The guard is the only place that checks the session. */}
@@ -47,7 +55,7 @@ export function App() {
           <Route path="/connections" element={<ConnectionsPage />} />
           <Route element={<WorkspaceLayout />}>
             <Route path={APP_HOME} element={<NewThreadPage />} />
-            <Route path={`${APP_HOME}/:taskId`} element={<ThreadPage />} />
+            <Route path="/c/:taskId" element={<ThreadPage />} />
             <Route path="/automations" element={<AutomationsPanel />} />
             <Route path="/archived" element={<ArchivedPanel />} />
           </Route>
@@ -61,6 +69,13 @@ export function App() {
       <Route path="*" element={<NotFound />} />
     </Routes>
   )
+}
+
+/** A non-public path on the public site (e.g. an old app link): continue on the app host with the same path. */
+function AppHostRedirect() {
+  const { pathname, search } = useLocation()
+  useEffect(() => window.location.replace(`${APP_ORIGIN}${pathname}${search}`), [pathname, search])
+  return null
 }
 
 /**
@@ -107,7 +122,6 @@ function AppShell() {
           <KestrelMark className="h-5" />
         </NavLink>
         <nav className="flex gap-1">
-
           <NavLink to="/connections" className={navLinkClass}>
             Connections
           </NavLink>

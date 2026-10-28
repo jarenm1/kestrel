@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Link } from "react-router-dom"
-import { ControlPaths } from "@cloudagents/protocol"
 import {
   Server, Monitor, Lock, Key, Terminal, Globe, ArrowRight,
   Play, X, MousePointer2, ShieldCheck, Zap, Cpu, Bot
@@ -9,8 +8,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
-import { SERVER_URL } from "@/config"
-import { APP_HOME } from "@/routes"
+import { APP_ORIGIN } from "@/routes"
 import "@/stylesfrontend.css"
 
 export const GITHUB_URL = "https://github.com/jarenm1/kestrel"
@@ -145,8 +143,8 @@ const slideInRight = { hidden: { opacity: 0, x: 40 }, visible: { opacity: 1, x: 
 const staggerContainer = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } }
 
 export function LandingPage() {
-  // Public pages are always the entry point; after GitHub auth the app home is APP_HOME.
-  const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent(APP_HOME)}`
+  // The app lives on its own host; its root is the new chat, and signed-out visitors are sent to sign in first.
+  const appUrl = `${APP_ORIGIN}/`
 
   const [activeFeature, setActiveFeature] = useState<number | null>(null)
   const featuresRef = useRef<HTMLDivElement>(null)
@@ -197,10 +195,10 @@ export function LandingPage() {
     <Link to="/pricing" className="text-sm text-zinc-400 hover:text-white transition-colors">Pricing</Link>
     <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
     <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
-    <a href="/auth/dev-login">Dev Login</a>
+    <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
     </Button>
     <Button asChild className="h-8 px-5 text-xs bg-white text-black hover:bg-zinc-200 rounded-md">
-    <a href={loginUrl}>Get Started</a>
+    <a href={appUrl}>Get Started</a>
     </Button>
     </div>
     </nav>
@@ -220,7 +218,7 @@ export function LandingPage() {
     </p>
     <div className="flex items-center gap-4 pt-2">
     <Button asChild size="lg" className="h-10 px-6 text-sm bg-white text-black hover:bg-zinc-200 rounded-md">
-    <a href={loginUrl}>Get Started <ArrowRight className="ml-2 h-4 w-4" /></a>
+    <a href={appUrl}>Get Started <ArrowRight className="ml-2 h-4 w-4" /></a>
     </Button>
     <Button asChild variant="soft" size="lg" className="h-10 px-6 text-sm border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
     <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">Read the Docs</a>
@@ -398,7 +396,7 @@ export function LandingPage() {
     <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-white">Stop babysitting a VPS.</h2>
     <p className="text-base text-zinc-400">Sign in with GitHub, add a repo, and hand your agent its first task.</p>
     <Button asChild size="lg" className="h-12 px-8 text-base rounded-full bg-white text-black hover:bg-zinc-200">
-    <a href={loginUrl}>Open the app</a>
+    <a href={appUrl}>Open the app</a>
     </Button>
     </motion.div>
     </section>

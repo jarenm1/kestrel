@@ -71,7 +71,7 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
   in the same worktree dies with `SQLITE_BUSY`. Need two stacks? Use two worktrees.
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
   when you need a real agent (`ANTHROPIC_API_KEY=... bun run dev`, never committed).
-- Sign in at `http://localhost:<app port>/auth/dev-login`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
+- Sign in at `http://localhost:<app port>/auth/dev-login`. The public pages (landing, pricing) are at `http://site.localhost:<app port>/`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
 
 ## Before opening a PR
 
@@ -87,7 +87,7 @@ say in the PR what you ran and what you saw. There is no CI; the PR description 
 
 | Path | What | Notes |
 |---|---|---|
-| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. Public pages (`/` landing, `/pricing`, `/login`) render without a session; everything signed-in sits behind `RequireAuth` in `App.tsx` (home `/c`, threads at `/c/:id`, see `src/routes.ts`). UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
+| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. One build, two hosts (`src/routes.ts`): on `kestrel-agent.com` / `site.localhost` only the public pages (`/` landing, `/pricing`); on the app host the new chat at `/`, threads at `/c/:id`, everything behind `RequireAuth` in `App.tsx` except `/login`. UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
 | `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
