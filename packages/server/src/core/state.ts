@@ -1,6 +1,7 @@
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { mkdir, open, readFile, rename } from "node:fs/promises"
+import { dirname } from "node:path"
 import { InternalError, Message, Repo, Run, Task } from "@cloudagents/protocol"
 import { Config } from "../config"
 
@@ -63,8 +64,21 @@ export class StateStore extends Context.Tag("cloudagents/StateStore")<StateStore
 
 const writeAtomic = async (file: string, data: string): Promise<void> => {
   const tmp = `${file}.${randomUUID()}.tmp`
-  await writeFile(tmp, data, "utf8")
+  const handle = await open(tmp, "w")
+  try {
+    await handle.writeFile(data, "utf8")
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
   await rename(tmp, file)
+  // Persist the rename itself; without this a crash can roll the directory entry back.
+  const dir = await open(dirname(file), "r")
+  try {
+    await dir.sync()
+  } finally {
+    await dir.close()
+  }
 }
 
 const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
