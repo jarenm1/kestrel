@@ -33,7 +33,7 @@ Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run crea
 Without `CLOUDAGENTS_SANDBOX_PATH`, `bun run dev` starts the box with `CLOUDAGENTS_SANDBOX=0`, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Set `CLOUDAGENTS_SANDBOX` yourself to override that.
 
 - **Linux:** the task desktop needs Xvfb, openbox, xterm, xdotool, an ffmpeg with rawvideo input (screenshots use x11grab) and the `xdamage-capture` helper built from `packages/server/native` (the flake provides all of these). Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
-- **macOS and Windows:** no task desktop (Xvfb and x11grab are Linux-only; runs go ahead without a display and the task says why) and no resource limits (`bun run dev` sets `CLOUDAGENTS_SYSTEMD=0`).
+- **macOS and Windows:** no task desktop (Xvfb and x11grab are Linux-only; runs go ahead without a display, and `desktop_open` says why there is none) and no resource limits (`bun run dev` sets `CLOUDAGENTS_SYSTEMD=0`).
 - **Windows:** agent commands and `workspace_exec` run through POSIX `sh`: the one on `PATH`, else the one from Git for Windows. Each process the box starts gets its own job object, so cancelling a run or stopping the stack also ends whatever it started. There is no uid, so ports move only with `KESTREL_DEV_SLOT`.
 
 ### Shared dev machine
@@ -52,6 +52,8 @@ Agents need a model key: add one on the Connections page, or export `ANTHROPIC_A
 ### Agent sandbox
 
 Everything an agent controls runs in bubblewrap inside a transient systemd scope: the agent run, every `workspace_exec`, the desktop terminal and apps started with `desktop_launch`. Each task gets a slice `kestrel-box<port>-t<task>.slice` (under `kestrel.slice`) whose limits cap all of the task's processes together; swap is off for it, so the memory limit is hard and the kernel OOM-kills inside the task only.
+
+The task desktop is not started with the run. The agent starts it with `desktop_open` when it needs one (or you start it from the Desktop tab), and the desktop tools fail until it is running.
 
 Each task also has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the box port, which is forwarded in for the broker and MCP. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
 
