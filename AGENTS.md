@@ -87,7 +87,7 @@ say in the PR what you ran and what you saw. There is no CI; the PR description 
 
 | Path | What | Notes |
 |---|---|---|
-| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. Public pages (`/` landing, `/pricing`, `/login`) render without a session; everything signed-in sits behind `RequireAuth` in `App.tsx` (home `/threads`, see `src/routes.ts`). UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
+| `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. Public pages (`/` landing, `/pricing`, `/login`) render without a session; everything signed-in sits behind `RequireAuth` in `App.tsx` (home `/c`, threads at `/c/:id`, see `src/routes.ts`). UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
 | `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |

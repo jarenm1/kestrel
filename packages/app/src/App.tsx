@@ -51,8 +51,7 @@ export function App() {
             <Route path="/automations" element={<AutomationsPanel />} />
             <Route path="/archived" element={<ArchivedPanel />} />
           </Route>
-          {/* Short and legacy thread URLs (including the old per-repo ones) resolve to the canonical thread URL. */}
-          <Route path="/c/:taskId" element={<ThreadRedirect />} />
+          {/* Legacy thread URLs (including the old per-repo ones) resolve to the canonical thread URL. */}
           <Route path="/tasks/:taskId" element={<ThreadRedirect />} />
           <Route path="/repos/:repoId/threads/:taskId" element={<ThreadRedirect />} />
           <Route path="/repos/*" element={<Navigate to={APP_HOME} replace />} />

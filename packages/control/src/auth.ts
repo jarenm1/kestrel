@@ -149,7 +149,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     const provider = findProvider("github")
     if (!provider || provider.kind !== "oauth") return errorResponse(404, "NotFound", "github is not a provider")
     // `/` is the public landing page now; a sign-in without a return path opens the app.
-    const returnTo = safeReturnPath(url.searchParams.get("return"), "/threads")
+    const returnTo = safeReturnPath(url.searchParams.get("return"), "/c")
     return beginOAuth(env, url, "login", provider, returnTo)
   }
 
@@ -192,7 +192,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     await stub.upsertUser({ login, name: login, avatarUrl: "" })
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, login, Date.now() + SESSION_TTL_MS, true)
-    return redirect("/threads", { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
+    return redirect("/c", { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
   }
 
   return errorResponse(404, "NotFound", `no route for ${path}`)

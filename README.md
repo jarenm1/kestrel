@@ -2,7 +2,7 @@
 
 Run your own agent harness in a sandboxed box with a live desktop.
 
-- `packages/app`: the React SPA (Vite, Tailwind, shadcn/ui, TanStack Query): the public landing and pricing pages, and the signed-in app under `/threads`. Talks only to the control plane, same origin.
+- `packages/app`: the React SPA (Vite, Tailwind, shadcn/ui, TanStack Query): the public landing and pricing pages, and the signed-in app under `/c`. Talks only to the control plane, same origin.
 - `packages/control`: the Cloudflare Worker control plane: GitHub sign-in, connections, and a relay to the agent box. Serves the built `packages/app` as static assets. Deployed as Worker `kestrel` on https://app.kestrel-agent.com (and its workers.dev URL, which boxes dial).
 - `packages/server`: the agent box. Runs harnesses inside bubblewrap, serves the desktop and MCP, and dials out to the control plane.
 - `packages/protocol`: shared schemas, including the relay frames (`relay.ts`) and control-plane API (`control.ts`).
