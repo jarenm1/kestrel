@@ -12,8 +12,8 @@ import { Switch } from "@/components/ui/switch"
 import { describeTrigger, formatNextRun, promptPreview } from "@/lib/automations"
 import { errorText } from "@/util"
 
-/** Automations for one project. The agent creates them from chat; this view lists, toggles, edits and removes them. */
-export function AutomationsPanel({ repoId, repoName }: { repoId: string; repoName: string | undefined }) {
+/** Every automation the user has. The agent creates them from chat; this view lists, toggles, edits and removes them. */
+export function AutomationsPanel() {
   const queryClient = useQueryClient()
   const automations = useQuery(queries.automations())
   const [editing, setEditing] = useState<Automation | null>(null)
@@ -27,7 +27,7 @@ export function AutomationsPanel({ repoId, repoName }: { repoId: string; repoNam
     onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.automations }),
   })
 
-  const projectAutomations = (automations.data ?? []).filter((a) => a.repoId === repoId)
+  const rows = automations.data ?? []
   const error = automations.error ?? toggle.error ?? remove.error
 
   return (
@@ -35,18 +35,17 @@ export function AutomationsPanel({ repoId, repoName }: { repoId: string; repoNam
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
         <p className="text-muted-foreground">
-          Tasks the agent starts on a schedule or when a pull request changes
-          {repoName ? ` in ${repoName}` : ""}.
+          Tasks the agent starts on a schedule or when a pull request changes.
         </p>
       </div>
 
       {error && <Alert>{errorText(error)}</Alert>}
       {automations.isPending && <p className="text-muted-foreground">Loading…</p>}
 
-      {automations.data && projectAutomations.length === 0 && (
+      {automations.data && rows.length === 0 && (
         <Card>
           <CardContent className="items-center gap-2 py-10 text-center text-muted-foreground">
-            <p className="font-medium text-foreground">No automations for this project yet.</p>
+            <p className="font-medium text-foreground">No automations yet.</p>
             <p>
               Ask the agent in a thread to set one up, for example “review open pull requests every weekday at 9am”, and
               it will appear here.
@@ -55,10 +54,10 @@ export function AutomationsPanel({ repoId, repoName }: { repoId: string; repoNam
         </Card>
       )}
 
-      {projectAutomations.length > 0 && (
+      {rows.length > 0 && (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
-            {projectAutomations.map((automation) => (
+            {rows.map((automation) => (
               <AutomationRow
                 key={automation.id}
                 automation={automation}
@@ -104,8 +103,11 @@ function AutomationRow({
             <Badge variant={automation.enabled ? "success" : "neutral"}>
               {automation.enabled ? "enabled" : "disabled"}
             </Badge>
+            <span className="truncate font-mono text-xs text-muted-foreground">
+              {automation.repo ?? "No repository"}
+            </span>
           </div>
-          <span className="text-xs text-muted-foreground">{describeTrigger(automation.trigger, automation.repo)}</span>
+          <span className="text-xs text-muted-foreground">{describeTrigger(automation.trigger)}</span>
         </div>
         <Switch
           aria-label={`Enabled: ${automation.name}`}

@@ -45,9 +45,9 @@ export function describeCron(cron: string): string {
 }
 
 /** One line describing when an automation fires, e.g. "Weekdays at 09:00 · America/New_York". */
-export function describeTrigger(trigger: AutomationTrigger, repo: string | null): string {
+export function describeTrigger(trigger: AutomationTrigger): string {
   if (trigger._tag === "schedule") return `${describeCron(trigger.cron)} · ${trigger.timezone}`
-  const parts = [`Pull requests on ${repo ?? "this project"}: ${trigger.events.map((e) => EVENT_LABELS[e]).join(", ")}`]
+  const parts = [`Pull requests: ${trigger.events.map((e) => EVENT_LABELS[e]).join(", ")}`]
   if (trigger.reviewers?.length) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
   if (trigger.baseBranches?.length) parts.push(`into ${trigger.baseBranches.join(", ")}`)
   if (trigger.includeDrafts) parts.push("drafts included")

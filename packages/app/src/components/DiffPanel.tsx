@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { ChevronRight } from "lucide-react"
+import type { CheckoutDiff } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -23,12 +24,42 @@ const fileKey = (file: DiffFile): string => `${file.oldPath}\0${file.newPath}`
 const isLarge = (file: DiffFile): boolean => file.additions + file.deletions > LARGE_FILE_LINES
 
 /**
- * Every change on the task's branch (commits, uncommitted and untracked files) against its fork point, as one
- * scrollable buffer with a collapsible section per file. `running` polls while the agent works.
+ * The thread's changes, one section per checked-out repository: every change on that checkout's branch (commits,
+ * uncommitted and untracked files) against its base branch. `running` polls while the agent works.
  */
 export function DiffPanel({ taskId, running }: { taskId: string; running: boolean }) {
   const diff = useQuery(queries.diff(taskId, running))
-  const files = useMemo(() => parseDiff(diff.data?.diff ?? ""), [diff.data?.diff])
+  const checkouts = diff.data?.checkouts ?? []
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex justify-end px-4 pb-2">
+        <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
+          {diff.isFetching ? "Refreshing…" : "Refresh"}
+        </Button>
+      </div>
+      {diff.error && <Alert className="mx-3 mb-2 w-auto">{errorText(diff.error)}</Alert>}
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
+        {diff.isPending && <p className="text-muted-foreground">Loading…</p>}
+        {diff.isSuccess && checkouts.length === 0 && (
+          <p className="text-muted-foreground">
+            No repository checked out yet. The agent checks repos out when the work needs one.
+          </p>
+        )}
+        {checkouts.map((checkout) => (
+          <CheckoutDiffSection key={checkout.checkoutId} checkout={checkout} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * One checkout's changes as a scrollable buffer with a collapsible section per file. Open/closed state lives here, not
+ * in the panel, because the same file path can appear under two repositories.
+ */
+function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
+  const files = useMemo(() => parseDiff(checkout.diff), [checkout.diff])
   // Explicit open/closed choices by file; files without one use their default (large files closed).
   const [collapsedByKey, setCollapsedByKey] = useState<ReadonlyMap<string, boolean>>(new Map())
 
@@ -46,38 +77,30 @@ export function DiffPanel({ taskId, running }: { taskId: string; running: boolea
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-3 px-4 pb-2 text-xs">
-        {diff.data ? (
-          <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
-            <span className="truncate">
-              {files.length} {files.length === 1 ? "file" : "files"} vs {diff.data.baseBranch}
-            </span>
-            <span className="font-mono text-success">+{additions}</span>
-            <span className="font-mono text-destructive">−{deletions}</span>
+    <section className="flex shrink-0 flex-col gap-2">
+      <div className="flex items-center gap-3 text-xs">
+        <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
+          <span className="truncate font-medium text-foreground">{checkout.repo}</span>
+          <span className="truncate">
+            {files.length} {files.length === 1 ? "file" : "files"} vs {checkout.baseBranch}
           </span>
-        ) : (
-          <span className="text-muted-foreground">Diff</span>
-        )}
+          <span className="font-mono text-success">+{additions}</span>
+          <span className="font-mono text-destructive">−{deletions}</span>
+        </span>
         <span className="flex-1" />
         {files.length > 1 && (
           <Button variant="ghost" size="sm" onClick={() => setAll(anyExpanded)}>
             {anyExpanded ? "Collapse all" : "Expand all"}
           </Button>
         )}
-        <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
-          {diff.isFetching ? "Refreshing…" : "Refresh"}
-        </Button>
       </div>
-      {diff.error && <Alert className="mx-3 mb-2 w-auto">{errorText(diff.error)}</Alert>}
-      <div className="mx-3 mb-3 min-h-0 flex-1 overflow-x-hidden overflow-y-auto rounded-xl bg-code font-mono text-xs shadow-well">
-        {diff.isPending && <p className="px-3 py-2.5 text-muted-foreground">Loading…</p>}
-        {diff.isSuccess && files.length === 0 && <p className="px-3 py-2.5 text-muted-foreground">No changes.</p>}
+      <div className="max-h-[60vh] overflow-x-hidden overflow-y-auto rounded-xl bg-code font-mono text-xs shadow-well">
+        {files.length === 0 && <p className="px-3 py-2.5 text-muted-foreground">No changes.</p>}
         {files.map((file) => (
           <FileSection key={fileKey(file)} file={file} collapsed={isCollapsed(file)} onToggle={() => toggle(file)} />
         ))}
       </div>
-    </div>
+    </section>
   )
 }
 

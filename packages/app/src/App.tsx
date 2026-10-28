@@ -4,6 +4,8 @@ import { NavLink, Route, Routes } from "react-router-dom"
 import { LogOut } from "lucide-react"
 import { api, ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
+import { ArchivedPanel } from "@/components/ArchivedPanel"
+import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Alert } from "@/components/ui/alert"
 import {
@@ -17,8 +19,9 @@ import {
 import { cn } from "@/lib/utils"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { LoginPage } from "@/pages/LoginPage"
-import { RepoPage } from "@/pages/RepoPage"
-import { ReposPage } from "@/pages/ReposPage"
+import { NewThreadPage } from "@/pages/NewThreadPage"
+import { ThreadPage } from "@/pages/ThreadPage"
+import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
 import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -55,9 +58,6 @@ export function App() {
           <KestrelMark className="h-5" />
         </NavLink>
         <nav className="flex gap-1">
-          <NavLink to="/" end className={navLinkClass}>
-            Repos
-          </NavLink>
           <NavLink to="/connections" className={navLinkClass}>
             Connections
           </NavLink>
@@ -68,12 +68,13 @@ export function App() {
       </header>
       <main className="flex min-h-0 flex-1 flex-col">
         <Routes>
-          <Route path="/" element={<ReposPage />} />
           <Route path="/connections" element={<ConnectionsPage />} />
-          <Route path="/repos/:repoId" element={<RepoPage />} />
-          <Route path="/repos/:repoId/threads/:taskId" element={<RepoPage />} />
-          <Route path="/repos/:repoId/automations" element={<RepoPage view="automations" />} />
-          <Route path="/repos/:repoId/archived" element={<RepoPage view="archived" />} />
+          <Route element={<WorkspaceLayout />}>
+            <Route path="/" element={<NewThreadPage />} />
+            <Route path="/threads/:taskId" element={<ThreadPage />} />
+            <Route path="/automations" element={<AutomationsPanel />} />
+            <Route path="/archived" element={<ArchivedPanel />} />
+          </Route>
           <Route path="*" element={<div className="p-5 text-muted-foreground">Not found.</div>} />
         </Routes>
       </main>

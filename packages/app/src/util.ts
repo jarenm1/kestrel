@@ -22,3 +22,16 @@ export function formatAgo(iso: string, now: number): string {
   if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86_400)}d ago`
 }
+
+/** Short name of a checkout's repository: "owner/name" → "name". */
+export function repoShortName(repo: string): string {
+  return (repo.split("/").pop() ?? repo).replace(/\.git$/, "")
+}
+
+const TITLE_MAX = 60
+
+/** First line of the prompt, shortened, as the thread's title (and branch name). */
+export function threadTitle(text: string): string {
+  const line = (text.split("\n", 1)[0] ?? "").replace(/\s+/g, " ").trim()
+  return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1).trimEnd()}…` : line
+}
