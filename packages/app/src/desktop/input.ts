@@ -57,22 +57,21 @@ export interface PointerPoint {
 }
 
 /**
- * Maps a client pointer position to normalized frame coordinates for an
- * `object-fit: contain` video element. Returns null before the stream has dimensions.
+ * Maps a client pointer position to normalized frame coordinates for an `object-fit: contain`
+ * stream canvas. `frame` is the stream's dimensions (status width/height).
+ * Returns null before the stream has dimensions.
  */
 export function normalizePoint(
-  video: HTMLVideoElement,
+  element: HTMLElement,
   clientX: number,
   clientY: number,
-  size: { width: number; height: number },
+  frame: { width: number; height: number },
 ): PointerPoint | null {
-  const rect = video.getBoundingClientRect()
-  const frameW = video.videoWidth || size.width
-  const frameH = video.videoHeight || size.height
-  if (rect.width === 0 || rect.height === 0 || frameW === 0 || frameH === 0) return null
-  const scale = Math.min(rect.width / frameW, rect.height / frameH)
-  const contentW = frameW * scale
-  const contentH = frameH * scale
+  const rect = element.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0 || frame.width === 0 || frame.height === 0) return null
+  const scale = Math.min(rect.width / frame.width, rect.height / frame.height)
+  const contentW = frame.width * scale
+  const contentH = frame.height * scale
   const left = rect.left + (rect.width - contentW) / 2
   const top = rect.top + (rect.height - contentH) / 2
   const x = (clientX - left) / contentW

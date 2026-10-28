@@ -7,7 +7,7 @@ import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
-import { MseSink } from "@/desktop/mseSink"
+import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
 import { StatusBadge } from "./StatusBadge"
 
@@ -15,19 +15,19 @@ const RECONNECT_MS = 2000
 
 export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient()
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const connRef = useRef<DesktopConnection | null>(null)
   const desktop = useQuery(queries.desktop(taskId))
   const status = desktop.data ?? null
   const [streamError, setStreamError] = useState<string | null>(null)
+  const [stats, setStats] = useState<RenderStats | null>(null)
   const [generation, setGeneration] = useState(0)
 
   useEffect(() => {
-    const video = videoRef.current
-    if (!video) return
-    let sink: MseSink | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    let renderer: VideoRenderer | null = null
     let mime: string | null = null
-    let initialized = false
     let retry: number | undefined
 
     const conn = openDesktopStream(taskId, {
@@ -38,31 +38,31 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           setStreamError(null)
           return
         }
-        // Stream is not live: drop the current init segment so the next start re-initializes.
-        sink?.close()
-        sink = null
-        initialized = false
+        // Stream is not live: drop the decoder so the next start re-initializes from its init segment.
+        renderer?.close()
+        renderer = null
+        setStats(null)
       },
       onMedia: (bytes) => {
-        if (!initialized) {
-          // The first binary frame of each connection (or each start) is the init segment.
-          initialized = true
+        // The init segment is the first binary frame of a connection and follows each encoder start.
+        if (!renderer) {
           if (!mime) {
             setStreamError("Stream started without a MIME type")
             return
           }
-          if (!MediaSource.isTypeSupported(mime)) {
-            setStreamError(`This browser cannot play ${mime}`)
+          try {
+            renderer = new VideoRenderer(canvas, mime, setStats, setStreamError)
+          } catch (e) {
+            setStreamError(`This browser cannot decode the desktop stream: ${errorText(e)}`)
             return
           }
-          sink = new MseSink(video, mime, setStreamError)
         }
-        sink?.push(bytes)
+        renderer.push(bytes)
       },
       onClose: () => {
-        sink?.close()
-        sink = null
-        initialized = false
+        renderer?.close()
+        renderer = null
+        setStats(null)
         setStreamError("Desktop connection lost; reconnecting…")
         retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
       },
@@ -72,7 +72,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     return () => {
       window.clearTimeout(retry)
       conn.close()
-      sink?.close()
+      renderer?.close()
       connRef.current = null
     }
   }, [taskId, generation, queryClient])
@@ -93,17 +93,17 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     connRef.current?.send(input)
   }
 
-  function pointer(e: MouseEvent<HTMLVideoElement>) {
+  function pointer(e: MouseEvent<HTMLCanvasElement>) {
     return status ? normalizePoint(e.currentTarget, e.clientX, e.clientY, status) : null
   }
 
-  function onMouseMove(e: MouseEvent<HTMLVideoElement>) {
+  function onMouseMove(e: MouseEvent<HTMLCanvasElement>) {
     if (!running) return
     const p = pointer(e)
     if (p?.inside) send({ _tag: "mouse.move", x: p.x, y: p.y })
   }
 
-  function onMouseButton(e: MouseEvent<HTMLVideoElement>, down: boolean) {
+  function onMouseButton(e: MouseEvent<HTMLCanvasElement>, down: boolean) {
     if (!running) return
     const button = mouseButton(e.button)
     const p = pointer(e)
@@ -113,7 +113,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     send({ _tag: "mouse.button", x: p.x, y: p.y, button, down })
   }
 
-  function onWheel(e: WheelEvent<HTMLVideoElement>) {
+  function onWheel(e: WheelEvent<HTMLCanvasElement>) {
     if (!running) return
     const dx = Math.sign(e.deltaX)
     const dy = Math.sign(e.deltaY)
@@ -121,7 +121,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     send({ _tag: "mouse.wheel", dx, dy })
   }
 
-  function onKey(e: KeyboardEvent<HTMLVideoElement>, down: boolean) {
+  function onKey(e: KeyboardEvent<HTMLCanvasElement>, down: boolean) {
     if (!running) return
     e.preventDefault()
     send(keyInput(e.nativeEvent, down))
@@ -144,18 +144,16 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         {status && <StatusBadge status={status.state} />}
         {status && status.state === "running" && (
           <span className="font-mono text-xs text-muted-foreground">
-            {status.width}×{status.height} · {status.fps} fps · {status.display}
+            {status.width}×{status.height} · {stats?.fps ?? 0} fps · {(stats?.decodeMs ?? 0).toFixed(1)} ms decode ·{" "}
+            {status.display}
           </span>
         )}
       </div>
       {error && <Alert className="m-2 w-auto">{error}</Alert>}
       <div className="relative min-h-0 flex-1 bg-black">
-        <video
-          ref={videoRef}
+        <canvas
+          ref={canvasRef}
           className="absolute inset-0 size-full cursor-default object-contain outline-none focus:shadow-[inset_0_0_0_1px_var(--ring)]"
-          muted
-          autoPlay
-          playsInline
           tabIndex={0}
           onMouseMove={onMouseMove}
           onMouseDown={(e) => onMouseButton(e, true)}
