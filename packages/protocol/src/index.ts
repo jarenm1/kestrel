@@ -59,6 +59,8 @@ export const Task = Schema.Struct({
   updatedAt: Schema.String,
   /** Set once a pull request has been opened for `branch`; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
+  archivedAt: Schema.optional(Schema.String),
 })
 export type Task = typeof Task.Type
 
@@ -255,6 +257,8 @@ export const Paths = {
   repo: (id: string) => `/api/repos/${id}`,
   repoTasks: (repoId: string) => `/api/repos/${repoId}/tasks`,
   task: (id: string) => `/api/tasks/${id}`,
+  /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
+  taskArchive: (id: string) => `/api/tasks/${id}/archive`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
