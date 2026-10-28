@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
-import { NavLink } from "react-router-dom"
-import { PanelLeftClose, PanelLeftOpen, SquarePen, Workflow } from "lucide-react"
+import { NavLink, useNavigate, useParams } from "react-router-dom"
+import { Archive, PanelLeftClose, PanelLeftOpen, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { cn } from "@/lib/utils"
 import { errorText, formatAgo } from "@/util"
 
@@ -90,6 +91,9 @@ interface Props {
 /** Threads (tasks) as vertical tabs, most recent first; collapses to an icon rail. */
 export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props) {
   const now = useNow(CLOCK_TICK_MS)
+  const navigate = useNavigate()
+  const { taskId: openTaskId } = useParams()
+  const { archive } = useThreadArchive(repoId)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (collapsed) localStorage.setItem(COLLAPSED_KEY, "1")
@@ -98,7 +102,18 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
-  const sorted = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const sorted = byRecent.filter((task) => task.archivedAt === undefined)
+  const archivedCount = byRecent.length - sorted.length
+
+  function archiveThread(task: Task) {
+    archive.mutate(task.id, {
+      // The open thread leaves the list; go back to the repo's empty chat.
+      onSuccess: () => {
+        if (task.id === openTaskId) navigate(`/repos/${repoId}`)
+      },
+    })
+  }
 
   if (collapsed) {
     return (
@@ -130,6 +145,14 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
         >
           <Workflow className="size-4" />
         </NavLink>
+        <NavLink
+          to={`/repos/${repoId}/archived`}
+          aria-label="Archived"
+          title="Archived"
+          className={(s) => cn(tabClass(s), "justify-center py-2")}
+        >
+          <Archive className="size-4" />
+        </NavLink>
         {sorted.map((task) => (
           <NavLink
             key={task.id}
@@ -141,7 +164,6 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
             <StatusIcon status={task.status} />
           </NavLink>
         ))}
-        {/* TODO: thread actions (rename, archive/delete via DELETE /api/tasks/:id) from a tab context menu. */}
       </nav>
     )
   }
@@ -171,25 +193,47 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
         <Workflow className="size-4 shrink-0" />
         Automations
       </NavLink>
+      <NavLink to={`/repos/${repoId}/archived`} className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+        <Archive className="size-4 shrink-0" />
+        Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
+      </NavLink>
       {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
+      {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
       {sorted.length > 0 && <div className="px-2.5 pt-4 pb-1 text-xs text-muted-foreground">Threads</div>}
-      {sorted.map((task) => (
-        <NavLink
-          key={task.id}
-          to={`/repos/${repoId}/threads/${task.id}`}
-          title={`${task.title}\n${task.branch}`}
-          className={(s) => cn(tabClass(s), "items-start py-2 pr-3 pl-2.5")}
-        >
-          <StatusIcon status={task.status} className="mt-0.5" />
-          <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <FadingTitle text={task.title} />
-            <span className="text-xs text-muted-foreground">
-              {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
-            </span>
-          </span>
-        </NavLink>
-      ))}
-      {/* TODO: thread actions (rename, archive/delete via DELETE /api/tasks/:id) from a tab context menu. */}
+      {sorted.map((task) => {
+        const isOpen = task.id === openTaskId
+        return (
+          <div key={task.id} className="group/thread relative flex min-w-0">
+            <NavLink
+              to={`/repos/${repoId}/threads/${task.id}`}
+              title={`${task.title}\n${task.branch}`}
+              className={(s) => cn(tabClass(s), "flex-1 items-start py-2 pr-9 pl-2.5")}
+            >
+              <StatusIcon status={task.status} className="mt-0.5" />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <FadingTitle text={task.title} />
+                <span className="text-xs text-muted-foreground">
+                  {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
+                </span>
+              </span>
+            </NavLink>
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn(
+                "absolute top-1.5 right-1.5 size-7 transition-opacity",
+                isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
+              )}
+              aria-label="Archive thread"
+              title="Archive thread"
+              disabled={archive.isPending && archive.variables === task.id}
+              onClick={() => archiveThread(task)}
+            >
+              <Archive />
+            </Button>
+          </div>
+        )
+      })}
     </nav>
   )
 }

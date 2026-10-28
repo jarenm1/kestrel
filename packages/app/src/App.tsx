@@ -73,6 +73,7 @@ export function App() {
           <Route path="/repos/:repoId" element={<RepoPage />} />
           <Route path="/repos/:repoId/threads/:taskId" element={<RepoPage />} />
           <Route path="/repos/:repoId/automations" element={<RepoPage view="automations" />} />
+          <Route path="/repos/:repoId/archived" element={<RepoPage view="archived" />} />
           <Route path="*" element={<div className="p-5 text-muted-foreground">Not found.</div>} />
         </Routes>
       </main>

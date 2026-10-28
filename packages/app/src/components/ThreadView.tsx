@@ -36,6 +36,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
   }
 
   const pullRequest = state.task?.pullRequest
+  // Archived threads keep their history; their desktop was torn down, so it does not start again.
+  const archivedTask = state.task?.archivedAt ? state.task : undefined
 
   return (
     <div
@@ -52,6 +54,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
           messages={state.messages}
           runs={state.runs}
           output={state.output}
+          archivedTask={archivedTask}
         />
       </section>
       {open ? (
@@ -87,7 +90,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <PanelRightClose />
             </Button>
           </div>
-          <SidebarBody tab={tab} taskId={taskId} />
+          <SidebarBody tab={tab} taskId={taskId} archived={archivedTask !== undefined} />
         </aside>
       ) : (
         <aside className="flex flex-col items-center gap-1 py-2">
@@ -119,9 +122,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
   )
 }
 
-function SidebarBody({ tab, taskId }: { tab: TabId; taskId: string }) {
+function SidebarBody({ tab, taskId, archived }: { tab: TabId; taskId: string; archived: boolean }) {
   switch (tab) {
     case "desktop":
+      if (archived) {
+        return <p className="p-4 text-sm text-muted-foreground">The desktop is off while this thread is archived.</p>
+      }
       return <DesktopViewer taskId={taskId} />
     case "diff":
       return <DiffPanel taskId={taskId} />

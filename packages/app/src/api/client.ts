@@ -132,6 +132,8 @@ export const api = {
   listRepoTasks: (repoId: string) => run(request(Schema.Array(Task), "GET", Paths.repoTasks(repoId))),
   createTask: (repoId: string, body: CreateTaskBody) => run(request(Task, "POST", Paths.repoTasks(repoId), body)),
   getTask: (taskId: string) => run(request(Task, "GET", Paths.task(taskId))),
+  archiveTask: (taskId: string) => run(request(Task, "POST", Paths.taskArchive(taskId))),
+  unarchiveTask: (taskId: string) => run(request(Task, "DELETE", Paths.taskArchive(taskId))),
   listMessages: (taskId: string) => run(request(Schema.Array(Message), "GET", Paths.taskMessages(taskId))),
   sendMessage: (taskId: string, body: SendMessageBody) =>
     run(request(SendMessageResponse, "POST", Paths.taskMessages(taskId), body)),

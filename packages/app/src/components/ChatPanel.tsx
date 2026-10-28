@@ -1,11 +1,12 @@
 import { useEffect, useRef, type ReactNode } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
-import type { Message, Run, SendMessageBody, TaskStatus } from "@cloudagents/protocol"
+import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api, taskAttachmentUrl } from "@/api/client"
 import { keys, upsert } from "@/api/queries"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { formatClock } from "@/util"
+import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer } from "./Composer"
 import { Markdown } from "./Markdown"
 import { RunPanel } from "./RunPanel"
@@ -17,6 +18,8 @@ interface Props {
   messages: readonly Message[]
   runs: readonly Run[]
   output: Record<string, string[]>
+  /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
+  archivedTask: Task | undefined
 }
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
@@ -78,7 +81,7 @@ function ThreadItem({
   }
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, output }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, output, archivedTask }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
 
@@ -153,13 +156,17 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output }: Props)
       </div>
       <RunPanel runs={sortedRuns} output={output} />
       <div className="flex justify-center px-5 pt-2 pb-5">
-        <Composer
-          onSend={send.mutateAsync}
-          pending={send.isPending}
-          error={send.error ?? cancel.error}
-          onStop={activeRun && (() => cancel.mutate(activeRun.id))}
-          stopping={cancel.isPending}
-        />
+        {archivedTask ? (
+          <ArchivedNotice task={archivedTask} />
+        ) : (
+          <Composer
+            onSend={send.mutateAsync}
+            pending={send.isPending}
+            error={send.error ?? cancel.error}
+            onStop={activeRun && (() => cancel.mutate(activeRun.id))}
+            stopping={cancel.isPending}
+          />
+        )}
       </div>
     </div>
   )
