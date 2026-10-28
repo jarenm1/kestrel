@@ -34,7 +34,8 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
       instructions:
         "Tools for the task's remote desktop (a virtual X display streamed to the user) and its git worktree. " +
         "Desktop coordinates are pixels with the origin at the top-left; call desktop_screenshot first to see the " +
-        "desktop and its size. Use task_report to tell the user when you are done or need input.",
+        "desktop and its size. Use task_report to tell the user when you are done, task_ask to ask them a question " +
+        "and wait for the answer, and task_inbox between steps to read messages the user sent during the run.",
     },
   )
   registerDesktopTools(server, ctx, deps)

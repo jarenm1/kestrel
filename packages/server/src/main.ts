@@ -129,6 +129,8 @@ const program = Effect.gen(function* () {
     },
     report: core.report,
     github: { push: core.gitPush, openPullRequest: core.openPullRequest, pullRequestStatus: core.pullRequestStatus },
+    ask: core.ask,
+    inbox: core.inbox,
   })
 
   const server = createServer((req, res) => {
