@@ -72,6 +72,22 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     const statusEl = document.getElementById("s");
     let ms = null, sb = null, mime = null;
     const queue = [];
+    let received = 0, acked = 0, ackedAt = performance.now(), ackTimer = null;
+
+    // Acks let the server bound how many frames are in flight to this viewer (see stream.ack in protocol).
+    function sendAck() {
+      clearTimeout(ackTimer);
+      ackTimer = null;
+      acked = received;
+      ackedAt = performance.now();
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ _tag: "stream.ack", frames: received }));
+    }
+
+    function countFrame() {
+      received++;
+      if (received - acked >= 6 || performance.now() - ackedAt >= 100) sendAck();
+      else if (!ackTimer) ackTimer = setTimeout(sendAck, 100);
+    }
 
     function pump() {
       if (!sb || sb.updating) return;
@@ -141,6 +157,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         } catch (err) {}
         return;
       }
+      countFrame();
       queue.push(new Uint8Array(e.data));
       start();
       pump();
