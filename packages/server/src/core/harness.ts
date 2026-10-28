@@ -1,7 +1,7 @@
 import { Context, Effect, Either, Layer, Runtime } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream, type WriteStream } from "node:fs"
-import { mkdir, writeFile } from "node:fs/promises"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
 import { InternalError, type CliProvider, type Message, type Run, type ServerEvent, type Task } from "@cloudagents/protocol"
@@ -185,15 +185,20 @@ export const AgentHarnessLive = Layer.effect(
           const mcpConfigAgent = join(agentHome(settings, homeDir), ".cloudagents", "mcp.json")
 
           const started = yield* Effect.gen(function* () {
+            // The run's token authorizes its MCP session as well as its model calls.
+            const lease = yield* broker.issue(run.id, user)
             yield* Effect.tryPromise({
               try: async () => {
                 await mkdir(runDir, { recursive: true })
                 await mkdir(join(homeDir, ".cloudagents"), { recursive: true })
-                await writeFile(
-                  mcpConfigHost,
-                  JSON.stringify({ mcpServers: { cloudagents: { type: "http", url: mcpUrl } } }, null, 2),
-                  "utf8",
-                )
+                const mcpJson = {
+                  mcpServers: {
+                    cloudagents: { type: "http", url: mcpUrl, headers: { Authorization: `Bearer ${lease.token}` } },
+                  },
+                }
+                // The file carries the run's token: owner-only, including when it already existed.
+                await writeFile(mcpConfigHost, JSON.stringify(mcpJson, null, 2), { encoding: "utf8", mode: 0o600 })
+                await chmod(mcpConfigHost, 0o600)
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
@@ -207,8 +212,7 @@ export const AgentHarnessLive = Layer.effect(
               inside: settings.enabled ? join(SANDBOX_HOME, ".kestrel", basename(login.dir)) : login.dir,
             }))
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
-            const brokerEnv = yield* broker.issue(run.id, user)
-            const keptBroker = Object.fromEntries(Object.entries(brokerEnv).filter(([key]) => !dropped.has(key)))
+            const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
             const launch = yield* prepareLaunch({
               settings,
@@ -224,6 +228,7 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_MCP_URL: mcpUrl,
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
+                CLOUDAGENTS_MCP_TOKEN: lease.token,
                 ...keptBroker,
                 ...loginEnv,
               },

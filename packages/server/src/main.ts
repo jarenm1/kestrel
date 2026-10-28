@@ -106,6 +106,7 @@ const program = Effect.gen(function* () {
   const webHandler = yield* makeWebHandler(core, cliAuth)
 
   const mcpHandler = createMcpHandler({
+    auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
     desktop: {
       status: (taskId) => desktop.status(taskId),
       screenshot: (taskId) => desktop.screenshot(taskId),
@@ -115,7 +116,7 @@ const program = Effect.gen(function* () {
     workspace: {
       exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
     },
-    report: (taskId, input) => core.report(taskId, input),
+    report: core.report,
   })
 
   const server = createServer((req, res) => {

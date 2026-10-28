@@ -63,8 +63,10 @@ export interface CoreShape {
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
 
-  /** Used by the MCP handler: agent-reported status and optional message. */
-  readonly report: (taskId: string, input: ReportInput) => Effect.Effect<void, NotFound | InternalError>
+  /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
+  readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
+  readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command in the task worktree. */
   readonly execInTask: (
     taskId: string,
@@ -427,12 +429,17 @@ export const CoreLive = Layer.effect(
 
       desktopStop: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.stop(taskId)),
 
-      report: (taskId, input) =>
+      report: (taskId, runId, input) =>
         Effect.gen(function* () {
           const updated = yield* store.update(
-            (s): Either.Either<{ task: Task; message: Message | null }, NotFound> => {
+            (s): Either.Either<{ task: Task; message: Message | null }, NotFound | Conflict> => {
               const found = findTask(s, taskId)
               if (Either.isLeft(found)) return Either.left(found.left)
+              // Only the task's running run may report, so a stale caller cannot leave the task in `running`.
+              const run = s.runs.find((r) => r.id === runId)
+              if (!run || run.taskId !== taskId || run.status !== "running") {
+                return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
+              }
               const task = found.right
               const now = nowIso()
               task.status = input.status
@@ -440,8 +447,7 @@ export const CoreLive = Layer.effect(
               const trimmed = input.message.trim()
               let message: Message | null = null
               if (trimmed !== "") {
-                const run = s.runs.find((r) => r.taskId === taskId && r.status === "running")
-                message = { id: newId(), taskId, role: "agent", text: trimmed, runId: run?.id ?? null, createdAt: now }
+                message = { id: newId(), taskId, role: "agent", text: trimmed, runId, createdAt: now }
                 s.messages.push(message)
               }
               return Either.right({ task: { ...task }, message })
@@ -450,6 +456,11 @@ export const CoreLive = Layer.effect(
           hub.publish({ _tag: "task.updated", task: updated.task })
           if (updated.message) publishMessage(updated.message)
         }),
+
+      runFor: (runId) => Effect.map(store.read, (s) => {
+        const run = s.runs.find((r) => r.id === runId)
+        return run ? { ...run } : null
+      }),
 
       execInTask: (taskId, command, timeoutMs) =>
         Effect.gen(function* () {
