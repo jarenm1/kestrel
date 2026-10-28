@@ -738,6 +738,8 @@ export class Hub extends DurableObject<Env> {
       } catch {
         // box already gone; failAll has or will close the rest
       }
+      // Complete the closing handshake: without this the browser stays CLOSING and never drops the connection.
+      closeQuietly(server, closeCode(event.code), "")
     })
 
     try {
