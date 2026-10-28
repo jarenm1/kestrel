@@ -71,9 +71,9 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
   }
 >() {}
 
-const WIDTH = 1280
-const HEIGHT = 800
-const FPS = 25
+const WIDTH = 1920
+const HEIGHT = 1080
+const FPS = 60
 const FIRST_DISPLAY = 101
 const LAST_DISPLAY = 199
 const X_SOCKET_TIMEOUT_MS = 10_000
@@ -82,6 +82,33 @@ const TERM_GRACE_MS = 2_000
 const COMMAND_TIMEOUT_MS = 15_000
 /** Output kept per launched app; older text is dropped. */
 const OUTPUT_TAIL_CHARS = 32 * 1024
+/** Frames per keyframe: 2 s at 60 fps. */
+const GOP = 120
+/** Cap on the cached current GOP replayed to late joiners. Past it, joiners wait for the next keyframe. */
+const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
+/** How long a live encoder keeps running after its last viewer leaves. */
+const LINGER_MS = 15_000
+/** Unexpected encoder exits tolerated while viewers are attached before the desktop fails. */
+const MAX_ENCODER_RESTARTS = 3
+/** NVENC is skipped for this long after it reports a busy GPU (session limit). */
+const NVENC_BUSY_BACKOFF_MS = 30_000
+/** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
+let nvencDisabled = false
+let nvencBusyUntil = 0
+
+type EncoderKind = "nvenc" | "x264"
+
+/** One ffmpeg encoder process and the splitter for its stdout. */
+interface Encoder {
+  readonly kind: EncoderKind
+  readonly splitter: Mp4Splitter
+  /** Set right after spawn. */
+  child: ChildProcess | null
+  /** The init segment arrived: later exits are restarts, not boot failures. */
+  initialized: boolean
+  /** Tail of stderr, for classifying why NVENC would not start. */
+  stderr: string
+}
 
 interface Session {
   readonly taskId: string
@@ -95,11 +122,19 @@ interface Session {
   readonly sinks: Set<DesktopSink>
   /** Apps started with launch(), in launch order. */
   readonly apps: Map<string, AppRecord>
-  readonly splitter: Mp4Splitter
+  /** Live encoder, or null while idle (no viewers past the linger) or after failure. */
+  encoder: Encoder | null
   state: DesktopState
   error: string | null
   mime: string | null
   init: Uint8Array | null
+  /** Fragments of the current GOP, keyframe first; null when not cached (restarting, or over the cap). */
+  gop: Uint8Array[] | null
+  gopBytes: number
+  /** Sinks that must not get delta fragments until the next keyframe. */
+  awaiting: Set<DesktopSink>
+  lingerTimer: NodeJS.Timeout | null
+  restartsLeft: number
   stderrTail: string
 }
 
@@ -178,10 +213,43 @@ const xdotoolArgs = (e: DesktopInput): string[] => {
   }
 }
 
-const ffmpegArgs = (display: string): string[] => [
+/** Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of GOP frames and no B-frames. */
+const ENCODER_ARGS: Record<EncoderKind, readonly string[]> = {
+  nvenc: [
+    "-c:v", "h264_nvenc",
+    "-preset", "p1",
+    "-tune", "ull",
+    "-rc", "vbr",
+    "-cq", "23",
+    "-b:v", "0",
+    "-maxrate", "20M",
+    "-bufsize", "20M",
+    "-bf", "0",
+    "-profile:v", "high",
+    "-g", String(GOP),
+    "-forced-idr", "1",
+  ],
+  x264: [
+    "-c:v", "libx264",
+    "-preset", "superfast",
+    "-tune", "zerolatency",
+    "-profile:v", "high",
+    "-crf", "23",
+    "-pix_fmt", "yuv420p",
+    "-g", String(GOP),
+    "-sc_threshold", "0",
+  ],
+}
+
+const ffmpegArgs = (display: string, kind: EncoderKind): string[] => [
   "-hide_banner",
   "-loglevel",
   "error",
+  // Grab frames as they are produced: no input buffering, no stream probing.
+  "-fflags",
+  "nobuffer",
+  "-probesize",
+  "32",
   "-f",
   "x11grab",
   "-framerate",
@@ -190,29 +258,17 @@ const ffmpegArgs = (display: string): string[] => [
   `${WIDTH}x${HEIGHT}`,
   "-i",
   display,
-  "-c:v",
-  "libx264",
-  "-profile:v",
-  "baseline",
-  "-tune",
-  "zerolatency",
-  "-preset",
-  "ultrafast",
-  "-pix_fmt",
-  "yuv420p",
-  "-g",
-  String(FPS), // keyframe every ~1s
-  "-keyint_min",
-  String(FPS),
-  "-sc_threshold",
-  "0",
+  ...ENCODER_ARGS[kind],
   "-r",
   String(FPS),
   "-an",
   "-f",
   "mp4",
+  // One moof+mdat per frame, so each frame reaches the viewer as soon as it is encoded.
   "-movflags",
-  "empty_moov+default_base_moof+frag_keyframe",
+  "empty_moov+default_base_moof+frag_every_frame",
+  "-flush_packets",
+  "1",
   "pipe:1",
 ]
 
@@ -297,43 +353,148 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       for (const w of watchers) w(st)
     }
 
+    const cancelLinger = (s: Session) => {
+      if (s.lingerTimer === null) return
+      clearTimeout(s.lingerTimer)
+      s.lingerTimer = null
+    }
+
+    /** Forgets the encoder and everything cached from it. The caller stops the process. */
+    const detachEncoder = (s: Session) => {
+      cancelLinger(s)
+      s.encoder = null
+      s.init = null
+      s.gop = null
+      s.gopBytes = 0
+      s.awaiting.clear()
+    }
+
     const failSession = (s: Session, message: string) => {
       if (s.state !== "starting" && s.state !== "running") return
       const tail = s.stderrTail.trim().slice(-500)
       const full = tail ? `${message}: ${tail}` : message
       s.state = "failed"
       s.error = full
+      detachEncoder(s)
       Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: full })))
       publish(s)
       void terminate(s.procs)
     }
 
-    const onMediaBytes = (s: Session, data: Buffer) => {
-      if (s.state !== "starting" && s.state !== "running") return
+    /** Stops the encoder on purpose (no viewers left): not a failure, so nothing restarts it. */
+    const stopEncoder = (s: Session) => {
+      const enc = s.encoder
+      if (enc === null) return
+      detachEncoder(s)
+      if (enc.child) void terminate([enc.child])
+    }
+
+    /** Starts the linger countdown once the last viewer has left a live encoder. */
+    const scheduleStop = (s: Session) => {
+      if (s.sinks.size > 0 || s.encoder === null || s.lingerTimer !== null) return
+      s.lingerTimer = setTimeout(() => {
+        s.lingerTimer = null
+        if (s.sinks.size === 0) stopEncoder(s)
+      }, LINGER_MS)
+    }
+
+    const onEncoderBytes = (s: Session, enc: Encoder, data: Buffer) => {
+      if (s.encoder !== enc || (s.state !== "starting" && s.state !== "running")) return
       let pieces: Mp4Piece[]
       try {
-        pieces = s.splitter.push(data)
+        pieces = enc.splitter.push(data)
       } catch (e) {
         failSession(s, toErr(e).message)
         return
       }
       for (const piece of pieces) {
-        if (piece.kind === "media") {
+        if (piece.kind === "init") {
+          const codec = avcCodecString(piece.bytes)
+          if (codec === null) {
+            failSession(s, "could not read H.264 codec from init segment")
+            return
+          }
+          enc.initialized = true
+          s.restartsLeft = MAX_ENCODER_RESTARTS
+          s.init = piece.bytes
+          s.mime = `video/mp4; codecs="${codec}"`
+          s.state = "running"
+          Deferred.unsafeDone(s.ready, Effect.void)
           for (const sink of s.sinks) sink.onMedia(piece.bytes)
+          publish(s)
+          scheduleStop(s)
           continue
         }
-        const codec = avcCodecString(piece.bytes)
-        if (codec === null) {
-          failSession(s, "could not read H.264 codec from init segment")
-          return
+        if (piece.keyframe) {
+          s.gop = [piece.bytes]
+          s.gopBytes = piece.bytes.length
+          s.awaiting.clear()
+        } else if (s.gop !== null) {
+          s.gop.push(piece.bytes)
+          s.gopBytes += piece.bytes.length
+          if (s.gopBytes > GOP_CACHE_MAX_BYTES) {
+            s.gop = null
+            s.gopBytes = 0
+          }
         }
-        s.init = piece.bytes
-        s.mime = `video/mp4; codecs="${codec}"`
-        s.state = "running"
-        Deferred.unsafeDone(s.ready, Effect.void)
-        for (const sink of s.sinks) sink.onMedia(piece.bytes)
-        publish(s)
+        for (const sink of s.sinks) if (piece.keyframe || !s.awaiting.has(sink)) sink.onMedia(piece.bytes)
       }
+    }
+
+    /** NVENC when it is usable, libx264 otherwise. */
+    const preferredEncoder = (): EncoderKind => (!nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
+
+    /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
+    const startEncoder = (s: Session, kind: EncoderKind) => {
+      const enc: Encoder = { kind, splitter: new Mp4Splitter(), child: null, initialized: false, stderr: "" }
+      s.init = null
+      s.gop = null
+      s.gopBytes = 0
+      s.awaiting = new Set(s.sinks)
+      enc.child = spawnTracked(s, "ffmpeg", ffmpegArgs(s.display, kind), {
+        critical: false,
+        onStdout: (d) => onEncoderBytes(s, enc, d),
+        onStderr: (d) => {
+          enc.stderr = (enc.stderr + d.toString()).slice(-2000)
+        },
+        onExit: (reason) => onEncoderExit(s, enc, reason),
+      })
+      s.encoder = enc
+    }
+
+    /** Starts an encoder from a process callback, where a spawn error must fail the desktop instead of throwing. */
+    const launchEncoder = (s: Session, kind: EncoderKind) => {
+      try {
+        startEncoder(s, kind)
+      } catch (e) {
+        failSession(s, toErr(e).message)
+      }
+    }
+
+    const onEncoderExit = (s: Session, enc: Encoder, reason: string) => {
+      if (s.encoder !== enc || (s.state !== "starting" && s.state !== "running")) return
+      detachEncoder(s)
+      const why = `${enc.kind} encoder exited (${reason})`
+      if (enc.kind === "nvenc" && !enc.initialized) {
+        // NVENC could not start. A busy GPU (session limit) is retried later; anything else disables NVENC.
+        if (/OpenEncodeSessionEx|out of memory/i.test(enc.stderr)) nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
+        else nvencDisabled = true
+        console.warn(`desktop ${s.display}: ${why}; using libx264`)
+        launchEncoder(s, "x264")
+        return
+      }
+      if (s.state === "starting") {
+        failSession(s, why)
+        return
+      }
+      // Nobody is watching: the next subscribe starts the encoder again.
+      if (s.sinks.size === 0) return
+      if (s.restartsLeft === 0) {
+        failSession(s, `${why}; gave up after ${MAX_ENCODER_RESTARTS} restarts`)
+        return
+      }
+      s.restartsLeft--
+      launchEncoder(s, preferredEncoder())
     }
 
     const spawnTracked = (
@@ -346,6 +507,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         env?: Readonly<Record<string, string>>
         onStdout?: (d: Buffer) => void
         onStderr?: (d: Buffer) => void
+        /** Replaces the default handling of the process ending (a restartable encoder). */
+        onExit?: (reason: string) => void
       },
     ) => {
       const child = ownGroup(
@@ -364,11 +527,13 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       child.stdout?.on("data", (d: Buffer) => opts.onStdout?.(d))
       child.on("error", (e) => {
         s.procs.delete(child)
-        failSession(s, `${command}: ${e.message}`)
+        if (opts.onExit) opts.onExit(e.message)
+        else failSession(s, `${command}: ${e.message}`)
       })
       child.on("exit", (code, signal) => {
         s.procs.delete(child)
-        if (opts.critical) failSession(s, `${command} exited (${code ?? signal})`)
+        if (opts.onExit) opts.onExit(`${code ?? signal}`)
+        else if (opts.critical) failSession(s, `${command} exited (${code ?? signal})`)
       })
       return child
     }
@@ -399,10 +564,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         yield* Effect.try({
           try: () => {
             spawnTracked(s, "openbox", ["--sm-disable"], { critical: false })
-            spawnTracked(s, "ffmpeg", ffmpegArgs(s.display), {
-              critical: true,
-              onStdout: (d) => onMediaBytes(s, d),
-            })
+            startEncoder(s, preferredEncoder())
           },
           catch: toErr,
         })
@@ -435,6 +597,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         sessions.delete(taskId)
         s.state = "stopped"
         s.error = null
+        detachEncoder(s)
         Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: "desktop stopped" })))
         publish(s)
         s.sinks.clear()
@@ -484,11 +647,16 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 procs: new Set(),
                 sinks: new Set(),
                 apps: new Map(),
-                splitter: new Mp4Splitter(),
+                encoder: null,
                 state: "starting",
                 error: null,
                 mime: null,
                 init: null,
+                gop: null,
+                gopBytes: 0,
+                awaiting: new Set(),
+                lingerTimer: null,
+                restartsLeft: MAX_ENCODER_RESTARTS,
                 stderrTail: "",
               }
               sessions.set(taskId, s)
@@ -615,9 +783,24 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const s = yield* lookup(taskId)
           s.sinks.add(sink)
           sink.onStatus(toStatus(taskId, s))
-          if (s.init) sink.onMedia(s.init)
+          cancelLinger(s)
+          if (s.encoder === null && s.state === "running") {
+            // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
+            yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(
+              Effect.tapError(() => Effect.sync(() => s.sinks.delete(sink))),
+            )
+          } else if (s.init !== null && s.gop !== null) {
+            // Live encoder with a cached GOP: the keyframe and its deltas bring this viewer straight to live.
+            sink.onMedia(s.init)
+            for (const fragment of s.gop) sink.onMedia(fragment)
+          } else {
+            if (s.init !== null) sink.onMedia(s.init)
+            s.awaiting.add(sink)
+          }
           return Effect.sync(() => {
             s.sinks.delete(sink)
+            s.awaiting.delete(sink)
+            scheduleStop(s)
           })
         }),
 
