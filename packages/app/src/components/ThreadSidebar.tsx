@@ -229,11 +229,33 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
               disabled={archive.isPending && archive.variables === task.id}
               onClick={() => archiveThread(task)}
             >
-              <Archive />
+              <ArchiveBoxIcon />
             </Button>
           </div>
         )
       })}
     </nav>
+  )
+}
+
+/** Archive box: lid, body and handle slot. Drawn inline so the row button needs no icon import. */
+function ArchiveBoxIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <rect x="2.5" y="3.5" width="19" height="5" rx="1" />
+      <path d="M4.5 8.5v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-10" />
+      <path d="M10 12.5h4" />
+    </svg>
   )
 }

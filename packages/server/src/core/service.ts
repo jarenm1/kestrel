@@ -600,6 +600,15 @@ export const CoreLive = Layer.effect(
         const desktopNow = yield* desktop.status(taskId)
         const display = desktopNow.state === "running" ? desktopNow.display : null
 
+        // Archiving may have landed while the desktop started: it cancelled this run and tore the task down,
+        // so nothing may be spawned, and a desktop started meanwhile goes too.
+        const stateNow = yield* store.read
+        const runNow = stateNow.runs.find((r) => r.id === reserved.run.id)
+        const archived = stateNow.tasks.find((t) => t.id === taskId)?.archivedAt !== undefined
+        if (archived || runNow?.status !== "running") {
+          if (archived) yield* desktop.stop(taskId)
+          return { message: reserved.message, run: runNow ?? reserved.run }
+        }
         yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
       })
