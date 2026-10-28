@@ -5,6 +5,7 @@ import { Context, Data, Deferred, Effect, Layer } from "effect"
 import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { avcCodecString, Mp4Splitter, type Mp4Piece } from "./fmp4"
+import { encodePng, resample, type RgbFrame } from "./frames"
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
 
@@ -57,6 +58,8 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
       crop?: DesktopRegion,
       scale?: number,
     ) => Effect.Effect<Uint8Array, DesktopError>
+    /** The whole desktop as raw RGB24, grabbed now. */
+    readonly grab: (taskId: string) => Effect.Effect<RgbFrame, DesktopError>
     readonly cursor: (taskId: string) => Effect.Effect<{ readonly x: number; readonly y: number }, DesktopError>
     readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, DesktopError>
     /** Starts an app on the live desktop and returns it. Killed with the desktop. `command` is what was asked for. */
@@ -338,6 +341,41 @@ const runCommand = (command: string, args: readonly string[], display: string) =
   })
   return promise
 }
+
+/** The whole desktop as raw RGB24, from one x11grab frame. */
+const grabFrame = (s: Session): Effect.Effect<RgbFrame, DesktopError> =>
+  Effect.gen(function* () {
+    const r = yield* Effect.tryPromise({
+      try: () =>
+        runCommand(
+          "ffmpeg",
+          [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "x11grab",
+            "-video_size",
+            `${WIDTH}x${HEIGHT}`,
+            "-i",
+            s.display,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+          ],
+          s.display,
+        ),
+      catch: toErr,
+    })
+    if (r.exitCode !== 0 || r.stdout.length !== WIDTH * HEIGHT * 3) {
+      return yield* Effect.fail(new DesktopError({ message: `screenshot failed: ${r.stderr.trim()}` }))
+    }
+    return { width: WIDTH, height: HEIGHT, pixels: r.stdout }
+  })
 
 export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
   DesktopManager,
@@ -689,41 +727,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       screenshot: (taskId, crop, scale) =>
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
-          const filters = [
-            ...(crop ? [`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}`] : []),
-            ...(scale !== undefined && scale !== 1 ? [`scale=round(iw*${scale}):round(ih*${scale})`] : []),
-          ]
-          const r = yield* Effect.tryPromise({
-            try: () =>
-              runCommand(
-                "ffmpeg",
-                [
-                  "-hide_banner",
-                  "-loglevel",
-                  "error",
-                  "-f",
-                  "x11grab",
-                  "-video_size",
-                  `${WIDTH}x${HEIGHT}`,
-                  "-i",
-                  s.display,
-                  "-frames:v",
-                  "1",
-                  ...(filters.length > 0 ? ["-vf", filters.join(",")] : []),
-                  "-f",
-                  "image2pipe",
-                  "-c:v",
-                  "png",
-                  "pipe:1",
-                ],
-                s.display,
-              ),
-            catch: toErr,
-          })
-          if (r.exitCode !== 0 || r.stdout.length === 0) {
-            return yield* Effect.fail(new DesktopError({ message: `screenshot failed: ${r.stderr.trim()}` }))
-          }
-          return r.stdout
+          const frame = yield* grabFrame(s)
+          const area = crop ?? { x: 0, y: 0, width: frame.width, height: frame.height }
+          return encodePng(resample(frame, area, scale ?? 1))
+        }),
+
+      grab: (taskId) =>
+        Effect.gen(function* () {
+          const s = yield* requireLive(taskId)
+          return yield* grabFrame(s)
         }),
 
       cursor: (taskId) =>
