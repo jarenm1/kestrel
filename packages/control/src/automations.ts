@@ -21,7 +21,7 @@ import {
 } from "./github"
 
 const badRequest = (message: string): Response => errorResponse(400, "BadRequest", message)
-const notFound = errorResponse(404, "NotFound", "no such automation")
+const notFound = (): Response => errorResponse(404, "NotFound", "no such automation")
 
 const parseJson = (text: string): unknown => {
   try {
@@ -107,7 +107,7 @@ const createAutomation = async (request: Request, env: Env, login: string, url: 
 
 const updateAutomation = async (request: Request, env: Env, login: string, url: URL, id: string): Promise<Response> => {
   const current = await hub(env).automation(login, id)
-  if (current === null) return notFound
+  if (current === null) return notFound()
   const body = await readBody(request, UpdateAutomationBody)
   if (body instanceof Response) return body
   const trigger = body.trigger ?? current.trigger
@@ -126,12 +126,12 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
     if (needsHook) await ensureHook(env, token, slug, webhookUrl(url))
   }
   const updated = await hub(env).updateAutomation(login, id, body)
-  return updated === null ? notFound : json(updated)
+  return updated === null ? notFound() : json(updated)
 }
 
 const deleteAutomation = async (env: Env, login: string, id: string): Promise<Response> => {
   const current = await hub(env).automation(login, id)
-  if (current === null) return notFound
+  if (current === null) return notFound()
   if (current.enabled && current.trigger._tag === "github" && current.repo !== null) {
     const token = await githubToken(env, login)
     if (token instanceof Response) return token
@@ -147,7 +147,7 @@ const deleteAutomation = async (env: Env, login: string, id: string): Promise<Re
  */
 const triggerAutomation = async (request: Request, env: Env, login: string, id: string): Promise<Response> => {
   const current = await hub(env).automation(login, id)
-  if (current === null) return notFound
+  if (current === null) return notFound()
   const body = await readBody(request, TriggerAutomationBody, true)
   if (body instanceof Response) return body
   let reason = "manual"
@@ -165,7 +165,7 @@ const triggerAutomation = async (request: Request, env: Env, login: string, id: 
     return badRequest("pullRequest only applies to GitHub automations")
   }
   const run = await hub(env).fireAutomation(login, id, reason, pr)
-  return run === null ? notFound : json(run, 201)
+  return run === null ? notFound() : json(run, 201)
 }
 
 /** Every `/api/automations` route. Called after the session check; the webhook route is outside this. */
@@ -181,7 +181,7 @@ export const handleAutomations = async (request: Request, env: Env, login: strin
   const [, id = "", suffix] = match
   if (suffix === "/runs" && method === "GET") {
     const runs = await hub(env).automationRuns(login, id)
-    return runs === null ? notFound : json(runs)
+    return runs === null ? notFound() : json(runs)
   }
   if (suffix === "/trigger" && method === "POST") return triggerAutomation(request, env, login, id)
   if (suffix === undefined && method === "PATCH") return updateAutomation(request, env, login, url, id)
