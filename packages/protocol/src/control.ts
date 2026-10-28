@@ -38,6 +38,16 @@ export const ControlPaths = {
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
+  /** GET -> Automation[] / POST CreateAutomationBody -> Automation: the signed-in user's automations. */
+  automations: "/api/automations",
+  /** GET -> Automation / PATCH UpdateAutomationBody -> Automation / DELETE -> 204. Other users' ids are 404. */
+  automation: (id: string) => `/api/automations/${id}`,
+  /** GET -> AutomationRun[] (newest first). */
+  automationRuns: (id: string) => `/api/automations/${id}/runs`,
+  /** POST TriggerAutomationBody -> AutomationRun: "run now". */
+  automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
+  /** POST: GitHub repository webhook receiver. No session; authenticated by X-Hub-Signature-256. */
+  githubWebhook: "/webhooks/github",
 } as const
 
 export const Me = Schema.Struct({
@@ -110,3 +120,91 @@ export const BoxStatus = Schema.Struct({
   boxVersion: Schema.NullOr(Schema.String),
 })
 export type BoxStatus = typeof BoxStatus.Type
+
+/** GitHub pull-request webhook events an automation can start on (`pull_request` action, prefixed). */
+export const GithubAutomationEvent = Schema.Literal(
+  "pull_request.opened",
+  "pull_request.reopened",
+  "pull_request.ready_for_review",
+  "pull_request.synchronize",
+  "pull_request.review_requested",
+)
+export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
+
+/**
+ * When an automation starts a task.
+ * - schedule: 5-field cron (minute hour day-of-month month day-of-week; `*`, lists, ranges, steps; 0 and 7 are Sunday)
+ *   evaluated in an IANA `timezone`, e.g. `0 13 * * 2` in `America/New_York` is Tuesdays at 13:00.
+ * - github: fires on matching pull request events of the automation's project repository. `reviewers` filters
+ *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
+ *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
+ *   list means no filter.
+ */
+export const AutomationTrigger = Schema.Union(
+  Schema.Struct({
+    _tag: Schema.Literal("schedule"),
+    cron: Schema.String,
+    timezone: Schema.String,
+  }),
+  Schema.Struct({
+    _tag: Schema.Literal("github"),
+    events: Schema.NonEmptyArray(GithubAutomationEvent),
+    reviewers: Schema.optional(Schema.Array(Schema.String)),
+    baseBranches: Schema.optional(Schema.Array(Schema.String)),
+    includeDrafts: Schema.optional(Schema.Boolean),
+  }),
+)
+export type AutomationTrigger = typeof AutomationTrigger.Type
+
+export const Automation = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  repoId: Schema.String,
+  /** GitHub "owner/name" of the project, or null for projects that are not on github.com. */
+  repo: Schema.NullOr(Schema.String),
+  prompt: Schema.String,
+  enabled: Schema.Boolean,
+  trigger: AutomationTrigger,
+  createdAt: Schema.String, // ISO-8601
+  updatedAt: Schema.String, // ISO-8601
+  /** Next scheduled fire (ISO-8601); schedule automations only, null otherwise or when disabled. */
+  nextRunAt: Schema.NullOr(Schema.String),
+})
+export type Automation = typeof Automation.Type
+
+export const CreateAutomationBody = Schema.Struct({
+  name: Schema.String.pipe(Schema.minLength(1)),
+  repoId: Schema.String,
+  prompt: Schema.String.pipe(Schema.minLength(1)),
+  trigger: AutomationTrigger,
+  enabled: Schema.optional(Schema.Boolean),
+})
+export type CreateAutomationBody = typeof CreateAutomationBody.Type
+
+/** Every field optional; `repoId` cannot change. */
+export const UpdateAutomationBody = Schema.Struct({
+  name: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
+  prompt: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
+  trigger: Schema.optional(AutomationTrigger),
+  enabled: Schema.optional(Schema.Boolean),
+})
+export type UpdateAutomationBody = typeof UpdateAutomationBody.Type
+
+/** One attempt to start a task for an automation. `started` has a `taskId`; `failed` has an `error`. */
+export const AutomationRun = Schema.Struct({
+  id: Schema.String,
+  automationId: Schema.String,
+  firedAt: Schema.String, // ISO-8601
+  /** "schedule", "manual", "manual #12", or the webhook event, e.g. "pull_request.opened #12". */
+  reason: Schema.String,
+  status: Schema.Literal("started", "failed", "skipped"),
+  taskId: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+})
+export type AutomationRun = typeof AutomationRun.Type
+
+/** Manual "run now". `pullRequest` is required for github automations and rejected for schedules. */
+export const TriggerAutomationBody = Schema.Struct({
+  pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+})
+export type TriggerAutomationBody = typeof TriggerAutomationBody.Type
