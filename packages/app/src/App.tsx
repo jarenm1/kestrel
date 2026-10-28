@@ -19,7 +19,6 @@ import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { RepoPage } from "@/pages/RepoPage"
 import { ReposPage } from "@/pages/ReposPage"
-import { TaskPage } from "@/pages/TaskPage"
 import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -72,7 +71,7 @@ export function App() {
           <Route path="/" element={<ReposPage />} />
           <Route path="/connections" element={<ConnectionsPage />} />
           <Route path="/repos/:repoId" element={<RepoPage />} />
-          <Route path="/tasks/:taskId" element={<TaskPage />} />
+          <Route path="/repos/:repoId/threads/:taskId" element={<RepoPage />} />
           <Route path="*" element={<div className="p-5 text-muted-foreground">Not found.</div>} />
         </Routes>
       </main>
