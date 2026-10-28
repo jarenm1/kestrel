@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
-import type { Message, Run } from "@cloudagents/protocol"
+import type { DesktopStatus, Message, Run } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { keys, queries, upsert } from "@/api/queries"
 import { errorText } from "@/util"
@@ -15,12 +15,14 @@ const RECONNECT_MS = 2000
  */
 export function useTaskState(taskId: string) {
   const queryClient = useQueryClient()
+  // The desktop query is the baseline for desktop.updated transitions; keeping it live keeps that cache entry current.
   const [task, messages, runs] = useQueries({
-    queries: [queries.task(taskId), queries.messages(taskId), queries.runs(taskId)],
+    queries: [queries.task(taskId), queries.messages(taskId), queries.runs(taskId), queries.desktop(taskId)],
   })
   const [output, setOutput] = useState<Record<string, string[]>>({})
   const [disconnected, setDisconnected] = useState(false)
   const [generation, setGeneration] = useState(0)
+  const [desktopOpens, setDesktopOpens] = useState(0)
 
   useEffect(() => {
     let active = true
@@ -50,8 +52,15 @@ export function useTaskState(taskId: string) {
               [event.runId]: [...(prev[event.runId] ?? []), ...event.text.split("\n")].slice(-MAX_LOG_LINES),
             }))
             break
-          case "desktop.updated":
+          case "desktop.updated": {
+            // Only a move into "running" counts as the agent opening it.
+            const previous = queryClient.getQueryData<DesktopStatus>(keys.desktop(taskId))
+            queryClient.setQueryData(keys.desktop(taskId), event.desktop)
+            if (previous && previous.state !== "running" && event.desktop.state === "running") {
+              setDesktopOpens((n) => n + 1)
+            }
             break
+          }
         }
       },
       onClose: () => {
@@ -80,6 +89,7 @@ export function useTaskState(taskId: string) {
     messages: messages.data ?? [],
     runs: runs.data ?? [],
     output,
+    desktopOpens,
     error,
   }
 }

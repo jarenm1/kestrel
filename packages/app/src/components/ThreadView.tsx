@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
@@ -23,6 +23,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<TabId>("desktop")
+  // The agent opened the desktop: show it. Only a new count reopens, so a reconnect with a running desktop does not.
+  useEffect(() => {
+    if (state.desktopOpens === 0) return
+    setTab("desktop")
+    setOpen(true)
+  }, [state.desktopOpens])
 
   function openTab(next: TabId) {
     setTab(next)
