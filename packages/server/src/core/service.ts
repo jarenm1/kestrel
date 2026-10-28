@@ -33,6 +33,9 @@ export interface AttachmentInput {
   readonly bytes: Uint8Array
 }
 
+/** Larger attachments are refused: they are kept on the box disk and served from it. */
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
 export interface ReportInput {
   readonly status: TaskStatus
   readonly message: string
@@ -100,13 +103,13 @@ export interface CoreShape {
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
 
   /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
-  readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | InternalError>
+  readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler: posts a question with options and waits for the user's answer. */
   readonly ask: (
     taskId: string,
     runId: string,
     input: AskInput,
-  ) => Effect.Effect<string, NotFound | Conflict | InternalError | AskError>
+  ) => Effect.Effect<string, NotFound | Conflict | BadRequest | InternalError | AskError>
   /** Used by the MCP handler: the run's user messages it has not seen yet; the returned messages are marked read. */
   readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<Message>>
   /** Bytes of an attachment on one of the signed-in user's task messages. */
@@ -322,14 +325,21 @@ export const CoreLive = Layer.effect(
     /** Writes attachment bytes under the attachments dir; the message only carries their metadata. */
     const storeAttachments = (
       inputs: ReadonlyArray<AttachmentInput> | undefined,
-    ): Effect.Effect<Attachment[], InternalError> =>
-      Effect.forEach(inputs ?? [], (input) => {
+    ): Effect.Effect<Attachment[], BadRequest | InternalError> => {
+      const oversize = (inputs ?? []).find((input) => input.bytes.byteLength > MAX_ATTACHMENT_BYTES)
+      if (oversize) {
+        return Effect.fail(
+          new BadRequest({ message: `attachment is ${oversize.bytes.byteLength} bytes; the limit is ${MAX_ATTACHMENT_BYTES}` }),
+        )
+      }
+      return Effect.forEach(inputs ?? [], (input) => {
         const id = newId()
         return Effect.tryPromise({
           try: () => writeFile(join(config.attachmentsDir, id), input.bytes),
           catch: (e) => new InternalError({ message: `store attachment: ${String(e)}` }),
         }).pipe(Effect.as({ id, mimeType: input.mimeType }))
       })
+    }
 
     /** A task waiting on `task_ask` goes back to running once its run is still going. */
     const resumeTask = (taskId: string, runId: string) =>
@@ -346,11 +356,22 @@ export const CoreLive = Layer.effect(
       })
 
     const removeTaskState = (taskId: string) =>
-      store.update((s): Either.Either<void, never> => {
-        s.tasks = s.tasks.filter((t) => t.id !== taskId)
-        s.messages = s.messages.filter((m) => m.taskId !== taskId)
-        s.runs = s.runs.filter((r) => r.taskId !== taskId)
-        return Either.right(undefined)
+      Effect.gen(function* () {
+        const attachmentIds = yield* store.update((s): Either.Either<string[], never> => {
+          const ids = s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id))
+          s.tasks = s.tasks.filter((t) => t.id !== taskId)
+          s.messages = s.messages.filter((m) => m.taskId !== taskId)
+          s.runs = s.runs.filter((r) => r.taskId !== taskId)
+          return Either.right(ids)
+        })
+        yield* Effect.forEach(
+          attachmentIds,
+          (id) =>
+            Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(
+              Effect.catchAll((e) => Effect.logWarning(`attachment ${id}: ${String(e)}`)),
+            ),
+          { discard: true },
+        )
       })
 
     const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
