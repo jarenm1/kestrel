@@ -82,7 +82,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           return
         }
         yield* desktop
-          .input(taskId, event.right)
+          .streamInput(taskId, event.right)
           .pipe(Effect.catchAll((e) => Effect.logWarning(`desktop input failed: ${e.message}`)))
       })
 

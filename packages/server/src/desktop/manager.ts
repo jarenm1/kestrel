@@ -61,7 +61,10 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     /** The whole desktop as raw RGB24, grabbed now. */
     readonly grab: (taskId: string) => Effect.Effect<RgbFrame, DesktopError>
     readonly cursor: (taskId: string) => Effect.Effect<{ readonly x: number; readonly y: number }, DesktopError>
+    /** Runs one event through xdotool and waits for it; a failing command is returned as an error. Used by MCP tools. */
     readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, DesktopError>
+    /** Queues one event for the desktop's persistent xdotool helper and returns at once; mouse moves coalesce. Used by viewer streams. */
+    readonly streamInput: (taskId: string, event: DesktopInput) => Effect.Effect<void, DesktopError>
     /** Starts an app on the live desktop and returns it. Killed with the desktop. `command` is what was asked for. */
     readonly launch: (taskId: string, command: string, process: ProcessSpec) => Effect.Effect<DesktopApp, DesktopError>
     /** Every app launched on the desktop, exited ones included, oldest first. */
@@ -97,6 +100,8 @@ const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
 const LINGER_MS = 15_000
 /** Unexpected encoder exits tolerated while viewers are attached before the desktop fails. */
 const MAX_ENCODER_RESTARTS = 3
+/** Unexpected xdotool helper exits tolerated per desktop before it fails. */
+const MAX_INPUT_RESTARTS = 3
 /** NVENC is skipped for this long after it reports a busy GPU (session limit). */
 const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
@@ -115,6 +120,18 @@ interface Encoder {
   initialized: boolean
   /** Tail of stderr, for classifying why NVENC would not start. */
   stderr: string
+}
+
+/** The long-lived `xdotool -` for a desktop: one command per stdin line, run as the line arrives. */
+interface InputPipe {
+  readonly child: ChildProcess
+  /** Commands the helper has not taken yet. Queued mouse moves are coalesced; see queueInput. */
+  readonly queue: PendingInput[]
+}
+
+interface PendingInput {
+  readonly line: string
+  readonly move: boolean
 }
 
 interface Session {
@@ -143,6 +160,9 @@ interface Session {
   lingerTimer: NodeJS.Timeout | null
   restartsLeft: number
   stderrTail: string
+  /** The long-lived xdotool helper; null until boot starts it and while it is being restarted. */
+  input: InputPipe | null
+  inputRestartsLeft: number
 }
 
 /** Keeps the tail of a launched app's output. Decodes per stream so UTF-8 split across chunks survives. */
@@ -218,6 +238,24 @@ const xdotoolArgs = (e: DesktopInput): string[] => {
     case "text":
       return e.text.length === 0 ? [] : ["type", "--", e.text]
   }
+}
+
+/** Single-quotes one argument. xdotool's stdin mode splits each line shell-style; inside single quotes a word is literal. */
+const quoteArg = (arg: string): string => {
+  if (/[\r\n]/.test(arg)) throw new Error(`input cannot contain a line break: ${JSON.stringify(arg)}`)
+  return `'${arg.replaceAll("'", `'"'"'`)}'`
+}
+
+/** xdotool stdin lines for one input event. Text is typed in pieces, and each line break in it is Return. */
+const xdotoolLines = (e: DesktopInput): string[] => {
+  if (e._tag !== "text") {
+    const args = xdotoolArgs(e)
+    return args.length === 0 ? [] : [args.map(quoteArg).join(" ")]
+  }
+  return e.text.split(/\r\n|\r|\n/).flatMap((piece, i) => [
+    ...(i > 0 ? ["key Return"] : []),
+    ...(piece.length > 0 ? [`type -- ${quoteArg(piece)}`] : []),
+  ])
 }
 
 /**
@@ -376,6 +414,24 @@ const grabFrame = (s: Session): Effect.Effect<RgbFrame, DesktopError> =>
     }
     return { width: WIDTH, height: HEIGHT, pixels: r.stdout }
   })
+
+/** Writes queued commands while the helper's pipe takes them. Past Node's buffer limit, the rest wait for 'drain'. */
+const flushInput = (pipe: InputPipe) => {
+  const stdin = pipe.child.stdin
+  if (!stdin) return
+  while (pipe.queue.length > 0 && !stdin.writableNeedDrain) {
+    const next = pipe.queue.shift()
+    if (next) stdin.write(`${next.line}\n`)
+  }
+}
+
+/** Queues one command behind any backlog. A mouse move replaces a queued move: a backed-up helper sees only the latest position. */
+const queueInput = (pipe: InputPipe, line: string, move: boolean) => {
+  const last = pipe.queue.at(-1)
+  if (move && last?.move) pipe.queue[pipe.queue.length - 1] = { line, move }
+  else pipe.queue.push({ line, move })
+  flushInput(pipe)
+}
 
 export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
   DesktopManager,
@@ -553,6 +609,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       args: readonly string[],
       opts: {
         critical: boolean
+        /** Gives the child a stdin pipe to write commands to. */
+        stdin?: boolean
         cwd?: string
         env?: Readonly<Record<string, string>>
         onStdout?: (d: Buffer) => void
@@ -566,7 +624,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           cwd: opts.cwd,
           detached: NEW_PROCESS_GROUP,
           env: opts.env ? { ...opts.env } : { ...process.env, DISPLAY: s.display },
-          stdio: ["ignore", opts.onStdout ? "pipe" : "ignore", "pipe"],
+          stdio: [opts.stdin ? "pipe" : "ignore", opts.onStdout ? "pipe" : "ignore", "pipe"],
         }),
       )
       s.procs.add(child)
@@ -586,6 +644,40 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         else if (opts.critical) failSession(s, `${command} exited (${code ?? signal})`)
       })
       return child
+    }
+
+    /** Starts the long-lived `xdotool -` for this desktop; it reads one command per stdin line. Throws if it cannot spawn. */
+    const startInput = (s: Session) => {
+      const child: ChildProcess = spawnTracked(s, "xdotool", ["-"], {
+        critical: false,
+        stdin: true,
+        onStderr: (d) => {
+          Effect.runFork(Effect.logWarning(`desktop ${s.display} input: ${d.toString().trim()}`))
+        },
+        onExit: (reason) => onInputExit(s, child, reason),
+      })
+      // EPIPE once the helper has exited; its exit handler restarts it.
+      child.stdin?.on("error", () => {})
+      const pipe: InputPipe = { child, queue: [] }
+      child.stdin?.on("drain", () => flushInput(pipe))
+      s.input = pipe
+    }
+
+    const onInputExit = (s: Session, child: ChildProcess, reason: string) => {
+      if (s.input?.child !== child) return
+      s.input = null
+      if (s.state !== "starting" && s.state !== "running") return
+      if (s.inputRestartsLeft === 0) {
+        failSession(s, `xdotool input helper exited (${reason}); gave up after ${MAX_INPUT_RESTARTS} restarts`)
+        return
+      }
+      s.inputRestartsLeft--
+      Effect.runFork(Effect.logWarning(`desktop ${s.display}: xdotool input helper exited (${reason}); restarting`))
+      try {
+        startInput(s)
+      } catch (e) {
+        failSession(s, toErr(e).message)
+      }
     }
 
     const pickDisplay = (): number => {
@@ -611,6 +703,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           catch: toErr,
         })
         yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
+        yield* Effect.try({ try: () => startInput(s), catch: toErr })
         yield* Effect.try({
           try: () => {
             spawnTracked(s, "openbox", ["--sm-disable"], { critical: false })
@@ -698,6 +791,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 sinks: new Set(),
                 apps: new Map(),
                 encoder: null,
+                input: null,
                 state: "starting",
                 error: null,
                 mime: null,
@@ -707,6 +801,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 awaiting: new Set(),
                 lingerTimer: null,
                 restartsLeft: MAX_ENCODER_RESTARTS,
+                inputRestartsLeft: MAX_INPUT_RESTARTS,
                 stderrTail: "",
               }
               sessions.set(taskId, s)
@@ -762,6 +857,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           if (r.exitCode !== 0) {
             return yield* Effect.fail(new DesktopError({ message: `xdotool failed: ${r.stderr.trim()}` }))
           }
+        }),
+
+      streamInput: (taskId, event) =>
+        Effect.gen(function* () {
+          const s = yield* requireLive(taskId)
+          const pipe = s.input
+          if (pipe === null) return yield* Effect.fail(new DesktopError({ message: "desktop input is not ready" }))
+          const lines = yield* Effect.try({ try: () => xdotoolLines(event), catch: toErr })
+          for (const line of lines) queueInput(pipe, line, event._tag === "mouse.move")
         }),
 
       launch: (taskId, command, proc) =>
