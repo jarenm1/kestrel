@@ -12,17 +12,6 @@ const API = "https://api.github.com"
 
 export type GithubTrigger = Extract<AutomationTrigger, { _tag: "github" }>
 
-/** `owner/name` of a github.com remote, or null for any other host. Same rules as the box's parseGitHubRepo. */
-export const parseGitHubSlug = (url: string): string | null => {
-  const match =
-    /^(?:https:\/\/github\.com\/|ssh:\/\/git@github\.com\/|git@github\.com:)([^/\s:]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(
-      url.trim(),
-    )
-  const owner = match?.[1]
-  const name = match?.[2]
-  return owner !== undefined && name !== undefined ? `${owner}/${name}` : null
-}
-
 const PullRequestJson = Schema.Struct({
   number: Schema.Number,
   title: Schema.String,
@@ -43,6 +32,7 @@ export const PullRequestWebhook = Schema.Struct({
 })
 
 const HookJson = Schema.Struct({ id: Schema.Number })
+const RepositoryJson = Schema.Struct({ full_name: Schema.String })
 
 export interface PullRequestInfo {
   readonly number: number
@@ -176,4 +166,13 @@ export const fetchPullRequest = async (token: string, slug: string, number: numb
   if (res.status === 404) return null
   if (!res.ok) throw await failure(res, what)
   return toPullRequestInfo(decode(PullRequestJson, await res.json(), what))
+}
+
+/** The repository's canonical `owner/name` as GitHub spells it, or null when GitHub has no such repository. */
+export const fetchRepository = async (token: string, slug: string): Promise<string | null> => {
+  const what = `repository ${slug}`
+  const res = await github(token, "GET", `/repos/${slug}`)
+  if (res.status === 404) return null
+  if (!res.ok) throw await failure(res, what)
+  return decode(RepositoryJson, await res.json(), what).full_name
 }

@@ -16,6 +16,7 @@ import {
   type AutomationRun,
   type BoxStatus,
   type CreateAutomationBody,
+  type CreateTaskBody,
   type RelayCredentials,
   type RelayFrame,
   type UpdateAutomationBody,
@@ -24,6 +25,7 @@ import { errorResponse, headersToRecord, isHopByHop } from "./http"
 import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
+import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
 import type { Env } from "./env"
 
@@ -66,7 +68,6 @@ type AutomationRow = {
   id: string
   login: string
   name: string
-  repoId: string
   repo: string | null
   prompt: string
   enabled: number
@@ -77,7 +78,7 @@ type AutomationRow = {
 }
 
 const AUTOMATION_COLUMNS =
-  "id, login, name, repo_id AS repoId, repo, prompt, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+  "id, login, name, repo, prompt, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
 
 const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
 
@@ -88,7 +89,6 @@ const nextRunMs = (trigger: AutomationTrigger, enabled: boolean, now: number): n
 const automationView = (row: AutomationRow): Automation => ({
   id: row.id,
   name: row.name,
-  repoId: row.repoId,
   repo: row.repo,
   prompt: row.prompt,
   enabled: row.enabled === 1,
@@ -183,19 +183,7 @@ export class Hub extends DurableObject<Env> {
         return_to TEXT NOT NULL,
         expires_at INTEGER NOT NULL
       )`)
-      sql.exec(`CREATE TABLE IF NOT EXISTS automations (
-        id TEXT PRIMARY KEY,
-        login TEXT NOT NULL,
-        name TEXT NOT NULL,
-        repo_id TEXT NOT NULL,
-        repo TEXT,
-        prompt TEXT NOT NULL,
-        enabled INTEGER NOT NULL,
-        trigger_json TEXT NOT NULL,
-        next_run_at INTEGER,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )`)
+      ctx.storage.transactionSync(() => ensureAutomationsTable(sql))
       sql.exec(`CREATE TABLE IF NOT EXISTS automation_runs (
         id TEXT PRIMARY KEY,
         automation_id TEXT NOT NULL,
@@ -393,14 +381,13 @@ export class Hub extends DurableObject<Env> {
     return row === null ? null : automationView(row)
   }
 
-  async createAutomation(login: string, input: CreateAutomationBody & { repo: string | null }): Promise<Automation> {
+  async createAutomation(login: string, input: Omit<CreateAutomationBody, "repo"> & { repo: string | null }): Promise<Automation> {
     const now = Date.now()
     const enabled = input.enabled ?? true
     const row: AutomationRow = {
       id: crypto.randomUUID(),
       login,
       name: input.name,
-      repoId: input.repoId,
       repo: input.repo,
       prompt: input.prompt,
       enabled: enabled ? 1 : 0,
@@ -410,12 +397,11 @@ export class Hub extends DurableObject<Env> {
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      `INSERT INTO automations (id, login, name, repo_id, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO automations (id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.login,
       row.name,
-      row.repoId,
       row.repo,
       row.prompt,
       row.enabled,
@@ -584,24 +570,18 @@ export class Hub extends DurableObject<Env> {
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
     const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
-    const outcome = await this.startTask(row.login, row.repoId, title, pr, prompt)
+    // A PR run checks the repository out at the PR head; the base branch stays the diff base.
+    const checkout =
+      row.repo === null
+        ? {}
+        : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number }) } }
+    const outcome = await this.startTask(row.login, { title, ...checkout }, prompt)
     return this.recordRun(row.id, reason, now, outcome)
   }
 
-  /** Creates the task (fetching the base, or the PR head) and sends the prompt to start its run. */
-  private async startTask(
-    login: string,
-    repoId: string,
-    title: string,
-    pr: PullRequestInfo | null,
-    prompt: string,
-  ): Promise<RunOutcome> {
-    // A PR task forks from the PR head; the box fetches `baseRef` too, so the prompt's diff against it works.
-    const created = await this.boxCall(login, "POST", Paths.repoTasks(repoId), {
-      title,
-      fetch: true,
-      ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number }),
-    })
+  /** Creates the task (with its repository checked out, if any) and sends the prompt to start its run. */
+  private async startTask(login: string, body: CreateTaskBody, prompt: string): Promise<RunOutcome> {
+    const created = await this.boxCall(login, "POST", Paths.tasks, body)
     if (!created.ok) return { taskId: null, error: boxError(created) }
     const task = decodeJson(CreatedTask, created.body)
     if (task === null) return { taskId: null, error: "agent box returned an unexpected task" }

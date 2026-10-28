@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
   matchGithubTrigger,
-  parseGitHubSlug,
   verifyGithubSignature,
   type GithubTrigger,
   type PullRequestEvent,
@@ -33,20 +32,6 @@ const event = (overrides: Partial<PullRequestEvent> = {}): PullRequestEvent => (
   pr: pr(),
   requestedReviewer: null,
   ...overrides,
-})
-
-describe("parseGitHubSlug", () => {
-  test("accepts github.com remotes in every common form", () => {
-    expect(parseGitHubSlug("https://github.com/acme/app")).toBe("acme/app")
-    expect(parseGitHubSlug("https://github.com/acme/app.git")).toBe("acme/app")
-    expect(parseGitHubSlug("git@github.com:acme/app.git")).toBe("acme/app")
-    expect(parseGitHubSlug("ssh://git@github.com/acme/app")).toBe("acme/app")
-  })
-
-  test("rejects other hosts and malformed remotes", () => {
-    expect(parseGitHubSlug("https://gitlab.com/acme/app")).toBeNull()
-    expect(parseGitHubSlug("https://github.com/acme")).toBeNull()
-  })
 })
 
 describe("verifyGithubSignature", () => {

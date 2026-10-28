@@ -3,20 +3,18 @@ import {
   BOX_USER_HEADER,
   ControlPaths,
   CreateAutomationBody,
-  Paths,
-  Repo,
   TriggerAutomationBody,
   UpdateAutomationBody,
   type AutomationTrigger,
 } from "@cloudagents/protocol"
-import { scheduleProblem } from "./cron"
+import { triggerProblem } from "./automation-rules"
 import { hub, type Env } from "./env"
 import { errorResponse, json } from "./http"
 import {
   createPullRequestHook,
   deletePullRequestHook,
   fetchPullRequest,
-  parseGitHubSlug,
+  fetchRepository,
   pullRequestHookExists,
   type PullRequestInfo,
 } from "./github"
@@ -43,25 +41,9 @@ const readBody = async <A, I>(
   return decoded._tag === "Left" ? badRequest("invalid request body") : decoded.right
 }
 
-/** The project as the box reports it, if `login` owns it (only the owner can see or change its automations). */
-const ownedRepo = async (env: Env, login: string, repoId: string): Promise<typeof Repo.Type | Response> => {
-  const res = await hub(env).boxCall(login, "GET", Paths.repo(repoId))
-  if (res.status === 404) return errorResponse(404, "NotFound", "unknown project")
-  if (!res.ok) return errorResponse(502, "BadGateway", `agent box responded ${res.status}`)
-  const repo = Schema.decodeUnknownEither(Repo)(parseJson(res.body))
-  if (repo._tag === "Left" || repo.right.owner !== login) return errorResponse(404, "NotFound", "unknown project")
-  return repo.right
-}
-
-/** Why a trigger cannot be saved for a project whose GitHub slug is `slug`, or null when it can. */
-const triggerProblem = (trigger: AutomationTrigger, slug: string | null): string | null => {
-  if (trigger._tag === "schedule") return scheduleProblem(trigger.cron, trigger.timezone, Date.now())
-  return slug === null ? "GitHub triggers need a GitHub repository" : null
-}
-
-const githubToken = async (env: Env, login: string): Promise<string | Response> => {
+const githubToken = async (env: Env, login: string, message: string): Promise<string | Response> => {
   const creds = await hub(env).credentials(login)
-  return creds.github ?? errorResponse(409, "Conflict", "connect GitHub to use GitHub triggers")
+  return creds.github ?? errorResponse(409, "Conflict", message)
 }
 
 const webhookUrl = (url: URL): string => new URL(ControlPaths.githubWebhook, url.origin).toString()
@@ -109,18 +91,18 @@ const releaseHook = async (env: Env, login: string, slug: string): Promise<void>
 const createAutomation = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
   const body = await readBody(request, CreateAutomationBody)
   if (body instanceof Response) return body
-  const repo = await ownedRepo(env, login, body.repoId)
-  if (repo instanceof Response) return repo
-  const slug = parseGitHubSlug(repo.url)
-  const problem = triggerProblem(body.trigger, slug)
+  const problem = triggerProblem(body.trigger, body.repo ?? null, Date.now())
   if (problem !== null) return badRequest(problem)
-  const enabled = body.enabled ?? true
-  if (enabled && body.trigger._tag === "github" && slug !== null) {
-    const token = await githubToken(env, login)
-    if (token instanceof Response) return token
-    await ensureHook(env, token, slug, webhookUrl(url))
+  if (body.repo === undefined) return json(await hub(env).createAutomation(login, { ...body, repo: null }), 201)
+  const token = await githubToken(env, login, "connect GitHub to use repositories")
+  if (token instanceof Response) return token
+  // The owner's GitHub token must be able to read the repository; the stored name is GitHub's canonical casing.
+  const repo = await fetchRepository(token, body.repo)
+  if (repo === null) return errorResponse(404, "NotFound", "unknown repository")
+  if ((body.enabled ?? true) && body.trigger._tag === "github") {
+    await ensureHook(env, token, repo, webhookUrl(url))
   }
-  return json(await hub(env).createAutomation(login, { ...body, repo: slug }), 201)
+  return json(await hub(env).createAutomation(login, { ...body, repo }), 201)
 }
 
 const updateAutomation = async (request: Request, env: Env, login: string, url: URL, id: string): Promise<Response> => {
@@ -131,7 +113,7 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
   const trigger = body.trigger ?? current.trigger
   const enabled = body.enabled ?? current.enabled
   if (body.trigger !== undefined) {
-    const problem = triggerProblem(body.trigger, current.repo)
+    const problem = triggerProblem(body.trigger, current.repo, Date.now())
     if (problem !== null) return badRequest(problem)
   }
   const slug = current.repo
@@ -139,7 +121,7 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
   const needsHook = enabled && trigger._tag === "github" && slug !== null
   // Only a hook that must exist needs the owner's token; turning GitHub triggers off never does.
   if (needsHook) {
-    const token = await githubToken(env, login)
+    const token = await githubToken(env, login, "connect GitHub to use GitHub triggers")
     if (token instanceof Response) return token
     await ensureHook(env, token, slug, webhookUrl(url))
   }
@@ -174,7 +156,7 @@ const triggerAutomation = async (request: Request, env: Env, login: string, id: 
     if (body.pullRequest === undefined) return badRequest("pullRequest is required for GitHub automations")
     const slug = current.repo
     if (slug === null) return badRequest("GitHub triggers need a GitHub repository")
-    const token = await githubToken(env, login)
+    const token = await githubToken(env, login, "connect GitHub to use GitHub triggers")
     if (token instanceof Response) return token
     pr = await fetchPullRequest(token, slug, body.pullRequest)
     if (pr === null) return errorResponse(404, "NotFound", `pull request #${body.pullRequest} not found`)
