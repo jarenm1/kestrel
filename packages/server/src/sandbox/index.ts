@@ -266,16 +266,20 @@ const taskNamespaces = (
   })
 
 /**
- * Argv prefix for the task desktop's X server and the box's MIT-SHM clients of it (capture, screenshots): the
- * task's IPC namespace, shared with its sandboxes. Empty without the sandbox, where everything shares the host's.
+ * The task's IPC namespace, for the task desktop's X server and the box's MIT-SHM clients of it (capture,
+ * screenshots): a process in it now, and the argv prefix that joins a process's IPC namespace. Starts the task's
+ * namespaces if needed. Null without the sandbox, where everything shares the host's.
  */
-export const desktopNamespace = (settings: SandboxSettings, taskId: string): Effect.Effect<string[], InternalError> =>
+export const desktopNamespace = (
+  settings: SandboxSettings,
+  taskId: string,
+): Effect.Effect<{ readonly holder: number; readonly join: (pid: number) => string[] } | null, InternalError> =>
   Effect.gen(function* () {
-    if (!settings.enabled) return []
+    if (!settings.enabled) return null
     const systemdRun = yield* requireSystemdRun(settings)
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
     const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
-    return joinTaskIpc(nsenter, holder)
+    return { holder, join: (pid: number) => joinTaskIpc(nsenter, pid) }
   })
 
 /**

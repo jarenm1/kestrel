@@ -44,14 +44,22 @@ export interface DesktopApp {
   readonly output: string
 }
 
+/** The IPC namespace the task's sandboxes share. */
+export interface IpcNamespace {
+  /** Pid of a process in it now (the task's namespace holder). */
+  readonly holder: number
+  /** Argv prefix that runs a command in the IPC namespace of process `pid`. */
+  readonly join: (pid: number) => ReadonlyArray<string>
+}
+
 export interface DesktopStartOptions {
   /** Builds the terminal opened on a fresh desktop, given its X display (e.g. ":101"). */
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
   /**
-   * Argv prefix that puts a process in the IPC namespace the task's sandboxes share; empty for the box's own. The X
-   * server and the box's MIT-SHM clients (capture, screenshots) run in it, so sandboxed apps can use MIT-SHM too.
+   * The X server and the box's MIT-SHM clients (capture, screenshots) run in this namespace, so sandboxed apps can use
+   * MIT-SHM too. Null: everything shares the box's own.
    */
-  readonly ipcNamespace: Effect.Effect<ReadonlyArray<string>, DesktopError>
+  readonly ipcNamespace: Effect.Effect<IpcNamespace | null, DesktopError>
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -153,7 +161,10 @@ interface Session {
   readonly display: string
   readonly terminal: DesktopStartOptions["terminal"]
   readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
-  /** The resolved `ipcNamespace` prefix; set by boot before the X server starts. */
+  /**
+   * Argv prefix for the box's MIT-SHM clients: joins Xvfb's IPC namespace. Xvfb lives as long as the session, so the
+   * target cannot go stale the way a holder pid could. Set by boot once Xvfb is spawned; empty without a namespace.
+   */
   ipc: ReadonlyArray<string>
   /** Completes when the init segment has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
@@ -576,7 +587,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.awaiting = new Set(s.sinks)
       enc.child = spawnTracked(s, "xdamage-capture", [String(WIDTH), String(HEIGHT), "ffmpeg", ...ffmpegArgs(kind)], {
         critical: false,
-        taskIpc: true,
+        prefix: s.ipc,
         onStdout: (d) => onEncoderBytes(s, enc, d),
         onStderr: (d) => {
           enc.stderr = (enc.stderr + d.toString()).slice(-2000)
@@ -629,8 +640,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         critical: boolean
         /** Gives the child a stdin pipe to write commands to. */
         stdin?: boolean
-        /** Runs it in the task's IPC namespace (`s.ipc`): the X server and MIT-SHM clients. */
-        taskIpc?: boolean
+        /** Argv prefix (an IPC namespace join) that runs before the command. */
+        prefix?: ReadonlyArray<string>
         cwd?: string
         env?: Readonly<Record<string, string>>
         onStdout?: (d: Buffer) => void
@@ -639,7 +650,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit?: (reason: string) => void
       },
     ) => {
-      const [file = command, ...argv] = opts.taskIpc ? [...s.ipc, command, ...args] : [command, ...args]
+      const [file = command, ...argv] = [...(opts.prefix ?? []), command, ...args]
       const child = ownGroup(
         spawn(file, argv, {
           cwd: opts.cwd,
@@ -711,8 +722,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     const boot = (s: Session) =>
       Effect.gen(function* () {
-        s.ipc = yield* s.ipcNamespace
-        yield* Effect.try({
+        const ns = yield* s.ipcNamespace
+        const xvfb = yield* Effect.try({
           // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the
           // abstract socket (`local`) would let every task's agent reach every display.
           try: () =>
@@ -720,10 +731,11 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               s,
               "Xvfb",
               [s.display, "-screen", "0", `${WIDTH}x${HEIGHT}x24`, "-nolisten", "tcp", "-nolisten", "local"],
-              { critical: true, taskIpc: true },
+              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder) },
             ),
           catch: toErr,
         })
+        if (ns !== null && xvfb.pid !== undefined) s.ipc = ns.join(xvfb.pid)
         yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         yield* Effect.try({

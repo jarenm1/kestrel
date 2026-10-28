@@ -171,13 +171,14 @@ export const joinTaskNet = (nsenterPath: string, holder: number): string[] => [
 ]
 
 /**
- * Argv prefix for the task's X server and its box-side clients that use MIT-SHM (capture, screenshots): the task's
- * IPC namespace (joining it needs its user namespace), but the host network, so the box still reaches them.
+ * Argv prefix for the task's X server and its box-side clients that use MIT-SHM (capture, screenshots): the IPC
+ * namespace of `target`, a process already in the task's (joining it needs its user namespace), but the host network,
+ * so the box still reaches them.
  */
-export const joinTaskIpc = (nsenterPath: string, holder: number): string[] => [
+export const joinTaskIpc = (nsenterPath: string, target: number): string[] => [
   nsenterPath,
   "--target",
-  String(holder),
+  String(target),
   "--user",
   "--ipc",
   "--preserve-credentials",
