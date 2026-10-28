@@ -18,6 +18,7 @@ import {
   PutApiKeyBody,
   Repo,
   Run,
+  SendMessageBody,
   SendMessageResponse,
   Task,
 } from "@cloudagents/protocol"
@@ -125,8 +126,8 @@ export const api = {
   createTask: (repoId: string, body: CreateTaskBody) => run(request(Task, "POST", Paths.repoTasks(repoId), body)),
   getTask: (taskId: string) => run(request(Task, "GET", Paths.task(taskId))),
   listMessages: (taskId: string) => run(request(Schema.Array(Message), "GET", Paths.taskMessages(taskId))),
-  sendMessage: (taskId: string, text: string) =>
-    run(request(SendMessageResponse, "POST", Paths.taskMessages(taskId), { text })),
+  sendMessage: (taskId: string, body: SendMessageBody) =>
+    run(request(SendMessageResponse, "POST", Paths.taskMessages(taskId), body)),
   listRuns: (taskId: string) => run(request(Schema.Array(Run), "GET", Paths.taskRuns(taskId))),
   cancelRun: (runId: string) => run(request(Run, "POST", Paths.runCancel(runId))),
   getDiff: (taskId: string) => run(request(DiffResponse, "GET", Paths.taskDiff(taskId))),
