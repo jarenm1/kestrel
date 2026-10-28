@@ -1,187 +1,189 @@
 /**
- * Minimal fragmented-MP4 splitter for ffmpeg's stdout, written with
- * `-movflags empty_moov+default_base_moof+frag_every_frame`: one `moof` + `mdat` pair per encoded frame.
+ * Fragmented-MP4 muxer for the desktop stream. It reads the encoder's FLV stdout (see `flv.ts`) and writes the
+ * wire format the clients read: an init segment (ftyp + moov with one avc1 track and mvex defaults), then one
+ * moof + mdat per frame. Each frame is muxed the moment its FLV tag completes, so no frame waits for the next.
  *
- * The splitter emits the init segment (everything before the first `moof`) once, then one media piece per
- * `moof` + `mdat` pair. Each media piece is a single copy of its bytes; bytes are only buffered while a box is
- * incomplete, and the buffer is reused rather than reallocated for every chunk.
+ * Each media piece holds exactly one copy of its frame's bytes.
  */
+import { FlvDemuxer } from "./flv"
 
 export type Mp4Piece =
-  | { readonly kind: "init"; readonly bytes: Uint8Array }
-  | { readonly kind: "media"; readonly bytes: Uint8Array; /** The fragment's first sample is an IDR (sync) sample. */ readonly keyframe: boolean }
+  | { readonly kind: "init"; readonly bytes: Uint8Array; /** RFC 6381 codec string from the avcC record, e.g. `avc1.640028`. */ readonly codec: string }
+  | { readonly kind: "media"; readonly bytes: Uint8Array; /** The frame is an IDR (sync) sample. */ readonly keyframe: boolean }
 
-const MIN_CAPACITY = 256 * 1024
+/** Track timescale: the usual 90 kHz video clock. */
+const TIMESCALE = 90_000
+/** Capture rate. The encoder runs constant frame rate at 60 fps (`-r 60`), so every frame is exactly one frame duration. */
+const FPS = 60
+const FRAME_TICKS = TIMESCALE / FPS
 
-/** Unsigned big-endian 32-bit read. The caller guarantees `i + 4` is in range. */
-const u32 = (b: Uint8Array, i: number): number => ((b[i]! << 24) | (b[i + 1]! << 16) | (b[i + 2]! << 8) | b[i + 3]!) >>> 0
+/** Capture frame number of an FLV millisecond timestamp. Rounding recovers the frame on a CFR clock; a timestamp that does not advance is bumped so the index stays strictly increasing. */
+const frameIndex = (ms: number, prev: number): number => Math.max(Math.round((ms * FPS) / 1000), prev + 1)
 
-interface BoxHeader {
-  readonly type: string
-  /** Total box size, header included. */
-  readonly size: number
-  /** Header length: 8, or 16 for a 64-bit "largesize" box. */
-  readonly header: number
-}
+const TFHD_DEFAULT_BASE_IS_MOOF = 0x02_0000
+const TRUN_DATA_OFFSET = 0x01
+const TRUN_FIRST_SAMPLE_FLAGS = 0x04
+const TRUN_SAMPLE_DURATION = 0x100
+const TRUN_SAMPLE_SIZE = 0x200
+/** sample_depends_on = 2 (does not depend on others): a sync sample. */
+const SAMPLE_SYNC = 0x0200_0000
+/** sample_depends_on = 1 and is_non_sync_sample: the flags the client reads as "not a keyframe". */
+const SAMPLE_NON_SYNC = 0x0101_0000
+const MATRIX_IDENTITY = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000]
 
-const readBoxHeader = (buf: Uint8Array, at: number, end: number): BoxHeader | null => {
-  if (end - at < 8) return null
-  let size = u32(buf, at)
-  const type = String.fromCharCode(buf[at + 4]!, buf[at + 5]!, buf[at + 6]!, buf[at + 7]!)
-  let header = 8
-  if (size === 1) {
-    if (end - at < 16) return null
-    size = u32(buf, at + 8) * 2 ** 32 + u32(buf, at + 12)
-    header = 16
-  } else if (size === 0) {
-    // "to end of file": not produced by ffmpeg's streaming muxer; treat as unparseable.
-    throw new Error(`mp4 box '${type}' with size 0 is not supported`)
-  }
-  if (size < header) throw new Error(`mp4 box '${type}' has invalid size ${size}`)
-  return { type, size, header }
-}
+const ascii = (s: string): Uint8Array => Uint8Array.from(s, (c) => c.charCodeAt(0))
+const zeros = (n: number): Uint8Array => new Uint8Array(n)
 
-interface Box {
-  readonly type: string
-  /** Offset of the box's first byte. */
-  readonly at: number
-  /** Offset of the box's payload (after the header). */
-  readonly body: number
-  /** Offset one past the box's last byte. */
-  readonly end: number
-}
-
-/** Direct children of the box range [begin, end), stopping at the first malformed or truncated box. */
-const boxesIn = (buf: Uint8Array, begin: number, end: number): Box[] => {
-  const out: Box[] = []
-  for (let at = begin; at < end; ) {
-    const h = readBoxHeader(buf, at, end)
-    if (h === null || at + h.size > end) break
-    out.push({ type: h.type, at, body: at + h.header, end: at + h.size })
-    at += h.size
+const cat = (parts: readonly Uint8Array[]): Uint8Array => {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let at = 0
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
   }
   return out
 }
 
-const findBox = (buf: Uint8Array, begin: number, end: number, type: string): Box | undefined =>
-  boxesIn(buf, begin, end).find((b) => b.type === type)
+const u8 = (...vs: number[]): Uint8Array => Uint8Array.from(vs)
 
-const SAMPLE_NON_SYNC = 0x0001_0000
-
-/**
- * True when the first sample of a `moof` + `mdat` fragment is a sync (IDR) sample. The flag comes from the
- * first `trun` sample flags, else the per-sample flags, else the `tfhd` default (ffmpeg writes the keyframe's
- * flags in `first_sample_flags` and leaves deltas to the `tfhd` default). Unknown flags count as not a keyframe.
- */
-export const isSyncFragment = (fragment: Uint8Array): boolean => {
-  const moof = findBox(fragment, 0, fragment.length, "moof")
-  const traf = moof ? findBox(fragment, moof.body, moof.end, "traf") : undefined
-  if (!traf) return false
-  const trun = findBox(fragment, traf.body, traf.end, "trun")
-  if (!trun || trun.end - trun.body < 8 || u32(fragment, trun.body + 4) === 0) return false
-  const trunFlags = u32(fragment, trun.body) & 0xff_ffff
-  let p = trun.body + 8 // version/flags and sample_count
-  if (trunFlags & 0x1) p += 4 // data_offset
-  let flags: number | undefined
-  if (trunFlags & 0x4) {
-    flags = u32(fragment, p) // first_sample_flags
-  } else if (trunFlags & 0x400) {
-    // Per-sample flags: skip the duration and size fields that precede them in sample 0.
-    if (trunFlags & 0x100) p += 4
-    if (trunFlags & 0x200) p += 4
-    flags = u32(fragment, p)
-  } else {
-    const tfhd = findBox(fragment, traf.body, traf.end, "tfhd")
-    if (tfhd && (u32(fragment, tfhd.body) & 0x20) !== 0) {
-      // Optional tfhd fields in order, then default_sample_flags.
-      let q = tfhd.body + 8 // version/flags and track_ID
-      const tfhdFlags = u32(fragment, tfhd.body) & 0xff_ffff
-      if (tfhdFlags & 0x1) q += 8 // base_data_offset
-      if (tfhdFlags & 0x2) q += 4 // sample_description_index
-      if (tfhdFlags & 0x8) q += 4 // default_sample_duration
-      if (tfhdFlags & 0x10) q += 4 // default_sample_size
-      flags = u32(fragment, q)
-    }
-  }
-  return flags !== undefined && (flags & SAMPLE_NON_SYNC) === 0
+const u16 = (...vs: number[]): Uint8Array => {
+  const out = new Uint8Array(vs.length * 2)
+  const view = new DataView(out.buffer)
+  vs.forEach((v, i) => view.setUint16(i * 2, v))
+  return out
 }
 
-export class Mp4Splitter {
-  /** Backing store. Valid bytes are [start, end); everything before `start` is already emitted. */
-  private buf = new Uint8Array(0)
-  private start = 0
-  private end = 0
-  /** Next top-level box to examine. Always >= start. */
-  private cursor = 0
-  /** Offset of the `moof` of the fragment being assembled, or -1 between fragments. */
-  private fragStart = -1
-  private initEmitted = false
+const u32 = (...vs: number[]): Uint8Array => {
+  const out = new Uint8Array(vs.length * 4)
+  const view = new DataView(out.buffer)
+  vs.forEach((v, i) => view.setUint32(i * 4, v >>> 0))
+  return out
+}
 
-  /** Feed raw bytes; returns completed pieces in stream order. */
-  push(data: Uint8Array): Mp4Piece[] {
-    this.reserve(data.length)
-    this.buf.set(data, this.end)
-    this.end += data.length
-    const out: Mp4Piece[] = []
-    for (;;) {
-      const h = readBoxHeader(this.buf, this.cursor, this.end)
-      if (h === null || this.end - this.cursor < h.size) break
-      const at = this.cursor
-      this.cursor += h.size
-      if (h.type === "moof") {
-        if (!this.initEmitted) {
-          out.push({ kind: "init", bytes: this.buf.slice(this.start, at) })
-          this.initEmitted = true
-        }
-        // A moof while another fragment is incomplete drops the incomplete one.
-        this.start = at
-        this.fragStart = at
-      } else if (this.fragStart >= 0) {
-        if (h.type === "mdat") {
-          const bytes = this.buf.slice(this.start, this.cursor)
-          out.push({ kind: "media", bytes, keyframe: isSyncFragment(bytes) })
-          this.start = this.cursor
-          this.fragStart = -1
-        }
-      } else if (this.initEmitted) {
-        // Stray top-level box between fragments: not part of any fragment.
-        this.start = this.cursor
+const u64 = (v: number): Uint8Array => {
+  const out = new Uint8Array(8)
+  new DataView(out.buffer).setBigUint64(0, BigInt(v))
+  return out
+}
+
+const box = (type: string, ...parts: Uint8Array[]): Uint8Array => {
+  const body = cat(parts)
+  return cat([u32(body.length + 8), ascii(type), body])
+}
+
+const fullBox = (type: string, version: number, flags: number, ...parts: Uint8Array[]): Uint8Array =>
+  box(type, u8(version, (flags >>> 16) & 0xff, (flags >>> 8) & 0xff, flags & 0xff), ...parts)
+
+const MATRIX = u32(...MATRIX_IDENTITY)
+
+const initSegment = (avcc: Uint8Array, width: number, height: number): Uint8Array => {
+  const avc1 = box(
+    "avc1",
+    zeros(6),
+    u16(1),
+    zeros(16),
+    u16(width, height),
+    u32(0x0048_0000, 0x0048_0000),
+    u32(0),
+    u16(1),
+    zeros(32),
+    u16(0x18),
+    u16(0xffff),
+    box("avcC", avcc),
+  )
+  const stbl = box(
+    "stbl",
+    fullBox("stsd", 0, 0, u32(1), avc1),
+    fullBox("stts", 0, 0, u32(0)),
+    fullBox("stsc", 0, 0, u32(0)),
+    fullBox("stsz", 0, 0, u32(0, 0)),
+    fullBox("stco", 0, 0, u32(0)),
+  )
+  const minf = box(
+    "minf",
+    fullBox("vmhd", 0, 1, zeros(8)),
+    box("dinf", fullBox("dref", 0, 0, u32(1), fullBox("url ", 0, 1))),
+    stbl,
+  )
+  const mdia = box(
+    "mdia",
+    fullBox("mdhd", 0, 0, u32(0, 0, TIMESCALE, 0), u16(0x55c4, 0)),
+    fullBox("hdlr", 0, 0, u32(0), ascii("vide"), zeros(12), ascii("VideoHandler"), zeros(1)),
+    minf,
+  )
+  const trak = box(
+    "trak",
+    fullBox("tkhd", 0, 3, u32(0, 0, 1, 0, 0), zeros(8), u16(0, 0, 0, 0), MATRIX, u32(width * 0x1_0000, height * 0x1_0000)),
+    mdia,
+  )
+  const moov = box(
+    "moov",
+    fullBox("mvhd", 0, 0, u32(0, 0, TIMESCALE, 0, 0x0001_0000), u16(0x0100, 0), u32(0, 0), MATRIX, zeros(24), u32(2)),
+    trak,
+    box("mvex", fullBox("trex", 0, 0, u32(1, 1, 0, 0, SAMPLE_NON_SYNC))),
+  )
+  return cat([box("ftyp", ascii("isom"), u32(0x200), ascii("isom"), ascii("iso5"), ascii("iso6"), ascii("avc1"), ascii("mp41")), moov])
+}
+
+const moofBox = (sequence: number, dts: number, duration: number, size: number, keyframe: boolean, dataOffset: number): Uint8Array =>
+  box(
+    "moof",
+    fullBox("mfhd", 0, 0, u32(sequence)),
+    box(
+      "traf",
+      fullBox("tfhd", 0, TFHD_DEFAULT_BASE_IS_MOOF, u32(1)),
+      fullBox("tfdt", 1, 0, u64(dts)),
+      fullBox(
+        "trun",
+        0,
+        TRUN_DATA_OFFSET | TRUN_FIRST_SAMPLE_FLAGS | TRUN_SAMPLE_DURATION | TRUN_SAMPLE_SIZE,
+        u32(1, dataOffset, keyframe ? SAMPLE_SYNC : SAMPLE_NON_SYNC, duration, size),
+      ),
+    ),
+  )
+
+/** Every moof has the same size whatever its values, so the mdat payload offset is a constant. */
+const MOOF_BYTES = moofBox(0, 0, 0, 0, false, 0).length
+
+const mediaFragment = (sequence: number, dts: number, duration: number, payload: Uint8Array, keyframe: boolean): Uint8Array => {
+  const moof = moofBox(sequence, dts, duration, payload.length, keyframe, MOOF_BYTES + 8)
+  return cat([moof, u32(payload.length + 8), ascii("mdat"), payload])
+}
+
+const avcCodec = (avcc: Uint8Array): string => {
+  if (avcc.length < 4) throw new Error("H.264 avcC record is truncated")
+  const hex = (v: number) => v.toString(16).padStart(2, "0")
+  return `avc1.${hex(avcc[1]!)}${hex(avcc[2]!)}${hex(avcc[3]!)}`
+}
+
+export class Mp4Muxer {
+  private readonly demuxer = new FlvDemuxer()
+  private readonly width: number
+  private readonly height: number
+  private configured = false
+  private sequence = 0
+  private prevIndex = -1
+
+  constructor(width: number, height: number) {
+    this.width = width
+    this.height = height
+  }
+
+  /** Feeds encoder stdout and returns the pieces it completes, in order. Throws on a stream that is not H.264 FLV. */
+  push(chunk: Uint8Array): Mp4Piece[] {
+    const pieces: Mp4Piece[] = []
+    for (const event of this.demuxer.push(chunk)) {
+      if (event.kind === "config") {
+        this.configured = true
+        pieces.push({ kind: "init", bytes: initSegment(event.avcc, this.width, this.height), codec: avcCodec(event.avcc) })
+        continue
       }
+      if (!this.configured) throw new Error("H.264 frame before the sequence header")
+      const index = frameIndex(event.dts, this.prevIndex)
+      this.prevIndex = index
+      this.sequence += 1
+      pieces.push({ kind: "media", bytes: mediaFragment(this.sequence, index * FRAME_TICKS, FRAME_TICKS, event.data, event.keyframe), keyframe: event.keyframe })
     }
-    return out
+    return pieces
   }
-
-  /** Makes room for `n` more bytes after `end`, compacting or growing the backing store as needed. */
-  private reserve(n: number): void {
-    if (this.end + n <= this.buf.length) return
-    const live = this.end - this.start
-    if (live + n > this.buf.length) {
-      const grown = new Uint8Array(Math.max(live + n, this.buf.length * 2, MIN_CAPACITY))
-      grown.set(this.buf.subarray(this.start, this.end))
-      this.buf = grown
-    } else {
-      this.buf.copyWithin(0, this.start, this.end)
-    }
-    const shift = this.start
-    this.cursor -= shift
-    this.end -= shift
-    if (this.fragStart >= 0) this.fragStart -= shift
-    this.start = 0
-  }
-}
-
-/**
- * Builds the RFC 6381 codec string (`avc1.PPCCLL`) from the avcC box in the init segment,
- * i.e. the profile_idc / constraint flags / level_idc actually written by the encoder.
- */
-export const avcCodecString = (init: Uint8Array): string | null => {
-  const tag = [0x61, 0x76, 0x63, 0x43] // "avcC"
-  for (let i = 0; i + 8 <= init.length; i++) {
-    if (init[i] !== tag[0] || init[i + 1] !== tag[1] || init[i + 2] !== tag[2] || init[i + 3] !== tag[3]) continue
-    // payload starts after the 'avcC' type: configurationVersion, profile, compat, level
-    const p = i + 4
-    const hex = (n: number) => n.toString(16).toUpperCase().padStart(2, "0")
-    return `avc1.${hex(init[p + 1]!)}${hex(init[p + 2]!)}${hex(init[p + 3]!)}`
-  }
-  return null
 }

@@ -4,7 +4,7 @@ import { StringDecoder } from "node:string_decoder"
 import { Context, Data, Deferred, Effect, Layer } from "effect"
 import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
-import { avcCodecString, Mp4Splitter, type Mp4Piece } from "./fmp4"
+import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
@@ -110,10 +110,10 @@ let nvencBusyUntil = 0
 
 type EncoderKind = "nvenc" | "x264"
 
-/** One ffmpeg encoder process and the splitter for its stdout. */
+/** One ffmpeg encoder process and the muxer for its stdout. */
 interface Encoder {
   readonly kind: EncoderKind
-  readonly splitter: Mp4Splitter
+  readonly muxer: Mp4Muxer
   /** Set right after spawn. */
   child: ChildProcess | null
   /** The init segment arrived: later exits are restarts, not boot failures. */
@@ -316,10 +316,8 @@ const ffmpegArgs = (display: string, kind: EncoderKind): string[] => [
   String(FPS),
   "-an",
   "-f",
-  "mp4",
-  // One moof+mdat per frame, so each frame reaches the viewer as soon as it is encoded.
-  "-movflags",
-  "empty_moov+default_base_moof+frag_every_frame",
+  "flv",
+  // One video tag per frame: the muxer completes each frame as its tag arrives.
   "-flush_packets",
   "1",
   "pipe:1",
@@ -508,22 +506,17 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       if (s.encoder !== enc || (s.state !== "starting" && s.state !== "running")) return
       let pieces: Mp4Piece[]
       try {
-        pieces = enc.splitter.push(data)
+        pieces = enc.muxer.push(data)
       } catch (e) {
         failSession(s, toErr(e).message)
         return
       }
       for (const piece of pieces) {
         if (piece.kind === "init") {
-          const codec = avcCodecString(piece.bytes)
-          if (codec === null) {
-            failSession(s, "could not read H.264 codec from init segment")
-            return
-          }
           enc.initialized = true
           s.restartsLeft = MAX_ENCODER_RESTARTS
           s.init = piece.bytes
-          s.mime = `video/mp4; codecs="${codec}"`
+          s.mime = `video/mp4; codecs="${piece.codec}"`
           s.state = "running"
           Deferred.unsafeDone(s.ready, Effect.void)
           for (const sink of s.sinks) sink.onMedia(piece.bytes)
@@ -552,7 +545,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
-      const enc: Encoder = { kind, splitter: new Mp4Splitter(), child: null, initialized: false, stderr: "" }
+      const enc: Encoder = { kind, muxer: new Mp4Muxer(WIDTH, HEIGHT), child: null, initialized: false, stderr: "" }
       s.init = null
       s.gop = null
       s.gopBytes = 0
