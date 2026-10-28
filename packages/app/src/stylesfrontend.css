@@ -1,0 +1,51 @@
+/*
+ * Frontend-only styles for the public routes (`/` and `/pricing`).
+ *
+ * This file is intentionally separate from `styles.css`: the authenticated app keeps main's
+ * theme and utilities untouched. These rules only affect the public page shells and replace
+ * the external noise/texture dependencies with local CSS so the public build is self-contained.
+ */
+
+.public-page {
+  color-scheme: dark;
+  background-color: #030303;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Local, dependency-free replacement for the external grainy-gradient noise texture. */
+.public-noise {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 160px 160px;
+}
+
+/* The grid + dot field behind both hero sections. */
+.public-vfx {
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.06) 1px, transparent 1px),
+    radial-gradient(circle, rgb(255 255 255 / 0.2) 1.5px, transparent 1.5px);
+  background-size: 64px 64px, 64px 64px, 32px 32px;
+  background-position: 0 0, 0 0, 16px 16px;
+}
+
+/* Pricing's slowly breathing spotlight. */
+@keyframes public-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .public-page *,
+  .public-page *::before,
+  .public-page *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
