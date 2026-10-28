@@ -131,6 +131,14 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id",
       Effect.flatMap(pathId, (id) => noContent(signedIn((user) => core.deleteTask(user, id)))),
     ),
+    HttpRouter.post(
+      "/api/tasks/:id/archive",
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.archiveTask(user, id)))),
+    ),
+    HttpRouter.del(
+      "/api/tasks/:id/archive",
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.unarchiveTask(user, id)))),
+    ),
     HttpRouter.get(
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listMessages(user, id)))),

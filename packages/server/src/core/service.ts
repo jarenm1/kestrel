@@ -89,6 +89,10 @@ export interface CoreShape {
   ) => Effect.Effect<Task, NotFound | BadRequest | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
   readonly deleteTask: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
+  /** Tears down the thread's runtime (running runs, desktop, sandbox) and hides it from the active list; history and worktree stay. */
+  readonly archiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
+  /** Lifts the archive; nothing restarts on its own. */
+  readonly unarchiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
 
   readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
@@ -97,13 +101,13 @@ export interface CoreShape {
     taskId: string,
     text: string,
     choice: AgentChoice,
-  ) => Effect.Effect<SendMessageResponse, NotFound | BadRequest | InternalError>
+  ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
 
   readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
-  readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
+  readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
   /** Used by the MCP handler: starts the task's desktop, or returns the one already running. */
   readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | InternalError>
@@ -385,11 +389,13 @@ export const CoreLive = Layer.effect(
         )
       })
 
-    const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
+    /**
+     * Stops everything a thread runs on the box: its running runs, its desktop (and the apps on it), its network
+     * namespace and its systemd slice. Archiving and deleting both start here.
+     */
+    const teardownRuntime = (taskId: string) =>
       Effect.gen(function* () {
-        const task = yield* requireTask(taskId)
         const state = yield* store.read
-        const repo = state.repos.find((r) => r.id === task.repoId)
         for (const run of state.runs) {
           if (run.taskId === taskId && run.status === "running") {
             yield* harness.cancel(run.id)
@@ -402,6 +408,14 @@ export const CoreLive = Layer.effect(
             Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: ${e.message}`)),
           )
         }
+      })
+
+    const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
+      Effect.gen(function* () {
+        const task = yield* requireTask(taskId)
+        const state = yield* store.read
+        const repo = state.repos.find((r) => r.id === task.repoId)
+        yield* teardownRuntime(taskId)
         if (repo) {
           yield* workspace
             .removeWorktree(repo.localPath, task.worktreePath)
@@ -410,6 +424,42 @@ export const CoreLive = Layer.effect(
           yield* workspace.deleteRef(repo.localPath, taskBaseRef(taskId)).pipe(Effect.mapError(toInternal("delete base ref")))
         }
         yield* removeTaskState(taskId)
+      })
+
+    // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down.
+    const archiveTask: CoreShape["archiveTask"] = (user, id) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, id)
+        const archived = yield* store.update((s): Either.Either<Task, NotFound> => {
+          const found = findTask(s, id)
+          if (Either.isLeft(found)) return Either.left(found.left)
+          const task = found.right
+          if (task.archivedAt === undefined) {
+            task.archivedAt = nowIso()
+            task.updatedAt = task.archivedAt
+          }
+          return Either.right({ ...task })
+        })
+        hub.publish({ _tag: "task.updated", task: archived })
+        yield* teardownRuntime(id)
+        return archived
+      })
+
+    const unarchiveTask: CoreShape["unarchiveTask"] = (user, id) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, id)
+        const restored = yield* store.update((s): Either.Either<Task, NotFound> => {
+          const found = findTask(s, id)
+          if (Either.isLeft(found)) return Either.left(found.left)
+          const task = found.right
+          if (task.archivedAt !== undefined) {
+            delete task.archivedAt
+            task.updatedAt = nowIso()
+          }
+          return Either.right({ ...task })
+        })
+        hub.publish({ _tag: "task.updated", task: restored })
+        return restored
       })
 
     const createTask: CoreShape["createTask"] = (user, repoId, input) =>
@@ -476,11 +526,14 @@ export const CoreLive = Layer.effect(
               answer: Deferred.Deferred<AskOutcome> | null
               start: { readonly prompt: string; readonly resumeSession: string | null } | null
             },
-            NotFound
+            NotFound | Conflict
           > => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
             const task = found.right
+            if (task.archivedAt !== undefined) {
+              return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
+            }
             const now = nowIso()
             // Any message settles the task's question: it is the answer, or it is ignored once the question's run is gone.
             const ask = s.pendingAsks.find((a) => a.taskId === taskId) ?? null
@@ -712,6 +765,8 @@ export const CoreLive = Layer.effect(
       getTask: ownedTask,
 
       deleteTask: (user, id) => Effect.zipRight(ownedTask(user, id), deleteTask(id)),
+      archiveTask,
+      unarchiveTask,
 
       diff: (user, taskId) =>
         Effect.gen(function* () {
@@ -762,6 +817,9 @@ export const CoreLive = Layer.effect(
       desktopStart: (user, taskId) =>
         Effect.gen(function* () {
           const task = yield* ownedTask(user, taskId)
+          if (task.archivedAt !== undefined) {
+            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
+          }
           return yield* startDesktop(task).pipe(
             Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
           )
