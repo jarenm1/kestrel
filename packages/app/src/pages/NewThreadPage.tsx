@@ -19,12 +19,14 @@ export function NewThreadPage() {
 
   // TODO: let the agent name the thread from the conversation instead of the first line of the prompt.
   const start = useMutation({
-    mutationFn: async (body: SendMessageBody) => {
-      const task = created.current ?? (await api.createTask({ title: threadTitle(body.text) }))
+    mutationFn: async ({ body, files }: { body: SendMessageBody; files: readonly File[] }) => {
+      // A message of only files is titled after the first one.
+      const title = threadTitle(body.text) || threadTitle(files[0]?.name ?? "")
+      const task = created.current ?? (await api.createTask({ title }))
       created.current = task
       // The thread exists from here on, even if the message below fails.
       storeTask(queryClient, task)
-      return { task, sent: await api.sendMessage(task.id, body) }
+      return { task, sent: await api.sendMessage(task.id, body, files) }
     },
     onSuccess: ({ task, sent }) => {
       queryClient.setQueryData(keys.messages(task.id), [sent.message])
@@ -37,7 +39,7 @@ export function NewThreadPage() {
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6 p-6">
       <h1 className="text-center text-xl font-semibold tracking-tight">What should we work on?</h1>
       <Composer
-        onSend={start.mutateAsync}
+        onSend={(body, files) => start.mutateAsync({ body, files })}
         pending={start.isPending}
         error={start.error}
         placeholder="Ask for anything — the agent checks out the repos it needs"

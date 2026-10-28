@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, type ReactNode } from "react"
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
-import { api, taskAttachmentUrl } from "@/api/client"
+import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -9,6 +9,7 @@ import { formatClock } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer } from "./Composer"
 import { Markdown } from "./Markdown"
+import { MessageAttachments } from "./MessageAttachments"
 import { RunPanel } from "./RunPanel"
 import { RunTranscript } from "./RunTranscript"
 import { StatusIcon } from "./StatusIcon"
@@ -55,9 +56,13 @@ function ThreadItem({
     case "user":
       return (
         <div className={cn("flex flex-col items-end", ENTER_CLASS)}>
-          <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">
-            {message.text}
-          </div>
+          {/* A message of only attachments has no text bubble. */}
+          {message.text !== "" && (
+            <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">
+              {message.text}
+            </div>
+          )}
+          {children}
           {/* No agent reply yet: the turn's status sits under the prompt, on the agent's side. */}
           {turn && (
             <div className="self-start">
@@ -116,7 +121,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
   }, [sortedMessages.length, itemsRevision])
 
   const send = useMutation({
-    mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
+    mutationFn: ({ body, files = [] }: { body: SendMessageBody; files?: readonly File[] }) =>
+      api.sendMessage(taskId, body, files),
     onSuccess: (res) => {
       queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) => upsert(list, res.message))
       queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, res.run))
@@ -151,14 +157,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
                 <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate}>
                   {extras ? (
                     <>
-                      {attachments.map((a) => (
-                        <img
-                          key={a.id}
-                          src={taskAttachmentUrl(taskId, a.id)}
-                          alt="Attachment"
-                          className="mt-2 max-h-80 rounded-xl shadow-soft"
+                      {attachments.length > 0 && (
+                        <MessageAttachments
+                          taskId={taskId}
+                          attachments={attachments}
+                          className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
                         />
-                      ))}
+                      )}
                       {m.id === pendingAsk?.id && (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {(m.options ?? []).map((option, i) => (
@@ -167,7 +172,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
                               variant="soft"
                               size="sm"
                               disabled={send.isPending}
-                              onClick={() => send.mutate({ text: option })}
+                              onClick={() => send.mutate({ body: { text: option } })}
                             >
                               {option}
                             </Button>
@@ -190,7 +195,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
           <ArchivedNotice task={archivedTask} />
         ) : (
           <Composer
-            onSend={send.mutateAsync}
+            onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             error={send.error ?? cancel.error}
             onStop={activeRun && (() => cancel.mutate(activeRun.id))}

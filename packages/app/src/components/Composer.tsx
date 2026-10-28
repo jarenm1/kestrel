@@ -1,7 +1,15 @@
-import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react"
 import { Schema } from "effect"
-import { ArrowUp, ChevronDown, Square } from "lucide-react"
-import { AgentEffort, AgentModel, type SendMessageBody } from "@cloudagents/protocol"
+import { ArrowUp, ChevronDown, FileText, Paperclip, Square, X } from "lucide-react"
+import { AgentEffort, AgentModel, MAX_ATTACHMENT_BYTES, type SendMessageBody } from "@cloudagents/protocol"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
@@ -82,9 +90,43 @@ function PillPicker<T extends string>({
   )
 }
 
+/** A file waiting to go with the next message: a thumbnail for images, else its name; the cross removes it. */
+function PendingFile({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const isImage = file.type.startsWith("image/")
+  const [preview, setPreview] = useState<string>()
+  useEffect(() => {
+    if (!isImage) return
+    const url = URL.createObjectURL(file)
+    setPreview(url)
+    return () => URL.revokeObjectURL(url)
+  }, [file, isImage])
+
+  return (
+    <div className="group relative flex h-14 max-w-56 items-center gap-2 rounded-xl bg-white/[0.06] shadow-soft">
+      {isImage ? (
+        preview && <img src={preview} alt={file.name} className="h-14 w-14 rounded-xl object-cover" />
+      ) : (
+        <>
+          <FileText className="ml-3 size-4 shrink-0 text-muted-foreground" />
+          <span className="truncate pr-6 text-xs">{file.name}</span>
+        </>
+      )}
+      <button
+        type="button"
+        aria-label={`Remove ${file.name}`}
+        title={`Remove ${file.name}`}
+        onClick={onRemove}
+        className="absolute -top-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-soft hover:text-foreground"
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  )
+}
+
 interface Props {
-  /** Resolves once the message is accepted; the text is cleared only then. */
-  onSend: (body: SendMessageBody) => Promise<unknown>
+  /** Resolves once the message is accepted; the text and files are cleared only then. */
+  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
   pending: boolean
   error: unknown
   /**
@@ -98,18 +140,42 @@ interface Props {
   className?: string
 }
 
-/** Message box with the model and thinking-level pickers, and a round send / stop button. */
+/** Message box with file attachments, the model and thinking-level pickers, and a round send / stop button. */
 export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className }: Props) {
   const [text, setText] = useState("")
+  const [files, setFiles] = useState<readonly File[]>([])
+  const [fileError, setFileError] = useState<string>()
+  const [dragging, setDragging] = useState(false)
+  const fileInput = useRef<HTMLInputElement>(null)
   const [model, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [effort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  const empty = text.trim() === "" && files.length === 0
+
+  /** Adds files, refusing empty ones and any over the box's limit before they are uploaded. */
+  function addFiles(added: readonly File[]) {
+    const refused = added.filter((f) => f.size === 0 || f.size > MAX_ATTACHMENT_BYTES)
+    setFileError(
+      refused.length === 0
+        ? undefined
+        : `Not attached (empty or over ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB): ${refused.map((f) => f.name).join(", ")}`,
+    )
+    const accepted = added.filter((f) => !refused.includes(f))
+    if (accepted.length > 0) setFiles((current) => [...current, ...accepted])
+  }
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    const body = text.trim()
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
-    // Failures surface through `error`; the text stays so it can be resent.
-    if (body && !pending) onSend({ text: body, model, effort }).then(() => setText(""), () => {})
+    // Failures surface through `error`; the text and files stay so they can be resent.
+    if (empty || pending) return
+    onSend({ text: text.trim(), model, effort }, files).then(
+      () => {
+        setText("")
+        setFiles([])
+        setFileError(undefined)
+      },
+      () => {},
+    )
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -119,13 +185,54 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     }
   }
 
+  /** Pasted files (e.g. a screenshot) are attached; pasted text goes into the box as usual. */
+  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const pasted = Array.from(e.clipboardData.files)
+    if (pasted.length === 0) return
+    e.preventDefault()
+    addFiles(pasted)
+  }
+
+  function onDragOver(e: DragEvent<HTMLFormElement>) {
+    if (!e.dataTransfer.types.includes("Files")) return
+    e.preventDefault()
+    setDragging(true)
+  }
+
+  function onDrop(e: DragEvent<HTMLFormElement>) {
+    setDragging(false)
+    if (e.dataTransfer.files.length === 0) return
+    e.preventDefault()
+    addFiles(Array.from(e.dataTransfer.files))
+  }
+
   return (
     <div className={cn("w-full max-w-3xl", className)}>
       {Boolean(error) && <Alert className="mb-2">{errorText(error)}</Alert>}
+      {fileError && <Alert className="mb-2">{fileError}</Alert>}
       <form
-        className="flex flex-col gap-1 rounded-2xl bg-secondary p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow"
+        className={cn(
+          "flex flex-col gap-1 rounded-2xl bg-secondary p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow",
+          dragging && "shadow-glow ring-1 ring-white/20",
+        )}
         onSubmit={submit}
+        onDragOver={onDragOver}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
+        }}
+        onDrop={onDrop}
       >
+        {files.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-1.5 pt-1.5">
+            {files.map((file, i) => (
+              <PendingFile
+                key={`${i}:${file.name}:${file.size}:${file.lastModified}`}
+                file={file}
+                onRemove={() => setFiles((current) => current.filter((f) => f !== file))}
+              />
+            ))}
+          </div>
+        )}
         <Textarea
           className="min-h-12 resize-none bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
           value={text}
@@ -134,11 +241,33 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
           autoFocus={autoFocus}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
+          onPaste={onPaste}
+        />
+        <input
+          ref={fileInput}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            addFiles(Array.from(e.target.files ?? []))
+            // Lets the same file be picked again after it was removed.
+            e.target.value = ""
+          }}
         />
         <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Attach files"
+            title="Attach files"
+            onClick={() => fileInput.current?.click()}
+          >
+            <Paperclip />
+          </Button>
           <PillPicker label="Model" value={model} options={MODEL_OPTIONS} onChange={setModel} />
           <PillPicker label="Thinking" value={effort} options={EFFORT_OPTIONS} onChange={setEffort} />
-          {onStop && text.trim() === "" ? (
+          {onStop && empty ? (
             <Button
               type="button"
               size="icon"
@@ -157,7 +286,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
               className="ml-auto"
               aria-label="Send"
               title="Send"
-              disabled={pending || text.trim() === ""}
+              disabled={pending || empty}
             >
               <ArrowUp />
             </Button>

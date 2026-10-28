@@ -1,5 +1,6 @@
 import { Effect, Either, Schema } from "effect"
 import {
+  Attachment,
   Automation,
   BoxStatus,
   CliAuthStatus,
@@ -54,6 +55,7 @@ function errorMessage(text: string, fallback: string): string {
   return text || fallback
 }
 
+/** `body`: a `Blob` (e.g. a `File`) is sent as raw bytes with its own type; anything else as JSON. */
 const request = <A, I>(
   schema: Schema.Schema<A, I>,
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
@@ -66,8 +68,11 @@ const request = <A, I>(
         fetch(SERVER_URL + path, {
           method,
           credentials: "include",
-          headers: body === undefined ? undefined : { "content-type": "application/json" },
-          body: body === undefined ? undefined : JSON.stringify(body),
+          ...(body === undefined
+            ? {}
+            : body instanceof Blob
+              ? { headers: { "content-type": body.type || "application/octet-stream" }, body }
+              : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
         }),
       catch: (e) => new ApiError(0, `Cannot reach server at ${SERVER_URL}: ${String(e)}`),
     })
@@ -129,8 +134,21 @@ export const api = {
   archiveTask: (taskId: string) => run(request(Task, "POST", Paths.taskArchive(taskId))),
   unarchiveTask: (taskId: string) => run(request(Task, "DELETE", Paths.taskArchive(taskId))),
   listMessages: (taskId: string) => run(request(Schema.Array(Message), "GET", Paths.taskMessages(taskId))),
-  sendMessage: (taskId: string, body: SendMessageBody) =>
-    run(request(SendMessageResponse, "POST", Paths.taskMessages(taskId), body)),
+  /**
+   * Uploads `files` to the task, then sends the message with them attached after any ids already in `body`.
+   * An upload that never gets sent (the send fails) waits on the box until the task is deleted.
+   */
+  sendMessage: async (taskId: string, body: SendMessageBody, files: readonly File[] = []) => {
+    const uploaded = await Promise.all(
+      files.map((file) =>
+        run(request(Attachment, "POST", `${Paths.taskUploads(taskId)}?name=${encodeURIComponent(file.name)}`, file)),
+      ),
+    )
+    const attachments = [...(body.attachments ?? []), ...uploaded.map((a) => a.id)]
+    return run(
+      request(SendMessageResponse, "POST", Paths.taskMessages(taskId), attachments.length > 0 ? { ...body, attachments } : body),
+    )
+  },
   listRuns: (taskId: string) => run(request(Schema.Array(Run), "GET", Paths.taskRuns(taskId))),
   runItems: (runId: string) => run(request(RunItems, "GET", Paths.runItems(runId))),
   cancelRun: (runId: string) => run(request(Run, "POST", Paths.runCancel(runId))),
