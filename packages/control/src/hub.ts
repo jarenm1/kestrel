@@ -23,6 +23,7 @@ import {
 import { errorResponse, headersToRecord, isHopByHop } from "./http"
 import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
+import { claimHookRow, type HookRow } from "./hooks"
 import { composePrompt } from "./prompt"
 import type { Env } from "./env"
 
@@ -526,26 +527,21 @@ export class Hub extends DurableObject<Env> {
     )
   }
 
-  saveGithubHook(repo: string, hookId: number, secret: string): void {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO github_hooks (repo, hook_id, secret) VALUES (?, ?, ?)
-       ON CONFLICT(repo) DO UPDATE SET hook_id = excluded.hook_id, secret = excluded.secret`,
-      repo,
-      hookId,
-      secret,
-    )
+  /** Stores a new hook unless the row changed since `expectedHookId` was read (see `claimHookRow`). */
+  claimGithubHook(repo: string, expectedHookId: number | null, hookId: number, secret: string): HookRow {
+    return claimHookRow(this.ctx.storage.sql, repo, expectedHookId, hookId, secret)
   }
 
   deleteGithubHook(repo: string): void {
     this.ctx.storage.sql.exec("DELETE FROM github_hooks WHERE repo = ?", repo)
   }
 
-  /** True when an enabled GitHub automation other than `excludeId` still needs the repository's webhook. */
-  githubHookInUse(repo: string, excludeId: string | null): boolean {
+  /** True when an enabled GitHub automation still needs the repository's webhook. */
+  githubHookInUse(repo: string): boolean {
     return this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, repo)
       .toArray()
-      .some((row) => row.id !== excludeId && decodeTrigger(row.triggerJson)._tag === "github")
+      .some((row) => decodeTrigger(row.triggerJson)._tag === "github")
   }
 
   override async alarm(): Promise<void> {
@@ -588,7 +584,7 @@ export class Hub extends DurableObject<Env> {
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
     const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
-    const outcome = await this.startTask(row.login, row.repoId, title, pr?.number ?? null, prompt)
+    const outcome = await this.startTask(row.login, row.repoId, title, pr, prompt)
     return this.recordRun(row.id, reason, now, outcome)
   }
 
@@ -597,13 +593,14 @@ export class Hub extends DurableObject<Env> {
     login: string,
     repoId: string,
     title: string,
-    pullRequest: number | null,
+    pr: PullRequestInfo | null,
     prompt: string,
   ): Promise<RunOutcome> {
+    // A PR task forks from the PR head; the box fetches `baseRef` too, so the prompt's diff against it works.
     const created = await this.boxCall(login, "POST", Paths.repoTasks(repoId), {
       title,
       fetch: true,
-      ...(pullRequest === null ? {} : { pullRequest }),
+      ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number }),
     })
     if (!created.ok) return { taskId: null, error: boxError(created) }
     const task = decodeJson(CreatedTask, created.body)

@@ -76,16 +76,33 @@ const ensureHook = async (env: Env, token: string, slug: string, url: string): P
   const bytes = crypto.getRandomValues(new Uint8Array(32))
   const secret = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
   const hookId = await createPullRequestHook(token, slug, url, secret)
-  await hub(env).saveGithubHook(key, hookId, secret)
+  const stored = await hub(env).claimGithubHook(key, existing?.hookId ?? null, hookId, secret)
+  if (stored.hookId === hookId) return
+  // A concurrent request stored its own hook first, so ours is unused: remove it (best-effort).
+  try {
+    await deletePullRequestHook(token, slug, hookId)
+  } catch (err) {
+    console.error(`removing an unused webhook on ${slug} failed: ${err instanceof Error ? err.message : "unknown error"}`)
+  }
 }
 
-/** Removes the repository's webhook once no other enabled GitHub automation needs it. */
-const releaseHook = async (env: Env, token: string, slug: string, excludeId: string): Promise<void> => {
+/**
+ * Removes the repository's webhook once no enabled GitHub automation needs it. Runs after the Hub has saved the
+ * change, so a failure is logged instead of failing the request; the hook then stays for a later ensureHook to
+ * reuse. Without a GitHub connection nothing is removed.
+ */
+const releaseHook = async (env: Env, login: string, slug: string): Promise<void> => {
   const key = slug.toLowerCase()
-  if (await hub(env).githubHookInUse(key, excludeId)) return
-  const hook = await hub(env).githubHook(key)
-  if (hook !== null) await deletePullRequestHook(token, slug, hook.hookId)
-  await hub(env).deleteGithubHook(key)
+  try {
+    if (await hub(env).githubHookInUse(key)) return
+    const token = (await hub(env).credentials(login)).github
+    const hook = await hub(env).githubHook(key)
+    if (token === undefined || hook === null) return
+    await deletePullRequestHook(token, slug, hook.hookId)
+    await hub(env).deleteGithubHook(key)
+  } catch (err) {
+    console.error(`removing the webhook on ${slug} failed: ${err instanceof Error ? err.message : "unknown error"}`)
+  }
 }
 
 const createAutomation = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
@@ -117,27 +134,27 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
     if (problem !== null) return badRequest(problem)
   }
   const slug = current.repo
-  const wasHooked = current.enabled && current.trigger._tag === "github"
-  const needsHook = enabled && trigger._tag === "github"
-  if (slug !== null && (wasHooked || needsHook)) {
+  const wasHooked = current.enabled && current.trigger._tag === "github" && slug !== null
+  const needsHook = enabled && trigger._tag === "github" && slug !== null
+  // Only a hook that must exist needs the owner's token; turning GitHub triggers off never does.
+  if (needsHook) {
     const token = await githubToken(env, login)
     if (token instanceof Response) return token
-    if (wasHooked && !needsHook) await releaseHook(env, token, slug, id)
-    if (needsHook) await ensureHook(env, token, slug, webhookUrl(url))
+    await ensureHook(env, token, slug, webhookUrl(url))
   }
   const updated = await hub(env).updateAutomation(login, id, body)
-  return updated === null ? notFound() : json(updated)
+  if (updated === null) return notFound()
+  if (slug !== null && wasHooked && !needsHook) await releaseHook(env, login, slug)
+  return json(updated)
 }
 
 const deleteAutomation = async (env: Env, login: string, id: string): Promise<Response> => {
   const current = await hub(env).automation(login, id)
   if (current === null) return notFound()
-  if (current.enabled && current.trigger._tag === "github" && current.repo !== null) {
-    const token = await githubToken(env, login)
-    if (token instanceof Response) return token
-    await releaseHook(env, token, current.repo, id)
-  }
   await hub(env).deleteAutomation(login, id)
+  if (current.enabled && current.trigger._tag === "github" && current.repo !== null) {
+    await releaseHook(env, login, current.repo)
+  }
   return new Response(null, { status: 204 })
 }
 
