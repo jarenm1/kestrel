@@ -62,6 +62,13 @@ export const Task = Schema.Struct({
 })
 export type Task = typeof Task.Type
 
+/** A file the agent attached to a message; bytes are served by `Paths.taskAttachment`. */
+export const Attachment = Schema.Struct({
+  id: Schema.String,
+  mimeType: Schema.String,
+})
+export type Attachment = typeof Attachment.Type
+
 export const Message = Schema.Struct({
   id: Schema.String,
   taskId: Schema.String,
@@ -69,6 +76,10 @@ export const Message = Schema.Struct({
   text: Schema.String,
   runId: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
+  /** Choices offered with a question (`task_ask`); the user answers by sending one of them. */
+  options: Schema.optional(Schema.Array(Schema.String)),
+  /** Files attached by the agent (e.g. a desktop screenshot). Optional so messages persisted before attachments decode. */
+  attachments: Schema.optional(Schema.Array(Attachment)),
 })
 export type Message = typeof Message.Type
 
@@ -219,6 +230,7 @@ export const Paths = {
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
+  taskAttachment: (taskId: string, attachmentId: string) => `/api/tasks/${taskId}/attachments/${attachmentId}`,
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
   /** WebSocket: JSON `ServerEvent` text frames. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,
