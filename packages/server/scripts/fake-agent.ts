@@ -1,6 +1,6 @@
 /**
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
- * Runs with cwd = task worktree and talks to the task's MCP endpoint like a real agent would.
+ * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would.
  */
 import { randomUUID } from "node:crypto"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
@@ -64,6 +64,27 @@ const runExecProbes = async (): Promise<number> => {
   return 0
 }
 
+// Checks `repo` out into the thread, commits one file in the checkout and leaves another uncommitted, so the diff
+// must show both. Reports the checkout's directory.
+const runCheckoutProbe = async (repo: string): Promise<number> => {
+  const checkout = await call("repo_checkout", { repo })
+  const dir = /\bat (\S+) \(/.exec(checkout.text)?.[1]
+  if (checkout.failed || dir === undefined) {
+    await call("task_report", { status: "failed", message: `fake agent could not check out ${repo}` })
+    return 1
+  }
+  const committed = await call("workspace_exec", {
+    command: `cd '${dir}' && echo committed > CHECKOUT_PROBE.txt && git add CHECKOUT_PROBE.txt && git -c user.name=fake -c user.email=fake@example.com commit -qm "checkout probe"`,
+  })
+  const uncommitted = await call("workspace_exec", { command: `cd '${dir}' && echo uncommitted > UNCOMMITTED_PROBE.txt` })
+  if (!committed.text.startsWith("exit code: 0") || !uncommitted.text.startsWith("exit code: 0")) {
+    await call("task_report", { status: "failed", message: `fake agent could not change files in ${dir}` })
+    return 1
+  }
+  await call("task_report", { status: "done", message: `checkout probe finished in ${dir}` })
+  return 0
+}
+
 const sleepMs = (ms: number): Promise<void> => {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, ms)
@@ -104,8 +125,8 @@ const runDesktopProbes = async (): Promise<number> => {
   return 0
 }
 
-// Drives the automation tools: creates a schedule automation on this task's project, lists, updates its cron and
-// deletes it. An optional automation id from another project must come back as not found.
+// Drives the automation tools: creates a schedule automation for this thread's owner, lists, updates its cron and
+// deletes it. An optional automation id of another user must come back as not found.
 const runAutomationProbes = async (foreignId: string | undefined): Promise<number> => {
   const created = await call("automation_create", {
     name: "probe",
@@ -165,8 +186,9 @@ const main = async (): Promise<number> => {
   if (resumeSession !== undefined) console.log(`fake-agent: resumed session ${resumeSession} with prompt: ${prompt}`)
   const resumed = resumeSession === undefined ? "" : ` Resumed session ${resumeSession}.`
   if (prompt.trim() === "exec-probe") return runExecProbes()
-  const [probe, foreignId] = prompt.trim().split(/\s+/)
-  if (probe === "automation-probe") return runAutomationProbes(foreignId)
+  const [probe, arg] = prompt.trim().split(/\s+/)
+  if (probe === "automation-probe") return runAutomationProbes(arg)
+  if (probe === "checkout-probe") return runCheckoutProbe(arg ?? "")
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
   // The desktop starts only when the agent opens it: until then the desktop tools refuse.

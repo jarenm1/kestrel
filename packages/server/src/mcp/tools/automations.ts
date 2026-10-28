@@ -6,7 +6,6 @@ import {
   type AutomationTrigger,
   GithubAutomationEvent,
   NotFound,
-  type Repo,
 } from "@cloudagents/protocol"
 import { type ControlClient, ControlError } from "../../control/client"
 import { type RunContext, guard, runTool, text, truncate } from "./common"
@@ -15,7 +14,7 @@ export interface AutomationToolDeps {
   readonly automations: {
     /** Null when the box runs without a control plane: automations are managed there. */
     readonly control: ControlClient | null
-    readonly taskRepo: (taskId: string) => Effect.Effect<Repo, NotFound>
+    readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
   }
 }
 
@@ -52,45 +51,35 @@ const formatAutomation = (automation: Automation): string =>
   [
     `${automation.id} "${automation.name}" (${automation.enabled ? "enabled" : "disabled"})`,
     `  trigger: ${describeTrigger(automation.trigger)}`,
+    `  repo: ${automation.repo ?? "none"}`,
     `  next run: ${automation.nextRunAt ?? "none"}`,
     `  prompt: ${automation.prompt}`,
   ].join("\n")
 
 export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps: AutomationToolDeps): void => {
-  // Automations act for the owner of the task's project and only ever see that project.
+  // Automations act for the thread's owner: every automation of that user, whichever repository it names.
   const scope = Effect.gen(function* () {
     const control = deps.automations.control
     if (control === null) {
       return yield* Effect.fail(new ControlError({ message: "automations need the control plane; this box has none" }))
     }
-    const repo = yield* deps.automations.taskRepo(ctx.taskId)
-    return { control, repo }
+    const owner = yield* deps.automations.taskOwner(ctx.taskId)
+    return { control, owner }
   })
-
-  // The automation must belong to this task's project; another project's id is simply not found.
-  const target = (id: string) =>
-    Effect.gen(function* () {
-      const { control, repo } = yield* scope
-      const automation = yield* control.get(repo.owner, id)
-      if (automation.repoId !== repo.id) return yield* Effect.fail(new NotFound({ message: "no such automation" }))
-      return { control, repo, automation }
-    })
 
   server.registerTool(
     "automation_list",
     {
-      description:
-        "List this task's project automations: id, name, enabled state, trigger, next scheduled run and prompt. " +
-        "Automations on other projects are not listed.",
+      description: "List the automations of this thread's owner: id, name, enabled state, trigger, repo, next run and prompt.",
       inputSchema: {},
     },
     () =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const { control, repo } = yield* scope
-            const automations = (yield* control.list(repo.owner)).filter((a) => a.repoId === repo.id)
-            if (automations.length === 0) return text("no automations for this project")
+            const { control, owner } = yield* scope
+            const automations = yield* control.list(owner)
+            if (automations.length === 0) return text("no automations")
             return text(truncate(automations.map(formatAutomation).join("\n\n")))
           }),
         ),
@@ -101,25 +90,26 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
     "automation_create",
     {
       description:
-        "Create an automation on this task's project. Each run starts a new task on this project with the prompt. " +
-        "A schedule trigger fires on a five-field cron in an IANA time zone. A github trigger fires on pull request " +
-        "events in this project's repository and needs the owner's GitHub connection, so it cannot be enabled without " +
-        "one. Pass enabled: false to create it paused.",
+        "Create an automation for this thread's owner. Each run starts a new thread with the prompt, checking out `repo` " +
+        "when one is given. A schedule trigger fires on a five-field cron in an IANA time zone. A github trigger fires on " +
+        "pull request events in `repo` and needs the owner's GitHub connection, so it cannot be enabled without one. " +
+        "Pass enabled: false to create it paused.",
       inputSchema: {
         name: z.string().min(1).describe("Short name shown in the app"),
         prompt: z.string().min(1).describe("Prompt the run's agent receives"),
+        repo: z.string().optional().describe("GitHub repository (owner/name) that runs check out; required for github triggers"),
         trigger: triggerSchema,
         enabled: z.boolean().optional().describe("Whether it fires (default true)"),
       },
     },
-    ({ name, prompt, trigger, enabled }) =>
+    ({ name, repo, prompt, trigger, enabled }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const { control, repo } = yield* scope
-            const created = yield* control.create(repo.owner, {
+            const { control, owner } = yield* scope
+            const created = yield* control.create(owner, {
               name,
-              repoId: repo.id,
+              repo,
               prompt,
               trigger,
               enabled,
@@ -134,8 +124,8 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
     "automation_update",
     {
       description:
-        "Change an automation on this task's project. Only the fields given change: name, prompt, trigger (the whole " +
-        "trigger is replaced) or enabled. The project cannot change.",
+        "Change an automation of this thread's owner. Only the fields given change: name, prompt, trigger (the whole " +
+        "trigger is replaced) or enabled. The repo cannot change.",
       inputSchema: {
         id: z.string().describe("Automation id from automation_list"),
         name: z.string().min(1).optional().describe("New name"),
@@ -148,8 +138,8 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const { control, repo } = yield* target(id)
-            const updated = yield* control.update(repo.owner, id, { name, prompt, trigger, enabled })
+            const { control, owner } = yield* scope
+            const updated = yield* control.update(owner, id, { name, prompt, trigger, enabled })
             return text(`updated automation ${updated.id}\n${formatAutomation(updated)}`)
           }),
         ),
@@ -159,7 +149,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   server.registerTool(
     "automation_delete",
     {
-      description: "Delete an automation on this task's project.",
+      description: "Delete an automation of this thread's owner.",
       inputSchema: {
         id: z.string().describe("Automation id from automation_list"),
       },
@@ -168,8 +158,8 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const { control, repo } = yield* target(id)
-            yield* control.remove(repo.owner, id)
+            const { control, owner } = yield* scope
+            yield* control.remove(owner, id)
             return text(`deleted automation ${id}`)
           }),
         ),

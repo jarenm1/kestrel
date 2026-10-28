@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { CheckoutRequest, type Checkout } from "@cloudagents/protocol"
 import { z } from "zod"
 import { type RunContext, guard, runTool, text } from "./common"
 
@@ -15,6 +16,7 @@ interface ExecOutput {
 
 export interface WorkspaceToolDeps {
   readonly workspace: {
+    readonly checkout: (taskId: string, request: CheckoutRequest) => Effect.Effect<Checkout, unknown>
     readonly exec: (
       taskId: string,
       command: string,
@@ -29,10 +31,46 @@ const formatStream = (out: ExecOutput): string =>
 
 export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps: WorkspaceToolDeps): void => {
   server.registerTool(
+    "repo_checkout",
+    {
+      description:
+        "Check a GitHub repository out into this thread's workspace, on a new branch forked from `baseBranch` (default: " +
+        "the repository's default branch). With `pullRequest`, the checkout starts at that pull request's head and its " +
+        "base is the pull request's base branch. The checkout is a directory under the workspace root; the result names " +
+        "its path and checkout id. Asking for a repository the thread already has returns that checkout. `repo` is " +
+        "`owner/name` on github.com, otherwise an https clone URL.",
+      inputSchema: {
+        repo: z.string().describe("`owner/name` on github.com, or an https clone URL"),
+        baseBranch: z.string().optional().describe("Branch to fork from; default: the repository's default branch"),
+        pullRequest: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Pull request number to check out, instead of forking a new branch"),
+      },
+    },
+    ({ repo, baseBranch, pullRequest }: { repo: string; baseBranch?: string; pullRequest?: number }) =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const request = yield* Schema.decodeUnknown(CheckoutRequest)({ repo, baseBranch, pullRequest }).pipe(
+              Effect.mapError((e) => new Error(`invalid repo_checkout arguments: ${e.message}`)),
+            )
+            const checkout = yield* deps.workspace.checkout(ctx.taskId, request)
+            return text(
+              `checked out ${checkout.repo} at ${checkout.dir} (checkout id ${checkout.id}, branch ${checkout.branch}, base ${checkout.baseBranch})`,
+            )
+          }),
+        ),
+      ),
+  )
+
+  server.registerTool(
     "workspace_exec",
     {
       description:
-        "Run a shell command with sh -c in the task's git worktree (the agent's working directory). Use this only " +
+        "Run a shell command with sh -c in the thread's workspace root (the agent's working directory; repo_checkout puts repositories under it). Use this only " +
         "when the command needs the task's desktop DISPLAY, or when your harness has no shell of its own; if you " +
         "have a shell, use that instead. Returns the exit code, stdout and stderr; a non-zero exit code is reported " +
         "in the output, not as a tool error. Each stream keeps its first and last 10000 bytes; the middle is " +
@@ -43,7 +81,7 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
         "output and background it: `nohup cmd >log 2>&1 &`. Output a backgrounded process writes after the call " +
         "returns goes to closed pipes and is lost (it gets SIGPIPE).",
       inputSchema: {
-        command: z.string().describe("Shell command, run with sh -c in the worktree"),
+        command: z.string().describe("Shell command, run with sh -c in the workspace root"),
         timeoutSec: z
           .number()
           .positive()
