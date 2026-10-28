@@ -1,253 +1,222 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  StyleSheet,
-  FlatList,
-  Pressable,
-  KeyboardAvoidingView,
-  Platform,
-} from "react-native";
+import React, { useMemo, useRef } from "react";
+import { ActivityIndicator, FlatList, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Message, Run } from "@/api/types";
+import type { Message, Run, SendMessageBody, TaskStatus } from "@cloudagents/protocol";
 import { useApiClient } from "@/hooks/useApiClient";
 import { keys, upsert } from "@/api/queries";
-import { RunPanel } from "./RunPanel";
+import { formatClock } from "@/lib/format";
 import { colors, radius, spacing } from "@/theme";
+import { Composer } from "./Composer";
+import { RunPanel } from "./RunPanel";
 
 interface Props {
   taskId: string;
+  taskStatus: TaskStatus | undefined;
   messages: readonly Message[];
   runs: readonly Run[];
   output: Record<string, string[]>;
+  archived: boolean;
+  onUnarchive: () => void;
+  unarchiving: boolean;
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+type RunStatus = Run["status"];
+
+/** Status of the run that produced each turn, keyed by the turn's last message. */
+function turnStatuses(messages: readonly Message[], runs: readonly Run[]): Map<string, RunStatus> {
+  const runStatus = new Map(runs.map((r) => [r.id, r.status] as const));
+  const lastOfRun = new Map<string, string>();
+  for (const m of messages) {
+    if (m.runId) lastOfRun.set(m.runId, m.id);
+  }
+  const turns = new Map<string, RunStatus>();
+  for (const [runId, messageId] of lastOfRun) {
+    const status = runStatus.get(runId);
+    if (status) turns.set(messageId, status);
+  }
+  return turns;
 }
 
-const ROLE_STYLES: Record<string, { align: "flex-end" | "flex-start" | "center"; bg: string; border: string }> = {
-  user: { align: "flex-end", bg: colors.primary + "18", border: colors.primary + "55" },
-  agent: { align: "flex-start", bg: colors.card, border: colors.border },
-  system: { align: "center", bg: "transparent", border: "transparent" },
-};
-
-export function ChatPanel({ taskId, messages, runs, output }: Props) {
+export function ChatPanel({
+  taskId,
+  taskStatus,
+  messages,
+  runs,
+  output,
+  archived,
+  onUnarchive,
+  unarchiving,
+}: Props) {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
-  const [text, setText] = useState("");
-  const listRef = useRef<FlatList>(null);
+  const listRef = useRef<FlatList<Message>>(null);
 
-  const sortedMessages = [...messages].sort((a, b) =>
-    a.createdAt.localeCompare(b.createdAt)
-  );
+  const sortedMessages = useMemo(() => [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [messages]);
+  const sortedRuns = useMemo(() => [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt)), [runs]);
+  const turns = useMemo(() => turnStatuses(sortedMessages, sortedRuns), [sortedMessages, sortedRuns]);
 
-  useEffect(() => {
-    if (listRef.current && sortedMessages.length > 0) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
-    }
-  }, [sortedMessages.length]);
+  // Option chips belong to the latest question, and only while the task is waiting on an answer.
+  const lastWithOptions = [...sortedMessages].reverse().find((m) => (m.options ?? []).length > 0);
+  const askingId = taskStatus === "needs_input" ? lastWithOptions?.id : undefined;
+
+  const latestRun = sortedRuns.at(-1);
+  const activeRun = latestRun?.status === "running" ? latestRun : undefined;
 
   const send = useMutation({
-    mutationFn: (body: string) => api.sendMessage(taskId, body),
-    onSuccess: (res) => {
-      queryClient.setQueryData(
-        keys.messages(taskId),
-        (list: Message[] | undefined) => upsert(list, res.message)
-      );
-      queryClient.setQueryData(
-        keys.runs(taskId),
-        (list: Run[] | undefined) => upsert(list, res.run)
-      );
-      setText("");
+    mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
+    onSuccess: (sent) => {
+      queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, sent.message));
+      queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, sent.run));
     },
   });
 
-  const submit = useCallback(() => {
-    const body = text.trim();
-    if (body) send.mutate(body);
-  }, [text, send]);
-
-  const renderMessage = useCallback(
-    ({ item: m }: { item: Message }) => {
-      const style = ROLE_STYLES[m.role] ?? ROLE_STYLES.system;
-      return (
-        <View
-          style={[
-            styles.bubble,
-            {
-              alignSelf: style.align,
-              backgroundColor: style.bg,
-              borderColor: style.border,
-            },
-            m.role === "system" && styles.systemBubble,
-          ]}
-        >
-          <Text style={styles.meta}>
-            {m.role} · {formatTime(m.createdAt)}
-          </Text>
-          <Text style={[styles.messageText, m.role === "system" && styles.systemText]}>
-            {m.text}
-          </Text>
-        </View>
-      );
-    },
-    []
-  );
+  const cancel = useMutation({
+    mutationFn: (runId: string) => api.cancelRun(runId),
+    onSuccess: (run) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
+  });
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 100 : 0}
-    >
+    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
       <FlatList
         ref={listRef}
+        style={styles.flex}
+        contentContainerStyle={styles.list}
         data={sortedMessages}
         keyExtractor={(m) => m.id}
-        renderItem={renderMessage}
-        contentContainerStyle={styles.list}
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>
-              No messages yet. Describe what to do.
-            </Text>
-          </View>
-        }
+        renderItem={({ item }) => (
+          <MessageItem
+            taskId={taskId}
+            message={item}
+            turn={turns.get(item.id)}
+            asking={item.id === askingId}
+            optionsDisabled={send.isPending}
+            onOption={(text) => send.mutate({ text })}
+          />
+        )}
+        ListEmptyComponent={<Text style={styles.empty}>No messages yet. Describe what you want done.</Text>}
+        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
       />
-      <RunPanel taskId={taskId} runs={[...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))} output={output} />
-      {send.error && (
-        <View style={styles.errorBar}>
-          <Text style={styles.errorText}>
-            {send.error instanceof Error ? send.error.message : String(send.error)}
-          </Text>
+      <RunPanel taskId={taskId} runs={sortedRuns} output={output} />
+      {archived ? (
+        <View style={styles.archived}>
+          <Text style={styles.archivedText}>This thread is archived.</Text>
+          <Pressable style={styles.unarchive} onPress={onUnarchive} disabled={unarchiving}>
+            <Text style={styles.unarchiveText}>{unarchiving ? "Unarchiving…" : "Unarchive"}</Text>
+          </Pressable>
         </View>
-      )}
-      <View style={styles.composer}>
-        <TextInput
-          style={styles.input}
-          value={text}
-          onChangeText={setText}
-          placeholder="Message the agent…"
-          placeholderTextColor={colors.mutedForeground}
-          multiline
-          maxLength={10000}
-          returnKeyType="send"
-          blurOnSubmit
-          onSubmitEditing={submit}
+      ) : (
+        <Composer
+          onSend={(body) => send.mutateAsync(body)}
+          pending={send.isPending}
+          error={send.error ?? cancel.error}
+          onStop={activeRun ? () => cancel.mutate(activeRun.id) : undefined}
+          stopping={cancel.isPending}
         />
-        <Pressable
-          style={[
-            styles.sendBtn,
-            (send.isPending || text.trim() === "") && styles.sendBtnDisabled,
-          ]}
-          onPress={submit}
-          disabled={send.isPending || text.trim() === ""}
-        >
-          <Text style={styles.sendText}>
-            {send.isPending ? "…" : "Send"}
-          </Text>
-        </Pressable>
-      </View>
+      )}
     </KeyboardAvoidingView>
   );
 }
 
+interface MessageItemProps {
+  taskId: string;
+  message: Message;
+  turn: RunStatus | undefined;
+  asking: boolean;
+  optionsDisabled: boolean;
+  onOption: (text: string) => void;
+}
+
+function MessageItem({ taskId, message, turn, asking, optionsDisabled, onOption }: MessageItemProps) {
+  const { api } = useApiClient();
+  const attachments = message.attachments ?? [];
+
+  if (message.role === "system") {
+    return <Text style={styles.system}>{message.text}</Text>;
+  }
+
+  const isUser = message.role === "user";
+  return (
+    <View style={[styles.bubbleWrap, isUser && styles.bubbleWrapUser]}>
+      <View style={[styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAgent]}>
+        {message.text ? <Text style={styles.bubbleText}>{message.text}</Text> : null}
+        {attachments.map((a) => (
+          <Image
+            key={a.id}
+            source={api.attachmentSource(taskId, a.id)}
+            style={styles.attachment}
+            resizeMode="contain"
+            accessibilityLabel="Attachment"
+          />
+        ))}
+        {asking
+          ? (message.options ?? []).map((option) => (
+              <Pressable
+                key={option}
+                style={[styles.option, optionsDisabled && styles.disabled]}
+                disabled={optionsDisabled}
+                onPress={() => onOption(option)}
+              >
+                <Text style={styles.optionText}>{option}</Text>
+              </Pressable>
+            ))
+          : null}
+      </View>
+      <TurnFooter status={turn} time={formatClock(message.createdAt)} />
+    </View>
+  );
+}
+
+function TurnFooter({ status, time }: { status: RunStatus | undefined; time: string }) {
+  const running = status === "running";
+  return (
+    <View style={styles.footer}>
+      {running ? <ActivityIndicator size="small" color={colors.mutedForeground} /> : null}
+      <Text style={styles.footerText}>{running ? `${time} · Working…` : time}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  list: {
-    padding: spacing.lg,
-    gap: spacing.md,
-    flexGrow: 1,
-  },
-  emptyContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: 80,
-  },
-  emptyText: {
-    color: colors.mutedForeground,
-    fontSize: 14,
-  },
-  bubble: {
-    maxWidth: "90%",
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  systemBubble: {
-    borderWidth: 0,
-  },
-  meta: {
-    color: colors.mutedForeground,
-    fontSize: 10,
-    textTransform: "capitalize",
-    marginBottom: 2,
-  },
-  messageText: {
-    color: colors.foreground,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  systemText: {
-    fontStyle: "italic",
-    color: colors.mutedForeground,
-    fontSize: 12,
-  },
-  errorBar: {
-    backgroundColor: colors.destructive + "18",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-  },
-  errorText: {
-    color: colors.destructive,
-    fontSize: 12,
-  },
-  composer: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    backgroundColor: colors.card,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-  },
-  input: {
-    flex: 1,
-    color: colors.foreground,
-    backgroundColor: colors.background,
-    borderRadius: radius.md,
+  flex: { flex: 1 },
+  list: { padding: spacing.md, gap: spacing.md, flexGrow: 1 },
+  empty: { color: colors.mutedForeground, textAlign: "center", marginTop: spacing.xl },
+  system: { color: colors.mutedForeground, fontStyle: "italic", textAlign: "center", fontSize: 13 },
+  bubbleWrap: { maxWidth: "88%", gap: spacing.xs },
+  bubbleWrapUser: { alignSelf: "flex-end", alignItems: "flex-end" },
+  bubble: { borderRadius: radius.xl, padding: spacing.md, gap: spacing.sm },
+  bubbleUser: { backgroundColor: colors.primary },
+  bubbleAgent: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  bubbleText: { color: colors.foreground, fontSize: 15, lineHeight: 21 },
+  attachment: { width: 220, height: 160, borderRadius: radius.md },
+  option: {
     borderWidth: 1,
     borderColor: colors.border,
+    borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
-    fontSize: 14,
-    maxHeight: 100,
-    minHeight: 40,
   },
-  sendBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
-    justifyContent: "center",
+  optionText: { color: colors.primary, fontSize: 14 },
+  disabled: { opacity: 0.4 },
+  footer: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  footerText: { color: colors.mutedForeground, fontSize: 12 },
+  archived: {
+    margin: spacing.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.xl,
+    backgroundColor: colors.card,
+    flexDirection: "row",
     alignItems: "center",
-    minHeight: 40,
+    justifyContent: "space-between",
   },
-  sendBtnDisabled: {
-    opacity: 0.4,
+  archivedText: { color: colors.mutedForeground, fontSize: 14 },
+  unarchive: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
   },
-  sendText: {
-    color: colors.primaryForeground,
-    fontSize: 14,
-    fontWeight: "600",
-  },
+  unarchiveText: { color: colors.foreground, fontSize: 14 },
 });
-

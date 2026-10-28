@@ -1,7 +1,7 @@
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { colors, radius, spacing } from "@/theme";
-import type { TaskStatus, RunStatus, DesktopState } from "@/api/types";
+import type { TaskStatus, RunStatus, DesktopState } from "@cloudagents/protocol";
 
 type Status = TaskStatus | RunStatus | DesktopState | string;
 
