@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { NavLink, Route, Routes } from "react-router-dom"
+import { LogOut } from "lucide-react"
 import { api, ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { LoginPage } from "@/pages/LoginPage"
@@ -55,16 +63,8 @@ export function App() {
             Connections
           </NavLink>
         </nav>
-        <div className="ml-auto flex items-center gap-3">
-          <img
-            className="rounded-full shadow-soft"
-            src={me.data.avatarUrl}
-            alt={me.data.login}
-            title={me.data.login}
-            width={24}
-            height={24}
-          />
-          <SignOutButton />
+        <div className="ml-auto">
+          <AccountMenu login={me.data.login} avatarUrl={me.data.avatarUrl} />
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col">
@@ -80,7 +80,7 @@ export function App() {
   )
 }
 
-function SignOutButton() {
+function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string }) {
   const signOut = useMutation({
     mutationFn: api.logout,
     // Reload re-checks the session either way.
@@ -88,8 +88,23 @@ function SignOutButton() {
   })
 
   return (
-    <Button variant="ghost" size="sm" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
-      Sign out
-    </Button>
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Account"
+        className="grid size-8 place-items-center overflow-hidden rounded-full bg-white/[0.08] text-xs font-medium uppercase shadow-soft transition-shadow duration-200 outline-none hover:shadow-glow focus-visible:shadow-glow data-[state=open]:shadow-glow"
+      >
+        {avatarUrl ? <img className="size-full" src={avatarUrl} alt="" /> : login.slice(0, 1)}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>
+          Signed in as <span className="text-foreground">{login}</span>
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem disabled={signOut.isPending} onSelect={() => signOut.mutate()}>
+          <LogOut />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
