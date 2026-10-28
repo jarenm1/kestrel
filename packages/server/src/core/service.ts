@@ -560,7 +560,10 @@ export const CoreLive = Layer.effect(
             Effect.sync(() => {
               unsubscribe()
               if (pendingAsks.get(runId) === answer) pendingAsks.delete(runId)
-            }).pipe(Effect.zipRight(resumeTask(taskId, runId))),
+            }).pipe(
+              Effect.zipRight(resumeTask(taskId, runId)),
+              Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: could not resume after ask: ${e.message}`)),
+            ),
           ),
         )
       })
