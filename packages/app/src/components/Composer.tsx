@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type KeyboardEvent } from "react"
 import { Schema } from "effect"
-import { ChevronDown } from "lucide-react"
+import { ArrowUp, ChevronDown, Square } from "lucide-react"
 import { AgentEffort, AgentModel, type SendMessageBody } from "@cloudagents/protocol"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -87,13 +87,16 @@ interface Props {
   onSend: (body: SendMessageBody) => Promise<unknown>
   pending: boolean
   error: unknown
+  /** Stops the active turn; when set, the send button becomes a stop button. */
+  onStop?: (() => void) | undefined
+  stopping?: boolean
   placeholder?: string
   autoFocus?: boolean
   className?: string
 }
 
-/** Message box with the model and thinking-level pickers. */
-export function Composer({ onSend, pending, error, placeholder, autoFocus, className }: Props) {
+/** Message box with the model and thinking-level pickers, and a round send / stop button. */
+export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className }: Props) {
   const [text, setText] = useState("")
   const [model, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [effort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
@@ -101,9 +104,10 @@ export function Composer({ onSend, pending, error, placeholder, autoFocus, class
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const body = text.trim()
-    // Enter submits via requestSubmit, which ignores the disabled Send button, so guard `pending` here too.
+    // Enter submits via requestSubmit, which ignores the disabled button, so guard here too; a turn that is
+    // still running must be stopped before the next message.
     // Failures surface through `error`; the text stays so it can be resent.
-    if (body && !pending) onSend({ text: body, model, effort }).then(() => setText(""), () => {})
+    if (body && !pending && !onStop) onSend({ text: body, model, effort }).then(() => setText(""), () => {})
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -132,9 +136,30 @@ export function Composer({ onSend, pending, error, placeholder, autoFocus, class
         <div className="flex items-center gap-1">
           <PillPicker label="Model" value={model} options={MODEL_OPTIONS} onChange={setModel} />
           <PillPicker label="Thinking" value={effort} options={EFFORT_OPTIONS} onChange={setEffort} />
-          <Button type="submit" className="ml-auto" disabled={pending || text.trim() === ""}>
-            {pending ? "Sending…" : "Send"}
-          </Button>
+          {onStop ? (
+            <Button
+              type="button"
+              size="icon"
+              className="ml-auto"
+              aria-label="Stop"
+              title="Stop"
+              disabled={stopping}
+              onClick={onStop}
+            >
+              <Square className="size-3.5 fill-current" />
+            </Button>
+          ) : (
+            <Button
+              type="submit"
+              size="icon"
+              className="ml-auto"
+              aria-label="Send"
+              title="Send"
+              disabled={pending || text.trim() === ""}
+            >
+              <ArrowUp />
+            </Button>
+          )}
         </div>
       </form>
     </div>

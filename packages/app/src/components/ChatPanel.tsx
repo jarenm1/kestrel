@@ -88,6 +88,12 @@ export function ChatPanel({ taskId, messages, runs, output }: Props) {
       queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, res.run))
     },
   })
+  const cancel = useMutation({
+    mutationFn: (runId: string) => api.cancelRun(runId),
+    onSuccess: (run) => queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, run)),
+  })
+  const latestRun = sortedRuns.at(-1)
+  const activeRun = latestRun?.status === "running" ? latestRun : undefined
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -105,9 +111,15 @@ export function ChatPanel({ taskId, messages, runs, output }: Props) {
           ))}
         </div>
       </div>
-      <RunPanel taskId={taskId} runs={sortedRuns} output={output} />
+      <RunPanel runs={sortedRuns} output={output} />
       <div className="flex justify-center px-5 pt-2 pb-5">
-        <Composer onSend={send.mutateAsync} pending={send.isPending} error={send.error} />
+        <Composer
+          onSend={send.mutateAsync}
+          pending={send.isPending}
+          error={send.error ?? cancel.error}
+          onStop={activeRun && (() => cancel.mutate(activeRun.id))}
+          stopping={cancel.isPending}
+        />
       </div>
     </div>
   )
