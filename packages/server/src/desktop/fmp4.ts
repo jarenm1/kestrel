@@ -17,8 +17,9 @@ const TIMESCALE = 90_000
 const FPS = 60
 const FRAME_TICKS = TIMESCALE / FPS
 
-/** Capture frame number of an FLV millisecond timestamp. Rounding recovers the frame on a CFR clock; a timestamp that does not advance is bumped so the index stays strictly increasing. */
-const frameIndex = (ms: number, prev: number): number => Math.max(Math.round((ms * FPS) / 1000), prev + 1)
+// The timeline counts frames in arrival order and never follows the wall clock. Chromium's MSE drops every
+// non-keyframe that follows a timeline gap, until the next keyframe, so an idle pause or a dropped tag must not
+// leave a hole. A paused stream simply resumes at the next frame; the client's live-edge follow handles any lag.
 
 const TFHD_DEFAULT_BASE_IS_MOOF = 0x02_0000
 const TRUN_DATA_OFFSET = 0x01
@@ -162,7 +163,6 @@ export class Mp4Muxer {
   private readonly height: number
   private configured = false
   private sequence = 0
-  private prevIndex = -1
 
   constructor(width: number, height: number) {
     this.width = width
@@ -179,10 +179,9 @@ export class Mp4Muxer {
         continue
       }
       if (!this.configured) throw new Error("H.264 frame before the sequence header")
-      const index = frameIndex(event.dts, this.prevIndex)
-      this.prevIndex = index
       this.sequence += 1
-      pieces.push({ kind: "media", bytes: mediaFragment(this.sequence, index * FRAME_TICKS, FRAME_TICKS, event.data, event.keyframe), keyframe: event.keyframe })
+      const decodeTime = (this.sequence - 1) * FRAME_TICKS
+      pieces.push({ kind: "media", bytes: mediaFragment(this.sequence, decodeTime, FRAME_TICKS, event.data, event.keyframe), keyframe: event.keyframe })
     }
     return pieces
   }

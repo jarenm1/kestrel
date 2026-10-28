@@ -113,10 +113,22 @@ describe.skipIf(!HAS_FFMPEG)("Mp4Muxer", () => {
     expect(decoded.trim()).toBe(String(FRAMES))
   })
 
-  test("timestamps follow the capture clock: each fragment starts where the previous one ends", () => {
+  test("timestamps are contiguous: each fragment starts where the previous one ends", () => {
     const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT), flv)).map((f) => timingOf(f.bytes))
     expect(timings.length).toBe(FRAMES)
     for (const t of timings) expect(t.duration).toBe(FRAME_TICKS)
+    timings.reduce((prev, cur) => {
+      expect(cur.decodeTime).toBe(prev.decodeTime + prev.duration)
+      return cur
+    })
+  })
+
+  test("a gap on the FLV clock leaves no gap on the timeline", () => {
+    // Drop the sixth frame's tag: the next frame arrives two frame periods later on the FLV clock.
+    const ends = frameTagEnds(flv)
+    const gapped = new Uint8Array([...flv.subarray(0, ends[4]), ...flv.subarray(ends[5]!)])
+    const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT), gapped)).map((f) => timingOf(f.bytes))
+    expect(timings.length).toBe(FRAMES - 1)
     timings.reduce((prev, cur) => {
       expect(cur.decodeTime).toBe(prev.decodeTime + prev.duration)
       return cur
