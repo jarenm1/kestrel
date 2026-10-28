@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { NavLink, Route, Routes } from "react-router-dom"
+import { Navigate, NavLink, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
 import { LogOut } from "lucide-react"
 import { api, ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
@@ -18,10 +18,13 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
+import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
+import { PricingPage } from "@/pages/PricingPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
+import { APP_HOME, threadPath } from "@/routes"
 import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -31,55 +34,108 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   )
 
 export function App() {
+  return (
+    <Routes>
+      {/* Public routes. They never mount the session query, so they render immediately. */}
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/pricing" element={<PricingPage />} />
+      <Route path="/login" element={<LoginPage />} />
+
+      {/* Protected routes. The guard is the only place that checks the session. */}
+      <Route element={<RequireAuth />}>
+        <Route element={<AppShell />}>
+          <Route path="/connections" element={<ConnectionsPage />} />
+          <Route element={<WorkspaceLayout />}>
+            <Route path={APP_HOME} element={<NewThreadPage />} />
+            <Route path={`${APP_HOME}/:taskId`} element={<ThreadPage />} />
+            <Route path="/automations" element={<AutomationsPanel />} />
+            <Route path="/archived" element={<ArchivedPanel />} />
+          </Route>
+          {/* Short and legacy thread URLs (including the old per-repo ones) resolve to the canonical thread URL. */}
+          <Route path="/c/:taskId" element={<ThreadRedirect />} />
+          <Route path="/tasks/:taskId" element={<ThreadRedirect />} />
+          <Route path="/repos/:repoId/threads/:taskId" element={<ThreadRedirect />} />
+          <Route path="/repos/*" element={<Navigate to={APP_HOME} replace />} />
+        </Route>
+      </Route>
+
+      <Route path="*" element={<NotFound />} />
+    </Routes>
+  )
+}
+
+/**
+ * Session gate. It runs `queries.me()` only for protected routes, then either redirects to the
+ * login page (preserving the attempted path) or renders the protected layout.
+ */
+function RequireAuth() {
   const me = useQuery(queries.me())
   const [expired, setExpired] = useState(false)
+  const location = useLocation()
 
   useEffect(() => onUnauthorized(() => setExpired(true)), [])
 
   const signedOut = expired || (me.error instanceof ApiError && me.error.status === 401)
-  if (signedOut) return <LoginPage />
-  if (me.isPending) return <div className="p-5 text-muted-foreground">Loading…</div>
+
+  if (signedOut) {
+    const next = location.pathname + location.search
+    return <Navigate to={`/login?return=${encodeURIComponent(next)}`} replace />
+  }
+  if (me.isPending) return <FullPageMessage>Loading…</FullPageMessage>
   if (me.isError) {
     return (
-      <div className="p-5">
-        <Alert>{errorText(me.error)}</Alert>
-      </div>
+      <FullPageMessage>
+        <Alert className="max-w-md">{errorText(me.error)}</Alert>
+      </FullPageMessage>
     )
   }
+
+  return <Outlet />
+}
+
+/** Header and account menu shared by every protected page. */
+function AppShell() {
+  const me = useQuery(queries.me())
 
   return (
     <div className="flex h-full flex-col">
       <header className="flex h-11 shrink-0 items-center gap-4 px-4">
         <NavLink
-          to="/"
+          to={APP_HOME}
           aria-label="Kestrel home"
           className="rounded-full text-foreground/90 transition-colors duration-200 hover:text-foreground"
         >
           <KestrelMark className="h-5" />
         </NavLink>
         <nav className="flex gap-1">
+
           <NavLink to="/connections" className={navLinkClass}>
             Connections
           </NavLink>
         </nav>
         <div className="ml-auto">
-          <AccountMenu login={me.data.login} avatarUrl={me.data.avatarUrl} />
+          {me.data ? <AccountMenu login={me.data.login} avatarUrl={me.data.avatarUrl} /> : null}
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col">
-        <Routes>
-          <Route path="/connections" element={<ConnectionsPage />} />
-          <Route element={<WorkspaceLayout />}>
-            <Route path="/" element={<NewThreadPage />} />
-            <Route path="/threads/:taskId" element={<ThreadPage />} />
-            <Route path="/automations" element={<AutomationsPanel />} />
-            <Route path="/archived" element={<ArchivedPanel />} />
-          </Route>
-          <Route path="*" element={<div className="p-5 text-muted-foreground">Not found.</div>} />
-        </Routes>
+        <Outlet />
       </main>
     </div>
   )
+}
+
+/** Sends short and legacy thread links to the one canonical address per thread. */
+function ThreadRedirect() {
+  const { taskId = "" } = useParams()
+  return <Navigate to={threadPath(taskId)} replace />
+}
+
+function FullPageMessage({ children }: { children: React.ReactNode }) {
+  return <div className="flex h-full items-center justify-center p-5 text-muted-foreground">{children}</div>
+}
+
+function NotFound() {
+  return <FullPageMessage>Not found.</FullPageMessage>
 }
 
 function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string }) {

@@ -1,12 +1,19 @@
-import { useLocation } from "react-router-dom"
+import { useSearchParams } from "react-router-dom"
 import { ControlPaths } from "@cloudagents/protocol"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Button } from "@/components/ui/button"
 import { SERVER_URL } from "@/config"
+import { APP_HOME } from "@/routes"
+
+/** Only allow same-origin paths, so a crafted `?return=` cannot redirect off-site after login. */
+function safeReturn(value: string | null): string | null {
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return null
+  return value
+}
 
 export function LoginPage() {
-  const location = useLocation()
-  const returnPath = location.pathname + location.search
+  const [searchParams] = useSearchParams()
+  const returnPath = safeReturn(searchParams.get("return")) ?? APP_HOME
   const loginUrl = `${SERVER_URL}${ControlPaths.login}?return=${encodeURIComponent(returnPath)}`
 
   return (

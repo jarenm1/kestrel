@@ -5,6 +5,7 @@ import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
 
 /** The user's archived threads, most recently archived first. Each opens read-only; Unarchive brings one back. */
@@ -36,7 +37,7 @@ export function ArchivedPanel() {
         <Card key={task.id}>
           <CardContent className="flex items-center gap-4">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <Link to={`/threads/${task.id}`} className="truncate font-medium hover:underline">
+              <Link to={threadPath(task.id)} className="truncate font-medium hover:underline">
                 {task.title}
               </Link>
               <span className="truncate text-xs text-muted-foreground">

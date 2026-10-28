@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { cn } from "@/lib/utils"
+import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
 
 const STATUS_LABEL: Record<Task["status"], string> = {
@@ -107,7 +108,7 @@ export function ThreadSidebar({ tasks, error }: Props) {
     archive.mutate(task.id, {
       // The open thread leaves the list; go back to the empty chat.
       onSuccess: () => {
-        if (task.id === openTaskId) navigate("/")
+        if (task.id === openTaskId) navigate(APP_HOME)
       },
     })
   }
@@ -126,7 +127,7 @@ export function ThreadSidebar({ tasks, error }: Props) {
           <PanelLeftOpen />
         </Button>
         <NavLink
-          to="/"
+          to={APP_HOME}
           end
           aria-label="New thread"
           title="New thread"
@@ -153,7 +154,7 @@ export function ThreadSidebar({ tasks, error }: Props) {
         {sorted.map((task) => (
           <NavLink
             key={task.id}
-            to={`/threads/${task.id}`}
+            to={threadPath(task.id)}
             aria-label={task.title}
             title={`${task.title}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
             className={(s) => cn(tabClass(s), "justify-center py-2")}
@@ -180,7 +181,7 @@ export function ThreadSidebar({ tasks, error }: Props) {
           <PanelLeftClose />
         </Button>
       </div>
-      <NavLink to="/" end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+      <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
         <SquarePen className="size-4 shrink-0" />
         New thread
       </NavLink>
@@ -199,7 +200,7 @@ export function ThreadSidebar({ tasks, error }: Props) {
         return (
           <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
             <NavLink
-              to={`/threads/${task.id}`}
+              to={threadPath(task.id)}
               title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
                 "\n",
               )}

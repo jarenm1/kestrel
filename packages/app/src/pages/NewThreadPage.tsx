@@ -5,6 +5,7 @@ import type { SendMessageBody, Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, storeTask } from "@/api/queries"
 import { Composer } from "@/components/Composer"
+import { threadPath } from "@/routes"
 import { threadTitle } from "@/util"
 
 /**
@@ -31,7 +32,7 @@ export function NewThreadPage() {
     onSuccess: ({ task, sent }) => {
       queryClient.setQueryData(keys.messages(task.id), [sent.message])
       queryClient.setQueryData(keys.runs(task.id), [sent.run])
-      navigate(`/threads/${task.id}`)
+      navigate(threadPath(task.id))
     },
   })
 
