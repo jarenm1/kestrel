@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
+import { repoShortName } from "@/util"
 
 type TabId = "desktop" | "diff"
 
@@ -35,7 +36,13 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setOpen(true)
   }
 
-  const pullRequest = state.task?.pullRequest
+  // A checkout with a pull request gets its own link; with several repos checked out, the link names its repo.
+  const checkouts = state.task?.checkouts ?? []
+  const pullRequests = checkouts.flatMap((checkout) => {
+    if (!checkout.pullRequest) return []
+    const repo = checkouts.length > 1 ? `${repoShortName(checkout.repo)} ` : ""
+    return [{ id: checkout.id, url: checkout.pullRequest.url, label: `${repo}PR #${checkout.pullRequest.number}` }]
+  })
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined
 
@@ -72,18 +79,19 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 {t.label}
               </Button>
             ))}
-            {pullRequest && (
-              <Button asChild variant="ghost" size="sm" className="ml-auto">
-                <a href={pullRequest.url} target="_blank" rel="noreferrer">
-                  <GitPullRequest />
-                  PR #{pullRequest.number}
-                </a>
-              </Button>
-            )}
+            <div className="ml-auto flex min-w-0 items-center gap-1">
+              {pullRequests.map((pr) => (
+                <Button key={pr.id} asChild variant="ghost" size="sm">
+                  <a href={pr.url} target="_blank" rel="noreferrer">
+                    <GitPullRequest />
+                    {pr.label}
+                  </a>
+                </Button>
+              ))}
+            </div>
             <Button
               variant="ghost"
               size="icon"
-              className={pullRequest ? undefined : "ml-auto"}
               aria-label="Collapse sidebar"
               onClick={() => setOpen(false)}
             >
@@ -114,13 +122,13 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <t.icon />
             </Button>
           ))}
-          {pullRequest && (
-            <Button asChild variant="ghost" size="icon" title={`PR #${pullRequest.number}`}>
-              <a href={pullRequest.url} target="_blank" rel="noreferrer" aria-label={`Pull request #${pullRequest.number}`}>
+          {pullRequests.map((pr) => (
+            <Button key={pr.id} asChild variant="ghost" size="icon" title={pr.label}>
+              <a href={pr.url} target="_blank" rel="noreferrer" aria-label={pr.label}>
                 <GitPullRequest />
               </a>
             </Button>
-          )}
+          ))}
         </aside>
       )}
     </div>
