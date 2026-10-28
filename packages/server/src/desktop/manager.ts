@@ -268,7 +268,7 @@ const xdotoolLines = (e: DesktopInput): string[] => {
 
 /**
  * Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of GOP frames and no B-frames.
- * NVENC takes x11grab's bgr0 frames directly and converts to 4:2:0 on the GPU (adding `-pix_fmt yuv420p`
+ * NVENC takes the raw bgr0 frames directly and converts to 4:2:0 on the GPU (adding `-pix_fmt yuv420p`
  * moves that conversion to the CPU: ~50% of a core at 1080p60). `-delay 0 -zerolatency 1` stop NVENC from
  * holding output frames: screen change to fragment on stdout drops from 66 ms to 33 ms. p4/ll costs the same
  * CPU and latency as p1/ull at ~25-30% less bitrate on text and scrolling.
@@ -302,30 +302,28 @@ const ENCODER_ARGS: Record<EncoderKind, readonly string[]> = {
   ],
 }
 
-const ffmpegArgs = (display: string, kind: EncoderKind): string[] => [
+/** ffmpeg reads the raw bgr0 frames that xdamage-capture writes to its stdin (xdamage-capture runs ffmpeg as its child). */
+const ffmpegArgs = (kind: EncoderKind): string[] => [
   "-hide_banner",
   "-loglevel",
   "error",
-  // Grab frames as they are produced: no input buffering, no stream probing.
+  // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
   "-fflags",
   "nobuffer",
-  "-probesize",
-  "32",
   "-f",
-  "x11grab",
-  "-framerate",
-  String(FPS),
+  "rawvideo",
+  "-pix_fmt",
+  "bgr0",
   "-video_size",
   `${WIDTH}x${HEIGHT}`,
+  "-use_wallclock_as_timestamps",
+  "1",
   "-i",
-  display,
+  "pipe:0",
   ...ENCODER_ARGS[kind],
-  // Identical frames are dropped before the encoder. The first frame always passes (it is an IDR); any changed byte passes.
-  "-vf",
-  "select=eq(n\\,0)+gt(scene\\,0)",
   "-force_key_frames",
   `expr:gte(t-prev_forced_t,${KEYFRAME_INTERVAL_S})`,
-  // Keep the capture clock: frames dropped by select leave gaps in the timeline instead of being duplicated.
+  // Keep the capture clock: a static desktop leaves gaps in the timeline instead of duplicating frames.
   "-fps_mode",
   "passthrough",
   "-an",
@@ -565,7 +563,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.gop = null
       s.gopBytes = 0
       s.awaiting = new Set(s.sinks)
-      enc.child = spawnTracked(s, "ffmpeg", ffmpegArgs(s.display, kind), {
+      enc.child = spawnTracked(s, "xdamage-capture", [String(WIDTH), String(HEIGHT), "ffmpeg", ...ffmpegArgs(kind)], {
         critical: false,
         onStdout: (d) => onEncoderBytes(s, enc, d),
         onStderr: (d) => {
