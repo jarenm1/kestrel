@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom"
 import type { SendMessageBody, Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
+import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { BoxOfflineBanner } from "@/components/BoxStatus"
 import { Composer } from "@/components/Composer"
 import { ThreadSidebar } from "@/components/ThreadSidebar"
@@ -12,9 +13,10 @@ const TITLE_MAX = 60
 
 /**
  * A repo's workspace: threads (tasks) as vertical tabs on the page background, and the open thread in a raised
- * panel. `/repos/:repoId` is an empty chat whose first message starts a new thread.
+ * panel. `/repos/:repoId` is an empty chat whose first message starts a new thread. With `view="automations"` the
+ * raised panel lists the repo's automations instead.
  */
-export function RepoPage() {
+export function RepoPage({ view }: { view?: "automations" }) {
   const { repoId = "", taskId } = useParams()
   const repo = useQuery(queries.repo(repoId))
   const tasks = useQuery(queries.repoTasks(repoId))
@@ -32,7 +34,9 @@ export function RepoPage() {
           error={error}
         />
         <div className="mr-3 mb-3 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl bg-card shadow-soft">
-          {taskId ? (
+          {view === "automations" ? (
+            <AutomationsPanel repoId={repoId} repoName={repo.data?.name} />
+          ) : taskId ? (
             <ThreadView key={taskId} taskId={taskId} />
           ) : (
             <NewThread repoId={repoId} repoName={repo.data?.name} />

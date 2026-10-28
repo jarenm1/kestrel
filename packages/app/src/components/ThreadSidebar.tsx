@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { NavLink } from "react-router-dom"
-import { PanelLeftClose, PanelLeftOpen, SquarePen } from "lucide-react"
+import { PanelLeftClose, PanelLeftOpen, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
@@ -122,6 +122,14 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
         >
           <SquarePen className="size-4" />
         </NavLink>
+        <NavLink
+          to={`/repos/${repoId}/automations`}
+          aria-label="Automations"
+          title="Automations"
+          className={(s) => cn(tabClass(s), "justify-center py-2")}
+        >
+          <Workflow className="size-4" />
+        </NavLink>
         {sorted.map((task) => (
           <NavLink
             key={task.id}
@@ -158,6 +166,10 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
       <NavLink to={`/repos/${repoId}`} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
         <SquarePen className="size-4 shrink-0" />
         New thread
+      </NavLink>
+      <NavLink to={`/repos/${repoId}/automations`} className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+        <Workflow className="size-4 shrink-0" />
+        Automations
       </NavLink>
       {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
       {sorted.length > 0 && <div className="px-2.5 pt-4 pb-1 text-xs text-muted-foreground">Threads</div>}
