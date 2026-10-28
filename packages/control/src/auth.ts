@@ -155,6 +155,16 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     return finishOAuth(request, env, url, "github")
   }
 
+  if (path === "/auth/mobile-callback" && request.method === "GET") {
+    const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
+    const login = id ? await hub(env).sessionLogin(id) : null
+    if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
+    return new Response(
+      `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel mobile...</p><script>window.location.href="kestrel://auth-callback?session=" + encodeURIComponent("${id}");</script></body></html>`,
+      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+    )
+  }
+
   if (path === ControlPaths.logout && request.method === "POST") {
     const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
     if (id) await hub(env).deleteSession(id)

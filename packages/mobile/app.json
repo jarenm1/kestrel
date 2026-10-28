@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Kestrel",
+    "slug": "kestrel-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "kestrel",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0e1014"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kestrel.mobile"
+    },
+    "android": {
+      "package": "com.kestrel.mobile"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-router"
+    ]
+  }
+}
