@@ -1,5 +1,5 @@
 import { Either, Schema } from "effect"
-import { DesktopInput, DesktopStatus, Paths, ServerEvent } from "@cloudagents/protocol"
+import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent } from "@cloudagents/protocol"
 import { WS_URL } from "@/config"
 
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
@@ -45,17 +45,37 @@ export interface DesktopConnection {
   close: () => void
 }
 
-/** Opens the desktop stream WebSocket: status text frames, fMP4 binary frames, input text frames. */
+/** Acks go out after this many binary frames or this long, whichever comes first, so the server bounds what is in flight. */
+const ACK_EVERY_FRAMES = 6
+const ACK_EVERY_MS = 100
+
+/** Opens the desktop stream WebSocket: status text frames, fMP4 binary frames, input and ack text frames. */
 export function openDesktopStream(taskId: string, handlers: DesktopHandlers): DesktopConnection {
   const socket = new WebSocket(WS_URL + Paths.taskDesktopWs(taskId))
   socket.binaryType = "arraybuffer"
+  let received = 0
+  let acked = 0
+  let ackedAt = performance.now()
+  let ackTimer: number | undefined
+  const sendAck = () => {
+    window.clearTimeout(ackTimer)
+    ackTimer = undefined
+    acked = received
+    ackedAt = performance.now()
+    const ack: DesktopAck = { _tag: "stream.ack", frames: received }
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(ack))
+  }
   socket.onmessage = (msg: MessageEvent<unknown>) => {
     if (typeof msg.data === "string") {
       const status = decodeText(DesktopStatus, msg.data)
       if (status) handlers.onStatus(status)
       return
     }
-    if (msg.data instanceof ArrayBuffer) handlers.onMedia(new Uint8Array(msg.data))
+    if (!(msg.data instanceof ArrayBuffer)) return
+    received++
+    if (received - acked >= ACK_EVERY_FRAMES || performance.now() - ackedAt >= ACK_EVERY_MS) sendAck()
+    else ackTimer ??= window.setTimeout(sendAck, ACK_EVERY_MS)
+    handlers.onMedia(new Uint8Array(msg.data))
   }
   socket.onclose = handlers.onClose
   return {
@@ -64,6 +84,7 @@ export function openDesktopStream(taskId: string, handlers: DesktopHandlers): De
     },
     close: () => {
       socket.onclose = null
+      window.clearTimeout(ackTimer)
       socket.close()
     },
   }
