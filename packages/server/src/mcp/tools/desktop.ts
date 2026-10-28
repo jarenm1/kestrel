@@ -1,16 +1,17 @@
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
+import type { CallToolResult, ImageContent, TextContent } from "@modelcontextprotocol/sdk/types.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import type { DesktopApp, DesktopRegion } from "../../desktop"
+import { changedRegions, defaultScale, encodePng, type RgbFrame, resample } from "../../desktop/frames"
 import { type RunContext, guard, runTool, text, truncate } from "./common"
 
 export interface DesktopToolDeps {
   readonly desktop: {
     readonly status: (taskId: string) => Effect.Effect<DesktopStatus, unknown>
-    /** PNG of the whole desktop, or of `crop` (desktop pixels) resized by `scale`. */
-    readonly screenshot: (taskId: string, crop?: DesktopRegion, scale?: number) => Effect.Effect<Uint8Array, unknown>
+    /** The whole desktop as raw RGB24, grabbed now. */
+    readonly grab: (taskId: string) => Effect.Effect<RgbFrame, unknown>
     readonly cursor: (taskId: string) => Effect.Effect<{ readonly x: number; readonly y: number }, unknown>
     readonly input: (taskId: string, event: DesktopInput) => Effect.Effect<void, unknown>
     /** Starts an app on the desktop and returns its id. */
@@ -33,7 +34,10 @@ const MAX_CLICKS_PER_EVENT = 10
 
 /** Shared by the action tools: optionally return a screenshot once the UI has had time to react. */
 const settleSchema = {
-  screenshot: z.boolean().optional().describe("Also return a screenshot of the desktop after the action, default false"),
+  screenshot: z
+    .boolean()
+    .optional()
+    .describe("Also return what changed on the desktop after the action, as desktop_screenshot's changes view; default false"),
   settleMs: z
     .number()
     .int()
@@ -54,7 +58,7 @@ const describeApp = (app: DesktopApp): string => {
 
 /** What the image pixels mean in desktop pixels, so the agent can turn a point in the image into a click. */
 const describeScreenshot = (
-  status: DesktopStatus,
+  status: { readonly width: number; readonly height: number },
   pointer: { readonly x: number; readonly y: number },
   region: DesktopRegion | undefined,
   scale: number,
@@ -74,6 +78,29 @@ const describeScreenshot = (
   )
 }
 
+/** Parameters of a desktop_screenshot or a settle screenshot. */
+interface Look {
+  readonly region?: DesktopRegion
+  readonly scale?: number
+  readonly changes?: boolean
+}
+
+type Block = ImageContent | TextContent
+
+const note = (value: string): TextContent => ({ type: "text", text: value })
+
+/** An image of `area`, then the mapping from its pixels to desktop pixels, so a point in the image can become a click. */
+const viewBlocks = (
+  frame: RgbFrame,
+  area: DesktopRegion,
+  scale: number,
+  pointer: { readonly x: number; readonly y: number },
+  region: DesktopRegion | undefined,
+): Block[] => [
+  { type: "image", data: encodePng(resample(frame, area, scale)).toString("base64"), mimeType: "image/png" },
+  { type: "text", text: describeScreenshot(frame, pointer, region, scale) },
+]
+
 export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: DesktopToolDeps): void => {
   /** Converts pixel coordinates to the normalized [0,1) coordinates DesktopInput uses. */
   const normalize = (x: number, y: number): Effect.Effect<{ nx: number; ny: number }, unknown> =>
@@ -90,18 +117,49 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
 
   const input = (event: DesktopInput): Effect.Effect<void, unknown> => deps.desktop.input(ctx.taskId, event)
 
-  /** An action's summary, plus a screenshot taken after the settle delay when the caller asked for one. */
+  let previous: RgbFrame | null = null
+
+  /** Captures the desktop or a region as blocks. With `changes`, only the parts that differ from this session's previous capture. */
+  const look = (request: Look): Effect.Effect<Block[], unknown> =>
+    Effect.gen(function* () {
+      const status = yield* deps.desktop.status(ctx.taskId)
+      const region = request.region
+      if (region && (region.x + region.width > status.width || region.y + region.height > status.height)) {
+        return yield* Effect.fail(new Error(`region is outside the ${status.width} x ${status.height} desktop`))
+      }
+      const frame = yield* deps.desktop.grab(ctx.taskId)
+      const baseline = previous
+      previous = frame
+      const pointer = yield* deps.desktop.cursor(ctx.taskId)
+      const area = region ?? { x: 0, y: 0, width: frame.width, height: frame.height }
+      const fullScale = request.scale ?? defaultScale(area)
+      if (!request.changes) return viewBlocks(frame, area, fullScale, pointer, region)
+      if (baseline === null) {
+        return [note("no earlier screenshot in this session; full view"), ...viewBlocks(frame, area, fullScale, pointer, region)]
+      }
+      const boxes = changedRegions(baseline, frame, area)
+      if (boxes.length === 0) return [note("no change since the previous screenshot")]
+      const changedPixels = boxes.reduce((sum, box) => sum + box.width * box.height, 0)
+      if (changedPixels * 2 > area.width * area.height) {
+        return [
+          note("most of the area changed since the previous screenshot; full view"),
+          ...viewBlocks(frame, area, fullScale, pointer, region),
+        ]
+      }
+      const boxScale = request.scale ?? 1
+      return [
+        note(`${boxes.length} changed region(s) since the previous screenshot`),
+        ...boxes.flatMap((box) => viewBlocks(frame, box, boxScale, pointer, box)),
+      ]
+    })
+
+  /** An action's summary, plus what changed on the desktop after the settle delay when the caller asked for a screenshot. */
   const finish = (summary: string, settle: Settle): Effect.Effect<CallToolResult, unknown> =>
     Effect.gen(function* () {
       if (!settle.screenshot) return text(summary)
       yield* Effect.sleep(settle.settleMs ?? DEFAULT_SETTLE_MS)
-      const png = yield* deps.desktop.screenshot(ctx.taskId)
-      const result: CallToolResult = {
-        content: [
-          { type: "text", text: summary },
-          { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
-        ],
-      }
+      const content = yield* look({ changes: true })
+      const result: CallToolResult = { content: [{ type: "text", text: summary }, ...content] }
       return result
     })
 
@@ -109,9 +167,10 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
     "desktop_screenshot",
     {
       description:
-        "Take a screenshot of the task desktop as a PNG. Optional region crops to a rectangle and scale resizes it; " +
-        "the result states how image pixels map to desktop pixels. Pixel coordinates for the other desktop_* tools " +
-        "are desktop pixels, origin at top-left.",
+        "Take a screenshot of the task desktop as a PNG. Optional region crops to a rectangle; scale resizes it (default " +
+        "fits the long edge within 1280 px). With changes, returns only the parts that changed since this session's " +
+        "previous screenshot, each at full resolution. The result states how image pixels map to desktop pixels. Pixel " +
+        "coordinates for the other desktop_* tools are desktop pixels, origin at top-left.",
       inputSchema: {
         region: z
           .object({
@@ -122,29 +181,23 @@ export const registerDesktopTools = (server: McpServer, ctx: RunContext, deps: D
           })
           .optional()
           .describe("Crop to this rectangle of the desktop, in desktop pixels"),
-        scale: z.number().min(0.1).max(4).optional().describe("Resize the image by this factor, default 1"),
+        scale: z
+          .number()
+          .min(0.1)
+          .max(4)
+          .optional()
+          .describe("Resize the image by this factor; default fits 1280 px, or 1 with changes"),
+        changes: z
+          .boolean()
+          .optional()
+          .describe(
+            "Return only what changed since the previous screenshot, as full-resolution crops; the full view when there is " +
+              "none or most of the area changed. Default false",
+          ),
       },
     },
-    ({ region, scale }: { region?: DesktopRegion; scale?: number }) =>
-      guard(() =>
-        runTool(
-          Effect.gen(function* () {
-            const status = yield* deps.desktop.status(ctx.taskId)
-            if (region && (region.x + region.width > status.width || region.y + region.height > status.height)) {
-              return yield* Effect.fail(new Error(`region is outside the ${status.width} x ${status.height} desktop`))
-            }
-            const png = yield* deps.desktop.screenshot(ctx.taskId, region, scale)
-            const pointer = yield* deps.desktop.cursor(ctx.taskId)
-            const result: CallToolResult = {
-              content: [
-                { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
-                { type: "text", text: describeScreenshot(status, pointer, region, scale ?? 1) },
-              ],
-            }
-            return result
-          }),
-        ),
-      ),
+    ({ region, scale, changes }: Look) =>
+      guard(() => runTool(look({ region, scale, changes }).pipe(Effect.map((content): CallToolResult => ({ content }))))),
   )
 
   server.registerTool(

@@ -118,6 +118,7 @@ const program = Effect.gen(function* () {
     desktop: {
       status: (taskId) => desktop.status(taskId),
       screenshot: (taskId: string, crop?: DesktopRegion, scale?: number) => desktop.screenshot(taskId, crop, scale),
+      grab: (taskId) => desktop.grab(taskId),
       cursor: (taskId) => desktop.cursor(taskId),
       input: (taskId, event) => desktop.input(taskId, event),
       launch: (taskId, command) => core.desktopLaunch(taskId, command),
