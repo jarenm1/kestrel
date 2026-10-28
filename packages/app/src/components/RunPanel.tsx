@@ -63,7 +63,7 @@ export function RunPanel({ taskId, runs, output }: Props) {
             )}
             {run.status === "running" && (
               <Button
-                variant="outline"
+                variant="soft"
                 size="sm"
                 disabled={cancel.isPending}
                 onClick={() => cancel.mutate(run.id)}

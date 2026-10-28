@@ -72,7 +72,7 @@ function ConnectionRow({ connection }: { connection: Connection }) {
       <ConnectionHeader label={connection.label} connected={connection.connected} account={connection.account} />
       {connection.kind === "oauth" ? (
         connection.available ? (
-          <Button asChild variant="outline" className="w-fit">
+          <Button asChild variant="soft" className="w-fit">
             <a href={SERVER_URL + ControlPaths.connectOAuth(connection.provider)}>
               {connection.connected ? "Reconnect" : "Connect"}
             </a>
@@ -94,7 +94,7 @@ function ConnectionRow({ connection }: { connection: Connection }) {
             Save
           </Button>
           {connection.connected && (
-            <Button type="button" variant="outline" disabled={busy} onClick={() => disconnect.mutate()}>
+            <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
               Disconnect
             </Button>
           )}
@@ -184,7 +184,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
       return (
         <>
           <p className="text-muted-foreground">Agent box is offline.</p>
-          <Button variant="outline" className="w-fit" onClick={refresh}>
+          <Button variant="soft" className="w-fit" onClick={refresh}>
             Check again
           </Button>
         </>
@@ -197,7 +197,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
             {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
           </p>
           <Button
-            variant="outline"
+            variant="soft"
             className="w-fit"
             disabled={busy}
             onClick={() => {
@@ -222,7 +222,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     if (login?.needsCode) {
       return (
         <>
-          <Button asChild variant="outline" className="w-fit">
+          <Button asChild variant="soft" className="w-fit">
             <a href={login.url} target="_blank" rel="noopener noreferrer">
               Open sign-in page
             </a>
@@ -246,7 +246,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
             <Button type="submit" disabled={busy || code.trim().length === 0}>
               Submit code
             </Button>
-            <Button type="button" variant="outline" onClick={cancel}>
+            <Button type="button" variant="soft" onClick={cancel}>
               Cancel
             </Button>
           </form>
@@ -256,7 +256,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     if (login) {
       return (
         <>
-          <Button asChild variant="outline" className="w-fit">
+          <Button asChild variant="soft" className="w-fit">
             <a href={login.url} target="_blank" rel="noopener noreferrer">
               Open sign-in page
             </a>
@@ -264,7 +264,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
           <p className="text-muted-foreground">Enter this code on the OpenAI page:</p>
           <div className="flex items-center gap-2">
             <code className="font-mono text-lg font-semibold tracking-widest">{login.userCode}</code>
-            <Button variant="outline" size="sm" onClick={() => void navigator.clipboard.writeText(login.userCode ?? "")}>
+            <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(login.userCode ?? "")}>
               Copy
             </Button>
             <Button variant="ghost" size="sm" onClick={cancel}>

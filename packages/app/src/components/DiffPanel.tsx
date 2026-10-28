@@ -20,7 +20,7 @@ export function DiffPanel({ taskId }: { taskId: string }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-2 border-b px-3 py-1.5">
         <span className="text-muted-foreground">{diff.data ? `vs ${diff.data.baseBranch}` : "diff"}</span>
-        <Button variant="outline" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
+        <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
           {diff.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </div>

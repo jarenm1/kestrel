@@ -79,7 +79,7 @@ function SignOutButton() {
   })
 
   return (
-    <Button variant="outline" size="sm" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
+    <Button variant="soft" size="sm" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
       Sign out
     </Button>
   )

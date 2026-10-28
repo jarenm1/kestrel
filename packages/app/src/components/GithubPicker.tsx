@@ -50,7 +50,7 @@ export function GithubPicker({ disabled, onPick }: { disabled: boolean; onPick: 
             <span className="min-w-0 flex-1 truncate">{repo.fullName}</span>
             {repo.private && <Badge>private</Badge>}
             <span className="text-muted-foreground">{repo.defaultBranch}</span>
-            <Button variant="outline" size="sm" disabled={disabled} onClick={() => onPick(repo)}>
+            <Button variant="soft" size="sm" disabled={disabled} onClick={() => onPick(repo)}>
               Add
             </Button>
           </li>
