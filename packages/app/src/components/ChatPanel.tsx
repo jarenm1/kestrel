@@ -19,14 +19,15 @@ interface Props {
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
 
-/** A turn's status icon (spinner while running, check when done) plus an optional time, under a thread block. */
+/** Under a thread block: a spinner while the turn runs, and the time. Finished turns get no icon. */
 function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?: string }) {
-  if (!status && !time) return null
+  const running = status === "running"
+  if (!running && !time) return null
   return (
     <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&_svg]:size-3.5">
-      {status && <StatusIcon status={status} />}
+      {running && <StatusIcon status="running" />}
       {time && <span>{time}</span>}
-      {status === "running" && !time && <span>Working…</span>}
+      {running && !time && <span>Working…</span>}
     </div>
   )
 }
