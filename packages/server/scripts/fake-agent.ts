@@ -41,10 +41,47 @@ const runExecProbes = async (): Promise<number> => {
   return 0
 }
 
+const sleepMs = (ms: number): Promise<void> => {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
+}
+
+// Drives the desktop tools against a live desktop: an xterm to type into, and a ticking app for output.
+const runDesktopProbes = async (): Promise<number> => {
+  await call("desktop_screenshot", {})
+  const term = await call("desktop_launch", { command: "xterm -geometry 100x30+40+40 -e bash" })
+  const ticker = await call("desktop_launch", {
+    command: "sh -c 'echo probe-started; i=0; while :; do i=$((i+1)); echo tick-$i; sleep 1; done'",
+  })
+  const termId = /launched (app-\d+)/.exec(term.text)?.[1]
+  const tickerId = /launched (app-\d+)/.exec(ticker.text)?.[1]
+  if (!termId || !tickerId) {
+    await call("task_report", { status: "failed", message: "desktop probe could not launch apps" })
+    return 1
+  }
+  await sleepMs(3000)
+  console.log(`fake-agent: processes\n${(await call("desktop_processes", { lines: 3 })).text}`)
+  await call("desktop_click", { x: 300, y: 200, screenshot: true, settleMs: 500 })
+  await call("desktop_type", { text: "echo hi" })
+  await call("desktop_key", { key: "+", repeat: 3, holdMs: 50 })
+  await call("desktop_key", { key: "Return" })
+  await call("desktop_scroll", { x: 300, y: 200, direction: "down", amount: 5 })
+  await call("desktop_drag", { fromX: 100, fromY: 100, toX: 200, toY: 120, steps: 5 })
+  console.log(`fake-agent: cursor ${(await call("desktop_cursor_position", {})).text}`)
+  console.log(`fake-agent: region ${(await call("desktop_screenshot", { region: { x: 0, y: 0, width: 640, height: 400 }, scale: 0.5 })).text}`)
+  await call("desktop_kill", { id: tickerId })
+  console.log(`fake-agent: processes after kill\n${(await call("desktop_processes", { lines: 3 })).text}`)
+  await call("desktop_kill", { id: termId })
+  await call("task_report", { status: "done", message: "desktop probes finished" })
+  return 0
+}
+
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
   if (prompt.trim() === "exec-probe") return runExecProbes()
+  if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
   // Screenshot is best-effort: the desktop may not be running.
   await call("desktop_screenshot", {})
