@@ -181,6 +181,10 @@ export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Base branch to fork the worktree from. Defaults to repo.defaultBranch. */
   baseBranch: Schema.optional(Schema.String),
+  /** Fetch `baseBranch` (default: repo.defaultBranch) from origin with the owner's token before forking, so the task starts from the remote tip. */
+  fetch: Schema.optional(Schema.Boolean),
+  /** Start the task at the head of this GitHub pull request (fetched from origin `refs/pull/<n>/head`). Implies fetch. */
+  pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
