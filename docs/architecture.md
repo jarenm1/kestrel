@@ -26,7 +26,7 @@ flowchart TB
     MCP["MCP server /mcp/:taskId<br/>desktop_*, workspace_exec, task_report<br/>mcp/handler.ts<br/>👤 Person 3"]
     BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
     SB["bwrap sandbox in a systemd scope<br/>per-task memory/CPU/pids limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
-    DESK["Desktop manager<br/>Xvfb + ffmpeg (NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
+    DESK["Desktop manager<br/>Xvfb + xdamage-capture → ffmpeg (damage-driven VFR; NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
     STATE[("state.json, worktrees<br/>core/state.ts")]
   end
 

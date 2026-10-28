@@ -32,7 +32,7 @@ Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run crea
 
 Without `CLOUDAGENTS_SANDBOX_PATH`, `bun run dev` starts the box with `CLOUDAGENTS_SANDBOX=0`, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Set `CLOUDAGENTS_SANDBOX` yourself to override that.
 
-- **Linux:** the task desktop needs Xvfb, openbox, xterm, xdotool and an ffmpeg built with x11grab. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
+- **Linux:** the task desktop needs Xvfb, openbox, xterm, xdotool, an ffmpeg with rawvideo input (screenshots use x11grab) and the `xdamage-capture` helper built from `packages/server/native` (the flake provides all of these). Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
 - **macOS and Windows:** no task desktop (Xvfb and x11grab are Linux-only; runs go ahead without a display and the task says why) and no resource limits (`bun run dev` sets `CLOUDAGENTS_SYSTEMD=0`).
 - **Windows:** agent commands and `workspace_exec` run through POSIX `sh`: the one on `PATH`, else the one from Git for Windows. Each process the box starts gets its own job object, so cancelling a run or stopping the stack also ends whatever it started. There is no uid, so ports move only with `KESTREL_DEV_SLOT`.
 
