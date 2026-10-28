@@ -38,6 +38,17 @@ export interface WorkspaceShape {
   }) => Effect.Effect<string, WorkspaceError>
   /** Runs `command` via `sh -c` in `cwd`. Fails on timeout; non-zero exit is a result. */
   readonly exec: (cwd: string, command: string, opts?: ExecOptions) => Effect.Effect<ExecResult, WorkspaceError>
+  /**
+   * Pushes `refs/heads/<branch>` from a task worktree to `remoteUrl`. Never forced; hooks and
+   * agent-writable config (credential helpers, ssh command, askpass) are not honoured.
+   */
+  readonly pushBranch: (opts: {
+    readonly repoPath: string
+    readonly worktreePath: string
+    readonly remoteUrl: string
+    readonly branch: string
+    readonly githubToken?: string
+  }) => Effect.Effect<void, WorkspaceError>
 }
 
 export class WorkspaceService extends Context.Tag("cloudagents/WorkspaceService")<
@@ -105,6 +116,22 @@ const runProcess = (
  */
 const SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const
 
+/** Host-side push also overrides agent-writable config that could run host commands or helpers. */
+const PUSH_GIT = [...SAFE_GIT, "-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.sshCommand=ssh"] as const
+
+const PUSH_TIMEOUT_MS = 120_000
+
+/** Git's own messages for the common push failures, so the agent sees an actionable reason. */
+const pushFailureMessage = (branch: string, detail: string): string => {
+  if (/non-fast-forward|fetch first/.test(detail)) {
+    return `git push ${branch} rejected: the remote branch has commits this worktree does not have (git_push never force-pushes): ${detail}`
+  }
+  if (/Permission to .* denied|\b403\b|\b401\b|could not read Username|Authentication failed|Invalid username or password/.test(detail)) {
+    return `GitHub rejected the push of ${branch} (the connected token lacks write access or has expired): ${detail}`
+  }
+  return `git push ${branch} failed: ${detail}`
+}
+
 const git = (
   cwd: string,
   args: ReadonlyArray<string>,
@@ -160,6 +187,23 @@ const redactSecret = (text: string, token: string | undefined): string => {
 }
 
 const make: WorkspaceShape = {
+  pushBranch: ({ repoPath, worktreePath, remoteUrl, branch, githubToken }) =>
+    Effect.gen(function* () {
+      const res = yield* runProcess(
+        "git",
+        [...PUSH_GIT, "push", remoteUrl, `refs/heads/${branch}:refs/heads/${branch}`],
+        {
+          cwd: worktreePath,
+          env: { ...worktreeGitEnv(repoPath, worktreePath), ...githubAuthEnv(remoteUrl, githubToken) },
+          timeoutMs: PUSH_TIMEOUT_MS,
+        },
+        "git push",
+      )
+      if (res.exitCode !== 0) {
+        const detail = redactSecret((res.stderr || res.stdout).trim(), githubToken)
+        return yield* Effect.fail(new WorkspaceError({ message: pushFailureMessage(branch, detail) }))
+      }
+    }),
   cloneRepo: (url, destDir, opts) =>
     Effect.gen(function* () {
       yield* Effect.tryPromise({
