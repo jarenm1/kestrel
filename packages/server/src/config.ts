@@ -35,6 +35,8 @@ export interface ServerConfig {
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
   readonly systemd: SystemdSettings | null
+  /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
+  readonly githubApiUrl: string
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -90,6 +92,7 @@ export const loadConfig = (): ServerConfig => {
     sandboxSslCertFile: sandboxSsl,
     fakeAgentRoBinds,
     systemd,
+    githubApiUrl: loadGitHubApiUrl(),
   }
 }
 
@@ -98,6 +101,18 @@ const limitEnv = (name: string, fallback: string): string => {
   const value = process.env[name]?.trim() || fallback
   if (!/^[A-Za-z0-9.%]+$/.test(value)) throw new Error(`${name} must be a systemd limit value, got "${value}"`)
   return value
+}
+
+const loadGitHubApiUrl = (): string => {
+  const raw = process.env.GITHUB_API_URL?.trim() || "https://api.github.com"
+  let protocol: string
+  try {
+    protocol = new URL(raw).protocol
+  } catch {
+    throw new Error(`GITHUB_API_URL must be an absolute URL, got "${raw}"`)
+  }
+  if (!["http:", "https:"].includes(protocol)) throw new Error(`GITHUB_API_URL must use http(s), got "${raw}"`)
+  return raw.replace(/\/+$/, "")
 }
 
 const loadRelay = (): ServerConfig["relay"] => {

@@ -37,6 +37,13 @@ export type Repo = typeof Repo.Type
 export const TaskStatus = Schema.Literal("idle", "running", "needs_input", "done", "failed")
 export type TaskStatus = typeof TaskStatus.Type
 
+/** The GitHub pull request opened for a task's branch (see the `github_pr_create` MCP tool). */
+export const PullRequestLink = Schema.Struct({
+  number: Schema.Number,
+  url: Schema.String,
+})
+export type PullRequestLink = typeof PullRequestLink.Type
+
 /** A task = one git worktree + one branch + one chat thread + (optional) one desktop. */
 export const Task = Schema.Struct({
   id: Schema.String,
@@ -50,6 +57,8 @@ export const Task = Schema.Struct({
   status: TaskStatus,
   createdAt: Schema.String,
   updatedAt: Schema.String,
+  /** Set once a pull request has been opened for `branch`; absent before that. */
+  pullRequest: Schema.optional(PullRequestLink),
 })
 export type Task = typeof Task.Type
 
