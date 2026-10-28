@@ -21,6 +21,7 @@ export const keys = {
   connections: ["connections"] as const,
   githubRepos: ["github", "repos"] as const,
   repos: ["repos"] as const,
+  automations: ["automations"] as const,
   repo: (repoId: string) => ["repos", repoId] as const,
   repoTasks: (repoId: string) => ["repos", repoId, "tasks"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
@@ -55,6 +56,7 @@ export const queries = {
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
   repos: () => queryOptions({ queryKey: keys.repos, queryFn: api.listRepos }),
+  automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
   repo: (repoId: string) => queryOptions({ queryKey: keys.repo(repoId), queryFn: () => api.getRepo(repoId) }),
   repoTasks: (repoId: string) =>
     queryOptions({

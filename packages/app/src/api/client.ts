@@ -1,5 +1,6 @@
 import { Effect, Either, Schema } from "effect"
 import {
+  Automation,
   BoxStatus,
   CliAuthStatus,
   CliLoginCodeBody,
@@ -21,6 +22,7 @@ import {
   SendMessageBody,
   SendMessageResponse,
   Task,
+  UpdateAutomationBody,
 } from "@cloudagents/protocol"
 import { SERVER_URL } from "@/config"
 
@@ -56,7 +58,7 @@ function errorMessage(text: string, fallback: string): string {
 
 const request = <A, I>(
   schema: Schema.Schema<A, I>,
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
 ): Effect.Effect<A, ApiError> =>
@@ -117,6 +119,11 @@ export const api = {
     run(request(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body)),
   cliLogout: (provider: CliProvider) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)))),
+  listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
+  updateAutomation: (id: string, body: UpdateAutomationBody) =>
+    run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
+  deleteAutomation: (id: string) =>
+    run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.automation(id)))),
 
   // Agent box (relayed by the Worker).
   listRepos: () => run(request(Schema.Array(Repo), "GET", Paths.repos)),
