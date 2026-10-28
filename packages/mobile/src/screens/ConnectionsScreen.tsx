@@ -1,9 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Schema } from "effect";
-import { CliProvider, ControlPaths, type Connection } from "@cloudagents/protocol";
+import { CliProvider, type Connection } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useNavigation } from "@/nav/navigation";
@@ -108,29 +107,14 @@ function ApiKeyRow({ connection }: { connection: Connection }) {
 }
 
 function OAuthRow({ connection }: { connection: Connection }) {
-  const { api } = useApiClient();
-  const queryClient = useQueryClient();
-
-  const connect = useMutation({
-    mutationFn: () =>
-      WebBrowser.openBrowserAsync(`${api.serverUrl}${ControlPaths.connectOAuth(connection.provider)}`),
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: keys.connections });
-    },
-  });
-
+  // OAuth needs the signed-in session cookie, which the app cannot hand to an external browser.
   return (
-    <ConnectionRowFrame connection={connection} error={connect.error}>
-      {connection.available ? (
-        <ActionButton
-          label={connection.connected ? "Reconnect" : "Connect"}
-          tone="secondary"
-          disabled={connect.isPending}
-          onPress={() => connect.mutate()}
-        />
-      ) : (
-        <Text style={connectionStyles.muted}>needs server config</Text>
-      )}
+    <ConnectionRowFrame connection={connection}>
+      <Text style={connectionStyles.muted}>
+        {connection.available
+          ? `${connection.connected ? "Reconnect" : "Connect"} ${connection.label} on the web app`
+          : "needs server config"}
+      </Text>
     </ConnectionRowFrame>
   );
 }
