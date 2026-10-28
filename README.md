@@ -83,3 +83,5 @@ Checks: `bun run typecheck`. Marketing site: `bun run dev:site` (Astro on http:/
 Don't run a box against production with the production token from your machine: the control plane keeps one box and a new connection replaces the live one.
 
 Pull requests get isolated Previews at `https://<branch>-kestrel.jarenmchugh.workers.dev` (app) and `https://<branch>-kestrel-site.jarenmchugh.workers.dev` (site), branch name with `/` replaced by `-`. The app Preview has its own empty Hub, no production secrets and no box, so it is for UI review.
+
+<!-- Smoke test for PR review automation; this PR is not meant to be merged. -->
