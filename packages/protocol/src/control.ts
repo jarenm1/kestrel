@@ -141,10 +141,10 @@ export const GithubAutomationEvent = Schema.Literal(
 export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
 
 /**
- * When an automation starts a task.
+ * When an automation starts a thread.
  * - schedule: 5-field cron (minute hour day-of-month month day-of-week; `*`, lists, ranges, steps; 0 and 7 are Sunday)
  *   evaluated in an IANA `timezone`, e.g. `0 13 * * 2` in `America/New_York` is Tuesdays at 13:00.
- * - github: fires on matching pull request events of the automation's project repository. `reviewers` filters
+ * - github: fires on matching pull request events of the automation's `repo` (required for this trigger). `reviewers` filters
  *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
  *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
  *   list means no filter.
@@ -168,8 +168,10 @@ export type AutomationTrigger = typeof AutomationTrigger.Type
 export const Automation = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
-  repoId: Schema.String,
-  /** GitHub "owner/name" of the project, or null for projects that are not on github.com. */
+  /**
+   * GitHub "owner/name" the automation works on, or null for one that starts a thread with no repository.
+   * Its threads start with this repository checked out (at the pull request head for github triggers).
+   */
   repo: Schema.NullOr(Schema.String),
   prompt: Schema.String,
   enabled: Schema.Boolean,
@@ -183,14 +185,15 @@ export type Automation = typeof Automation.Type
 
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),
-  repoId: Schema.String,
+  /** GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules. */
+  repo: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   prompt: Schema.String.pipe(Schema.minLength(1)),
   trigger: AutomationTrigger,
   enabled: Schema.optional(Schema.Boolean),
 })
 export type CreateAutomationBody = typeof CreateAutomationBody.Type
 
-/** Every field optional; `repoId` cannot change. */
+/** Every field optional; `repo` cannot change. */
 export const UpdateAutomationBody = Schema.Struct({
   name: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   prompt: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
@@ -199,7 +202,7 @@ export const UpdateAutomationBody = Schema.Struct({
 })
 export type UpdateAutomationBody = typeof UpdateAutomationBody.Type
 
-/** One attempt to start a task for an automation. `started` has a `taskId`; `failed` has an `error`. */
+/** One attempt to start a thread for an automation. `started` has a `taskId`; `failed` has an `error`. */
 export const AutomationRun = Schema.Struct({
   id: Schema.String,
   automationId: Schema.String,

@@ -10,23 +10,6 @@ import { Schema } from "effect"
 // Domain
 // ---------------------------------------------------------------------------
 
-export const Repo = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  /** Clone URL as given by the user. */
-  url: Schema.String,
-  /** Absolute path of the bare-ish clone on the server host. */
-  localPath: Schema.String,
-  defaultBranch: Schema.String,
-  createdAt: Schema.String, // ISO-8601
-  /**
-   * GitHub login of the user who added the project. Only the owner can see or change it and its
-   * tasks; access to the upstream repository is GitHub's (the clone uses the owner's token).
-   */
-  owner: Schema.String,
-})
-export type Repo = typeof Repo.Type
-
 /**
  * idle          no run in flight
  * running       an agent run is executing in the worktree
@@ -37,28 +20,48 @@ export type Repo = typeof Repo.Type
 export const TaskStatus = Schema.Literal("idle", "running", "needs_input", "done", "failed")
 export type TaskStatus = typeof TaskStatus.Type
 
-/** The GitHub pull request opened for a task's branch (see the `github_pr_create` MCP tool). */
+/** The GitHub pull request opened for a checkout's branch (see the `github_pr_create` MCP tool). */
 export const PullRequestLink = Schema.Struct({
   number: Schema.Number,
   url: Schema.String,
 })
 export type PullRequestLink = typeof PullRequestLink.Type
 
-/** A task = one git worktree + one branch + one chat thread + (optional) one desktop. */
+/**
+ * A repository the agent checked out into its thread's workspace (MCP `repo_checkout`, or `CreateTaskBody.checkout`).
+ * Each checkout is a clone of its own, on a branch created for the thread; a thread has at most one checkout per repo.
+ */
+export const Checkout = Schema.Struct({
+  /** Stable within the thread; names the checkout in `DiffResponse` and the GitHub MCP tools. */
+  id: Schema.String,
+  /** GitHub "owner/name" for github.com repositories, otherwise the https clone URL. */
+  repo: Schema.String,
+  /** Directory of the checkout, relative to the thread workspace (the agent's working directory), e.g. `kestrel`. */
+  dir: Schema.String,
+  /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`. */
+  branch: Schema.String,
+  /** Branch the checkout forked from and pull requests target. */
+  baseBranch: Schema.String,
+  createdAt: Schema.String,
+  /** Set once a pull request has been opened for `branch`; absent before that. */
+  pullRequest: Schema.optional(PullRequestLink),
+})
+export type Checkout = typeof Checkout.Type
+
+/**
+ * A thread = one chat + one workspace directory + (optional) one desktop. It starts with no repository;
+ * the agent checks repositories out into the workspace as the work needs them.
+ */
 export const Task = Schema.Struct({
   id: Schema.String,
-  repoId: Schema.String,
+  /** GitHub login of the user who started the thread. Only they can see or change it. */
+  owner: Schema.String,
   title: Schema.String,
-  /** Branch created for this task, e.g. `cloudagents/fix-login-a1b2`. */
-  branch: Schema.String,
-  baseBranch: Schema.String,
-  /** Absolute path of the git worktree on the server host. */
-  worktreePath: Schema.String,
   status: TaskStatus,
   createdAt: Schema.String,
   updatedAt: Schema.String,
-  /** Set once a pull request has been opened for `branch`; absent before that. */
-  pullRequest: Schema.optional(PullRequestLink),
+  /** Oldest first. Empty until the agent checks a repository out. */
+  checkouts: Schema.Array(Checkout),
   /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
   archivedAt: Schema.optional(Schema.String),
 })
@@ -96,7 +99,7 @@ export type Message = typeof Message.Type
 export const RunStatus = Schema.Literal("running", "succeeded", "failed", "cancelled")
 export type RunStatus = typeof RunStatus.Type
 
-/** One agent-harness invocation against a task's worktree. */
+/** One agent-harness invocation in a thread's workspace. */
 export const Run = Schema.Struct({
   id: Schema.String,
   taskId: Schema.String,
@@ -190,23 +193,27 @@ export type ServerEvent = typeof ServerEvent.Type
 // REST request / response bodies
 // ---------------------------------------------------------------------------
 
-export const CreateRepoBody = Schema.Struct({
-  url: Schema.String,
-  name: Schema.optional(Schema.String),
+/**
+ * A repository to check out. `repo` is a GitHub "owner/name" (cloned from github.com with the owner's token)
+ * or an https clone URL. The box keeps one mirror per repository per user and always fetches it first,
+ * so a checkout starts from the remote tip.
+ */
+export const CheckoutRequest = Schema.Struct({
+  repo: Schema.String.pipe(Schema.minLength(1)),
+  /** Branch to fork from. Defaults to the repository's default branch; with `pullRequest`, the pull request's base. */
+  baseBranch: Schema.optional(Schema.String),
+  /**
+   * Start at the head of this GitHub pull request (`refs/pull/<n>/head`) instead of `baseBranch`. `baseBranch`
+   * stays the pull request's base (for opening a pull request); the checkout's diff is against the head it started at.
+   */
+  pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
-export type CreateRepoBody = typeof CreateRepoBody.Type
+export type CheckoutRequest = typeof CheckoutRequest.Type
 
 export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
-  /** Base branch the task is for. Defaults to repo.defaultBranch. With `pullRequest`, the pull request's base branch. */
-  baseBranch: Schema.optional(Schema.String),
-  /** Fetch `baseBranch` (default: repo.defaultBranch) from origin with the owner's token before forking, so the task starts from the remote tip. The fork point is pinned for the task's lifetime. */
-  fetch: Schema.optional(Schema.Boolean),
-  /**
-   * Start the task at the head of this GitHub pull request (fetched from origin `refs/pull/<n>/head`). Implies fetch.
-   * `baseBranch` stays the pull request's base branch (for opening a pull request); the task diff is against the head it started at.
-   */
-  pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+  /** Check this repository out before the first message, e.g. for an automation on a pull request. */
+  checkout: Schema.optional(CheckoutRequest),
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
@@ -235,7 +242,18 @@ export type SendMessageBody = typeof SendMessageBody.Type
 export const SendMessageResponse = Schema.Struct({ message: Message, run: Run })
 export type SendMessageResponse = typeof SendMessageResponse.Type
 
-export const DiffResponse = Schema.Struct({ baseBranch: Schema.String, diff: Schema.String })
+/** Changes of one checkout: everything on its branch and in its working tree, against its fork point. */
+export const CheckoutDiff = Schema.Struct({
+  checkoutId: Schema.String,
+  repo: Schema.String,
+  dir: Schema.String,
+  baseBranch: Schema.String,
+  diff: Schema.String,
+})
+export type CheckoutDiff = typeof CheckoutDiff.Type
+
+/** One entry per checkout, in `Task.checkouts` order; empty for a thread without checkouts. */
+export const DiffResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutDiff) })
 export type DiffResponse = typeof DiffResponse.Type
 
 export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
@@ -267,9 +285,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 
 export const Paths = {
   health: "/api/health",
-  repos: "/api/repos",
-  repo: (id: string) => `/api/repos/${id}`,
-  repoTasks: (repoId: string) => `/api/repos/${repoId}/tasks`,
+  /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
+  tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,
   /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
