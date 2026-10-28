@@ -168,11 +168,11 @@ export const fetchPullRequest = async (token: string, slug: string, number: numb
   return toPullRequestInfo(decode(PullRequestJson, await res.json(), what))
 }
 
-/** The repository's canonical `owner/name` as GitHub spells it, or null when this token cannot see it. */
+/** The repository's canonical `owner/name` as GitHub spells it, or null when GitHub has no such repository. */
 export const fetchRepository = async (token: string, slug: string): Promise<string | null> => {
   const what = `repository ${slug}`
   const res = await github(token, "GET", `/repos/${slug}`)
-  if (res.status === 404 || res.status === 403) return null
+  if (res.status === 404) return null
   if (!res.ok) throw await failure(res, what)
   return decode(RepositoryJson, await res.json(), what).full_name
 }
