@@ -12,7 +12,7 @@ import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
 import { CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
-import { DesktopManager, DesktopManagerLive } from "./desktop"
+import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
 import { BOX_USER_HEADER, runRelay } from "./relay/client"
@@ -117,7 +117,7 @@ const program = Effect.gen(function* () {
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
     desktop: {
       status: (taskId) => desktop.status(taskId),
-      screenshot: (taskId, crop, scale) => desktop.screenshot(taskId, crop, scale),
+      screenshot: (taskId: string, crop?: DesktopRegion, scale?: number) => desktop.screenshot(taskId, crop, scale),
       cursor: (taskId) => desktop.cursor(taskId),
       input: (taskId, event) => desktop.input(taskId, event),
       launch: (taskId, command) => core.desktopLaunch(taskId, command),
