@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@plugin "@tailwindcss/typography";
 
 /* Dark-only, monochrome theme: white is the accent; blue (`info`) is reserved for states white can't carry.
    Token names follow shadcn/ui so `bunx shadcn add <component>` works unchanged. */

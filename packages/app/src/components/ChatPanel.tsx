@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { errorText, formatClock } from "@/util"
+import { Markdown } from "./Markdown"
 import { RunPanel } from "./RunPanel"
 import { StatusIcon } from "./StatusIcon"
 
@@ -51,7 +52,7 @@ function ThreadItem({ message, turn }: { message: Message; turn: Run["status"] |
     case "agent":
       return (
         <div className={ENTER_CLASS}>
-          <div className="break-words whitespace-pre-wrap">{message.text}</div>
+          <Markdown text={message.text} />
           <TurnFooter status={turn} time={formatClock(message.createdAt)} />
         </div>
       )
