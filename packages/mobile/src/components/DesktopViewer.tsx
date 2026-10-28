@@ -1,5 +1,6 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AppState,
   View,
   Text,
   StyleSheet,
@@ -40,6 +41,17 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
   });
 
+  // Streaming pauses while the app is backgrounded: the page closes its socket and resumes on foreground.
+  const webView = useRef<{ injectJavaScript(script: string): void } | null>(null);
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active" || state === "background") {
+        webView.current?.injectJavaScript(`window.setDesktopActive && window.setDesktopActive(${state === "active"}); true;`);
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
   // Minimal MSE page for the desktop fMP4 stream. Every binary frame (init or fragment) goes into one
   // FIFO that is drained only while the SourceBuffer is idle: dropping a fragment corrupts H.264 decoding.
   const desktopHtml = useMemo(() => {
@@ -66,8 +78,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     const KEEP_BEHIND_S = 10;
     const LIVE_EDGE_S = 0.5;
     const CATCH_UP_S = 0.08;
-    const ws = new WebSocket("${wsUrl}");
-    ws.binaryType = "arraybuffer";
+    let ws = null;
     const video = document.getElementById("v");
     const statusEl = document.getElementById("s");
     let ms = null, sb = null, mime = null;
@@ -80,7 +91,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       ackTimer = null;
       acked = received;
       ackedAt = performance.now();
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ _tag: "stream.ack", frames: received }));
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ _tag: "stream.ack", frames: received }));
     }
 
     function countFrame() {
@@ -134,16 +145,18 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         statusEl.textContent = "cannot play " + mime;
         return;
       }
-      ms = new MediaSource();
-      video.src = URL.createObjectURL(ms);
-      ms.addEventListener("sourceopen", function() {
-        sb = ms.addSourceBuffer(mime);
+      const src = new MediaSource();
+      ms = src;
+      video.src = URL.createObjectURL(src);
+      src.addEventListener("sourceopen", function() {
+        if (ms !== src) return;
+        sb = src.addSourceBuffer(mime);
         sb.addEventListener("updateend", function() { follow(); pump(); });
         pump();
       });
     }
 
-    ws.onmessage = function(e) {
+    function onMessage(e) {
       if (typeof e.data === "string") {
         try {
           const st = JSON.parse(e.data);
@@ -161,14 +174,56 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       queue.push(new Uint8Array(e.data));
       start();
       pump();
-    };
+    }
 
-    ws.onclose = function() {
-      statusEl.textContent = "disconnected";
-    };
+    function connect() {
+      ws = new WebSocket("${wsUrl}");
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = onMessage;
+      ws.onclose = function() {
+        ws = null;
+        statusEl.textContent = "disconnected";
+      };
+    }
+
+    // Closes the socket and drops the MSE state built on it; the next connect starts from a fresh init segment.
+    function disconnect() {
+      if (ws) {
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+      clearTimeout(ackTimer);
+      ackTimer = null;
+      queue.length = 0;
+      received = 0;
+      acked = 0;
+      if (ms) {
+        URL.revokeObjectURL(video.src);
+        video.removeAttribute("src");
+        video.load();
+      }
+      ms = null;
+      sb = null;
+    }
+
+    // Streams only while the page is visible and the app is foregrounded (React Native calls this too).
+    function setActive(on) {
+      if (!on) {
+        disconnect();
+        statusEl.textContent = "paused";
+      } else if (!ws) {
+        statusEl.textContent = "";
+        connect();
+      }
+    }
 
     video.addEventListener("waiting", follow);
     setInterval(follow, 100);
+    window.setDesktopActive = setActive;
+    document.addEventListener("visibilitychange", function() { setActive(!document.hidden); });
+    setActive(!document.hidden);
   </script>
 </body>
 </html>`;
@@ -208,6 +263,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       <View style={styles.videoContainer}>
         {status?.state === "running" && desktopHtml ? (
           <SafeWebView
+            ref={webView}
             source={{ html: desktopHtml }}
             style={styles.webview}
             javaScriptEnabled

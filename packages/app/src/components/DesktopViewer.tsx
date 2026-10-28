@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type WheelEvent } from "react"
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject, type WheelEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
 import { api } from "@/api/client"
@@ -13,6 +13,46 @@ import { StatusIcon } from "./StatusIcon"
 
 const RECONNECT_MS = 2000
 
+/** A viewer nobody can see keeps its stream this long, so switching away and back costs nothing. */
+const UNSEEN_GRACE_MS = 5000
+
+/**
+ * Whether anyone can see the desktop: the tab is visible and the canvas is on screen. The stream is wanted while
+ * the viewer is seen, and for UNSEEN_GRACE_MS after it stops being seen. Becoming seen again is immediate.
+ */
+function useStreamWanted(canvasRef: RefObject<HTMLCanvasElement | null>): boolean {
+  const [docVisible, setDocVisible] = useState(() => document.visibilityState === "visible")
+  const [onScreen, setOnScreen] = useState(true)
+  // Starts expired when mounted in a hidden tab, so a background tab never connects.
+  const [expired, setExpired] = useState(() => document.visibilityState !== "visible")
+  const seen = docVisible && onScreen
+
+  useEffect(() => {
+    const onChange = () => setDocVisible(document.visibilityState === "visible")
+    document.addEventListener("visibilitychange", onChange)
+    return () => document.removeEventListener("visibilitychange", onChange)
+  }, [])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new IntersectionObserver(([entry]) => setOnScreen(entry?.isIntersecting ?? false))
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [canvasRef])
+
+  useEffect(() => {
+    if (seen) {
+      setExpired(false)
+      return
+    }
+    const timer = window.setTimeout(() => setExpired(true), UNSEEN_GRACE_MS)
+    return () => window.clearTimeout(timer)
+  }, [seen])
+
+  return seen || !expired
+}
+
 export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient()
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -22,10 +62,17 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const [streamError, setStreamError] = useState<string | null>(null)
   const [stats, setStats] = useState<RenderStats | null>(null)
   const [generation, setGeneration] = useState(0)
+  const wanted = useStreamWanted(canvasRef)
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
+    if (!wanted) {
+      // Nobody can see the stream: disconnect. The server stops encoding shortly after the last viewer leaves.
+      setStreamError(null)
+      setStats(null)
+      return
+    }
     let renderer: VideoRenderer | null = null
     let mime: string | null = null
     let retry: number | undefined
@@ -75,10 +122,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       renderer?.close()
       connRef.current = null
     }
-  }, [taskId, generation, queryClient])
+  }, [taskId, generation, queryClient, wanted])
 
   const running = status?.state === "running"
   const active = status?.state === "running" || status?.state === "starting"
+  // Over the canvas whenever no live frames can be shown: the stream is not running, or it is paused.
+  const overlay = running ? (wanted ? null : "paused") : (status?.state ?? "loading")
 
   const toggle = useMutation({
     mutationFn: async (): Promise<DesktopStatus> => {
@@ -142,7 +191,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           {active ? "Stop" : "Start"}
         </Button>
         {status && <StatusIcon status={status.state} />}
-        {status && status.state === "running" && (
+        {status && status.state === "running" && wanted && (
           <span className="font-mono text-xs text-muted-foreground">
             {status.width}×{status.height} · {stats?.fps ?? 0} fps · {(stats?.decodeMs ?? 0).toFixed(1)} ms decode ·{" "}
             {status.display}
@@ -163,9 +212,9 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           onKeyUp={(e) => onKey(e, false)}
           onContextMenu={(e) => e.preventDefault()}
         />
-        {!running && (
+        {overlay && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
-            {status?.state ?? "loading"}
+            {overlay}
           </div>
         )}
       </div>
