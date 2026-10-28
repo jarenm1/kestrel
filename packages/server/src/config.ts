@@ -6,7 +6,7 @@ import type { SystemdSettings } from "./sandbox/systemd"
 export const VERSION: string = pkg.version
 
 const DEFAULT_AGENT_COMMAND =
-  'claude -p "$CLOUDAGENTS_PROMPT" --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose'
+  'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose'
 
 export interface ServerConfig {
   readonly port: number

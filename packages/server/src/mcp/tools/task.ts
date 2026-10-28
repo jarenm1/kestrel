@@ -6,8 +6,6 @@ import { Effect } from "effect"
 import { z } from "zod"
 import { type RunContext, guard, runTool, text } from "./common"
 
-const DEFAULT_ASK_TIMEOUT_SEC = 600
-export const MAX_ASK_TIMEOUT_SEC = 1800
 const MAX_OPTIONS = 10
 const MAX_OPTION_CHARS = 200
 const PROGRESS_EVERY_MS = 15_000
@@ -21,7 +19,6 @@ export interface AskToolInput {
   readonly question: string
   readonly options: ReadonlyArray<string>
   readonly attachments: ReadonlyArray<TaskAttachmentInput>
-  readonly timeoutMs: number
 }
 
 export interface TaskToolDeps {
@@ -67,6 +64,18 @@ const pingWhileWaiting = (extra: RequestHandlerExtra<ServerRequest, ServerNotifi
   )
 }
 
+/**
+ * Fails when the client abandons the call: it cancels the request, or the connection closes. The question then stays
+ * pending, and the user's next message answers it.
+ */
+const abandonedCall = (extra: RequestHandlerExtra<ServerRequest, ServerNotification>): Effect.Effect<never, Error> =>
+  Effect.async<never, Error>((resume) => {
+    const fail = () => resume(Effect.fail(new Error("the call was cancelled")))
+    if (extra.signal.aborted) return fail()
+    extra.signal.addEventListener("abort", fail, { once: true })
+    return Effect.sync(() => extra.signal.removeEventListener("abort", fail))
+  })
+
 export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: TaskToolDeps): void => {
   server.registerTool(
     "task_report",
@@ -108,7 +117,8 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
       description:
         "Ask the user a question and wait for their answer. Use it when you need a decision you cannot make alone. " +
         "The question appears in the chat with the options as buttons; the user can also type a reply. The call " +
-        "blocks until the user answers or timeoutSec passes (default 600, max 1800), then returns the answer text. " +
+        "waits until the user answers, however long that takes, then returns the answer text. If the call is dropped " +
+        "before an answer, the question stays open: the user's next message answers it and resumes this task. " +
         "Set attachScreenshot to show the user the current desktop with the question.",
       inputSchema: {
         question: z.string().min(1).describe("The question to ask the user"),
@@ -119,35 +129,25 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
           .optional()
           .describe(`Up to ${MAX_OPTIONS} short answers the user can pick, each at most ${MAX_OPTION_CHARS} characters`),
         attachScreenshot: z.boolean().optional().describe("Attach a PNG screenshot of the task desktop to the question"),
-        timeoutSec: z
-          .number()
-          .positive()
-          .max(MAX_ASK_TIMEOUT_SEC)
-          .optional()
-          .describe(`Seconds to wait for the answer, default ${DEFAULT_ASK_TIMEOUT_SEC}, at most ${MAX_ASK_TIMEOUT_SEC}`),
       },
     },
     ({
       question,
       options,
       attachScreenshot,
-      timeoutSec,
     }: {
       question: string
       options?: string[]
       attachScreenshot?: boolean
-      timeoutSec?: number
     }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
             const attachments = yield* screenshotIfAsked(deps, ctx.taskId, attachScreenshot === true)
-            const answer = yield* deps.ask(ctx.taskId, ctx.runId, {
-              question,
-              options: options ?? [],
-              attachments,
-              timeoutMs: Math.round((timeoutSec ?? DEFAULT_ASK_TIMEOUT_SEC) * 1000),
-            }).pipe(Effect.raceFirst(pingWhileWaiting(extra)))
+            const answer = yield* deps.ask(ctx.taskId, ctx.runId, { question, options: options ?? [], attachments }).pipe(
+              Effect.raceFirst(pingWhileWaiting(extra)),
+              Effect.raceFirst(abandonedCall(extra)),
+            )
             return text(answer)
           }),
         ),

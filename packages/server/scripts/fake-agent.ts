@@ -2,6 +2,7 @@
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
  * Runs with cwd = task worktree and talks to the task's MCP endpoint like a real agent would.
  */
+import { randomUUID } from "node:crypto"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
@@ -15,13 +16,18 @@ if (!mcpUrl || !mcpToken) {
   process.exit(1)
 }
 
+// The first line names the agent session, as `claude -p --output-format stream-json` does. A resumed run keeps its session.
+const resumeSession = process.env.CLOUDAGENTS_RESUME_SESSION
+console.log(JSON.stringify({ type: "system", subtype: "init", session_id: resumeSession ?? randomUUID() }))
+
 const client = new Client({ name: "cloudagents-fake-agent", version: "0.1.0" })
 const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
   requestInit: { headers: { Authorization: `Bearer ${mcpToken}` } },
 })
 
 const DEFAULT_CALL_TIMEOUT_MS = 60_000
-const ASK_TIMEOUT_MS = 330_000
+// The longest timer the runtime accepts: a question waits as long as the user takes to answer.
+const UNBOUNDED_CALL_MS = 2_147_483_647
 
 const call = async (
   name: string,
@@ -29,11 +35,10 @@ const call = async (
   timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
 ): Promise<{ failed: boolean; text: string }> => {
   console.log(`fake-agent: call ${name} ${JSON.stringify(args).slice(0, 200)}`)
-  // Progress pings from the server reset the per-call timeout, so a call waiting on the user lives up to timeoutMs.
+  // Progress pings from the server reset the per-call timeout, so a call waiting on the user is not cut short.
   const result = (await client.callTool({ name, arguments: args }, undefined, {
-    timeout: DEFAULT_CALL_TIMEOUT_MS,
+    timeout: timeoutMs,
     resetTimeoutOnProgress: true,
-    maxTotalTimeout: timeoutMs,
     onprogress: () => {},
   })) as CallToolResult
   const text = result.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n")
@@ -94,8 +99,8 @@ const runDesktopProbes = async (): Promise<number> => {
 const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
   const asked = await call(
     "task_ask",
-    { question: "Which colour should the notes use?", options: ["Blue", "Red"], attachScreenshot: true, timeoutSec: 300 },
-    ASK_TIMEOUT_MS,
+    { question: "Which colour should the notes use?", options: ["Blue", "Red"], attachScreenshot: true },
+    UNBOUNDED_CALL_MS,
   )
   if (asked.failed) return null
   let inbox = ""
@@ -114,6 +119,11 @@ const askAndListen = async (): Promise<{ answer: string; inbox: string } | null>
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
+  if (resumeSession !== undefined) {
+    console.log(`fake-agent: resumed session ${resumeSession} with prompt: ${prompt}`)
+    await call("task_report", { status: "done", message: "Resumed after the user's answer." })
+    return 0
+  }
   if (prompt.trim() === "exec-probe") return runExecProbes()
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
