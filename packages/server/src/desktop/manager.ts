@@ -82,8 +82,12 @@ const TERM_GRACE_MS = 2_000
 const COMMAND_TIMEOUT_MS = 15_000
 /** Output kept per launched app; older text is dropped. */
 const OUTPUT_TAIL_CHARS = 32 * 1024
-/** Frames per keyframe: 2 s at 60 fps. */
-const GOP = 120
+/**
+ * Frames per keyframe: 4 s at 60 fps. On a static desktop the IDR frames are nearly all of the bitrate
+ * (NVENC: ~600 KB IDR vs ~0.1 KB P-frame at 1080p), so GOP 240 halves idle bandwidth against GOP 120.
+ * Late joiners don't wait for it: they get the cached GOP.
+ */
+const GOP = 240
 /** Cap on the cached current GOP replayed to late joiners. Past it, joiners wait for the next keyframe. */
 const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
 /** How long a live encoder keeps running after its last viewer leaves. */
@@ -213,12 +217,20 @@ const xdotoolArgs = (e: DesktopInput): string[] => {
   }
 }
 
-/** Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of GOP frames and no B-frames. */
+/**
+ * Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of GOP frames and no B-frames.
+ * NVENC takes x11grab's bgr0 frames directly and converts to 4:2:0 on the GPU (adding `-pix_fmt yuv420p`
+ * moves that conversion to the CPU: ~50% of a core at 1080p60). `-delay 0 -zerolatency 1` stop NVENC from
+ * holding output frames: screen change to fragment on stdout drops from 66 ms to 33 ms. p4/ll costs the same
+ * CPU and latency as p1/ull at ~25-30% less bitrate on text and scrolling.
+ */
 const ENCODER_ARGS: Record<EncoderKind, readonly string[]> = {
   nvenc: [
     "-c:v", "h264_nvenc",
-    "-preset", "p1",
-    "-tune", "ull",
+    "-preset", "p4",
+    "-tune", "ll",
+    "-delay", "0",
+    "-zerolatency", "1",
     "-rc", "vbr",
     "-cq", "23",
     "-b:v", "0",
@@ -231,7 +243,7 @@ const ENCODER_ARGS: Record<EncoderKind, readonly string[]> = {
   ],
   x264: [
     "-c:v", "libx264",
-    "-preset", "superfast",
+    "-preset", "veryfast",
     "-tune", "zerolatency",
     "-profile:v", "high",
     "-crf", "23",
