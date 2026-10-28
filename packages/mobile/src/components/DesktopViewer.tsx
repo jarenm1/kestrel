@@ -65,6 +65,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   <script>
     const KEEP_BEHIND_S = 10;
     const LIVE_EDGE_S = 0.5;
+    const CATCH_UP_S = 0.08;
     const ws = new WebSocket("${wsUrl}");
     ws.binaryType = "arraybuffer";
     const video = document.getElementById("v");
@@ -92,7 +93,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     }
 
     // Chase the live edge and recover from timestamp gaps. Underrun at the end of the last range is
-    // left alone: the playhead then waits for more data.
+    // left alone: the playhead then waits for more data. A small lag is caught up by playing slightly
+    // fast (no visible jump); only a large lag seeks.
     function follow() {
       if (!sb || sb.buffered.length === 0) return;
       const b = sb.buffered;
@@ -105,7 +107,9 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           if (b.start(i) > t) { video.currentTime = b.start(i); return; }
         }
       }
-      if (b.end(last) - t > LIVE_EDGE_S) video.currentTime = b.end(last) - 0.05;
+      const lag = b.end(last) - t;
+      if (lag > LIVE_EDGE_S) video.currentTime = b.end(last) - 0.05;
+      else video.playbackRate = lag > CATCH_UP_S ? 1.25 : 1;
     }
 
     function start() {
