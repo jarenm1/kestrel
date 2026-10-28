@@ -31,7 +31,7 @@ export function ConnectionsPage() {
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {connections.data && (
         <Card className="py-0">
-          <CardContent className="divide-y px-0">
+          <CardContent className="divide-y divide-white/[0.04] px-0">
             {connections.data.map((connection) =>
               connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                 <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />

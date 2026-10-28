@@ -44,9 +44,12 @@ export function GithubPicker({ disabled, onPick }: { disabled: boolean; onPick: 
         onChange={(e) => setFilter(e.target.value)}
       />
       {matches.length === 0 && <div className="text-muted-foreground">No matching repositories.</div>}
-      <ul className="max-h-80 divide-y overflow-auto rounded-md border px-3">
+      <ul className="max-h-80 overflow-auto rounded-xl bg-code/60 p-1.5 shadow-well">
         {matches.map((repo) => (
-          <li key={repo.cloneUrl} className="flex items-center gap-3 py-1.5">
+          <li
+            key={repo.cloneUrl}
+            className="flex items-center gap-3 rounded-lg px-2.5 py-1.5 transition-colors duration-200 hover:bg-white/[0.04]"
+          >
             <span className="min-w-0 flex-1 truncate">{repo.fullName}</span>
             {repo.private && <Badge>private</Badge>}
             <span className="text-muted-foreground">{repo.defaultBranch}</span>

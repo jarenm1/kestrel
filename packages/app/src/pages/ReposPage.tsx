@@ -50,13 +50,16 @@ export function ReposPage() {
           {repos.isPending && <div className="text-muted-foreground">Loading…</div>}
           {repos.error && <Alert>{errorText(repos.error)}</Alert>}
           {repos.data?.length === 0 && <div className="text-muted-foreground">No repositories yet.</div>}
-          <ul className="divide-y">
+          <ul className="-mx-2">
             {repos.data?.map((repo) => (
-              <li key={repo.id} className="flex items-baseline gap-3 py-2">
-                <Link to={`/repos/${repo.id}`} className="font-medium text-primary hover:underline">
-                  {repo.name}
+              <li key={repo.id}>
+                <Link
+                  to={`/repos/${repo.id}`}
+                  className="flex items-baseline gap-3 rounded-xl px-2 py-2 transition-colors duration-200 hover:bg-white/[0.04]"
+                >
+                  <span className="font-medium">{repo.name}</span>
+                  <span className="truncate font-mono text-xs text-muted-foreground">{repo.url}</span>
                 </Link>
-                <span className="truncate font-mono text-xs text-muted-foreground">{repo.url}</span>
               </li>
             ))}
           </ul>

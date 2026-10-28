@@ -58,7 +58,7 @@ export function RepoPage() {
       {error && <Alert>{errorText(error)}</Alert>}
       {tasks.data?.length === 0 && <div className="text-muted-foreground">No tasks yet.</div>}
       {tasks.data && tasks.data.length > 0 && (
-        <div className="rounded-lg border bg-card">
+        <div className="rounded-2xl bg-card p-2 shadow-soft">
           <Table>
             <TableHeader>
               <TableRow>
