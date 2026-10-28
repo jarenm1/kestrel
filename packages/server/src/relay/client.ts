@@ -1,5 +1,6 @@
 import { Context, Duration, Either, Effect, Runtime, Schema } from "effect"
 import {
+  BOX_USER_HEADER,
   CREDENTIALS_HEADER,
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
@@ -41,12 +42,6 @@ const HOP_HEADERS: Record<string, true> = {
   upgrade: true,
   [CREDENTIALS_HEADER]: true,
 }
-
-/**
- * Signed-in user of a relayed request, set by the relay client only (after it drops any copy the browser sent).
- * The box's own HTTP listener strips it, so a local caller (e.g. a sandboxed agent) cannot claim a user.
- */
-export const BOX_USER_HEADER = "x-kestrel-box-user"
 
 const Credentials = Schema.parseJson(
   Schema.Struct({

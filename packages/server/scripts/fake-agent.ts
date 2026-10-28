@@ -100,6 +100,37 @@ const runDesktopProbes = async (): Promise<number> => {
   return 0
 }
 
+// Drives the automation tools: creates a schedule automation on this task's project, lists, updates its cron and
+// deletes it. An optional automation id from another project must come back as not found.
+const runAutomationProbes = async (foreignId: string | undefined): Promise<number> => {
+  const created = await call("automation_create", {
+    name: "probe",
+    prompt: "automation probe prompt",
+    trigger: { _tag: "schedule", cron: "0 13 * * 2", timezone: "UTC" },
+  })
+  const id = /created automation (\S+)/.exec(created.text)?.[1]
+  if (created.failed || id === undefined) {
+    await call("task_report", { status: "failed", message: "automation probe could not create" })
+    return 1
+  }
+  console.log(`fake-agent: probe list\n${(await call("automation_list", {})).text}`)
+  const updated = await call("automation_update", {
+    id,
+    trigger: { _tag: "schedule", cron: "30 9 * * 1", timezone: "UTC" },
+  })
+  console.log(`fake-agent: probe updated failed=${updated.failed}`)
+  if (foreignId !== undefined) {
+    const foreign = await call("automation_update", { id: foreignId, enabled: false })
+    console.log(`fake-agent: probe foreign failed=${foreign.failed} text=${foreign.text.slice(0, 120)}`)
+  }
+  const removed = await call("automation_delete", { id })
+  await call("task_report", {
+    status: removed.failed || updated.failed ? "failed" : "done",
+    message: "automation probes finished",
+  })
+  return removed.failed || updated.failed ? 1 : 0
+}
+
 // Asks the user a question with options and a screenshot, then polls the inbox for a message sent during the run.
 const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
   const asked = await call(
@@ -130,6 +161,8 @@ const main = async (): Promise<number> => {
     return 0
   }
   if (prompt.trim() === "exec-probe") return runExecProbes()
+  const [probe, foreignId] = prompt.trim().split(/\s+/)
+  if (probe === "automation-probe") return runAutomationProbes(foreignId)
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
   // Screenshot is best-effort: the desktop may not be running.

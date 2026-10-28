@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { Effect, Fiber, Layer } from "effect"
-import { CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -10,12 +10,13 @@ import { StateLive } from "./core/state"
 import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
+import { makeControlClient } from "./control/client"
 import { CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { makeWebHandler } from "./http/router"
-import { BOX_USER_HEADER, runRelay } from "./relay/client"
+import { runRelay } from "./relay/client"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -136,6 +137,7 @@ const program = Effect.gen(function* () {
       reviewPullRequest: core.reviewPullRequest,
     },
     ask: core.ask,
+    automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskRepo: core.taskRepo },
     inbox: core.inbox,
   })
 

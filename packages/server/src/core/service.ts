@@ -142,6 +142,8 @@ export interface CoreShape {
     taskId: string,
     input: ReviewPullRequestInput,
   ) => Effect.Effect<PostedReview, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: the project a task belongs to. Its owner is the user the task's automations act for. */
+  readonly taskRepo: (taskId: string) => Effect.Effect<Repo, NotFound>
 
   /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
@@ -844,6 +846,7 @@ export const CoreLive = Layer.effect(
           const app = yield* desktop.launch(taskId, command, launch).pipe(Effect.mapError(toInternal("desktop launch")))
           return app.id
         }),
+      taskRepo: (taskId) => Effect.flatMap(requireTask(taskId), (task) => requireRepo(task.repoId)),
       gitPush: (taskId) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)

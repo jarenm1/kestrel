@@ -1,10 +1,9 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateRepoBody, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
-import { BOX_USER_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
