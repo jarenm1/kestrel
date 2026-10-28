@@ -64,7 +64,13 @@ function TaskView({ taskId }: { taskId: string }) {
             )}
           </header>
           {state.error && <Alert className="rounded-none border-x-0 border-t-0">{state.error}</Alert>}
-          <ChatPanel taskId={taskId} messages={state.messages} runs={state.runs} output={state.output} />
+          <ChatPanel
+            taskId={taskId}
+            taskStatus={task?.status}
+            messages={state.messages}
+            runs={state.runs}
+            output={state.output}
+          />
         </section>
         {open ? (
           <aside className="flex min-h-0 min-w-0 flex-col border-l">

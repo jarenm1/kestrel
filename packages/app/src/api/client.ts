@@ -96,6 +96,10 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
     return result.right
   })
 
+/** Absolute URL of an attachment; the browser loads it with the session cookie, so it is safe to use in an `<img>`. */
+export const taskAttachmentUrl = (taskId: string, attachmentId: string): string =>
+  SERVER_URL + Paths.taskAttachment(taskId, attachmentId)
+
 export const api = {
   // Control plane (served by the Worker).
   me: () => run(request(Me, "GET", ControlPaths.me)),
