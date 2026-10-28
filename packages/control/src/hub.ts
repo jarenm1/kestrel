@@ -1,25 +1,37 @@
 import { DurableObject } from "cloudflare:workers"
+import { Option, Schema } from "effect"
 import {
+  CREDENTIALS_HEADER,
+  Paths,
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
+  AutomationTrigger,
   decodeBinary,
   decodeFrame,
   encodeBinary,
   encodeFrame,
   fromBase64,
   toBase64,
+  type Automation,
+  type AutomationRun,
   type BoxStatus,
+  type CreateAutomationBody,
   type RelayCredentials,
   type RelayFrame,
+  type UpdateAutomationBody,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop } from "./http"
+import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
+import { localDate, nextFireTime } from "./cron"
+import { composePrompt } from "./prompt"
 import type { Env } from "./env"
 
 /**
  * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
  * outbound relay to the agent box.
  *
- * - SQLite tables: users, sessions, connections, oauth_states.
+ * - SQLite tables: users, sessions, connections, oauth_states, automations, automation_runs, github_hooks,
+ *   webhook_deliveries.
  * - The box holds one hibernatable WebSocket (tag "box"); its metadata lives in the socket attachment.
  * - Browser HTTP requests are tunnelled as `http` frames and resolved by `http-res` (30s timeout → 504).
  * - Browser WebSockets are accepted with the standard API (they pin the object in memory) and
@@ -32,6 +44,71 @@ const BOX_TAG = "box"
 const HTTP_TIMEOUT_MS = 30_000
 /** Close code sent to browsers when the box goes away (custom range; 1001 is not settable). */
 const BOX_GONE_CLOSE_CODE = 4001
+
+/** Recent runs kept per automation. */
+const RUNS_KEPT = 50
+/** How long webhook delivery ids are remembered for deduplication. */
+const DELIVERY_RETENTION_MS = 24 * 60 * 60 * 1000
+
+/** Response of `POST /api/repos/:id/tasks`. */
+const CreatedTask = Schema.Struct({ id: Schema.String })
+/** Error body of box responses (`{ _tag, message }`). */
+const BoxErrorBody = Schema.Struct({ message: Schema.String })
+
+/** Result of a box request; `body` is the raw response text. */
+export type BoxResult = { ok: boolean; status: number; body: string }
+
+/** Outcome of starting a task for a run. `error` is null when the task started. */
+type RunOutcome = { taskId: string | null; error: string | null }
+
+type AutomationRow = {
+  id: string
+  login: string
+  name: string
+  repoId: string
+  repo: string | null
+  prompt: string
+  enabled: number
+  triggerJson: string
+  nextRunAt: number | null
+  createdAt: string
+  updatedAt: string
+}
+
+const AUTOMATION_COLUMNS =
+  "id, login, name, repo_id AS repoId, repo, prompt, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+
+const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
+
+/** Next fire (epoch ms) after `now` for an enabled schedule; null for everything else. */
+const nextRunMs = (trigger: AutomationTrigger, enabled: boolean, now: number): number | null =>
+  enabled && trigger._tag === "schedule" ? nextFireTime(trigger.cron, trigger.timezone, now) : null
+
+const automationView = (row: AutomationRow): Automation => ({
+  id: row.id,
+  name: row.name,
+  repoId: row.repoId,
+  repo: row.repo,
+  prompt: row.prompt,
+  enabled: row.enabled === 1,
+  trigger: decodeTrigger(row.triggerJson),
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+  nextRunAt: row.nextRunAt === null ? null : new Date(row.nextRunAt).toISOString(),
+})
+
+const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A | null => {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return null
+  }
+  return Option.getOrNull(Schema.decodeUnknownOption(schema)(value))
+}
+
+const boxError = (res: BoxResult): string =>
+  decodeJson(BoxErrorBody, res.body)?.message ?? `agent box responded ${res.status}`
 
 /** Headers the box must never see from the browser. Hop-by-hop headers are dropped by `headersToRecord`. */
 const DROP_FOR_BOX: Record<string, true> = {
@@ -104,6 +181,37 @@ export class Hub extends DurableObject<Env> {
         provider TEXT NOT NULL,
         return_to TEXT NOT NULL,
         expires_at INTEGER NOT NULL
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS automations (
+        id TEXT PRIMARY KEY,
+        login TEXT NOT NULL,
+        name TEXT NOT NULL,
+        repo_id TEXT NOT NULL,
+        repo TEXT,
+        prompt TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        trigger_json TEXT NOT NULL,
+        next_run_at INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS automation_runs (
+        id TEXT PRIMARY KEY,
+        automation_id TEXT NOT NULL,
+        fired_at TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL,
+        task_id TEXT,
+        error TEXT
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS github_hooks (
+        repo TEXT PRIMARY KEY,
+        hook_id INTEGER NOT NULL,
+        secret TEXT NOT NULL
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        received_at INTEGER NOT NULL
       )`)
     })
   }
@@ -243,6 +351,296 @@ export class Hub extends DurableObject<Env> {
     if (!ws) return { online: false, connectedAt: null, boxVersion: null }
     const att = this.attachment(ws)
     return { online: true, connectedAt: att.connectedAt, boxVersion: att.boxVersion }
+  }
+
+  // -------------------------------------------------------------------------
+  // Box calls: one request to the box with `login`'s credentials
+  // -------------------------------------------------------------------------
+
+  boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    const box = this.ctx.getWebSockets(BOX_TAG)[0]
+    if (!box) {
+      return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
+    }
+    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(this.credentials(login)) }
+    const body = payload === undefined ? undefined : new TextEncoder().encode(JSON.stringify(payload))
+    if (body !== undefined) headers["content-type"] = "application/json"
+    const frame: HttpFrame = {
+      t: "http",
+      id: this.allocId(),
+      method,
+      path,
+      headers,
+      ...(body ? { body: toBase64(body) } : {}),
+    }
+    return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
+  }
+
+  // -------------------------------------------------------------------------
+  // Automations: stored per user; schedules fire from the alarm, GitHub triggers from webhook deliveries
+  // -------------------------------------------------------------------------
+
+  automations(login: string): Automation[] {
+    return this.ctx.storage.sql
+      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE login = ? ORDER BY created_at`, login)
+      .toArray()
+      .map(automationView)
+  }
+
+  automation(login: string, id: string): Automation | null {
+    const row = this.automationRow(login, id)
+    return row === null ? null : automationView(row)
+  }
+
+  async createAutomation(login: string, input: CreateAutomationBody & { repo: string | null }): Promise<Automation> {
+    const now = Date.now()
+    const enabled = input.enabled ?? true
+    const row: AutomationRow = {
+      id: crypto.randomUUID(),
+      login,
+      name: input.name,
+      repoId: input.repoId,
+      repo: input.repo,
+      prompt: input.prompt,
+      enabled: enabled ? 1 : 0,
+      triggerJson: JSON.stringify(input.trigger),
+      nextRunAt: nextRunMs(input.trigger, enabled, now),
+      createdAt: new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    }
+    this.ctx.storage.sql.exec(
+      `INSERT INTO automations (id, login, name, repo_id, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.id,
+      row.login,
+      row.name,
+      row.repoId,
+      row.repo,
+      row.prompt,
+      row.enabled,
+      row.triggerJson,
+      row.nextRunAt,
+      row.createdAt,
+      row.updatedAt,
+    )
+    await this.rearm()
+    return automationView(row)
+  }
+
+  async updateAutomation(login: string, id: string, changes: UpdateAutomationBody): Promise<Automation | null> {
+    const current = this.automationRow(login, id)
+    if (current === null) return null
+    const now = Date.now()
+    const trigger = changes.trigger ?? decodeTrigger(current.triggerJson)
+    const enabled = changes.enabled ?? current.enabled === 1
+    const next: AutomationRow = {
+      ...current,
+      name: changes.name ?? current.name,
+      prompt: changes.prompt ?? current.prompt,
+      enabled: enabled ? 1 : 0,
+      triggerJson: JSON.stringify(trigger),
+      nextRunAt: nextRunMs(trigger, enabled, now),
+      updatedAt: new Date(now).toISOString(),
+    }
+    this.ctx.storage.sql.exec(
+      "UPDATE automations SET name = ?, prompt = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
+      next.name,
+      next.prompt,
+      next.enabled,
+      next.triggerJson,
+      next.nextRunAt,
+      next.updatedAt,
+      id,
+      login,
+    )
+    await this.rearm()
+    return automationView(next)
+  }
+
+  async deleteAutomation(login: string, id: string): Promise<boolean> {
+    if (this.automationRow(login, id) === null) return false
+    const sql = this.ctx.storage.sql
+    sql.exec("DELETE FROM automation_runs WHERE automation_id = ?", id)
+    sql.exec("DELETE FROM automations WHERE id = ? AND login = ?", id, login)
+    await this.rearm()
+    return true
+  }
+
+  /** Recent runs, newest first; null when the automation is not `login`'s. */
+  automationRuns(login: string, id: string): AutomationRun[] | null {
+    if (this.automationRow(login, id) === null) return null
+    return this.ctx.storage.sql
+      .exec<AutomationRun>(
+        `SELECT id, automation_id AS automationId, fired_at AS firedAt, reason, status, task_id AS taskId, error
+         FROM automation_runs WHERE automation_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT ?`,
+        id,
+        RUNS_KEPT,
+      )
+      .toArray()
+  }
+
+  /** Manual "run now" (or any caller-supplied reason); null when the automation is not `login`'s. */
+  async fireAutomation(
+    login: string,
+    id: string,
+    reason: string,
+    pr: PullRequestInfo | null,
+  ): Promise<AutomationRun | null> {
+    const row = this.automationRow(login, id)
+    return row === null ? null : this.fire(row, reason, pr)
+  }
+
+  /**
+   * Records one pull request webhook delivery and starts a task for every enabled GitHub automation on the
+   * repository whose trigger matches. Runs happen after the response (`waitUntil`), so GitHub gets a fast 202.
+   */
+  githubDelivery(deliveryId: string, event: PullRequestEvent): { duplicate: boolean; matched: number } {
+    const sql = this.ctx.storage.sql
+    const now = Date.now()
+    if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) {
+      return { duplicate: true, matched: 0 }
+    }
+    sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
+    sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
+    const rows = sql
+      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, event.repo)
+      .toArray()
+    let matched = 0
+    for (const row of rows) {
+      const trigger = decodeTrigger(row.triggerJson)
+      if (trigger._tag !== "github") continue
+      const reason = matchGithubTrigger(trigger, event)
+      if (reason === null) continue
+      matched++
+      this.ctx.waitUntil(this.fire(row, reason, event.pr))
+    }
+    return { duplicate: false, matched }
+  }
+
+  /** The webhook for a repository (key: lowercase "owner/name"), or null when none was created. */
+  githubHook(repo: string): { hookId: number; secret: string } | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ hookId: number; secret: string }>("SELECT hook_id AS hookId, secret FROM github_hooks WHERE repo = ?", repo)
+        .toArray()[0] ?? null
+    )
+  }
+
+  saveGithubHook(repo: string, hookId: number, secret: string): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO github_hooks (repo, hook_id, secret) VALUES (?, ?, ?)
+       ON CONFLICT(repo) DO UPDATE SET hook_id = excluded.hook_id, secret = excluded.secret`,
+      repo,
+      hookId,
+      secret,
+    )
+  }
+
+  deleteGithubHook(repo: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM github_hooks WHERE repo = ?", repo)
+  }
+
+  /** True when an enabled GitHub automation other than `excludeId` still needs the repository's webhook. */
+  githubHookInUse(repo: string, excludeId: string | null): boolean {
+    return this.ctx.storage.sql
+      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, repo)
+      .toArray()
+      .some((row) => row.id !== excludeId && decodeTrigger(row.triggerJson)._tag === "github")
+  }
+
+  override async alarm(): Promise<void> {
+    const now = Date.now()
+    const due = this.ctx.storage.sql
+      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
+      .toArray()
+    for (const row of due) {
+      this.ctx.storage.sql.exec(
+        "UPDATE automations SET next_run_at = ? WHERE id = ?",
+        nextRunMs(decodeTrigger(row.triggerJson), true, now),
+        row.id,
+      )
+      await this.fire(row, "schedule", null)
+    }
+    await this.rearm()
+  }
+
+  private automationRow(login: string, id: string): AutomationRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE id = ? AND login = ?`, id, login)
+        .toArray()[0] ?? null
+    )
+  }
+
+  /** Points the alarm at the earliest pending schedule, or clears it when none is pending. */
+  private async rearm(): Promise<void> {
+    const row = this.ctx.storage.sql
+      .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
+      .toArray()[0]
+    const at = row?.at ?? null
+    if (at === null) await this.ctx.storage.deleteAlarm()
+    else await this.ctx.storage.setAlarm(at)
+  }
+
+  private async fire(row: AutomationRow, reason: string, pr: PullRequestInfo | null): Promise<AutomationRun> {
+    const now = Date.now()
+    const trigger = decodeTrigger(row.triggerJson)
+    const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
+    const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
+    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
+    const outcome = await this.startTask(row.login, row.repoId, title, pr?.number ?? null, prompt)
+    return this.recordRun(row.id, reason, now, outcome)
+  }
+
+  /** Creates the task (fetching the base, or the PR head) and sends the prompt to start its run. */
+  private async startTask(
+    login: string,
+    repoId: string,
+    title: string,
+    pullRequest: number | null,
+    prompt: string,
+  ): Promise<RunOutcome> {
+    const created = await this.boxCall(login, "POST", Paths.repoTasks(repoId), {
+      title,
+      fetch: true,
+      ...(pullRequest === null ? {} : { pullRequest }),
+    })
+    if (!created.ok) return { taskId: null, error: boxError(created) }
+    const task = decodeJson(CreatedTask, created.body)
+    if (task === null) return { taskId: null, error: "agent box returned an unexpected task" }
+    const sent = await this.boxCall(login, "POST", Paths.taskMessages(task.id), { text: prompt })
+    return sent.ok ? { taskId: task.id, error: null } : { taskId: task.id, error: boxError(sent) }
+  }
+
+  private recordRun(automationId: string, reason: string, firedAt: number, outcome: RunOutcome): AutomationRun {
+    const run: AutomationRun = {
+      id: crypto.randomUUID(),
+      automationId,
+      firedAt: new Date(firedAt).toISOString(),
+      reason,
+      status: outcome.error === null ? "started" : "failed",
+      taskId: outcome.taskId,
+      error: outcome.error,
+    }
+    const sql = this.ctx.storage.sql
+    sql.exec(
+      "INSERT INTO automation_runs (id, automation_id, fired_at, reason, status, task_id, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      run.id,
+      run.automationId,
+      run.firedAt,
+      run.reason,
+      run.status,
+      run.taskId,
+      run.error,
+    )
+    sql.exec(
+      `DELETE FROM automation_runs WHERE automation_id = ? AND id NOT IN (
+         SELECT id FROM automation_runs WHERE automation_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT ?)`,
+      automationId,
+      automationId,
+      RUNS_KEPT,
+    )
+    return run
   }
 
   // -------------------------------------------------------------------------
