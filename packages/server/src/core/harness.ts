@@ -10,6 +10,7 @@ import { CredentialBroker } from "../broker"
 import { Config } from "../config"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
+import { MAX_ASK_TIMEOUT_SEC } from "../mcp/tools/task"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable } from "./state"
 
@@ -229,6 +230,8 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
                 CLOUDAGENTS_MCP_TOKEN: lease.token,
+                // Claude Code's MCP tool-call timeout (ms): task_ask can block for up to MAX_ASK_TIMEOUT_SEC.
+                MCP_TOOL_TIMEOUT: String((MAX_ASK_TIMEOUT_SEC + 60) * 1000),
                 ...keptBroker,
                 ...loginEnv,
               },

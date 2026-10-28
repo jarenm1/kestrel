@@ -29,7 +29,13 @@ const call = async (
   timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
 ): Promise<{ failed: boolean; text: string }> => {
   console.log(`fake-agent: call ${name} ${JSON.stringify(args).slice(0, 200)}`)
-  const result = (await client.callTool({ name, arguments: args }, undefined, { timeout: timeoutMs })) as CallToolResult
+  // Progress pings from the server reset the per-call timeout, so a call waiting on the user lives up to timeoutMs.
+  const result = (await client.callTool({ name, arguments: args }, undefined, {
+    timeout: DEFAULT_CALL_TIMEOUT_MS,
+    resetTimeoutOnProgress: true,
+    maxTotalTimeout: timeoutMs,
+    onprogress: () => {},
+  })) as CallToolResult
   const text = result.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n")
   console.log(`fake-agent: ${name} ${result.isError ? "error" : "ok"}: ${text.slice(0, 200)}`)
   return { failed: result.isError === true, text }

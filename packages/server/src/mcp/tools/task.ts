@@ -1,13 +1,16 @@
 import type { Message, TaskStatus } from "@cloudagents/protocol"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js"
+import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import { type RunContext, guard, runTool, text } from "./common"
 
 const DEFAULT_ASK_TIMEOUT_SEC = 600
-const MAX_ASK_TIMEOUT_SEC = 1800
+export const MAX_ASK_TIMEOUT_SEC = 1800
 const MAX_OPTIONS = 10
 const MAX_OPTION_CHARS = 200
+const PROGRESS_EVERY_MS = 15_000
 
 export interface TaskAttachmentInput {
   readonly mimeType: string
@@ -39,6 +42,30 @@ const screenshotIfAsked = (deps: TaskToolDeps, taskId: string, asked: boolean) =
     const bytes = yield* deps.desktop.screenshot(taskId)
     return [{ mimeType: "image/png", bytes }]
   })
+
+/**
+ * While a question waits, progress pings let MCP clients that reset their call timeout on progress keep the call
+ * open. Clients that send no progress token get no pings.
+ */
+const pingWhileWaiting = (extra: RequestHandlerExtra<ServerRequest, ServerNotification>): Effect.Effect<never> => {
+  const progressToken = extra._meta?.progressToken
+  if (progressToken === undefined) return Effect.never
+  let progress = 0
+  return Effect.forever(
+    Effect.sleep(PROGRESS_EVERY_MS).pipe(
+      Effect.zipRight(
+        Effect.tryPromise(() => {
+          progress += 1
+          return extra.sendNotification({
+            method: "notifications/progress",
+            params: { progressToken, progress, message: "waiting for the user" },
+          })
+        }),
+      ),
+      Effect.ignore,
+    ),
+  )
+}
 
 export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: TaskToolDeps): void => {
   server.registerTool(
@@ -110,7 +137,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
       options?: string[]
       attachScreenshot?: boolean
       timeoutSec?: number
-    }) =>
+    }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
@@ -120,7 +147,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
               options: options ?? [],
               attachments,
               timeoutMs: Math.round((timeoutSec ?? DEFAULT_ASK_TIMEOUT_SEC) * 1000),
-            })
+            }).pipe(Effect.raceFirst(pingWhileWaiting(extra)))
             return text(answer)
           }),
         ),
