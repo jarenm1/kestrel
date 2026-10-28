@@ -1,17 +1,9 @@
 import React, { useState } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  Modal,
-  SafeAreaView,
-} from "react-native";
-import { WebView, type WebViewMessageEvent, type WebViewNavigation, type WebViewProps } from "react-native-webview";
-import type { Me } from "@cloudagents/protocol";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Modal } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { WebView, type WebViewProps } from "react-native-webview";
+import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
 import { useAuth } from "@/auth/AuthContext";
 import { KestrelMark } from "@/components/KestrelMark";
 import { Alert } from "@/components/ui/Alert";
@@ -22,19 +14,16 @@ import { colors, fonts, radius } from "@/theme";
 // The WebView class's generic props are not inferred through `React.ComponentType`; the props we pass are the public `WebViewProps`.
 const SafeWebView = WebView as unknown as React.ComponentType<WebViewProps>;
 
-interface AuthMessage {
-  type: "AUTH_SUCCESS";
-  user: Me;
-  cookies?: string;
-}
-
-function isAuthMessage(value: unknown): value is AuthMessage {
-  return typeof value === "object" && value !== null && "type" in value && value.type === "AUTH_SUCCESS" && "user" in value && Boolean(value.user);
-}
+/** Where the control plane's /auth/mobile-callback page sends the session id. */
+const CALLBACK_PREFIX = "kestrel://auth-callback";
+/**
+ * The WebView must let `kestrel://` through its origin whitelist: otherwise it hands the URL to Linking before our
+ * should-start callback runs, and Expo Go cannot open an app-specific scheme, so the session would be lost.
+ */
+const ORIGIN_WHITELIST = ["http://*", "https://*", "kestrel://*"];
 
 export function LoginScreen() {
-  const { serverUrl, setServerUrl, setSessionCookie, setUser, loading, error } =
-    useAuth();
+  const { serverUrl, setServerUrl, setSessionCookie, loading, error } = useAuth();
   const [url, setUrl] = useState(serverUrl ?? "https://app.kestrel-agent.com");
   const [showWebView, setShowWebView] = useState(false);
   const [showTokenInput, setShowTokenInput] = useState(false);
@@ -47,66 +36,18 @@ export function LoginScreen() {
   };
 
   const currentServerUrl = serverUrl || url.trim() || "https://app.kestrel-agent.com";
-  // Attempt mobile-callback first, falling back to /
   const loginUrl = `${currentServerUrl}/auth/github/login?return=/auth/mobile-callback`;
 
-  const onNavigationStateChange = (navState: WebViewNavigation) => {
-    const currentUrl: string = navState.url;
-
-    // Check for custom protocol redirect: kestrel://auth-callback?session=...
-    if (currentUrl.startsWith("kestrel://") || currentUrl.includes("auth-callback")) {
-      try {
-        const parsed = new URL(currentUrl.replace("kestrel://", "http://placeholder/"));
-        const session = parsed.searchParams.get("session");
-        if (session) {
-          setShowWebView(false);
-          void setSessionCookie(session);
-          return;
-        }
-      } catch {
-        // Fall through
-      }
-    }
-  };
-
-  const injectedJavaScript = `
-    (function() {
-      // Check if user is on the main app page or api/me after auth
-      if (window.location.pathname === '/' || window.location.pathname.startsWith('/api/me') || window.location.pathname.startsWith('/auth/mobile-callback')) {
-        fetch('/api/me', { credentials: 'include' })
-          .then(function(res) { return res.ok ? res.json() : null; })
-          .then(function(user) {
-            if (user && user.login) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'AUTH_SUCCESS',
-                user: user,
-                cookies: document.cookie
-              }));
-            }
-          })
-          .catch(function(e) {});
-      }
-    })();
-    true;
-  `;
-
-  const onMessage = (event: WebViewMessageEvent) => {
-    try {
-      const data: unknown = JSON.parse(event.nativeEvent.data);
-      if (isAuthMessage(data)) {
-        setShowWebView(false);
-        setUser(data.user);
-        // If cookie has session=..., save it
-        if (data.cookies) {
-          const match = /session=([^;]+)/.exec(data.cookies);
-          if (match && match[1]) {
-            void setSessionCookie(match[1]);
-          }
-        }
-      }
-    } catch {
-      // Ignore
-    }
+  /**
+   * Catches the callback redirect inside the WebView: the session id comes from the URL, since the session cookie is
+   * HttpOnly and unreadable from page JavaScript. The redirect itself is never loaded.
+   */
+  const onShouldStartLoadWithRequest = (request: ShouldStartLoadRequest): boolean => {
+    if (!request.url.startsWith(CALLBACK_PREFIX)) return true;
+    const session = new URL(request.url.replace("kestrel://", "http://callback/")).searchParams.get("session");
+    setShowWebView(false);
+    if (session) void setSessionCookie(session);
+    return false;
   };
 
   const handleManualTokenSubmit = () => {
@@ -118,7 +59,7 @@ export function LoginScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      behavior="padding"
     >
       <ScrollView
         contentContainerStyle={styles.content}
@@ -213,9 +154,8 @@ export function LoginScreen() {
           <SafeWebView
             source={{ uri: loginUrl }}
             style={styles.webview}
-            onNavigationStateChange={onNavigationStateChange}
-            injectedJavaScript={injectedJavaScript}
-            onMessage={onMessage}
+            originWhitelist={ORIGIN_WHITELIST}
+            onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             javaScriptEnabled

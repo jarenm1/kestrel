@@ -1,5 +1,6 @@
 import React, { useRef } from "react";
-import { KeyboardAvoidingView, Platform, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
 import { keys, storeTask } from "@/api/queries";
@@ -37,7 +38,7 @@ export function NewThreadScreen() {
   });
 
   return (
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView style={styles.flex} behavior="padding">
       <View style={styles.body}>
         <Text style={styles.heading}>What should we work on?</Text>
       </View>

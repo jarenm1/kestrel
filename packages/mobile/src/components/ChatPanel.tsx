@@ -1,15 +1,6 @@
 import React, { type ComponentRef, Fragment, type ReactNode, useMemo, useRef } from "react";
-import {
-  Image,
-  KeyboardAvoidingView,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { Image, type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
 import { createQueries, keys, upsert } from "@/api/queries";
@@ -160,7 +151,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
   }
 
   return (
-    <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView style={styles.flex} behavior="padding">
       <ScrollView
         ref={scrollRef}
         style={styles.flex}

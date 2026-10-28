@@ -6,6 +6,7 @@ Run your own agent harness in a sandboxed box with a live desktop.
 - `packages/control`: the Cloudflare Worker control plane: GitHub sign-in, connections, and a relay to the agent box. Serves the built `packages/app` as static assets. Deployed as Worker `kestrel` on https://app.kestrel-agent.com, https://kestrel-agent.com and `www.` (and its workers.dev URL, which boxes dial). Sign-in and the API only answer on the app host; the public hosts redirect them there.
 - `packages/server`: the agent box. Runs harnesses inside bubblewrap, serves the desktop and MCP, and dials out to the control plane.
 - `packages/protocol`: shared schemas, including the relay frames (`relay.ts`) and control-plane API (`control.ts`).
+- `packages/mobile`: the Expo app. Start Metro with `bun run dev:mobile` and open it in Expo Go (SDK 58). Chat inputs use `react-native-keyboard-controller` with a root `KeyboardProvider` so the composer follows the keyboard on both platforms. GitHub sign-in captures the `kestrel://auth-callback` redirect inside its WebView; Expo Go does not need to register that custom URL scheme.
 
 ## Local development
 
