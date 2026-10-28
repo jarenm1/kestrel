@@ -46,14 +46,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output }: Props)
     onSuccess: (res) => {
       queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) => upsert(list, res.message))
       queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, res.run))
-      setText("")
     },
   })
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const body = text.trim()
-    if (body) send.mutate(body)
+    if (body) send.mutate(body, { onSuccess: () => setText("") })
   }
 
   function onComposerKey(e: KeyboardEvent<HTMLTextAreaElement>) {
