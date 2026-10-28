@@ -1,6 +1,7 @@
+import { useRef } from "react"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
-import type { SendMessageBody } from "@cloudagents/protocol"
+import type { SendMessageBody, Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, storeTask } from "@/api/queries"
 import { Composer } from "@/components/Composer"
@@ -13,11 +14,14 @@ import { threadTitle } from "@/util"
 export function NewThreadPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  // The thread created by an earlier attempt; a retry after a failed send reuses it instead of creating another.
+  const created = useRef<Task | null>(null)
 
   // TODO: let the agent name the thread from the conversation instead of the first line of the prompt.
   const start = useMutation({
     mutationFn: async (body: SendMessageBody) => {
-      const task = await api.createTask({ title: threadTitle(body.text) })
+      const task = created.current ?? (await api.createTask({ title: threadTitle(body.text) }))
+      created.current = task
       // The thread exists from here on, even if the message below fails.
       storeTask(queryClient, task)
       return { task, sent: await api.sendMessage(task.id, body) }
