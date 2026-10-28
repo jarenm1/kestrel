@@ -15,7 +15,7 @@ import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries, keys } from "@/api/queries";
 import { StatusBadge } from "./StatusBadge";
 import { colors, radius, spacing } from "@/theme";
-import type { DesktopStatus } from "@/api/types";
+import type { DesktopStatus } from "@cloudagents/protocol";
 
 /**
  * Desktop viewer for mobile — renders the desktop stream in a WebView.

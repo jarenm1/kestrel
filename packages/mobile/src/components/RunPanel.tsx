@@ -1,7 +1,7 @@
 import React from "react";
 import { View, Text, StyleSheet, FlatList, Pressable } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Run } from "@/api/types";
+import type { Run } from "@cloudagents/protocol";
 import { useApiClient } from "@/hooks/useApiClient";
 import { keys, upsert } from "@/api/queries";
 import { StatusBadge } from "./StatusBadge";

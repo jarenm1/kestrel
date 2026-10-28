@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import * as SecureStore from "expo-secure-store";
-import type { Me } from "@/api/types";
+import type { Me } from "@cloudagents/protocol";
 
 const SERVER_URL_KEY = "kestrel_server_url";
 const SESSION_COOKIE_KEY = "kestrel_session";

@@ -1,218 +1,135 @@
 import React, { useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  StyleSheet,
-  ScrollView,
-  Pressable,
-  ActivityIndicator,
-  Alert,
-} from "react-native";
+import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useApiClient } from "@/hooks/useApiClient";
+import { Schema } from "effect";
+import { CliProvider, type Connection } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
+import { useApiClient } from "@/hooks/useApiClient";
+import { useNavigation } from "@/nav/navigation";
+import { ScreenHeader } from "@/components/ScreenHeader";
+import {
+  ActionButton,
+  ConnectionRowFrame,
+  ErrorLine,
+  connectionStyles,
+} from "@/components/ConnectionsShared";
+import { ConnectionsCliRow } from "@/components/ConnectionsCliRow";
 import { colors, radius, spacing } from "@/theme";
-import type { Connection } from "@/api/types";
 
-interface Props {
-  onBack: () => void;
-}
+/** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
+const MIN_API_KEY_LENGTH = 8;
 
-export function ConnectionsScreen({ onBack }: Props) {
+export function ConnectionsScreen() {
   const { api } = useApiClient();
-  const queryClient = useQueryClient();
+  const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Pressable onPress={onBack} style={styles.backBtn}>
-          <Text style={styles.backText}>← Back</Text>
-        </Pressable>
-        <Text style={styles.headerTitle}>API Keys & Connections</Text>
-      </View>
-
+    <View style={styles.screen}>
+      <ScreenHeader title="Connections" onBack={() => navigation.back()} />
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.sectionSubtitle}>
-          Configure LLM API keys and model credentials for your agents.
-        </Text>
-
-        {connections.isPending && (
-          <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} />
-        )}
-
-        {connections.error && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>
-              {connections.error instanceof Error
-                ? connections.error.message
-                : "Failed to load connections"}
-            </Text>
+        <Text style={styles.subtitle}>Accounts and keys Kestrel uses on your behalf.</Text>
+        {connections.isPending ? <ActivityIndicator color={colors.primary} /> : null}
+        {connections.error ? <ErrorLine error={connections.error} /> : null}
+        {connections.data ? (
+          <View style={styles.card}>
+            {connections.data.map((connection) => (
+              <ConnectionRow key={connection.provider} connection={connection} />
+            ))}
           </View>
-        )}
-
-        {connections.data?.map((conn) => (
-          <ConnectionCard key={conn.provider} connection={conn} />
-        ))}
+        ) : null}
       </ScrollView>
     </View>
   );
 }
 
-function ConnectionCard({ connection }: { connection: Connection }) {
+function ConnectionRow({ connection }: { connection: Connection }) {
+  if (connection.kind === "oauth") return <OAuthRow connection={connection} />;
+  if (connection.kind === "cli" && Schema.is(CliProvider)(connection.provider)) {
+    return <ConnectionsCliRow connection={connection} provider={connection.provider} />;
+  }
+  return <ApiKeyRow connection={connection} />;
+}
+
+function ApiKeyRow({ connection }: { connection: Connection }) {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
-  const [keyInput, setKeyInput] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const trimmed = apiKey.trim();
 
-  const refresh = () =>
-    queryClient.invalidateQueries({ queryKey: keys.connections });
-
-  const saveMutation = useMutation({
-    mutationFn: (apiKey: string) =>
-      api.putApiKey(connection.provider, { apiKey }),
+  const save = useMutation({
+    mutationFn: (key: string) => api.putApiKey(connection.provider, { apiKey: key }),
     onSuccess: () => {
-      setKeyInput("");
-      refresh();
-      Alert.alert("Success", `${connection.label} key saved.`);
-    },
-    onError: (err: any) => {
-      Alert.alert("Error", err?.message ?? "Failed to save key");
+      setApiKey("");
+      void queryClient.invalidateQueries({ queryKey: keys.connections });
     },
   });
-
-  const deleteMutation = useMutation({
+  const disconnect = useMutation({
     mutationFn: () => api.deleteConnection(connection.provider),
     onSuccess: () => {
-      refresh();
-      Alert.alert("Disconnected", `${connection.label} disconnected.`);
+      void queryClient.invalidateQueries({ queryKey: keys.connections });
     },
   });
 
-  const busy = saveMutation.isPending || deleteMutation.isPending;
+  const busy = save.isPending || disconnect.isPending;
+  const error = save.error ?? disconnect.error;
 
   return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <View style={styles.providerInfo}>
-          <Text style={styles.providerLabel}>{connection.label}</Text>
-          {connection.account ? (
-            <Text style={styles.accountText}>{connection.account}</Text>
-          ) : null}
-        </View>
-        <View
-          style={[
-            styles.statusPill,
-            {
-              backgroundColor: connection.connected
-                ? colors.success + "22"
-                : colors.muted,
-            },
-          ]}
-        >
-          <Text
-            style={[
-              styles.statusText,
-              {
-                color: connection.connected
-                  ? colors.success
-                  : colors.mutedForeground,
-              },
-            ]}
-          >
-            {connection.connected ? "Connected" : "Not connected"}
-          </Text>
-        </View>
-      </View>
-
-      {connection.kind === "apikey" && (
-        <View style={styles.inputRow}>
-          <TextInput
-            style={styles.input}
-            value={keyInput}
-            onChangeText={setKeyInput}
-            placeholder={
-              connection.connected ? "Replace API key…" : "Enter API key…"
-            }
-            placeholderTextColor={colors.mutedForeground}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
+    <ConnectionRowFrame connection={connection} error={error}>
+      <TextInput
+        style={connectionStyles.input}
+        value={apiKey}
+        onChangeText={setApiKey}
+        placeholder={connection.connected ? "Replace API key" : "API key"}
+        placeholderTextColor={colors.mutedForeground}
+        secureTextEntry
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
+      <View style={connectionStyles.actions}>
+        <ActionButton
+          label="Save"
+          disabled={busy || trimmed.length < MIN_API_KEY_LENGTH}
+          onPress={() => save.mutate(trimmed)}
+        />
+        {connection.connected ? (
+          <ActionButton
+            label="Disconnect"
+            tone="secondary"
+            disabled={busy}
+            onPress={() => disconnect.mutate()}
           />
-          <Pressable
-            style={[
-              styles.btn,
-              styles.saveBtn,
-              (busy || keyInput.trim().length < 8) && styles.btnDisabled,
-            ]}
-            onPress={() => saveMutation.mutate(keyInput.trim())}
-            disabled={busy || keyInput.trim().length < 8}
-          >
-            <Text style={styles.saveBtnText}>
-              {saveMutation.isPending ? "…" : "Save"}
-            </Text>
-          </Pressable>
-          {connection.connected && (
-            <Pressable
-              style={[styles.btn, styles.disconnectBtn, busy && styles.btnDisabled]}
-              onPress={() => deleteMutation.mutate()}
-              disabled={busy}
-            >
-              <Text style={styles.disconnectBtnText}>Remove</Text>
-            </Pressable>
-          )}
-        </View>
-      )}
-    </View>
+        ) : null}
+      </View>
+    </ConnectionRowFrame>
+  );
+}
+
+function OAuthRow({ connection }: { connection: Connection }) {
+  // OAuth needs the signed-in session cookie, which the app cannot hand to an external browser.
+  return (
+    <ConnectionRowFrame connection={connection}>
+      <Text style={connectionStyles.muted}>
+        {connection.available
+          ? `${connection.connected ? "Reconnect" : "Connect"} ${connection.label} on the web app`
+          : "needs server config"}
+      </Text>
+    </ConnectionRowFrame>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
     backgroundColor: colors.background,
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.md,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    backgroundColor: colors.card,
-  },
-  backBtn: {
-    paddingVertical: 4,
-    paddingRight: spacing.sm,
-  },
-  backText: {
-    color: colors.primary,
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  headerTitle: {
-    color: colors.foreground,
-    fontSize: 16,
-    fontWeight: "600",
   },
   content: {
     padding: spacing.lg,
     gap: spacing.md,
   },
-  sectionSubtitle: {
+  subtitle: {
     color: colors.mutedForeground,
-    fontSize: 13,
-    marginBottom: spacing.xs,
-  },
-  errorBox: {
-    backgroundColor: colors.destructive + "18",
-    padding: spacing.md,
-    borderRadius: radius.md,
-  },
-  errorText: {
-    color: colors.destructive,
     fontSize: 13,
   },
   card: {
@@ -220,78 +137,6 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.lg,
-    gap: spacing.md,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  providerInfo: {
-    gap: 2,
-  },
-  providerLabel: {
-    color: colors.foreground,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  accountText: {
-    color: colors.mutedForeground,
-    fontSize: 12,
-    fontFamily: "monospace",
-  },
-  statusPill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: colors.secondary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    color: colors.foreground,
-    fontSize: 13,
-  },
-  btn: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    borderRadius: radius.md,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  saveBtn: {
-    backgroundColor: colors.primary,
-  },
-  saveBtnText: {
-    color: colors.primaryForeground,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  disconnectBtn: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: "transparent",
-  },
-  disconnectBtnText: {
-    color: colors.destructive,
-    fontSize: 13,
-  },
-  btnDisabled: {
-    opacity: 0.4,
+    overflow: "hidden",
   },
 });
-

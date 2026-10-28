@@ -1,8 +1,10 @@
-import type { ServerEvent } from "./types";
-import { Paths } from "./types";
+import { Option, Schema } from "effect";
+import { Paths, ServerEvent } from "@cloudagents/protocol";
+
+const decodeEvent = Schema.decodeUnknownOption(ServerEvent);
 
 /**
- * Opens a WebSocket connection to the task's event stream.
+ * Opens a WebSocket connection to the task's event stream. Frames that do not decode as a ServerEvent are ignored.
  * Returns a cleanup function that closes the socket.
  */
 export function openTaskEvents(
@@ -21,12 +23,14 @@ export function openTaskEvents(
 
   socket.onmessage = (msg) => {
     if (typeof msg.data !== "string") return;
+    let parsed: unknown;
     try {
-      const event: ServerEvent = JSON.parse(msg.data);
-      if (event && event._tag) handlers.onEvent(event);
+      parsed = JSON.parse(msg.data);
     } catch {
-      // Ignore malformed messages
+      return;
     }
+    const event = decodeEvent(parsed);
+    if (Option.isSome(event)) handlers.onEvent(event.value);
   };
 
   socket.onclose = handlers.onClose;
@@ -36,4 +40,3 @@ export function openTaskEvents(
     socket.close();
   };
 }
-
