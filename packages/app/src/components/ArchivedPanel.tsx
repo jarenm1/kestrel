@@ -1,15 +1,17 @@
+import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
-import type { Task } from "@cloudagents/protocol"
+import { queries } from "@/api/queries"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { errorText, formatAgo } from "@/util"
+import { errorText, formatAgo, repoShortName } from "@/util"
 
-/** A repo's archived threads, most recently archived first. Each opens read-only; Unarchive brings one back. */
-export function ArchivedPanel({ repoId, tasks }: { repoId: string; tasks: readonly Task[] | undefined }) {
-  const { unarchive } = useThreadArchive(repoId)
-  const archived = (tasks ?? [])
+/** The user's archived threads, most recently archived first. Each opens read-only; Unarchive brings one back. */
+export function ArchivedPanel() {
+  const tasks = useQuery(queries.tasks())
+  const { unarchive } = useThreadArchive()
+  const archived = (tasks.data ?? [])
     .filter((task) => task.archivedAt !== undefined)
     .sort((a, b) => (b.archivedAt ?? "").localeCompare(a.archivedAt ?? ""))
 
@@ -18,11 +20,12 @@ export function ArchivedPanel({ repoId, tasks }: { repoId: string; tasks: readon
       <div>
         <h2 className="text-lg font-semibold tracking-tight">Archived threads</h2>
         <p className="text-sm text-muted-foreground">
-          Archived threads keep their history and branch. Unarchive one to continue it.
+          Archived threads keep their history and checkouts. Unarchive one to continue it.
         </p>
       </div>
+      {tasks.error && <Alert>{errorText(tasks.error)}</Alert>}
       {unarchive.error && <Alert>{errorText(unarchive.error)}</Alert>}
-      {tasks && archived.length === 0 && (
+      {tasks.data && archived.length === 0 && (
         <Card>
           <CardContent className="items-center py-10 text-center text-muted-foreground">
             <p className="font-medium text-foreground">No archived threads.</p>
@@ -33,11 +36,13 @@ export function ArchivedPanel({ repoId, tasks }: { repoId: string; tasks: readon
         <Card key={task.id}>
           <CardContent className="flex items-center gap-4">
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <Link to={`/repos/${repoId}/threads/${task.id}`} className="truncate font-medium hover:underline">
+              <Link to={`/threads/${task.id}`} className="truncate font-medium hover:underline">
                 {task.title}
               </Link>
               <span className="truncate text-xs text-muted-foreground">
-                {task.branch}
+                {task.checkouts.length > 0
+                  ? task.checkouts.map((checkout) => repoShortName(checkout.repo)).join(", ")
+                  : "No repository"}
                 {task.archivedAt && <> · archived {formatAgo(task.archivedAt, Date.now())}</>}
               </span>
             </div>

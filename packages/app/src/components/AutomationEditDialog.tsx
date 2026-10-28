@@ -86,7 +86,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
     <>
       <DialogTitle>Edit automation</DialogTitle>
       <DialogDescription>
-        {trigger._tag === "schedule" ? "Runs on a schedule." : "Runs on pull request events in this project."}
+        {trigger._tag === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
       </DialogDescription>
       <form
         className="flex flex-col gap-4"

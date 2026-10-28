@@ -6,7 +6,7 @@ import { errorText } from "@/util"
 
 /** Stands in for the composer on an archived thread: its history stays readable until it is unarchived. */
 export function ArchivedNotice({ task }: { task: Task }) {
-  const { unarchive } = useThreadArchive(task.repoId)
+  const { unarchive } = useThreadArchive()
   return (
     <div className="flex w-full max-w-3xl flex-col gap-2 rounded-xl bg-background/60 p-4 shadow-well sm:flex-row sm:items-center">
       <p className="flex-1 text-sm text-muted-foreground">This thread is archived. Unarchive it to send messages again.</p>

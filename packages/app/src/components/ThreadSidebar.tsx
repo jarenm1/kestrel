@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { cn } from "@/lib/utils"
-import { errorText, formatAgo } from "@/util"
+import { errorText, formatAgo, repoShortName } from "@/util"
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   idle: "Idle",
@@ -81,19 +81,16 @@ function tabClass({ isActive }: { isActive: boolean }) {
 }
 
 interface Props {
-  repoId: string
-  repoName: string | undefined
-  repoUrl: string | undefined
   tasks: readonly Task[] | undefined
   error: unknown
 }
 
-/** Threads (tasks) as vertical tabs, most recent first; collapses to an icon rail. */
-export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props) {
+/** The user's threads (tasks) as vertical tabs, most recent first; collapses to an icon rail. */
+export function ThreadSidebar({ tasks, error }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
-  const { archive } = useThreadArchive(repoId)
+  const { archive } = useThreadArchive()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (collapsed) localStorage.setItem(COLLAPSED_KEY, "1")
@@ -108,9 +105,9 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
-      // The open thread leaves the list; go back to the repo's empty chat.
+      // The open thread leaves the list; go back to the empty chat.
       onSuccess: () => {
-        if (task.id === openTaskId) navigate(`/repos/${repoId}`)
+        if (task.id === openTaskId) navigate("/")
       },
     })
   }
@@ -129,7 +126,7 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
           <PanelLeftOpen />
         </Button>
         <NavLink
-          to={`/repos/${repoId}`}
+          to="/"
           end
           aria-label="New thread"
           title="New thread"
@@ -138,7 +135,7 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
           <SquarePen className="size-4" />
         </NavLink>
         <NavLink
-          to={`/repos/${repoId}/automations`}
+          to="/automations"
           aria-label="Automations"
           title="Automations"
           className={(s) => cn(tabClass(s), "justify-center py-2")}
@@ -146,7 +143,7 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
           <Workflow className="size-4" />
         </NavLink>
         <NavLink
-          to={`/repos/${repoId}/archived`}
+          to="/archived"
           aria-label="Archived"
           title="Archived"
           className={(s) => cn(tabClass(s), "justify-center py-2")}
@@ -156,7 +153,7 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
         {sorted.map((task) => (
           <NavLink
             key={task.id}
-            to={`/repos/${repoId}/threads/${task.id}`}
+            to={`/threads/${task.id}`}
             aria-label={task.title}
             title={`${task.title}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
             className={(s) => cn(tabClass(s), "justify-center py-2")}
@@ -171,9 +168,7 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
   return (
     <nav aria-label="Threads" className="flex w-64 shrink-0 flex-col gap-0.5 overflow-auto pb-3 pl-3">
       <div className="flex items-center gap-1 pb-2 pl-2.5">
-        <span className="min-w-0 flex-1 truncate font-medium" title={repoUrl}>
-          {repoName ?? "Repository"}
-        </span>
+        <span className="min-w-0 flex-1 truncate font-medium">Threads</span>
         <Button
           variant="ghost"
           size="icon"
@@ -185,28 +180,29 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
           <PanelLeftClose />
         </Button>
       </div>
-      <NavLink to={`/repos/${repoId}`} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+      <NavLink to="/" end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
         <SquarePen className="size-4 shrink-0" />
         New thread
       </NavLink>
-      <NavLink to={`/repos/${repoId}/automations`} className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+      <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
         <Workflow className="size-4 shrink-0" />
         Automations
       </NavLink>
-      <NavLink to={`/repos/${repoId}/archived`} className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+      <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
         <Archive className="size-4 shrink-0" />
         Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
       </NavLink>
       {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
       {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
-      {sorted.length > 0 && <div className="px-2.5 pt-4 pb-1 text-xs text-muted-foreground">Threads</div>}
       {sorted.map((task) => {
         const isOpen = task.id === openTaskId
         return (
-          <div key={task.id} className="group/thread relative flex min-w-0">
+          <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
             <NavLink
-              to={`/repos/${repoId}/threads/${task.id}`}
-              title={`${task.title}\n${task.branch}`}
+              to={`/threads/${task.id}`}
+              title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
+                "\n",
+              )}
               className={(s) => cn(tabClass(s), "flex-1 items-start py-2 pr-9 pl-2.5")}
             >
               <StatusIcon status={task.status} className="mt-0.5" />
@@ -215,6 +211,20 @@ export function ThreadSidebar({ repoId, repoName, repoUrl, tasks, error }: Props
                 <span className="text-xs text-muted-foreground">
                   {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
                 </span>
+                {task.checkouts.length > 0 && (
+                  <span className="flex flex-wrap gap-1 pt-0.5">
+                    {task.checkouts.map((checkout) => (
+                      <span
+                        key={checkout.id}
+                        title={checkout.repo}
+                        className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
+                      >
+                        {repoShortName(checkout.repo)}
+                        {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </span>
             </NavLink>
             <Button
