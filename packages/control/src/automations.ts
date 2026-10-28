@@ -201,6 +201,10 @@ export const handleAutomations = async (request: Request, env: Env, login: strin
     return runs === null ? notFound() : json(runs)
   }
   if (suffix === "/trigger" && method === "POST") return triggerAutomation(request, env, login, id)
+  if (suffix === undefined && method === "GET") {
+    const automation = await hub(env).automation(login, id)
+    return automation === null ? notFound() : json(automation)
+  }
   if (suffix === undefined && method === "PATCH") return updateAutomation(request, env, login, url, id)
   if (suffix === undefined && method === "DELETE") return deleteAutomation(env, login, id)
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
