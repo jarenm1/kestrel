@@ -46,7 +46,7 @@ const CLOSE_INTERNAL = 1011
 
 /**
  * A viewer's lag is how long its oldest unacked frame has been on the way. Over FLOW_LAG_HIGH_MS the server withholds
- * deltas; a withheld viewer resumes at the next keyframe once its lag is under FLOW_LAG_LOW_MS (or nothing is unacked).
+ * deltas. A withheld viewer resumes from the cached GOP once its lag is under FLOW_LAG_LOW_MS (or nothing is unacked).
  * A join burst is fine as long as the viewer acks it promptly: only a viewer that stays behind is throttled.
  */
 export const FLOW_LAG_HIGH_MS = 1000
@@ -60,8 +60,9 @@ const FLOW_TRACK_LIMIT = 1024
 /**
  * Per-viewer flow control for desktop media. The viewer acks how many binary frames it has received; the server records
  * when each frame was sent. While the oldest unacked frame is over FLOW_LAG_HIGH_MS old the server withholds deltas,
- * which a decoder cannot use without their predecessors anyway, and resumes at a keyframe once that frame is under
- * FLOW_LAG_LOW_MS old. Init segments always go out. A viewer that never acks is never throttled.
+ * which a decoder cannot use without their predecessors anyway. A withheld viewer that catches up (lag under
+ * FLOW_LAG_LOW_MS, or nothing unacked) is resynced from the cached GOP, since a static desktop may produce no keyframe
+ * for a long time; otherwise it resumes at the next keyframe. Init segments always go out. A viewer that never acks is never throttled.
  */
 export class MediaFlow {
   private sent = 0
@@ -76,9 +77,18 @@ export class MediaFlow {
     private readonly now: () => number = () => performance.now(),
   ) {}
 
-  ack(frames: number): void {
+  /** Records the viewer's acks. Returns true when a withheld viewer is back under FLOW_LAG_LOW_MS and should be resynced. */
+  ack(frames: number): boolean {
     this.acked = Math.min(Math.max(this.acked ?? 0, frames), this.sent)
     while (this.inFlight[0] !== undefined && this.inFlight[0].index < this.acked) this.inFlight.shift()
+    return this.withholding && this.lag() < FLOW_LAG_LOW_MS
+  }
+
+  /** Ends withholding once the viewer has been resynced from the cached GOP. */
+  resume(): void {
+    this.withholding = false
+    this.debug(`desktop viewer resynced from the cached GOP after skipping ${this.skipped} frames`)
+    this.skipped = 0
   }
 
   /** How long the oldest unacked frame has been on the way; 0 when nothing is unacked. */
@@ -144,6 +154,9 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
 
     const flow = new MediaFlow((message) => fork(Effect.logDebug(message)))
     const decodeMessage = Schema.decodeUnknown(Schema.parseJson(Schema.Union(DesktopAck, DesktopInput)))
+    const send = (chunk: Uint8Array, kind: MediaKind): void => {
+      if (flow.offer(kind)) socket.sendBinary(chunk)
+    }
     const handleMessage = (raw: string) =>
       Effect.gen(function* () {
         const message = yield* decodeMessage(raw).pipe(Effect.either)
@@ -152,7 +165,13 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           return
         }
         if (message.right._tag === "stream.ack") {
-          flow.ack(message.right.frames)
+          if (!flow.ack(message.right.frames)) return
+          const gop = yield* desktop.cachedGop(taskId).pipe(
+            Effect.catchAll((e) => Effect.logWarning(`desktop resync failed: ${e.message}`).pipe(Effect.as(null))),
+          )
+          if (gop === null) return
+          flow.resume()
+          for (const [i, fragment] of gop.entries()) send(fragment, i === 0 ? "key" : "delta")
           return
         }
         yield* desktop
@@ -163,9 +182,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     yield* Effect.acquireUseRelease(
       desktop.subscribe(taskId, {
         onStatus: (status) => socket.sendText(JSON.stringify(status)),
-        onMedia: (chunk, kind) => {
-          if (flow.offer(kind)) socket.sendBinary(chunk)
-        },
+        onMedia: send,
       }),
       () =>
         Effect.gen(function* () {

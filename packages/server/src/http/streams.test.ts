@@ -86,6 +86,22 @@ describe("MediaFlow", () => {
     expect(logs.some((m) => m.includes("resumed at a keyframe"))).toBe(true)
   })
 
+  test("a withheld viewer that catches up is resynced from the cached GOP instead of waiting for a keyframe", () => {
+    const clock = manualClock()
+    const flow = new MediaFlow(quiet, clock.now)
+    flow.ack(0)
+    expect(flow.offer("key")).toBe(true)
+    for (let i = 0; i < 10; i++) expect(flow.offer("delta")).toBe(true)
+    clock.advance(FLOW_LAG_HIGH_MS + 1)
+    // Nothing acked and the oldest frame is past the high-water mark: the next delta is withheld.
+    expect(flow.offer("delta")).toBe(false)
+    // Once the viewer has everything sent, the ack reports it can be resynced from the GOP.
+    expect(flow.ack(11)).toBe(true)
+    flow.resume()
+    expect(flow.offer("key")).toBe(true)
+    expect(flow.offer("delta")).toBe(true)
+  })
+
   test("clamps acks to what was sent", () => {
     const clock = manualClock()
     const flow = new MediaFlow(quiet, clock.now)

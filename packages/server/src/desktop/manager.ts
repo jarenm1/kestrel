@@ -74,6 +74,8 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly processes: (taskId: string) => Effect.Effect<ReadonlyArray<DesktopApp>, DesktopError>
     /** Terminates an app (SIGTERM, then SIGKILL) and returns its final state. */
     readonly kill: (taskId: string, id: string) => Effect.Effect<DesktopApp, DesktopError>
+    /** The live encoder's cached GOP, keyframe first, for resyncing a viewer that fell behind; null when not cached. */
+    readonly cachedGop: (taskId: string) => Effect.Effect<ReadonlyArray<Uint8Array> | null, DesktopError>
     readonly subscribe: (taskId: string, sink: DesktopSink) => Effect.Effect<Effect.Effect<void>, DesktopError>
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
     readonly stopAll: () => Effect.Effect<void>
@@ -92,10 +94,13 @@ const COMMAND_TIMEOUT_MS = 15_000
 /** Output kept per launched app; older text is dropped. */
 const OUTPUT_TAIL_CHARS = 32 * 1024
 /**
- * Frames per keyframe: 4 s at 60 fps. On a static desktop the IDR frames are nearly all of the bitrate
- * (NVENC: ~600 KB IDR vs ~0.1 KB P-frame at 1080p), so GOP 240 halves idle bandwidth against GOP 120.
+ * Keyframe clock: an IDR at least every KEYFRAME_INTERVAL_S of capture time. A static desktop encodes nothing, so the
+ * interval is what bounds how long a joiner waits for a keyframe and how large the cached GOP can get. On a static
+ * desktop the IDR is nearly all of the bitrate (NVENC: ~600 KB IDR vs ~0.1 KB P-frame at 1080p).
  * Late joiners don't wait for it: they get the cached GOP.
  */
+const KEYFRAME_INTERVAL_S = 4
+/** Frame-count backstop for the encoder's GOP; at 60 fps it equals KEYFRAME_INTERVAL_S, so the clock normally fires first. */
 const GOP = 240
 /** Cap on the cached current GOP replayed to late joiners. Past it, joiners wait for the next keyframe. */
 const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
@@ -315,8 +320,14 @@ const ffmpegArgs = (display: string, kind: EncoderKind): string[] => [
   "-i",
   display,
   ...ENCODER_ARGS[kind],
-  "-r",
-  String(FPS),
+  // Identical frames are dropped before the encoder. The first frame always passes (it is an IDR); any changed byte passes.
+  "-vf",
+  "select=eq(n\\,0)+gt(scene\\,0)",
+  "-force_key_frames",
+  `expr:gte(t-prev_forced_t,${KEYFRAME_INTERVAL_S})`,
+  // Keep the capture clock: frames dropped by select leave gaps in the timeline instead of being duplicated.
+  "-fps_mode",
+  "passthrough",
   "-an",
   "-f",
   "flv",
@@ -903,6 +914,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           return appView(app)
         }),
 
+      cachedGop: (taskId) => Effect.map(lookup(taskId), (s) => (s.gop === null ? null : [...s.gop])),
       subscribe: (taskId, sink) =>
         Effect.gen(function* () {
           const s = yield* lookup(taskId)
