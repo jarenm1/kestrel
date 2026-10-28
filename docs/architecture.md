@@ -12,7 +12,7 @@ flowchart TB
     SITEW["Worker kestrel-site<br/>static assets"]
     subgraph CTRL["Worker kestrel: packages/control"]
       AUTH["GitHub OAuth, sessions, allow-list<br/>auth.ts, providers.ts<br/>👤 Person 4"]
-      API["Control API<br/>/api/me, /connections, /github/repos, /box<br/>api.ts<br/>👤 Person 4"]
+      API["Control API<br/>/api/me, /connections, /github/repos, /box, /api/automations<br/>api.ts, automations.ts<br/>👤 Person 4"]
       HUB["Hub Durable Object<br/>users, sessions, secrets, relay<br/>hub.ts<br/>👤 Person 4 + Jaren"]
     end
   end
@@ -64,6 +64,7 @@ flowchart TB
 - The browser only talks to Cloudflare. `kestrel-agent.com` is the static marketing site; `app.kestrel-agent.com` is the app, served by the same Worker as the API.
 - The Hub Durable Object relays app requests to the box over the WebSocket the box dials out to, so nothing on the box is exposed to the internet.
 - The control plane signs users in; the box decides what they can see. Each project is owned by the user who added it, and the box serves a project and its tasks, runs and desktops only to that user (identity comes from the relay; the box's own port has no user and gets no project data).
+- Automations are user-defined triggers that start a task on the owner's box: a cron schedule in an IANA time zone, or a GitHub `pull_request` event (opened, reopened, ready for review, synchronize, review requested). The Hub stores them, arms one alarm for the next schedule fire, and receives GitHub deliveries at `/webhooks/github` (verified with a per-repo HMAC secret; deduped by delivery id). Each repo has one webhook shared by its automations, created on GitHub with the owner's token when the first GitHub automation is saved. Firing starts a task on the box with `fetch` and, for a PR, the PR head, then sends the automation's prompt.
 - The agent runs inside a bubblewrap sandbox, in a transient systemd scope whose task slice caps memory, CPU and process count, and in the task's own network namespace (pasta): internet yes, host loopback no, except the box port for MCP and the broker. Everything the agent can start (runs, `workspace_exec`, the desktop terminal, `desktop_launch` apps) goes through the same path and shares that namespace. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys. Each run has one token (`CLOUDAGENTS_MCP_TOKEN`): MCP requires it as a bearer header, the broker takes it in its URL, and both refuse it once the run ends; MCP sessions close with the run.
 - GitHub tools (`git_push`, `github_pr_create`, `github_pr_status`, `github_pr_review`) run on the box host, not in the sandbox. The host pushes the task branch to the repo's clone URL with the owner's GitHub token passed only through git's per-process config, and the PR calls use the same token from the host side. Task creation with `fetch` or `pullRequest` fetches the base branch or the pull request head the same way. The token never enters the sandbox environment, tool arguments, tool output, or logs; pushes never force, and base-branch fetches never overwrite local commits (the pull request ref `kestrel/pr-<n>` is force-updated to match GitHub).
 - Dotted WebRTC line: planned direct video path from the box to the browser, replacing today's stream relayed through the Hub.
