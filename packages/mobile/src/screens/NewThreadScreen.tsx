@@ -1,7 +1,7 @@
-import React from "react";
+import React, { useRef } from "react";
 import { KeyboardAvoidingView, Platform, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Message, Run, SendMessageBody } from "@cloudagents/protocol";
+import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
 import { keys, storeTask } from "@/api/queries";
 import { Composer } from "@/components/Composer";
 import { ScreenHeader } from "@/components/ScreenHeader";
@@ -15,10 +15,13 @@ export function NewThreadScreen() {
   const { api } = useApiClient();
   const nav = useNavigation();
   const queryClient = useQueryClient();
+  // The thread created by an earlier attempt; a retry after a failed send reuses it instead of creating another.
+  const created = useRef<Task | null>(null);
 
   const start = useMutation({
     mutationFn: async (body: SendMessageBody) => {
-      const task = await api.createTask({ title: threadTitle(body.text) });
+      const task = created.current ?? (await api.createTask({ title: threadTitle(body.text) }));
+      created.current = task;
       // The thread exists from here on, even if sending the first message fails.
       storeTask(queryClient, task);
       const sent = await api.sendMessage(task.id, body);
