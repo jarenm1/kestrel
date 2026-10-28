@@ -77,7 +77,7 @@ function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
   }
 
   return (
-    <section className="flex min-h-0 flex-col gap-2">
+    <section className="flex shrink-0 flex-col gap-2">
       <div className="flex items-center gap-3 text-xs">
         <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
           <span className="truncate font-medium text-foreground">{checkout.repo}</span>
