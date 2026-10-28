@@ -1,52 +1,36 @@
 import React, { type ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
-import type { Connection, ConnectionKind } from "@cloudagents/protocol";
-import { colors, fonts, radius, spacing } from "@/theme";
-
-const KIND_LABEL: Record<ConnectionKind, string> = {
-  apikey: "API key",
-  oauth: "OAuth",
-  cli: "Subscription",
-};
+import { StyleSheet, Text, View } from "react-native";
+import type { Connection } from "@cloudagents/protocol";
+import { Alert } from "@/components/ui/Alert";
+import { Badge } from "@/components/ui/Badge";
+import { colors, fonts } from "@/theme";
 
 export const connectionStyles = StyleSheet.create({
-  row: {
-    padding: spacing.lg,
-    gap: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
-  },
   body: {
-    gap: spacing.sm,
+    gap: 8,
   },
   muted: {
     color: colors.mutedForeground,
-    fontSize: 13,
+    fontSize: 14,
   },
   hint: {
     color: colors.mutedForeground,
     fontSize: 12,
   },
-  input: {
-    backgroundColor: colors.secondary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    color: colors.foreground,
-    fontSize: 14,
-  },
   actions: {
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",
-    gap: spacing.sm,
+    gap: 8,
+  },
+  /** `w-fit`: a button sized to its label inside the stretching body column. */
+  fit: {
+    alignSelf: "flex-start",
   },
   code: {
     color: colors.foreground,
     fontFamily: fonts.mono,
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: "600",
     letterSpacing: 2,
   },
@@ -58,33 +42,20 @@ interface FrameProps {
   children: ReactNode;
 }
 
-/** One connection: label, kind, connected state and account, then the row's controls and any error. */
+/**
+ * One connection, the web `ConnectionHeader` plus the row's body and error: label, connected badge, account, then controls.
+ * Subscription rows state their account in the body instead, as the web page does.
+ */
 export function ConnectionRowFrame({ connection, error, children }: FrameProps) {
+  const showAccount = connection.connected && connection.account && connection.kind !== "cli";
   return (
-    <View style={connectionStyles.row}>
+    <View style={styles.row}>
       <View style={styles.header}>
-        <View style={styles.titleBlock}>
-          <View style={styles.titleLine}>
-            <Text style={styles.label}>{connection.label}</Text>
-            <Text style={styles.kind}>{KIND_LABEL[connection.kind]}</Text>
-          </View>
-          {connection.account ? <Text style={styles.account}>{connection.account}</Text> : null}
-        </View>
-        <View
-          style={[
-            styles.pill,
-            { backgroundColor: connection.connected ? colors.success + "22" : colors.muted },
-          ]}
-        >
-          <Text
-            style={[
-              styles.pillText,
-              { color: connection.connected ? colors.success : colors.mutedForeground },
-            ]}
-          >
-            {connection.connected ? "Connected" : "Not connected"}
-          </Text>
-        </View>
+        <Text style={styles.label}>{connection.label}</Text>
+        <Badge variant={connection.connected ? "success" : "neutral"}>
+          {connection.connected ? "connected" : "not connected"}
+        </Badge>
+        {showAccount ? <Text style={styles.account}>{connection.account}</Text> : null}
       </View>
       <View style={connectionStyles.body}>{children}</View>
       {error ? <ErrorLine error={error} /> : null}
@@ -94,114 +65,29 @@ export function ConnectionRowFrame({ connection, error, children }: FrameProps) 
 
 /** Visible error text: the `ApiError` message, or the stringified value for anything else. */
 export function ErrorLine({ error }: { error: unknown }) {
-  return (
-    <View style={styles.errorBox}>
-      <Text style={styles.errorText}>{error instanceof Error ? error.message : String(error)}</Text>
-    </View>
-  );
-}
-
-interface ActionButtonProps {
-  label: string;
-  onPress: () => void;
-  disabled?: boolean;
-  tone?: "primary" | "secondary";
-}
-
-export function ActionButton({ label, onPress, disabled = false, tone = "primary" }: ActionButtonProps) {
-  const primary = tone === "primary";
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityState={{ disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={[
-        styles.button,
-        primary ? styles.buttonPrimary : styles.buttonSecondary,
-        disabled && styles.disabled,
-      ]}
-    >
-      <Text style={primary ? styles.buttonTextPrimary : styles.buttonTextSecondary}>{label}</Text>
-    </Pressable>
-  );
+  return <Alert>{error instanceof Error ? error.message : String(error)}</Alert>;
 }
 
 const styles = StyleSheet.create({
+  row: {
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    gap: 10,
+  },
   header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: spacing.sm,
-  },
-  titleBlock: {
-    flex: 1,
-    gap: 2,
-  },
-  titleLine: {
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "center",
-    gap: spacing.sm,
+    gap: 8,
   },
   label: {
     color: colors.foreground,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  kind: {
-    color: colors.mutedForeground,
-    fontSize: 11,
+    fontSize: 14,
+    fontWeight: "700",
   },
   account: {
     color: colors.mutedForeground,
     fontSize: 12,
     fontFamily: fonts.mono,
-  },
-  pill: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  pillText: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  errorBox: {
-    backgroundColor: colors.destructive + "18",
-    padding: spacing.md,
-    borderRadius: radius.md,
-  },
-  errorText: {
-    color: colors.destructive,
-    fontSize: 13,
-  },
-  button: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    borderRadius: radius.md,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  buttonPrimary: {
-    backgroundColor: colors.primary,
-  },
-  buttonSecondary: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.secondary,
-  },
-  buttonTextPrimary: {
-    color: colors.primaryForeground,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  buttonTextSecondary: {
-    color: colors.foreground,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  disabled: {
-    opacity: 0.4,
   },
 });

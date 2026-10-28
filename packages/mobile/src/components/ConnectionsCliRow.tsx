@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { Alert, Text, TextInput, View } from "react-native";
+import { Alert, Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
 import { keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
-import { colors } from "@/theme";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 import {
-  ActionButton,
   ConnectionRowFrame,
   connectionStyles,
 } from "@/components/ConnectionsShared";
@@ -110,7 +110,9 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       return (
         <>
           <Text style={connectionStyles.muted}>Agent box is offline.</Text>
-          <ActionButton label="Check again" tone="secondary" onPress={refresh} />
+          <Button variant="soft" style={connectionStyles.fit} onPress={refresh}>
+            Check again
+          </Button>
         </>
       );
     }
@@ -120,7 +122,9 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
           <Text style={connectionStyles.muted}>
             {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
           </Text>
-          <ActionButton label="Disconnect" tone="secondary" disabled={busy} onPress={confirmDisconnect} />
+          <Button variant="soft" style={connectionStyles.fit} disabled={busy} onPress={confirmDisconnect}>
+            Disconnect
+          </Button>
         </>
       );
     }
@@ -128,38 +132,43 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       return (
         <>
           <Text style={connectionStyles.muted}>This sign-in expired.</Text>
-          <ActionButton label="Try again" disabled={busy} onPress={() => start.mutate()} />
+          <Button style={connectionStyles.fit} disabled={busy} onPress={() => start.mutate()}>
+            Try again
+          </Button>
         </>
       );
     }
     if (login?.needsCode) {
       return (
         <>
-          <ActionButton
-            label="Open sign-in page"
-            tone="secondary"
+          <Button
+            variant="soft"
+            style={connectionStyles.fit}
             onPress={() => openPage.mutate(login.url)}
-          />
+          >
+            Open sign-in page
+          </Button>
           <Text style={connectionStyles.muted}>
             Sign in on Anthropic's page, then paste the code it shows you.
           </Text>
-          <TextInput
-            style={connectionStyles.input}
+          <Input
             value={code}
             onChangeText={setCode}
             placeholder="Code"
-            placeholderTextColor={colors.mutedForeground}
             accessibilityLabel="Code from the Claude sign-in page"
             autoCapitalize="none"
             autoCorrect={false}
           />
           <View style={connectionStyles.actions}>
-            <ActionButton
-              label="Submit code"
+            <Button
               disabled={busy || code.trim().length === 0}
               onPress={() => submitCode.mutate(code.trim())}
-            />
-            <ActionButton label="Cancel" tone="secondary" onPress={cancel} />
+            >
+              Submit code
+            </Button>
+            <Button variant="soft" onPress={cancel}>
+              Cancel
+            </Button>
           </View>
         </>
       );
@@ -167,26 +176,34 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     if (login) {
       return (
         <>
-          <ActionButton
-            label="Open sign-in page"
-            tone="secondary"
+          <Button
+            variant="soft"
+            style={connectionStyles.fit}
             onPress={() => openPage.mutate(login.url)}
-          />
+          >
+            Open sign-in page
+          </Button>
           <Text style={connectionStyles.muted}>Enter this code on the OpenAI page:</Text>
-          {login.userCode ? (
-            <Text selectable style={connectionStyles.code}>
-              {login.userCode}
-            </Text>
-          ) : null}
+          <View style={connectionStyles.actions}>
+            {login.userCode ? (
+              <Text selectable style={connectionStyles.code}>
+                {login.userCode}
+              </Text>
+            ) : null}
+            <Button variant="ghost" size="sm" onPress={cancel}>
+              Cancel
+            </Button>
+          </View>
           <Text style={connectionStyles.hint}>Waiting for you to approve the sign-in…</Text>
-          <ActionButton label="Cancel" tone="secondary" onPress={cancel} />
         </>
       );
     }
     return (
       <>
         <Text style={connectionStyles.muted}>{CLI_INTRO[provider]}</Text>
-        <ActionButton label="Connect" disabled={busy} onPress={() => start.mutate()} />
+        <Button style={connectionStyles.fit} disabled={busy} onPress={() => start.mutate()}>
+          Connect
+        </Button>
       </>
     );
   }

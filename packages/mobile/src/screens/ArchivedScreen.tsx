@@ -3,12 +3,15 @@ import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
 import { createQueries, storeTask } from "@/api/queries";
-import { ScreenHeader } from "@/components/ScreenHeader";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
 import { useApiClient } from "@/hooks/useApiClient";
-import { errorText, formatAgo } from "@/lib/format";
+import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
-import { colors, radius, spacing } from "@/theme";
+import { colors, spacing } from "@/theme";
 
+/** The user's archived threads, most recently archived first. Opening one shows it; Unarchive brings it back. */
 export function ArchivedScreen() {
   const { api } = useApiClient();
   const nav = useNavigation();
@@ -28,29 +31,43 @@ export function ArchivedScreen() {
     onSuccess: (task) => storeTask(queryClient, task),
   });
 
+  const now = Date.now();
+
   return (
-    <View style={styles.flex}>
-      <ScreenHeader title="Archived" onBack={nav.back} />
-      {tasks.error ? <Text style={styles.error}>{errorText(tasks.error)}</Text> : null}
-      <FlatList
-        style={styles.flex}
-        contentContainerStyle={styles.list}
-        data={archived}
-        keyExtractor={(t) => t.id}
-        renderItem={({ item }) => (
-          <ArchivedRow
-            task={item}
-            now={Date.now()}
-            unarchiving={unarchive.isPending && unarchive.variables === item.id}
-            onOpen={() => nav.push({ name: "thread", taskId: item.id })}
-            onUnarchive={() => unarchive.mutate(item.id)}
-          />
-        )}
-        ListEmptyComponent={
-          tasks.isPending ? undefined : <Text style={styles.note}>No archived threads.</Text>
-        }
-      />
-    </View>
+    <FlatList
+      style={styles.flex}
+      contentContainerStyle={styles.content}
+      data={archived}
+      keyExtractor={(t) => t.id}
+      ListHeaderComponent={
+        <View style={styles.header}>
+          <View style={styles.heading}>
+            <Text style={styles.title}>Archived threads</Text>
+            <Text style={styles.description}>
+              Archived threads keep their history and checkouts. Unarchive one to continue it.
+            </Text>
+          </View>
+          {tasks.error ? <Alert>{errorText(tasks.error)}</Alert> : null}
+          {unarchive.error ? <Alert>{errorText(unarchive.error)}</Alert> : null}
+        </View>
+      }
+      renderItem={({ item }) => (
+        <ArchivedRow
+          task={item}
+          now={now}
+          unarchiving={unarchive.isPending && unarchive.variables === item.id}
+          onOpen={() => nav.push({ name: "thread", taskId: item.id })}
+          onUnarchive={() => unarchive.mutate(item.id)}
+        />
+      )}
+      ListEmptyComponent={
+        tasks.isSuccess ? (
+          <Card style={styles.empty}>
+            <Text style={styles.emptyText}>No archived threads.</Text>
+          </Card>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -63,45 +80,42 @@ interface ArchivedRowProps {
 }
 
 function ArchivedRow({ task, now, unarchiving, onOpen, onUnarchive }: ArchivedRowProps) {
+  const repos =
+    task.checkouts.length > 0 ? task.checkouts.map((checkout) => repoShortName(checkout.repo)).join(", ") : "No repository";
   return (
-    <Pressable style={styles.row} onPress={onOpen}>
-      <View style={styles.rowText}>
-        <Text style={styles.title} numberOfLines={1}>
-          {task.title || "Untitled thread"}
-        </Text>
-        <Text style={styles.age}>Archived {formatAgo(task.archivedAt ?? task.updatedAt, now)}</Text>
+    <Card>
+      <View style={styles.row}>
+        <View style={styles.rowText}>
+          <Pressable onPress={onOpen} accessibilityRole="button" hitSlop={8} style={styles.titlePress}>
+            <Text style={styles.threadTitle} numberOfLines={1}>
+              {task.title || "Untitled thread"}
+            </Text>
+          </Pressable>
+          <Text style={styles.meta} numberOfLines={1}>
+            {repos}
+            {task.archivedAt ? ` · archived ${formatAgo(task.archivedAt, now)}` : ""}
+          </Text>
+        </View>
+        <Button variant="soft" size="sm" disabled={unarchiving} onPress={onUnarchive}>
+          Unarchive
+        </Button>
       </View>
-      <Pressable style={styles.button} onPress={onUnarchive} disabled={unarchiving}>
-        <Text style={styles.buttonText}>{unarchiving ? "…" : "Unarchive"}</Text>
-      </Pressable>
-    </Pressable>
+    </Card>
   );
 }
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  list: { padding: spacing.md, gap: spacing.sm },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.xl,
-    backgroundColor: colors.card,
-    padding: spacing.md,
-  },
-  rowText: { flex: 1, gap: spacing.xs },
-  title: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
-  age: { color: colors.mutedForeground, fontSize: 12 },
-  button: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  buttonText: { color: colors.foreground, fontSize: 13 },
-  note: { color: colors.mutedForeground, textAlign: "center", marginTop: spacing.xl },
-  error: { color: colors.destructive, paddingHorizontal: spacing.md },
+  content: { padding: spacing.lg, gap: spacing.lg },
+  header: { gap: spacing.lg },
+  heading: { gap: spacing.xs },
+  title: { color: colors.foreground, fontSize: 18, fontWeight: "600", letterSpacing: -0.2 },
+  description: { color: colors.mutedForeground, fontSize: 14, lineHeight: 20 },
+  row: { flexDirection: "row", alignItems: "center", gap: spacing.lg },
+  rowText: { flex: 1, minWidth: 0, gap: 2 },
+  titlePress: { paddingVertical: spacing.xs },
+  threadTitle: { color: colors.foreground, fontSize: 15, fontWeight: "500" },
+  meta: { color: colors.mutedForeground, fontSize: 12 },
+  empty: { alignItems: "center", paddingVertical: 40 },
+  emptyText: { color: colors.foreground, fontSize: 14, fontWeight: "500" },
 });

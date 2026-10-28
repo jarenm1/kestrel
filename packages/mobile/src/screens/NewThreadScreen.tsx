@@ -4,13 +4,15 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
 import { keys, storeTask } from "@/api/queries";
 import { Composer } from "@/components/Composer";
-import { ScreenHeader } from "@/components/ScreenHeader";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadTitle } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, spacing } from "@/theme";
 
-/** A thread starts without a repository; the agent checks out the repos it needs. */
+/**
+ * Chat home: the first message creates a thread (task), sends the message to it and opens it. The thread starts with
+ * no repository; the agent checks out the ones it needs. The composer sits at the bottom, above the keyboard.
+ */
 export function NewThreadScreen() {
   const { api } = useApiClient();
   const nav = useNavigation();
@@ -36,16 +38,14 @@ export function NewThreadScreen() {
 
   return (
     <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-      <ScreenHeader title="New thread" onBack={nav.back} />
       <View style={styles.body}>
         <Text style={styles.heading}>What should we work on?</Text>
-        <Text style={styles.sub}>Describe the task. The agent checks out the repositories it needs as it goes.</Text>
       </View>
       <Composer
         onSend={(body) => start.mutateAsync(body)}
         pending={start.isPending}
         error={start.error}
-        placeholder="Ask for anything"
+        placeholder="Ask for anything — the agent checks out the repos it needs"
       />
     </KeyboardAvoidingView>
   );
@@ -53,7 +53,6 @@ export function NewThreadScreen() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  body: { flex: 1, justifyContent: "center", padding: spacing.xl, gap: spacing.sm },
-  heading: { color: colors.foreground, fontSize: 22, fontWeight: "700", textAlign: "center" },
-  sub: { color: colors.mutedForeground, fontSize: 14, textAlign: "center" },
+  body: { flex: 1, justifyContent: "center", padding: spacing.xl },
+  heading: { color: colors.foreground, fontSize: 20, fontWeight: "600", letterSpacing: -0.3, textAlign: "center" },
 });

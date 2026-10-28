@@ -1,17 +1,17 @@
 import React, { useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   FlatList,
   Modal,
   Pressable,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, ChevronDown } from "lucide-react-native";
 import {
   GithubAutomationEvent,
   type Automation,
@@ -21,16 +21,22 @@ import {
 } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { ScreenHeader } from "@/components/ScreenHeader";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { Input, Textarea } from "@/components/ui/Input";
+import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
 import { errorText } from "@/lib/format";
 import { EVENT_LABELS, splitList } from "@/lib/automations";
-import { colors, radius, spacing } from "@/theme";
+import { colors, fonts, radius, spacing } from "@/theme";
 
 export type AutomationEditorTarget =
   | { readonly kind: "create" }
   | { readonly kind: "edit"; readonly automation: Automation };
 
 type TriggerKind = "schedule" | "github";
+
+const switchTrack = { false: colors.secondary, true: colors.primary };
 
 /**
  * Creates or edits an automation with the web dialog's fields and validation. Edit keeps the trigger kind and repo;
@@ -123,29 +129,19 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null);
 
   return (
-    <View style={styles.container}>
-      <ScreenHeader
-        title={target.kind === "edit" ? "Edit automation" : "New automation"}
-        onBack={onClose}
-      />
+    <SafeAreaView style={styles.container}>
+      <ScreenHeader title={target.kind === "edit" ? "Edit automation" : "New automation"} onBack={onClose} />
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        <Text style={styles.subtitle}>
+        <Text style={styles.description}>
           {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
         </Text>
 
         <Field label="Name">
-          <TextInput style={styles.input} value={name} onChangeText={setName} placeholderTextColor={colors.mutedForeground} />
+          <Input value={name} onChangeText={setName} />
         </Field>
 
         <Field label="Prompt">
-          <TextInput
-            style={[styles.input, styles.multiline]}
-            value={prompt}
-            onChangeText={setPrompt}
-            multiline
-            textAlignVertical="top"
-            placeholderTextColor={colors.mutedForeground}
-          />
+          <Textarea style={styles.prompt} value={prompt} onChangeText={setPrompt} />
         </Field>
 
         {target.kind === "create" ? (
@@ -161,10 +157,11 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
           {target.kind === "edit" ? (
             <Text style={styles.readonly}>{target.automation.repo ?? "No repository"}</Text>
           ) : (
-            <Pressable style={styles.input} onPress={() => setPickingRepo(true)} accessibilityRole="button">
-              <Text style={repo === null ? styles.placeholder : styles.readonly}>
+            <Pressable style={styles.select} onPress={() => setPickingRepo(true)} accessibilityRole="button">
+              <Text style={[styles.selectText, repo === null && styles.placeholder]}>
                 {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
               </Text>
+              <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
             </Pressable>
           )}
         </Field>
@@ -172,22 +169,19 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         {kind === "schedule" ? (
           <>
             <Field label="Cron (minute hour day-of-month month day-of-week)">
-              <TextInput
-                style={[styles.input, styles.mono]}
+              <Input
+                style={styles.mono}
                 value={cron}
                 placeholder="0 9 * * 1-5"
-                placeholderTextColor={colors.mutedForeground}
                 onChangeText={setCron}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
             </Field>
             <Field label="Timezone">
-              <TextInput
-                style={styles.input}
+              <Input
                 value={timezone}
                 placeholder="America/New_York"
-                placeholderTextColor={colors.mutedForeground}
                 onChangeText={setTimezone}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -208,7 +202,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
                     accessibilityState={{ checked }}
                   >
                     <View style={[styles.checkbox, checked && styles.checkboxOn]}>
-                      {checked ? <Text style={styles.checkMark}>✓</Text> : null}
+                      {checked ? <Check size={12} color={colors.primaryForeground} strokeWidth={3} /> : null}
                     </View>
                     <Text style={styles.checkLabel}>{EVENT_LABELS[event]}</Text>
                   </Pressable>
@@ -216,22 +210,18 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               })}
             </Field>
             <Field label="Reviewers (comma-separated; empty means any)">
-              <TextInput
-                style={styles.input}
+              <Input
                 value={reviewers}
                 placeholder="alice, bob"
-                placeholderTextColor={colors.mutedForeground}
                 onChangeText={setReviewers}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
             </Field>
             <Field label="Base branches (comma-separated; empty means any)">
-              <TextInput
-                style={styles.input}
+              <Input
                 value={baseBranches}
                 placeholder="main"
-                placeholderTextColor={colors.mutedForeground}
                 onChangeText={setBaseBranches}
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -239,7 +229,13 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             </Field>
             <View style={styles.switchRow}>
               <Text style={styles.switchLabel}>Include draft pull requests</Text>
-              <Switch value={includeDrafts} onValueChange={setIncludeDrafts} trackColor={switchColors} />
+              <Switch
+                value={includeDrafts}
+                onValueChange={setIncludeDrafts}
+                trackColor={switchTrack}
+                thumbColor={includeDrafts ? colors.primaryForeground : colors.foreground}
+                ios_backgroundColor={colors.secondary}
+              />
             </View>
           </>
         )}
@@ -247,28 +243,25 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         {target.kind === "create" ? (
           <View style={styles.switchRow}>
             <Text style={styles.switchLabel}>Enabled</Text>
-            <Switch value={enabled} onValueChange={setEnabled} trackColor={switchColors} />
+            <Switch
+              value={enabled}
+              onValueChange={setEnabled}
+              trackColor={switchTrack}
+              thumbColor={enabled ? colors.primaryForeground : colors.foreground}
+              ios_backgroundColor={colors.secondary}
+            />
           </View>
         ) : null}
 
-        {save.error ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{errorText(save.error)}</Text>
-          </View>
-        ) : null}
+        {save.error ? <Alert>{errorText(save.error)}</Alert> : null}
 
         <View style={styles.footer}>
-          <Pressable style={[styles.button, styles.ghostButton]} onPress={onClose} accessibilityRole="button">
-            <Text style={styles.ghostText}>Cancel</Text>
-          </Pressable>
-          <Pressable
-            style={[styles.button, styles.primaryButton, (!canSave || save.isPending) && styles.disabled]}
-            disabled={!canSave || save.isPending}
-            onPress={() => save.mutate()}
-            accessibilityRole="button"
-          >
-            <Text style={styles.primaryText}>{save.isPending ? "Saving…" : "Save"}</Text>
-          </Pressable>
+          <Button variant="ghost" onPress={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={!canSave || save.isPending} onPress={() => save.mutate()}>
+            {save.isPending ? "Saving…" : "Save"}
+          </Button>
         </View>
       </ScrollView>
 
@@ -282,7 +275,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         }}
         onClose={() => setPickingRepo(false)}
       />
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -305,18 +298,18 @@ function RepoPicker({
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container}>
         <ScreenHeader title="Repository" onBack={onClose} />
-        {repos.isPending ? <ActivityIndicator color={colors.primary} style={styles.spinner} /> : null}
-        {repos.error ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{errorText(repos.error)}</Text>
+        {repos.isPending ? (
+          <View style={styles.spinner}>
+            <StatusIcon status="running" size={20} />
           </View>
         ) : null}
+        {repos.error ? <Alert style={styles.inset}>{errorText(repos.error)}</Alert> : null}
         <FlatList
           data={repos.data ?? []}
           keyExtractor={(item: GithubRepo) => item.fullName}
-          contentContainerStyle={styles.content}
+          contentContainerStyle={styles.list}
           ListHeaderComponent={
             allowNone ? (
               <RepoOption label="No repository" selected={selected === null} onPress={() => onSelect(null)} />
@@ -331,10 +324,12 @@ function RepoPicker({
             />
           )}
           ListEmptyComponent={
-            repos.isPending || repos.error ? undefined : <Text style={styles.subtitle}>No repositories found.</Text>
+            repos.isPending || repos.error ? undefined : (
+              <Text style={styles.emptyText}>No repositories found.</Text>
+            )
           }
         />
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -357,22 +352,28 @@ function RepoOption({
       accessibilityRole="button"
       accessibilityState={{ selected }}
     >
-      <Text style={styles.optionLabel}>{label}</Text>
-      {detail ? <Text style={styles.optionDetail}>{detail}</Text> : null}
+      <View style={styles.optionText}>
+        <Text style={styles.optionLabel} numberOfLines={1}>
+          {label}
+        </Text>
+        {detail ? <Text style={styles.optionDetail}>{detail}</Text> : null}
+      </View>
+      {selected ? <Check size={16} color={colors.foreground} strokeWidth={2} /> : null}
     </Pressable>
   );
 }
 
 function Segment({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
   return (
-    <Pressable
-      style={[styles.segment, selected && styles.segmentSelected]}
+    <Button
+      variant={selected ? "secondary" : "ghost"}
+      active={selected}
+      style={styles.segment}
       onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected }}
+      accessibilityLabel={label}
     >
-      <Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>{label}</Text>
-    </Pressable>
+      {label}
+    </Button>
   );
 }
 
@@ -385,8 +386,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-const switchColors = { false: colors.secondary, true: colors.primary };
-
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -394,11 +393,13 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: spacing.lg,
-    gap: spacing.md,
+    gap: spacing.lg,
+    paddingBottom: spacing.xxl,
   },
-  subtitle: {
+  description: {
     color: colors.mutedForeground,
-    fontSize: 13,
+    fontSize: 14,
+    lineHeight: 20,
   },
   field: {
     gap: spacing.xs,
@@ -407,29 +408,35 @@ const styles = StyleSheet.create({
     color: colors.mutedForeground,
     fontSize: 12,
   },
-  input: {
-    backgroundColor: colors.secondary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 2,
-    color: colors.foreground,
-    fontSize: 14,
-  },
-  multiline: {
+  prompt: {
     minHeight: 120,
   },
   mono: {
-    fontFamily: "monospace",
+    fontFamily: fonts.mono,
   },
   placeholder: {
     color: colors.mutedForeground,
-    fontSize: 14,
   },
   readonly: {
     color: colors.foreground,
     fontSize: 14,
+    paddingVertical: spacing.sm,
+  },
+  select: {
+    minHeight: 40,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: spacing.sm,
+    backgroundColor: colors.input,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  selectText: {
+    flexShrink: 1,
+    color: colors.foreground,
+    fontSize: 15,
   },
   segmented: {
     flexDirection: "row",
@@ -437,30 +444,12 @@ const styles = StyleSheet.create({
   },
   segment: {
     flex: 1,
-    alignItems: "center",
-    paddingVertical: spacing.sm + 2,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.secondary,
-  },
-  segmentSelected: {
-    borderColor: colors.primary,
-    backgroundColor: colors.accent,
-  },
-  segmentText: {
-    color: colors.mutedForeground,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  segmentTextSelected: {
-    color: colors.foreground,
   },
   checkRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
-    paddingVertical: spacing.xs,
+    minHeight: 36,
   },
   checkbox: {
     width: 18,
@@ -475,11 +464,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
-  checkMark: {
-    color: colors.primaryForeground,
-    fontSize: 12,
-    fontWeight: "700",
-  },
   checkLabel: {
     color: colors.foreground,
     fontSize: 14,
@@ -489,69 +473,56 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: spacing.md,
+    minHeight: 36,
   },
   switchLabel: {
+    flexShrink: 1,
     color: colors.foreground,
     fontSize: 14,
-  },
-  errorBox: {
-    backgroundColor: colors.destructive + "18",
-    padding: spacing.md,
-    borderRadius: radius.md,
-  },
-  errorText: {
-    color: colors.destructive,
-    fontSize: 13,
   },
   footer: {
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: spacing.sm,
-    marginTop: spacing.sm,
-  },
-  button: {
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm + 2,
-    borderRadius: radius.md,
-  },
-  ghostButton: {
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  ghostText: {
-    color: colors.foreground,
-    fontSize: 14,
-  },
-  primaryButton: {
-    backgroundColor: colors.primary,
-  },
-  primaryText: {
-    color: colors.primaryForeground,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  disabled: {
-    opacity: 0.4,
   },
   spinner: {
+    alignItems: "center",
+    paddingVertical: spacing.xl,
+  },
+  inset: {
+    marginHorizontal: spacing.lg,
     marginTop: spacing.lg,
+  },
+  list: {
+    flexGrow: 1,
+    paddingBottom: spacing.xxl,
+  },
+  emptyText: {
+    padding: spacing.lg,
+    color: colors.mutedForeground,
+    fontSize: 14,
   },
   option: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: spacing.sm,
+    minHeight: 44,
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
   },
   optionSelected: {
-    backgroundColor: colors.accent,
+    backgroundColor: colors.white06,
+  },
+  optionText: {
+    flex: 1,
+    gap: 2,
   },
   optionLabel: {
     color: colors.foreground,
     fontSize: 14,
-    fontFamily: "monospace",
+    fontFamily: fonts.mono,
   },
   optionDetail: {
     color: colors.mutedForeground,

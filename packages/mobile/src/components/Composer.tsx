@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
+import { ArrowUp, Check, ChevronDown, Settings2, Square } from "lucide-react-native";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
 import {
   AgentEffort,
   AgentModel,
@@ -16,7 +19,7 @@ import { useShownModels } from "@/hooks/useShownModels";
 import { useStoredChoice } from "@/hooks/useStoredChoice";
 import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
-import { colors, radius, spacing } from "@/theme";
+import { colors, radius, shadows, spacing } from "@/theme";
 
 interface PickerOption<T extends string> {
   readonly value: T | undefined;
@@ -29,37 +32,53 @@ interface ModelSection {
   readonly models: readonly ModelInfo[];
 }
 
-interface PillPickerProps<T extends string> {
-  readonly label: string;
-  readonly value: T | undefined;
-  readonly options: readonly PickerOption<T>[];
-  readonly onChange: (value: T | undefined) => void;
-}
-
-function PillPicker<T extends string>({ label, value, options, onChange }: PillPickerProps<T>) {
+/**
+ * A pill that opens a single-choice menu; shows its label until something other than Default is picked.
+ * The web dropdown becomes a bottom sheet.
+ */
+function PillPicker<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T | undefined;
+  options: readonly PickerOption<T>[];
+  onChange: (value: T | undefined) => void;
+}) {
   const [open, setOpen] = useState(false);
   const shown = value === undefined ? label : (options.find((o) => o.value === value)?.label ?? label);
   return (
     <>
-      <Pressable style={styles.pill} onPress={() => setOpen(true)} accessibilityRole="button" accessibilityLabel={label}>
-        <Text style={styles.pillText}>{shown} ▾</Text>
-      </Pressable>
+      <Button variant="ghost" size="sm" active={open} onPress={() => setOpen(true)} accessibilityLabel={label}>
+        <Text style={styles.pillText}>{shown}</Text>
+        <ChevronDown size={16} color={colors.mutedForeground + "99"} />
+      </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
           <View style={styles.sheet}>
-            <Text style={styles.sheetTitle}>{label}</Text>
-            {options.map((o) => (
-              <Pressable
-                key={o.label}
-                style={styles.option}
-                onPress={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                }}
-              >
-                <Text style={[styles.optionText, o.value === value && styles.optionSelected]}>{o.label}</Text>
-              </Pressable>
-            ))}
+            <Text style={styles.sheetLabel}>{label}</Text>
+            {options.map((o) => {
+              const selected = o.value === value;
+              return (
+                <Pressable
+                  key={o.label}
+                  style={({ pressed }) => [styles.option, pressed && styles.optionPressed]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: selected }}
+                  onPress={() => {
+                    onChange(o.value);
+                    setOpen(false);
+                  }}
+                >
+                  <View style={styles.optionCheck}>
+                    {selected ? <Check size={16} color={colors.foreground} /> : null}
+                  </View>
+                  <Text style={styles.optionText}>{o.label}</Text>
+                </Pressable>
+              );
+            })}
           </View>
         </Pressable>
       </Modal>
@@ -85,19 +104,21 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
   const shown = nothingOffered ? "No models" : (value?.name ?? "Model");
   return (
     <>
-      <Pressable
-        style={styles.pill}
+      <Button
+        variant="ghost"
+        size="sm"
+        active={open}
         onPress={() => (nothingOffered ? onManage() : setOpen(true))}
-        accessibilityRole="button"
         accessibilityLabel="Model"
       >
-        <Text style={styles.pillText}>{shown} ▾</Text>
-      </Pressable>
+        <Text style={styles.pillText} numberOfLines={1}>{shown}</Text>
+        <ChevronDown size={16} color={colors.mutedForeground} />
+      </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <View style={styles.modalRoot}>
           <Pressable style={styles.backdropFill} onPress={() => setOpen(false)} />
           <View style={[styles.sheet, styles.sheetTall]}>
-            <Text style={styles.sheetTitle}>Model</Text>
+            <Text style={styles.sheetLabel}>Model</Text>
             <ScrollView style={styles.sheetScroll}>
               {sections?.map((section, i) => (
                 <React.Fragment key={section.provider.id}>
@@ -106,16 +127,18 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
                   {section.models.map((m) => (
                     <Pressable
                       key={m.id}
-                      style={styles.option}
+                      style={({ pressed }) => [styles.option, pressed && styles.optionPressed]}
                       onPress={() => {
                         onChange(m.id);
                         setOpen(false);
                       }}
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: m.id === value?.id }}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: m.id === value?.id }}
                     >
-                      <Text style={[styles.optionText, m.id === value?.id && styles.optionSelected]}>{m.name}</Text>
-                      {m.id === value?.id ? <Text style={styles.optionCheck}>✓</Text> : null}
+                      <View style={styles.optionCheck}>
+                        {m.id === value?.id ? <Check size={16} color={colors.foreground} /> : null}
+                      </View>
+                      <Text style={styles.optionText}>{m.name}</Text>
                     </Pressable>
                   ))}
                 </React.Fragment>
@@ -130,6 +153,7 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
               }}
               accessibilityRole="button"
             >
+              <Settings2 size={16} color={colors.mutedForeground} />
               <Text style={styles.manageText}>Manage models</Text>
             </Pressable>
           </View>
@@ -156,6 +180,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
   const connections = useQuery(queries.connections());
   const shown = useShownModels();
   const [text, setText] = useState("");
+  const [focused, setFocused] = useState(false);
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
 
@@ -173,12 +198,11 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ];
   const empty = text.trim() === "";
-  const showStop = onStop !== undefined && empty;
 
   function submit() {
     const body = text.trim();
+    // Failures surface through `error`; the text stays so it can be resent.
     if (body === "" || pending) return;
-    // A failed send keeps the text so it can be resent; the error is shown through `error`.
     void onSend({ text: body, model: model?.id, effort }).then(
       () => setText(""),
       () => undefined
@@ -187,14 +211,16 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
 
   return (
     <View style={styles.wrap}>
-      {error ? <Text style={styles.error}>{errorText(error)}</Text> : null}
-      <View style={styles.box}>
+      {error ? <Alert>{errorText(error)}</Alert> : null}
+      <View style={[styles.box, focused && styles.boxFocused]}>
         <TextInput
           style={styles.input}
           value={text}
           onChangeText={setText}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           placeholder={placeholder ?? "Message the agent"}
-          placeholderTextColor={colors.mutedForeground}
+          placeholderTextColor={colors.mutedForeground + "b3"}
           multiline
         />
         <View style={styles.row}>
@@ -208,30 +234,18 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
             <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
           ) : null}
           <View style={styles.flex} />
-          {showStop ? (
-            <Pressable
-              style={[styles.roundBtn, stopping && styles.disabled]}
-              disabled={stopping}
-              onPress={onStop}
-              accessibilityRole="button"
-              accessibilityLabel="Stop"
-            >
-              <View style={styles.stopSquare} />
-            </Pressable>
+          {onStop && empty ? (
+            <Button size="icon" accessibilityLabel="Stop" disabled={stopping} onPress={onStop}>
+              <Square size={14} color={colors.primaryForeground} fill={colors.primaryForeground} />
+            </Button>
           ) : (
-            <Pressable
-              style={[styles.roundBtn, (pending || empty) && styles.disabled]}
-              disabled={pending || empty}
-              onPress={submit}
-              accessibilityRole="button"
-              accessibilityLabel="Send"
-            >
+            <Button size="icon" accessibilityLabel="Send" disabled={pending || empty} onPress={submit}>
               {pending ? (
                 <ActivityIndicator size="small" color={colors.primaryForeground} />
               ) : (
-                <Text style={styles.sendArrow}>↑</Text>
+                <ArrowUp size={16} color={colors.primaryForeground} />
               )}
-            </Pressable>
+            </Button>
           )}
         </View>
       </View>
@@ -241,69 +255,54 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  wrap: { gap: spacing.sm, padding: spacing.md },
-  error: { color: colors.destructive, fontSize: 13 },
+  wrap: { gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.md },
   box: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.xl,
-    backgroundColor: colors.card,
-    padding: spacing.sm,
-    gap: spacing.sm,
-  },
-  input: { color: colors.foreground, fontSize: 16, minHeight: 40, maxHeight: 160, paddingHorizontal: spacing.sm },
-  row: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
-  pill: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  pillText: { color: colors.mutedForeground, fontSize: 13 },
-  roundBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: colors.primary,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  disabled: { opacity: 0.4 },
-  sendArrow: { color: colors.primaryForeground, fontSize: 18, fontWeight: "700" },
-  stopSquare: { width: 12, height: 12, borderRadius: 2, backgroundColor: colors.primaryForeground },
-  backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  modalRoot: { flex: 1, justifyContent: "flex-end" },
-  backdropFill: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    bottom: 0,
-    left: 0,
-    backgroundColor: "rgba(0,0,0,0.4)",
-  },
-  sheet: {
-    backgroundColor: colors.card,
-    borderTopLeftRadius: radius.xl,
-    borderTopRightRadius: radius.xl,
-    padding: spacing.lg,
     gap: spacing.xs,
+    borderRadius: radius.xxl,
+    backgroundColor: colors.secondary,
+    padding: spacing.sm,
+    borderWidth: 1,
+    borderColor: "transparent",
+    ...shadows.soft,
+  },
+  boxFocused: { borderColor: "rgba(255,255,255,0.14)" },
+  input: {
+    color: colors.foreground,
+    fontSize: 16,
+    minHeight: 48,
+    maxHeight: 160,
+    paddingHorizontal: 6,
+    paddingTop: 6,
+    textAlignVertical: "top",
+  },
+  row: { flexDirection: "row", alignItems: "center", gap: spacing.xs },
+  pillText: { color: colors.mutedForeground, fontSize: 12, fontWeight: "500" },
+  backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
+  sheet: {
+    backgroundColor: colors.secondary,
+    borderTopLeftRadius: radius.xxl,
+    borderTopRightRadius: radius.xxl,
+    paddingHorizontal: spacing.sm,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.xxl,
   },
   sheetTall: { maxHeight: "75%" },
   sheetScroll: { flexGrow: 0, flexShrink: 1 },
-  sheetTitle: { color: colors.mutedForeground, fontSize: 13, marginBottom: spacing.sm },
-  sectionHeader: {
-    color: colors.mutedForeground,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0.6,
-    textTransform: "uppercase",
-    paddingVertical: spacing.xs,
-  },
+  modalRoot: { flex: 1, justifyContent: "flex-end" },
+  backdropFill: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: colors.scrim },
+  sectionHeader: { color: colors.mutedForeground, fontSize: 12, fontWeight: "600", paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: spacing.xs },
-  option: { paddingVertical: spacing.md, flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  manageText: { color: colors.mutedForeground, fontSize: 14 },
+  sheetLabel: { color: colors.mutedForeground, fontSize: 12, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  option: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  optionPressed: { backgroundColor: colors.white06 },
+  optionCheck: { width: 16 },
   optionText: { color: colors.foreground, fontSize: 16 },
-  optionSelected: { fontWeight: "700" },
-  optionCheck: { color: colors.primary, fontSize: 16, fontWeight: "700" },
-  manageText: { color: colors.mutedForeground, fontSize: 16 },
 });
