@@ -94,9 +94,12 @@ export function PricingPage() {
         <Link to="/" className="text-sm text-zinc-400 hover:text-white transition-colors">Product</Link>
         <Link to="/pricing" className="text-sm text-white transition-colors">Pricing</Link>
         <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className="text-sm text-zinc-400 hover:text-white transition-colors">Docs</a>
-        <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
-        <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
-        </Button>
+        {/* Dev-login exists only on local stacks (DEV_SESSION_LOGIN); production builds never show it. */}
+        {import.meta.env.DEV && (
+          <Button asChild variant="soft" className="h-8 px-4 text-xs border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.08] rounded-md">
+          <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
+          </Button>
+        )}
         <Button asChild className="h-8 px-5 text-xs bg-white text-black hover:bg-zinc-200 rounded-md">
         <a href={appUrl}>Get Started</a>
         </Button>
