@@ -28,9 +28,23 @@ const call = async (name: string, args: Record<string, unknown>): Promise<{ fail
   return { failed: result.isError === true, text }
 }
 
+const runExecProbes = async (): Promise<number> => {
+  const started = Date.now()
+  const bg = await call("workspace_exec", { command: "sleep 30 & echo started" })
+  console.log(`fake-agent: probe background elapsedMs=${Date.now() - started} firstLine=${bg.text.split("\n")[0]}`)
+  const flood = await call("workspace_exec", { command: "yes | head -c 50000000" })
+  const marker = flood.text.match(/\[\.\.\. \d+ bytes omitted \.\.\.\]/)
+  console.log(`fake-agent: probe flood marker=${marker?.[0] ?? "none"} textLength=${flood.text.length}`)
+  const timeout = await call("workspace_exec", { command: "yes", timeoutSec: 3 })
+  console.log(`fake-agent: probe timeout firstLine=${timeout.text.split("\n")[0]}`)
+  await call("task_report", { status: "done", message: "exec probes finished" })
+  return 0
+}
+
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
+  if (prompt.trim() === "exec-probe") return runExecProbes()
 
   // Screenshot is best-effort: the desktop may not be running.
   await call("desktop_screenshot", {})
