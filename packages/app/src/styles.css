@@ -1,32 +1,33 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-/* Dark-only theme. Token names follow shadcn/ui so `bunx shadcn add <component>` works unchanged. */
+/* Dark-only, monochrome theme: white is the accent; blue (`info`) is reserved for states white can't carry.
+   Token names follow shadcn/ui so `bunx shadcn add <component>` works unchanged. */
 :root {
   color-scheme: dark;
-  --radius: 0.5rem;
-  --background: #0e1014;
-  --foreground: #e4e7ee;
-  --card: #161921;
-  --card-foreground: #e4e7ee;
-  --popover: #161921;
-  --popover-foreground: #e4e7ee;
-  --primary: #5b8cff;
-  --primary-foreground: #ffffff;
-  --secondary: #1d212b;
-  --secondary-foreground: #e4e7ee;
-  --muted: #1d212b;
-  --muted-foreground: #8a93a6;
-  --accent: #232837;
-  --accent-foreground: #e4e7ee;
-  --destructive: #f85149;
-  --border: #293040;
-  --input: #293040;
-  --ring: #5b8cff;
-  --success: #3fb950;
-  --warning: #d29922;
-  --info: #58a6ff;
-  --code: #0a0c10;
+  --radius: 0.875rem;
+  --background: #0a0a0b;
+  --foreground: #ededef;
+  --card: #141416;
+  --card-foreground: #ededef;
+  --popover: #141416;
+  --popover-foreground: #ededef;
+  --primary: #f5f5f6;
+  --primary-foreground: #0a0a0b;
+  --secondary: #1c1c1f;
+  --secondary-foreground: #ededef;
+  --muted: #1c1c1f;
+  --muted-foreground: #8b8b93;
+  --accent: #242428;
+  --accent-foreground: #ededef;
+  --destructive: #f2555a;
+  --border: rgb(255 255 255 / 0.07);
+  --input: rgb(255 255 255 / 0.05);
+  --ring: #ffffff;
+  --success: #4ade80;
+  --warning: #e3b341;
+  --info: #6b9bff;
+  --code: #070708;
 }
 
 @theme inline {
@@ -36,6 +37,11 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  /* Depth instead of outlines: a faint top highlight plus a soft drop shadow. */
+  --shadow-soft: inset 0 1px 0 0 rgb(255 255 255 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.7);
+  --shadow-glow: 0 0 0 1px rgb(255 255 255 / 0.14), 0 0 22px -4px rgb(255 255 255 / 0.22);
+  --shadow-well: inset 0 1px 3px 0 rgb(0 0 0 / 0.6);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -71,5 +77,13 @@
   }
   body {
     @apply bg-background text-foreground font-sans text-sm antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  ::selection {
+    @apply bg-primary/20;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 0.12) transparent;
   }
 }
