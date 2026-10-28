@@ -23,7 +23,7 @@ import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   cn(
-    "rounded-full px-3 py-1.5 text-muted-foreground transition-colors duration-200 hover:text-foreground",
+    "rounded-full px-2.5 py-1 text-muted-foreground transition-colors duration-200 hover:text-foreground",
     isActive && "bg-white/[0.07] text-foreground",
   )
 
@@ -46,13 +46,13 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex h-14 shrink-0 items-center gap-5 px-5">
+      <header className="flex h-11 shrink-0 items-center gap-4 px-4">
         <NavLink
           to="/"
           aria-label="Kestrel home"
           className="rounded-full text-foreground/90 transition-colors duration-200 hover:text-foreground"
         >
-          <KestrelMark className="h-6" />
+          <KestrelMark className="h-5" />
         </NavLink>
         <nav className="flex gap-1">
           <NavLink to="/" end className={navLinkClass}>
@@ -90,7 +90,7 @@ function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string })
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label="Account"
-        className="grid size-8 place-items-center overflow-hidden rounded-full bg-white/[0.08] text-xs font-medium uppercase shadow-soft transition-shadow duration-200 outline-none hover:shadow-glow focus-visible:shadow-glow data-[state=open]:shadow-glow"
+        className="grid size-7 place-items-center overflow-hidden rounded-full bg-white/[0.08] text-xs font-medium uppercase shadow-soft transition-shadow duration-200 outline-none hover:shadow-glow focus-visible:shadow-glow data-[state=open]:shadow-glow"
       >
         {avatarUrl ? <img className="size-full" src={avatarUrl} alt="" /> : login.slice(0, 1)}
       </DropdownMenuTrigger>
