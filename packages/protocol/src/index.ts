@@ -150,6 +150,15 @@ export const DesktopInput = Schema.Union(
 )
 export type DesktopInput = typeof DesktopInput.Type
 
+/**
+ * Client -> server flow-control ack over the desktop WebSocket (JSON text frames, sent alongside `DesktopInput`).
+ * `frames` is the cumulative count of binary frames (init segment and fragments) the client has received on this
+ * connection. The client sends one every ~100 ms or every 6 frames, whichever comes first. The server throttles a
+ * connection only after its first ack, so clients that never ack keep the unthrottled stream.
+ */
+export const DesktopAck = Schema.Struct({ _tag: Schema.Literal("stream.ack"), frames: Schema.Number })
+export type DesktopAck = typeof DesktopAck.Type
+
 /** Server -> client events over the task event WebSocket (JSON text frames). */
 export const ServerEvent = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("task.updated"), task: Task }),
@@ -241,7 +250,10 @@ export const Paths = {
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
   /** WebSocket: JSON `ServerEvent` text frames. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,
-  /** WebSocket: server sends `DesktopStatus` JSON text frames + fMP4 binary frames; client sends `DesktopInput` JSON. */
+  /**
+   * WebSocket: server sends `DesktopStatus` JSON text frames + fMP4 binary frames; client sends `DesktopInput` JSON
+   * and `DesktopAck` JSON.
+   */
   taskDesktopWs: (id: string) => `/api/tasks/${id}/desktop/stream`,
   /** MCP (streamable HTTP) endpoint for the agent harness. */
   mcp: (taskId: string) => `/mcp/${taskId}`,
