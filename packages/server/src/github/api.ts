@@ -30,6 +30,10 @@ export interface PullRequest {
   readonly state: "open" | "closed" | "merged"
   readonly draft: boolean
   readonly headSha: string
+  /** Branch the pull request merges into. */
+  readonly baseRef: string
+  /** Branch the pull request was opened from. */
+  readonly headRef: string
   /** null while GitHub is still computing mergeability. */
   readonly mergeable: boolean | null
   readonly mergeableState: string
@@ -102,7 +106,8 @@ const PullRequestBody = Schema.Struct({
   draft: Schema.Boolean,
   mergeable: Schema.optional(Schema.NullOr(Schema.Boolean)),
   mergeable_state: Schema.optional(Schema.String),
-  head: Schema.Struct({ sha: Schema.String }),
+  head: Schema.Struct({ sha: Schema.String, ref: Schema.String }),
+  base: Schema.Struct({ ref: Schema.String }),
 })
 
 const PullRequestList = Schema.Array(PullRequestBody)
@@ -205,6 +210,8 @@ export const GitHubLive = Layer.effect(
       state: pr.merged ? "merged" : pr.state === "open" ? "open" : "closed",
       draft: pr.draft,
       headSha: pr.head.sha,
+      baseRef: pr.base.ref,
+      headRef: pr.head.ref,
       mergeable: pr.mergeable ?? null,
       mergeableState: pr.mergeable_state ?? "unknown",
     })

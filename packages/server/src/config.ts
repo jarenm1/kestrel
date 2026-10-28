@@ -14,8 +14,12 @@ export interface ServerConfig {
   /** Base URL the agent harness uses to reach this server's MCP endpoint. */
   readonly mcpBaseUrl: string
   readonly dataDir: string
-  readonly reposDir: string
-  readonly worktreesDir: string
+  /** Bare mirrors of repositories, one per user per repository; host-only writes, read-only in sandboxes. */
+  readonly mirrorsDir: string
+  /** Per-thread workspaces: the agent's working directory, with one checkout directory per repository. */
+  readonly threadsDir: string
+  /** Host-only shadow git dirs, one per checkout; all host-side git on a checkout runs against these. */
+  readonly shadowsDir: string
   readonly runsDir: string
   readonly attachmentsDir: string
   readonly stateFile: string
@@ -89,8 +93,9 @@ export const loadConfig = (): ServerConfig => {
     relay: loadRelay(),
     mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
     dataDir,
-    reposDir: join(dataDir, "repos"),
-    worktreesDir: join(dataDir, "worktrees"),
+    mirrorsDir: join(dataDir, "mirrors"),
+    threadsDir: join(dataDir, "threads"),
+    shadowsDir: join(dataDir, "shadows"),
     runsDir: join(dataDir, "runs"),
     attachmentsDir: join(dataDir, "attachments"),
     stateFile: join(dataDir, "state.json"),
