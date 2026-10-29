@@ -82,8 +82,38 @@
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+        # Toolkits: heavy desktop apps a task opts into (the agent's `toolkit_install`), never part of
+        # sandboxEnv. The box realizes `packages.toolkit-<name>` on demand with `nix build`, so a box
+        # downloads Blender or Wine only once some task asks for it. Names match packages/server/src/toolkits.ts.
+        # Every binary is wrapped for the sandbox: Xvfb has no GPU and the sandbox has no /run/opengl-driver,
+        # so GL and Vulkan come from Mesa's software drivers (llvmpipe, lavapipe).
+        toolkitWrapArgs = pkgs.lib.escapeShellArgs [
+          "--prefix" "LD_LIBRARY_PATH" ":" "${pkgs.mesa}/lib"
+          "--set" "__EGL_VENDOR_LIBRARY_FILENAMES" "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
+          "--set" "VK_DRIVER_FILES" "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.uname.processor}.json"
+          "--set" "GALLIUM_DRIVER" "llvmpipe"
+          "--set-default" "FONTCONFIG_FILE" "${sandboxFontsConf}"
+        ];
+        mkToolkit = name: apps: pkgs.runCommand "kestrel-toolkit-${name}" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+          mkdir -p $out/bin
+          for app in ${toString apps}; do
+            for exe in "$app"/bin/*; do
+              makeWrapper "$exe" "$out/bin/$(basename "$exe")" ${toolkitWrapArgs}
+            done
+          done
+        '';
+        # Vinegar is x86_64-linux only; the box is too, in practice.
+        toolkits = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          toolkit-blender = mkToolkit "blender" [ pkgs.blender ];
+          # Roblox Studio through Vinegar (Wine); Vinegar downloads Studio itself on first `vinegar run`.
+          # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
+          toolkit-roblox-studio = mkToolkit "roblox-studio" [ pkgs.vinegar pkgs.rojo pkgs.wally ];
+        };
       in
       {
+        packages = toolkits;
+
         devShells.default = pkgs.mkShell {
           packages = systemDeps;
 
@@ -92,6 +122,7 @@
             export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-$PWD/.data}"
             export CLOUDAGENTS_SANDBOX_PATH="${sandboxEnv}/bin"
             export CLOUDAGENTS_SANDBOX_SSL="${sandboxSsl}"
+            export CLOUDAGENTS_TOOLKITS_FLAKE="${self}"
             export PATH="$PWD/node_modules/.bin:$PATH"
             echo "cloudagents dev shell: bun $(bun --version), ffmpeg $(ffmpeg -version | head -1 | cut -d' ' -f3)"
           '';
@@ -112,6 +143,7 @@
               export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-$PWD/.data}"
               export CLOUDAGENTS_SANDBOX_PATH="${sandboxEnv}/bin"
               export CLOUDAGENTS_SANDBOX_SSL="${sandboxSsl}"
+              export CLOUDAGENTS_TOOLKITS_FLAKE="${self}"
               if [ ! -d node_modules ]; then
                 bun install --frozen-lockfile
               fi

@@ -54,6 +54,8 @@ export interface ServerConfig {
   readonly sandboxPath: string | null
   /** CA bundle exposed inside the sandbox (CLOUDAGENTS_SANDBOX_SSL). */
   readonly sandboxSslCertFile: string | null
+  /** Flake (CLOUDAGENTS_TOOLKITS_FLAKE, set by the flake) whose `toolkit-<name>` packages `toolkit_install` builds; null without Nix. */
+  readonly toolkitsFlake: string | null
   /** Extra read-only binds the fake agent needs; empty for real agents. */
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
@@ -119,6 +121,7 @@ export const loadConfig = (): ServerConfig => {
     sandboxEnabled,
     sandboxPath,
     sandboxSslCertFile: sandboxSsl,
+    toolkitsFlake: process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null,
     fakeAgentRoBinds,
     systemd,
     githubApiUrl: loadGitHubApiUrl(),

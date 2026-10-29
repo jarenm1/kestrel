@@ -14,6 +14,9 @@ export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./sy
 /** Where the per-task home is mounted inside the sandbox. */
 export const SANDBOX_HOME = "/home/agent"
 
+/** Under the task home: executables of the task's installed toolkits (`toolkits.ts`), last on every launch's PATH. */
+export const TOOLKIT_BIN = ".kestrel/bin"
+
 /** Host paths exposed read-only when present; enough for DNS, TLS and passwd lookups. */
 const SYSTEM_RO_FILES = [
   "/etc/resolv.conf",
@@ -548,7 +551,9 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     const home = agentHome(settings, req.homeDir)
     const env: Record<string, string> = {
       ...(settings.enabled ? {} : platformEnv()),
-      PATH: settings.enabled ? (settings.binPath as string) : (process.env.PATH ?? "/usr/bin:/bin"),
+      PATH: settings.enabled
+        ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
+        : `${process.env.PATH ?? "/usr/bin:/bin"}:${join(req.homeDir, TOOLKIT_BIN)}`,
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
       ...(settings.sslCertFile

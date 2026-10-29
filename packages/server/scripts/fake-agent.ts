@@ -164,6 +164,27 @@ const runAutomationProbes = async (foreignId: string | undefined): Promise<numbe
   return removed.failed || updated.failed ? 1 : 0
 }
 
+// Installs a toolkit, checks its commands are on PATH for a new process, launches `gui` on the desktop and reports
+// the desktop a while later with a screenshot.
+const runToolkitProbe = async (name: string, gui: string): Promise<number> => {
+  const installed = await call("toolkit_install", { name }, UNBOUNDED_CALL_MS)
+  const found = await call("workspace_exec", { command: `command -v ${gui.split(" ")[0]} && ls ~/.kestrel/bin` })
+  if (installed.failed || !found.text.startsWith("exit code: 0")) {
+    await call("task_report", { status: "failed", message: `toolkit probe: ${installed.text} / ${found.text}` })
+    return 1
+  }
+  await call("desktop_open", {})
+  const launched = await call("desktop_launch", { command: gui })
+  await sleepMs(45_000)
+  console.log(`fake-agent: processes\n${(await call("desktop_processes", { lines: 20 })).text}`)
+  await call("task_report", {
+    status: launched.failed ? "failed" : "done",
+    message: `toolkit probe: ${installed.text}; ${launched.text}`,
+    attachScreenshot: true,
+  })
+  return launched.failed ? 1 : 0
+}
+
 // Asks the user a question with options and a screenshot, then polls the inbox for a message sent during the run.
 const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
   // The question attaches the desktop, so it has to be running.
@@ -235,6 +256,7 @@ const main = async (): Promise<number> => {
     return answered.failed ? 1 : 0
   }
   if (probe === "checkout-probe") return runCheckoutProbe(arg ?? "")
+  if (probe === "toolkit-probe") return runToolkitProbe(arg ?? "", prompt.trim().split(/\s+/).slice(2).join(" "))
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 
   // The desktop starts only when the agent opens it: until then the desktop tools refuse.
