@@ -38,14 +38,14 @@
           git
           # Agent sandbox: every agent run and MCP exec runs inside bubblewrap
           bubblewrap
-          passt         # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
-          util-linux    # `nsenter`: sandbox launches join their task's network namespace
+          passt # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
+          util-linux # `nsenter`: sandbox launches join their task's network namespace
           # Remote desktop stack (one virtual X display per task)
-          xvfb         # virtual X server (xorg.xvfb is deprecated)
-          openbox       # minimal window manager
-          xterm         # default app on agent desktops
-          xdotool       # input injection (mouse/keyboard) from the web client / MCP
-          ffmpeg-full   # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
+          xvfb # virtual X server (xorg.xvfb is deprecated)
+          openbox # minimal window manager
+          xterm # default app on agent desktops
+          xdotool # input injection (mouse/keyboard) from the web client / MCP
+          ffmpeg-full # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
           xdamageCapture # frames from the X damage/cursor events -> ffmpeg rawvideo
           # Local control plane (`wrangler dev`); nixpkgs' build runs workerd on NixOS
           wrangler
@@ -59,28 +59,44 @@
         '';
 
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
-        sandboxEnv = pkgs.buildEnv {
-          name = "cloudagents-sandbox-env";
-          paths = with pkgs; [
-            bash
-            coreutils
-            findutils
-            gnugrep
-            gnused
-            gawk
-            which
-            procps
-            git
-            curl
-            ripgrep
-            nodejs_22
-            bun
-            claude-code
-            codex
-            xterm # the task desktop's terminal and what the agent launches on it run sandboxed
-            sandboxFirefox # a browser for desktop_launch
-          ];
+        sandboxBasePackages = with pkgs; [
+          bash
+          coreutils
+          findutils
+          gnugrep
+          gnused
+          gawk
+          which
+          procps
+          git
+          curl
+          ripgrep
+          nodejs_22
+          bun
+          claude-code
+          codex
+          xterm # the task desktop's terminal and what the agent launches on it run sandboxed
+          sandboxFirefox # a browser for desktop_launch
+        ];
+
+        desktopProfilePackages = {
+          default = [ ];
+        } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          blender = [ pkgs.blender ];
+          # Vinegar is x86_64 Linux only. The profile supplies the bootstrapper
+          # and Roblox development CLIs; users install Studio on first launch.
+          roblox = with pkgs; [ vinegar rojo wally ];
         };
+
+        sandboxEnvs = pkgs.lib.mapAttrs
+          (profile: extraPackages:
+            pkgs.buildEnv {
+              name = "cloudagents-sandbox-${profile}";
+              paths = sandboxBasePackages ++ extraPackages;
+            }
+          )
+          desktopProfilePackages;
+        sandboxEnv = sandboxEnvs.default;
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
       in
       {
@@ -127,11 +143,12 @@
                 exec bun run dev
               '';
             };
-            boxRun = pkgs.writeShellApplication {
-              name = "cloudagents-box";
+            mkBoxRun = profile: env: pkgs.writeShellApplication {
+              name = if profile == "default" then "cloudagents-box" else "cloudagents-box-${profile}";
               runtimeInputs = systemDeps;
               text = ''
                 ${preflight}
+                export CLOUDAGENTS_SANDBOX_PATH="${env}/bin"
                 if [ -f .box.env ]; then
                   set -a
                   # shellcheck source=/dev/null
@@ -141,6 +158,11 @@
                 exec bun run --filter @cloudagents/server dev
               '';
             };
+            boxRuns = pkgs.lib.mapAttrs mkBoxRun sandboxEnvs;
+            blenderAutoProfileCase = pkgs.lib.optionalString (system == "x86_64-linux")
+              "blender) box_app=\"box-blender\" ;;";
+            robloxAutoProfileCase = pkgs.lib.optionalString (system == "x86_64-linux")
+              "roblox) box_app=\"box-roblox\" ;;";
             # Production box that follows `main`: keeps its own clone (never your working checkout),
             # polls origin every KESTREL_BOX_POLL seconds, and on a new commit fast-forwards,
             # reinstalls deps and restarts the box. A restart interrupts in-flight agent runs.
@@ -164,6 +186,14 @@
                 fi
                 cd "$dir"
 
+                profile="''${CLOUDAGENTS_DESKTOP_PROFILE:-default}"
+                case "$profile" in
+                  default) box_app="box" ;;
+                  ${blenderAutoProfileCase}
+                  ${robloxAutoProfileCase}
+                  *) echo "unknown CLOUDAGENTS_DESKTOP_PROFILE: $profile" >&2; exit 2 ;;
+                esac
+
                 child=""
                 stop() {
                   if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
@@ -176,7 +206,7 @@
                   echo "box-auto: starting box at $(git rev-parse --short HEAD)" >&2
                   bun install --frozen-lockfile >/dev/null
                   # Own process group, so a restart stops bun and every agent under it.
-                  setsid nix run .#box &
+                  setsid nix run ".#$box_app" &
                   child=$!
                 }
                 trap 'stop; exit 0' INT TERM
@@ -201,20 +231,29 @@
               '';
             };
           in
-          {
+          ({
             default = {
               type = "app";
               program = "${devRun}/bin/cloudagents-dev";
             };
             box = {
               type = "app";
-              program = "${boxRun}/bin/cloudagents-box";
+              program = "${boxRuns.default}/bin/cloudagents-box";
             };
             box-auto = {
               type = "app";
               program = "${boxAutoRun}/bin/cloudagents-box-auto";
             };
-          };
+          } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+            box-blender = {
+              type = "app";
+              program = "${boxRuns.blender}/bin/cloudagents-box-blender";
+            };
+            box-roblox = {
+              type = "app";
+              program = "${boxRuns.roblox}/bin/cloudagents-box-roblox";
+            };
+          });
 
         formatter = pkgs.nixpkgs-fmt;
       });
