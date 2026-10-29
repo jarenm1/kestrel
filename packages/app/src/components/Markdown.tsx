@@ -4,7 +4,7 @@ import rehypeRaw from "rehype-raw"
 import rehypeSanitize from "rehype-sanitize"
 import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
-import { AGENT_HTML_SCHEMA, rehypeScopeIdRefs } from "@/lib/agentHtml"
+import { AGENT_HTML_SCHEMA, rehypeAgentSvg } from "@/lib/agentHtml"
 import { cn } from "@/lib/utils"
 
 const COMPONENTS: Components = {
@@ -22,7 +22,7 @@ export function Markdown({ text, className }: { text: string; className?: string
   const instance = useId().replace(/[^a-zA-Z0-9]/g, "")
   const rehypePlugins = useMemo((): Options["rehypePlugins"] => {
     const prefix = `md${instance}-`
-    return [rehypeRaw, [rehypeSanitize, { ...AGENT_HTML_SCHEMA, clobberPrefix: prefix }], rehypeScopeIdRefs(prefix)]
+    return [rehypeRaw, [rehypeSanitize, { ...AGENT_HTML_SCHEMA, clobberPrefix: prefix }], rehypeAgentSvg(prefix)]
   }, [instance])
   return (
     <div

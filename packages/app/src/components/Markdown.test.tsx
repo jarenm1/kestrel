@@ -33,6 +33,22 @@ describe("agent HTML and SVG", () => {
     }
   })
 
+  test("SVG styles and presentation attributes cannot load anything, but painting survives", () => {
+    const html = render(
+      `<svg viewBox="0 0 10 10"><defs><filter id="f"/></defs>` +
+        `<rect style="filter:url(https://attacker.example/x.svg#f);fill:rgb(1,2,3)"/>` +
+        `<rect style="fill:u\\rl(https://attacker.example/a)"/>` +
+        `<rect style="mask-image:image-set('https://attacker.example/b' 1x)"/>` +
+        `<rect style='font-family:"a;fill:url(https://attacker.example/c)"'/>` +
+        `<rect fill="url(https://attacker.example/d#g)" stroke="URL( 'https://attacker.example/e' )" filter="url(#f)" transform="rotate(45) translate(1 2)"/>` +
+        `<use href="https://attacker.example/f.svg#a"/></svg>`,
+    )
+    expect(html).not.toContain("attacker.example")
+    expect(html).toContain('style="fill:rgb(1,2,3)"')
+    expect(html).toMatch(/filter="url\(#md[^"]+-f\)"/)
+    expect(html).toContain('transform="rotate(45) translate(1 2)"')
+  })
+
   test("ids are scoped per message and SVG references follow them", () => {
     const svg = `<svg viewBox="0 0 10 10"><defs><linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient></defs><rect fill="url(#g)" style="opacity:.5"/><use href="#g"/></svg>`
     const html = renderToStaticMarkup(
