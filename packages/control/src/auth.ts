@@ -1,18 +1,12 @@
 import { ControlPaths } from "@cloudagents/protocol"
 import { findProvider, type OAuthProvider } from "./providers"
 import { UpstreamError, errorResponse, readCookie, safeReturnPath } from "./http"
-import { hub, type Env } from "./env"
+import { hub, isAllowedLogin, type Env } from "./env"
 import type { SessionRecord } from "./hub"
 
 export const SESSION_COOKIE = "session"
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const STATE_TTL_MS = 10 * 60 * 1000
-
-/** Sign-in is restricted to the comma-separated `ALLOWED_GITHUB_LOGINS` (case-insensitive). */
-export const isAllowedLogin = (env: Env, login: string): boolean =>
-  env.ALLOWED_GITHUB_LOGINS.split(",")
-    .map((s) => s.trim().toLowerCase())
-    .includes(login.toLowerCase())
 
 /** The signed-in user's session, or null when there is no live session for an allowed account. */
 export const currentSession = async (request: Request, env: Env): Promise<SessionRecord | null> => {

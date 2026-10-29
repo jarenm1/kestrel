@@ -4,7 +4,6 @@ import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, C
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
-import type { TaskStatsShape } from "../stats"
 import { BOX_DEV_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
@@ -118,7 +117,7 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, stats: TaskStatsShape) =>
+export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
@@ -266,22 +265,15 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, stats: TaskSt
         ),
       ),
     ),
-    // The thread's RAM, CPU and storage against its own limits (VRAM is the shared GPU), for the Desktop panel's graphs.
-    HttpRouter.get(
-      "/api/tasks/:id/stats",
-      Effect.flatMap(pathId, (id) =>
-        respond(signedIn((user) => Effect.zipRight(core.getTask(user, id), stats.snapshot(id)))),
-      ),
-    ),
   )
 
 /**
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, stats: TaskStatsShape) =>
+export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, stats))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

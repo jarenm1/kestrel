@@ -249,7 +249,10 @@ export const TaskStatsSample = Schema.Struct({
 })
 export type TaskStatsSample = typeof TaskStatsSample.Type
 
-/** GET `Paths.taskStats`: the last `TASK_STATS_WINDOW_MS` of samples, oldest first, one per `intervalMs`. */
+/**
+ * Over `Paths.taskStatsWs`: the first frame carries the last `TASK_STATS_WINDOW_MS` of samples, oldest first; every
+ * later frame carries the samples taken since (normally one per `intervalMs`), to append.
+ */
 export const TaskStats = Schema.Struct({
   intervalMs: Schema.Number,
   samples: Schema.Array(TaskStatsSample),
@@ -296,6 +299,8 @@ export type DesktopAck = typeof DesktopAck.Type
 /** Server -> client events over the task event WebSocket (JSON text frames). */
 export const ServerEvent = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("task.updated"), task: Task }),
+  /** The thread is gone (deleted, not archived). `owner` routes it to that user's `Paths.eventsWs` stream. */
+  Schema.Struct({ _tag: Schema.Literal("task.deleted"), taskId: Schema.String, owner: Schema.String }),
   Schema.Struct({ _tag: Schema.Literal("message.created"), message: Message }),
   Schema.Struct({ _tag: Schema.Literal("run.updated"), run: Run }),
   Schema.Struct({
@@ -516,8 +521,11 @@ export const Paths = {
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
   taskDesktopQuality: (id: string) => `/api/tasks/${id}/desktop/quality`,
-  /** GET -> TaskStats of the thread. The box samples only while someone asks, so the first answer may be short. */
-  taskStats: (id: string) => `/api/tasks/${id}/stats`,
+  /**
+   * WebSocket: server sends `TaskStats` JSON text frames, the window so far and then new samples as they are taken.
+   * The box samples the thread only while a stream is open (and briefly after), so the first frame may be short.
+   */
+  taskStatsWs: (id: string) => `/api/tasks/${id}/stats/stream`,
   /** Preview view path; the remaining path segments and query are proxied to the registered dev server. */
   taskPreview: (id: string) => `/api/tasks/${id}/preview`,
   /** POST -> PreviewSession: mints a short-lived token for the isolated/sandboxed browser preview. */
@@ -534,8 +542,13 @@ export const Paths = {
   runCancel: (id: string) => `/api/runs/${id}/cancel`,
   /** GET -> RunItems: the run's display items so far (live runs) or final (finished runs). */
   runItems: (id: string) => `/api/runs/${id}/items`,
-  /** WebSocket: JSON `ServerEvent` text frames. */
+  /** WebSocket: JSON `ServerEvent` text frames for one thread. */
   taskEventsWs: (id: string) => `/api/tasks/${id}/events`,
+  /**
+   * WebSocket: JSON `ServerEvent` text frames for the thread list of the signed-in user: `task.updated` for every one
+   * of their threads (including new ones) and `task.deleted`. Replaces polling `Paths.tasks`.
+   */
+  eventsWs: "/api/events",
   /**
    * WebSocket: server sends `DesktopStatus` JSON text frames + fMP4 binary frames; client sends `DesktopInput` JSON
    * and `DesktopAck` JSON.

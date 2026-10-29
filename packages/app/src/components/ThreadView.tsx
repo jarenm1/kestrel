@@ -177,7 +177,6 @@ export function ThreadView({ taskId }: { taskId: string }) {
               tab={tab}
               taskId={taskId}
               archived={archivedTask !== undefined}
-              running={state.task?.status === "running"}
               previewPort={state.task?.previewPort}
               onSelectElement={(element) => setElements((current) => [...current, element])}
             />
@@ -217,14 +216,12 @@ function SidebarBody({
   tab,
   taskId,
   archived,
-  running,
   previewPort,
   onSelectElement,
 }: {
   tab: TabId
   taskId: string
   archived: boolean
-  running: boolean
   previewPort: number | undefined
   onSelectElement: (element: ElementContext) => void
 }) {
@@ -240,6 +237,6 @@ function SidebarBody({
       }
       return <PreviewViewer taskId={taskId} port={previewPort} onSelect={onSelectElement} />
     case "diff":
-      return <DiffPanel taskId={taskId} running={running} />
+      return <DiffPanel taskId={taskId} />
   }
 }

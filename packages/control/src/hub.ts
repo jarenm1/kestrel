@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers"
 import { Option, Schema } from "effect"
 import {
   CREDENTIALS_HEADER,
+  ControlPaths,
   Paths,
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
@@ -27,7 +28,7 @@ import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
-import type { Env } from "./env"
+import { SESSION_HEADER, isAllowedLogin, type Env } from "./env"
 
 /**
  * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
@@ -40,7 +41,7 @@ import type { Env } from "./env"
  * - Browser WebSockets are accepted with the standard API (they pin the object in memory) and
  *   piped to the box as `ws-open` / `ws-text` / binary / `ws-close`.
  *
- * Methods are RPC-callable from the Worker; `fetch` handles `/box/connect` and tunnelled `/api/*`.
+ * Methods are RPC-callable from the Worker; `fetch` handles `/box/connect` and `/api/*` signed in by session id.
  */
 
 const BOX_TAG = "box"
@@ -686,8 +687,28 @@ export class Hub extends DurableObject<Env> {
     if (url.pathname.startsWith("/_preview/") || this.previewReferer(request) !== null) {
       return this.previewRelay(request, url)
     }
-    if (url.pathname.startsWith("/api/")) return this.relay(request, url)
+    if (url.pathname.startsWith("/api/")) return this.signedInApi(request, url)
     return errorResponse(404, "NotFound", `no route for ${url.pathname}`)
+  }
+
+  /**
+   * A browser API call the Worker forwarded with the caller's session id (`SESSION_HEADER`): resolving the session,
+   * checking the account is still allowed, attaching its credentials and relaying all happen in this one Durable
+   * Object request, instead of one RPC each. `GET /api/box` is answered here, since it needs no box round trip.
+   */
+  private signedInApi(request: Request, url: URL): Promise<Response> | Response {
+    const sessionId = request.headers.get(SESSION_HEADER)
+    const session = sessionId ? this.session(sessionId) : null
+    if (!session || !isAllowedLogin(this.env, session.login)) {
+      return errorResponse(401, "Unauthorized", "sign in required")
+    }
+    if (url.pathname === ControlPaths.box && request.method === "GET") return Response.json(this.boxStatus())
+    const creds = this.credentials(session.login)
+    const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
+    const headers = new Headers(request.headers)
+    headers.delete(SESSION_HEADER)
+    headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
+    return this.relay(new Request(request, { headers }), url)
   }
   private previewReferer(request: Request): { token: string; taskId: string } | null {
     const referer = request.headers.get("referer")

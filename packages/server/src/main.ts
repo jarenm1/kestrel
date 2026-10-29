@@ -15,7 +15,7 @@ import { CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
-import { TaskStatsLive, TaskStatsService } from "./stats"
+import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import { BOX_DEV_HEADER, runRelay } from "./relay/client"
 
@@ -114,8 +114,7 @@ const program = Effect.gen(function* () {
   const desktop = yield* DesktopManager
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
-  const stats = yield* TaskStatsService
-  const webHandler = yield* makeWebHandler(core, cliAuth, stats)
+  const webHandler = yield* makeWebHandler(core, cliAuth)
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },

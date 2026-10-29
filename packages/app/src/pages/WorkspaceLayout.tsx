@@ -6,6 +6,7 @@ import { queries } from "@/api/queries"
 import { BoxOfflineBanner } from "@/components/BoxStatus"
 import { ThreadSidebar } from "@/components/ThreadSidebar"
 import { Button } from "@/components/ui/button"
+import { useThreadListEvents } from "@/hooks/useThreadListEvents"
 
 const COLLAPSED_KEY = "kestrel.threadsCollapsed"
 
@@ -16,6 +17,7 @@ const COLLAPSED_KEY = "kestrel.threadsCollapsed"
  */
 export function WorkspaceLayout() {
   const tasks = useQuery(queries.tasks())
+  useThreadListEvents()
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (collapsed) localStorage.setItem(COLLAPSED_KEY, "1")

@@ -25,10 +25,10 @@ const isLarge = (file: DiffFile): boolean => file.additions + file.deletions > L
 
 /**
  * The thread's changes, one section per checked-out repository: every change on that checkout's branch (commits,
- * uncommitted and untracked files) against its base branch. `running` polls while the agent works.
+ * uncommitted and untracked files) against its base branch. Refetched when the thread's run events invalidate it.
  */
-export function DiffPanel({ taskId, running }: { taskId: string; running: boolean }) {
-  const diff = useQuery(queries.diff(taskId, running))
+export function DiffPanel({ taskId }: { taskId: string }) {
+  const diff = useQuery(queries.diff(taskId))
   const checkouts = diff.data?.checkouts ?? []
 
   return (

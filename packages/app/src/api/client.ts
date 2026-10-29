@@ -25,7 +25,6 @@ import {
   SendMessageResponse,
   type SetDesktopQualityBody,
   Task,
-  TaskStats,
   UpdateAutomationBody,
   Usage,
 } from "@cloudagents/protocol"
@@ -207,5 +206,4 @@ export const api = {
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)))),
   setDesktopQuality: (taskId: string, body: SetDesktopQualityBody) =>
     run(request(DesktopStatus, "PUT", Paths.taskDesktopQuality(taskId), body)),
-  taskStats: (taskId: string) => run(request(TaskStats, "GET", Paths.taskStats(taskId))),
 }
