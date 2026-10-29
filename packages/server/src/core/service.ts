@@ -33,6 +33,7 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
+import { withUserContext } from "./user-context"
 import { peerMessageText, type FromThread } from "./peer"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
@@ -892,7 +893,7 @@ export const CoreLive = Layer.effect(
               question === null
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
-            const prompt = earlier === null ? asked : formatHandoff(earlier, asked)
+            const prompt = withUserContext(user, earlier === null ? asked : formatHandoff(earlier, asked))
             return Either.right({
               task: { ...task },
               message,
