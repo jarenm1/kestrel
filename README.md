@@ -25,12 +25,14 @@ Kestrel runs Claude Code or Codex on a box you own, driven from a chat in the br
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/claude-command-autocomplete.png" alt="Claude Code slash commands in the composer"></td>
-    <td><img src="docs/screenshots/codex-skill-autocomplete.png" alt="Codex skills in the composer"></td>
+    <td width="33%"><img src="docs/screenshots/thread-streaming.png" alt="A thread streaming the agent's tool calls and command output"></td>
+    <td width="33%"><img src="docs/screenshots/thread-question.png" alt="The agent asking a question with answer options"></td>
+    <td width="33%"><img src="docs/screenshots/claude-command-autocomplete.png" alt="Claude Code slash commands in the composer"></td>
   </tr>
   <tr>
-    <td align="center">Claude Code slash commands</td>
-    <td align="center">Codex skills</td>
+    <td align="center">Tool calls and command output, live</td>
+    <td align="center">The agent asks when it needs you</td>
+    <td align="center">Your harness's slash commands and skills</td>
   </tr>
 </table>
 
