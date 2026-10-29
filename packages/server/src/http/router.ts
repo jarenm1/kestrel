@@ -185,6 +185,7 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/runs",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listRuns(user, id)))),
     ),
+    HttpRouter.get("/api/usage", respond(signedIn((user) => core.usage(user, new Date())))),
     HttpRouter.post(
       "/api/runs/:id/cancel",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
