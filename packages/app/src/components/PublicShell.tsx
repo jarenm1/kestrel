@@ -1,11 +1,13 @@
-import type { ReactNode } from "react"
+import { lazy, Suspense, type ReactNode } from "react"
 import { Link, NavLink } from "react-router-dom"
 import { KestrelMark } from "@/components/KestrelMark"
-import { PlasmaBackground } from "@/components/PlasmaBackground"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { APP_ORIGIN } from "@/routes"
 import "@/stylesfrontend.css"
+
+// WebGL shader code only loads on the public pages.
+const PublicBackground = lazy(() => import("@/components/PublicBackground"))
 
 export const GITHUB_URL = "https://github.com/jarenm1/kestrel"
 
@@ -19,8 +21,8 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   )
 
 /**
- * Frame for the public pages (landing, pricing): the app's theme with a bit more atmosphere (a braille plasma and
- * a spotlight behind the hero) and a floating pill nav.
+ * Frame for the public pages (landing, pricing): the app's theme with a bit more atmosphere (a greyscale grain
+ * gradient and a spotlight behind the hero) and a floating pill nav.
  */
 export function PublicShell({
   children,
@@ -32,8 +34,15 @@ export function PublicShell({
 }) {
   return (
     <div className="public-page relative flex min-h-screen flex-col overflow-x-hidden bg-background">
-      {/* The plasma shows around the hero and fades to black towards the edges and further down the page. */}
-      <PlasmaBackground className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[110vh] [mask-image:radial-gradient(ellipse_65%_60%_at_50%_35%,black_15%,transparent_100%)]" />
+      {/* Covers the hero and fades out as the page scrolls on, so it never sits behind body text. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[110vh] [mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
+      >
+        <Suspense fallback={null}>
+          <PublicBackground />
+        </Suspense>
+      </div>
       <div aria-hidden className="pointer-events-none fixed top-0 left-1/2 z-0 h-[600px] w-[900px] -translate-x-1/2">
         <div className="absolute inset-0 rounded-full bg-[radial-gradient(ellipse_at_top,rgb(255_255_255/0.16),transparent_65%)] blur-3xl" />
       </div>
