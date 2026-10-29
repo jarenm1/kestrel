@@ -19,10 +19,11 @@ const sections = [
 export function SettingsLayout() {
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 p-6 md:flex-row md:gap-10">
-        <aside className="flex shrink-0 flex-col gap-3 md:w-44">
+      {/* The nav column is mirrored by an empty one on the right, so the content sits in the middle of the page. */}
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 lg:grid lg:max-w-none lg:grid-cols-[11rem_minmax(0,48rem)_11rem] lg:justify-center lg:gap-10">
+        <aside className="flex shrink-0 flex-col gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-          <nav className="flex gap-1 md:flex-col">
+          <nav className="flex gap-1 lg:flex-col">
             {sections.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
