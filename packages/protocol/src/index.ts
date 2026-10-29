@@ -348,7 +348,7 @@ export const PLANS: readonly Plan[] = [
     period: "forever",
     desc: "Try an agent box on a side project.",
     agentHours: 10,
-    features: ["1 box, shared compute", "10 agent hours / month", "Live desktop at 720p", "Bring your own model key"],
+    features: ["1 box, shared compute", "10 agent hours / month", "Live desktop at 1080p, 60 fps", "Bring your own model key"],
   },
   {
     id: "pro",
@@ -361,7 +361,6 @@ export const PLANS: readonly Plan[] = [
       "1 dedicated box",
       "200 agent hours / month",
       "Live desktop at 1080p, 60 fps",
-      "Parallel tasks with isolated worktrees",
       "Priority support",
     ],
   },
