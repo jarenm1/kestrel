@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
-import { Navigate, NavLink, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
 import { CreditCard, LogOut, Settings } from "lucide-react"
-import { api, ApiError, onUnauthorized } from "@/api/client"
+import { ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
 import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
@@ -17,16 +17,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
 import { PricingPage } from "@/pages/PricingPage"
-import { AccountLayout, BillingSection, ProfileSection } from "@/pages/AccountPage"
+import { BillingSettings, ProfileSettings, SettingsLayout } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
-import { ACCOUNT_PATH, APP_HOME, APP_ORIGIN, BILLING_PATH, IS_SITE_HOST, SITE_ORIGIN, threadPath } from "@/routes"
+import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
 import { errorText } from "@/util"
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -43,10 +44,6 @@ export function App() {
         <Route element={<PublicShell />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
-          <Route path={ACCOUNT_PATH} element={<AccountLayout />}>
-            <Route index element={<ProfileSection />} />
-            <Route path="billing" element={<BillingSection />} />
-          </Route>
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>
@@ -61,6 +58,11 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route element={<AppShell />}>
           <Route path="/connections" element={<ConnectionsPage />} />
+          <Route path="/settings" element={<SettingsLayout />}>
+            <Route index element={<Navigate to="profile" replace />} />
+            <Route path="profile" element={<ProfileSettings />} />
+            <Route path="billing" element={<BillingSettings />} />
+          </Route>
           <Route element={<WorkspaceLayout />}>
             <Route path={APP_HOME} element={<NewThreadPage />} />
             <Route path="/c/:taskId" element={<ThreadPage />} />
@@ -160,11 +162,7 @@ function NotFound() {
 }
 
 function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string }) {
-  const signOut = useMutation({
-    mutationFn: api.logout,
-    // Reload re-checks the session either way.
-    onSettled: () => window.location.reload(),
-  })
+  const signOut = useSignOut()
 
   return (
     <DropdownMenu>
@@ -180,16 +178,16 @@ function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string })
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <a href={SITE_ORIGIN + ACCOUNT_PATH}>
+          <Link to="/settings/profile">
             <Settings />
-            Account
-          </a>
+            Settings
+          </Link>
         </DropdownMenuItem>
         <DropdownMenuItem asChild>
-          <a href={SITE_ORIGIN + BILLING_PATH}>
+          <Link to="/settings/billing">
             <CreditCard />
             Billing
-          </a>
+          </Link>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled={signOut.isPending} onSelect={() => signOut.mutate()}>

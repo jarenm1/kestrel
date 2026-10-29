@@ -1,4 +1,4 @@
-import { ControlPaths, Paths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { ControlPaths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
@@ -32,7 +32,7 @@ const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "www.kestr
 const APP_ORIGIN = "https://app.kestrel-agent.com"
 
 /**
- * The public pages ask the app host who is signed in (nav and account page) and for their usage. They are
+ * The public pages ask the app host who is signed in (to show "Profile" instead of "Get Started"). They are
  * same-site with the app host, so its `SameSite=Lax` session cookie rides along; this lets them read the answer.
  * Allowed: the marketing hosts, and on local stacks (dev sign-in enabled) any `site.*` origin.
  */
@@ -49,14 +49,6 @@ const withCors = (response: Response, origin: string): Response => {
   headers.set("Access-Control-Allow-Credentials", "true")
   headers.append("Vary", "Origin")
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-}
-
-/** What the public pages read from the app host: who is signed in, their usage (account page), and sign-out. */
-const SITE_PATHS: Record<string, true> = { [ControlPaths.me]: true, [Paths.usage]: true, [ControlPaths.logout]: true }
-
-const siteCors = (request: Request, env: Env, url: URL, response: Response): Response => {
-  const origin = SITE_PATHS[url.pathname] ? publicSiteOrigin(request, env) : null
-  return origin ? withCors(response, origin) : response
 }
 
 const previewAssetRequest = (request: Request, url: URL): boolean => {
@@ -83,10 +75,12 @@ export default {
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
-      if (url.pathname.startsWith("/auth/")) return siteCors(request, env, url, await handleAuth(request, env, url))
+      if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
       if (previewAssetRequest(request, url)) return await hub(env).fetch(request)
       if (url.pathname.startsWith("/api/")) {
-        return siteCors(request, env, url, await handleApi(request, env, url))
+        const response = await handleApi(request, env, url)
+        const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null
+        return origin ? withCors(response, origin) : response
       }
       return env.ASSETS.fetch(request)
     } catch (err) {
