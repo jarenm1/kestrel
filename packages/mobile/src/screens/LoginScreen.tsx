@@ -1,26 +1,28 @@
-import React, { useState, useRef } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  Pressable,
-  StyleSheet,
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  Modal,
-  SafeAreaView,
-} from "react-native";
-import { WebView } from "react-native-webview";
+import React, { useState } from "react";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Modal } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { WebView, type WebViewProps } from "react-native-webview";
+import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
 import { useAuth } from "@/auth/AuthContext";
-import { colors, radius, spacing } from "@/theme";
+import { KestrelMark } from "@/components/KestrelMark";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
+import { colors, fonts, radius } from "@/theme";
 
-const SafeWebView = WebView as unknown as React.ComponentType<any>;
+// The WebView class's generic props are not inferred through `React.ComponentType`; the props we pass are the public `WebViewProps`.
+const SafeWebView = WebView as unknown as React.ComponentType<WebViewProps>;
+
+/** Where the control plane's /auth/mobile-callback page sends the session id. */
+const CALLBACK_PREFIX = "kestrel://auth-callback";
+/**
+ * The WebView must let `kestrel://` through its origin whitelist: otherwise it hands the URL to Linking before our
+ * should-start callback runs, and Expo Go cannot open an app-specific scheme, so the session would be lost.
+ */
+const ORIGIN_WHITELIST = ["http://*", "https://*", "kestrel://*"];
 
 export function LoginScreen() {
-  const { serverUrl, setServerUrl, setSessionCookie, setUser, loading, error } =
-    useAuth();
+  const { serverUrl, setServerUrl, setSessionCookie, loading, error } = useAuth();
   const [url, setUrl] = useState(serverUrl ?? "https://app.kestrel-agent.com");
   const [showWebView, setShowWebView] = useState(false);
   const [showTokenInput, setShowTokenInput] = useState(false);
@@ -33,66 +35,18 @@ export function LoginScreen() {
   };
 
   const currentServerUrl = serverUrl || url.trim() || "https://app.kestrel-agent.com";
-  // Attempt mobile-callback first, falling back to /
   const loginUrl = `${currentServerUrl}/auth/github/login?return=/auth/mobile-callback`;
 
-  const onNavigationStateChange = (navState: any) => {
-    const currentUrl: string = navState.url;
-
-    // Check for custom protocol redirect: kestrel://auth-callback?session=...
-    if (currentUrl.startsWith("kestrel://") || currentUrl.includes("auth-callback")) {
-      try {
-        const parsed = new URL(currentUrl.replace("kestrel://", "http://placeholder/"));
-        const session = parsed.searchParams.get("session");
-        if (session) {
-          setShowWebView(false);
-          void setSessionCookie(session);
-          return;
-        }
-      } catch {
-        // Fall through
-      }
-    }
-  };
-
-  const injectedJavaScript = `
-    (function() {
-      // Check if user is on the main app page or api/me after auth
-      if (window.location.pathname === '/' || window.location.pathname.startsWith('/api/me') || window.location.pathname.startsWith('/auth/mobile-callback')) {
-        fetch('/api/me', { credentials: 'include' })
-          .then(function(res) { return res.ok ? res.json() : null; })
-          .then(function(user) {
-            if (user && user.login) {
-              window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'AUTH_SUCCESS',
-                user: user,
-                cookies: document.cookie
-              }));
-            }
-          })
-          .catch(function(e) {});
-      }
-    })();
-    true;
-  `;
-
-  const onMessage = (event: any) => {
-    try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data.type === "AUTH_SUCCESS" && data.user) {
-        setShowWebView(false);
-        setUser(data.user);
-        // If cookie has session=..., save it
-        if (data.cookies) {
-          const match = /session=([^;]+)/.exec(data.cookies);
-          if (match && match[1]) {
-            void setSessionCookie(match[1]);
-          }
-        }
-      }
-    } catch {
-      // Ignore
-    }
+  /**
+   * Catches the callback redirect inside the WebView: the session id comes from the URL, since the session cookie is
+   * HttpOnly and unreadable from page JavaScript. The redirect itself is never loaded.
+   */
+  const onShouldStartLoadWithRequest = (request: ShouldStartLoadRequest): boolean => {
+    if (!request.url.startsWith(CALLBACK_PREFIX)) return true;
+    const session = new URL(request.url.replace("kestrel://", "http://callback/")).searchParams.get("session");
+    setShowWebView(false);
+    if (session) void setSessionCookie(session);
+    return false;
   };
 
   const handleManualTokenSubmit = () => {
@@ -102,29 +56,27 @@ export function LoginScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-    >
+    <View style={styles.container}>
       <ScrollView
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={styles.header}>
-          <Text style={styles.title}>Kestrel</Text>
-          <Text style={styles.subtitle}>
-            Your Cloud Agent Harness & Desktop
+        <View style={styles.hero}>
+          {/* The glow sits on a wrapper, as on the web: the mark itself has no background to cast it. */}
+          <View style={styles.glow} accessibilityRole="header" accessibilityLabel="Kestrel">
+            <KestrelMark height={64} />
+          </View>
+          <Text style={styles.tagline}>
+            Run your own agent harness in a sandboxed cloud box with a live desktop.
           </Text>
         </View>
 
         <View style={styles.form}>
           <Text style={styles.label}>Server URL</Text>
-          <TextInput
-            style={styles.input}
+          <Input
             value={url}
             onChangeText={setUrl}
             placeholder="https://app.kestrel-agent.com"
-            placeholderTextColor={colors.mutedForeground}
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
@@ -133,62 +85,51 @@ export function LoginScreen() {
             onBlur={handleSetUrl}
           />
 
-          {error && (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          )}
+          {error ? <Alert>{error}</Alert> : null}
 
-          <Pressable
-            style={[styles.signInBtn, loading && styles.btnDisabled]}
+          <Button
+            size="lg"
+            style={styles.centered}
+            disabled={loading}
             onPress={() => {
               void handleSetUrl();
               setShowWebView(true);
             }}
-            disabled={loading}
           >
-            {loading ? (
-              <ActivityIndicator color={colors.primaryForeground} />
-            ) : (
-              <Text style={styles.signInText}>Sign in with GitHub</Text>
-            )}
-          </Pressable>
+            {loading ? <ActivityIndicator color={colors.primaryForeground} /> : "Sign in with GitHub"}
+          </Button>
 
-          <Pressable
-            style={styles.tokenToggle}
+          <Button
+            variant="ghost"
+            size="sm"
+            style={styles.centered}
             onPress={() => setShowTokenInput(!showTokenInput)}
           >
-            <Text style={styles.tokenToggleText}>
-              {showTokenInput ? "Hide token sign-in" : "Sign in with session token directly"}
-            </Text>
-          </Pressable>
+            {showTokenInput ? "Hide token sign-in" : "Sign in with session token directly"}
+          </Button>
 
-          {showTokenInput && (
+          {showTokenInput ? (
             <View style={styles.tokenBox}>
               <Text style={styles.tokenHelp}>
                 Paste the 'session' cookie token from your web browser:
               </Text>
-              <TextInput
+              <Input
                 style={styles.tokenInput}
                 value={manualToken}
                 onChangeText={setManualToken}
                 placeholder="Session cookie value…"
-                placeholderTextColor={colors.mutedForeground}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
-              <Pressable
-                style={[
-                  styles.tokenBtn,
-                  !manualToken.trim() && styles.btnDisabled,
-                ]}
-                onPress={handleManualTokenSubmit}
+              <Button
+                variant="soft"
                 disabled={!manualToken.trim()}
+                onPress={handleManualTokenSubmit}
               >
-                <Text style={styles.tokenBtnText}>Authenticate Token</Text>
-              </Pressable>
+                Authenticate Token
+              </Button>
             </View>
-          )}
+          ) : null}
         </View>
       </ScrollView>
 
@@ -202,19 +143,15 @@ export function LoginScreen() {
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Sign in with GitHub</Text>
-            <Pressable
-              onPress={() => setShowWebView(false)}
-              style={styles.closeBtn}
-            >
-              <Text style={styles.closeBtnText}>Done</Text>
-            </Pressable>
+            <Button variant="soft" size="sm" onPress={() => setShowWebView(false)}>
+              Done
+            </Button>
           </View>
           <SafeWebView
             source={{ uri: loginUrl }}
             style={styles.webview}
-            onNavigationStateChange={onNavigationStateChange}
-            injectedJavaScript={injectedJavaScript}
-            onMessage={onMessage}
+            originWhitelist={ORIGIN_WHITELIST}
+            onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             javaScriptEnabled
@@ -228,7 +165,7 @@ export function LoginScreen() {
           />
         </SafeAreaView>
       </Modal>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -238,115 +175,57 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   content: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: "center",
     alignItems: "center",
-    paddingHorizontal: spacing.xl,
-    gap: spacing.xxl,
+    padding: 24,
+    gap: 24,
   },
-  header: {
+  hero: {
     alignItems: "center",
-    gap: spacing.sm,
+    gap: 12,
   },
-  title: {
-    fontSize: 34,
-    fontWeight: "700",
-    color: colors.foreground,
-    letterSpacing: -0.5,
+  /** `drop-shadow-[0_0_24px_rgb(255_255_255/0.25)]`: a white glow behind the mark. */
+  glow: {
+    shadowColor: "#ffffff",
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
   },
-  subtitle: {
-    fontSize: 14,
+  tagline: {
+    maxWidth: 340,
     color: colors.mutedForeground,
+    fontSize: 14,
     textAlign: "center",
-    maxWidth: 280,
   },
   form: {
     width: "100%",
     maxWidth: 340,
-    gap: spacing.md,
+    gap: 12,
   },
   label: {
     color: colors.foreground,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "500",
   },
-  input: {
-    backgroundColor: colors.secondary,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    color: colors.foreground,
-    fontSize: 14,
-  },
-  errorBox: {
-    backgroundColor: colors.destructive + "18",
-    borderRadius: radius.md,
-    padding: spacing.md,
-  },
-  errorText: {
-    color: colors.destructive,
-    fontSize: 13,
-  },
-  signInBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: spacing.md + 2,
-    alignItems: "center",
-    marginTop: spacing.sm,
-  },
-  btnDisabled: {
-    opacity: 0.5,
-  },
-  signInText: {
-    color: colors.primaryForeground,
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  tokenToggle: {
-    alignItems: "center",
-    paddingVertical: spacing.xs,
-  },
-  tokenToggleText: {
-    color: colors.mutedForeground,
-    fontSize: 12,
+  centered: {
+    alignSelf: "center",
   },
   tokenBox: {
     backgroundColor: colors.card,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: spacing.md,
-    gap: spacing.sm,
+    padding: 12,
+    gap: 8,
   },
   tokenHelp: {
     color: colors.mutedForeground,
-    fontSize: 11,
+    fontSize: 12,
   },
   tokenInput: {
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs + 2,
-    color: colors.foreground,
+    fontFamily: fonts.mono,
     fontSize: 12,
-    fontFamily: "monospace",
-  },
-  tokenBtn: {
-    backgroundColor: colors.secondary,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingVertical: spacing.sm,
-    alignItems: "center",
-  },
-  tokenBtnText: {
-    color: colors.foreground,
-    fontSize: 12,
-    fontWeight: "600",
   },
   modalContainer: {
     flex: 1,
@@ -359,21 +238,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.card,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
   },
   modalTitle: {
     color: colors.foreground,
     fontSize: 16,
-    fontWeight: "600",
-  },
-  closeBtn: {
-    paddingVertical: 4,
-    paddingHorizontal: spacing.sm,
-  },
-  closeBtnText: {
-    color: colors.primary,
-    fontSize: 15,
     fontWeight: "600",
   },
   webview: {

@@ -5,18 +5,23 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/api/queries";
 import { AuthProvider } from "@/auth/AuthContext";
 import { MainNavigator } from "@/screens/MainNavigator";
-import { StyleSheet } from "react-native";
+import { KeyboardAvoidingView, Platform, StyleSheet } from "react-native";
 import { colors } from "@/theme";
 
 export default function App() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <QueryClientProvider client={queryClient}>
-          <AuthProvider>
-            <MainNavigator />
-          </AuthProvider>
-        </QueryClientProvider>
+        <KeyboardAvoidingView
+          style={styles.root}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <QueryClientProvider client={queryClient}>
+            <AuthProvider>
+              <MainNavigator />
+            </AuthProvider>
+          </QueryClientProvider>
+        </KeyboardAvoidingView>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

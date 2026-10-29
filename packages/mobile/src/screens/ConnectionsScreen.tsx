@@ -1,48 +1,49 @@
 import React, { useMemo, useState } from "react";
-import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Schema } from "effect";
 import { CliProvider, type Connection } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
-import { useNavigation } from "@/nav/navigation";
-import { ScreenHeader } from "@/components/ScreenHeader";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { Input } from "@/components/ui/Input";
 import {
-  ActionButton,
   ConnectionRowFrame,
   ErrorLine,
   connectionStyles,
 } from "@/components/ConnectionsShared";
 import { ConnectionsCliRow } from "@/components/ConnectionsCliRow";
 import { ConnectionsModels } from "@/components/ConnectionsModels";
-import { colors, radius, spacing } from "@/theme";
+import { colors } from "@/theme";
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8;
 
 export function ConnectionsScreen() {
   const { api } = useApiClient();
-  const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
 
   return (
-    <View style={styles.screen}>
-      <ScreenHeader title="Connections" onBack={() => navigation.back()} />
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.subtitle}>Accounts and keys Kestrel uses on your behalf.</Text>
-        {connections.isPending ? <ActivityIndicator color={colors.primary} /> : null}
-        {connections.error ? <ErrorLine error={connections.error} /> : null}
-        {connections.data ? (
-          <View style={styles.card}>
-            {connections.data.map((connection) => (
-              <ConnectionRow key={connection.provider} connection={connection} />
-            ))}
-          </View>
-        ) : null}
-        {connections.data ? <ConnectionsModels connections={connections.data} /> : null}
-      </ScrollView>
-    </View>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <View style={styles.heading}>
+        <Text style={styles.title}>Connections</Text>
+        <Text style={styles.description}>Accounts and keys Kestrel uses on your behalf.</Text>
+      </View>
+      {connections.error ? <ErrorLine error={connections.error} /> : null}
+      {connections.isPending ? <Text style={connectionStyles.muted}>Loading…</Text> : null}
+      {connections.data ? (
+        <Card style={styles.card}>
+          {connections.data.map((connection, index) => (
+            <View key={connection.provider} style={index > 0 ? styles.divider : null}>
+              <ConnectionRow connection={connection} />
+            </View>
+          ))}
+        </Card>
+      ) : null}
+      {connections.data ? <ConnectionsModels connections={connections.data} /> : null}
+    </ScrollView>
   );
 }
 
@@ -79,29 +80,23 @@ function ApiKeyRow({ connection }: { connection: Connection }) {
 
   return (
     <ConnectionRowFrame connection={connection} error={error}>
-      <TextInput
-        style={connectionStyles.input}
-        value={apiKey}
-        onChangeText={setApiKey}
-        placeholder={connection.connected ? "Replace API key" : "API key"}
-        placeholderTextColor={colors.mutedForeground}
-        secureTextEntry
-        autoCapitalize="none"
-        autoCorrect={false}
-      />
       <View style={connectionStyles.actions}>
-        <ActionButton
-          label="Save"
-          disabled={busy || trimmed.length < MIN_API_KEY_LENGTH}
-          onPress={() => save.mutate(trimmed)}
+        <Input
+          style={styles.keyInput}
+          value={apiKey}
+          onChangeText={setApiKey}
+          placeholder={connection.connected ? "Replace API key" : "API key"}
+          secureTextEntry
+          autoCapitalize="none"
+          autoCorrect={false}
         />
+        <Button disabled={busy || trimmed.length < MIN_API_KEY_LENGTH} onPress={() => save.mutate(trimmed)}>
+          Save
+        </Button>
         {connection.connected ? (
-          <ActionButton
-            label="Disconnect"
-            tone="secondary"
-            disabled={busy}
-            onPress={() => disconnect.mutate()}
-          />
+          <Button variant="soft" disabled={busy} onPress={() => disconnect.mutate()}>
+            Disconnect
+          </Button>
         ) : null}
       </View>
     </ConnectionRowFrame>
@@ -127,18 +122,34 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   content: {
-    padding: spacing.lg,
-    gap: spacing.md,
+    padding: 16,
+    gap: 16,
   },
-  subtitle: {
+  heading: {
+    gap: 2,
+  },
+  title: {
+    color: colors.foreground,
+    fontSize: 20,
+    fontWeight: "600",
+    letterSpacing: -0.5,
+  },
+  description: {
     color: colors.mutedForeground,
-    fontSize: 13,
+    fontSize: 14,
   },
+  /** The web card's `py-0` with its rows' own padding: no vertical or horizontal inset around the list. */
   card: {
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: "hidden",
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    gap: 0,
+  },
+  divider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.white06,
+  },
+  keyInput: {
+    flexGrow: 1,
+    flexBasis: 200,
   },
 });

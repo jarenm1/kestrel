@@ -1,5 +1,9 @@
 import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Check, ChevronDown, ChevronUp } from "lucide-react-native";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
 import {
   MODEL_PROVIDERS,
   connectedModelProviders,
@@ -9,7 +13,7 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol";
 import { setShownModels, useShownModels } from "@/hooks/useShownModels";
-import { colors, radius, spacing } from "@/theme";
+import { colors, spacing } from "@/theme";
 
 interface Props {
   readonly connections: readonly Connection[];
@@ -22,11 +26,11 @@ export function ConnectionsModels({ connections }: Props) {
     <View style={styles.wrap}>
       <Text style={styles.title}>Models</Text>
       <Text style={styles.hint}>Choose which models each provider offers in the chat's model picker.</Text>
-      <View style={styles.card}>
+      <Card style={styles.card}>
         {MODEL_PROVIDERS.map((provider, i) => (
           <ModelRow key={provider.id} provider={provider} connected={connected.has(provider.id)} divided={i > 0} />
         ))}
-      </View>
+      </Card>
     </View>
   );
 }
@@ -57,21 +61,21 @@ function ModelRow({ provider, connected, divided }: RowProps) {
       <View style={styles.head}>
         <View style={styles.titleBlock}>
           <Text style={styles.label}>{provider.name}</Text>
-          <Text style={[styles.status, { color: connected ? colors.success : colors.mutedForeground }]}>
-            {connected ? "Connected" : "Not connected"}
-          </Text>
+          <Badge variant={connected ? "success" : "neutral"}>
+            {connected ? "connected" : "not connected"}
+          </Badge>
         </View>
-        <Pressable
+        <Button
+          variant="soft"
+          size="sm"
+          icon={open ? ChevronUp : ChevronDown}
           style={styles.trigger}
           onPress={() => setOpen((current) => !current)}
-          accessibilityRole="button"
           accessibilityLabel={`${provider.name} models shown in the chat picker`}
-          accessibilityState={{ expanded: open }}
+          active={open}
         >
-          <Text style={styles.triggerText}>
-            {shown.length} of {all.length} shown {open ? "▴" : "▾"}
-          </Text>
-        </Pressable>
+          {`${shown.length} of ${all.length} shown`}
+        </Button>
       </View>
       {connected ? null : (
         <Text style={styles.hint}>Connect a key or subscription above to use these.</Text>
@@ -92,18 +96,14 @@ function ModelRow({ provider, connected, divided }: RowProps) {
               >
                 <Text style={[styles.toggleText, checked && styles.toggleChecked]}>{m.name}</Text>
                 <View style={[styles.box, checked && styles.boxChecked]}>
-                  {checked ? <Text style={styles.check}>✓</Text> : null}
+                  {checked ? <Check size={12} color={colors.primaryForeground} /> : null}
                 </View>
               </Pressable>
             );
           })}
-          <Pressable
-            style={styles.reset}
-            onPress={() => setShownModels(provider.id, null)}
-            accessibilityRole="button"
-          >
-            <Text style={styles.resetText}>Reset to defaults</Text>
-          </Pressable>
+          <Button variant="ghost" size="sm" style={styles.reset} onPress={() => setShownModels(provider.id, null)}>
+            Reset to defaults
+          </Button>
         </View>
       ) : null}
     </View>
@@ -116,11 +116,9 @@ const styles = StyleSheet.create({
   hint: { color: colors.mutedForeground, fontSize: 13 },
   card: {
     marginTop: spacing.sm,
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    overflow: "hidden",
+    paddingVertical: 0,
+    paddingHorizontal: 0,
+    gap: 0,
   },
   row: {
     padding: spacing.lg,
@@ -130,15 +128,7 @@ const styles = StyleSheet.create({
   head: { flexDirection: "row", alignItems: "center", gap: spacing.md },
   titleBlock: { gap: spacing.xs },
   label: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
-  status: { fontSize: 12 },
-  trigger: {
-    marginLeft: "auto",
-    backgroundColor: colors.secondary,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  triggerText: { color: colors.secondaryForeground, fontSize: 13 },
+  trigger: { marginLeft: "auto" },
   list: { gap: spacing.xs, marginTop: spacing.xs },
   listTitle: { color: colors.mutedForeground, fontSize: 12, marginBottom: spacing.xs },
   toggle: {
@@ -153,14 +143,12 @@ const styles = StyleSheet.create({
     marginLeft: "auto",
     width: 20,
     height: 20,
-    borderRadius: radius.sm,
+    borderRadius: 4,
     borderWidth: 1,
     borderColor: colors.border,
     alignItems: "center",
     justifyContent: "center",
   },
   boxChecked: { backgroundColor: colors.primary, borderColor: colors.primary },
-  check: { color: colors.primaryForeground, fontSize: 12, fontWeight: "700" },
-  reset: { paddingVertical: spacing.sm, marginTop: spacing.xs },
-  resetText: { color: colors.mutedForeground, fontSize: 13 },
+  reset: { alignSelf: "flex-start", marginTop: spacing.xs },
 });

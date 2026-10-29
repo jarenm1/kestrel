@@ -1,130 +1,67 @@
-import React from "react";
-import { View, Text, StyleSheet, FlatList, Pressable } from "react-native";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import React, { type ComponentRef, useEffect, useRef, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { Run } from "@cloudagents/protocol";
-import { useApiClient } from "@/hooks/useApiClient";
-import { keys, upsert } from "@/api/queries";
-import { StatusBadge } from "./StatusBadge";
-import { colors, radius, spacing } from "@/theme";
+import { StatusIcon } from "@/components/ui/StatusIcon";
+import { colors, fonts, radius, spacing } from "@/theme";
 
 interface Props {
-  taskId: string;
+  /** Runs sorted oldest -> newest. */
   runs: readonly Run[];
   output: Record<string, string[]>;
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-export function RunPanel({ taskId, runs, output }: Props) {
-  const { api } = useApiClient();
-  const queryClient = useQueryClient();
-  const current = runs.length > 0 ? runs[runs.length - 1] : null;
+/** The latest run's raw harness output, open while it runs. Stopping a run lives on the composer's button. */
+export function RunPanel({ runs, output }: Props) {
+  const current = runs.at(-1) ?? null;
+  const running = current?.status === "running";
   const lines = current ? (output[current.id] ?? []) : [];
+  const [open, setOpen] = useState(running);
+  const logRef = useRef<ComponentRef<typeof ScrollView>>(null);
 
-  const cancel = useMutation({
-    mutationFn: (runId: string) => api.cancelRun(runId),
-    onSuccess: (run) =>
-      queryClient.setQueryData(
-        keys.runs(taskId),
-        (list: Run[] | undefined) => upsert(list, run)
-      ),
-  });
+  // Like the web `<details open={running}>`: a run starting opens the log, finishing closes it.
+  useEffect(() => setOpen(running), [running]);
 
-  if (runs.length === 0) return null;
+  if (!current) return null;
 
   return (
-    <View style={styles.container}>
-      {current && current.status === "running" && lines.length > 0 && (
-        <View style={styles.logBox}>
-          <Text style={styles.logLabel}>Live log</Text>
-          <Text style={styles.logText} numberOfLines={8}>
-            {lines.slice(-8).join("\n")}
-          </Text>
-        </View>
-      )}
-      {[...runs].reverse().map((run) => (
-        <View key={run.id} style={styles.runRow}>
-          <StatusBadge status={run.status} />
-          <Text style={styles.prompt} numberOfLines={1}>
-            {run.prompt}
-          </Text>
-          <Text style={styles.time}>{formatTime(run.startedAt)}</Text>
-          {run.exitCode !== null && (
-            <Text style={styles.exitCode}>exit {run.exitCode}</Text>
+    <View style={styles.wrap}>
+      <Pressable
+        style={styles.summary}
+        onPress={() => setOpen((o) => !o)}
+        hitSlop={8}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+      >
+        {running ? <StatusIcon status="running" /> : null}
+        <Text style={styles.summaryText}>Live log</Text>
+      </Pressable>
+      {open ? (
+        <ScrollView
+          ref={logRef}
+          style={styles.log}
+          contentContainerStyle={styles.logContent}
+          nestedScrollEnabled
+          onContentSizeChange={() => logRef.current?.scrollToEnd({ animated: false })}
+        >
+          {lines.length === 0 ? (
+            <Text style={[styles.logText, styles.muted]}>No output yet.</Text>
+          ) : (
+            <Text style={styles.logText} selectable>
+              {lines.join("\n")}
+            </Text>
           )}
-          {run.status === "running" && (
-            <Pressable
-              style={styles.cancelBtn}
-              onPress={() => cancel.mutate(run.id)}
-              disabled={cancel.isPending}
-            >
-              <Text style={styles.cancelText}>Cancel</Text>
-            </Pressable>
-          )}
-        </View>
-      ))}
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.sm,
-  },
-  logBox: {
-    backgroundColor: colors.code,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.sm,
-    marginBottom: spacing.sm,
-  },
-  logLabel: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    marginBottom: 4,
-  },
-  logText: {
-    color: colors.foreground,
-    fontSize: 11,
-    fontFamily: "monospace",
-  },
-  runRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    paddingVertical: 4,
-  },
-  prompt: {
-    flex: 1,
-    color: colors.foreground,
-    fontSize: 13,
-  },
-  time: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-  },
-  exitCode: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: "monospace",
-  },
-  cancelBtn: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  cancelText: {
-    color: colors.foreground,
-    fontSize: 11,
-  },
+  wrap: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm },
+  summary: { flexDirection: "row", alignItems: "center", gap: spacing.sm, alignSelf: "flex-start", paddingVertical: 2 },
+  summaryText: { color: colors.mutedForeground, fontSize: 14 },
+  log: { maxHeight: 180, marginTop: spacing.sm, borderRadius: radius.xl, backgroundColor: colors.code },
+  logContent: { paddingHorizontal: 14, paddingVertical: spacing.md },
+  logText: { color: colors.foreground, fontFamily: fonts.mono, fontSize: 12, lineHeight: 17 },
+  muted: { color: colors.mutedForeground },
 });
-

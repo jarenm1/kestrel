@@ -1,21 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AppState,
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-  Dimensions,
-  ActivityIndicator,
-} from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { WebView } from "react-native-webview";
-const SafeWebView = WebView as unknown as React.ComponentType<any>;
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries, keys } from "@/api/queries";
-import { StatusBadge } from "./StatusBadge";
-import { colors, radius, spacing } from "@/theme";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { StatusIcon } from "@/components/ui/StatusIcon";
+import { colors, fonts, radius, spacing } from "@/theme";
 import type { DesktopStatus } from "@cloudagents/protocol";
+
+const SafeWebView = WebView as unknown as React.ComponentType<any>;
 
 /**
  * Desktop viewer for mobile — renders the desktop stream in a WebView.
@@ -239,28 +234,23 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   return (
     <View style={styles.container}>
       <View style={styles.toolbar}>
-        <Pressable
-          style={[styles.toggleBtn, active && styles.toggleBtnActive]}
+        <Button
+          variant={active ? "soft" : "default"}
+          size="sm"
           onPress={() => toggle.mutate()}
           disabled={toggle.isPending || !status}
         >
-          <Text style={[styles.toggleText, active && styles.toggleTextActive]}>
-            {active ? "Stop" : "Start"}
-          </Text>
-        </Pressable>
-        {status && <StatusBadge status={status.state} />}
-        {status?.state === "running" && (
+          {active ? "Stop" : "Start"}
+        </Button>
+        {status ? <StatusIcon status={status.state} /> : null}
+        {status?.state === "running" ? (
           <Text style={styles.info}>
             {status.width}×{status.height} · {status.fps} fps
           </Text>
-        )}
+        ) : null}
       </View>
-      {error && (
-        <View style={styles.errorBar}>
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
-      )}
-      <View style={styles.videoContainer}>
+      {error ? <Alert style={styles.alert}>{error}</Alert> : null}
+      <View style={styles.well}>
         {status?.state === "running" && desktopHtml ? (
           <SafeWebView
             ref={webView}
@@ -276,9 +266,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             {toggle.isPending ? (
               <ActivityIndicator color={colors.mutedForeground} />
             ) : (
-              <Text style={styles.placeholderText}>
-                {status?.state ?? "loading"}
-              </Text>
+              <Text style={styles.placeholderText}>{status?.state ?? "loading"}</Text>
             )}
           </View>
         )}
@@ -288,68 +276,13 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  toolbar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-  },
-  toggleBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 4,
-  },
-  toggleBtnActive: {
-    backgroundColor: "transparent",
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  toggleText: {
-    color: colors.primaryForeground,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  toggleTextActive: {
-    color: colors.foreground,
-  },
-  info: {
-    color: colors.mutedForeground,
-    fontSize: 11,
-    fontFamily: "monospace",
-  },
-  errorBar: {
-    backgroundColor: colors.destructive + "18",
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  errorText: {
-    color: colors.destructive,
-    fontSize: 12,
-  },
-  videoContainer: {
-    flex: 1,
-    backgroundColor: "#000",
-  },
-  webview: {
-    flex: 1,
-    backgroundColor: "#000",
-  },
-  placeholder: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  placeholderText: {
-    color: colors.mutedForeground,
-    fontSize: 14,
-  },
+  container: { flex: 1, paddingHorizontal: spacing.md },
+  toolbar: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: spacing.sm },
+  info: { color: colors.mutedForeground, fontSize: 12, fontFamily: fonts.mono },
+  alert: { marginBottom: spacing.sm },
+  well: { flex: 1, marginBottom: spacing.md, borderRadius: radius.xl, overflow: "hidden", backgroundColor: "#000" },
+  webview: { flex: 1, backgroundColor: "#000" },
+  placeholder: { flex: 1, alignItems: "center", justifyContent: "center" },
+  placeholderText: { color: colors.mutedForeground, fontSize: 14, textAlign: "center" },
 });
 

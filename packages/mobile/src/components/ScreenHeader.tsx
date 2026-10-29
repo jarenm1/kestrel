@@ -1,5 +1,7 @@
 import React, { type ReactNode } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
+import { ChevronLeft } from "lucide-react-native";
+import { Button } from "@/components/ui/Button";
 import { colors, spacing } from "@/theme";
 
 interface Props {
@@ -10,14 +12,13 @@ interface Props {
   right?: ReactNode;
 }
 
+/** Monochrome page bar: a ghost back control, the title centred, trailing actions. Sits on the page background, no card. */
 export function ScreenHeader({ title, onBack, right }: Props) {
   return (
     <View style={styles.bar}>
       <View style={styles.side}>
         {onBack ? (
-          <Pressable onPress={onBack} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back">
-            <Text style={styles.back}>‹ Back</Text>
-          </Pressable>
+          <Button variant="ghost" size="icon" icon={ChevronLeft} onPress={onBack} accessibilityLabel="Back" />
         ) : null}
       </View>
       <Text style={styles.title} numberOfLines={1}>
@@ -32,11 +33,11 @@ const styles = StyleSheet.create({
   bar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
-    backgroundColor: colors.card,
+    backgroundColor: colors.background,
   },
   side: {
     minWidth: 72,
@@ -46,10 +47,6 @@ const styles = StyleSheet.create({
   sideRight: {
     justifyContent: "flex-end",
     gap: spacing.md,
-  },
-  back: {
-    color: colors.primary,
-    fontSize: 16,
   },
   title: {
     flex: 1,

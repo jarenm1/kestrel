@@ -19,6 +19,7 @@ import {
   Paths,
   PutApiKeyBody,
   Run,
+  RunItems,
   SendMessageBody,
   SendMessageResponse,
   Task,
@@ -86,6 +87,7 @@ export interface ApiClient {
   listMessages(taskId: string): Promise<readonly Message[]>;
   sendMessage(taskId: string, body: SendMessageBody): Promise<SendMessageResponse>;
   listRuns(taskId: string): Promise<readonly Run[]>;
+  runItems(runId: string): Promise<RunItems>;
   cancelRun(runId: string): Promise<Run>;
   getDiff(taskId: string): Promise<DiffResponse>;
   getDesktop(taskId: string): Promise<DesktopStatus>;
@@ -111,7 +113,8 @@ export function createApiClient(serverUrl: string, sessionCookie: string | null)
       res = await fetch(`${serverUrl}${path}`, {
         method,
         headers,
-        credentials: "include",
+        // RN's cookie jar would append a second session to our explicit Cookie header.
+        credentials: "omit",
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (e) {
@@ -171,6 +174,7 @@ export function createApiClient(serverUrl: string, sessionCookie: string | null)
     listMessages: (taskId) => request(Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
     sendMessage: (taskId, body) => request(SendMessageResponse, "POST", Paths.taskMessages(taskId), body),
     listRuns: (taskId) => request(Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
+    runItems: (runId) => request(RunItems, "GET", Paths.runItems(runId)),
     cancelRun: (runId) => request(Run, "POST", Paths.runCancel(runId)),
     getDiff: (taskId) => request(DiffResponse, "GET", Paths.taskDiff(taskId)),
     getDesktop: (taskId) => request(DesktopStatus, "GET", Paths.taskDesktop(taskId)),

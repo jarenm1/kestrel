@@ -1,22 +1,49 @@
 import React, { useMemo, useState } from "react";
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
+import { ChevronRight } from "lucide-react-native";
 import type { CheckoutDiff } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
 import { useApiClient } from "@/hooks/useApiClient";
 import { type DiffFile, type DiffLine, displayPath, parseDiff } from "@/lib/diff";
-import { errorText, repoShortName } from "@/lib/format";
-import { colors, radius, spacing } from "@/theme";
+import { errorText } from "@/lib/format";
+import { colors, fonts, radius, spacing } from "@/theme";
 
-/** Files with more changed lines than this start collapsed, as on the web. */
+/** Files with more changed lines than this start collapsed, so one huge file does not bury the rest. */
 const LARGE_FILE_LINES = 1500;
 
+/** Per-file collapse overrides, keyed by `${checkoutId}:${fileIndex}`. Absent keys use the size default. */
+type Overrides = ReadonlyMap<string, boolean>;
+
 type Row =
-  | { kind: "checkout"; key: string; repo: string; baseBranch: string; files: number; additions: number; deletions: number }
+  | {
+      kind: "checkout";
+      key: string;
+      repo: string;
+      baseBranch: string;
+      files: number;
+      additions: number;
+      deletions: number;
+      fileKeys: readonly string[];
+      anyExpanded: boolean;
+    }
   | { kind: "file"; key: string; file: DiffFile; collapsed: boolean }
-  | { kind: "note"; key: string; text: string }
-  | { kind: "hunk"; key: string; range: string; section: string }
-  | { kind: "line"; key: string; line: DiffLine };
+  | { kind: "note"; key: string; text: string };
+
+const STATUS_STYLE: Record<DiffFile["status"], { letter: string; label: string; color: string; wash: string }> = {
+  added: { letter: "A", label: "Added", color: colors.success, wash: colors.success + "26" },
+  deleted: { letter: "D", label: "Deleted", color: colors.destructive, wash: colors.destructive + "26" },
+  modified: { letter: "M", label: "Modified", color: colors.warning, wash: colors.warning + "26" },
+  renamed: { letter: "R", label: "Renamed", color: colors.info, wash: colors.info + "26" },
+};
+
+const LINE_STYLE: Record<DiffLine["kind"], { row?: string; gutter: string; marker: string }> = {
+  add: { row: colors.success + "1a", gutter: colors.success + "99", marker: "+" },
+  del: { row: colors.destructive + "1a", gutter: colors.destructive + "99", marker: "-" },
+  context: { gutter: colors.mutedForeground + "80", marker: " " },
+};
 
 function fileNotes(file: DiffFile): string[] {
   const notes: string[] = [];
@@ -28,45 +55,39 @@ function fileNotes(file: DiffFile): string[] {
   return notes;
 }
 
-/** Flattens checkouts → files → hunks → lines into one list for virtualised rendering. */
-function buildRows(checkouts: readonly CheckoutDiff[], overrides: ReadonlyMap<string, boolean>): Row[] {
+function withCollapsed(prev: Overrides, keys: readonly string[], collapsed: boolean): Overrides {
+  const next = new Map(prev);
+  for (const key of keys) next.set(key, collapsed);
+  return next;
+}
+
+/** Flattens checkouts → files into one list for virtualised rendering; each file row carries its own hunks. */
+function buildRows(checkouts: readonly CheckoutDiff[], overrides: Overrides): Row[] {
   const rows: Row[] = [];
   for (const checkout of checkouts) {
-    const files = parseDiff(checkout.diff);
+    const entries = parseDiff(checkout.diff).map((file, index) => {
+      const key = `${checkout.checkoutId}:${index}`;
+      const collapsed = overrides.get(key) ?? file.additions + file.deletions > LARGE_FILE_LINES;
+      return { file, key, collapsed };
+    });
     rows.push({
       kind: "checkout",
       key: `co:${checkout.checkoutId}`,
       repo: checkout.repo,
       baseBranch: checkout.baseBranch,
-      files: files.length,
-      additions: files.reduce((sum, f) => sum + f.additions, 0),
-      deletions: files.reduce((sum, f) => sum + f.deletions, 0),
+      files: entries.length,
+      additions: entries.reduce((sum, e) => sum + e.file.additions, 0),
+      deletions: entries.reduce((sum, e) => sum + e.file.deletions, 0),
+      fileKeys: entries.map((e) => e.key),
+      anyExpanded: entries.some((e) => !e.collapsed),
     });
-    if (files.length === 0) rows.push({ kind: "note", key: `co:${checkout.checkoutId}:none`, text: "No changes." });
-    for (const [index, file] of files.entries()) {
-      const key = `${checkout.checkoutId}:${index}`;
-      const collapsed = overrides.get(key) ?? file.additions + file.deletions > LARGE_FILE_LINES;
-      rows.push({ kind: "file", key, file, collapsed });
-      if (collapsed) continue;
-      for (const text of fileNotes(file)) rows.push({ kind: "note", key: `${key}:note:${text}`, text });
-      for (const [h, hunk] of file.hunks.entries()) {
-        rows.push({ kind: "hunk", key: `${key}:h${h}`, range: hunk.range, section: hunk.section });
-        for (const [l, line] of hunk.lines.entries()) rows.push({ kind: "line", key: `${key}:h${h}:l${l}`, line });
-        if (hunk.lines.at(-1)?.noNewline) {
-          rows.push({ kind: "note", key: `${key}:h${h}:eof`, text: "No newline at end of file" });
-        }
-      }
+    if (entries.length === 0) rows.push({ kind: "note", key: `co:${checkout.checkoutId}:none`, text: "No changes." });
+    for (const entry of entries) {
+      rows.push({ kind: "file", key: entry.key, file: entry.file, collapsed: entry.collapsed });
     }
   }
   return rows;
 }
-
-const STATUS_LETTER: Record<DiffFile["status"], { letter: string; color: string }> = {
-  added: { letter: "A", color: colors.success },
-  deleted: { letter: "D", color: colors.destructive },
-  modified: { letter: "M", color: colors.warning },
-  renamed: { letter: "R", color: colors.info },
-};
 
 interface DiffViewProps {
   taskId: string;
@@ -77,144 +98,230 @@ interface DiffViewProps {
 export function DiffView({ taskId, running }: DiffViewProps) {
   const { api } = useApiClient();
   const diff = useQuery(createQueries(api).diff(taskId, running));
-  const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const [overrides, setOverrides] = useState<Overrides>(new Map());
   const checkouts = diff.data?.checkouts;
   const rows = useMemo(() => buildRows(checkouts ?? [], overrides), [checkouts, overrides]);
 
-  function toggle(key: string, collapsed: boolean) {
-    setOverrides((prev) => new Map(prev).set(key, !collapsed));
-  }
-
-  if (diff.isPending) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={colors.mutedForeground} />
-      </View>
-    );
-  }
-  if (diff.error) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.error}>{errorText(diff.error)}</Text>
-      </View>
-    );
-  }
   return (
-    <FlatList
-      style={styles.flex}
-      contentContainerStyle={styles.list}
-      data={rows}
-      keyExtractor={(r) => r.key}
-      renderItem={({ item }) => <RowView row={item} onToggle={toggle} />}
-      ListEmptyComponent={<Text style={styles.note}>No checkouts yet. The agent checks out a repository when it needs one.</Text>}
-    />
+    <View style={styles.root}>
+      <View style={styles.toolbar}>
+        <Button variant="soft" size="sm" onPress={() => void diff.refetch()} disabled={diff.isFetching}>
+          {diff.isFetching ? "Refreshing…" : "Refresh"}
+        </Button>
+      </View>
+      {diff.error ? <Alert style={styles.alert}>{errorText(diff.error)}</Alert> : null}
+      {diff.isPending ? (
+        <Text style={styles.muted}>Loading…</Text>
+      ) : (
+        <FlatList
+          style={styles.list}
+          contentContainerStyle={styles.content}
+          data={rows}
+          keyExtractor={(r) => r.key}
+          renderItem={({ item }) => <RowView row={item} onOverrides={setOverrides} />}
+          ListEmptyComponent={
+            diff.isSuccess ? (
+              <Text style={styles.note}>
+                No repository checked out yet. The agent checks repos out when the work needs one.
+              </Text>
+            ) : undefined
+          }
+        />
+      )}
+    </View>
   );
 }
 
-function RowView({ row, onToggle }: { row: Row; onToggle: (key: string, collapsed: boolean) => void }) {
+function RowView({
+  row,
+  onOverrides,
+}: {
+  row: Row;
+  onOverrides: React.Dispatch<React.SetStateAction<Overrides>>;
+}) {
   switch (row.kind) {
-    case "checkout":
+    case "checkout": {
+      const { repo, baseBranch, files, additions, deletions, fileKeys, anyExpanded } = row;
       return (
         <View style={styles.checkout}>
-          <Text style={styles.checkoutName} numberOfLines={1}>
-            {repoShortName(row.repo)}
+          <View style={styles.checkoutText}>
+            <Text style={styles.checkoutName} numberOfLines={1}>
+              {repo}
+            </Text>
+            <Text style={styles.muted} numberOfLines={1}>
+              {files} {files === 1 ? "file" : "files"} vs {baseBranch}
+            </Text>
+          </View>
+          <Text style={styles.stat}>
+            <Text style={styles.add}>+{additions}</Text> <Text style={styles.del}>−{deletions}</Text>
           </Text>
-          <Text style={styles.muted}>
-            vs {row.baseBranch} · {row.files} {row.files === 1 ? "file" : "files"} · <Text style={styles.add}>+{row.additions}</Text>{" "}
-            <Text style={styles.del}>−{row.deletions}</Text>
-          </Text>
+          {files > 1 ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onPress={() => onOverrides((prev) => withCollapsed(prev, fileKeys, anyExpanded))}
+            >
+              {anyExpanded ? "Collapse all" : "Expand all"}
+            </Button>
+          ) : null}
         </View>
       );
+    }
     case "file": {
-      const { file, collapsed } = row;
-      const status = STATUS_LETTER[file.status];
+      const { file, key, collapsed } = row;
       return (
-        <Pressable style={styles.file} onPress={() => onToggle(row.key, collapsed)} accessibilityRole="button">
-          <Text style={styles.chevron}>{collapsed ? "▸" : "▾"}</Text>
-          <View style={[styles.statusBox, { borderColor: status.color }]}>
-            <Text style={[styles.statusText, { color: status.color }]}>{status.letter}</Text>
-          </View>
-          <Text style={styles.filePath} numberOfLines={2}>
-            {displayPath(file)}
-          </Text>
-          <Text style={styles.muted}>
-            <Text style={styles.add}>+{file.additions}</Text> <Text style={styles.del}>−{file.deletions}</Text>
-          </Text>
-        </Pressable>
+        <FileView
+          file={file}
+          collapsed={collapsed}
+          onToggle={() => onOverrides((prev) => new Map(prev).set(key, !collapsed))}
+        />
       );
     }
     case "note":
       return <Text style={styles.note}>{row.text}</Text>;
-    case "hunk":
-      return (
-        <Text style={styles.hunk} numberOfLines={1}>
-          {row.range}
-          {row.section ? ` ${row.section}` : ""}
-        </Text>
-      );
-    case "line":
-      return <LineView line={row.line} />;
   }
 }
 
-function LineView({ line }: { line: DiffLine }) {
-  const marker = line.kind === "add" ? "+" : line.kind === "del" ? "−" : " ";
-  const bg = line.kind === "add" ? styles.lineAdd : line.kind === "del" ? styles.lineDel : undefined;
+function FileView({ file, collapsed, onToggle }: { file: DiffFile; collapsed: boolean; onToggle: () => void }) {
+  const status = STATUS_STYLE[file.status];
+  const path = displayPath(file);
+  const slash = path.lastIndexOf("/");
   return (
-    <View style={[styles.line, bg]}>
-      <Text style={styles.gutter}>{line.oldLine ?? ""}</Text>
-      <Text style={styles.gutter}>{line.newLine ?? ""}</Text>
+    <View style={styles.well}>
+      <Pressable
+        onPress={onToggle}
+        accessibilityRole="button"
+        accessibilityLabel={path}
+        accessibilityState={{ expanded: !collapsed }}
+        style={styles.fileHead}
+      >
+        <View style={[styles.chevron, !collapsed && styles.chevronOpen]}>
+          <ChevronRight size={14} color={colors.mutedForeground} strokeWidth={2} />
+        </View>
+        <View accessibilityLabel={status.label} style={[styles.statusChip, { backgroundColor: status.wash }]}>
+          <Text style={[styles.statusLetter, { color: status.color }]}>{status.letter}</Text>
+        </View>
+        <Text style={styles.filePath} numberOfLines={2}>
+          {file.status === "renamed" ? <Text style={styles.muted}>{file.oldPath} → </Text> : null}
+          <Text style={styles.muted}>{path.slice(0, slash + 1)}</Text>
+          <Text style={styles.fileName}>{path.slice(slash + 1)}</Text>
+        </Text>
+        {file.binary ? (
+          <Text style={styles.muted}>binary</Text>
+        ) : (
+          <Text style={styles.stat}>
+            <Text style={styles.add}>+{file.additions}</Text> <Text style={styles.del}>−{file.deletions}</Text>
+          </Text>
+        )}
+      </Pressable>
+      {collapsed ? null : <FileBody file={file} />}
+    </View>
+  );
+}
+
+/** Hunks sit in a horizontal scroller so long lines scroll sideways; each line's background spans the widest line. */
+function FileBody({ file }: { file: DiffFile }) {
+  const [width, setWidth] = useState(0);
+  const notes = fileNotes(file);
+  return (
+    <View>
+      {notes.map((note) => (
+        <Text key={note} style={styles.bodyNote}>
+          {note}
+        </Text>
+      ))}
+      {file.hunks.length > 0 ? (
+        <ScrollView horizontal onLayout={(e) => setWidth(e.nativeEvent.layout.width)}>
+          <View style={{ minWidth: width }}>
+            {file.hunks.map((hunk, h) => (
+              <View key={h}>
+                <Text style={styles.hunk}>
+                  {hunk.range}
+                  {hunk.section ? <Text style={styles.hunkSection}>{` ${hunk.section}`}</Text> : null}
+                </Text>
+                {hunk.lines.map((line, l) => (
+                  <LineView key={l} line={line} />
+                ))}
+              </View>
+            ))}
+          </View>
+        </ScrollView>
+      ) : null}
+    </View>
+  );
+}
+
+function LineView({ line }: { line: DiffLine }) {
+  const tone = LINE_STYLE[line.kind];
+  return (
+    <View style={[styles.line, tone.row ? { backgroundColor: tone.row } : null]}>
+      <Text style={[styles.gutter, { color: tone.gutter }]}>{line.oldLine ?? ""}</Text>
+      <Text style={[styles.gutter, { color: tone.gutter }]}>{line.newLine ?? ""}</Text>
+      <Text style={[styles.marker, { color: tone.gutter }]}>{tone.marker}</Text>
       <Text style={styles.code}>
-        {marker}
         {line.text}
+        {line.noNewline ? <Text style={styles.noNewline}>{"  no newline at end of file"}</Text> : null}
       </Text>
     </View>
   );
 }
 
-const MONO = "monospace";
-
 const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.lg },
-  list: { paddingBottom: spacing.xxl },
-  error: { color: colors.destructive, textAlign: "center" },
-  note: { color: colors.mutedForeground, fontSize: 13, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
+  root: { flex: 1, paddingHorizontal: spacing.md },
+  toolbar: { flexDirection: "row", justifyContent: "flex-end", paddingVertical: spacing.sm },
+  alert: { marginBottom: spacing.sm },
+  list: { flex: 1 },
+  content: { paddingBottom: spacing.xl, gap: spacing.sm },
   muted: { color: colors.mutedForeground, fontSize: 12 },
+  note: { color: colors.mutedForeground, fontSize: 13, paddingVertical: spacing.sm },
+  stat: { fontFamily: fonts.mono, fontSize: 12 },
   add: { color: colors.success },
   del: { color: colors.destructive },
-  checkout: {
-    backgroundColor: colors.secondary,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    marginTop: spacing.sm,
-    gap: spacing.xs,
-  },
-  checkoutName: { color: colors.foreground, fontWeight: "700", fontSize: 15 },
-  file: {
+  checkout: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingTop: spacing.md },
+  checkoutText: { flex: 1, minWidth: 0, gap: 2 },
+  checkoutName: { color: colors.foreground, fontSize: 14, fontWeight: "500" },
+  well: { backgroundColor: colors.code, borderRadius: radius.xl, overflow: "hidden" },
+  fileHead: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
+    minHeight: 36,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderTopWidth: 1,
-    borderColor: colors.border,
+    backgroundColor: colors.card,
   },
-  chevron: { color: colors.mutedForeground, width: 12 },
-  statusBox: { borderWidth: 1, borderRadius: radius.sm, width: 20, height: 20, alignItems: "center", justifyContent: "center" },
-  statusText: { fontSize: 12, fontWeight: "700" },
-  filePath: { color: colors.foreground, flex: 1, fontFamily: MONO, fontSize: 13 },
+  chevron: { width: 14, height: 14, alignItems: "center", justifyContent: "center" },
+  chevronOpen: { transform: [{ rotate: "90deg" }] },
+  statusChip: { width: 16, height: 16, borderRadius: 4, alignItems: "center", justifyContent: "center" },
+  statusLetter: { fontFamily: fonts.mono, fontSize: 10, fontWeight: "600" },
+  filePath: { flex: 1, minWidth: 0, fontFamily: fonts.mono, fontSize: 12, color: colors.foreground },
+  fileName: { fontWeight: "600", color: colors.foreground },
+  bodyNote: { color: colors.mutedForeground, fontSize: 12, paddingHorizontal: spacing.md, paddingVertical: 6 },
   hunk: {
-    color: colors.info,
-    fontFamily: MONO,
+    color: colors.info + "cc",
+    backgroundColor: colors.info + "12",
+    fontFamily: fonts.mono,
     fontSize: 12,
-    backgroundColor: colors.accent,
+    lineHeight: 17,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingVertical: 2,
   },
-  line: { flexDirection: "row", alignItems: "flex-start" },
-  lineAdd: { backgroundColor: "rgba(63,185,80,0.15)" },
-  lineDel: { backgroundColor: "rgba(248,81,73,0.15)" },
-  gutter: { width: 40, textAlign: "right", color: colors.mutedForeground, fontFamily: MONO, fontSize: 11, paddingTop: 2 },
-  code: { flex: 1, color: colors.foreground, fontFamily: MONO, fontSize: 12, lineHeight: 17, paddingHorizontal: spacing.xs },
+  hunkSection: { color: colors.mutedForeground },
+  line: { flexDirection: "row" },
+  gutter: {
+    minWidth: 40,
+    paddingHorizontal: spacing.sm,
+    textAlign: "right",
+    fontFamily: fonts.mono,
+    fontSize: 11,
+    lineHeight: 17,
+  },
+  marker: { width: 18, textAlign: "center", fontFamily: fonts.mono, fontSize: 12, lineHeight: 17 },
+  code: {
+    fontFamily: fonts.mono,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.foreground + "e6",
+    paddingRight: spacing.lg,
+  },
+  noNewline: { color: colors.mutedForeground, fontSize: 10 },
 });
