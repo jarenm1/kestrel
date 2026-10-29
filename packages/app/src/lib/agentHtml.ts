@@ -5,9 +5,10 @@ import { defaultSchema, type Options as Schema } from "rehype-sanitize"
  * What agent markdown may carry as raw HTML. Agent text is untrusted (an agent can be steered by a web page or a
  * repository it read), so this is GitHub's allowlist plus inline SVG drawing, and nothing that runs code or styles
  * the page. Removed by omission: script, style, iframe/object/embed, forms, foreignObject and SVG animation
- * (`set`/`animate` can rewrite an href to `javascript:`), every event handler, and `class`. `style` is kept only
- * on elements inside an SVG, where CSS positioning has no effect, so it cannot draw over the app; there and in
- * every SVG presentation attribute, `rehypeAgentSvg` drops anything that could load a resource.
+ * (`set`/`animate` can rewrite an href to `javascript:`), every event handler, and `class`. `style` passes the
+ * sanitizer and `rehypeAgentSvg` filters it per declaration: inside an SVG, where CSS positioning has no effect,
+ * every declaration that cannot load a resource stays; on HTML only the properties in `HTML_STYLE_PROPS` (colour,
+ * type, spacing, borders, in-flow layout), so agent markup cannot draw over the app.
  */
 
 /** SVG drawing elements, in the hast tag names parse5 produces (camelCase where SVG is). */
@@ -177,7 +178,8 @@ export const AGENT_HTML_SCHEMA: Schema = {
   strip: [...(defaultSchema.strip ?? []), "style", "foreignObject", "template", "noscript"],
   attributes: {
     ...defaultSchema.attributes,
-    ...Object.fromEntries(SVG_TAGS.map((tag) => [tag, tag === "svg" ? SVG_PROPS : [...SVG_PROPS, "style"]])),
+    "*": [...(defaultSchema.attributes?.["*"] ?? []), "style"],
+    ...Object.fromEntries(SVG_TAGS.map((tag) => [tag, SVG_PROPS])),
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -200,7 +202,71 @@ const SAFE_FUNCTIONS: Readonly<Record<string, true>> = {
   rotate: true,
   skewx: true,
   skewy: true,
+  "linear-gradient": true,
+  "radial-gradient": true,
+  "conic-gradient": true,
 }
+/**
+ * CSS properties an HTML element's `style` may set: they paint and size the element in the flow and never take it
+ * out of it. Left out: `position`, `inset`/`top`/…, `z-index`, `transform`, `float`, `overflow`, `content`, and
+ * anything that loads a resource. Margins may not be negative, so a block cannot slide over its neighbours.
+ */
+const HTML_STYLE_PROPS: ReadonlySet<string> = new Set([
+  "color",
+  "background",
+  "background-color",
+  "opacity",
+  "font",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "font-variant",
+  "line-height",
+  "letter-spacing",
+  "text-align",
+  "text-decoration",
+  "text-transform",
+  "text-shadow",
+  "white-space",
+  "vertical-align",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "border",
+  "border-top",
+  "border-right",
+  "border-bottom",
+  "border-left",
+  "border-color",
+  "border-width",
+  "border-style",
+  "border-radius",
+  "border-collapse",
+  "box-shadow",
+  "box-sizing",
+  "width",
+  "min-width",
+  "max-width",
+  "height",
+  "min-height",
+  "max-height",
+  "display",
+  "gap",
+  "flex",
+  "flex-direction",
+  "flex-wrap",
+  "align-items",
+  "justify-content",
+  "grid-template-columns",
+])
 /** SVG properties that hold text, not CSS: never parsed as a style value. */
 const TEXT_PROPS: Readonly<Record<string, true>> = {
   ariaLabel: true,
@@ -227,7 +293,8 @@ const safeCssValue = (value: string): boolean => {
 }
 
 /**
- * Runs after sanitizing, on agent SVG:
+ * Runs after sanitizing, on agent HTML and SVG:
+ * - Keeps only the HTML `style` declarations that `HTML_STYLE_PROPS` allows and `safeCssValue` passes.
  * - Drops every presentation attribute and `style` declaration that could load a resource (`safeCssValue`), and
  *   `<use>` hrefs that leave the drawing. External `<image>` sources stay, like markdown images.
  * - Sanitizing prefixes every `id` (so agent markup cannot clobber page globals or collide across messages) but
@@ -245,6 +312,8 @@ export function rehypeAgentSvg(prefix: string) {
         elements.push(child)
         if (typeof child.properties.id === "string") ids.add(child.properties.id)
         const childInSvg = inSvg || child.tagName === "svg"
+        // An `<svg>` root sits in the page's flow, so its own style follows the HTML rules.
+        if (!inSvg) filterHtmlStyle(child)
         if (childInSvg) dropFetchingValues(child)
         walk(child, childInSvg)
       }
@@ -293,4 +362,19 @@ function dropFetchingValues(element: Element) {
     const href = props[key]
     if (element.tagName === "use" && typeof href === "string" && !href.startsWith("#")) delete props[key]
   }
+}
+
+function filterHtmlStyle(element: Element) {
+  const style = element.properties.style
+  if (typeof style !== "string") return
+  const kept = style.split(";").filter((declaration) => {
+    const colon = declaration.indexOf(":")
+    if (colon === -1) return false
+    const name = declaration.slice(0, colon).trim().toLowerCase()
+    if (!HTML_STYLE_PROPS.has(name) || !safeCssValue(declaration)) return false
+    // A negative margin would pull the block over the text around it.
+    return !name.startsWith("margin") || !/(^|[\s(,])-/.test(declaration.slice(colon + 1))
+  })
+  if (kept.length === 0) delete element.properties.style
+  else element.properties.style = kept.join(";")
 }

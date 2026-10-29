@@ -33,6 +33,24 @@ describe("agent HTML and SVG", () => {
     }
   })
 
+  test("HTML keeps styles that paint and space it, but nothing that leaves the flow or loads anything", () => {
+    const html = render(
+      `<div style="background:#0b1020;color:#fff;padding:16px;border-radius:12px;border:2px solid #3355ff;max-width:360px;font-family:Comic Sans MS,cursive">` +
+        `<span style="color:#ff3355;position:absolute;top:0">red</span>` +
+        `<p style="margin:-40px 0 0;z-index:9;transform:scale(9)">up</p>` +
+        `<p style="margin:8px 0 0;background:url(https://attacker.example/a);background-image:linear-gradient(red,blue)">ok</p></div>`,
+    )
+    expect(html).toContain(
+      'style="background:#0b1020;color:#fff;padding:16px;border-radius:12px;border:2px solid #3355ff;max-width:360px;font-family:Comic Sans MS,cursive"',
+    )
+    expect(html).toContain('<span style="color:#ff3355">red</span>')
+    expect(html).toContain("<p>up</p>")
+    expect(html).toContain('<p style="margin:8px 0 0">ok</p>')
+    for (const banned of ["position", "top:0", "-40px", "z-index", "scale(9)", "attacker.example", "background-image"]) {
+      expect(html).not.toContain(banned)
+    }
+  })
+
   test("SVG styles and presentation attributes cannot load anything, but painting survives", () => {
     const html = render(
       `<svg viewBox="0 0 10 10"><defs><filter id="f"/></defs>` +
