@@ -6,7 +6,8 @@ export type Route =
   | { name: "thread"; taskId: string }
   | { name: "archived" }
   | { name: "automations" }
-  | { name: "connections" };
+  | { name: "connections" }
+  | { name: "settings" };
 
 export interface Navigation {
   /** The route on screen. */

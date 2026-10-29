@@ -2,10 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Linking, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
-import { GitCompare, GitPullRequest, type LucideIcon, Monitor, PanelRightClose } from "lucide-react-native";
+import { AppWindow, GitCompare, GitPullRequest, type LucideIcon, Monitor, PanelRightClose } from "lucide-react-native";
 import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
 import { DiffView } from "@/components/DiffView";
+import { PreviewViewer } from "@/components/PreviewViewer";
 import { ContentPanel, TopBar } from "@/components/TopBar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -15,11 +16,12 @@ import { repoShortName } from "@/lib/format";
 import { useShell } from "@/nav/navigation";
 import { colors, radius, spacing } from "@/theme";
 
-type TabId = "desktop" | "diff";
+type TabId = "desktop" | "preview" | "diff";
 
 // Add a panel tab by adding an entry here and a case in PanelBody.
 const PANEL_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "desktop", label: "Desktop", icon: Monitor },
+  { id: "preview", label: "Preview", icon: AppWindow },
   { id: "diff", label: "Diff", icon: GitCompare },
 ];
 
@@ -129,6 +131,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
               messages={state.messages}
               runs={state.runs}
               archivedTask={archivedTask}
+              context={state.task?.context}
             />
           </View>
         </GestureDetector>
@@ -167,7 +170,13 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
                 />
               </View>
             </GestureDetector>
-            <PanelBody tab={tab} taskId={taskId} archived={archivedTask !== undefined} running={state.task?.status === "running"} />
+            <PanelBody
+              tab={tab}
+              taskId={taskId}
+              archived={archivedTask !== undefined}
+              running={state.task?.status === "running"}
+              previewPort={state.task?.previewPort}
+            />
             <GestureDetector gesture={edgeClosePan}>
               <View style={styles.closeEdge} />
             </GestureDetector>
@@ -178,13 +187,27 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
   );
 }
 
-function PanelBody({ tab, taskId, archived, running }: { tab: TabId; taskId: string; archived: boolean; running: boolean }) {
+function PanelBody({
+  tab,
+  taskId,
+  archived,
+  running,
+  previewPort,
+}: {
+  tab: TabId;
+  taskId: string;
+  archived: boolean;
+  running: boolean;
+  previewPort: number | undefined;
+}) {
   switch (tab) {
     case "desktop":
       if (archived) {
         return <Text style={styles.note}>The desktop is off while this thread is archived.</Text>;
       }
       return <DesktopViewer taskId={taskId} />;
+    case "preview":
+      return <PreviewViewer taskId={taskId} port={previewPort} />;
     case "diff":
       return <DiffView taskId={taskId} running={running} />;
   }

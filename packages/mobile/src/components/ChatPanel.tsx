@@ -1,15 +1,15 @@
-import React, { type ComponentRef, Fragment, type ReactNode, useMemo, useRef } from "react";
+import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Image, type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
+import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
 import { createQueries, keys, upsert } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
-import { errorText, formatClock } from "@/lib/format";
-import { colors, radius, shadows, spacing } from "@/theme";
+import { errorText, formatClock, formatElapsed } from "@/lib/format";
+import { colors, fonts, radius, shadows, spacing } from "@/theme";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { RunTranscript } from "./RunTranscript";
@@ -21,33 +21,42 @@ interface Props {
   runs: readonly Run[];
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined;
+  context?: ContextUsage | null | undefined;
 }
 
 /** Within this distance of the end, new content keeps the thread scrolled to the bottom. */
 const STICK_PX = 80;
 
-/** Under a thread block: a spinner while the turn runs, and the time. Finished turns get no icon. */
-function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?: string }) {
-  const running = status === "running";
-  if (!running && !time) return null;
+const ELAPSED_TICK_MS = 1000;
+
+function Elapsed({ startedAt }: { startedAt: string }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+  return <Text style={styles.elapsed}>{formatElapsed(Date.parse(startedAt), now)}</Text>;
+}
+
+function WorkingIndicator({ run }: { run: Run }) {
   return (
-    <View style={styles.footer}>
-      {running ? <StatusIcon status="running" size={14} /> : null}
-      {time ? <Text style={styles.footerText}>{time}</Text> : null}
-      {running && !time ? <Text style={styles.footerText}>Working…</Text> : null}
+    <View style={styles.workingWrap} pointerEvents="none">
+      <View style={styles.working}>
+        <StatusIcon status="running" size={14} />
+        <Text style={styles.workingText}>Working</Text>
+        <Elapsed startedAt={run.startedAt} />
+      </View>
     </View>
   );
 }
 
-/** `children`: what hangs off a message (attachments, answer buttons), shown under its text. */
+/** `children`: what hangs off a message (attachments), shown under its text. */
 function ThreadItem({
   message,
-  turn,
   hideText = false,
   children,
 }: {
   message: Message;
-  turn: Run["status"] | undefined;
   /** The run transcript already renders this text; only what hangs off the message stays. */
   hideText?: boolean;
   children?: ReactNode;
@@ -68,23 +77,15 @@ function ThreadItem({
             </Text>
           </View>
           {children}
-          {/* No agent reply yet: the turn's status sits under the prompt, on the agent's side. */}
-          {turn ? (
-            <View style={styles.agentSide}>
-              <TurnFooter status={turn} />
-            </View>
-          ) : null}
         </View>
       );
     case "agent":
-      // A duplicated message still holds attachments and answer buttons, and its footer is the running
-      // indicator; only the clock goes, since the transcript's turn footer covers the finished turn.
-      if (hideText && children === undefined) return <TurnFooter status={turn} />;
+      if (hideText && children === undefined) return null;
       return (
         <View>
           {hideText ? null : <Markdown text={message.text} />}
           {children}
-          <TurnFooter status={turn} time={hideText ? undefined : formatClock(message.createdAt)} />
+          <Text style={styles.messageTime}>{formatClock(message.createdAt)}</Text>
         </View>
       );
     case "system":
@@ -92,7 +93,6 @@ function ThreadItem({
         <View style={styles.systemWrap}>
           <Text style={styles.system}>{message.text}</Text>
           {children}
-          <TurnFooter status={turn} />
         </View>
       );
   }
@@ -112,7 +112,7 @@ function ArchivedNotice({ task }: { task: Task }) {
   );
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, context }: Props) {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
@@ -122,15 +122,12 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: 
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  const runById = new Map(sortedRuns.map((r) => [r.id, r]));
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) });
   const itemCountByRun = new Map(sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]));
-  // The last message of each run carries that turn's status.
-  const lastMessageOfRun = new Map<string, string>();
-  for (const m of sortedMessages) if (m.runId) lastMessageOfRun.set(m.runId, m.id);
-  // The latest question with options gets answer buttons, but only while the agent is blocked waiting for one.
-  const lastAsk = [...sortedMessages].reverse().find((m) => (m.options ?? []).length > 0);
+
+  // The latest question with options gets answer choices in the composer while waiting for input.
+  const lastAsk = sortedMessages.filter((m) => m.role === "agent" && m.options !== undefined).at(-1);
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined;
 
   const send = useMutation({
@@ -172,17 +169,14 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: 
         {sortedMessages.map((m) => {
           // A user message starts its run: that run's transcript follows the prompt.
           const startedRunId = m.role === "user" ? m.runId : null;
-          const duplicate = m.role === "agent" && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0;
-          const attachments = m.attachments ?? [];
-          // Attachments and answer buttons stay on the message itself, so it survives hiding its text.
-          const extras = attachments.length > 0 || m.id === pendingAsk?.id;
-          const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined;
-          // While the prompt is the run's last message, its status goes under the transcript once one exists.
-          const turnBelowTranscript = startedRunId !== null && (itemCountByRun.get(startedRunId) ?? 0) > 0;
+          const pending = m.id === pendingAsk?.id;
+          const duplicate =
+            m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0;
+          const attachments = pending ? [] : (m.attachments ?? []);
           return (
             <Fragment key={m.id}>
-              <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate}>
-                {extras ? (
+              <ThreadItem message={m} hideText={duplicate || pending}>
+                {attachments.length > 0 ? (
                   <>
                     {attachments.map((a) => (
                       <Image
@@ -193,34 +187,24 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: 
                         accessibilityLabel="Attachment"
                       />
                     ))}
-                    {m.id === pendingAsk?.id ? (
-                      <View style={styles.options}>
-                        {(m.options ?? []).map((option, i) => (
-                          <Button
-                            key={i}
-                            variant="soft"
-                            size="sm"
-                            disabled={send.isPending}
-                            onPress={() => send.mutate({ text: option })}
-                          >
-                            {option}
-                          </Button>
-                        ))}
-                      </View>
-                    ) : null}
                   </>
                 ) : undefined}
               </ThreadItem>
               {startedRunId !== null ? <RunTranscript runId={startedRunId} /> : null}
-              {turnBelowTranscript ? <TurnFooter status={turn} /> : null}
             </Fragment>
           );
         })}
       </ScrollView>
+      {activeRun ? <WorkingIndicator run={activeRun} /> : null}
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />
       ) : (
         <Composer
+          taskId={taskId}
+          ask={pendingAsk}
+          context={context}
+          activeRunId={activeRun?.id}
+          activeRunProvider={activeRun?.provider}
           onSend={(body) => send.mutateAsync(body)}
           pending={send.isPending}
           error={send.error ?? cancel.error}
@@ -247,6 +231,28 @@ const styles = StyleSheet.create({
     ...shadows.soft,
   },
   userText: { color: colors.foreground, fontSize: 15, lineHeight: 22 },
+  messageTime: { color: colors.mutedForeground, fontSize: 11, marginTop: 6 },
+  workingWrap: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: 4,
+    paddingBottom: 2,
+    alignItems: "flex-start",
+  },
+  working: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingLeft: spacing.xs,
+  },
+  workingText: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+  },
+  elapsed: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+    fontFamily: fonts.mono,
+  },
   agentSide: { alignSelf: "flex-start" },
   systemWrap: { alignSelf: "center", alignItems: "center" },
   system: { color: colors.mutedForeground, fontSize: 12, fontStyle: "italic", textAlign: "center" },

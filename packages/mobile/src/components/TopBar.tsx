@@ -1,6 +1,6 @@
 import React, { type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { Menu } from "lucide-react-native";
+import { PanelLeftOpen } from "lucide-react-native";
 import { BoxOfflineBanner } from "@/components/BoxStatus";
 import { KestrelMark } from "@/components/KestrelMark";
 import { Button } from "@/components/ui/Button";
@@ -18,7 +18,7 @@ export function TopBar({ title, right }: { title?: string; right?: ReactNode }) 
       <Button
         variant="ghost"
         size="icon"
-        icon={Menu}
+        icon={PanelLeftOpen}
         accessibilityLabel="Open threads"
         onPress={shell.openSidebar}
       />

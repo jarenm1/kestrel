@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Check, ChevronDown, Settings2, Square } from "lucide-react-native";
 import { Alert } from "@/components/ui/Alert";
@@ -9,7 +9,11 @@ import {
   AgentModel,
   EFFORT_LABELS,
   connectedModelProviders,
+  type ContextUsage,
+  type HarnessCommand,
+  type Message,
   type ModelInfo,
+  type ModelProvider,
   type ModelProviderInfo,
   type SendMessageBody,
 } from "@cloudagents/protocol";
@@ -19,7 +23,10 @@ import { useShownModels } from "@/hooks/useShownModels";
 import { useStoredChoice } from "@/hooks/useStoredChoice";
 import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
-import { colors, radius, shadows, spacing } from "@/theme";
+import { colors, fonts, radius, shadows, spacing } from "@/theme";
+import { ContextBar } from "./ContextBar";
+import { Markdown } from "./Markdown";
+import { SlashCommands } from "./SlashCommands";
 
 interface PickerOption<T extends string> {
   readonly value: T | undefined;
@@ -172,9 +179,88 @@ interface ComposerProps {
   readonly onStop?: () => void;
   readonly stopping?: boolean;
   readonly placeholder?: string;
+  readonly taskId?: string;
+  readonly ask?: Message | undefined;
+  readonly context?: ContextUsage | null | undefined;
+  readonly activeRunId?: string;
+  readonly activeRunProvider?: ModelProvider;
 }
 
-export function Composer({ onSend, pending, error, onStop, stopping, placeholder }: ComposerProps) {
+/**
+ * The agent's open question (`task_ask`) at the top of the box: its screenshot, the question, and its options.
+ */
+function AskPanel({
+  ask,
+  chosen,
+  onChoose,
+  api,
+}: {
+  ask: Message;
+  chosen: number | undefined;
+  onChoose: (index: number) => void;
+  api: ReturnType<typeof useApiClient>["api"];
+}) {
+  const attachments = ask.attachments ?? [];
+  const options = ask.options ?? [];
+
+  return (
+    <View style={styles.askPanel}>
+      {attachments.map((a) => (
+        <Image
+          key={a.id}
+          source={api.attachmentSource(ask.taskId, a.id)}
+          style={styles.askImage}
+          resizeMode="contain"
+          accessibilityLabel="Question attachment"
+        />
+      ))}
+      <Markdown text={ask.text} />
+      {options.length > 0 ? (
+        <View style={styles.askOptions}>
+          {options.map((option, i) => {
+            const selected = chosen === i;
+            return (
+              <Pressable
+                key={i}
+                style={({ pressed }) => [
+                  styles.askOption,
+                  selected && styles.askOptionSelected,
+                  pressed && styles.askOptionPressed,
+                ]}
+                onPress={() => onChoose(i)}
+                accessibilityRole="radio"
+                accessibilityState={{ selected }}
+              >
+                <View style={[styles.askBadge, selected && styles.askBadgeSelected]}>
+                  {selected ? (
+                    <Check size={12} color={colors.primaryForeground} strokeWidth={2.5} />
+                  ) : (
+                    <Text style={[styles.askBadgeText, selected && styles.askBadgeTextSelected]}>{i + 1}</Text>
+                  )}
+                </View>
+                <Text style={styles.askOptionText}>{option}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+export function Composer({
+  onSend,
+  pending,
+  error,
+  onStop,
+  stopping,
+  placeholder,
+  taskId,
+  ask,
+  context,
+  activeRunId,
+  activeRunProvider,
+}: ComposerProps) {
   const { api } = useApiClient();
   const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
@@ -184,6 +270,11 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
   const [focused, setFocused] = useState(false);
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
+  const [choice, setChoice] = useState<{ askId: string; index: number } | undefined>();
+
+  const askOptions = ask?.options ?? [];
+  const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined;
+  const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex];
 
   const sections: readonly ModelSection[] | null = connections.data
     ? connectedModelProviders(connections.data)
@@ -198,29 +289,96 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ];
-  const empty = text.trim() === "";
+
+  // Slash commands
+  const firstSpace = text.search(/\s/);
+  const commandTokenEnd = firstSpace === -1 ? text.length : firstSpace;
+  const trigger: "/" | "$" | undefined = text.startsWith("/") ? "/" : text.startsWith("$") ? "$" : undefined;
+  const expectedProvider = activeRunProvider ?? model?.provider;
+  const triggerAllowed =
+    trigger === "/" ||
+    (trigger === "$" &&
+      (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)));
+  const slashQuery =
+    taskId !== undefined && trigger !== undefined && triggerAllowed && (firstSpace === -1 || text.length <= firstSpace)
+      ? text.slice(1)
+      : undefined;
+
+  const commandQuery = useQuery({
+    ...queries.commands(taskId, model?.id, activeRunId, activeRunProvider),
+    enabled: slashQuery !== undefined && taskId !== undefined && model !== undefined,
+  });
+
+  const commandProvider = commandQuery.data?.provider ?? expectedProvider;
+  const slashMenuOpen =
+    slashQuery !== undefined &&
+    (trigger !== "$" || commandProvider === "openai") &&
+    focused;
+
+  const commandMatches =
+    slashQuery === undefined
+      ? []
+      : (commandQuery.data?.commands ?? []).filter((c) =>
+          c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
+        );
+
+  function chooseCommand(command: HarnessCommand) {
+    const prefix = commandQuery.data?.provider === "openai" ? "$" : "/";
+    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "");
+    setText(`${prefix}${command.name} ${rest}`);
+  }
+
+  const empty = text.trim() === "" && chosenOption === undefined;
 
   function submit() {
-    const body = text.trim();
     // Failures surface through `error`; the text stays so it can be resent.
-    if (body === "" || pending) return;
+    if (empty || pending) return;
+    const body = [chosenOption ?? "", text.trim()].filter(Boolean).join("\n\n");
     void onSend({ text: body, model: model?.id, effort }).then(
-      () => setText(""),
+      () => {
+        setText("");
+        setChoice(undefined);
+      },
       () => undefined
     );
   }
 
+  const computedPlaceholder =
+    placeholder ??
+    (ask
+      ? askOptions.length > 0
+        ? "Pick an answer, or type your own"
+        : "Type your answer"
+      : "Message the agent");
+
   return (
     <View style={styles.wrap}>
       {error ? <Alert>{errorText(error)}</Alert> : null}
+      {slashMenuOpen ? (
+        <SlashCommands
+          matches={commandMatches}
+          provider={commandProvider}
+          pending={commandQuery.isPending}
+          onSelect={chooseCommand}
+        />
+      ) : null}
       <View style={[styles.box, focused && styles.boxFocused]}>
+        {context ? <ContextBar context={context} /> : null}
+        {ask ? (
+          <AskPanel
+            ask={ask}
+            chosen={chosenIndex}
+            onChoose={(index) => setChoice({ askId: ask.id, index })}
+            api={api}
+          />
+        ) : null}
         <TextInput
           style={styles.input}
           value={text}
           onChangeText={setText}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
-          placeholder={placeholder ?? "Message the agent"}
+          placeholder={computedPlaceholder}
           placeholderTextColor={colors.mutedForeground + "b3"}
           multiline
         />
@@ -267,6 +425,66 @@ const styles = StyleSheet.create({
     ...shadows.soft,
   },
   boxFocused: { borderColor: "rgba(255,255,255,0.14)" },
+  askPanel: {
+    paddingHorizontal: 6,
+    paddingTop: 6,
+    paddingBottom: spacing.sm,
+    gap: spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+    marginBottom: spacing.xs,
+  },
+  askImage: {
+    width: "100%",
+    height: 160,
+    borderRadius: radius.lg,
+  },
+  askOptions: {
+    gap: 6,
+    marginTop: spacing.xs,
+  },
+  askOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderRadius: radius.lg,
+    backgroundColor: colors.white03,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  askOptionSelected: {
+    backgroundColor: colors.white12,
+    borderColor: "rgba(255,255,255,0.25)",
+  },
+  askOptionPressed: {
+    backgroundColor: colors.white06,
+  },
+  askBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: radius.sm,
+    backgroundColor: colors.white08,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  askBadgeSelected: {
+    backgroundColor: colors.foreground,
+  },
+  askBadgeText: {
+    fontSize: 11,
+    fontFamily: fonts.mono,
+    color: colors.mutedForeground,
+  },
+  askBadgeTextSelected: {
+    color: colors.primaryForeground,
+  },
+  askOptionText: {
+    flex: 1,
+    fontSize: 14,
+    color: colors.foreground,
+  },
   input: {
     color: colors.foreground,
     fontSize: 16,
