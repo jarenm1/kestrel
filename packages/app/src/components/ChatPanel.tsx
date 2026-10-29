@@ -151,8 +151,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Bottom padding matches the dock's fade, so the last line rests clear of it when scrolled to the end. */}
-      <div className="min-h-0 flex-1 overflow-auto px-5 pt-4 pb-6" ref={threadRef}>
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-4" ref={threadRef}>
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
           {sortedMessages.length === 0 && (
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
@@ -206,12 +205,12 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
       </div>
       <div className="relative flex justify-center px-5 pt-2 pb-5">
         {/*
-          Extends the dock's solid strip upward: the context bar's labels sit above the composer, over the thread,
-          so text scrolling under them fades out instead of clashing or cutting off at a hard edge.
+          A short fade up from the dock's edge, ending just past the context bar's labels (which sit above the
+          composer, over the thread), so text scrolling under them softens instead of clashing.
         */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-full h-6 bg-linear-to-t from-card from-25% to-transparent"
+          className="pointer-events-none absolute inset-x-0 bottom-full h-3 bg-linear-to-t from-card to-transparent"
         />
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
