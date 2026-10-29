@@ -2,6 +2,48 @@
 
 Run your own agent harness in a sandboxed box with a live desktop.
 
+Repository: [github.com/jarenm1/kestrel](https://github.com/jarenm1/kestrel). Hosted app: [app.kestrel-agent.com](https://app.kestrel-agent.com).
+
+## Quick start
+
+Install Git, Bun and Node.js 22. The local demo runs without a Cloudflare account, GitHub OAuth app or model API key.
+
+```sh
+git clone https://github.com/jarenm1/kestrel.git
+cd kestrel
+bun install --frozen-lockfile
+```
+
+Start the stack with the scripted agent (POSIX shell):
+
+```sh
+CLOUDAGENTS_FAKE_AGENT=1 bun run dev
+```
+
+In Windows PowerShell, use `$env:CLOUDAGENTS_FAKE_AGENT = "1"; bun run dev` instead. On Linux without a user systemd manager, also set `CLOUDAGENTS_SYSTEMD=0`. On NixOS, use `CLOUDAGENTS_FAKE_AGENT=1 nix run` so the pinned toolchain supplies a compatible Worker runtime; this is also the recommended Linux route for the sandbox and desktop.
+
+Open the `/auth/dev-login` URL printed in the terminal (normally `http://localhost:5173/auth/dev-login`) to sign in as `dev`. Follow [Reproduce the demo](#reproduce-the-demo) below. Ctrl+C stops the stack.
+
+## Tech stack and architecture
+
+Kestrel is a TypeScript monorepo using Bun workspaces. The box uses Effect and the MCP SDK; the web client uses React 19, Vite, Tailwind CSS, shadcn/ui and TanStack Query; the control plane uses Cloudflare Workers and a Durable Object. The optional mobile client uses Expo and React Native. Linux desktops use Weston, Xwayland and ffmpeg, with bubblewrap, pasta and systemd providing task isolation and resource limits.
+
+```mermaid
+flowchart LR
+  Web["Web app: React / Vite"] --> Control["Control plane: Worker + Hub Durable Object"]
+  Mobile["Mobile: Expo / React Native"] --> Control
+  Control <-->|"outbound WebSocket from box"| Box["Agent box: Bun / Effect"]
+  Control <-->|"OAuth / repository API"| GitHub["GitHub"]
+  Box --> Harness["Claude Code / Codex harness"]
+  Harness --> Sandbox["Task sandbox: bubblewrap / pasta / systemd"]
+  Sandbox --> MCP["MCP tools: workspace / desktop / preview"]
+  Sandbox --> Broker["Credential broker"]
+  Broker --> Models["Anthropic / OpenAI APIs"]
+  MCP --> Desktop["Desktop: Weston / Xwayland / ffmpeg"]
+```
+
+The clients talk only to the control plane; the box opens the relay connection. The broker keeps model API keys outside the agent sandbox. Local development replaces the deployed Worker with Wrangler and can replace the real harness with a scripted agent. See [docs/architecture.md](docs/architecture.md) for the detailed diagram and component responsibilities.
+
 - `packages/app`: the React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves two hosts, picked by hostname: the public landing and pricing pages on https://kestrel-agent.com (and `www.`), and the app on https://app.kestrel-agent.com (new chat at `/`, threads at `/c/:id`). Talks only to the control plane, same origin.
 - `packages/control`: the Cloudflare Worker control plane: GitHub sign-in, connections, and a relay to the agent box. Serves the built `packages/app` as static assets. Deployed as Worker `kestrel` on https://app.kestrel-agent.com, https://kestrel-agent.com and `www.` (and its workers.dev URL, which boxes dial). Sign-in and the API only answer on the app host; the public hosts redirect them there.
 - `packages/server`: the agent box. Runs harnesses inside bubblewrap, serves the desktop and MCP, and dials out to the control plane.
@@ -11,9 +53,56 @@ Run your own agent harness in a sandboxed box with a live desktop.
   In a thread, swipe left over chat or from its right edge to open Desktop/Diff; swipe right over the panel header or left edge to close it. Swipe right over chat for Threads, or use the header buttons. Mostly horizontal swipes tolerate small vertical drift; vertical swipes keep scrolling the content.
   The composer groups modern models by connected Anthropic/OpenAI provider. **Manage models** opens Connections, where each provider's visible models can be toggled or reset. Choices are saved on the device. Thinking offers only levels supported by the selected model, and disappears for models without thinking controls.
 
+## Reproduce the demo
+
+### No-key demo
+
+1. Start the stack with `CLOUDAGENTS_FAKE_AGENT=1` using the quick start and sign in through `/auth/dev-login`.
+2. Create a new thread and send `Write a short project note`. The scripted agent writes `AGENT_NOTES.md` in the thread workspace and reports `Wrote AGENT_NOTES.md from the prompt.` It does not call a model or need a repository checkout. Its initial desktop screenshot tool error is expected: desktops start only when opened.
+3. After the run finishes, send `/replay claude/markdown` to show formatted chat output, or `/replay codex/kitchen-sink` to show reasoning, tool results and file changes. These commands replay bundled transcripts through the real event pipeline; they do not execute the actions described in those transcripts. Replay is available only in dev-login sessions.
+4. For a live desktop demonstration on Linux with the desktop dependencies installed (included by `nix run`), send `desktop-probe`. It opens the desktop, launches terminal processes, exercises input and capture tools, then reports `desktop probes finished`. This step is optional; the note and replay demos also work without a desktop.
+
+### Environment and API keys
+
+For the commands below, set box variables in your shell before starting `bun run dev`; no manual `.env` file is required. The Worker reads `packages/control/.dev.vars`; the dev script creates this file on first run with a random `BOX_TOKEN`, `DEV_SESSION_LOGIN=dev` and `ALLOWED_GITHUB_LOGINS=dev`, then passes the matching token and local Worker URL to the box automatically.
+
+Example shell environment for the no-key demo (omit `CLOUDAGENTS_SYSTEMD=0` when a user systemd manager is available):
+
+```sh
+export CLOUDAGENTS_FAKE_AGENT=1
+export KESTREL_DEV_SLOT=1
+export CLOUDAGENTS_SYSTEMD=0
+bun run dev
+```
+
+For reference, this is the shape of the generated Worker configuration; let the dev script generate the actual token:
+
+```dotenv
+# packages/control/.dev.vars — local development only; never commit this file
+BOX_TOKEN=<random-local-token-generated-by-the-dev-script>
+DEV_SESSION_LOGIN=dev
+ALLOWED_GITHUB_LOGINS=dev
+# Optional, only for exercising real GitHub OAuth:
+# GITHUB_CLIENT_ID=<your-development-oauth-app-client-id>
+# GITHUB_CLIENT_SECRET=<your-development-oauth-app-client-secret>
+```
+
+The tracked [Worker example](packages/control/.dev.vars.example) also lists OAuth fields. If configuring OAuth, register a development GitHub OAuth app with callback `http://localhost:<app-port>/auth/github/callback`, add its credentials to `.dev.vars`, and include your GitHub login in `ALLOWED_GITHUB_LOGINS`. The dev-login account has no GitHub token; use real GitHub sign-in to exercise private repository access and GitHub writes.
+
+To run a real agent, stop the stack, unset `CLOUDAGENTS_FAKE_AGENT` (PowerShell: `Remove-Item Env:CLOUDAGENTS_FAKE_AGENT`), and restart with `bun run dev` or `nix run`. Install the corresponding Claude Code or Codex CLI on the box when running without the Nix toolchain. Add an Anthropic/OpenAI API key or sign in to a supported subscription under **Settings › Connections**, then select its model in the composer. Alternatively, export `ANTHROPIC_API_KEY` before startup for the box's Anthropic fallback. Real runs use your provider's billing or subscription limits; the no-key demo needs neither. Never put keys in prompts or committed files.
+
+| Variable | Purpose |
+|---|---|
+| `CLOUDAGENTS_FAKE_AGENT=1` | Use the scripted agent instead of a model-backed CLI. |
+| `KESTREL_DEV_SLOT=0`–`9` | Give simultaneously running worktrees separate ports; default `0`. Use the printed URLs. |
+| `CLOUDAGENTS_SYSTEMD=0` | Disable task resource limits when no user systemd manager is available. |
+| `CLOUDAGENTS_DEV_DATA_DIR` | Override the local box data directory, normally `.data-dev/`. |
+| `ANTHROPIC_API_KEY` | Optional box-side fallback for real Anthropic runs. |
+| `KESTREL_REPLAY_DELAY_MS` | Delay between replay transcript lines; default `300`. |
+
 ## Local development
 
-Nothing in the cloud is required. One command starts the whole stack on Linux, macOS and Windows; it needs Bun and Node 22 (for `wrangler`):
+The [quick start](#quick-start) runs the whole stack with a scripted agent. For normal development with a real agent connection, use:
 
 ```sh
 bun install --frozen-lockfile
@@ -90,6 +179,29 @@ Signed-in users can instead run agents on their own Claude or ChatGPT subscripti
 Threads are private to the user who started them: the box answers every thread, run, diff and desktop route (REST and WebSocket) only for the thread's owner and returns `404` to anyone else. A thread starts with no repository; the agent checks repositories out into the thread's workspace with `repo_checkout`, and the box clones with the owner's own GitHub token, so GitHub decides which repositories someone's agent can read. The broker pays for a run with the keys of the user who started it. At first start after the upgrade, the box turns each old project thread into a thread with one checkout of its branch (uncommitted files included); the old `repos/` and `worktrees/` directories stay on disk (logged).
 
 Checks: `bun run typecheck`.
+
+## Datasets and synthetic data
+
+Kestrel does not require an external dataset or train a model for this demo. The demo inputs are your prompt and the bundled agent transcripts:
+
+| Data | Provenance and use |
+|---|---|
+| [`packages/server/scripts/fake-agent.ts`](packages/server/scripts/fake-agent.ts) | Repository-authored scripted behavior. Writes the supplied prompt to `AGENT_NOTES.md` and exercises live MCP tools; its output is not model-generated. |
+| [`fixtures/agent/claude/*.jsonl`](packages/server/fixtures/agent/claude) | Four hand-authored synthetic transcripts based on Claude stream-JSON shapes, for Markdown, tools, long responses and errors. |
+| [`fixtures/agent/codex/recorded-*.jsonl`](packages/server/fixtures/agent/codex) | Two real `codex exec --json` recordings from codex-cli 0.163.0, sanitized for paths, the PowerShell wrapper/output and thread IDs. |
+| [`fixtures/agent/codex/kitchen-sink.jsonl`](packages/server/fixtures/agent/codex/kitchen-sink.jsonl) and [`failed-turn.jsonl`](packages/server/fixtures/agent/codex/failed-turn.jsonl) | Hand-authored synthetic transcripts covering rendering and error cases. |
+
+See the [fixture provenance and recording guide](packages/server/fixtures/agent/README.md) for the per-file inventory and sanitization instructions. Your own repository checkouts, uploads and messages are runtime inputs, not bundled demo datasets. Local box state lives in `.data-dev/`; local Worker state lives in `packages/control/.wrangler/`.
+
+## Known limitations and next steps
+
+- **Scripted demo scope:** the fake agent follows fixed branches; replay shows recorded output without running its tool actions. Use a real provider connection to evaluate agent quality or repository work.
+- **Platform support:** the live desktop is Linux-only. Without the Nix sandbox toolchain, local agents run unsandboxed; macOS and Windows also run without systemd resource limits. See [Without Nix](#without-nix).
+- **Isolation boundaries:** task CPU/RAM limits do not impose a VRAM quota, and desktops share the host GPU. The task network can still reach the LAN and the host's non-loopback addresses.
+- **Preview scope:** pull-request Previews have no box or production secrets, so they support UI review only. In-thread browser previews intentionally omit app-origin storage, cookies, popups and service workers.
+- **Runtime availability:** production box updates restart the box and interrupt active runs. Optional Roblox Studio support depends on Vinegar and can break with upstream changes.
+
+Next steps include direct WebRTC desktop streaming, NVENC encoding, and adding real Claude recordings to complement the synthetic fixtures. These are planned improvements, not prerequisites for reproducing the demo; see [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
 
 ## Deploys
 
