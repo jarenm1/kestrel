@@ -24,23 +24,17 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 export function PublicShell({
   children,
   onProductClick,
-  pulse = false,
 }: {
   children: ReactNode
   /** On the landing page, "Product" scrolls to the features instead of navigating. */
   onProductClick?: () => void
-  /** Let the spotlight breathe slowly (pricing). */
-  pulse?: boolean
 }) {
   return (
     <div className="public-page relative flex min-h-screen flex-col overflow-x-hidden bg-background">
       <div aria-hidden className="public-vfx pointer-events-none fixed inset-0 z-0" />
       <div aria-hidden className="public-noise pointer-events-none fixed inset-0 z-0 opacity-[0.035]" />
       <div aria-hidden className="pointer-events-none fixed top-0 left-1/2 z-0 h-[600px] w-[900px] -translate-x-1/2">
-        <div
-          className="absolute inset-0 rounded-full bg-[radial-gradient(ellipse_at_top,rgb(255_255_255/0.16),transparent_65%)] blur-3xl"
-          style={pulse ? { animation: "public-pulse 8s cubic-bezier(0.4, 0, 0.6, 1) infinite" } : undefined}
-        />
+        <div className="absolute inset-0 rounded-full bg-[radial-gradient(ellipse_at_top,rgb(255_255_255/0.16),transparent_65%)] blur-3xl" />
       </div>
 
       <header className="fixed inset-x-0 top-4 z-50 flex justify-center px-4">

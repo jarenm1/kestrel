@@ -70,7 +70,7 @@ const faqs = [
 
 export function PricingPage() {
   return (
-    <PublicShell pulse>
+    <PublicShell>
       <section className="relative z-10 px-8 pt-36 pb-16">
         <motion.div
           initial="hidden"
@@ -87,13 +87,6 @@ export function PricingPage() {
           <motion.p variants={fadeInUp} className="mx-auto max-w-2xl text-lg text-muted-foreground">
             Rent the box, bring your own model key. No servers to manage, cancel anytime.
           </motion.p>
-          <motion.div
-            variants={fadeInUp}
-            className="inline-flex items-center gap-2 rounded-full bg-white/[0.05] px-3 py-1 text-xs text-muted-foreground shadow-soft"
-          >
-            <span className="size-1.5 animate-pulse rounded-full bg-success" />
-            Demo pricing. Billing is not live and every plan is free during the hackathon.
-          </motion.div>
         </motion.div>
       </section>
 

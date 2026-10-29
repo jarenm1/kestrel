@@ -29,17 +29,6 @@
   mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 100%);
 }
 
-/* Pricing's slowly breathing spotlight. */
-@keyframes public-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .public-page *,
   .public-page *::before,
