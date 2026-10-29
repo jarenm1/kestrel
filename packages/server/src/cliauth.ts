@@ -11,7 +11,14 @@ import {
   type HarnessCommand,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
-import { CLAUDE_DISCOVERY_ARGS, CODEX_DISCOVERY_ARGS, discoverClaudeCommands, discoverCodexCommands, killActiveDiscovery } from "./harness-commands"
+import {
+  CLAUDE_DISCOVERY_ARGS,
+  CODEX_DISCOVERY_ARGS,
+  discoverClaudeCommands,
+  discoverCodexCommands,
+  killActiveDiscovery,
+  limitDiscovery,
+} from "./harness-commands"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { cliBwrapArgs, findExecutable } from "./sandbox"
 
@@ -286,13 +293,14 @@ export const CliAuthLive = Layer.effect(
     /**
      * How to run `bin args` for `user`: inside bwrap with only the user's dir writable, so it dies with the box and
      * sees nothing else of the host; directly (or through POSIX sh for Windows `.cmd` shims) only when the sandbox
-     * is disabled (local debugging). `workspacePath` runs discovery in that read-only thread workspace.
+     * is disabled (local debugging). Sign-in keeps the box network; discovery runs in its thread workspace with no
+     * network at all, so repo-controlled config cannot reach the box's loopback services.
      */
     const invoke = (
       user: string,
       bin: string,
       args: ReadonlyArray<string>,
-      workspacePath?: string,
+      discovery?: { readonly workspacePath: string },
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const env = yield* cliEnv(user)
@@ -307,7 +315,11 @@ export const CliAuthLive = Layer.effect(
         const bwrap = findExecutable("bwrap")
         if (bwrap === null) return yield* Effect.fail(new InternalError({ message: "bwrap (bubblewrap) not found on PATH" }))
         const root = yield* rootOf(user)
-        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args], workspacePath), env: {} }
+        const sandbox =
+          discovery === undefined
+            ? { network: "host" as const }
+            : { network: "none" as const, workspacePath: discovery.workspacePath }
+        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args], sandbox), env: {} }
       })
 
     /**
@@ -346,13 +358,15 @@ export const CliAuthLive = Layer.effect(
         const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, args, workspace)
+        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
             if (running !== undefined) return running
             const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: workspace }
-            const pending = (provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch))
+            const pending = limitDiscovery(() =>
+              provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch),
+            )
               .then((commands) => {
                 commandCache.delete(key)
                 commandCache.set(key, { at: Date.now(), commands })
