@@ -1,30 +1,36 @@
 import { useEffect, useRef, useState } from "react"
-import { Check, Copy, MousePointer2, RefreshCw } from "lucide-react"
+import { MousePointer2, RefreshCw } from "lucide-react"
 import { Paths } from "@cloudagents/protocol"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { api } from "@/api/client"
 
-interface PreviewSelection {
-  readonly label: string
-  readonly selector: string
-}
+import type { ElementContext } from "@/components/Composer"
 
 const MAX_SELECTION_TEXT = 500
+const MAX_SELECTION_HTML = 2001
 
 /** Sandboxed browser view for a dev server opened by the task's MCP preview tool. */
-export function PreviewViewer({ taskId, port }: { taskId: string; port: number | undefined }) {
+export function PreviewViewer({
+  taskId,
+  port,
+  onSelect,
+}: {
+  taskId: string
+  port: number | undefined
+  /** Receives the picked element; the thread puts it in the composer as context. */
+  onSelect: (element: ElementContext) => void
+}) {
   const [previewToken, setPreviewToken] = useState<string>()
   const [sessionError, setSessionError] = useState<string>()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [selecting, setSelecting] = useState(false)
-  const [selection, setSelection] = useState<PreviewSelection | null>(null)
-  const [copied, setCopied] = useState(false)
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
   const [generation, setGeneration] = useState(0)
 
   useEffect(() => {
     setSelecting(false)
-    setSelection(null)
     setPreviewToken(undefined)
     setSessionError(undefined)
     if (port === undefined) return
@@ -52,12 +58,13 @@ export function PreviewViewer({ taskId, port }: { taskId: string; port: number |
         typeof data.label !== "string" ||
         typeof data.selector !== "string"
       ) return
-      setSelection({
+      onSelectRef.current({
         label: data.label.slice(0, MAX_SELECTION_TEXT),
         selector: data.selector.slice(0, MAX_SELECTION_TEXT),
+        html: typeof data.html === "string" ? data.html.slice(0, MAX_SELECTION_HTML) : "",
+        page: typeof data.page === "string" ? data.page.slice(0, MAX_SELECTION_TEXT) : undefined,
       })
       setSelecting(false)
-      setCopied(false)
     }
     window.addEventListener("message", receive)
     return () => window.removeEventListener("message", receive)
@@ -67,12 +74,6 @@ export function PreviewViewer({ taskId, port }: { taskId: string; port: number |
     const enabled = !selecting
     setSelecting(enabled)
     frameRef.current?.contentWindow?.postMessage({ type: "kestrel-preview-select-mode", enabled }, "*")
-  }
-
-  async function copySelection() {
-    if (!selection) return
-    await navigator.clipboard.writeText(`Selected UI element: ${selection.label}\nSelector: ${selection.selector}`)
-    setCopied(true)
   }
 
   if (port === undefined) {
@@ -97,18 +98,6 @@ export function PreviewViewer({ taskId, port }: { taskId: string; port: number |
         </Button>
         <span className="ml-auto text-xs text-muted-foreground">Port {port}</span>
       </div>
-      {selection && (
-        <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border bg-background/80 p-2 text-xs">
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-medium">{selection.label}</div>
-            <code className="block truncate text-muted-foreground">{selection.selector}</code>
-          </div>
-          <Button variant="ghost" size="sm" onClick={() => void copySelection()}>
-            {copied ? <Check /> : <Copy />}
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        </div>
-      )}
       <iframe
         key={`${taskId}:${port}:${generation}`}
         ref={frameRef}

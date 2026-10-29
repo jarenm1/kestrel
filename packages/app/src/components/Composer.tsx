@@ -11,7 +11,7 @@ import {
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, ChevronDown, FileText, Paperclip, Settings2, Square, X } from "lucide-react"
+import { ArrowUp, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
 import {
   AgentEffort,
   AgentModel,
@@ -190,6 +190,52 @@ function PendingFile({ file, onRemove }: { file: File; onRemove: () => void }) {
   )
 }
 
+/** A UI element picked in the thread's browser preview, sent with the next message as context. */
+export interface ElementContext {
+  readonly label: string
+  readonly selector: string
+  readonly html: string
+  readonly page: string | undefined
+}
+
+/** The context block appended to the message text, one section per picked element. */
+function elementsText(elements: readonly ElementContext[]): string {
+  return elements
+    .map((e) => {
+      const lines = [`Selected UI element: ${e.label}`]
+      if (e.page) lines.push(`Page: ${e.page}`)
+      lines.push(`Selector: \`${e.selector}\``)
+      if (e.html) lines.push("```html", e.html, "```")
+      return lines.join("\n")
+    })
+    .join("\n\n")
+}
+
+/** A picked preview element waiting to go with the next message; styled like a pending file. */
+function PendingElement({ element, onRemove }: { element: ElementContext; onRemove: () => void }) {
+  return (
+    <div
+      className="group relative flex h-14 max-w-64 items-center gap-2 rounded-xl bg-white/[0.06] shadow-soft"
+      title={element.selector}
+    >
+      <MousePointer2 className="ml-3 size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 pr-6">
+        <div className="truncate text-xs">{element.label}</div>
+        <code className="block truncate text-[11px] text-muted-foreground">{element.selector}</code>
+      </div>
+      <button
+        type="button"
+        aria-label={`Remove ${element.label}`}
+        title={`Remove ${element.label}`}
+        onClick={onRemove}
+        className="absolute -top-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-soft hover:text-foreground"
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  )
+}
+
 interface Props {
   /** Resolves once the message is accepted; the text and files are cleared only then. */
   onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
@@ -204,10 +250,13 @@ interface Props {
   placeholder?: string
   autoFocus?: boolean
   className?: string
+  /** Preview elements to send as context; owned by the thread so the preview can add to them. */
+  elements?: readonly ElementContext[]
+  onElementsChange?: (elements: readonly ElementContext[]) => void
 }
 
 /** Message box with file attachments, the model and thinking-level pickers, and a round send / stop button. */
-export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className }: Props) {
+export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className, elements = [], onElementsChange }: Props) {
   const [text, setText] = useState("")
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
@@ -230,7 +279,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ]
-  const empty = text.trim() === "" && files.length === 0
+  const empty = text.trim() === "" && files.length === 0 && elements.length === 0
 
   /** Adds files, refusing empty ones and any over the box's limit before they are uploaded. */
   function addFiles(added: readonly File[]) {
@@ -249,9 +298,11 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
-    onSend({ text: text.trim(), model: model?.id, effort }, files).then(
+    const message = [text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
+    onSend({ text: message, model: model?.id, effort }, files).then(
       () => {
         setText("")
+        onElementsChange?.([])
         setFiles([])
         setFileError(undefined)
       },
@@ -303,8 +354,15 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
         }}
         onDrop={onDrop}
       >
-        {files.length > 0 && (
+        {(files.length > 0 || elements.length > 0) && (
           <div className="flex flex-wrap gap-2 px-1.5 pt-1.5">
+            {elements.map((element, i) => (
+              <PendingElement
+                key={`${i}:${element.selector}`}
+                element={element}
+                onRemove={() => onElementsChange?.(elements.filter((e) => e !== element))}
+              />
+            ))}
             {files.map((file, i) => (
               <PendingFile
                 key={`${i}:${file.name}:${file.size}:${file.lastModified}`}

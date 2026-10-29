@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatClock } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
-import { Composer } from "./Composer"
+import { Composer, type ElementContext } from "./Composer"
 import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
 import { RunTranscript } from "./RunTranscript"
@@ -22,6 +22,9 @@ interface Props {
   runs: readonly Run[]
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined
+  /** Preview elements attached to the composer as context. */
+  elements: readonly ElementContext[]
+  onElementsChange: (elements: readonly ElementContext[]) => void
 }
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
@@ -103,7 +106,7 @@ function ThreadItem({
   }
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
 
@@ -208,6 +211,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: 
             error={send.error ?? cancel.error}
             onStop={activeRun && (() => cancel.mutate(activeRun.id))}
             stopping={cancel.isPending}
+            elements={elements}
+            onElementsChange={onElementsChange}
           />
         )}
       </div>

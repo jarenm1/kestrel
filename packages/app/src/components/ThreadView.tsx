@@ -3,6 +3,7 @@ import { AppWindow, GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelR
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { PreviewViewer } from "@/components/PreviewViewer"
+import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -26,6 +27,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<TabId>("desktop")
+  // Elements picked in the preview, waiting in the composer to go with the next message.
+  const [elements, setElements] = useState<readonly ElementContext[]>([])
   // The agent opened the desktop: show it. Only a new count reopens, so a reconnect with a running desktop does not.
   useEffect(() => {
     if (state.desktopOpens === 0) return
@@ -63,6 +66,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
           messages={state.messages}
           runs={state.runs}
           archivedTask={archivedTask}
+          elements={elements}
+          onElementsChange={setElements}
         />
       </section>
       {open ? (
@@ -105,6 +110,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
             archived={archivedTask !== undefined}
             running={state.task?.status === "running"}
             previewPort={state.task?.previewPort}
+            onSelectElement={(element) => setElements((current) => [...current, element])}
           />
         </aside>
       ) : (
@@ -143,12 +149,14 @@ function SidebarBody({
   archived,
   running,
   previewPort,
+  onSelectElement,
 }: {
   tab: TabId
   taskId: string
   archived: boolean
   running: boolean
   previewPort: number | undefined
+  onSelectElement: (element: ElementContext) => void
 }) {
   switch (tab) {
     case "desktop":
@@ -160,7 +168,7 @@ function SidebarBody({
       if (archived) {
         return <p className="p-4 text-sm text-muted-foreground">The preview is off while this thread is archived.</p>
       }
-      return <PreviewViewer taskId={taskId} port={previewPort} />
+      return <PreviewViewer taskId={taskId} port={previewPort} onSelect={onSelectElement} />
     case "diff":
       return <DiffPanel taskId={taskId} running={running} />
   }
