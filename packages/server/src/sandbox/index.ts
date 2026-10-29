@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import { spawn } from "node:child_process"
-import { accessSync, constants, existsSync } from "node:fs"
+import { accessSync, constants, existsSync, readdirSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
@@ -111,6 +111,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.display !== undefined) {
     const socket = x11Socket(opts.display)
     argv.push("--bind", socket, socket)
+    argv.push(...gpuArgs())
   }
   for (const [name, value] of Object.entries(opts.env)) argv.push("--setenv", name, value)
   argv.push("--chdir", opts.workspacePath, "--", "sh", "-c", opts.command)
@@ -163,6 +164,29 @@ export const cliBwrapArgs = (
 }
 
 export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display}`
+
+/**
+ * The host GPU, for processes that can draw on the task desktop: DRM render nodes (never the card nodes, which can
+ * modeset), NVIDIA's device files, and the host's GL/Vulkan drivers at /run/opengl-driver, where nixpkgs' libglvnd and
+ * Vulkan loader look (NixOS; elsewhere sandboxed apps keep Mesa's software drivers). Mesa finds a render node's driver
+ * through sysfs, so /sys/dev and /sys/devices are visible read-only. Empty on a host without a GPU.
+ */
+const gpuArgs = (): string[] => {
+  const devices: string[] = []
+  try {
+    for (const name of readdirSync("/dev/dri")) if (name.startsWith("renderD")) devices.push(`/dev/dri/${name}`)
+  } catch {
+    // no DRM devices
+  }
+  for (const name of readdirSync("/dev")) if (name.startsWith("nvidia")) devices.push(`/dev/${name}`)
+  if (devices.length === 0) return []
+  const argv: string[] = []
+  for (const device of devices) argv.push("--dev-bind", device, device)
+  for (const dir of ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run/opengl-driver-32"]) {
+    if (existsSync(dir)) argv.push("--ro-bind", dir, dir)
+  }
+  return argv
+}
 
 /** Parses ":101" into 101 when the desktop socket exists on the host. */
 export const displayNumber = (display: string | null): number | undefined => {
