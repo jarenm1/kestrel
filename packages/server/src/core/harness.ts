@@ -12,6 +12,7 @@ import {
   type AgentEffort,
   type AgentItem,
   type AgentModel,
+  type ContextUsage,
   type CliProvider,
   type Message,
   type ModelProvider,
@@ -26,6 +27,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
+import { codexContext } from "./rollout"
 import { makeTranscript, type Transcript } from "./transcript"
 
 export interface AgentHarnessShape {
@@ -77,6 +79,18 @@ interface ActiveRun {
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   readonly transcript: Transcript
+  /** Context use last stored on the task. */
+  context: ContextUsage | null
+  /** Agent session id, once the CLI names it. */
+  sessionId: string | null
+  /** Host path of the run's `CODEX_HOME` for a codex run, whose context use is read from its rollout; else null. */
+  readonly codexHome: string | null
+}
+
+/** What a run starts from besides its process: the session's last context use and where codex keeps its rollouts. */
+interface RunSession {
+  readonly seed: ContextUsage | null
+  readonly codexHome: string | null
 }
 
 /** How to start a run's child process; real agent launches and replays differ only here. */
@@ -136,6 +150,19 @@ export const AgentHarnessLive = Layer.effect(
         publish({ _tag: "task.updated", task: changed.task })
       })
 
+    /** Stores the task's context use (null clears it) and publishes the task; not an activity, so `updatedAt` stays. */
+    const setContext = (taskId: string, context: ContextUsage | null) =>
+      Effect.gen(function* () {
+        const changed = yield* store.update((s) => {
+          const task = s.tasks.find((t) => t.id === taskId)
+          if (!task) return Either.right(null)
+          if (context === null) delete task.context
+          else task.context = context
+          return Either.right({ ...task })
+        })
+        if (changed !== null) publish({ _tag: "task.updated", task: changed })
+      }).pipe(Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: could not store context use: ${e.message}`)))
+
     const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
       Effect.gen(function* () {
         // The run's broker token dies with the run, whatever the outcome.
@@ -146,6 +173,13 @@ export const AgentHarnessLive = Layer.effect(
         entry.log.end()
         if (spawnError) entry.stderrLines.push(spawnError)
 
+        // Codex reports context use only in its rollout, complete once the CLI has exited.
+        if (entry.codexHome !== null && entry.sessionId !== null) {
+          const context = yield* Effect.tryPromise(() => codexContext(entry.codexHome as string, entry.sessionId as string)).pipe(
+            Effect.catchAll((e) => Effect.as(Effect.logWarning(`run ${runId}: cannot read codex rollout: ${String(e)}`), null)),
+          )
+          if (context !== null) yield* setContext(entry.taskId, context)
+        }
         // The items are the run's display history; keep them next to the raw log for later reads.
         yield* Effect.tryPromise({
           try: () =>
@@ -244,8 +278,16 @@ export const AgentHarnessLive = Layer.effect(
             entry.items.set(item.id, item)
             publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
           }
+          const context = entry.transcript.context()
+          if (context !== null && context !== entry.context) {
+            entry.context = context
+            runFork(setContext(entry.taskId, context))
+          }
           const session = sessionOf(parsed)
-          if (session !== null) runFork(recordSession(runId, session.sessionId, session.provider))
+          if (session !== null) {
+            entry.sessionId = session.sessionId
+            runFork(recordSession(runId, session.sessionId, session.provider))
+          }
           publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
           return
         } catch {
@@ -260,7 +302,7 @@ export const AgentHarnessLive = Layer.effect(
      * Starts the run's child and wires stdout/stderr into the shared line, finish and cancel
      * paths. A real agent launch and a replay differ only in the `ProcessSpec`.
      */
-    const startRun = (task: Task, run: Run, spec: ProcessSpec): Effect.Effect<void, InternalError> =>
+    const startRun = (task: Task, run: Run, spec: ProcessSpec, session: RunSession): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
         const runDir = join(config.runsDir, run.id)
         yield* Effect.tryPromise({
@@ -285,7 +327,10 @@ export const AgentHarnessLive = Layer.effect(
               stdoutLines: [],
               stderrLines: [],
               items: new Map(),
-              transcript: makeTranscript(),
+              transcript: makeTranscript(session.seed),
+              context: session.seed,
+              sessionId: null,
+              codexHome: session.codexHome,
             }
             active.set(run.id, entry)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
@@ -392,12 +437,19 @@ export const AgentHarnessLive = Layer.effect(
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
 
-            yield* startRun(task, run, {
-              file: launch.file,
-              args: launch.args,
-              cwd: launch.cwd,
-              env: { ...launch.env },
-            })
+            // Codex writes its rollouts under CODEX_HOME: the user's login when there is one, else the task's home.
+            const codexHome =
+              provider === "openai"
+                ? (loginDirs.find((d) => d.provider === "codex-cli")?.host ?? join(homeDir, ".codex"))
+                : null
+            // A fresh session starts empty; the previous session's context use no longer applies.
+            if (resumeSession === null && task.context !== undefined) yield* setContext(task.id, null)
+            yield* startRun(
+              task,
+              run,
+              { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
+              { seed: resumeSession === null ? null : (task.context ?? null), codexHome },
+            )
           }).pipe(Effect.either)
 
           if (Either.isLeft(started)) {
@@ -412,12 +464,19 @@ export const AgentHarnessLive = Layer.effect(
           // prints its lines, so it needs no sandbox, broker token, MCP config or checkout. From stdout
           // on it takes the same paths as a real agent run (handleLine, finish, cancel).
           const serverDir = join(import.meta.dir, "..", "..")
-          const started = yield* startRun(task, run, {
-            file: process.execPath,
-            args: [join(serverDir, "scripts", "replay-agent.ts"), fixturePath],
-            cwd: serverDir,
-            env: { ...process.env },
-          }).pipe(Effect.either)
+          // The fixture is a session of its own.
+          if (task.context !== undefined) yield* setContext(task.id, null)
+          const started = yield* startRun(
+            task,
+            run,
+            {
+              file: process.execPath,
+              args: [join(serverDir, "scripts", "replay-agent.ts"), fixturePath],
+              cwd: serverDir,
+              env: { ...process.env },
+            },
+            { seed: null, codexHome: null },
+          ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
             return yield* Effect.fail(started.left)

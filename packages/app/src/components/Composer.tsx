@@ -18,6 +18,7 @@ import {
   EFFORT_LABELS,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
+  type ContextUsage,
   type ModelInfo,
   type ModelProviderInfo,
   type SendMessageBody,
@@ -39,6 +40,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
+import { ContextBar } from "./ContextBar"
 
 /** A connected provider and the models the user keeps in the picker for it. */
 interface ModelSection {
@@ -253,10 +255,12 @@ interface Props {
   /** Preview elements to send as context; owned by the thread so the preview can add to them. */
   elements?: readonly ElementContext[]
   onElementsChange?: (elements: readonly ElementContext[]) => void
+  /** The thread's context use, drawn along the top of the box; absent on a new thread or before a turn reports it. */
+  context?: ContextUsage | undefined
 }
 
 /** Message box with file attachments, the model and thinking-level pickers, and a round send / stop button. */
-export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className, elements = [], onElementsChange }: Props) {
+export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className, elements = [], onElementsChange, context }: Props) {
   const [text, setText] = useState("")
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
@@ -344,7 +348,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
       {fileError && <Alert className="mb-2">{fileError}</Alert>}
       <form
         className={cn(
-          "flex flex-col gap-1 rounded-2xl bg-secondary p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow",
+          "relative flex flex-col gap-1 rounded-2xl bg-secondary p-2 shadow-soft transition-shadow duration-200 focus-within:shadow-glow",
           dragging && "shadow-glow ring-1 ring-white/20",
         )}
         onSubmit={submit}
@@ -354,6 +358,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
         }}
         onDrop={onDrop}
       >
+        {context && <ContextBar context={context} />}
         {(files.length > 0 || elements.length > 0) && (
           <div className="flex flex-wrap gap-2 px-1.5 pt-1.5">
             {elements.map((element, i) => (

@@ -11,7 +11,7 @@ Names are `^[a-z0-9-]+$`; harness directories are `claude/` and `codex/`.
 
 | File | Source | What it exercises |
 |---|---|---|
-| `claude/markdown` | hand-made | init, thinking block, one long markdown answer (headings, lists, table, TS/Python/Bash/JSON code, inline SVG, raw `<details>`/`<table>` HTML, mermaid, links, long lines), result usage/cost/duration |
+| `claude/markdown` | hand-made | init, thinking block, one long markdown answer (headings, lists, table, TS/Python/Bash/JSON code, inline SVG, raw `<details>`/`<table>` HTML, mermaid, links, long lines), result usage/cost/duration and `modelUsage.contextWindow` (every `claude/` result carries it, so a replay fills the composer's context bar) |
 | `claude/tools` | hand-made | thinking, Bash/Read/Grep/Edit/Write calls, parallel Read+Grep (two lines, same `message.id`, one user line with both results), `is_error: true` tool result, MCP `mcp__cloudagents__desktop_screenshot` returning an image block, Task subagent with `parent_tool_use_id` on its assistant/user lines, multiple text messages between tools, result |
 | `claude/long` | hand-made | 66 lines / 20 tool cycles: scrolling, incremental item updates and streaming performance |
 | `claude/error` | hand-made | failing tool result, then a `result` with `subtype: "error_during_execution"`, `is_error: true` and no `result` text |
