@@ -105,12 +105,39 @@
             done
           done
         '';
+        # Vinegar with this sandbox's defaults, written only where the user has none yet:
+        # - renderer Vulkan: Vinegar's default, DXVK, crashes Studio on lavapipe;
+        # - Web Pages off: the embedded WebView2 sign-in never loads under Wine here, so Studio goes
+        #   straight to its browser sign-in;
+        # - a `roblox-studio-auth:` handler, so Firefox hands the signed-in link back to Vinegar.
+        robloxVinegar = pkgs.writeShellScriptBin "vinegar" ''
+          config="''${XDG_CONFIG_HOME:-$HOME/.config}"
+          apps="''${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+          mkdir -p "$config/vinegar" "$apps"
+          if [ ! -e "$config/vinegar/config.toml" ]; then
+            printf '[studio]\nrenderer = "Vulkan"\nwebview = ""\n' > "$config/vinegar/config.toml"
+          fi
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Vinegar' 'Exec=vinegar %u' 'NoDisplay=true' \
+            'MimeType=x-scheme-handler/roblox-studio;x-scheme-handler/roblox-studio-auth;' > "$apps/kestrel-vinegar.desktop"
+          if ! grep -qs 'roblox-studio-auth' "$config/mimeapps.list"; then
+            printf '%s\n' '[Default Applications]' 'x-scheme-handler/roblox-studio=kestrel-vinegar.desktop' \
+              'x-scheme-handler/roblox-studio-auth=kestrel-vinegar.desktop' >> "$config/mimeapps.list"
+          fi
+          exec ${pkgs.vinegar}/bin/vinegar "$@"
+        '';
+        # Wine opens links (Studio's "Login via Browser") with xdg-open, which the sandbox lacks.
+        robloxXdgOpen = pkgs.writeShellScriptBin "xdg-open" ''
+          case "$1" in
+            roblox-studio:* | roblox-studio-auth:*) exec vinegar "$1" ;;
+            *) exec firefox "$1" ;;
+          esac
+        '';
         # Vinegar is x86_64-linux only; the box is too, in practice.
         toolkits = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
           toolkit-blender = mkToolkit "blender" [ pkgs.blender ];
           # Roblox Studio through Vinegar (Wine); Vinegar downloads Studio itself on first `vinegar run`.
           # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
-          toolkit-roblox-studio = mkToolkit "roblox-studio" [ pkgs.vinegar pkgs.rojo pkgs.wally ];
+          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
         };
       in
       {
