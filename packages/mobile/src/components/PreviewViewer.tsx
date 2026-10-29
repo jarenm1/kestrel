@@ -11,6 +11,15 @@ import { colors, fonts, radius, spacing } from "@/theme";
 const SafeWebView = WebView as unknown as React.ComponentType<any>;
 
 /**
+ * Wraps the preview URL in an iframe with the same sandbox as the web viewer. Without `allow-same-origin`
+ * the frame gets an opaque origin, so dev-server scripts cannot reach the app's origin or its data.
+ */
+function previewFrameHtml(src: string): string {
+  const attr = src.replace(/[&"'<>]/g, (char) => `&#${char.charCodeAt(0)};`);
+  return `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body,iframe{margin:0;padding:0;width:100%;height:100%;border:0;background:#ffffff}</style></head><body><iframe src="${attr}" sandbox="allow-scripts allow-forms" referrerpolicy="strict-origin-when-cross-origin"></iframe></body></html>`;
+}
+
+/**
  * Sandboxed browser view for a dev server opened by the task's MCP preview tool.
  */
 export function PreviewViewer({
@@ -77,7 +86,7 @@ export function PreviewViewer({
         {previewUrl ? (
           <SafeWebView
             ref={webViewRef}
-            source={{ uri: previewUrl }}
+            source={{ html: previewFrameHtml(previewUrl) }}
             style={styles.webview}
             javaScriptEnabled
             domStorageEnabled
