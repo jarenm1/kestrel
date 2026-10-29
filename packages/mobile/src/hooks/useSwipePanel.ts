@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PanGestureConfig } from "react-native-gesture-handler";
 import { Easing, type SharedValue, useSharedValue, withTiming } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
 
 /** Horizontal travel before a swipe takes over; vertical travel first lets lists scroll instead. */
-const ACTIVATE_PX = 20;
-const FAIL_Y_PX = 16;
+const ACTIVATE_PX = 12;
+const FAIL_Y_PX = 24;
 /** A flick this fast settles in its direction regardless of how far it travelled. */
 const FLING_PX_PER_S = 300;
 const SETTLE_MS = 260;
@@ -46,6 +46,7 @@ export function useSwipePanel({ open, onOpenChange, side, distance, enabled = tr
   const start = useSharedValue(0);
   const [dragging, setDragging] = useState(false);
   const [closing, setClosing] = useState(false);
+  const previousOpen = useRef(open);
 
   const settled = useCallback(
     (nowOpen: boolean) => {
@@ -58,6 +59,10 @@ export function useSwipePanel({ open, onOpenChange, side, distance, enabled = tr
   const closed = useCallback(() => setClosing(false), []);
 
   useEffect(() => {
+    const wasOpen = previousOpen.current;
+    previousOpen.current = open;
+    // A panel that starts closed has nothing to animate out or mount.
+    if (!open && !wasOpen) return;
     if (!open) setClosing(true);
     progress.value = withTiming(open ? 1 : 0, SETTLE, (finished) => {
       if (finished && !open) scheduleOnRN(closed);
@@ -81,11 +86,12 @@ export function useSwipePanel({ open, onOpenChange, side, distance, enabled = tr
         const next = start.value + (dir * e.translationX) / distance;
         progress.value = Math.min(1, Math.max(0, next));
       },
-      onDeactivate: (e: { velocityX: number }) => {
+      onDeactivate: (e: { velocityX: number; canceled: boolean }) => {
         "worklet";
         const velocity = dir * e.velocityX;
-        const target =
-          velocity > FLING_PX_PER_S ? 1 : velocity < -FLING_PX_PER_S ? 0 : progress.value > 0.5 ? 1 : 0;
+        const target = e.canceled
+          ? (open ? 1 : 0)
+          : velocity > FLING_PX_PER_S ? 1 : velocity < -FLING_PX_PER_S ? 0 : progress.value > 0.5 ? 1 : 0;
         progress.value = withTiming(target, SETTLE, (finished) => {
           if (finished && target === 0) scheduleOnRN(closed);
         });
@@ -96,12 +102,15 @@ export function useSwipePanel({ open, onOpenChange, side, distance, enabled = tr
     const openGesture: PanGestureConfig = {
       enabled: enabled && !open,
       activeOffsetX: towardOpen,
+      // The opposite panel's recognizer should fail promptly, not linger until touch-up.
+      failOffsetX: dir === 1 ? [-ACTIVATE_PX, NEVER] : [-NEVER, ACTIVATE_PX],
       failOffsetY: [-FAIL_Y_PX, FAIL_Y_PX],
       ...callbacks,
     };
     const closeGesture: PanGestureConfig = {
       enabled: open,
       activeOffsetX: towardClose,
+      failOffsetX: dir === 1 ? [-NEVER, ACTIVATE_PX] : [-ACTIVATE_PX, NEVER],
       failOffsetY: [-FAIL_Y_PX, FAIL_Y_PX],
       ...callbacks,
     };

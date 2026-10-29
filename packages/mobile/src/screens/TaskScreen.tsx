@@ -75,6 +75,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
 
   const swipe = useSwipePanel({ open, onOpenChange: setOpen, side: "right", distance: width });
   const openPan = usePanGesture(swipe.openGesture);
+  const edgeOpenPan = usePanGesture(swipe.openGesture);
   const headerClosePan = usePanGesture(swipe.closeGesture);
   const edgeClosePan = usePanGesture(swipe.closeGesture);
   const panelStyle = useAnimatedStyle(() => ({
@@ -131,6 +132,9 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
               archivedTask={archivedTask}
             />
           </View>
+        </GestureDetector>
+        <GestureDetector gesture={edgeOpenPan}>
+          <View pointerEvents={open ? "none" : "auto"} style={[styles.openEdge, { bottom: bottomInset }]} />
         </GestureDetector>
         {swipe.visible ? (
           <Animated.View style={[styles.panel, { bottom: bottomInset + PANEL_INSET }, panelStyle]}>
@@ -201,6 +205,8 @@ const styles = StyleSheet.create({
   },
   panelHeader: { flexDirection: "row", alignItems: "center", gap: 6, padding: spacing.sm },
   prLinks: { flex: 1, flexDirection: "row", justifyContent: "flex-end", gap: spacing.xs, overflow: "hidden" },
+  // This target is outside the chat ScrollView, so the native scroll recognizer cannot consume its left swipe.
+  openEdge: { position: "absolute", top: 0, right: 0, width: CLOSE_EDGE_WIDTH },
   closeEdge: { position: "absolute", top: 52, bottom: 0, left: 0, width: CLOSE_EDGE_WIDTH },
   note: { color: colors.mutedForeground, fontSize: 14, padding: spacing.lg },
 });
