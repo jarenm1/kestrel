@@ -54,7 +54,7 @@ git pull --ff-only origin main
   (`~/.bun/install/cache`), and the flake's tools come from `/nix/store`, so a new worktree installs in about a second
   and costs almost no disk. Don't copy or symlink `node_modules` between worktrees; run `bun install` in each.
 - Nix is optional. The flake pins the toolchain and gives you `nix run` with the agent sandbox; without Nix, install
-  Bun and Node 22 and use `bun run dev` (see "Without Nix" in `README.md`).
+  Bun and Node 22 and use `bun run dev` (see "Run it locally" in `README.md`).
 
 ## Running the stack from a worktree
 
