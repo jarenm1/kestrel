@@ -1,5 +1,5 @@
 import { Either, Schema } from "effect"
-import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent } from "@cloudagents/protocol"
+import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent, TaskStats } from "@cloudagents/protocol"
 import { WS_URL } from "@/config"
 
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
@@ -11,6 +11,25 @@ function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   }
 }
 
+/** Opens a ServerEvent WebSocket and returns a function that closes it without firing `onClose`. */
+function openEvents(
+  path: string,
+  handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
+): () => void {
+  const socket = new WebSocket(WS_URL + path)
+  socket.onopen = handlers.onOpen
+  socket.onmessage = (msg: MessageEvent<unknown>) => {
+    if (typeof msg.data !== "string") return
+    const event = decodeText(ServerEvent, msg.data)
+    if (event) handlers.onEvent(event)
+  }
+  socket.onclose = handlers.onClose
+  return () => {
+    socket.onclose = null
+    socket.close()
+  }
+}
+
 /**
  * Subscribes to a task's ServerEvent stream. Callers re-snapshot over REST in `onOpen`; events that race
  * the snapshot are reconciled by id. Returns a function that closes the socket.
@@ -19,12 +38,31 @@ export function openTaskEvents(
   taskId: string,
   handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
 ): () => void {
-  const socket = new WebSocket(WS_URL + Paths.taskEventsWs(taskId))
-  socket.onopen = handlers.onOpen
+  return openEvents(Paths.taskEventsWs(taskId), handlers)
+}
+
+/** Subscribes to the signed-in user's thread list stream: `task.updated` for its own threads and `task.deleted`. */
+export function openUserEvents(handlers: {
+  onOpen: () => void
+  onEvent: (event: ServerEvent) => void
+  onClose: () => void
+}): () => void {
+  return openEvents(Paths.eventsWs, handlers)
+}
+
+/**
+ * Subscribes to a task's stats stream: the first frame of a connection carries the window so far, later frames carry
+ * new samples. Returns a function that closes the socket.
+ */
+export function openTaskStats(
+  taskId: string,
+  handlers: { onFrame: (stats: TaskStats) => void; onClose: () => void },
+): () => void {
+  const socket = new WebSocket(WS_URL + Paths.taskStatsWs(taskId))
   socket.onmessage = (msg: MessageEvent<unknown>) => {
     if (typeof msg.data !== "string") return
-    const event = decodeText(ServerEvent, msg.data)
-    if (event) handlers.onEvent(event)
+    const stats = decodeText(TaskStats, msg.data)
+    if (stats) handlers.onFrame(stats)
   }
   socket.onclose = handlers.onClose
   return () => {
@@ -45,9 +83,14 @@ export interface DesktopConnection {
   close: () => void
 }
 
-/** Acks go out after this many binary frames or this long, whichever comes first, so the server bounds what is in flight. */
-const ACK_EVERY_FRAMES = 6
-const ACK_EVERY_MS = 100
+/**
+ * Acks go out after this many binary messages or this long, whichever comes first, so the server bounds what is in
+ * flight. Acks are billed relay messages, hence the spacing: the lag an ack reports is about this interval plus a
+ * round trip, and the box's resync threshold (FLOW_LAG_LOW_MS = 400) has to sit above that. One message may carry
+ * several fragments when the box bundles them; acks count messages, as the box's flow control does.
+ */
+const ACK_EVERY_FRAMES = 15
+const ACK_EVERY_MS = 250
 
 /** Opens the desktop stream WebSocket: status text frames, fMP4 binary frames, input and ack text frames. */
 export function openDesktopStream(taskId: string, handlers: DesktopHandlers): DesktopConnection {

@@ -1,7 +1,6 @@
 import { useId, useState, type PointerEvent } from "react"
-import { useQuery } from "@tanstack/react-query"
 import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
-import { queries } from "@/api/queries"
+import { useTaskStats } from "@/hooks/useTaskStats"
 import { cn } from "@/lib/utils"
 
 /** Graph drawing units; the SVG stretches to the card, and strokes do not scale with it. */
@@ -19,7 +18,7 @@ const GRAPHS: readonly { label: string; value: (s: TaskStatsSample) => number | 
   { label: "Storage", value: (s) => ratio(s.diskUsed, s.diskMax) },
 ]
 
-/** One polled sample on a graph: x and y as 0-1 fractions of the card, `value` unclipped (storage can pass 100%). */
+/** One sampled point on a graph: x and y as 0-1 fractions of the card, `value` unclipped (storage can pass 100%). */
 interface Point {
   readonly x: number
   readonly y: number
@@ -60,7 +59,7 @@ function agoText(ms: number): string {
   return s === 0 ? "now" : `${s}s ago`
 }
 
-/** The point nearest to `x` (0-1 across the card): hovering snaps to polled samples, never between them. */
+/** The point nearest to `x` (0-1 across the card): hovering snaps to sampled points, never between them. */
 function nearest(points: readonly Point[], x: number): Point | null {
   let best: Point | null = null
   for (const p of points) if (best === null || Math.abs(p.x - x) < Math.abs(best.x - x)) best = p
@@ -150,11 +149,10 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
 
 /**
  * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
- * (shared by every thread). Each graph spans 0-100%; hovering one shows the polled sample nearest the pointer.
+ * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer.
  */
 export function ThreadGraphs({ taskId }: { taskId: string }) {
-  const stats = useQuery(queries.taskStats(taskId))
-  const samples = stats.data?.samples ?? []
+  const samples = useTaskStats(taskId)
   return (
     <div className="flex flex-col gap-2">
       {GRAPHS.map((g) => (

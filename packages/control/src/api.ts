@@ -7,11 +7,9 @@ import {
   PreviewSession,
   PutApiKeyBody,
   Task,
-  type BoxStatus,
   type Connection,
   type GithubRepo,
   type Me,
-  type RelayCredentials,
 } from "@cloudagents/protocol"
 import {
   PROVIDERS,
@@ -22,10 +20,9 @@ import {
   type OAuthProvider,
   type Provider,
 } from "./providers"
-import { UpstreamError, errorResponse, json, maskKey } from "./http"
-import { hub, type Env } from "./env"
-import { currentSession } from "./auth"
-import type { SessionRecord } from "./hub"
+import { UpstreamError, errorResponse, json, maskKey, readCookie } from "./http"
+import { SESSION_HEADER, hub, type Env } from "./env"
+import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
 
 type ConnectionRow = { provider: string; account: string | null }
@@ -50,11 +47,14 @@ const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Conn
 
 /** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */
 const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
-  const creds = await hub(env).credentials(login)
-  const headers = new Headers({ [CREDENTIALS_HEADER]: JSON.stringify(creds) })
-  const res = await hub(env).fetch(new Request(`https://hub${ControlPaths.cliAuth}`, { headers }))
+  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuth)
   if (!res.ok) return []
-  const body: unknown = await res.json().catch(() => null)
+  let body: unknown = null
+  try {
+    body = JSON.parse(res.body)
+  } catch {
+    return []
+  }
   return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
 }
 
@@ -114,12 +114,17 @@ const listRepos = async (env: Env, login: string): Promise<Response> => {
   return json(repos)
 }
 
-/** Forwards a browser request to the box with the caller's credentials (and dev-login marker) attached. */
-const relayToBox = async (request: Request, env: Env, session: SessionRecord, url: URL): Promise<Response> => {
-  const creds = await hub(env).credentials(session.login)
-  const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
+/**
+ * Forwards a browser request to the Hub with the caller's session id. The Hub resolves the session, attaches the
+ * caller's credentials (and dev-login marker) and relays to the box in that one Durable Object request; looking the
+ * session and credentials up here first would cost two more.
+ */
+const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> | Response => {
+  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
+  if (!sessionId) return errorResponse(401, "Unauthorized", "sign in required")
   const headers = new Headers(request.headers)
-  headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
+  headers.delete(CREDENTIALS_HEADER)
+  headers.set(SESSION_HEADER, sessionId)
   const hasBody = request.method !== "GET" && request.method !== "HEAD"
   const forwarded = new Request(`https://hub${url.pathname}${url.search}`, {
     method: request.method,
@@ -145,15 +150,33 @@ const createPreviewSession = async (env: Env, login: string, taskId: string): Pr
   return json(Schema.decodeSync(PreviewSession)({ token }))
 }
 
-/** Routes every `/api/*` request: control routes in the Worker, everything else relayed to the box. */
+const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
+const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
+
+/** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
+const isWorkerRoute = (path: string, method: string): boolean =>
+  (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
+  (path === ControlPaths.me && method === "GET") ||
+  (path === ControlPaths.connections && method === "GET") ||
+  CONNECTION_PATH.test(path) ||
+  (path === ControlPaths.githubRepos && method === "GET") ||
+  path === ControlPaths.automations ||
+  path.startsWith(`${ControlPaths.automations}/`)
+
+/**
+ * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
+ * `GET /api/box`) in one request to the Hub.
+ */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const path = url.pathname
+  const method = request.method
+  if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
+
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
 
-  const path = url.pathname
-  const method = request.method
-  const previewSession = /^\/api\/tasks\/([^/]+)\/preview\/session$/.exec(path)
+  const previewSession = PREVIEW_SESSION_PATH.exec(path)
   if (previewSession?.[1] && method === "POST") {
     return createPreviewSession(env, login, decodeURIComponent(previewSession[1]))
   }
@@ -169,7 +192,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     return json(await listConnections(login, env))
   }
 
-  const connection = /^\/api\/connections\/([a-z0-9-]+)$/.exec(path)
+  const connection = CONNECTION_PATH.exec(path)
   if (connection && connection[1] !== undefined) {
     const provider = findProvider(connection[1])
     if (!provider) return errorResponse(404, "NotFound", `unknown provider ${connection[1]}`)
@@ -188,14 +211,5 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     return listRepos(env, login)
   }
 
-  if (path === ControlPaths.box && method === "GET") {
-    const status: BoxStatus = await hub(env).boxStatus()
-    return json(status)
-  }
-
-  if (path === ControlPaths.automations || path.startsWith(`${ControlPaths.automations}/`)) {
-    return handleAutomations(request, env, login, url, ControlPaths.automations)
-  }
-
-  return relayToBox(request, env, session, url)
+  return handleAutomations(request, env, login, url, ControlPaths.automations)
 }

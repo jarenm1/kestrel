@@ -708,12 +708,13 @@ export const CoreLive = Layer.effect(
 
     const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
       Effect.gen(function* () {
-        yield* requireTask(taskId)
+        const task = yield* requireTask(taskId)
         yield* teardownRuntime(taskId)
         yield* workspace.removePath(threadDirOf(taskId)).pipe(Effect.mapError(toInternal("remove workspace")))
         yield* workspace.removePath(join(config.shadowsDir, taskId)).pipe(Effect.mapError(toInternal("remove shadow repos")))
         yield* workspace.removePath(join(config.homesDir, taskId)).pipe(Effect.mapError(toInternal("remove thread home")))
         yield* removeTaskState(taskId)
+        hub.publish({ _tag: "task.deleted", taskId, owner: task.owner })
       })
 
     // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down.
@@ -863,6 +864,7 @@ export const CoreLive = Layer.effect(
           s.tasks.push(task)
           return Either.right(undefined)
         })
+        hub.publish({ _tag: "task.updated", task })
         if (request !== undefined) {
           // A checkout that fails leaves no thread behind: the request is all-or-nothing from the caller's view.
           yield* addCheckout(id, request).pipe(Effect.tapError(() => deleteTask(id).pipe(Effect.ignore)))

@@ -7,6 +7,8 @@ import { errorText } from "@/util"
 
 const MAX_LOG_LINES = 2000
 const RECONNECT_MS = 2000
+/** Items arrive far faster than the diff is worth fetching; one invalidation per window bounds that traffic. */
+const DIFF_INVALIDATE_MS = 3000
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -27,6 +29,25 @@ export function useTaskState(taskId: string) {
   useEffect(() => {
     let active = true
     let retry: number | undefined
+    let diffTimer: number | undefined
+    let diffInvalidatedAt = 0
+
+    /** At most one diff invalidation per interval: the first item goes through, later ones share one trailing run. */
+    const invalidateDiff = () => {
+      diffInvalidatedAt = Date.now()
+      void queryClient.invalidateQueries({ queryKey: keys.diff(taskId) })
+    }
+    const invalidateDiffThrottled = () => {
+      const wait = DIFF_INVALIDATE_MS - (Date.now() - diffInvalidatedAt)
+      if (wait <= 0) {
+        invalidateDiff()
+        return
+      }
+      diffTimer ??= window.setTimeout(() => {
+        diffTimer = undefined
+        invalidateDiff()
+      }, wait)
+    }
 
     const close = openTaskEvents(taskId, {
       onOpen: () => {
@@ -37,6 +58,9 @@ export function useTaskState(taskId: string) {
         switch (event._tag) {
           case "task.updated":
             storeTask(queryClient, event.task)
+            break
+          case "task.deleted":
+            // The thread list stream drops the thread; nothing else in this view needs to hear about it.
             break
           case "message.created":
             queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
@@ -59,6 +83,8 @@ export function useTaskState(taskId: string) {
             queryClient.setQueryData(keys.runItems(event.runId), (list: RunItems | undefined) =>
               upsert(list, event.item),
             )
+            // Items are what change the worktree, so the diff follows them; a run.updated covers the ends.
+            invalidateDiffThrottled()
             break
           case "desktop.updated": {
             // Only a move into "running" counts as the agent opening it.
@@ -81,6 +107,7 @@ export function useTaskState(taskId: string) {
     return () => {
       active = false
       window.clearTimeout(retry)
+      window.clearTimeout(diffTimer)
       close()
     }
   }, [taskId, generation, queryClient])

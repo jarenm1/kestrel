@@ -133,12 +133,16 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const [stats, setStats] = useState<RenderStats | null>(null)
   const [generation, setGeneration] = useState(0)
   const wanted = useStreamWanted(canvasRef)
+  const running = status?.state === "running"
+  const active = status?.state === "running" || status?.state === "starting"
 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    if (!wanted) {
-      // Nobody can see the stream: disconnect. The server stops encoding shortly after the last viewer leaves.
+    // Nobody can see the stream, or there is no desktop to stream: stay disconnected. Each connection is a billed
+    // relay request, and the box refuses a stream for a stopped desktop, so connecting anyway would retry every
+    // RECONNECT_MS. The thread's event stream moves `status` to "starting" when the desktop comes up.
+    if (!wanted || !active) {
       setStreamError(null)
       setStats(null)
       return
@@ -192,10 +196,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       renderer?.close()
       connRef.current = null
     }
-  }, [taskId, generation, queryClient, wanted])
+  }, [taskId, generation, queryClient, wanted, active])
 
-  const running = status?.state === "running"
-  const active = status?.state === "running" || status?.state === "starting"
   // Over the canvas whenever no live frames can be shown: the stream is not running, or it is paused.
   const overlay = running ? (wanted ? null : "paused") : (status?.state ?? "loading")
 

@@ -119,6 +119,24 @@ describe("fmp4 fragments", () => {
     }
   })
 
+  test("one message carrying several fragments parses like each fragment on its own", async () => {
+    // Bundling relies on this: the parser resolves sample offsets against each moof, not the message start.
+    const { init, fragments } = splitSegments(
+      await encode("empty_moov+default_base_moof+frag_every_frame", "high"),
+    )
+    const parsed = parseInit(init)
+    const separately = fragments.flatMap((f) => parseFragment(f, parsed))
+    const together = parseFragment(concat(fragments), parsed)
+
+    expect(together.length).toBe(separately.length)
+    for (const [i, sample] of together.entries()) {
+      const alone = separately[i]!
+      expect(sample.timestampUs).toBe(alone.timestampUs)
+      expect(sample.key).toBe(alone.key)
+      expect([...sample.data]).toEqual([...alone.data])
+    }
+  })
+
   test("keyframe-aligned fragments carry multiple samples and flag the GOP start", async () => {
     const { init, fragments } = splitSegments(
       await encode("empty_moov+default_base_moof+frag_keyframe", "high"),

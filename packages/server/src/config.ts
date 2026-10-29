@@ -66,6 +66,13 @@ export interface ServerConfig {
    * shadow repos. The box enforces it itself (see `core/storage.ts`); it applies with or without systemd.
    */
   readonly taskDiskMax: number
+  /**
+   * Desktop frame bundling window in ms (CLOUDAGENTS_DESKTOP_BUNDLE_MS, default 0 = off). When set, the box sends at
+   * most one relay message per window per viewer: the first fragment after a quiet window goes out at once, later ones
+   * are held and sent together. Fewer billed relay messages, at up to the window of added latency during continuous
+   * motion. See docs/box.md.
+   */
+  readonly desktopBundleMs: number
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
   readonly githubApiUrl: string
 }
@@ -131,6 +138,7 @@ export const loadConfig = (): ServerConfig => {
     fakeAgentRoBinds,
     systemd,
     taskDiskMax: diskMaxEnv(),
+    desktopBundleMs: bundleMsEnv(),
     githubApiUrl: loadGitHubApiUrl(),
   }
 }
@@ -147,6 +155,15 @@ const diskMaxEnv = (): number => {
   const bytes = parseSize(raw)
   if (bytes === null || bytes <= 0) throw new Error(`CLOUDAGENTS_TASK_DISK_MAX must be a size such as 50G, got "${raw}"`)
   return bytes
+}
+
+const bundleMsEnv = (): number => {
+  const raw = process.env.CLOUDAGENTS_DESKTOP_BUNDLE_MS?.trim() || "0"
+  const ms = Number(raw)
+  if (!/^\d+$/.test(raw) || ms > 1000) {
+    throw new Error(`CLOUDAGENTS_DESKTOP_BUNDLE_MS must be a whole number of milliseconds from 0 to 1000, got "${raw}"`)
+  }
+  return ms
 }
 
 const loadGitHubApiUrl = (): string => {

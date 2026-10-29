@@ -10,16 +10,29 @@ import { sliceCgroup } from "./sandbox/systemd"
 import { parseCpuQuota, parseSize } from "./size"
 
 const INTERVAL_MS = 1_000
-/** A thread's sampling stops this long after its last request; nobody is watching. */
+/** A thread keeps its history this long after its last subscriber leaves, so reopening the panel shows it; then it is dropped. */
 const IDLE_MS = 15_000
 const NVIDIA_SMI_TIMEOUT_MS = 2_000
 /** How often to ask systemd again for the cgroup of a slice that has not been active yet. */
 const CGROUP_RETRY_MS = 10_000
 const CGROUP_ROOT = "/sys/fs/cgroup"
 
+/** What a stats stream starts with, and how to stop the subscription. */
+export interface TaskStatsSubscription {
+  /** The thread's recent samples, oldest first; may be empty on a freshly watched thread. */
+  readonly initial: TaskStats
+  readonly unsubscribe: () => void
+}
+
 export interface TaskStatsShape {
-  /** The thread's recent samples; starts sampling it when nobody was. The caller checks ownership. */
-  readonly snapshot: (taskId: string) => Effect.Effect<TaskStats>
+  /**
+   * Watches a thread and samples it while it has subscribers. `onSamples` receives the samples taken since the
+   * previous tick; the caller checks ownership.
+   */
+  readonly subscribe: (
+    taskId: string,
+    onSamples: (samples: readonly TaskStatsSample[]) => void,
+  ) => Effect.Effect<TaskStatsSubscription>
 }
 
 export class TaskStatsService extends Context.Tag("cloudagents/TaskStats")<TaskStatsService, TaskStatsShape>() {}
@@ -65,7 +78,9 @@ const readSlice = (cgroup: string): Effect.Effect<{ memory: number; cpuUsec: num
 
 interface Watched {
   samples: TaskStatsSample[]
-  lastAsked: number
+  subscribers: Set<(samples: readonly TaskStatsSample[]) => void>
+  /** When the last subscriber left; null while one is watching. */
+  idleSince: number | null
   cgroup: string | null
   cgroupCheckedAt: number
   /** CPU time and wall clock at the previous sample; null until the first one. */
@@ -86,7 +101,12 @@ export const TaskStatsLive = Layer.effect(
     let sampling = false
     let gpu = true
 
-    const sampleTask = (taskId: string, w: Watched, video: { used: number; total: number } | null) =>
+    /** Takes one sample for a watched thread; null when the reading only served as the CPU baseline. */
+    const sampleTask = (
+      taskId: string,
+      w: Watched,
+      video: { used: number; total: number } | null,
+    ): Effect.Effect<TaskStatsSample | null> =>
       Effect.gen(function* () {
         const now = Date.now()
         let ramUsed: number | null = null
@@ -103,13 +123,13 @@ export const TaskStatsLive = Layer.effect(
           const previous = w.previous
           w.previous = { cpuUsec: slice.cpuUsec, at: now }
           // The first reading is only the baseline; CPU use is the change between two of them.
-          if (previous === null) return
+          if (previous === null) return null
           const elapsedUsec = (now - previous.at) * 1000
           // A slice that was restarted counts again from zero.
           const busy = Math.max(0, slice.cpuUsec - previous.cpuUsec)
           cpu = elapsedUsec > 0 ? Math.min(1, busy / (elapsedUsec * cores)) : 0
         }
-        w.samples.push({
+        const sample: TaskStatsSample = {
           at: now,
           cpu,
           ramUsed,
@@ -118,44 +138,73 @@ export const TaskStatsLive = Layer.effect(
           vramTotal: video?.total ?? null,
           diskUsed: core.storageUsed(taskId),
           diskMax: config.taskDiskMax,
-        })
+        }
+        w.samples.push(sample)
         const oldest = now - TASK_STATS_WINDOW_MS
         const keep = w.samples.findIndex((s) => s.at >= oldest)
         if (keep > 0) w.samples = w.samples.slice(keep)
+        return sample
       })
 
     const tick = Effect.gen(function* () {
       const now = Date.now()
-      for (const [taskId, w] of watched) if (now - w.lastAsked >= IDLE_MS) watched.delete(taskId)
-      if (watched.size === 0) return
+      // Only threads somebody is watching are sampled; an unwatched one keeps its history until IDLE_MS is up.
+      const active: [string, Watched][] = []
+      for (const [taskId, w] of [...watched]) {
+        if (w.subscribers.size > 0) {
+          active.push([taskId, w])
+        } else if (w.idleSince !== null && now - w.idleSince >= IDLE_MS) {
+          watched.delete(taskId)
+        }
+      }
+      if (active.length === 0) return
       // One GPU query per tick, shared by every watched thread.
       const video = gpu ? yield* vram() : null
       if (video === "missing") gpu = false
       const shared = video === "missing" ? null : video
-      for (const [taskId, w] of watched) yield* sampleTask(taskId, w, shared)
+      for (const [taskId, w] of active) {
+        const sample = yield* sampleTask(taskId, w, shared)
+        if (sample === null || w.subscribers.size === 0) continue
+        for (const listener of [...w.subscribers]) listener([sample])
+      }
     })
 
-    // Samples every INTERVAL_MS while any thread is watched; the next request starts it again.
+    // Samples every INTERVAL_MS while any thread is watched; the next subscription starts it again.
     const run = tick.pipe(
       Effect.repeat(Schedule.spaced(INTERVAL_MS).pipe(Schedule.whileOutput(() => watched.size > 0))),
       Effect.ensuring(Effect.sync(() => (sampling = false))),
     )
 
     return {
-      snapshot: (taskId) =>
+      subscribe: (taskId, onSamples) =>
         Effect.sync(() => {
-          const now = Date.now()
           let w = watched.get(taskId)
           if (w === undefined) {
-            w = { samples: [], lastAsked: now, cgroup: null, cgroupCheckedAt: 0, previous: null }
+            w = {
+              samples: [],
+              subscribers: new Set(),
+              idleSince: null,
+              cgroup: null,
+              cgroupCheckedAt: 0,
+              previous: null,
+            }
             watched.set(taskId, w)
           }
-          w.lastAsked = now
+          const entry = w
+          entry.subscribers.add(onSamples)
+          entry.idleSince = null
           if (!sampling) {
             sampling = true
             runFork(run)
           }
-          return { intervalMs: INTERVAL_MS, samples: [...w.samples] }
+          return {
+            initial: { intervalMs: INTERVAL_MS, samples: [...entry.samples] },
+            unsubscribe: () => {
+              if (watched.get(taskId) !== entry) return
+              entry.subscribers.delete(onSamples)
+              if (entry.subscribers.size === 0) entry.idleSince = Date.now()
+            },
+          }
         }),
     }
   }),

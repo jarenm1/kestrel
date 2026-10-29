@@ -1,10 +1,12 @@
 import { Effect, Runtime, Schema } from "effect"
 import { DesktopAck, DesktopInput } from "@cloudagents/protocol"
+import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, type MediaKind } from "../desktop"
+import { DesktopManager, MediaBundler, type MediaKind } from "../desktop"
+import { TaskStatsService } from "../stats"
 
-export type WsServices = CoreService | DesktopManager | EventHub
+export type WsServices = CoreService | DesktopManager | EventHub | Config | TaskStatsService
 
 /**
  * One bidirectional stream to a browser, tunnelled through the control plane relay.
@@ -22,16 +24,23 @@ export interface StreamSocket {
 
 export type StreamRoute =
   | { readonly kind: "events" | "desktop"; readonly taskId: string }
+  | { readonly kind: "user-events" }
+  | { readonly kind: "stats"; readonly taskId: string }
   | { readonly kind: "preview"; readonly taskId: string; readonly path: string; readonly protocol?: string }
 
+const USER_EVENTS_PATH = "/api/events"
+const STATS_PATH = /^\/api\/tasks\/([^/]+)\/stats\/stream$/
 const EVENTS_PATH = /^\/api\/tasks\/([^/]+)\/events$/
 const DESKTOP_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/stream$/
 const PREVIEW_PATH = /^\/api\/tasks\/([^/]+)\/preview(?:\/.*)?$/
 
 /** Maps a relayed WebSocket URL to its thread stream route. */
 export const streamRoute = (pathname: string, requestPath = pathname, protocol?: string): StreamRoute | null => {
+  if (pathname === USER_EVENTS_PATH) return { kind: "user-events" }
   const events = EVENTS_PATH.exec(pathname)
   if (events) return { kind: "events", taskId: decodeURIComponent(events[1] ?? "") }
+  const stats = STATS_PATH.exec(pathname)
+  if (stats) return { kind: "stats", taskId: decodeURIComponent(stats[1] ?? "") }
   const desktop = DESKTOP_PATH.exec(pathname)
   if (desktop) return { kind: "desktop", taskId: decodeURIComponent(desktop[1] ?? "") }
   const preview = PREVIEW_PATH.exec(pathname)
@@ -60,7 +69,11 @@ const CLOSE_INTERNAL = 1011
  * A join burst is fine as long as the viewer acks it promptly: only a viewer that stays behind is throttled.
  */
 export const FLOW_LAG_HIGH_MS = 1000
-export const FLOW_LAG_LOW_MS = 250
+/**
+ * Above the browser's ack interval (250 ms) plus RTT: the lag measured at an ack is roughly that interval plus RTT,
+ * so a lower threshold would resync a viewer that is not actually behind.
+ */
+export const FLOW_LAG_LOW_MS = 400
 /**
  * Send times kept per viewer, oldest first. At 60 fps this is ~17 s, far past FLOW_LAG_HIGH_MS. Past it the oldest
  * record is dropped, so the reported lag is then a lower bound.
@@ -151,10 +164,50 @@ const serveEvents = (socket: StreamSocket, user: string, taskId: string): Effect
     )
   })
 
+const serveUserEvents = (socket: StreamSocket, user: string): Effect.Effect<void, never, EventHub> =>
+  Effect.gen(function* () {
+    const hub = yield* EventHub
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        hub.subscribeAll((event) => {
+          const mine =
+            event._tag === "task.updated"
+              ? event.task.owner === user
+              : event._tag === "task.deleted" && event.owner === user
+          if (mine) socket.sendText(JSON.stringify(event))
+        }),
+      ),
+      () => Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void))),
+      (unsubscribe) => Effect.sync(unsubscribe),
+    )
+  })
+
+const serveStats = (socket: StreamSocket, user: string, taskId: string): Effect.Effect<void, never, CoreService | TaskStatsService> =>
+  Effect.gen(function* () {
+    const core = yield* CoreService
+    const stats = yield* TaskStatsService
+    const found = yield* core.getTask(user, taskId).pipe(Effect.either)
+    if (found._tag === "Left") {
+      return yield* closeWith(socket, CLOSE_NOT_FOUND, found.left.message)
+    }
+    let intervalMs = 0
+    yield* Effect.acquireUseRelease(
+      stats.subscribe(taskId, (samples) => socket.sendText(JSON.stringify({ intervalMs, samples }))),
+      (subscription) =>
+        Effect.gen(function* () {
+          intervalMs = subscription.initial.intervalMs
+          socket.sendText(JSON.stringify(subscription.initial))
+          yield* Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void)))
+        }),
+      (subscription) => Effect.sync(subscription.unsubscribe),
+    )
+  })
+
 const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effect.Effect<void, never, WsServices> =>
   Effect.gen(function* () {
     const core = yield* CoreService
     const desktop = yield* DesktopManager
+    const config = yield* Config
     const runtime = yield* Effect.runtime<WsServices>()
     const fork = Runtime.runFork(runtime)
     const found = yield* core.getTask(user, taskId).pipe(Effect.either)
@@ -163,10 +216,12 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     }
 
     const flow = new MediaFlow((message) => fork(Effect.logDebug(message)))
-    const decodeMessage = Schema.decodeUnknown(Schema.parseJson(Schema.Union(DesktopAck, DesktopInput)))
     const send = (chunk: Uint8Array, kind: MediaKind): void => {
       if (flow.offer(kind)) socket.sendBinary(chunk)
     }
+    // Bundling happens before flow control: a bundle is one message to the viewer, and one frame to ack.
+    const bundler = new MediaBundler(config.desktopBundleMs, send)
+    const decodeMessage = Schema.decodeUnknown(Schema.parseJson(Schema.Union(DesktopAck, DesktopInput)))
     const handleMessage = (raw: string) =>
       Effect.gen(function* () {
         const message = yield* decodeMessage(raw).pipe(Effect.either)
@@ -181,7 +236,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           )
           if (gop === null) return
           flow.resume()
-          for (const [i, fragment] of gop.entries()) send(fragment, i === 0 ? "key" : "delta")
+          for (const [i, fragment] of gop.entries()) bundler.push(fragment, i === 0 ? "key" : "delta")
           return
         }
         yield* desktop
@@ -191,15 +246,19 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
 
     yield* Effect.acquireUseRelease(
       desktop.subscribe(taskId, {
-        onStatus: (status) => socket.sendText(JSON.stringify(status)),
-        onMedia: send,
+        // Held media was produced before this status, so it goes out first: the viewer sees them in order.
+        onStatus: (status) => {
+          bundler.flush()
+          socket.sendText(JSON.stringify(status))
+        },
+        onMedia: (chunk, kind) => bundler.push(chunk, kind),
       }),
       () =>
         Effect.gen(function* () {
           socket.onText((data) => fork(handleMessage(data)))
           yield* Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void)))
         }),
-      (unsubscribe) => unsubscribe,
+      (unsubscribe) => Effect.zipRight(unsubscribe, Effect.sync(() => bundler.close())),
     ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
   })
 
@@ -226,6 +285,10 @@ export const serveStream = (route: StreamRoute, user: string, socket: StreamSock
   switch (route.kind) {
     case "events":
       return serveEvents(socket, user, route.taskId)
+    case "user-events":
+      return serveUserEvents(socket, user)
+    case "stats":
+      return serveStats(socket, user, route.taskId)
     case "desktop":
       return serveDesktop(socket, user, route.taskId)
     case "preview":

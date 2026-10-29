@@ -5,7 +5,7 @@ import { storeTask } from "@/api/queries"
 
 /**
  * Archive and unarchive a thread. The box returns the updated task, which replaces it in the thread list and in the
- * thread's own cache entry, so the sidebar and the thread view agree without waiting for the next poll.
+ * thread's own cache entry, so the sidebar and the thread view agree without another list refetch.
  */
 export function useThreadArchive() {
   const queryClient = useQueryClient()
