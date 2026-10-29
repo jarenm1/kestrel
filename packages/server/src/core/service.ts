@@ -1,4 +1,4 @@
-import { Context, Data, Deferred, Effect, Either, Layer } from "effect"
+import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
@@ -47,6 +47,7 @@ import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { checkoutPinRef, WorkspaceService, type CheckoutSpec } from "./workspace"
+import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 
 const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
   const prefix = location.pathname.match(/^\\/_preview\\/[^/]+\\/[^/]+/)[0];
@@ -289,6 +290,8 @@ export interface CoreShape {
   ) => Effect.Effect<PostedReview, NotFound | BadRequest | InternalError>
   /** Used by the automations: the user a thread belongs to, whom its automations act for. */
   readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
+  /** Bytes the thread's files took at the last storage check; null before its first check. */
+  readonly storageUsed: (taskId: string) => number | null
 
   /** Cancels active runs, stops desktops and tears down task networks. */
   readonly shutdown: () => Effect.Effect<void>
@@ -583,13 +586,16 @@ export const CoreLive = Layer.effect(
       return Either.right(picked)
     }
 
+    /** Every attachment file of a thread: its pending uploads and the files on its messages (user's and agent's). */
+    const attachmentIdsOf = (s: Readonly<StoreState>, taskId: string): string[] => [
+      ...s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id)),
+      ...s.uploads.filter((u) => u.taskId === taskId).map((u) => u.id),
+    ]
+
     const removeTaskState = (taskId: string) =>
       Effect.gen(function* () {
         const attachmentIds = yield* store.update((s): Either.Either<string[], never> => {
-          const ids = [
-            ...s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id)),
-            ...s.uploads.filter((u) => u.taskId === taskId).map((u) => u.id),
-          ]
+          const ids = attachmentIdsOf(s, taskId)
           const runIds = new Set(s.runs.filter((r) => r.taskId === taskId).map((r) => r.id))
           s.tasks = s.tasks.filter((t) => t.id !== taskId)
           s.messages = s.messages.filter((m) => m.taskId !== taskId)
@@ -629,6 +635,76 @@ export const CoreLive = Layer.effect(
           )
         }
       })
+
+    /**
+     * Bytes each thread's files took at the last storage check: workspace, home, shadow repos and its attachment files
+     * (pending uploads included). Uploads add their bytes as they arrive, so the count is never behind on them.
+     */
+    const storageUsed = new Map<string, number>()
+    /** Upload bytes added while a thread's check is walking its files; added to the walk's total so none is lost. */
+    const uploadedDuringCheck = new Map<string, number>()
+    const storageRootsOf = (s: Readonly<StoreState>, taskId: string) => [
+      threadDirOf(taskId),
+      join(config.homesDir, taskId),
+      join(config.shadowsDir, taskId),
+      ...attachmentIdsOf(s, taskId).map((id) => join(config.attachmentsDir, id)),
+    ]
+    /** Set while the thread is over `taskDiskMax`: uploads and checkouts are refused, and runs are told to clean up. */
+    const overStorage = (taskId: string): number | null => {
+      const used = storageUsed.get(taskId)
+      return used !== undefined && used > config.taskDiskMax ? used : null
+    }
+    const refuseOverStorage = (taskId: string): Effect.Effect<void, Conflict> => {
+      const used = overStorage(taskId)
+      return used === null
+        ? Effect.void
+        : Effect.fail(
+            new Conflict({
+              message: `this thread is over its storage limit (${formatBytes(used)} of ${formatBytes(config.taskDiskMax)}); delete files first`,
+            }),
+          )
+    }
+
+    /**
+     * Measures every thread's files and enforces `taskDiskMax`: a thread over the limit that is still growing (by more
+     * than `STORAGE_GROWTH_SLACK` since the last check) while something runs has its runtime stopped, and the chat says
+     * why. A thread over the limit but shrinking keeps running, so a run can delete files to get back under.
+     */
+    const checkStorage = Effect.gen(function* () {
+      const state = yield* store.read
+      for (const task of state.tasks) {
+        uploadedDuringCheck.set(task.id, 0)
+        const measured = yield* Effect.promise(() => diskUsage(storageRootsOf(state, task.id)))
+        // An upload that lands during the walk may or may not be in `measured`; counting it again errs on the safe side.
+        const used = measured + (uploadedDuringCheck.get(task.id) ?? 0)
+        uploadedDuringCheck.delete(task.id)
+        const previous = storageUsed.get(task.id)
+        storageUsed.set(task.id, used)
+        if (task.archivedAt !== undefined || used <= config.taskDiskMax) continue
+        if (previous !== undefined && used <= previous + STORAGE_GROWTH_SLACK) continue
+        const running = state.runs.some((r) => r.taskId === task.id && r.status === "running")
+        const desktopNow = yield* desktop.status(task.id)
+        if (!running && desktopNow.state === "stopped") continue
+        yield* Effect.logWarning(`task ${task.id}: over its storage limit (${used} bytes) and growing; stopping its runtime`)
+        yield* teardownRuntime(task.id)
+        const message: Message = {
+          id: newId(),
+          taskId: task.id,
+          role: "system",
+          text: `Stopped the agent and the desktop: this thread's files take ${formatBytes(used)}, over its ${formatBytes(config.taskDiskMax)} storage limit, and were still growing. Ask the agent to delete files it no longer needs; while the thread is over the limit, anything that keeps growing it is stopped again.`,
+          runId: null,
+          createdAt: nowIso(),
+        }
+        yield* store.update((s): Either.Either<void, never> => {
+          s.messages.push(message)
+          return Either.right(undefined)
+        })
+        publishMessage(message)
+      }
+      for (const id of storageUsed.keys()) {
+        if (!state.tasks.some((t) => t.id === id)) storageUsed.delete(id)
+      }
+    })
 
     const deleteTask = (taskId: string): Effect.Effect<void, NotFound | InternalError> =>
       Effect.gen(function* () {
@@ -690,6 +766,7 @@ export const CoreLive = Layer.effect(
           if (task.archivedAt !== undefined) {
             return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
           }
+          yield* refuseOverStorage(taskId)
           const ref = yield* parseCheckoutRequest(request)
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
           if (existing) return existing
@@ -797,6 +874,15 @@ export const CoreLive = Layer.effect(
     const deliveredText = (taskId: string, m: Pick<Message, "text" | "attachments" | "fromThread">): string => {
       const typed = agentText(m.text, m.attachments ?? [], agentHome(sandboxSettings, join(config.homesDir, taskId)))
       return m.fromThread === undefined ? typed : peerMessageText(m.fromThread, typed)
+    }
+
+    /** Box notes for a new run's preamble: while the thread is over its storage limit, the run is asked to clean up. */
+    const runNotes = (taskId: string): string[] => {
+      const over = overStorage(taskId)
+      if (over === null) return []
+      return [
+        `This thread's files (workspace, home and git data) take ${formatBytes(over)}, over the thread's ${formatBytes(config.taskDiskMax)} storage limit. Delete files you no longer need (build output, caches, downloads) before anything else. Uploads and new checkouts are refused until it is under the limit, and anything that keeps growing it is stopped.`,
+      ]
     }
 
     /** A message to a thread: from its user (`from` null), or from the agent of another of the owner's threads. */
@@ -923,7 +1009,7 @@ export const CoreLive = Layer.effect(
               question === null
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
-            const prompt = withUserContext(user, earlier === null ? asked : formatHandoff(earlier, asked))
+            const prompt = withUserContext(user, earlier === null ? asked : formatHandoff(earlier, asked), runNotes(taskId))
             return Either.right({
               task: { ...task },
               message,
@@ -1097,10 +1183,27 @@ export const CoreLive = Layer.effect(
         }
         const id = newId()
         const name = sanitizeUploadName(input.name)
+        // The upload's bytes count against the thread now, not at the next storage check, so a burst of uploads between
+        // checks cannot pass the limit. Refused like a full disk: the bytes that would cross it are not written.
+        const before = storageUsed.get(taskId) ?? 0
+        if (before + input.bytes.byteLength > config.taskDiskMax) {
+          return yield* Effect.fail(
+            new Conflict({
+              message: `this upload would put the thread over its storage limit (${formatBytes(before)} of ${formatBytes(config.taskDiskMax)} used); delete files first`,
+            }),
+          )
+        }
+        const reserve = (bytes: number) => {
+          storageUsed.set(taskId, (storageUsed.get(taskId) ?? 0) + bytes)
+          const during = uploadedDuringCheck.get(taskId)
+          if (during !== undefined) uploadedDuringCheck.set(taskId, during + bytes)
+        }
+        reserve(input.bytes.byteLength)
+        const release = Effect.sync(() => reserve(-input.bytes.byteLength))
         yield* Effect.tryPromise({
           try: () => writeFile(join(config.attachmentsDir, id), input.bytes),
           catch: (e) => new InternalError({ message: `store upload: ${String(e)}` }),
-        })
+        }).pipe(Effect.tapError(() => release))
         yield* store
           .update((s): Either.Either<void, NotFound | Conflict> => {
             const found = findTask(s, taskId)
@@ -1113,11 +1216,22 @@ export const CoreLive = Layer.effect(
           })
           .pipe(
             Effect.tapError(() =>
-              Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(Effect.ignore),
+              Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(
+                Effect.ignore,
+                Effect.zipRight(release),
+              ),
             ),
           )
         return { id, mimeType: input.mimeType, name }
       })
+
+    // First check at startup, then every STORAGE_CHECK_MS; a failed check is logged and the next one runs anyway.
+    yield* Effect.forkDaemon(
+      checkStorage.pipe(
+        Effect.catchAllCause((cause) => Effect.logWarning(`storage check failed: ${Cause.pretty(cause)}`)),
+        Effect.repeat(Schedule.spaced(STORAGE_CHECK_MS)),
+      ),
+    )
 
     const shape: CoreShape = {
       ask,
@@ -1460,6 +1574,7 @@ export const CoreLive = Layer.effect(
       checkout: (taskId, input) => addCheckout(taskId, input),
 
       taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),
+      storageUsed: (taskId) => storageUsed.get(taskId) ?? null,
 
       gitPush: (taskId, checkoutId) =>
         Effect.gen(function* () {
