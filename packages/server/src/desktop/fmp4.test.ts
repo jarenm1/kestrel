@@ -8,8 +8,7 @@ const FRAMES = 120
 const GOP = 30
 const WIDTH = 320
 const HEIGHT = 240
-/** One frame at 60 fps on the 90 kHz track clock the muxer writes. */
-const FRAME_TICKS = 1500
+const FPS = 60
 const HAS_FFMPEG = Bun.which("ffmpeg") !== null && Bun.which("ffprobe") !== null
 
 const run = async (args: string[]): Promise<string> => {
@@ -93,7 +92,7 @@ describe.skipIf(!HAS_FFMPEG)("Mp4Muxer", () => {
   })
 
   test("writes one fragment per frame, decodable, with the source keyframe pattern", async () => {
-    const pieces = feed(new Mp4Muxer(WIDTH, HEIGHT), flv)
+    const pieces = feed(new Mp4Muxer(WIDTH, HEIGHT, FPS), flv)
     const [init, ...rest] = pieces
     expect(init?.kind).toBe("init")
     if (init?.kind !== "init") throw new Error("first piece is not the init segment")
@@ -113,10 +112,11 @@ describe.skipIf(!HAS_FFMPEG)("Mp4Muxer", () => {
     expect(decoded.trim()).toBe(String(FRAMES))
   })
 
-  test("timestamps are contiguous: each fragment starts where the previous one ends", () => {
-    const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT), flv)).map((f) => timingOf(f.bytes))
+  test.each([60, 30])("timestamps are contiguous at %i fps: each fragment lasts one frame and starts where the previous one ends", (fps) => {
+    const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT, fps), flv)).map((f) => timingOf(f.bytes))
     expect(timings.length).toBe(FRAMES)
-    for (const t of timings) expect(t.duration).toBe(FRAME_TICKS)
+    // One frame on the 90 kHz track clock.
+    for (const t of timings) expect(t.duration).toBe(90_000 / fps)
     timings.reduce((prev, cur) => {
       expect(cur.decodeTime).toBe(prev.decodeTime + prev.duration)
       return cur
@@ -127,7 +127,7 @@ describe.skipIf(!HAS_FFMPEG)("Mp4Muxer", () => {
     // Drop the sixth frame's tag: the next frame arrives two frame periods later on the FLV clock.
     const ends = frameTagEnds(flv)
     const gapped = new Uint8Array([...flv.subarray(0, ends[4]), ...flv.subarray(ends[5]!)])
-    const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT), gapped)).map((f) => timingOf(f.bytes))
+    const timings = media(feed(new Mp4Muxer(WIDTH, HEIGHT, FPS), gapped)).map((f) => timingOf(f.bytes))
     expect(timings.length).toBe(FRAMES - 1)
     timings.reduce((prev, cur) => {
       expect(cur.decodeTime).toBe(prev.decodeTime + prev.duration)
@@ -136,7 +136,7 @@ describe.skipIf(!HAS_FFMPEG)("Mp4Muxer", () => {
   })
 
   test("emits each frame the moment its FLV tag is complete", () => {
-    const muxer = new Mp4Muxer(WIDTH, HEIGHT)
+    const muxer = new Mp4Muxer(WIDTH, HEIGHT, FPS)
     const ends = frameTagEnds(flv).slice(0, 10)
     let at = 0
     let emitted = 0

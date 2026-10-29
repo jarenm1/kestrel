@@ -13,9 +13,6 @@ export type Mp4Piece =
 
 /** Track timescale: the usual 90 kHz video clock. */
 const TIMESCALE = 90_000
-/** Capture rate. The encoder runs constant frame rate at 60 fps (`-r 60`), so every frame is exactly one frame duration. */
-const FPS = 60
-const FRAME_TICKS = TIMESCALE / FPS
 
 // The timeline counts frames in arrival order and never follows the wall clock. Chromium's MSE drops every
 // non-keyframe that follows a timeline gap, until the next keyframe, so an idle pause or a dropped tag must not
@@ -161,12 +158,15 @@ export class Mp4Muxer {
   private readonly demuxer = new FlvDemuxer()
   private readonly width: number
   private readonly height: number
+  /** One frame at the stream's frame rate cap, in track ticks: every frame is given exactly this duration. */
+  private readonly frameTicks: number
   private configured = false
   private sequence = 0
 
-  constructor(width: number, height: number) {
+  constructor(width: number, height: number, fps: number) {
     this.width = width
     this.height = height
+    this.frameTicks = TIMESCALE / fps
   }
 
   /** Feeds encoder stdout and returns the pieces it completes, in order. Throws on a stream that is not H.264 FLV. */
@@ -180,8 +180,8 @@ export class Mp4Muxer {
       }
       if (!this.configured) throw new Error("H.264 frame before the sequence header")
       this.sequence += 1
-      const decodeTime = (this.sequence - 1) * FRAME_TICKS
-      pieces.push({ kind: "media", bytes: mediaFragment(this.sequence, decodeTime, FRAME_TICKS, event.data, event.keyframe), keyframe: event.keyframe })
+      const decodeTime = (this.sequence - 1) * this.frameTicks
+      pieces.push({ kind: "media", bytes: mediaFragment(this.sequence, decodeTime, this.frameTicks, event.data, event.keyframe), keyframe: event.keyframe })
     }
     return pieces
   }

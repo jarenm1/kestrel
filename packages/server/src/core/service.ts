@@ -6,6 +6,7 @@ import {
   Conflict,
   DEFAULT_MODEL_PROVIDER,
   DesktopStatus,
+  type DesktopQuality,
   DiffResponse,
   InternalError,
   MAX_ATTACHMENT_BYTES,
@@ -223,6 +224,12 @@ export interface CoreShape {
   readonly desktopStatus: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound>
   readonly desktopStart: (user: string, taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
+  /** Sets how the owner's live desktop is streamed; a desktop that is not running is a Conflict. */
+  readonly desktopSetQuality: (
+    user: string,
+    taskId: string,
+    quality: DesktopQuality,
+  ) => Effect.Effect<DesktopStatus, NotFound | Conflict>
   /** Used by the MCP handler: starts the task's desktop, or returns the one already running. */
   readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
   /** Used by the MCP handler: expose the agent's dev-server port in the browser preview. */
@@ -1340,6 +1347,14 @@ export const CoreLive = Layer.effect(
         }),
 
       desktopStop: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.stop(taskId)),
+
+      desktopSetQuality: (user, taskId, quality) =>
+        Effect.zipRight(
+          ownedTask(user, taskId),
+          desktop
+            .setQuality(taskId, quality)
+            .pipe(Effect.mapError((e: DesktopError) => new Conflict({ message: e.message }))),
+        ),
 
       desktopOpen: (taskId) =>
         Effect.gen(function* () {

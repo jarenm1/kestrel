@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
 import { AppWindow, GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
@@ -20,6 +20,21 @@ const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = 
   { id: "diff", label: "Diff", icon: GitCompare },
 ]
 
+/** The open sidebar's share of the thread's width, remembered across threads and reloads. */
+const SIDEBAR_SHARE_KEY = "kestrel.sidebarShare"
+const DEFAULT_SIDEBAR_SHARE = 0.5
+const MIN_SIDEBAR_SHARE = 0.2
+const MAX_SIDEBAR_SHARE = 0.8
+/** Arrow keys on the resize handle move it by this share. */
+const SIDEBAR_SHARE_STEP = 0.02
+
+const clampShare = (share: number) => Math.min(MAX_SIDEBAR_SHARE, Math.max(MIN_SIDEBAR_SHARE, share))
+
+function storedSidebarShare(): number {
+  const stored = Number(localStorage.getItem(SIDEBAR_SHARE_KEY) ?? Number.NaN)
+  return Number.isFinite(stored) ? clampShare(stored) : DEFAULT_SIDEBAR_SHARE
+}
+
 /** One thread (task): chat, plus a collapsible Desktop/Preview/Diff sidebar. Key it by taskId. */
 export function ThreadView({ taskId }: { taskId: string }) {
   const state = useTaskState(taskId)
@@ -29,6 +44,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
   const [tab, setTab] = useState<TabId>("desktop")
   // Elements picked in the preview, waiting in the composer to go with the next message.
   const [elements, setElements] = useState<readonly ElementContext[]>([])
+  const gridRef = useRef<HTMLDivElement>(null)
+  const [sidebarShare, setSidebarShare] = useState(storedSidebarShare)
+  const [resizing, setResizing] = useState(false)
+  useEffect(() => {
+    localStorage.setItem(SIDEBAR_SHARE_KEY, String(sidebarShare))
+  }, [sidebarShare])
   // The agent opened the desktop: show it. Only a new count reopens, so a reconnect with a running desktop does not.
   useEffect(() => {
     if (state.desktopOpens === 0) return
@@ -39,6 +60,21 @@ export function ThreadView({ taskId }: { taskId: string }) {
   function openTab(next: TabId) {
     setTab(next)
     setOpen(true)
+  }
+
+  /** Dragging the handle: the sidebar spans from the pointer to the thread's right edge. */
+  function onResizeMove(e: PointerEvent<HTMLDivElement>) {
+    const grid = gridRef.current
+    if (!e.currentTarget.hasPointerCapture(e.pointerId) || grid === null) return
+    const rect = grid.getBoundingClientRect()
+    if (rect.width > 0) setSidebarShare(clampShare((rect.right - e.clientX) / rect.width))
+  }
+
+  function onResizeKey(e: KeyboardEvent<HTMLDivElement>) {
+    const delta = e.key === "ArrowLeft" ? SIDEBAR_SHARE_STEP : e.key === "ArrowRight" ? -SIDEBAR_SHARE_STEP : 0
+    if (delta === 0) return
+    e.preventDefault()
+    setSidebarShare((share) => clampShare(share + delta))
   }
 
   // A checkout with a pull request gets its own link; with several repos checked out, the link names its repo.
@@ -53,10 +89,14 @@ export function ThreadView({ taskId }: { taskId: string }) {
 
   return (
     <div
-      className={cn(
-        "grid min-h-0 flex-1",
-        open ? "grid-cols-[minmax(320px,1fr)_minmax(320px,1fr)]" : "grid-cols-[minmax(0,1fr)_3.25rem]",
-      )}
+      ref={gridRef}
+      className={cn("grid min-h-0 flex-1", !open && "grid-cols-[minmax(0,1fr)_3.25rem]", resizing && "select-none")}
+      // Both columns keep at least 320px; between those, the sidebar takes its share.
+      style={
+        open
+          ? { gridTemplateColumns: `minmax(320px,1fr) clamp(320px, ${sidebarShare * 100}%, calc(100% - 320px))` }
+          : undefined
+      }
     >
       <section className="flex min-h-0 min-w-0 flex-col">
         {state.error && <Alert className="mx-5 mt-3 w-auto">{state.error}</Alert>}
@@ -72,48 +112,77 @@ export function ThreadView({ taskId }: { taskId: string }) {
         />
       </section>
       {open ? (
-        <aside className="m-2 ml-0 flex min-h-0 min-w-0 animate-in flex-col overflow-hidden rounded-xl bg-background/60 shadow-well duration-300 fade-in slide-in-from-right-4">
-          <div className="flex items-center gap-1.5 p-2">
-            {SIDEBAR_TABS.map((t) => (
-              <Button
-                key={t.id}
-                variant={tab === t.id ? "soft" : "ghost"}
-                size="sm"
-                aria-pressed={tab === t.id}
-                onClick={() => setTab(t.id)}
-              >
-                <t.icon />
-                {t.label}
-              </Button>
-            ))}
-            <div className="ml-auto flex min-w-0 items-center gap-1">
-              {pullRequests.map((pr) => (
-                <Button key={pr.id} asChild variant="ghost" size="sm">
-                  <a href={pr.url} target="_blank" rel="noreferrer">
-                    <GitPullRequest />
-                    {pr.label}
-                  </a>
+        <div className="relative flex min-h-0 min-w-0">
+          {/* Drag (or arrow keys) to resize; double-click resets. Pointer capture keeps the drag over the preview iframe. */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuemin={MIN_SIDEBAR_SHARE * 100}
+            aria-valuemax={MAX_SIDEBAR_SHARE * 100}
+            aria-valuenow={Math.round(sidebarShare * 100)}
+            tabIndex={0}
+            className="group absolute inset-y-2 -left-1.5 z-10 flex w-3 cursor-col-resize touch-none justify-center outline-none"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId)
+              setResizing(true)
+            }}
+            onPointerMove={onResizeMove}
+            onPointerUp={() => setResizing(false)}
+            onPointerCancel={() => setResizing(false)}
+            onKeyDown={onResizeKey}
+            onDoubleClick={() => setSidebarShare(DEFAULT_SIDEBAR_SHARE)}
+          >
+            <div
+              className={cn(
+                "h-full w-0.5 rounded-full transition-colors group-hover:bg-white/20 group-focus-visible:bg-ring",
+                resizing && "bg-white/30",
+              )}
+            />
+          </div>
+          <aside className="m-2 ml-0 flex min-h-0 min-w-0 flex-1 animate-in flex-col overflow-hidden rounded-xl bg-background/60 shadow-well duration-300 fade-in slide-in-from-right-4">
+            <div className="flex items-center gap-1.5 p-2">
+              {SIDEBAR_TABS.map((t) => (
+                <Button
+                  key={t.id}
+                  variant={tab === t.id ? "soft" : "ghost"}
+                  size="sm"
+                  aria-pressed={tab === t.id}
+                  onClick={() => setTab(t.id)}
+                >
+                  <t.icon />
+                  {t.label}
                 </Button>
               ))}
+              <div className="ml-auto flex min-w-0 items-center gap-1">
+                {pullRequests.map((pr) => (
+                  <Button key={pr.id} asChild variant="ghost" size="sm">
+                    <a href={pr.url} target="_blank" rel="noreferrer">
+                      <GitPullRequest />
+                      {pr.label}
+                    </a>
+                  </Button>
+                ))}
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Collapse sidebar"
+                onClick={() => setOpen(false)}
+              >
+                <PanelRightClose />
+              </Button>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Collapse sidebar"
-              onClick={() => setOpen(false)}
-            >
-              <PanelRightClose />
-            </Button>
-          </div>
-          <SidebarBody
-            tab={tab}
-            taskId={taskId}
-            archived={archivedTask !== undefined}
-            running={state.task?.status === "running"}
-            previewPort={state.task?.previewPort}
-            onSelectElement={(element) => setElements((current) => [...current, element])}
-          />
-        </aside>
+            <SidebarBody
+              tab={tab}
+              taskId={taskId}
+              archived={archivedTask !== undefined}
+              running={state.task?.status === "running"}
+              previewPort={state.task?.previewPort}
+              onSelectElement={(element) => setElements((current) => [...current, element])}
+            />
+          </aside>
+        </div>
       ) : (
         <aside className="flex flex-col items-center gap-1 py-2">
           <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => setOpen(true)}>

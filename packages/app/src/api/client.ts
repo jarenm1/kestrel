@@ -23,6 +23,7 @@ import {
   RunItems,
   SendMessageBody,
   SendMessageResponse,
+  type SetDesktopQualityBody,
   Task,
   UpdateAutomationBody,
   Usage,
@@ -203,4 +204,6 @@ export const api = {
   startDesktop: (taskId: string) => run(request(DesktopStatus, "POST", Paths.taskDesktop(taskId))),
   stopDesktop: (taskId: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)))),
+  setDesktopQuality: (taskId: string, body: SetDesktopQualityBody) =>
+    run(request(DesktopStatus, "PUT", Paths.taskDesktopQuality(taskId), body)),
 }
