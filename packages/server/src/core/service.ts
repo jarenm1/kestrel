@@ -586,13 +586,16 @@ export const CoreLive = Layer.effect(
       return Either.right(picked)
     }
 
+    /** Every attachment file of a thread: its pending uploads and the files on its messages (user's and agent's). */
+    const attachmentIdsOf = (s: Readonly<StoreState>, taskId: string): string[] => [
+      ...s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id)),
+      ...s.uploads.filter((u) => u.taskId === taskId).map((u) => u.id),
+    ]
+
     const removeTaskState = (taskId: string) =>
       Effect.gen(function* () {
         const attachmentIds = yield* store.update((s): Either.Either<string[], never> => {
-          const ids = [
-            ...s.messages.filter((m) => m.taskId === taskId).flatMap((m) => (m.attachments ?? []).map((a) => a.id)),
-            ...s.uploads.filter((u) => u.taskId === taskId).map((u) => u.id),
-          ]
+          const ids = attachmentIdsOf(s, taskId)
           const runIds = new Set(s.runs.filter((r) => r.taskId === taskId).map((r) => r.id))
           s.tasks = s.tasks.filter((t) => t.id !== taskId)
           s.messages = s.messages.filter((m) => m.taskId !== taskId)
@@ -633,9 +636,19 @@ export const CoreLive = Layer.effect(
         }
       })
 
-    /** Bytes each thread's files took at the last storage check (workspace, home, shadow repos). */
+    /**
+     * Bytes each thread's files took at the last storage check: workspace, home, shadow repos and its attachment files
+     * (pending uploads included). Uploads add their bytes as they arrive, so the count is never behind on them.
+     */
     const storageUsed = new Map<string, number>()
-    const storageRootsOf = (taskId: string) => [threadDirOf(taskId), join(config.homesDir, taskId), join(config.shadowsDir, taskId)]
+    /** Upload bytes added while a thread's check is walking its files; added to the walk's total so none is lost. */
+    const uploadedDuringCheck = new Map<string, number>()
+    const storageRootsOf = (s: Readonly<StoreState>, taskId: string) => [
+      threadDirOf(taskId),
+      join(config.homesDir, taskId),
+      join(config.shadowsDir, taskId),
+      ...attachmentIdsOf(s, taskId).map((id) => join(config.attachmentsDir, id)),
+    ]
     /** Set while the thread is over `taskDiskMax`: uploads and checkouts are refused, and runs are told to clean up. */
     const overStorage = (taskId: string): number | null => {
       const used = storageUsed.get(taskId)
@@ -660,7 +673,11 @@ export const CoreLive = Layer.effect(
     const checkStorage = Effect.gen(function* () {
       const state = yield* store.read
       for (const task of state.tasks) {
-        const used = yield* Effect.promise(() => diskUsage(storageRootsOf(task.id)))
+        uploadedDuringCheck.set(task.id, 0)
+        const measured = yield* Effect.promise(() => diskUsage(storageRootsOf(state, task.id)))
+        // An upload that lands during the walk may or may not be in `measured`; counting it again errs on the safe side.
+        const used = measured + (uploadedDuringCheck.get(task.id) ?? 0)
+        uploadedDuringCheck.delete(task.id)
         const previous = storageUsed.get(task.id)
         storageUsed.set(task.id, used)
         if (task.archivedAt !== undefined || used <= config.taskDiskMax) continue
@@ -1158,7 +1175,6 @@ export const CoreLive = Layer.effect(
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
-        yield* refuseOverStorage(taskId)
         if (input.bytes.byteLength === 0) return yield* Effect.fail(new BadRequest({ message: "upload is empty" }))
         if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
           return yield* Effect.fail(
@@ -1167,10 +1183,27 @@ export const CoreLive = Layer.effect(
         }
         const id = newId()
         const name = sanitizeUploadName(input.name)
+        // The upload's bytes count against the thread now, not at the next storage check, so a burst of uploads between
+        // checks cannot pass the limit. Refused like a full disk: the bytes that would cross it are not written.
+        const before = storageUsed.get(taskId) ?? 0
+        if (before + input.bytes.byteLength > config.taskDiskMax) {
+          return yield* Effect.fail(
+            new Conflict({
+              message: `this upload would put the thread over its storage limit (${formatBytes(before)} of ${formatBytes(config.taskDiskMax)} used); delete files first`,
+            }),
+          )
+        }
+        const reserve = (bytes: number) => {
+          storageUsed.set(taskId, (storageUsed.get(taskId) ?? 0) + bytes)
+          const during = uploadedDuringCheck.get(taskId)
+          if (during !== undefined) uploadedDuringCheck.set(taskId, during + bytes)
+        }
+        reserve(input.bytes.byteLength)
+        const release = Effect.sync(() => reserve(-input.bytes.byteLength))
         yield* Effect.tryPromise({
           try: () => writeFile(join(config.attachmentsDir, id), input.bytes),
           catch: (e) => new InternalError({ message: `store upload: ${String(e)}` }),
-        })
+        }).pipe(Effect.tapError(() => release))
         yield* store
           .update((s): Either.Either<void, NotFound | Conflict> => {
             const found = findTask(s, taskId)
@@ -1183,7 +1216,10 @@ export const CoreLive = Layer.effect(
           })
           .pipe(
             Effect.tapError(() =>
-              Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(Effect.ignore),
+              Effect.tryPromise(() => rm(join(config.attachmentsDir, id), { force: true })).pipe(
+                Effect.ignore,
+                Effect.zipRight(release),
+              ),
             ),
           )
         return { id, mimeType: input.mimeType, name }
