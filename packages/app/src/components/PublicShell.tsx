@@ -22,7 +22,7 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
 
 /**
  * Frame for the public pages (landing, pricing): the app's theme with a bit more atmosphere (a greyscale grain
- * gradient and a spotlight behind the hero) and a floating pill nav.
+ * gradient behind the hero) and a floating pill nav.
  */
 export function PublicShell({
   children,
@@ -34,17 +34,14 @@ export function PublicShell({
 }) {
   return (
     <div className="public-page relative flex min-h-screen flex-col overflow-x-hidden bg-background">
-      {/* Covers the hero and fades out as the page scrolls on, so it never sits behind body text. */}
+      {/* The gradient shows around the hero and fades to black towards the edges and further down the page. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[110vh] [mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
+        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-[110vh] [mask-image:radial-gradient(ellipse_65%_60%_at_50%_35%,black_15%,transparent_100%)]"
       >
         <Suspense fallback={null}>
           <PublicBackground />
         </Suspense>
-      </div>
-      <div aria-hidden className="pointer-events-none fixed top-0 left-1/2 z-0 h-[600px] w-[900px] -translate-x-1/2">
-        <div className="absolute inset-0 rounded-full bg-[radial-gradient(ellipse_at_top,rgb(255_255_255/0.16),transparent_65%)] blur-3xl" />
       </div>
 
       <header className="fixed inset-x-0 top-4 z-50 flex justify-center px-4">
