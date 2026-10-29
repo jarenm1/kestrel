@@ -113,7 +113,8 @@ export function createApiClient(serverUrl: string, sessionCookie: string | null)
       res = await fetch(`${serverUrl}${path}`, {
         method,
         headers,
-        credentials: "include",
+        // RN's cookie jar would append a second session to our explicit Cookie header.
+        credentials: "omit",
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (e) {

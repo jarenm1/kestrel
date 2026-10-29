@@ -1,6 +1,5 @@
 import React, { useRef } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
 import { keys, storeTask } from "@/api/queries";
@@ -38,7 +37,7 @@ export function NewThreadScreen() {
   });
 
   return (
-    <KeyboardAvoidingView style={styles.flex} behavior="padding">
+    <View style={styles.flex}>
       <View style={styles.body}>
         <Text style={styles.heading}>What should we work on?</Text>
       </View>
@@ -48,7 +47,7 @@ export function NewThreadScreen() {
         error={start.error}
         placeholder="Ask for anything — the agent checks out the repos it needs"
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 

@@ -1,6 +1,5 @@
 import React, { useState } from "react";
 import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Modal } from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { WebView, type WebViewProps } from "react-native-webview";
 import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
@@ -57,10 +56,7 @@ export function LoginScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior="padding"
-    >
+    <View style={styles.container}>
       <ScrollView
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
@@ -169,7 +165,7 @@ export function LoginScreen() {
           />
         </SafeAreaView>
       </Modal>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 

@@ -90,6 +90,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         await fetch(`${state.serverUrl}/auth/logout`, {
           method: "POST",
+          // The explicit session header is authoritative; RN otherwise merges in WebView cookies.
+          credentials: "omit",
           headers: { Cookie: `session=${state.sessionCookie}` },
         });
       } catch {
@@ -145,7 +147,8 @@ async function fetchMe(
     }
     const res = await fetch(`${serverUrl}/api/me`, {
       headers,
-      credentials: "include",
+      // Do not combine the secure-store session with the native/WebView cookie jar.
+      credentials: "omit",
     });
     if (res.status === 401) {
       setState((s) => ({ ...s, user: null, loading: false, error: null }));
