@@ -146,8 +146,8 @@ export function LandingPage() {
                 for your agents.
               </h1>
               <p className="max-w-md text-base leading-relaxed text-muted-foreground">
-                Cloud agents that keep what's good about local: your repo, your harness, your keys. They just keep
-                running when you close the laptop.
+                Cloud agents with everything good about local: your repos, your subscriptions, and builds and tests
+                that run just like on your own machine. They just keep going when you close the laptop.
               </p>
               <div className="flex items-center gap-3 pt-2">
                 <Button asChild size="lg">
