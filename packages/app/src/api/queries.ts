@@ -2,7 +2,7 @@ import { QueryClient, queryOptions } from "@tanstack/react-query"
 import type { AgentModel, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
 
-/** Agent box status poll; it feeds the top bar pill and the offline banner. */
+/** Agent box status poll; it feeds the offline banner. */
 const BOX_POLL_MS = 10_000
 /** Task statuses change from agent runs with no list-level event stream, so the thread list is polled. */
 const TASK_POLL_MS = 2000

@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, PanelLeftClose, PanelLeftOpen, SquarePen, Workflow } from "lucide-react"
+import { Archive, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
+import { AccountMenu } from "@/components/AccountMenu"
+import { KestrelMark } from "@/components/KestrelMark"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -18,7 +20,6 @@ const STATUS_LABEL: Record<Task["status"], string> = {
   failed: "Failed",
 }
 
-const COLLAPSED_KEY = "kestrel.threadsCollapsed"
 /** Hover scroll speed for long titles. */
 const SCROLL_PX_PER_S = 60
 /** How often "5m ago" labels refresh. */
@@ -84,19 +85,19 @@ function tabClass({ isActive }: { isActive: boolean }) {
 interface Props {
   tasks: readonly Task[] | undefined
   error: unknown
+  collapsed: boolean
+  onCollapse: () => void
 }
 
-/** The user's threads (tasks) as vertical tabs, most recent first; collapses to an icon rail. */
-export function ThreadSidebar({ tasks, error }: Props) {
+/**
+ * The user's threads (tasks) as vertical tabs, most recent first. Collapsed, it is an icon rail; the button that
+ * expands it again lives in the page panel (`WorkspaceLayout`).
+ */
+export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
   const { archive } = useThreadArchive()
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === "1")
-  useEffect(() => {
-    if (collapsed) localStorage.setItem(COLLAPSED_KEY, "1")
-    else localStorage.removeItem(COLLAPSED_KEY)
-  }, [collapsed])
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
@@ -115,137 +116,153 @@ export function ThreadSidebar({ tasks, error }: Props) {
 
   if (collapsed) {
     return (
-      <nav aria-label="Threads" className="flex w-12 shrink-0 flex-col items-stretch gap-1 overflow-auto pb-3 pl-2">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="self-center"
-          aria-label="Expand threads"
-          title="Expand threads"
-          onClick={() => setCollapsed(false)}
-        >
-          <PanelLeftOpen />
-        </Button>
-        <NavLink
-          to={APP_HOME}
-          end
-          aria-label="New thread"
-          title="New thread"
-          className={(s) => cn(tabClass(s), "justify-center py-2")}
-        >
-          <SquarePen className="size-4" />
-        </NavLink>
-        <NavLink
-          to="/automations"
-          aria-label="Automations"
-          title="Automations"
-          className={(s) => cn(tabClass(s), "justify-center py-2")}
-        >
-          <Workflow className="size-4" />
-        </NavLink>
-        <NavLink
-          to="/archived"
-          aria-label="Archived"
-          title="Archived"
-          className={(s) => cn(tabClass(s), "justify-center py-2")}
-        >
-          <Archive className="size-4" />
-        </NavLink>
-        {sorted.map((task) => (
+      <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
+        <HomeMark className="self-center py-0.5" />
+        <nav aria-label="Threads" className="flex min-h-0 flex-1 flex-col items-stretch gap-1 overflow-auto">
           <NavLink
-            key={task.id}
-            to={threadPath(task.id)}
-            aria-label={task.title}
-            title={`${task.title}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
+            to={APP_HOME}
+            end
+            aria-label="New thread"
+            title="New thread"
             className={(s) => cn(tabClass(s), "justify-center py-2")}
           >
-            <StatusIcon status={task.status} />
+            <SquarePen className="size-4" />
           </NavLink>
-        ))}
-      </nav>
+          <NavLink
+            to="/automations"
+            aria-label="Automations"
+            title="Automations"
+            className={(s) => cn(tabClass(s), "justify-center py-2")}
+          >
+            <Workflow className="size-4" />
+          </NavLink>
+          <NavLink
+            to="/archived"
+            aria-label="Archived"
+            title="Archived"
+            className={(s) => cn(tabClass(s), "justify-center py-2")}
+          >
+            <Archive className="size-4" />
+          </NavLink>
+          {sorted.map((task) => (
+            <NavLink
+              key={task.id}
+              to={threadPath(task.id)}
+              aria-label={task.title}
+              title={`${task.title}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
+              className={(s) => cn(tabClass(s), "justify-center py-2")}
+            >
+              <StatusIcon status={task.status} />
+            </NavLink>
+          ))}
+        </nav>
+        <AccountMenu compact />
+      </div>
     )
   }
 
   return (
-    <nav aria-label="Threads" className="flex w-64 shrink-0 flex-col gap-0.5 overflow-auto pb-3 pl-3">
-      <div className="flex items-center gap-1 pb-2 pl-2.5">
-        <span className="min-w-0 flex-1 truncate font-medium">Threads</span>
+    <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
+      <div className="flex items-center gap-2 pb-2 pl-1.5">
+        <HomeMark />
+        <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         <Button
           variant="ghost"
           size="icon"
           className="size-7"
           aria-label="Collapse threads"
           title="Collapse threads"
-          onClick={() => setCollapsed(true)}
+          onClick={onCollapse}
         >
           <PanelLeftClose />
         </Button>
       </div>
-      <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-        <SquarePen className="size-4 shrink-0" />
-        New thread
-      </NavLink>
-      <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-        <Workflow className="size-4 shrink-0" />
-        Automations
-      </NavLink>
-      <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-        <Archive className="size-4 shrink-0" />
-        Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
-      </NavLink>
-      {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
-      {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
-      {sorted.map((task) => {
-        const isOpen = task.id === openTaskId
-        return (
-          <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
-            <NavLink
-              to={threadPath(task.id)}
-              title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
-                "\n",
-              )}
-              className={(s) => cn(tabClass(s), "flex-1 items-start py-2 pr-9 pl-2.5")}
-            >
-              <StatusIcon status={task.status} className="mt-0.5" />
-              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <FadingTitle text={task.title} />
-                <span className="text-xs text-muted-foreground">
-                  {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
-                </span>
-                {task.checkouts.length > 0 && (
-                  <span className="flex flex-wrap gap-1 pt-0.5">
-                    {task.checkouts.map((checkout) => (
-                      <span
-                        key={checkout.id}
-                        title={checkout.repo}
-                        className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
-                      >
-                        {repoShortName(checkout.repo)}
-                        {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
-                      </span>
-                    ))}
-                  </span>
+      <nav aria-label="Threads" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto">
+        <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+          <SquarePen className="size-4 shrink-0" />
+          New thread
+        </NavLink>
+        <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+          <Workflow className="size-4 shrink-0" />
+          Automations
+        </NavLink>
+        <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+          <Archive className="size-4 shrink-0" />
+          Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
+        </NavLink>
+        {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
+        {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
+        {sorted.length > 0 && (
+          <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
+        )}
+        {sorted.map((task) => {
+          const isOpen = task.id === openTaskId
+          return (
+            <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
+              <NavLink
+                to={threadPath(task.id)}
+                title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
+                  "\n",
                 )}
-              </span>
-            </NavLink>
-            <Button
-              variant="ghost"
-              size="icon"
-              className={cn(
-                "absolute top-1.5 right-1.5 size-7 transition-opacity",
-                isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
-              )}
-              aria-label="Archive thread"
-              title="Archive thread"
-              disabled={archive.isPending && archive.variables === task.id}
-              onClick={() => archiveThread(task)}
-            >
-              <ArchiveBoxIcon />
-            </Button>
-          </div>
-        )
-      })}
-    </nav>
+                className={(s) => cn(tabClass(s), "flex-1 items-start py-2 pr-9 pl-2.5")}
+              >
+                <StatusIcon status={task.status} className="mt-0.5" />
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <FadingTitle text={task.title} />
+                  <span className="text-xs text-muted-foreground">
+                    {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
+                  </span>
+                  {task.checkouts.length > 0 && (
+                    <span className="flex flex-wrap gap-1 pt-0.5">
+                      {task.checkouts.map((checkout) => (
+                        <span
+                          key={checkout.id}
+                          title={checkout.repo}
+                          className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
+                        >
+                          {repoShortName(checkout.repo)}
+                          {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                        </span>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              </NavLink>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "absolute top-1.5 right-1.5 size-7 transition-opacity",
+                  isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
+                )}
+                aria-label="Archive thread"
+                title="Archive thread"
+                disabled={archive.isPending && archive.variables === task.id}
+                onClick={() => archiveThread(task)}
+              >
+                <ArchiveBoxIcon />
+              </Button>
+            </div>
+          )
+        })}
+      </nav>
+      <div className="pt-2 pr-3">
+        <AccountMenu />
+      </div>
+    </div>
+  )
+}
+
+/** The Kestrel mark, linking to a new chat. */
+function HomeMark({ className }: { className?: string }) {
+  return (
+    <NavLink
+      to={APP_HOME}
+      aria-label="Kestrel home"
+      className={cn("shrink-0 rounded text-foreground/90 transition-colors duration-200 hover:text-foreground", className)}
+    >
+      <KestrelMark className="h-6" />
+    </NavLink>
   )
 }
 

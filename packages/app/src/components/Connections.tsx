@@ -39,15 +39,12 @@ const MIN_API_KEY_LENGTH = 8
 /** While a codex sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000
 
-export function ConnectionsPage() {
+/** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
+export function Connections() {
   const connections = useQuery(queries.connections())
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-auto p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Connections</h1>
-        <p className="text-muted-foreground">Accounts and keys Kestrel uses on your behalf.</p>
-      </div>
+    <>
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {connections.data && (
@@ -64,7 +61,7 @@ export function ConnectionsPage() {
         </Card>
       )}
       {connections.data && <ModelListsCard connections={connections.data} />}
-    </div>
+    </>
   )
 }
 

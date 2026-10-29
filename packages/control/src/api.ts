@@ -174,7 +174,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     const provider = findProvider(connection[1])
     if (!provider) return errorResponse(404, "NotFound", `unknown provider ${connection[1]}`)
     if (provider.kind === "cli") {
-      return errorResponse(400, "BadRequest", `${provider.label} connects from the Connections page`)
+      return errorResponse(400, "BadRequest", `${provider.label} connects from Settings › Connections`)
     }
     if (method === "PUT") return putApiKey(request, env, login, provider)
     if (method === "DELETE") {

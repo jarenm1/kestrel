@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, LogOut, User } from "lucide-react"
+import { Check, CreditCard, ExternalLink, LogOut, Plug, User } from "lucide-react"
 import { Link, NavLink, Outlet } from "react-router-dom"
 import { queries } from "@/api/queries"
+import { Connections } from "@/components/Connections"
 import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -13,17 +14,19 @@ import { errorText } from "@/util"
 
 const sections = [
   { to: "profile", label: "Profile", icon: User },
+  { to: "connections", label: "Connections", icon: Plug },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
 
 export function SettingsLayout() {
   return (
-    <div className="min-h-0 flex-1 overflow-auto">
+    // Sized by the panel it sits in (beside the threads strip), not the viewport.
+    <div className="@container min-h-0 flex-1 overflow-auto">
       {/* The nav column is mirrored by an empty one on the right, so the content sits in the middle of the page. */}
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 lg:grid lg:max-w-none lg:grid-cols-[11rem_minmax(0,48rem)_11rem] lg:justify-center lg:gap-10">
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-6 @5xl:grid @5xl:max-w-none @5xl:grid-cols-[11rem_minmax(0,48rem)_11rem] @5xl:justify-center @5xl:gap-10">
         <aside className="flex shrink-0 flex-col gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
-          <nav className="flex gap-1 lg:flex-col">
+          <nav className="flex gap-1 @5xl:flex-col">
             {sections.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
@@ -104,7 +107,7 @@ export function ProfileSettings() {
           <Row label="Connections">
             <span className="text-muted-foreground">Model keys, subscriptions and GitHub access.</span>
             <Button asChild variant="soft" size="sm" className="ml-auto">
-              <Link to="/connections">Manage</Link>
+              <Link to="/settings/connections">Manage</Link>
             </Button>
           </Row>
         </CardContent>
@@ -118,6 +121,15 @@ export function ProfileSettings() {
           Sign out
         </Button>
       </div>
+    </>
+  )
+}
+
+export function ConnectionsSettings() {
+  return (
+    <>
+      <SectionHeader title="Connections" desc="Accounts and keys Kestrel uses on your behalf." />
+      <Connections />
     </>
   )
 }
