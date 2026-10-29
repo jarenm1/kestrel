@@ -23,14 +23,17 @@ Kestrel runs Claude Code or Codex on a box you own, driven from a chat in the br
 - **Built-in tools.** An MCP server for screenshots, the shell, questions, previews, automations and messaging other threads.
 - **No ports to open.** The box dials out to a Cloudflare control plane, so it runs anywhere.
 
+<p align="center">
+  <img src="docs/screenshots/thread-streaming.png" alt="A thread streaming the agent's tool calls and command output" width="900"><br>
+  <sub>Tool calls and command output stream into the thread as the agent works.</sub>
+</p>
+
 <table>
   <tr>
-    <td width="33%"><img src="docs/screenshots/thread-streaming.png" alt="A thread streaming the agent's tool calls and command output"></td>
-    <td width="33%"><img src="docs/screenshots/thread-question.png" alt="The agent asking a question with answer options"></td>
-    <td width="33%"><img src="docs/screenshots/claude-command-autocomplete.png" alt="Claude Code slash commands in the composer"></td>
+    <td width="50%"><img src="docs/screenshots/thread-question.png" alt="The agent asking a question with answer options"></td>
+    <td width="50%"><img src="docs/screenshots/claude-command-autocomplete.png" alt="Claude Code slash commands in the composer"></td>
   </tr>
   <tr>
-    <td align="center">Tool calls and command output, live</td>
     <td align="center">The agent asks when it needs you</td>
     <td align="center">Your harness's slash commands and skills</td>
   </tr>
