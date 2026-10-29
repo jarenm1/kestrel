@@ -1,5 +1,5 @@
-import { lazy, Suspense, type ReactNode } from "react"
-import { Link, NavLink } from "react-router-dom"
+import { lazy, Suspense, useEffect } from "react"
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -21,17 +21,19 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   )
 
 /**
- * Frame for the public pages (landing, pricing): the app's theme with a bit more atmosphere (a greyscale grain
- * gradient behind the hero) and a floating pill nav.
+ * Layout route for the public pages (landing, pricing): the app's theme with a bit more atmosphere (a greyscale
+ * grain gradient behind the hero) and a floating pill nav. Both stay mounted while switching pages, so the
+ * background keeps running instead of restarting.
  */
-export function PublicShell({
-  children,
-  onProductClick,
-}: {
-  children: ReactNode
-  /** On the landing page, "Product" scrolls to the features instead of navigating. */
-  onProductClick?: () => void
-}) {
+export function PublicShell() {
+  const { pathname } = useLocation()
+
+  // Page switches start at the top, like a full page load would. Block body: newer Chromium returns a Promise
+  // from scrollTo, and React treats an effect's return value as its cleanup.
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
+
   return (
     <div className="public-page relative flex min-h-screen flex-col overflow-x-hidden bg-background">
       {/* The gradient shows around the hero and fades to black towards the edges and further down the page. */}
@@ -54,19 +56,19 @@ export function PublicShell({
             <KestrelMark className="h-5" />
             <span className="font-semibold tracking-tight max-sm:hidden">Kestrel</span>
           </Link>
-          {onProductClick ? (
-            <button
-              type="button"
-              onClick={onProductClick}
-              className={cn(navLinkClass({ isActive: false }), "max-sm:hidden")}
-            >
-              Product
-            </button>
-          ) : (
-            <NavLink to="/" end className={(s) => cn(navLinkClass(s), "max-sm:hidden")}>
-              Product
-            </NavLink>
-          )}
+          <NavLink
+            to="/"
+            end
+            className={(s) => cn(navLinkClass(s), "max-sm:hidden")}
+            onClick={(e) => {
+              // Already on the landing page: "Product" scrolls to the features.
+              if (pathname !== "/") return
+              e.preventDefault()
+              document.getElementById("features")?.scrollIntoView({ behavior: "smooth" })
+            }}
+          >
+            Product
+          </NavLink>
           <NavLink to="/pricing" className={navLinkClass}>
             Pricing
           </NavLink>
@@ -90,7 +92,7 @@ export function PublicShell({
         </nav>
       </header>
 
-      {children}
+      <Outlet />
     </div>
   )
 }

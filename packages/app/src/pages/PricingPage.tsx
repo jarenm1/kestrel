@@ -1,6 +1,6 @@
 import { motion } from "framer-motion"
 import { ArrowRight, Check } from "lucide-react"
-import { APP_URL, PublicShell } from "@/components/PublicShell"
+import { APP_URL } from "@/components/PublicShell"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -70,7 +70,7 @@ const faqs = [
 
 export function PricingPage() {
   return (
-    <PublicShell>
+    <>
       <section className="relative z-10 px-8 pt-36 pb-16">
         <motion.div
           initial="hidden"
@@ -163,6 +163,6 @@ export function PricingPage() {
           </div>
         </div>
       </section>
-    </PublicShell>
+    </>
   )
 }

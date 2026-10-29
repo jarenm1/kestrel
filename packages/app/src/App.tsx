@@ -7,6 +7,7 @@ import { queries } from "@/api/queries"
 import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { KestrelMark } from "@/components/KestrelMark"
+import { PublicShell } from "@/components/PublicShell"
 import { Alert } from "@/components/ui/alert"
 import {
   DropdownMenu,
@@ -38,8 +39,10 @@ export function App() {
     return (
       <Routes>
         {/* The public site never mounts the session query; everything else belongs to the app host. */}
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/pricing" element={<PricingPage />} />
+        <Route element={<PublicShell />}>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/pricing" element={<PricingPage />} />
+        </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>
     )

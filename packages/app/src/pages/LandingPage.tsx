@@ -1,4 +1,3 @@
-import { useRef } from "react"
 import { motion } from "framer-motion"
 import {
   ArrowRight,
@@ -17,7 +16,7 @@ import {
   Terminal,
 } from "lucide-react"
 import { KestrelMark } from "@/components/KestrelMark"
-import { APP_URL, GITHUB_URL, PublicShell } from "@/components/PublicShell"
+import { APP_URL, GITHUB_URL } from "@/components/PublicShell"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -131,10 +130,8 @@ function AppPreview() {
 }
 
 export function LandingPage() {
-  const featuresRef = useRef<HTMLDivElement>(null)
-
   return (
-    <PublicShell onProductClick={() => featuresRef.current?.scrollIntoView({ behavior: "smooth" })}>
+    <>
       <section className="relative z-10 overflow-hidden px-8 pt-36 pb-20">
         <div className="relative z-10 mx-auto max-w-7xl">
           <motion.div
@@ -188,7 +185,7 @@ export function LandingPage() {
         </div>
       </section>
 
-      <section ref={featuresRef} id="features" className="relative z-10 scroll-mt-24 px-8 py-20">
+      <section id="features" className="relative z-10 scroll-mt-24 px-8 py-20">
         <motion.div
           initial="hidden"
           whileInView="visible"
@@ -243,6 +240,6 @@ export function LandingPage() {
           </div>
         </motion.div>
       </section>
-    </PublicShell>
+    </>
   )
 }
