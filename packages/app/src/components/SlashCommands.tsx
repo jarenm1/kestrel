@@ -47,7 +47,7 @@ export function SlashCommands({
   trigger: "/" | "$"
   /** Text after the leading trigger, used in the empty state. */
   query: string
-  /** Harness of the loaded list; shown so the provider in use is visible. */
+  /** Harness of the loaded list; determines invocation syntax and its accessible label. */
   provider: ModelProvider | undefined
   matches: readonly HarnessCommand[]
   /** False before a model is on offer: no harness exists to ask. */
@@ -64,7 +64,6 @@ export function SlashCommands({
   // Codex resolves `$skill-name`; Claude Code resolves `/name`. The slash menu itself triggers either list.
   const prefix = provider === "openai" ? "$" : "/"
   const noun = provider === "openai" ? "skills" : "slash commands"
-  const title = provider === "openai" ? "Skills" : "Slash commands"
 
   // Keyboard navigation past the fold must bring the active option into the menu's view.
   useEffect(() => {
@@ -80,10 +79,6 @@ export function SlashCommands({
         "animate-in duration-150 fade-in slide-in-from-bottom-1",
       )}
     >
-      <div className="flex items-center gap-2 px-2.5 pt-0.5 pb-1.5 text-[11px] text-muted-foreground">
-        <span className="font-medium text-foreground/80">{title}</span>
-        {provider !== undefined && <span className="ml-auto uppercase tracking-[0.08em]">{PROVIDER_LABELS[provider]}</span>}
-      </div>
       {!chosenModel ? (
         <StateLine>Choose a model to see its commands.</StateLine>
       ) : pending ? (
