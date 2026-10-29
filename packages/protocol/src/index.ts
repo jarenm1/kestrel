@@ -227,30 +227,36 @@ export type DesktopStatus = typeof DesktopStatus.Type
 export const SetDesktopQualityBody = Schema.Struct({ quality: DesktopQuality })
 export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
 
-/** One reading of the box's resources. Byte counts; VRAM is null on a box without an NVIDIA GPU. */
-export const MachineSample = Schema.Struct({
+/**
+ * One reading of a thread's resources against its own limits, in bytes. RAM and CPU come from the thread's systemd
+ * slice and are null on a box without one (`CLOUDAGENTS_SYSTEMD=0`). VRAM is the whole GPU, shared by every thread
+ * (there is no per-thread VRAM limit), and null without an NVIDIA GPU. Storage is the thread's files against its
+ * storage limit; null until the box has measured them.
+ */
+export const TaskStatsSample = Schema.Struct({
   /** Epoch milliseconds. */
   at: Schema.Number,
-  /** Busy share of all cores since the previous sample, 0 to 1. */
-  cpu: Schema.Number,
-  ramUsed: Schema.Number,
-  ramTotal: Schema.Number,
+  /** Share of the thread's CPU quota used since the previous sample, 0 to 1. */
+  cpu: Schema.NullOr(Schema.Number),
+  ramUsed: Schema.NullOr(Schema.Number),
+  /** The thread's memory limit. */
+  ramMax: Schema.NullOr(Schema.Number),
   vramUsed: Schema.NullOr(Schema.Number),
   vramTotal: Schema.NullOr(Schema.Number),
-  /** The filesystem holding the box's data directory (workspaces, mirrors, homes). */
-  diskUsed: Schema.Number,
-  diskTotal: Schema.Number,
+  /** The thread's workspace, home and git data. It can pass `diskMax` briefly; the box then stops what keeps it growing. */
+  diskUsed: Schema.NullOr(Schema.Number),
+  diskMax: Schema.Number,
 })
-export type MachineSample = typeof MachineSample.Type
+export type TaskStatsSample = typeof TaskStatsSample.Type
 
-/** GET `Paths.machineStats`: the last `MACHINE_STATS_WINDOW_MS` of samples, oldest first, one per `intervalMs`. */
-export const MachineStats = Schema.Struct({
+/** GET `Paths.taskStats`: the last `TASK_STATS_WINDOW_MS` of samples, oldest first, one per `intervalMs`. */
+export const TaskStats = Schema.Struct({
   intervalMs: Schema.Number,
-  samples: Schema.Array(MachineSample),
+  samples: Schema.Array(TaskStatsSample),
 })
-export type MachineStats = typeof MachineStats.Type
+export type TaskStats = typeof TaskStats.Type
 
-export const MACHINE_STATS_WINDOW_MS = 60_000
+export const TASK_STATS_WINDOW_MS = 60_000
 
 /**
  * Client -> server input over the desktop WebSocket (JSON text frames).
@@ -498,8 +504,6 @@ export const Paths = {
   health: "/api/health",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
-  /** GET -> MachineStats of the box. The box samples only while someone asks, so the first answer may be short. */
-  machineStats: "/api/machine/stats",
   /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
   tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,
@@ -512,6 +516,8 @@ export const Paths = {
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
   taskDesktopQuality: (id: string) => `/api/tasks/${id}/desktop/quality`,
+  /** GET -> TaskStats of the thread. The box samples only while someone asks, so the first answer may be short. */
+  taskStats: (id: string) => `/api/tasks/${id}/stats`,
   /** Preview view path; the remaining path segments and query are proxied to the registered dev server. */
   taskPreview: (id: string) => `/api/tasks/${id}/preview`,
   /** POST -> PreviewSession: mints a short-lived token for the isolated/sandboxed browser preview. */

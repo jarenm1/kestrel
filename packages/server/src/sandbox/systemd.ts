@@ -54,6 +54,24 @@ const systemctl = (args: ReadonlyArray<string>): Effect.Effect<void, InternalErr
     })
   })
 
+/**
+ * The task slice's cgroup, relative to the cgroup2 mount (e.g. `/user.slice/…/kestrel-box8787-t1.slice`); null while
+ * the slice has never been active. Its memory and CPU accounting files are what the per-thread graphs read.
+ */
+export const sliceCgroup = (settings: SystemdSettings, taskId: string): Effect.Effect<string | null, InternalError> =>
+  Effect.async<string | null, InternalError>((resume) => {
+    const args = ["--user", "show", "--property=ControlGroup", "--value", taskSlice(settings, taskId)]
+    execFile("systemctl", args, { env: process.env, timeout: 15_000 }, (err, stdout, stderr) => {
+      if (err) {
+        const detail = stderr.trim() || err.message
+        resume(Effect.fail(new InternalError({ message: `systemctl ${args.join(" ")}: ${detail}` })))
+        return
+      }
+      const path = stdout.trim()
+      resume(Effect.succeed(path === "" ? null : path))
+    })
+  })
+
 /** Writes the task slice's limits (runtime drop-in); idempotent, so it runs before every launch. */
 export const applyTaskLimits = (settings: SystemdSettings, taskId: string): Effect.Effect<void, InternalError> =>
   systemctl([

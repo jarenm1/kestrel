@@ -26,7 +26,7 @@ import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
 import { StatusIcon } from "./StatusIcon"
-import { MachineGraphs } from "./MachineGraphs"
+import { ThreadGraphs } from "./ThreadGraphs"
 
 const RECONNECT_MS = 2000
 
@@ -327,7 +327,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </Button>
         </div>
-        <MachineGraphs />
+        <ThreadGraphs taskId={taskId} />
       </div>
     </div>
   )

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path"
 import type { ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
 import type { SystemdSettings } from "./sandbox/systemd"
+import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
 
@@ -60,6 +61,11 @@ export interface ServerConfig {
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
   readonly systemd: SystemdSettings | null
+  /**
+   * Per-thread storage limit in bytes (CLOUDAGENTS_TASK_DISK_MAX, default 50G): the thread's workspace, home and
+   * shadow repos. The box enforces it itself (see `core/storage.ts`); it applies with or without systemd.
+   */
+  readonly taskDiskMax: number
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
   readonly githubApiUrl: string
 }
@@ -124,6 +130,7 @@ export const loadConfig = (): ServerConfig => {
     toolkitsFlake: process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null,
     fakeAgentRoBinds,
     systemd,
+    taskDiskMax: diskMaxEnv(),
     githubApiUrl: loadGitHubApiUrl(),
   }
 }
@@ -133,6 +140,13 @@ const limitEnv = (name: string, fallback: string): string => {
   const value = process.env[name]?.trim() || fallback
   if (!/^[A-Za-z0-9.%]+$/.test(value)) throw new Error(`${name} must be a systemd limit value, got "${value}"`)
   return value
+}
+
+const diskMaxEnv = (): number => {
+  const raw = process.env.CLOUDAGENTS_TASK_DISK_MAX?.trim() || "50G"
+  const bytes = parseSize(raw)
+  if (bytes === null || bytes <= 0) throw new Error(`CLOUDAGENTS_TASK_DISK_MAX must be a size such as 50G, got "${raw}"`)
+  return bytes
 }
 
 const loadGitHubApiUrl = (): string => {
