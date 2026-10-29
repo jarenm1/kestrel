@@ -26,6 +26,7 @@ import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
 import { StatusIcon } from "./StatusIcon"
+import { MachineGraphs } from "./MachineGraphs"
 
 const RECONNECT_MS = 2000
 
@@ -290,10 +291,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         )}
       </div>
       {error && <Alert className="mx-3 mb-2 w-auto">{error}</Alert>}
-      <div className="mx-3 mb-3 flex min-h-0 flex-1 justify-center [container-type:size]">
+      {/* The stream keeps the largest size that fits the panel; the graphs go under it and scroll when they don't fit.
+          The gutter is always reserved, so a scrollbar appearing never shrinks the stream and loops. */}
+      <div className="mx-3 mb-3 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto [container-type:size] [scrollbar-gutter:stable_both-edges]">
         <div
           ref={frameRef}
-          className="relative self-start overflow-hidden rounded-xl bg-black shadow-well [&:fullscreen]:rounded-none"
+          className="relative mx-auto shrink-0 overflow-hidden rounded-xl bg-black shadow-well [&:fullscreen]:rounded-none"
           style={{ aspectRatio: aspect, width: `min(100cqw, 100cqh * ${aspect})` }}
         >
           <canvas
@@ -324,6 +327,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </Button>
         </div>
+        <MachineGraphs />
       </div>
     </div>
   )

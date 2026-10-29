@@ -15,6 +15,7 @@ import { CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
+import { MachineStatsLive, MachineStatsService } from "./machine"
 import { makeWebHandler } from "./http/router"
 import { BOX_DEV_HEADER, runRelay } from "./relay/client"
 
@@ -27,6 +28,7 @@ const BaseLive = Layer.provideMerge(
     DesktopManagerLive,
     CredentialStoreLive,
     Layer.provide(GitHubLive, ConfigLive),
+    Layer.provide(MachineStatsLive, ConfigLive),
   ),
 )
 const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
@@ -112,7 +114,8 @@ const program = Effect.gen(function* () {
   const desktop = yield* DesktopManager
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
-  const webHandler = yield* makeWebHandler(core, cliAuth)
+  const machine = yield* MachineStatsService
+  const webHandler = yield* makeWebHandler(core, cliAuth, machine)
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },

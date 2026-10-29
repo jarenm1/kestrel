@@ -227,6 +227,31 @@ export type DesktopStatus = typeof DesktopStatus.Type
 export const SetDesktopQualityBody = Schema.Struct({ quality: DesktopQuality })
 export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
 
+/** One reading of the box's resources. Byte counts; VRAM is null on a box without an NVIDIA GPU. */
+export const MachineSample = Schema.Struct({
+  /** Epoch milliseconds. */
+  at: Schema.Number,
+  /** Busy share of all cores since the previous sample, 0 to 1. */
+  cpu: Schema.Number,
+  ramUsed: Schema.Number,
+  ramTotal: Schema.Number,
+  vramUsed: Schema.NullOr(Schema.Number),
+  vramTotal: Schema.NullOr(Schema.Number),
+  /** The filesystem holding the box's data directory (workspaces, mirrors, homes). */
+  diskUsed: Schema.Number,
+  diskTotal: Schema.Number,
+})
+export type MachineSample = typeof MachineSample.Type
+
+/** GET `Paths.machineStats`: the last `MACHINE_STATS_WINDOW_MS` of samples, oldest first, one per `intervalMs`. */
+export const MachineStats = Schema.Struct({
+  intervalMs: Schema.Number,
+  samples: Schema.Array(MachineSample),
+})
+export type MachineStats = typeof MachineStats.Type
+
+export const MACHINE_STATS_WINDOW_MS = 60_000
+
 /**
  * Client -> server input over the desktop WebSocket (JSON text frames).
  * Coordinates are normalized to [0, 1] relative to the stream frame so the
@@ -473,6 +498,8 @@ export const Paths = {
   health: "/api/health",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
+  /** GET -> MachineStats of the box. The box samples only while someone asks, so the first answer may be short. */
+  machineStats: "/api/machine/stats",
   /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
   tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,

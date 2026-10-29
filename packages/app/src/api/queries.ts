@@ -8,6 +8,8 @@ const BOX_POLL_MS = 10_000
 const TASK_POLL_MS = 2000
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000
+/** The box samples its resources once a second while someone polls; the Desktop panel graphs follow it. */
+const MACHINE_STATS_POLL_MS = 1000
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -40,6 +42,7 @@ export const keys = {
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
+  machineStats: ["machine-stats"] as const,
 }
 
 type Keyed = { readonly id: string }
@@ -126,4 +129,9 @@ export const queries = {
     }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
+  machineStats: queryOptions({
+    queryKey: keys.machineStats,
+    queryFn: () => api.machineStats(),
+    refetchInterval: MACHINE_STATS_POLL_MS,
+  }),
 }
