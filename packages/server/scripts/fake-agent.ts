@@ -208,6 +208,29 @@ const askAndListen = async (): Promise<{ answer: string; inbox: string } | null>
   return { answer: asked.text, inbox }
 }
 
+// Asks a long question with three options (like a real agent's task_ask), with a desktop screenshot when the desktop
+// can start, so the question UI can be checked by hand; then reports the answer.
+const runAskProbe = async (): Promise<number> => {
+  const desktop = await call("desktop_open", {})
+  const asked = await call(
+    "task_ask",
+    {
+      question:
+        "Before I edit the project’s README, how should I handle the setup instructions? Choose “Keep and clarify” to " +
+        "preserve the existing steps while making them easier to follow; choose “Replace with a short guide” to rewrite " +
+        "them from scratch; or choose “Show me a draft” to review a proposed version before anything changes.",
+      options: ["Keep and clarify", "Replace with a short guide", "Show me a draft"],
+      attachScreenshot: !desktop.failed,
+    },
+    UNBOUNDED_CALL_MS,
+  )
+  await call("task_report", {
+    status: asked.failed ? "failed" : "done",
+    message: asked.failed ? `ask probe failed: ${asked.text}` : `You chose: ${asked.text}`,
+  })
+  return asked.failed ? 1 : 0
+}
+
 // Drives the thread tools: lists the owner's other threads, reads one (the named thread, or the first listed), sends
 // its agent "ping" and waits in the inbox for its "pong".
 const runThreadProbe = async (target: string | undefined): Promise<number> => {
@@ -250,6 +273,7 @@ const main = async (): Promise<number> => {
   const [probe, arg] = request.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
   if (probe === "thread-probe") return runThreadProbe(arg)
+  if (probe === "ask-probe") return runAskProbe()
   // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
   const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(request)
   if (ping !== null) {

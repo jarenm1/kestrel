@@ -138,7 +138,7 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
     {
       description:
         "Ask the user a question and wait for their answer. Use it when you need a decision you cannot make alone. " +
-        "The question appears in the chat with the options as buttons; the user can also type a reply. The call " +
+        "The question and its options appear above the user's message box; the user picks one or types a reply. The call " +
         "waits until the user answers, however long that takes, then returns the answer text. If the call is dropped " +
         "before an answer, the question stays open: the user's next message answers it and resumes this task. " +
         "Set attachScreenshot to show the user the current desktop with the question (it must be running; see desktop_open).",

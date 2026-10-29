@@ -12,7 +12,7 @@ import {
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
+import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
 import {
   AgentEffort,
   AgentModel,
@@ -21,6 +21,7 @@ import {
   connectedModelProviders,
   type ContextUsage,
   type HarnessCommand,
+  type Message,
   type ModelInfo,
   type ModelProvider,
   type ModelProviderInfo,
@@ -45,6 +46,8 @@ import { useShownModels } from "@/hooks/useShownModels"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
+import { Markdown } from "./Markdown"
+import { MessageAttachments } from "./MessageAttachments"
 
 /** A connected provider and the models the user keeps in the picker for it. */
 interface ModelSection {
@@ -242,6 +245,60 @@ function PendingElement({ element, onRemove }: { element: ElementContext; onRemo
   )
 }
 
+/**
+ * The agent's open question (`task_ask`) at the top of the box: its screenshot, the question, and its options as a
+ * vertical list. Clicking an option only selects it; Send or Enter locks it in.
+ */
+function AskPanel({
+  ask,
+  chosen,
+  onChoose,
+}: {
+  ask: Message
+  chosen: number | undefined
+  onChoose: (index: number) => void
+}) {
+  const attachments = ask.attachments ?? []
+  const options = ask.options ?? []
+  return (
+    <div className="flex max-h-[60vh] flex-col gap-3 overflow-auto px-2 pt-2 pb-1">
+      {attachments.length > 0 && <MessageAttachments taskId={ask.taskId} attachments={attachments} className="mt-0" />}
+      <Markdown text={ask.text} />
+      {options.length > 0 && (
+        <div role="radiogroup" aria-label="Answer" className="flex flex-col gap-1.5">
+          {options.map((option, i) => {
+            const selected = chosen === i
+            return (
+              <button
+                key={i}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => onChoose(i)}
+                className={cn(
+                  "flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors",
+                  selected ? "bg-white/[0.12] ring-1 ring-white/30" : "bg-white/[0.04] hover:bg-white/[0.08]",
+                )}
+              >
+                <span
+                  aria-hidden
+                  className={cn(
+                    "flex size-5 shrink-0 items-center justify-center rounded-md text-[11px] tabular-nums",
+                    selected ? "bg-foreground text-background" : "bg-white/[0.08] text-muted-foreground",
+                  )}
+                >
+                  {selected ? <Check className="size-3.5" /> : i + 1}
+                </span>
+                <span className="min-w-0 break-words">{option}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 interface Props {
   /** Resolves once the message is accepted; the text and files are cleared only then. */
   onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
@@ -267,6 +324,11 @@ interface Props {
   onElementsChange?: (elements: readonly ElementContext[]) => void
   /** The thread's context use, drawn along the top of the box; absent on a new thread or before a turn reports it. */
   context?: ContextUsage | undefined
+  /**
+   * The agent's open question (a `task_ask` message), shown at the top of the box. A picked option is sent as the
+   * answer, followed by anything typed; with nothing picked, the typed text answers.
+   */
+  ask?: Message | undefined
 }
 
 /** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
@@ -285,6 +347,7 @@ export function Composer({
   elements = [],
   onElementsChange,
   context,
+  ask,
 }: Props) {
   const [text, setText] = useState("")
   const [caret, setCaret] = useState(0)
@@ -296,6 +359,11 @@ export function Composer({
   const [activeCommandIndex, setActiveCommandIndex] = useState(0)
   const fileInput = useRef<HTMLInputElement>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
+  // The picked option belongs to one question; a new question starts with nothing picked.
+  const [choice, setChoice] = useState<{ askId: string; index: number }>()
+  const askOptions = ask?.options ?? []
+  const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined
+  const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex]
   const slashMenuId = useId()
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
@@ -314,7 +382,7 @@ export function Composer({
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ]
-  const empty = text.trim() === "" && files.length === 0 && elements.length === 0
+  const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
   // Codex accepts both the native `$` and `/`. The menu follows the caret while it stays inside the first word,
@@ -400,13 +468,14 @@ export function Composer({
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
-    const message = [text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
+    const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, effort }, files).then(
       () => {
         setText("")
         onElementsChange?.([])
         setFiles([])
         setFileError(undefined)
+        setChoice(undefined)
       },
       () => {},
     )
@@ -440,6 +509,14 @@ export function Composer({
         chooseCommand(selectedCommand)
         return
       }
+    }
+    // With an empty box, the arrow keys move through the question's options.
+    if (!composing && ask && askOptions.length > 0 && text === "" && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault()
+      const delta = e.key === "ArrowDown" ? 1 : -1
+      const start = chosenIndex ?? (delta === 1 ? -1 : askOptions.length)
+      setChoice({ askId: ask.id, index: (start + delta + askOptions.length) % askOptions.length })
+      return
     }
     if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault()
@@ -485,6 +562,17 @@ export function Composer({
         onDrop={onDrop}
       >
         {context && <ContextBar context={context} />}
+        {ask && (
+          <AskPanel
+            ask={ask}
+            chosen={chosenIndex}
+            onChoose={(index) => {
+              setChoice({ askId: ask.id, index })
+              // Back to the box, so Enter sends the pick.
+              textarea.current?.focus()
+            }}
+          />
+        )}
         {(files.length > 0 || elements.length > 0) && (
           <div className="flex flex-wrap gap-2 px-1.5 pt-1.5">
             {elements.map((element, i) => (
@@ -508,7 +596,14 @@ export function Composer({
             ref={textarea}
             className="min-h-12 resize-none bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
             value={text}
-            placeholder={placeholder ?? "Message the agent (Enter to send, Shift+Enter for newline)"}
+            placeholder={
+              placeholder ??
+              (ask
+                ? askOptions.length > 0
+                  ? "Pick an answer and press Enter, or type your own"
+                  : "Type your answer (Enter to send)"
+                : "Message the agent (Enter to send, Shift+Enter for newline)")
+            }
             rows={2}
             autoFocus={autoFocus}
             role="combobox"

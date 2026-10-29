@@ -4,7 +4,6 @@ import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
-import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatClock } from "@/util"
@@ -44,7 +43,7 @@ function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?
   )
 }
 
-/** `children`: what hangs off a message (attachments, answer buttons), shown under its text. */
+/** `children`: what hangs off a message (attachments), shown under its text. */
 function ThreadItem({
   message,
   turn,
@@ -86,8 +85,8 @@ function ThreadItem({
         </div>
       )
     case "agent": {
-      // A duplicated message still holds attachments and answer buttons, and its footer is the running
-      // indicator; only the clock goes, since the transcript's turn footer covers the finished turn.
+      // A duplicated message still holds attachments, and its footer is the running indicator; only the clock
+      // goes, since the transcript's turn footer covers the finished turn.
       if (hideText && (children === undefined || children === null)) return <TurnFooter status={turn} />
       return (
         <div className={ENTER_CLASS}>
@@ -125,8 +124,9 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   // The last message of each run carries that turn's status.
   const lastMessageOfRun = new Map<string, string>()
   for (const m of sortedMessages) if (m.runId) lastMessageOfRun.set(m.runId, m.id)
-  // The latest question with options gets answer buttons, but only while the agent is blocked waiting for one.
-  const lastAsk = [...sortedMessages].reverse().find((m) => (m.options ?? []).length > 0)
+  // `task_ask` questions are the messages with `options` (possibly none). The latest one, while the agent is blocked
+  // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
+  const lastAsk = [...sortedMessages].reverse().find((m) => m.options !== undefined)
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined
 
   useEffect(() => {
@@ -159,41 +159,23 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           {sortedMessages.map((m) => {
             // A user message starts its run: that run's transcript follows the prompt.
             const startedRunId = m.role === "user" ? m.runId : null
-            const duplicate = m.role === "agent" && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
-            const attachments = m.attachments ?? []
-            // Attachments and answer buttons stay on the message itself, so it survives hiding its text.
-            const extras = attachments.length > 0 || m.id === pendingAsk?.id
+            const pending = m.id === pendingAsk?.id
+            // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
+            const duplicate =
+              m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
+            const attachments = pending ? [] : (m.attachments ?? [])
             const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined
             // While the prompt is the run's last message, its status goes under the transcript once one exists.
             const turnBelowTranscript = startedRunId !== null && (itemCountByRun.get(startedRunId) ?? 0) > 0
             return (
               <Fragment key={m.id}>
-                <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate}>
-                  {extras ? (
-                    <>
-                      {attachments.length > 0 && (
-                        <MessageAttachments
-                          taskId={taskId}
-                          attachments={attachments}
-                          className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
-                        />
-                      )}
-                      {m.id === pendingAsk?.id && (
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {(m.options ?? []).map((option, i) => (
-                            <Button
-                              key={i}
-                              variant="soft"
-                              size="sm"
-                              disabled={send.isPending}
-                              onClick={() => send.mutate({ body: { text: option } })}
-                            >
-                              {option}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
-                    </>
+                <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate || pending}>
+                  {attachments.length > 0 ? (
+                    <MessageAttachments
+                      taskId={taskId}
+                      attachments={attachments}
+                      className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
+                    />
                   ) : null}
                 </ThreadItem>
                 {startedRunId !== null && <RunTranscript runId={startedRunId} />}
@@ -221,6 +203,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
+            ask={pendingAsk}
             error={send.error ?? cancel.error}
             onStop={activeRun && (() => cancel.mutate(activeRun.id))}
             stopping={cancel.isPending}
