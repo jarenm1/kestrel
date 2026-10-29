@@ -85,7 +85,7 @@
 
         # Toolkits: heavy desktop apps a task opts into (the agent's `toolkit_install`), never part of
         # sandboxEnv. The box realizes `packages.toolkit-<name>` on demand with `nix build`, so a box
-        # downloads Blender or Wine only once some task asks for it. Names match packages/server/src/toolkits.ts.
+        # downloads Blender or Wine only once some task asks for it. Names match packages/server/src/sandbox/toolkits.ts.
         # Every binary is wrapped for the sandbox: Xvfb has no GPU and the sandbox has no /run/opengl-driver,
         # so GL and Vulkan come from Mesa's software drivers (llvmpipe, lavapipe).
         toolkitWrapArgs = pkgs.lib.escapeShellArgs [
@@ -94,6 +94,8 @@
           "--set" "VK_DRIVER_FILES" "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.uname.processor}.json"
           "--set" "GALLIUM_DRIVER" "llvmpipe"
           "--set-default" "FONTCONFIG_FILE" "${sandboxFontsConf}"
+          # Wine's X11 driver crashes on start when XDG_SESSION_TYPE is unset, as it is in the sandbox.
+          "--set-default" "XDG_SESSION_TYPE" "x11"
         ];
         mkToolkit = name: apps: pkgs.runCommand "kestrel-toolkit-${name}" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
           mkdir -p $out/bin
