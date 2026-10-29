@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { motion } from "framer-motion"
 import {
   ArrowRight,
@@ -56,11 +57,44 @@ const slideInRight = {
 }
 const staggerContainer = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } }
 
+/** The preview is laid out at this size and scaled down to fit narrower columns, so the tabs always show. */
+const PREVIEW_WIDTH = 640
+const PREVIEW_HEIGHT = 400
+
+/** Scales `children` (laid out at PREVIEW_WIDTH × PREVIEW_HEIGHT) down to the available width. */
+function FitWidth({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [scale, setScale] = useState(1)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const observer = new ResizeObserver(() => setScale(Math.min(1, el.clientWidth / PREVIEW_WIDTH)))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    // `contain: inline-size`: the fixed-width child must not widen this box, or it could never scale down.
+    <div ref={ref} className="[contain:inline-size]" style={{ height: PREVIEW_HEIGHT * scale }}>
+      <div
+        className="mx-auto"
+        style={{ width: PREVIEW_WIDTH, transform: `scale(${scale})`, transformOrigin: "top left" }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
 /** A still of the real app: thread tabs on the left, the open thread in a raised panel with the composer. */
 function AppPreview() {
   return (
-    <div className="flex h-[400px] overflow-hidden rounded-2xl bg-background text-[13px] shadow-[0_40px_80px_-20px_rgb(0_0_0/0.9),0_0_0_1px_rgb(255_255_255/0.06),0_0_60px_-10px_rgb(255_255_255/0.08)]">
-      <div className="hidden w-48 shrink-0 flex-col gap-0.5 py-3 pl-2 sm:flex">
+    <div
+      style={{ height: PREVIEW_HEIGHT }}
+      className="flex overflow-hidden rounded-2xl bg-background text-[13px] shadow-[0_40px_80px_-20px_rgb(0_0_0/0.9),0_0_0_1px_rgb(255_255_255/0.06),0_0_60px_-10px_rgb(255_255_255/0.08)]"
+    >
+      <div className="flex w-48 shrink-0 flex-col gap-0.5 py-3 pl-2">
         <div className="flex items-center gap-2 px-2.5 pb-3 text-foreground/90">
           <KestrelMark className="h-4" />
           <span className="text-xs font-medium">kestrel</span>
@@ -88,7 +122,7 @@ function AppPreview() {
           </div>
         ))}
       </div>
-      <div className="my-2 mr-2 flex min-w-0 flex-1 flex-col rounded-xl bg-card shadow-soft sm:rounded-l-none">
+      <div className="my-2 mr-2 flex min-w-0 flex-1 flex-col rounded-xl rounded-l-none bg-card shadow-soft">
         <div className="flex flex-1 flex-col gap-4 overflow-hidden px-5 pt-5">
           <div className="max-w-[85%] self-end rounded-2xl bg-white/[0.08] px-3.5 py-2 shadow-soft">
             The login test fails about one run in ten. Find out why and fix it.
@@ -140,17 +174,17 @@ export function LandingPage() {
             variants={staggerContainer}
             className="grid items-center gap-12 lg:grid-cols-2"
           >
-            <motion.div variants={fadeInUp} className="space-y-6">
+            <motion.div variants={fadeInUp} className="space-y-6 text-center lg:text-left">
               <h1 className="bg-[linear-gradient(180deg,#ffffff_0%,#ededef_45%,#8b8b93_100%)] bg-clip-text pb-2 text-5xl leading-[1.1] font-semibold tracking-tight text-transparent md:text-6xl lg:text-7xl">
                 A secure home
                 <br />
                 for your agents.
               </h1>
-              <p className="max-w-md text-base leading-relaxed text-muted-foreground">
+              <p className="mx-auto max-w-md text-base leading-relaxed text-muted-foreground lg:mx-0">
                 Cloud agents with everything good about local: your repos, your subscriptions, and builds that run
                 just like on your own machine. They just keep going when you close the laptop.
               </p>
-              <div className="flex items-center gap-3 pt-2">
+              <div className="flex items-center justify-center gap-3 pt-2 lg:justify-start">
                 <Button asChild size="lg">
                   <a href={APP_URL}>
                     Get Started <ArrowRight />
@@ -165,8 +199,11 @@ export function LandingPage() {
             </motion.div>
 
             <motion.div variants={slideInRight} className="relative" style={{ perspective: "1200px" }}>
-              <div style={{ transform: "rotateY(-8deg) rotateX(3deg)" }}>
-                <AppPreview />
+              {/* The tilt is for the wide two-column layout; stacked on narrow screens the preview sits flat. */}
+              <div className="lg:[transform:rotateY(-8deg)_rotateX(3deg)]">
+                <FitWidth>
+                  <AppPreview />
+                </FitWidth>
               </div>
             </motion.div>
           </motion.div>
