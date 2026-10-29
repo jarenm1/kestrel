@@ -51,6 +51,17 @@ const withCors = (response: Response, origin: string): Response => {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
+const previewAssetRequest = (request: Request, url: URL): boolean => {
+  if (url.pathname.startsWith("/_preview/")) return true
+  const referer = request.headers.get("referer")
+  if (referer === null) return false
+  try {
+    return /^\/_preview\/[0-9a-f-]{36}\/[^/]+(?:\/|$)/.test(new URL(referer).pathname)
+  } catch {
+    return false
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
@@ -65,6 +76,7 @@ export default {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
+      if (previewAssetRequest(request, url)) return await hub(env).fetch(request)
       if (url.pathname.startsWith("/api/")) {
         const response = await handleApi(request, env, url)
         const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null

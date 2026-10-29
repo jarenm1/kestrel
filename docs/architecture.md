@@ -4,14 +4,14 @@
 flowchart TB
   subgraph Browser["Browser"]
     APP["App SPA<br/>app.kestrel-agent.com: the app<br/>kestrel-agent.com: landing + pricing<br/>packages/app (React, TanStack Query)<br/>👤 caayd"]
-    VIEW["Desktop viewer + input<br/>DesktopViewer.tsx, desktop/*<br/>👤 Jaren (streaming)"]
+    VIEW["Desktop + Browser Preview<br/>DesktopViewer.tsx, PreviewViewer.tsx<br/>👤 Jaren"]
   end
 
   subgraph CF["Cloudflare"]
     subgraph CTRL["Worker kestrel: packages/control"]
       AUTH["GitHub OAuth, sessions, allow-list<br/>auth.ts, providers.ts<br/>👤 Person 4"]
-      API["Control API<br/>/api/me, /connections, /github/repos, /box, /api/automations<br/>api.ts, automations.ts<br/>👤 Person 4"]
-      HUB["Hub Durable Object<br/>users, sessions, secrets, relay<br/>hub.ts<br/>👤 Person 4 + Jaren"]
+      API["Control API<br/>/api and preview sessions<br/>api.ts, automations.ts<br/>👤 Person 4"]
+      HUB["Hub Durable Object<br/>users, sessions, secrets, preview tokens, relay<br/>hub.ts<br/>👤 Person 4 + Jaren"]
     end
   end
 
@@ -21,7 +21,7 @@ flowchart TB
     RELAY["Relay client<br/>dials out over WSS<br/>relay/*<br/>👤 Jaren"]
     REST["Box REST + WebSockets<br/>threads, checkouts, runs, diff, events<br/>http/*, core/service.ts<br/>👤 Jaren"]
     HARN["Harness<br/>runs claude / other CLI agents<br/>core/harness.ts, config.ts<br/>👤 Person 3"]
-    MCP["MCP server /mcp/:taskId<br/>desktop_*, workspace_exec, task_report<br/>mcp/handler.ts<br/>👤 Person 3"]
+    MCP["MCP server /mcp/:taskId<br/>desktop_*, preview_open, workspace_exec<br/>mcp/handler.ts<br/>👤 Person 3"]
     BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
     SB["bwrap sandbox in a systemd scope<br/>per-task memory/CPU/pids limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
     DESK["Desktop manager<br/>Xvfb + xdamage-capture → ffmpeg (damage-driven VFR; NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
@@ -36,9 +36,11 @@ flowchart TB
   API -->|list repos| GH
   API --> HUB
   HUB <-->|relay frames over WSS| RELAY
+  VIEW -->|sandboxed preview + short-lived token| HUB
   VIEW <-->|desktop stream WS| HUB
   VIEW -.->|planned: WebRTC direct| DESK
   RELAY --> REST
+  REST -->|loopback proxy in task netns| SB
   REST --> HARN
   REST --> STATE
   HARN -->|spawn| SB
@@ -67,6 +69,7 @@ flowchart TB
 - The agent runs inside a bubblewrap sandbox, in a transient systemd scope whose task slice caps memory, CPU and process count, and in the thread's own network namespace (pasta): internet yes, host loopback no, except the box port for MCP and the broker. Everything the agent can start (runs, `workspace_exec`, the desktop terminal, `desktop_launch` apps) goes through the same path and shares that namespace. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys. Each run has one token (`CLOUDAGENTS_MCP_TOKEN`): MCP requires it as a bearer header, the broker takes it in its URL, and both refuse it once the run ends; MCP sessions close with the run.
 - Each message names a model from the catalog in `packages/protocol/src/models.ts` (display name, provider, supported thinking levels). The harness runs the model's provider CLI: Claude Code for Anthropic, `codex exec` for OpenAI (`agentCommands` in `config.ts`). Agent sessions are recorded with the provider that printed them; a run resumes the thread's latest session only on the same provider, and a run on the other provider starts fresh with the earlier conversation in its prompt (`core/handoff.ts`).
 - The thread desktop is on demand: a run starts without one, and the agent starts it with `desktop_open` (or the user starts it from the Desktop tab). The desktop tools refuse until it is running. When it comes up, the Desktop tab opens for the user. Its Xvfb and the box's capture run in the thread's IPC namespace, the one the thread's sandboxes share, so desktop apps can use MIT-SHM.
+- The agent's `preview_open` MCP tool makes a dev server available in the separate Preview tab by recording its port on the Task; there is no user-facing port picker. A signed-in browser obtains a 24-hour preview-only bearer token; the iframe uses an opaque sandbox origin, and app cookies and connection credentials are never forwarded to the dev server. HTTP assets and text HMR WebSockets use the existing box relay, and the box connects only to `127.0.0.1:<registered port>` from the task's private network namespace. No dev-server port is published on the host or internet. “Select element” highlights a DOM element and returns its label and CSS selector for copying into a message. This sandbox intentionally does not expose app-origin storage, cookies, popups, or service workers.
 - Users attach files by uploading them first (`POST /api/tasks/:id/uploads`, raw bytes, `Content-Type` as the file type, optional `?name=`; at most 10 MiB). An upload waits on the box, unsent, until a message names it in `attachments`; then its bytes are copied into the task home at `uploads/<id>/<name>` and the message's text is followed by a note giving the agent that path. Uploads not sent are deleted with their task.
 - `repo_checkout` and the GitHub tools (`git_push`, `github_pr_create`, `github_pr_status`, `github_pr_review`) run on the box host, not in the sandbox; the GitHub tools name the checkout they act on (optional when the thread has one). The host pushes the checkout's thread branch to the repository with the owner's GitHub token passed only through git's per-process config, and the PR calls use the same token from the host side. Mirror fetches for a checkout (base branch or pull request head) work the same way. The token never enters the sandbox environment, tool arguments, tool output, or logs; pushes never force and only ever push the checkout's own thread branch.
 - Agents manage automations with the `automation_list`, `automation_create`, `automation_update` and `automation_delete` MCP tools. The box calls the control plane at `/box/automations` over HTTPS with the box token and the thread's owner in `x-kestrel-box-user` (`BOX_USER_HEADER`, from `packages/protocol`). The control plane checks the token and that the user exists, then runs the same handlers as the browser. A tool sees and changes the automations of its thread's owner.

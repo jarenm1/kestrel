@@ -13,6 +13,7 @@ import {
   type AgentItem,
   type Attachment,
   NotFound,
+  Paths,
   type PullRequestLink,
   Run,
   SendMessageResponse,
@@ -27,7 +28,7 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
-import { agentHome, desktopNamespace, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, type LaunchKind, type ProcessResult } from "../sandbox"
+import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
@@ -35,6 +36,65 @@ import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { checkoutPinRef, WorkspaceService, type CheckoutSpec } from "./workspace"
+
+const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
+  const prefix = location.pathname.match(/^\\/_preview\\/[^/]+\\/[^/]+/)[0];
+  const previewUrl = (value) => {
+    const url = new URL(value, location.href);
+    if (url.host !== location.host && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return value;
+    url.host = location.host;
+    if (!url.pathname.startsWith(prefix + "/")) url.pathname = prefix + url.pathname;
+    return url.href;
+  };
+  const nativeFetch = window.fetch;
+  window.fetch = (input, init) => nativeFetch(input instanceof Request ? new Request(previewUrl(input.url), input) : previewUrl(String(input)), init);
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) { return nativeOpen.call(this, method, previewUrl(String(url)), ...rest); };
+  const NativeWebSocket = window.WebSocket;
+  window.WebSocket = class extends NativeWebSocket {
+    constructor(url, protocols) { super(previewUrl(String(url)), protocols); }
+  };
+  let enabled = false;
+  let hovered = null;
+  const style = document.createElement("style");
+  style.textContent = "[data-kestrel-preview-hover]{outline:2px solid #7c3aed!important;outline-offset:2px!important;cursor:crosshair!important}";
+  document.documentElement.append(style);
+  const selectorFor = (element) => {
+    if (element.id) return "#" + CSS.escape(element.id);
+    const parts = [];
+    for (let node = element; node && node.nodeType === 1; node = node.parentElement) {
+      let part = node.localName;
+      const siblings = node.parentElement ? [...node.parentElement.children].filter((item) => item.localName === node.localName) : [];
+      if (siblings.length > 1) part += ":nth-of-type(" + (siblings.indexOf(node) + 1) + ")";
+      parts.unshift(part);
+      if (node.id) { parts[0] = "#" + CSS.escape(node.id); break; }
+    }
+    return parts.join(" > ");
+  };
+  window.addEventListener("message", (event) => {
+    if (event.source !== parent || event.data?.type !== "kestrel-preview-select-mode") return;
+    enabled = event.data.enabled === true;
+    document.documentElement.style.cursor = enabled ? "crosshair" : "";
+    if (!enabled && hovered) { hovered.removeAttribute("data-kestrel-preview-hover"); hovered = null; }
+  });
+  document.addEventListener("pointerover", (event) => {
+    if (!enabled || !(event.target instanceof Element)) return;
+    if (hovered) hovered.removeAttribute("data-kestrel-preview-hover");
+    hovered = event.target;
+    hovered.setAttribute("data-kestrel-preview-hover", "");
+  }, true);
+  document.addEventListener("click", (event) => {
+    if (!enabled || !(event.target instanceof Element)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const element = event.target;
+    const label = element.getAttribute("aria-label") || element.getAttribute("alt") || (element.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 160) || element.localName;
+    parent.postMessage({ type: "kestrel-preview-selection", label, selector: selectorFor(element) }, "*");
+    enabled = false;
+    document.documentElement.style.cursor = "";
+    if (hovered) { hovered.removeAttribute("data-kestrel-preview-hover"); hovered = null; }
+  }, true);
+})();</script>`
 
 /** Bytes an agent attaches to a message (e.g. a desktop screenshot); core stores them and serves them over REST. */
 export interface AttachmentInput {
@@ -133,6 +193,8 @@ export interface CoreShape {
   readonly desktopStop: (user: string, taskId: string) => Effect.Effect<void, NotFound>
   /** Used by the MCP handler: starts the task's desktop, or returns the one already running. */
   readonly desktopOpen: (taskId: string) => Effect.Effect<DesktopStatus, NotFound | Conflict | InternalError>
+  /** Used by the MCP handler: expose the agent's dev-server port in the browser preview. */
+  readonly previewOpen: (taskId: string, runId: string, port: number) => Effect.Effect<Task, NotFound | Conflict | InternalError>
 
   /** Used by the MCP handler: a run's own status report. Fails unless `runId` is the task's running run. */
   readonly report: (taskId: string, runId: string, input: ReportInput) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
@@ -144,6 +206,10 @@ export interface CoreShape {
   ) => Effect.Effect<string, NotFound | Conflict | BadRequest | InternalError | AskError>
   /** Used by the MCP handler: the agent-facing text of the run's user messages it has not seen yet; those messages are marked read. */
   readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>>
+  /** An authenticated request to the task's registered loopback dev server. */
+  readonly previewRequest: (user: string, taskId: string, request: Request) => Effect.Effect<Response, NotFound | Conflict | BadRequest | InternalError>
+  /** Authenticated HMR socket for the task's registered preview port. */
+  readonly previewSocket: (user: string, taskId: string, path: string, protocol?: string) => Effect.Effect<TaskPreviewSocket, NotFound | Conflict | InternalError>
   /** Bytes of an attachment on one of the signed-in user's task messages. */
   readonly attachment: (
     user: string,
@@ -1052,6 +1118,96 @@ export const CoreLive = Layer.effect(
         }),
 
       desktopStatus: (user, taskId) => Effect.zipRight(ownedTask(user, taskId), desktop.status(taskId)),
+      previewSocket: (user, taskId, path, protocol) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          if (task.archivedAt !== undefined) {
+            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
+          }
+          if (task.previewPort === undefined) {
+            return yield* Effect.fail(new NotFound({ message: "the agent has not opened a preview for this thread" }))
+          }
+          return yield* openTaskPreviewSocket(sandboxSettings, taskId, {
+            port: task.previewPort,
+            path,
+            protocol,
+          })
+        }),
+      previewRequest: (user, taskId, request) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          if (task.archivedAt !== undefined) {
+            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
+          }
+          if (task.previewPort === undefined) {
+            return yield* Effect.fail(new NotFound({ message: "the agent has not opened a preview for this thread" }))
+          }
+          const previewToken = request.headers.get("x-kestrel-preview-token")
+          if (previewToken === null) {
+            return yield* Effect.fail(new NotFound({ message: "preview session is invalid" }))
+          }
+          const requestUrl = new URL(request.url)
+          const prefix = Paths.taskPreview(taskId)
+          const framePrefix = Paths.taskPreviewFrame(previewToken, taskId).slice(0, -1)
+          if (!requestUrl.pathname.startsWith(prefix)) {
+            return yield* Effect.fail(new NotFound({ message: "preview route not found" }))
+          }
+          const path = `${requestUrl.pathname.slice(prefix.length) || "/"}${requestUrl.search}`
+          if (!["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(request.method)) {
+            return yield* Effect.fail(new BadRequest({ message: "unsupported preview request method" }))
+          }
+          const headers: Record<string, string> = {}
+          request.headers.forEach((value, name) => {
+            if (["accept", "accept-language", "content-type", "range"].includes(name)) {
+              headers[name] = value
+            }
+          })
+          headers["accept-encoding"] = "identity"
+          const body = request.method === "GET" || request.method === "HEAD"
+            ? undefined
+            : new Uint8Array(yield* Effect.tryPromise({
+                try: () => request.arrayBuffer(),
+                catch: () => new BadRequest({ message: "cannot read preview request body" }),
+              }))
+          const upstream = yield* taskPreviewFetch(sandboxSettings, taskId, {
+            port: task.previewPort,
+            method: request.method,
+            path,
+            headers,
+            body,
+          })
+          const responseHeaders = new Headers(upstream.headers)
+          for (const name of ["set-cookie", "set-cookie2", "content-length", "content-encoding", "content-security-policy", "connection", "x-frame-options"]) {
+            responseHeaders.delete(name)
+          }
+          const location = responseHeaders.get("location")
+          if (location?.startsWith("/")) responseHeaders.set("location", `${framePrefix}${location}`)
+          let responseBody = new Uint8Array(yield* Effect.tryPromise({
+            try: () => upstream.arrayBuffer(),
+            catch: () => new InternalError({ message: "cannot read preview response" }),
+          }))
+          const prefixPath = `${framePrefix}/`
+          const contentType = responseHeaders.get("content-type") ?? ""
+          if (contentType.includes("text/html")) {
+            let html = new TextDecoder().decode(responseBody)
+            html = html.replace(/((?:src|href|action|poster)\s*=\s*["'])\/(?!\/)/gi, `$1${prefixPath}`)
+            html = /<head(?:\s[^>]*)?>/i.test(html)
+              ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${PREVIEW_SELECTOR_SCRIPT}`)
+              : `${PREVIEW_SELECTOR_SCRIPT}${html}`
+            responseBody = new TextEncoder().encode(html)
+            responseHeaders.set("content-security-policy", "sandbox allow-scripts allow-forms")
+          } else if (/javascript|ecmascript|text\/css/.test(contentType)) {
+            const text = new TextDecoder().decode(responseBody)
+            const rewritten = text.replace(/(["'`])\/(?!\/)/g, `$1${prefixPath}`).replace(/url\(\s*\/(?!\/)/g, `url(${prefixPath}`)
+            responseBody = new TextEncoder().encode(rewritten)
+          }
+          const noBody = request.method === "HEAD" || [204, 205, 304].includes(upstream.status)
+          responseHeaders.delete("content-length")
+          responseHeaders.set("referrer-policy", "strict-origin-when-cross-origin")
+          responseHeaders.set("cache-control", "no-store")
+          responseHeaders.set("access-control-allow-origin", "*")
+          return new Response(noBody ? null : responseBody, { status: upstream.status, headers: responseHeaders })
+        }),
 
       desktopStart: (user, taskId) =>
         Effect.gen(function* () {
@@ -1076,6 +1232,27 @@ export const CoreLive = Layer.effect(
           return yield* startDesktop(task).pipe(
             Effect.mapError((e: DesktopError) => new InternalError({ message: e.message })),
           )
+        }),
+      previewOpen: (taskId, runId, port) =>
+        Effect.gen(function* () {
+          const updated = yield* store.update(
+            (s): Either.Either<Task, NotFound | Conflict> => {
+              const found = findTask(s, taskId)
+              if (Either.isLeft(found)) return Either.left(found.left)
+              const run = s.runs.find((r) => r.id === runId)
+              if (!run || run.taskId !== taskId || run.status !== "running") {
+                return Either.left(new Conflict({ message: `run ${runId} is not the running run of task ${taskId}` }))
+              }
+              if (found.right.archivedAt !== undefined) {
+                return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
+              }
+              found.right.previewPort = port
+              found.right.updatedAt = nowIso()
+              return Either.right({ ...found.right })
+            },
+          )
+          hub.publish({ _tag: "task.updated", task: updated })
+          return updated
         }),
 
       report: (taskId, runId, input) =>

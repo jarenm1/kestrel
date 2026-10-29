@@ -64,9 +64,15 @@ export const Task = Schema.Struct({
   updatedAt: Schema.String,
   /** Oldest first. Empty until the agent checks a repository out. */
   checkouts: Schema.Array(Checkout),
+  /** Port of the task's dev server, registered by its agent for the browser preview. */
+  previewPort: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 65535))),
   /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
   archivedAt: Schema.optional(Schema.String),
 })
+
+/** Short-lived bearer used by a sandboxed preview frame; grants access only to its own task preview. */
+export const PreviewSession = Schema.Struct({ token: Schema.String })
+export type PreviewSession = typeof PreviewSession.Type
 export type Task = typeof Task.Type
 
 /**
@@ -337,6 +343,12 @@ export const Paths = {
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
+  /** Preview view path; the remaining path segments and query are proxied to the registered dev server. */
+  taskPreview: (id: string) => `/api/tasks/${id}/preview`,
+  /** POST -> PreviewSession: mints a short-lived token for the isolated/sandboxed browser preview. */
+  taskPreviewSession: (id: string) => `/api/tasks/${id}/preview/session`,
+  /** Sandboxed preview document path; `token` is scoped to `taskId` and cannot access the app session. */
+  taskPreviewFrame: (token: string, taskId: string) => `/_preview/${token}/${taskId}/`,
   taskAttachment: (taskId: string, attachmentId: string) => `/api/tasks/${taskId}/attachments/${attachmentId}`,
   /**
    * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the

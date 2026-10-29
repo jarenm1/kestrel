@@ -265,6 +265,228 @@ const taskNamespaces = (
     return { holder, nsenter }
   })
 
+const PREVIEW_FETCH_SCRIPT = `
+const input = JSON.parse(process.env.KESTREL_PREVIEW_REQUEST);
+const bodyChunks = [];
+for await (const chunk of process.stdin) bodyChunks.push(Buffer.from(chunk));
+const body = Buffer.concat(bodyChunks);
+const response = await fetch("http://127.0.0.1:" + input.port + input.path, {
+  method: input.method,
+  headers: input.headers,
+  body: input.method === "GET" || input.method === "HEAD" || body.length === 0 ? undefined : body,
+  redirect: "manual"
+});
+const metadata = JSON.stringify({ status: response.status, headers: Object.fromEntries(response.headers) }) + "\\n";
+process.stdout.write(metadata);
+if (response.body) {
+  for await (const chunk of response.body) {
+    if (!process.stdout.write(chunk)) await new Promise((resolve) => process.stdout.once("drain", resolve));
+  }
+}
+`
+
+/** A bounded HTTP request to a task's loopback-only dev server; never accepts a hostname or an arbitrary target URL. */
+export const taskPreviewFetch = (
+  settings: SandboxSettings,
+  taskId: string,
+  input: {
+    readonly port: number
+    readonly method: string
+    readonly path: string
+    readonly headers: Readonly<Record<string, string>>
+    readonly body?: Uint8Array
+  },
+): Effect.Effect<Response, InternalError> =>
+  Effect.gen(function* () {
+    const serialized = JSON.stringify({
+      port: input.port,
+      method: input.method,
+      path: input.path,
+      headers: input.headers,
+    })
+    const env = { PATH: process.env.PATH ?? "", KESTREL_PREVIEW_REQUEST: serialized }
+    let file = process.execPath
+    let args = ["-e", PREVIEW_FETCH_SCRIPT]
+    if (settings.enabled) {
+      const systemdRun = yield* requireSystemdRun(settings)
+      if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
+      const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
+      const joined = joinTaskNet(nsenter, holder)
+      file = joined[0]!
+      args = [...joined.slice(1), process.execPath, ...args]
+    }
+    const pending = Promise.withResolvers<Response>()
+    const spawned = yield* Effect.try({
+      try: () => spawn(file, args, { env, stdio: ["pipe", "pipe", "ignore"] }),
+      catch: (e) => new InternalError({ message: `preview request failed to start: ${String(e)}` }),
+    })
+    spawned.stdin?.end(input.body ? Buffer.from(input.body) : undefined)
+    const chunks: Buffer[] = []
+    let size = 0
+    let timedOut = false
+    const maxBytes = 20 * 1024 * 1024
+    const timeout = setTimeout(() => {
+      timedOut = true
+      spawned.kill("SIGKILL")
+    }, 25_000)
+    spawned.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength
+      if (size > maxBytes) {
+        spawned.kill("SIGKILL")
+        return
+      }
+      chunks.push(chunk)
+    })
+    spawned.once("error", pending.reject)
+    spawned.once("close", (code) => {
+      clearTimeout(timeout)
+      if (code !== 0) {
+        pending.reject(
+          new Error(
+            size > maxBytes ? "preview response exceeded 20 MiB" : timedOut ? "preview request timed out" : `preview request exited ${code}`,
+          ),
+        )
+        return
+      }
+      const output = Buffer.concat(chunks)
+      const end = output.indexOf(10)
+      if (end < 0) {
+        pending.reject(new Error("preview server returned an invalid response"))
+        return
+      }
+      try {
+        const meta = JSON.parse(output.subarray(0, end).toString("utf8")) as {
+          status: number
+          headers: Record<string, string>
+        }
+        const body = input.method === "HEAD" || [204, 205, 304].includes(meta.status) ? null : output.subarray(end + 1)
+        pending.resolve(new Response(body, { status: meta.status, headers: meta.headers }))
+      } catch {
+        pending.reject(new Error("preview server returned an invalid response"))
+      }
+    })
+    return yield* Effect.tryPromise({
+      try: () => pending.promise,
+      catch: (e) => new InternalError({ message: `preview request failed: ${e instanceof Error ? e.message : String(e)}` }),
+    })
+  })
+
+const PREVIEW_WEBSOCKET_SCRIPT = `
+const input = JSON.parse(process.env.KESTREL_PREVIEW_REQUEST);
+const socket = new WebSocket("ws://127.0.0.1:" + input.port + input.path, input.protocol ? [input.protocol] : undefined);
+socket.addEventListener("open", () => process.stdout.write(JSON.stringify({ type: "open" }) + "\\n"));
+socket.addEventListener("message", (event) => {
+  if (typeof event.data === "string") process.stdout.write(JSON.stringify({ type: "text", data: event.data }) + "\\n");
+});
+socket.addEventListener("close", () => {
+  process.stdout.write(JSON.stringify({ type: "close" }) + "\\n");
+  process.exit(0);
+});
+socket.addEventListener("error", () => {
+  process.stdout.write(JSON.stringify({ type: "close" }) + "\\n");
+  process.exit(1);
+});
+let lines = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  lines += chunk;
+  let end;
+  while ((end = lines.indexOf("\\n")) >= 0) {
+    const line = lines.slice(0, end);
+    lines = lines.slice(end + 1);
+    try {
+      const message = JSON.parse(line);
+      if (message.type === "text" && socket.readyState === WebSocket.OPEN) socket.send(message.data);
+      if (message.type === "close") socket.close();
+    } catch {}
+  }
+});
+`
+
+export interface TaskPreviewSocket {
+  readonly sendText: (data: string) => void
+  readonly onText: (listener: (data: string) => void) => void
+  readonly onClose: (listener: () => void) => void
+  readonly close: () => void
+}
+
+/** Opens a WebSocket only to the task's loopback dev server for HMR. */
+export const openTaskPreviewSocket = (
+  settings: SandboxSettings,
+  taskId: string,
+  input: { readonly port: number; readonly path: string; readonly protocol?: string },
+): Effect.Effect<TaskPreviewSocket, InternalError> =>
+  Effect.gen(function* () {
+    let file = process.execPath
+    let args = ["-e", PREVIEW_WEBSOCKET_SCRIPT]
+    if (settings.enabled) {
+      const systemdRun = yield* requireSystemdRun(settings)
+      if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
+      const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
+      const joined = joinTaskNet(nsenter, holder)
+      file = joined[0]!
+      args = [...joined.slice(1), process.execPath, ...args]
+    }
+    const spawned = yield* Effect.try({
+      try: () =>
+        spawn(file, args, {
+          env: { PATH: process.env.PATH ?? "", KESTREL_PREVIEW_REQUEST: JSON.stringify(input) },
+          stdio: ["pipe", "pipe", "ignore"],
+        }),
+      catch: (e) => new InternalError({ message: `preview WebSocket failed to start: ${String(e)}` }),
+    })
+    let pendingText = ""
+    let textListener: ((data: string) => void) | null = null
+    const queuedText: string[] = []
+    let closed = false
+    let closeListener: (() => void) | null = null
+    const close = () => {
+      if (closed) return
+      closed = true
+      closeListener?.()
+    }
+    const startupTimeout = setTimeout(() => spawned.kill("SIGKILL"), 15_000)
+    spawned.stdout.on("data", (chunk: Buffer) => {
+      pendingText += chunk.toString("utf8")
+      let end: number
+      while ((end = pendingText.indexOf("\n")) >= 0) {
+        const line = pendingText.slice(0, end)
+        pendingText = pendingText.slice(end + 1)
+        try {
+          const message = JSON.parse(line) as { type?: string; data?: string }
+          if (message.type === "open") clearTimeout(startupTimeout)
+          if (message.type === "text" && typeof message.data === "string") {
+            if (textListener) textListener(message.data)
+            else queuedText.push(message.data)
+          }
+          if (message.type === "close") close()
+        } catch {
+          spawned.kill("SIGKILL")
+        }
+      }
+    })
+    spawned.once("close", close)
+    return {
+      sendText: (data) => {
+        if (!closed) spawned.stdin.write(`${JSON.stringify({ type: "text", data })}\n`)
+      },
+      onText: (listener) => {
+        textListener = listener
+        for (const data of queuedText.splice(0)) listener(data)
+      },
+      onClose: (listener) => {
+        closeListener = listener
+        if (closed) listener()
+      },
+      close: () => {
+        if (closed) return
+        spawned.stdin.write(`${JSON.stringify({ type: "close" })}\n`)
+        setTimeout(() => spawned.kill("SIGTERM"), 500)
+        close()
+      },
+    }
+  })
+
 /**
  * The task's IPC namespace, for the task desktop's X server and the box's MIT-SHM clients of it (capture,
  * screenshots): a process in it now, and the argv prefix that joins a process's IPC namespace. Starts the task's

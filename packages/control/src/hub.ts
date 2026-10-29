@@ -213,6 +213,12 @@ export class Hub extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS preview_sessions (
+        token TEXT PRIMARY KEY,
+        login TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      )`)
     })
   }
 
@@ -257,6 +263,37 @@ export class Hub extends DurableObject<Env> {
 
   deleteSession(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
+  }
+
+  /** Short-lived preview-only capability; the browser never receives the app session cookie. */
+  createPreviewSession(login: string, taskId: string): string {
+    const now = Date.now()
+    const token = crypto.randomUUID()
+    const sql = this.ctx.storage.sql
+    sql.exec("DELETE FROM preview_sessions WHERE expires_at <= ?", now)
+    sql.exec(
+      "INSERT INTO preview_sessions (token, login, task_id, expires_at) VALUES (?, ?, ?, ?)",
+      token,
+      login,
+      taskId,
+      now + 24 * 60 * 60 * 1000,
+    )
+    return token
+  }
+
+  /** The owner and task for a live preview token; expired tokens are not valid. */
+  previewSession(token: string): { login: string; taskId: string } | null {
+    const sql = this.ctx.storage.sql
+    const now = Date.now()
+    sql.exec("DELETE FROM preview_sessions WHERE expires_at <= ?", now)
+    const row = sql
+      .exec<{ login: string; taskId: string }>(
+        "SELECT login, task_id AS taskId FROM preview_sessions WHERE token = ? AND expires_at > ?",
+        token,
+        now,
+      )
+      .toArray()[0]
+    return row ?? null
   }
 
   // -------------------------------------------------------------------------
@@ -646,8 +683,48 @@ export class Hub extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === RELAY_CONNECT_PATH) return this.acceptBox(request)
+    if (url.pathname.startsWith("/_preview/") || this.previewReferer(request) !== null) {
+      return this.previewRelay(request, url)
+    }
     if (url.pathname.startsWith("/api/")) return this.relay(request, url)
     return errorResponse(404, "NotFound", `no route for ${url.pathname}`)
+  }
+  private previewReferer(request: Request): { token: string; taskId: string } | null {
+    const referer = request.headers.get("referer")
+    if (referer === null) return null
+    let pathname: string
+    try {
+      pathname = new URL(referer).pathname
+    } catch {
+      return null
+    }
+    const match = /^\/_preview\/([0-9a-f-]{36})\/([^/]+)(?:\/.*)?$/.exec(pathname)
+    return match?.[1] && match[2] ? { token: match[1], taskId: decodeURIComponent(match[2]) } : null
+  }
+
+  private async previewRelay(request: Request, url: URL): Promise<Response> {
+    const direct = /^\/_preview\/([0-9a-f-]{36})\/([^/]+)(\/.*)?$/.exec(url.pathname)
+    const referer = this.previewReferer(request)
+    const token = direct?.[1] ?? referer?.token
+    const taskId = direct?.[2] ? decodeURIComponent(direct[2]) : referer?.taskId
+    if (!token || !taskId) return errorResponse(404, "NotFound", "preview not found")
+    const session = this.previewSession(token)
+    if (!session || session.taskId !== taskId) return errorResponse(404, "NotFound", "preview not found")
+    const suffix = direct ? (direct[3] || "/") : `${url.pathname}${url.search}`
+    const target = new URL(`${Paths.taskPreview(taskId)}${suffix}${direct ? url.search : ""}`, request.url)
+    const headers = new Headers(request.headers)
+    headers.delete("cookie")
+    headers.delete("authorization")
+    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.credentials(session.login)))
+    headers.set("x-kestrel-preview-token", token)
+    const protocol = request.headers.get("sec-websocket-protocol")
+    if (protocol) headers.set("x-kestrel-preview-protocol", protocol.split(",")[0]!.trim())
+    const forwarded = new Request(request, { headers })
+    const response = await this.relay(forwarded, target)
+    if (response.status === 101) return response
+    const outputHeaders = new Headers(response.headers)
+    outputHeaders.set("referrer-policy", "strict-origin-when-cross-origin")
+    return new Response(response.body, { status: response.status, headers: outputHeaders })
   }
 
   private acceptBox(request: Request): Response {
@@ -675,7 +752,7 @@ export class Hub extends DurableObject<Env> {
     const headers = headersToRecord(request.headers, DROP_FOR_BOX)
 
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return this.openStream(box, path, headers)
+      return this.openStream(box, path, headers, request.headers.get("sec-websocket-protocol")?.split(",")[0]?.trim())
     }
 
     const body =
@@ -708,7 +785,7 @@ export class Hub extends DurableObject<Env> {
     return promise
   }
 
-  private openStream(box: WebSocket, path: string, headers: Record<string, string>): Response {
+  private openStream(box: WebSocket, path: string, headers: Record<string, string>, protocol?: string): Response {
     const id = this.allocId()
     const pair = new WebSocketPair()
     const client = pair[0]
@@ -748,7 +825,11 @@ export class Hub extends DurableObject<Env> {
       closeQuietly(server, 1000, "agent box unreachable")
       return errorResponse(502, "BadGateway", "agent box is unreachable")
     }
-    return new Response(null, { status: 101, webSocket: client })
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      ...(protocol ? { headers: { "sec-websocket-protocol": protocol } } : {}),
+    })
   }
 
   // -------------------------------------------------------------------------

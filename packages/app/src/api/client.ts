@@ -12,6 +12,7 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  PreviewSession,
   Me,
   Message,
   Paths,
@@ -157,6 +158,8 @@ export const api = {
     run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
   deleteAutomation: (id: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.automation(id)))),
+  previewSession: (taskId: string) =>
+    run(request(PreviewSession, "POST", Paths.taskPreviewSession(taskId), {})),
 
   // Agent box (relayed by the Worker).
   listTasks: () => run(request(Schema.Array(Task), "GET", Paths.tasks)),

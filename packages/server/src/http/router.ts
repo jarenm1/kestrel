@@ -93,6 +93,20 @@ const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
   Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
 )
 
+const servePreview = (core: CoreShape, taskId: string) =>
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest
+    const webRequest = yield* HttpServerRequest.toWeb(request).pipe(
+      Effect.mapError(() => new BadRequest({ message: "cannot read preview request" })),
+    )
+    const user = yield* requestUser
+    if (user === null) return errorResponse(new BadRequest({ message: "no signed-in user" }))
+    return yield* core.previewRequest(user, taskId, webRequest).pipe(
+      Effect.map(HttpServerResponse.fromWeb),
+      Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
+    )
+  })
+
 export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
@@ -200,6 +214,14 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       ),
     ),
 
+    HttpRouter.all(
+      "/api/tasks/:id/preview",
+      Effect.flatMap(pathId, (id) => servePreview(core, id)),
+    ),
+    HttpRouter.all(
+      "/api/tasks/:id/preview/*",
+      Effect.flatMap(pathId, (id) => servePreview(core, id)),
+    ),
     HttpRouter.get(
       "/api/tasks/:id/desktop",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.desktopStatus(user, id)))),

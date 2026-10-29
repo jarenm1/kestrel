@@ -20,21 +20,31 @@ export interface StreamSocket {
   readonly onClose: (listener: () => void) => void
 }
 
-export interface StreamRoute {
-  readonly kind: "events" | "desktop"
-  readonly taskId: string
-}
+export type StreamRoute =
+  | { readonly kind: "events" | "desktop"; readonly taskId: string }
+  | { readonly kind: "preview"; readonly taskId: string; readonly path: string; readonly protocol?: string }
 
 const EVENTS_PATH = /^\/api\/tasks\/([^/]+)\/events$/
 const DESKTOP_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/stream$/
+const PREVIEW_PATH = /^\/api\/tasks\/([^/]+)\/preview(?:\/.*)?$/
 
-/** Maps a WebSocket pathname (no query) to its stream route; null when the path is not a stream. */
-export const streamRoute = (pathname: string): StreamRoute | null => {
+/** Maps a relayed WebSocket URL to its thread stream route. */
+export const streamRoute = (pathname: string, requestPath = pathname, protocol?: string): StreamRoute | null => {
   const events = EVENTS_PATH.exec(pathname)
   if (events) return { kind: "events", taskId: decodeURIComponent(events[1] ?? "") }
   const desktop = DESKTOP_PATH.exec(pathname)
   if (desktop) return { kind: "desktop", taskId: decodeURIComponent(desktop[1] ?? "") }
-  return null
+  const preview = PREVIEW_PATH.exec(pathname)
+  if (!preview?.[1]) return null
+  const requestUrl = new URL(requestPath, "http://box.local")
+  const prefix = `/api/tasks/${preview[1]}/preview`
+  const path = `${requestUrl.pathname.slice(prefix.length) || "/"}${requestUrl.search}`
+  return {
+    kind: "preview",
+    taskId: decodeURIComponent(preview[1]),
+    path,
+    ...(protocol ? { protocol } : {}),
+  }
 }
 
 /** Close code sent when the task does not exist or belongs to someone else. */
@@ -193,6 +203,32 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
   })
 
+
+const servePreview = (
+  route: Extract<StreamRoute, { kind: "preview" }>,
+  user: string,
+  socket: StreamSocket,
+): Effect.Effect<void, never, WsServices> =>
+  Effect.gen(function* () {
+    const core = yield* CoreService
+    const upstream = yield* core.previewSocket(user, route.taskId, route.path, route.protocol).pipe(Effect.either)
+    if (upstream._tag === "Left") {
+      return yield* closeWith(socket, CLOSE_NOT_FOUND, upstream.left.message)
+    }
+    upstream.right.onText((data) => socket.sendText(data))
+    upstream.right.onClose(() => socket.close())
+    socket.onText(upstream.right.sendText)
+    socket.onClose(upstream.right.close)
+    yield* Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void)))
+  })
 /** Runs the handler for a stream route against one socket for the signed-in `user`. Never fails: errors close the socket. */
-export const serveStream = (route: StreamRoute, user: string, socket: StreamSocket): Effect.Effect<void, never, WsServices> =>
-  route.kind === "events" ? serveEvents(socket, user, route.taskId) : serveDesktop(socket, user, route.taskId)
+export const serveStream = (route: StreamRoute, user: string, socket: StreamSocket): Effect.Effect<void, never, WsServices> => {
+  switch (route.kind) {
+    case "events":
+      return serveEvents(socket, user, route.taskId)
+    case "desktop":
+      return serveDesktop(socket, user, route.taskId)
+    case "preview":
+      return servePreview(route, user, socket)
+  }
+}

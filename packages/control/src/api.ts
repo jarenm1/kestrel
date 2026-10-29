@@ -3,7 +3,10 @@ import {
   CREDENTIALS_HEADER,
   CliAuthStatus,
   ControlPaths,
+  Paths,
+  PreviewSession,
   PutApiKeyBody,
+  Task,
   type BoxStatus,
   type Connection,
   type GithubRepo,
@@ -126,6 +129,22 @@ const relayToBox = async (request: Request, env: Env, session: SessionRecord, ur
   return hub(env).fetch(forwarded)
 }
 
+const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
+  const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
+  if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
+  let value: unknown
+  try {
+    value = JSON.parse(result.body) as unknown
+  } catch {
+    return errorResponse(502, "BadGateway", "agent box returned an invalid task")
+  }
+  if (!Schema.is(Task)(value) || value.owner !== login) return errorResponse(404, "NotFound", "thread not found")
+  if (value.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
+  if (value.previewPort === undefined) return errorResponse(409, "Conflict", "the agent has not opened a preview")
+  const token = await hub(env).createPreviewSession(login, taskId)
+  return json(Schema.decodeSync(PreviewSession)({ token }))
+}
+
 /** Routes every `/api/*` request: control routes in the Worker, everything else relayed to the box. */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const session = await currentSession(request, env)
@@ -134,6 +153,10 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
 
   const path = url.pathname
   const method = request.method
+  const previewSession = /^\/api\/tasks\/([^/]+)\/preview\/session$/.exec(path)
+  if (previewSession?.[1] && method === "POST") {
+    return createPreviewSession(env, login, decodeURIComponent(previewSession[1]))
+  }
 
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)

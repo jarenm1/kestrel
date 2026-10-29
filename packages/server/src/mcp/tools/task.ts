@@ -1,4 +1,4 @@
-import type { TaskStatus } from "@cloudagents/protocol"
+import type { Task, TaskStatus } from "@cloudagents/protocol"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js"
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js"
@@ -29,6 +29,7 @@ export interface TaskToolDeps {
   ) => Effect.Effect<void, unknown>
   readonly ask: (taskId: string, runId: string, input: AskToolInput) => Effect.Effect<string, unknown>
   readonly inbox: (taskId: string, runId: string) => Effect.Effect<ReadonlyArray<string>, unknown>
+  readonly previewOpen: (taskId: string, runId: string, port: number) => Effect.Effect<Task, unknown>
   readonly desktop: { readonly screenshot: (taskId: string) => Effect.Effect<Uint8Array, unknown> }
 }
 
@@ -77,6 +78,27 @@ const abandonedCall = (extra: RequestHandlerExtra<ServerRequest, ServerNotificat
   })
 
 export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: TaskToolDeps): void => {
+  server.registerTool(
+    "preview_open",
+    {
+      description:
+        "Register this task's dev server for the user's in-app Preview tab. Call after starting the web app's development server; " +
+        "the agent chooses the port. The server must listen on 127.0.0.1 in this task. The browser Preview tab becomes available " +
+        "without exposing the port publicly.",
+      inputSchema: {
+        port: z.number().int().min(1).max(65535).describe("Port of the dev server running inside this task"),
+      },
+    },
+    ({ port }: { port: number }) =>
+      guard(() =>
+        runTool(
+          Effect.map(deps.previewOpen(ctx.taskId, ctx.runId, port), (task) =>
+            text(`Preview is available in this thread on port ${task.previewPort}.`),
+          ),
+        ),
+      ),
+  )
+
   server.registerTool(
     "task_report",
     {
