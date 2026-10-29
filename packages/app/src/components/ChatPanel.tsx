@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, type ReactNode } from "react"
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
@@ -6,7 +6,7 @@ import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
-import { formatClock } from "@/util"
+import { formatClock, formatElapsed } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer, type ElementContext } from "./Composer"
 import { Markdown } from "./Markdown"
@@ -30,30 +30,49 @@ interface Props {
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
 
-/** Under a thread block: a spinner while the turn runs, and the time. Finished turns get no icon. */
-function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?: string }) {
-  const running = status === "running"
-  if (!running && !time) return null
+/** How often the running turn's elapsed time is redrawn. */
+const ELAPSED_TICK_MS = 1000
+
+/** The run's time so far, redrawn every second. */
+function Elapsed({ startedAt }: { startedAt: string }) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="tabular-nums">{formatElapsed(Date.parse(startedAt), now)}</span>
+}
+
+/**
+ * The running turn's spinner and time so far, anchored just above the composer whatever the thread's scroll position.
+ * It sits a row above the context bar's labels (which ride the composer's top edge), so the two never overlap.
+ */
+function WorkingIndicator({ run }: { run: Run }) {
   return (
-    <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&_svg]:size-3.5">
-      {running && <StatusIcon status="running" />}
-      {time && <span>{time}</span>}
-      {running && !time && <span>Working…</span>}
+    <div className="pointer-events-none absolute inset-x-5 bottom-full z-10 flex justify-center">
+      <div className="mb-3 flex w-full max-w-3xl items-center gap-1.5 pl-2 text-[11px] text-muted-foreground [&_svg]:size-3.5">
+        <StatusIcon status="running" />
+        <span>Working</span>
+        <Elapsed startedAt={run.startedAt} />
+      </div>
     </div>
   )
+}
+
+/** Under an agent reply: the time it was sent. */
+function MessageTime({ iso }: { iso: string }) {
+  return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
 }
 
 /** `children`: what hangs off a message (attachments), shown under its text. */
 function ThreadItem({
   message,
-  turn,
   hideText = false,
   children,
 }: {
   message: Message
   /** The run transcript already renders this text; only what hangs off the message stays. */
   hideText?: boolean
-  turn: Run["status"] | undefined
   children?: ReactNode
 }) {
   switch (message.role) {
@@ -76,23 +95,16 @@ function ThreadItem({
             </div>
           )}
           {children}
-          {/* No agent reply yet: the turn's status sits under the prompt, on the agent's side. */}
-          {turn && (
-            <div className="self-start">
-              <TurnFooter status={turn} />
-            </div>
-          )}
         </div>
       )
     case "agent": {
-      // A duplicated message still holds attachments, and its footer is the running indicator; only the clock
-      // goes, since the transcript's turn footer covers the finished turn.
-      if (hideText && (children === undefined || children === null)) return <TurnFooter status={turn} />
+      // A duplicated message only keeps its attachments: the transcript already shows its text.
+      if (hideText && (children === undefined || children === null)) return null
       return (
         <div className={ENTER_CLASS}>
           {!hideText && <Markdown text={message.text} />}
           {children}
-          <TurnFooter status={turn} time={hideText ? undefined : formatClock(message.createdAt)} />
+          {!hideText && <MessageTime iso={message.createdAt} />}
         </div>
       )
     }
@@ -101,7 +113,6 @@ function ThreadItem({
         <div className={cn("self-center text-xs text-muted-foreground italic", ENTER_CLASS)}>
           {message.text}
           {children}
-          <TurnFooter status={turn} />
         </div>
       )
   }
@@ -113,7 +124,6 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-  const runById = new Map(sortedRuns.map((r) => [r.id, r]))
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript,
   // and each arrival bumps `dataUpdatedAt`, which is what re-runs the scroll effect.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) })
@@ -121,9 +131,6 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
     sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]),
   )
   const itemsRevision = runItemQueries.map((query) => query.dataUpdatedAt).join(",")
-  // The last message of each run carries that turn's status.
-  const lastMessageOfRun = new Map<string, string>()
-  for (const m of sortedMessages) if (m.runId) lastMessageOfRun.set(m.runId, m.id)
   // `task_ask` questions are the messages with `options` (possibly none). The latest one, while the agent is blocked
   // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
   const lastAsk = [...sortedMessages].reverse().find((m) => m.options !== undefined)
@@ -151,7 +158,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-4" ref={threadRef}>
+      {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
+      <div className={cn("min-h-0 flex-1 overflow-auto px-5 pt-4", activeRun ? "pb-14" : "pb-4")} ref={threadRef}>
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
           {sortedMessages.length === 0 && (
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
@@ -164,12 +172,9 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             const duplicate =
               m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
             const attachments = pending ? [] : (m.attachments ?? [])
-            const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined
-            // While the prompt is the run's last message, its status goes under the transcript once one exists.
-            const turnBelowTranscript = startedRunId !== null && (itemCountByRun.get(startedRunId) ?? 0) > 0
             return (
               <Fragment key={m.id}>
-                <ThreadItem message={m} turn={turnBelowTranscript ? undefined : turn} hideText={duplicate || pending}>
+                <ThreadItem message={m} hideText={duplicate || pending}>
                   {attachments.length > 0 ? (
                     <MessageAttachments
                       taskId={taskId}
@@ -179,20 +184,25 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
                   ) : null}
                 </ThreadItem>
                 {startedRunId !== null && <RunTranscript runId={startedRunId} />}
-                {turnBelowTranscript && <TurnFooter status={turn} />}
               </Fragment>
             )
           })}
         </div>
       </div>
       <div className="relative flex justify-center px-5 pt-2 pb-5">
+        {activeRun && <WorkingIndicator run={activeRun} />}
         {/*
           A short fade up from the dock's edge, ending just past the context bar's labels (which sit above the
-          composer, over the thread), so text scrolling under them softens instead of clashing.
+          composer, over the thread), so text scrolling under them softens instead of clashing. While a turn runs it
+          is a taller band, solid behind the working indicator and fading out above it, so the thread never shows
+          through the indicator's text.
         */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-full h-5 bg-linear-to-t from-card to-transparent"
+          className={cn(
+            "pointer-events-none absolute inset-x-0 bottom-full bg-linear-to-t from-card to-transparent",
+            activeRun ? "h-14 from-60%" : "h-5",
+          )}
         />
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
