@@ -22,7 +22,12 @@ export interface DiscoveryLaunch {
   readonly cwd: string
 }
 
-/** Args that put Claude Code into stream-json control mode without starting a turn. */
+/**
+ * Args that put Claude Code into stream-json control mode without starting a turn. `disableAllHooks` keeps the
+ * workspace's own `.claude/settings.json` hooks from running during discovery: they are repo-controlled code that
+ * would otherwise fire on a keystroke, outside any turn. Project commands and skills are still listed (`--bare`
+ * and `--setting-sources` would drop them).
+ */
 export const CLAUDE_DISCOVERY_ARGS: ReadonlyArray<string> = [
   "--print",
   "--input-format",
@@ -30,6 +35,8 @@ export const CLAUDE_DISCOVERY_ARGS: ReadonlyArray<string> = [
   "--output-format",
   "stream-json",
   "--verbose",
+  "--settings",
+  '{"disableAllHooks":true}',
 ]
 
 /** Codex app-server over stdio (its default transport). */
@@ -56,6 +63,33 @@ export const killActiveDiscovery = (): void => {
     active.delete(pid)
     killProcessGroup(pid, "SIGKILL")
   }
+}
+
+/** Discovery children allowed to run at once on the box; more wait in a queue, and a full queue fails fast. */
+const MAX_RUNNING = 4
+const MAX_QUEUED = 32
+let running = 0
+const queued: Array<() => void> = []
+
+/**
+ * Runs `start` in a discovery slot. A finished child hands its slot straight to the next waiter, so no more than
+ * MAX_RUNNING children exist at once, whichever user or thread asked for them.
+ */
+export const limitDiscovery = <A>(start: () => Promise<A>): Promise<A> => {
+  const run = () =>
+    start().finally(() => {
+      const next = queued.shift()
+      if (next === undefined) running--
+      else next()
+    })
+  if (running < MAX_RUNNING) {
+    running++
+    return run()
+  }
+  if (queued.length >= MAX_QUEUED) return Promise.reject(new Error("command discovery is busy; try again"))
+  const turn = Promise.withResolvers<void>()
+  queued.push(() => turn.resolve())
+  return turn.promise.then(run)
 }
 
 const cleanText = (value: unknown, max: number): string =>
@@ -162,9 +196,13 @@ const discover = <A>(
     done = true
     clearTimeout(timer)
     lines.close()
+    // Data listeners go; error listeners stay, so an error emitted after the answer cannot become an unhandled throw.
     stdout.removeAllListeners()
+    stdout.on("error", () => {})
     child.stderr?.removeAllListeners()
+    child.stderr?.on("error", () => {})
     child.removeAllListeners()
+    child.on("error", () => {})
     stdin.on("error", () => {})
     stdin.end()
     if (child.pid !== undefined) {
