@@ -3,33 +3,46 @@ import { cn } from "@/lib/utils"
 
 const tokens = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
 
-/** Hairline gauge of how full the thread's agent session is, for the top edge of the composer. */
+/**
+ * How full the thread's agent session is, drawn as the composer's top edge: a dim track along the rounded top
+ * border, a filled stretch up to the used share, the percentage riding above the head and the window size above
+ * the far end. Takes no layout space; the parent must be `relative` and `rounded-2xl`.
+ */
 export function ContextBar({ context }: { context: ContextUsage }) {
   const percent = Math.min(100, (context.usedTokens / context.windowTokens) * 100)
-  const label = `${Math.round(percent)}%`
-  const detail = `Context ${label}: ${tokens.format(context.usedTokens)} of ${tokens.format(context.windowTokens)} tokens${
-    context.model === null ? "" : ` (${context.model})`
-  }`
+  const percentLabel = `${Math.round(percent)}%`
+  const detail = `Context ${percentLabel} used: ${tokens.format(context.usedTokens)} of ${tokens.format(
+    context.windowTokens,
+  )} tokens${context.model === null ? "" : ` (${context.model})`}`
+  const edge = "absolute inset-0 rounded-[inherit] border-t"
+  const label = "absolute bottom-full mb-1 text-[10px] leading-none whitespace-nowrap text-muted-foreground tabular-nums"
   return (
-    <div className="flex items-center gap-2 px-2.5 pt-0.5" title={detail}>
+    <div
+      role="meter"
+      aria-label="Context used"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(percent)}
+      aria-valuetext={detail}
+      className="pointer-events-none absolute inset-0 rounded-[inherit]"
+    >
+      <div className={cn(edge, "border-white/10")} />
       <div
-        role="meter"
-        aria-label="Context used"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(percent)}
-        aria-valuetext={detail}
-        className="h-[3px] flex-1 overflow-hidden rounded-full bg-white/[0.06]"
+        className={cn(
+          edge,
+          "transition-[clip-path] duration-500",
+          percent >= 90 ? "border-destructive" : percent >= 75 ? "border-warning" : "border-white/60",
+        )}
+        style={{ clipPath: `inset(0 ${100 - percent}% 0 0)` }}
+      />
+      <span
+        className={cn(label, "-translate-x-1/2 transition-[left] duration-500")}
+        // Kept clear of the box's left end and of the window size on the right.
+        style={{ left: `clamp(1.25rem, ${percent}%, calc(100% - 4.5rem))` }}
       >
-        <div
-          className={cn(
-            "h-full rounded-full transition-[width] duration-500",
-            percent >= 90 ? "bg-destructive" : percent >= 75 ? "bg-warning" : "bg-white/35",
-          )}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-      <span className="text-[10px] leading-none text-muted-foreground tabular-nums">{label}</span>
+        {percentLabel}
+      </span>
+      <span className={cn(label, "right-3")}>{tokens.format(context.windowTokens)}</span>
     </div>
   )
 }
