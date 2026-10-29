@@ -51,6 +51,25 @@ describe("ensureAutomationsTable", () => {
     ])
   })
 
+  test("adds the default model to existing automations without changing their schedule", () => {
+    db.run(`CREATE TABLE automations (
+      id TEXT PRIMARY KEY, login TEXT NOT NULL, name TEXT NOT NULL, repo TEXT,
+      prompt TEXT NOT NULL, enabled INTEGER NOT NULL, trigger_json TEXT NOT NULL, next_run_at INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+    db.run(`INSERT INTO automations VALUES
+      ('a1', 'octo', 'Daily', NULL, 'Summarize', 1, '{"_tag":"schedule"}', 1700000000000, 'c1', 'u1')`)
+
+    ensureAutomationsTable(sql)
+    expect(db.query("SELECT model, prompt, next_run_at FROM automations WHERE id = 'a1'").get()).toEqual({
+      model: null,
+      prompt: "Summarize",
+      next_run_at: 1700000000000,
+    })
+    db.run("UPDATE automations SET model = 'gpt-6.1-sol' WHERE id = 'a1'")
+    ensureAutomationsTable(sql)
+    expect(db.query("SELECT model FROM automations WHERE id = 'a1'").get()).toEqual({ model: "gpt-6.1-sol" })
+  })
+
   test("is a no-op once the table is current", () => {
     ensureAutomationsTable(sql)
     db.run(

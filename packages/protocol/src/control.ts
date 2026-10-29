@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
+import { AgentModel } from "./models"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -175,6 +176,8 @@ export const Automation = Schema.Struct({
    */
   repo: Schema.NullOr(Schema.String),
   prompt: Schema.String,
+  /** Null uses the box's default model. */
+  model: Schema.NullOr(AgentModel),
   enabled: Schema.Boolean,
   trigger: AutomationTrigger,
   createdAt: Schema.String, // ISO-8601
@@ -189,6 +192,7 @@ export const CreateAutomationBody = Schema.Struct({
   /** GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules. */
   repo: Schema.optional(GithubRepoSlug),
   prompt: Schema.String.pipe(Schema.minLength(1)),
+  model: Schema.optional(Schema.NullOr(AgentModel)),
   trigger: AutomationTrigger,
   enabled: Schema.optional(Schema.Boolean),
 }).pipe(
@@ -200,6 +204,8 @@ export type CreateAutomationBody = typeof CreateAutomationBody.Type
 export const UpdateAutomationBody = Schema.Struct({
   name: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
   prompt: Schema.optional(Schema.String.pipe(Schema.minLength(1))),
+  /** Omitted preserves the selection; null restores the box default. */
+  model: Schema.optional(Schema.NullOr(AgentModel)),
   trigger: Schema.optional(AutomationTrigger),
   enabled: Schema.optional(Schema.Boolean),
 })

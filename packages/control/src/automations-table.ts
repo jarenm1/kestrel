@@ -17,6 +17,7 @@ const COLUMNS = `
   name TEXT NOT NULL,
   repo TEXT,
   prompt TEXT NOT NULL,
+  model TEXT,
   enabled INTEGER NOT NULL,
   trigger_json TEXT NOT NULL,
   next_run_at INTEGER,
@@ -42,4 +43,8 @@ export const ensureAutomationsTable = (sql: AutomationsSql): void => {
     sql.exec("DROP TABLE automations_legacy")
   }
   sql.exec(`CREATE TABLE IF NOT EXISTS automations (${COLUMNS})`)
+  const modelColumn = sql
+    .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'model'")
+    .toArray()
+  if (modelColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN model TEXT")
 }

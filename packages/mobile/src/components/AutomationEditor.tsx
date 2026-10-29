@@ -14,6 +14,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown } from "lucide-react-native";
 import {
   GithubAutomationEvent,
+  connectedModelProviders,
+  modelInfo,
+  type AgentModel,
   type Automation,
   type AutomationTrigger,
   type CreateAutomationBody,
@@ -26,6 +29,7 @@ import { Button } from "@/components/ui/Button";
 import { Input, Textarea } from "@/components/ui/Input";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
+import { useShownModels } from "@/hooks/useShownModels";
 import { errorText } from "@/lib/format";
 import { EVENT_LABELS, splitList } from "@/lib/automations";
 import { colors, fonts, radius, spacing } from "@/theme";
@@ -64,6 +68,14 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
 
   const [name, setName] = useState(seed?.name ?? "");
   const [prompt, setPrompt] = useState(seed?.prompt ?? "");
+  const [model, setModel] = useState<AgentModel | null>(seed?.model ?? null);
+  const [pickingModel, setPickingModel] = useState(false);
+  const queries = useMemo(() => createQueries(api), [api]);
+  const connections = useQuery(queries.connections());
+  const shown = useShownModels();
+  const providers = connectedModelProviders(connections.data ?? []);
+  const models = providers.flatMap((provider) => shown[provider.id]);
+  const selectedModel = model === null ? null : modelInfo(model);
   const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule");
   const [cron, setCron] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.cron : "");
   const [timezone, setTimezone] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.timezone : "");
@@ -101,12 +113,14 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         return api.updateAutomation(target.automation.id, {
           name: name.trim(),
           prompt: prompt.trim(),
+          model,
           trigger: buildTrigger(),
         });
       }
       const body: CreateAutomationBody = {
         name: name.trim(),
         prompt: prompt.trim(),
+        model,
         trigger: buildTrigger(),
         enabled,
         ...(repo === null ? {} : { repo }),
@@ -142,6 +156,12 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
 
         <Field label="Prompt">
           <Textarea style={styles.prompt} value={prompt} onChangeText={setPrompt} />
+        </Field>
+        <Field label="Model">
+          <Pressable style={styles.select} onPress={() => setPickingModel(true)} accessibilityRole="button">
+            <Text style={styles.selectText}>{selectedModel?.name ?? "Default (box model)"}</Text>
+            <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
+          </Pressable>
         </Field>
 
         {target.kind === "create" ? (
@@ -275,6 +295,39 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         }}
         onClose={() => setPickingRepo(false)}
       />
+      <Modal visible={pickingModel} animationType="slide" onRequestClose={() => setPickingModel(false)}>
+        <SafeAreaView style={styles.container}>
+          <ScreenHeader title="Model" onBack={() => setPickingModel(false)} />
+          <ScrollView contentContainerStyle={styles.list}>
+            <RepoOption
+              label="Default (box model)"
+              selected={model === null}
+              onPress={() => { setModel(null); setPickingModel(false); }}
+            />
+            {selectedModel !== null && !models.some((candidate) => candidate.id === model) ? (
+              <RepoOption label={selectedModel.name} detail="Saved model" selected onPress={() => setPickingModel(false)} />
+            ) : null}
+            {providers.map((provider) => (
+              <React.Fragment key={provider.id}>
+                <Text style={styles.label}>{provider.name}</Text>
+                {shown[provider.id].map((candidate) => (
+                  <RepoOption
+                    key={candidate.id}
+                    label={candidate.name}
+                    selected={candidate.id === model}
+                    onPress={() => { setModel(candidate.id); setPickingModel(false); }}
+                  />
+                ))}
+              </React.Fragment>
+            ))}
+            {connections.isPending ? <Text style={styles.emptyText}>Loading models…</Text> : null}
+            {connections.error ? <Alert>{errorText(connections.error)}</Alert> : null}
+            {connections.isSuccess && providers.length === 0 ? (
+              <Text style={styles.emptyText}>Connect Anthropic or OpenAI to choose a model.</Text>
+            ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
     </SafeAreaView>
   );
 }
