@@ -27,6 +27,12 @@ interface Point {
   readonly agoMs: number
 }
 
+/** Share of the card's height kept above 100%, so a full reading and its hover dot stay inside the card. */
+const HEADROOM = 0.1
+
+/** Card height fraction (0 = top) where a 0-1 reading sits. */
+const yOf = (v: number): number => HEADROOM + (1 - HEADROOM) * (1 - Math.min(1, Math.max(0, v)))
+
 /** x is time over the last minute (right edge = newest sample), y is 0-100%. */
 function pointsOf(samples: readonly TaskStatsSample[], value: (s: TaskStatsSample) => number | null): Point[] {
   const newest = samples.at(-1)?.at ?? 0
@@ -36,7 +42,7 @@ function pointsOf(samples: readonly TaskStatsSample[], value: (s: TaskStatsSampl
     if (v === null || !Number.isFinite(v)) continue
     points.push({
       x: 1 - (newest - s.at) / TASK_STATS_WINDOW_MS,
-      y: 1 - Math.min(1, Math.max(0, v)),
+      y: yOf(v),
       value: v,
       agoMs: newest - s.at,
     })
@@ -89,7 +95,7 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
             <stop offset="100%" stopColor="white" stopOpacity="0" />
           </linearGradient>
         </defs>
-        {[25, 50, 75].map((y) => (
+        {[0.25, 0.5, 0.75].map((q) => yOf(q) * H).map((y) => (
           <line key={y} x1="0" x2={W} y1={y} y2={y} stroke="white" strokeOpacity="0.05" vectorEffect="non-scaling-stroke" />
         ))}
         {drawn && (
