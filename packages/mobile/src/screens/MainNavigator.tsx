@@ -15,6 +15,7 @@ import { AutomationsScreen } from "@/screens/AutomationsScreen";
 import { ConnectionsScreen } from "@/screens/ConnectionsScreen";
 import { LoginScreen } from "@/screens/LoginScreen";
 import { NewThreadScreen } from "@/screens/NewThreadScreen";
+import { SettingsScreen } from "@/screens/SettingsScreen";
 import { TaskScreen } from "@/screens/TaskScreen";
 
 /** Home is the empty chat, as on the web ("/"). */
@@ -181,6 +182,8 @@ function pageFor(route: Exclude<Route, { name: "thread" }>): ReactNode {
       return <AutomationsScreen />;
     case "connections":
       return <ConnectionsScreen />;
+    case "settings":
+      return <SettingsScreen />;
   }
 }
 

@@ -1,5 +1,5 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query";
-import type { AgentItem, Message, Run, Task } from "@cloudagents/protocol";
+import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 
 /** Agent box status poll; it feeds the top bar pill. */
@@ -21,6 +21,7 @@ export const keys = {
   me: ["me"] as const,
   box: ["box"] as const,
   connections: ["connections"] as const,
+  usage: ["usage"] as const,
   githubRepos: ["github-repos"] as const,
   automations: ["automations"] as const,
   automationRuns: (automationId: string) => ["automations", automationId, "runs"] as const,
@@ -30,6 +31,12 @@ export const keys = {
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
   runItems: (runId: string) => ["runs", runId, "items"] as const,
+  commands: (
+    taskId: string | undefined,
+    model: AgentModel | undefined,
+    activeRunId: string | undefined,
+    activeRunProvider: ModelProvider | undefined,
+  ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
 };
@@ -102,5 +109,22 @@ export function createQueries(api: ApiClient) {
       }),
     desktop: (taskId: string) =>
       queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
+    usage: () => queryOptions({ queryKey: keys.usage, queryFn: () => api.usage() }),
+    commands: (
+      taskId: string | undefined,
+      model: AgentModel | undefined,
+      activeRunId: string | undefined,
+      activeRunProvider: ModelProvider | undefined,
+    ) =>
+      queryOptions({
+        queryKey: keys.commands(taskId, model, activeRunId, activeRunProvider),
+        queryFn: () => {
+          if (taskId === undefined || model === undefined) {
+            throw new Error("Slash commands need a thread and a model");
+          }
+          return api.commands(taskId, model);
+        },
+        enabled: taskId !== undefined && model !== undefined,
+      }),
   };
 }

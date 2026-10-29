@@ -2,6 +2,7 @@ import React, { type ReactNode, useMemo } from "react";
 import { Linking, StyleSheet, Text, type TextStyle, View } from "react-native";
 // The gesture handler's ScrollView, so a code block or table scrolls sideways instead of opening the Desktop/Diff panel.
 import { ScrollView } from "react-native-gesture-handler";
+import { SvgXml } from "react-native-svg";
 import type { PhrasingContent, RootContent, Table } from "mdast";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
@@ -84,6 +85,23 @@ function TableView({ node, keyPrefix }: { node: Table; keyPrefix: string }) {
   );
 }
 
+class SvgBlock extends React.Component<{ xml: string }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return <Text style={styles.body}>{this.props.xml}</Text>;
+    }
+    return (
+      <View style={styles.svgWrap}>
+        <SvgXml xml={this.props.xml} width="100%" />
+      </View>
+    );
+  }
+}
+
 function block(node: RootContent, key: string, ordinal?: string): ReactNode {
   switch (node.type) {
     case "paragraph":
@@ -133,12 +151,17 @@ function block(node: RootContent, key: string, ordinal?: string): ReactNode {
       return <View key={key} style={styles.hr} />;
     case "table":
       return <TableView key={key} node={node} keyPrefix={key} />;
-    case "html":
+    case "html": {
+      const trimmed = node.value.trim();
+      if (trimmed.toLowerCase().startsWith("<svg")) {
+        return <SvgBlock key={key} xml={trimmed} />;
+      }
       return (
         <Text key={key} style={styles.body}>
           {node.value}
         </Text>
       );
+    }
     default:
       return null;
   }
@@ -178,6 +201,7 @@ const styles = StyleSheet.create({
   marker: { minWidth: 14, color: colors.mutedForeground },
   itemBody: { flex: 1, gap: spacing.xs },
   hr: { height: StyleSheet.hairlineWidth, backgroundColor: colors.white12 },
+  svgWrap: { marginVertical: spacing.sm, alignItems: "center", width: "100%" },
   tableRow: { flexDirection: "row" },
   tableRowBorder: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   cell: { ...body, minWidth: 96, maxWidth: 260, paddingHorizontal: spacing.sm, paddingVertical: 6 },

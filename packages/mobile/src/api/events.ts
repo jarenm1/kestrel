@@ -1,7 +1,8 @@
 import { Option, Schema } from "effect";
-import { Paths, ServerEvent } from "@cloudagents/protocol";
+import { Paths, ServerEvent, TaskStats } from "@cloudagents/protocol";
 
 const decodeEvent = Schema.decodeUnknownOption(ServerEvent);
+const decodeTaskStats = Schema.decodeUnknownOption(TaskStats);
 
 /**
  * Opens a WebSocket connection to the task's event stream. Frames that do not decode as a ServerEvent are ignored.
@@ -31,6 +32,38 @@ export function openTaskEvents(
     }
     const event = decodeEvent(parsed);
     if (Option.isSome(event)) handlers.onEvent(event.value);
+  };
+
+  socket.onclose = handlers.onClose;
+
+  return () => {
+    socket.onclose = null;
+    socket.close();
+  };
+}
+
+/**
+ * Subscribes to a task's stats stream: the first frame carries the window so far, later frames carry new samples.
+ * Returns a cleanup function that closes the socket.
+ */
+export function openTaskStats(
+  serverUrl: string,
+  taskId: string,
+  handlers: { onFrame: (stats: TaskStats) => void; onClose: () => void }
+): () => void {
+  const wsUrl = serverUrl.replace(/^http/, "ws") + Paths.taskStatsWs(taskId);
+  const socket = new WebSocket(wsUrl);
+
+  socket.onmessage = (msg) => {
+    if (typeof msg.data !== "string") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(msg.data);
+    } catch {
+      return;
+    }
+    const stats = decodeTaskStats(parsed);
+    if (Option.isSome(stats)) handlers.onFrame(stats.value);
   };
 
   socket.onclose = handlers.onClose;

@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import {
+  AgentModel,
   Automation,
   AutomationRun,
   BoxStatus,
@@ -14,17 +15,21 @@ import {
   DesktopStatus,
   DiffResponse,
   GithubRepo,
+  HarnessCommands,
   Me,
   Message,
   Paths,
+  PreviewSession,
   PutApiKeyBody,
   Run,
   RunItems,
   SendMessageBody,
   SendMessageResponse,
   Task,
+  TaskStats,
   TriggerAutomationBody,
   UpdateAutomationBody,
+  Usage,
 } from "@cloudagents/protocol";
 
 export class ApiError extends Error {
@@ -93,6 +98,9 @@ export interface ApiClient {
   getDesktop(taskId: string): Promise<DesktopStatus>;
   startDesktop(taskId: string): Promise<DesktopStatus>;
   stopDesktop(taskId: string): Promise<void>;
+  usage(): Promise<Usage>;
+  commands(taskId: string, model: AgentModel): Promise<HarnessCommands>;
+  previewSession(taskId: string): Promise<PreviewSession>;
 }
 
 /** Creates an API client bound to one server URL and session cookie. Responses are decoded with protocol schemas. */
@@ -180,5 +188,9 @@ export function createApiClient(serverUrl: string, sessionCookie: string | null)
     getDesktop: (taskId) => request(DesktopStatus, "GET", Paths.taskDesktop(taskId)),
     startDesktop: (taskId) => request(DesktopStatus, "POST", Paths.taskDesktop(taskId)),
     stopDesktop: (taskId) => request(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),
+    usage: () => request(Usage, "GET", Paths.usage),
+    commands: (taskId: string, model: AgentModel) =>
+      request(HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`),
+    previewSession: (taskId: string) => request(PreviewSession, "POST", Paths.taskPreviewSession(taskId)),
   };
 }

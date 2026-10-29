@@ -18,6 +18,17 @@ export function formatAgo(iso: string, now: number): string {
   return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
+/** Time a run has been going, from `startMs` to `now`: "12s", "3m 4s", "1h 0m 5s". Minutes and hours show only once reached. */
+export function formatElapsed(startMs: number, now: number): string {
+  const total = Math.max(0, Math.floor((now - startMs) / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 /** Short name of a checkout's repository: "owner/name" → "name". */
 export function repoShortName(repo: string): string {
   return (repo.split("/").pop() ?? repo).replace(/\.git$/, "");

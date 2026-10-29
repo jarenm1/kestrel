@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { FlatList, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { Archive, LogOut, type LucideIcon, Plug, Settings, SquarePen, Workflow } from "lucide-react-native";
+import { Archive, ChevronsUpDown, LogOut, type LucideIcon, Plug, Settings, SquarePen, Workflow } from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
@@ -11,12 +11,17 @@ import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
-import { errorText } from "@/lib/format";
+import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { type Route, useNavigation } from "@/nav/navigation";
-import { colors, radius, shadows, spacing } from "@/theme";
+import { colors, fonts, radius, shadows, spacing } from "@/theme";
 
-/** Thread states worth an icon in the list; idle and done threads show just their title. */
-const FLAGGED: Partial<Record<Task["status"], true>> = { running: true, needs_input: true, failed: true };
+const STATUS_LABEL: Record<Task["status"], string> = {
+  idle: "Idle",
+  running: "Working",
+  needs_input: "Needs input",
+  done: "Done",
+  failed: "Failed",
+};
 
 function NavRow({ icon: Icon, label, route, active }: { icon: LucideIcon; label: string; route: Route; active: boolean }) {
   const nav = useNavigation();
@@ -38,25 +43,47 @@ function ThreadRow({
   active,
   archiving,
   onArchive,
+  now,
 }: {
   task: Task;
   active: boolean;
   archiving: boolean;
   onArchive: () => void;
+  now: number;
 }) {
   const nav = useNavigation();
+  const checkouts = task.checkouts ?? [];
   return (
     <Pressable
       onPress={() => nav.navigate({ name: "thread", taskId: task.id })}
       accessibilityRole="button"
       accessibilityLabel={task.title}
       accessibilityState={{ selected: active }}
-      style={({ pressed }) => [styles.row, (pressed || active) && styles.rowActive]}
+      style={({ pressed }) => [styles.threadRow, (pressed || active) && styles.rowActive]}
     >
-      <Text style={styles.threadTitle} numberOfLines={1}>
-        {task.title}
-      </Text>
-      {FLAGGED[task.status] ? <StatusIcon status={task.status} /> : null}
+      <View style={styles.statusWrap}>
+        <StatusIcon status={task.status} size={15} />
+      </View>
+      <View style={styles.threadInfo}>
+        <Text style={[styles.threadTitle, active && styles.threadTitleActive]} numberOfLines={1}>
+          {task.title || "Untitled thread"}
+        </Text>
+        <Text style={styles.threadMeta} numberOfLines={1}>
+          {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
+        </Text>
+        {checkouts.length > 0 ? (
+          <View style={styles.chipRow}>
+            {checkouts.map((checkout) => (
+              <View key={checkout.id} style={styles.repoChip}>
+                <Text style={styles.repoChipText} numberOfLines={1}>
+                  {repoShortName(checkout.repo)}
+                  {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+      </View>
       {active ? (
         <Button
           variant="ghost"
@@ -98,6 +125,16 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
             style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
             onPress={() => {
               onClose();
+              nav.navigate({ name: "settings" });
+            }}
+          >
+            <Settings size={22} color={colors.foreground} strokeWidth={1.75} />
+            <Text style={styles.navText}>Settings</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.row, pressed && styles.rowActive]}
+            onPress={() => {
+              onClose();
               nav.navigate({ name: "connections" });
             }}
           >
@@ -123,6 +160,7 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
 /** The user's threads, most recent first, under the workspace pages: the left drawer. */
 export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const { api } = useApiClient();
+  const { user } = useAuth();
   const queries = useMemo(() => createQueries(api), [api]);
   const tasks = useQuery(queries.tasks());
   const nav = useNavigation();
@@ -130,6 +168,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const current = nav.current;
   const openTaskId = current.name === "thread" ? current.taskId : undefined;
+  const now = Date.now();
 
   // Ordered by updatedAt, which also moves when a run finishes; Task has no `lastMessageAt` to sort by yet.
   const byRecent = [...(tasks.data ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -146,11 +185,12 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   }
 
   const header = (
-    <View>
+    <View style={styles.header}>
       <View style={styles.brand}>
         <KestrelMark height={22} />
         <Text style={styles.brandText}>Kestrel</Text>
       </View>
+      <NavRow icon={SquarePen} label="New thread" route={{ name: "new-thread" }} active={current.name === "new-thread"} />
       <NavRow icon={Workflow} label="Automations" route={{ name: "automations" }} active={current.name === "automations"} />
       <NavRow
         icon={Archive}
@@ -158,7 +198,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
         route={{ name: "archived" }}
         active={current.name === "archived"}
       />
-      <Text style={styles.section}>Threads</Text>
+      {threads.length > 0 ? <Text style={styles.section}>Threads</Text> : null}
       {tasks.error ? <Alert style={styles.alert}>{errorText(tasks.error)}</Alert> : null}
       {archive.error ? <Alert style={styles.alert}>{errorText(archive.error)}</Alert> : null}
       {tasks.data && threads.length === 0 ? <Text style={styles.empty}>No threads yet.</Text> : null}
@@ -171,34 +211,38 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
         data={threads}
         keyExtractor={(task) => task.id}
         ListHeaderComponent={header}
-        contentContainerStyle={[styles.list, { paddingBottom: bottomInset + 96 }]}
+        contentContainerStyle={[styles.list, { paddingBottom: bottomInset + 80 }]}
         renderItem={({ item }) => (
           <ThreadRow
             task={item}
             active={item.id === openTaskId}
             archiving={archive.isPending && archive.variables === item.id}
             onArchive={() => archiveThread(item)}
+            now={now}
           />
         )}
       />
-      <View style={[styles.dock, { bottom: bottomInset + spacing.md }]} pointerEvents="box-none">
-        <Pressable
-          style={({ pressed }) => [styles.newThread, pressed && styles.newThreadPressed]}
-          onPress={() => nav.navigate({ name: "new-thread" })}
-          accessibilityRole="button"
-          accessibilityLabel="New thread"
-        >
-          <SquarePen size={20} color={colors.primaryForeground} strokeWidth={2} />
-          <Text style={styles.newThreadText}>New thread</Text>
-        </Pressable>
-        <Pressable
-          style={({ pressed }) => [styles.settings, pressed && styles.settingsPressed]}
-          onPress={() => setSettingsOpen(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Settings"
-        >
-          <Settings size={22} color={colors.foreground} strokeWidth={1.75} />
-        </Pressable>
+      <View style={[styles.dock, { bottom: bottomInset + spacing.sm }]} pointerEvents="box-none">
+        {user ? (
+          <Pressable
+            style={({ pressed }) => [styles.accountRow, pressed && styles.accountRowPressed]}
+            onPress={() => setSettingsOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Account menu"
+          >
+            <View style={styles.avatar}>
+              {user.avatarUrl ? (
+                <Image source={{ uri: user.avatarUrl }} style={styles.avatarImage} />
+              ) : (
+                <Text style={styles.avatarLetter}>{user.login.slice(0, 1)}</Text>
+              )}
+            </View>
+            <Text style={styles.accountName} numberOfLines={1}>
+              {user.login}
+            </Text>
+            <ChevronsUpDown size={16} color={colors.mutedForeground} />
+          </Pressable>
+        ) : null}
       </View>
       <SettingsSheet open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </View>
@@ -208,60 +252,103 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
 const styles = StyleSheet.create({
   root: { flex: 1 },
   list: { paddingHorizontal: spacing.sm },
-  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.lg, paddingVertical: spacing.lg },
-  brandText: { color: colors.foreground, fontSize: 24, fontWeight: "600", letterSpacing: -0.4 },
+  header: { paddingBottom: spacing.xs },
+  brand: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: spacing.md, paddingVertical: spacing.lg },
+  brandText: { color: colors.foreground, fontSize: 22, fontWeight: "600", letterSpacing: -0.4 },
   row: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
-    minHeight: 46,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radius.lg,
+    gap: 12,
+    minHeight: 42,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    marginVertical: 1,
   },
   rowActive: { backgroundColor: colors.accent },
-  navText: { color: colors.foreground, fontSize: 17 },
+  navText: { color: colors.foreground, fontSize: 15, fontWeight: "500" },
   section: {
-    color: colors.foreground,
-    fontSize: 16,
+    color: colors.mutedForeground,
+    fontSize: 12,
     fontWeight: "600",
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xl,
-    paddingBottom: spacing.sm,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xs,
   },
   alert: { marginHorizontal: spacing.sm, marginBottom: spacing.sm },
-  empty: { color: colors.mutedForeground, fontSize: 15, paddingHorizontal: spacing.lg },
-  threadTitle: { flex: 1, color: colors.foreground, fontSize: 16 },
-  archive: { marginRight: -spacing.sm, width: 32, height: 32 },
+  empty: { color: colors.mutedForeground, fontSize: 14, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
+  threadRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
+    borderRadius: radius.md,
+    marginVertical: 1,
+  },
+  statusWrap: {
+    marginTop: 2,
+  },
+  threadInfo: {
+    flex: 1,
+    gap: 2,
+    minWidth: 0,
+  },
+  threadTitle: {
+    color: colors.mutedForeground,
+    fontSize: 14,
+    fontWeight: "500",
+  },
+  threadTitleActive: {
+    color: colors.foreground,
+    fontWeight: "600",
+  },
+  threadMeta: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+    opacity: 0.8,
+  },
+  chipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 4,
+    marginTop: 4,
+  },
+  repoChip: {
+    backgroundColor: colors.white06,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.full,
+  },
+  repoChipText: {
+    color: colors.mutedForeground,
+    fontSize: 10,
+    fontFamily: fonts.mono,
+  },
+  archive: { width: 28, height: 28, alignSelf: "center", marginRight: -spacing.xs },
   dock: {
     position: "absolute",
-    left: spacing.lg,
-    right: spacing.lg,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    left: spacing.md,
+    right: spacing.md,
   },
-  newThread: {
+  accountRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    height: 52,
-    paddingHorizontal: 22,
-    borderRadius: radius.full,
-    backgroundColor: colors.primary,
-    ...shadows.soft,
-  },
-  newThreadPressed: { backgroundColor: "#dcdcde" },
-  newThreadText: { color: colors.primaryForeground, fontSize: 17, fontWeight: "600" },
-  settings: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    alignItems: "center",
-    justifyContent: "center",
+    height: 48,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.lg,
     backgroundColor: colors.secondary,
     ...shadows.soft,
   },
-  settingsPressed: { backgroundColor: colors.accent },
+  accountRowPressed: { backgroundColor: colors.accent },
+  accountName: {
+    flex: 1,
+    color: colors.foreground,
+    fontSize: 15,
+    fontWeight: "500",
+  },
   backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
   sheet: {
     backgroundColor: colors.secondary,

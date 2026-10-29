@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from "react-native";
 import { WebView } from "react-native-webview";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -7,6 +7,7 @@ import { createQueries, keys } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
+import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { colors, fonts, radius, spacing } from "@/theme";
 import type { DesktopStatus } from "@cloudagents/protocol";
 
@@ -231,8 +232,10 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       : String(actionError)
     : status?.error ?? null;
 
+  const aspect = status?.width && status?.height ? status.width / status.height : 16 / 9;
+
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
       <View style={styles.toolbar}>
         <Button
           variant={active ? "soft" : "default"}
@@ -250,7 +253,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         ) : null}
       </View>
       {error ? <Alert style={styles.alert}>{error}</Alert> : null}
-      <View style={styles.well}>
+      <View style={[styles.well, { aspectRatio: aspect }]}>
         {status?.state === "running" && desktopHtml ? (
           <SafeWebView
             ref={webView}
@@ -271,16 +274,18 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           </View>
         )}
       </View>
-    </View>
+      <ThreadGraphs taskId={taskId} />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: spacing.md },
+  scroll: { flex: 1 },
+  container: { paddingHorizontal: spacing.md, paddingBottom: spacing.lg },
   toolbar: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: spacing.sm },
   info: { color: colors.mutedForeground, fontSize: 12, fontFamily: fonts.mono },
   alert: { marginBottom: spacing.sm },
-  well: { flex: 1, marginBottom: spacing.md, borderRadius: radius.xl, overflow: "hidden", backgroundColor: "#000" },
+  well: { width: "100%", marginBottom: spacing.md, borderRadius: radius.xl, overflow: "hidden", backgroundColor: "#000" },
   webview: { flex: 1, backgroundColor: "#000" },
   placeholder: { flex: 1, alignItems: "center", justifyContent: "center" },
   placeholderText: { color: colors.mutedForeground, fontSize: 14, textAlign: "center" },
