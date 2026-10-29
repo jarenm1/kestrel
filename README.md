@@ -31,6 +31,21 @@ Open the printed URL (`/auth/dev-login`) to sign in as `dev`. The first run crea
 
 `nix run` runs the same `bun run dev` with the flake's toolchain (Bun, Node, wrangler, bubblewrap, pasta, the desktop stack). Nix is what turns the agent sandbox on: the sandbox exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake). On NixOS use the flake: the npm `workerd` binary that `bunx wrangler` runs does not start there, so the flake passes its own wrangler in `KESTREL_WRANGLER`.
 
+#### Optional Linux desktop profiles
+
+The default sandbox stays small. On Linux x86_64, choose a desktop profile when starting a box to add its apps and CLI tools to the sandbox `PATH`:
+
+```sh
+nix run .#box-blender
+nix run .#box-roblox
+```
+
+For the auto-updating box, set `CLOUDAGENTS_DESKTOP_PROFILE=blender` or `CLOUDAGENTS_DESKTOP_PROFILE=roblox` in its service environment before running `nix run .#box-auto`. The Blender profile adds Blender. The experimental Roblox profile adds Vinegar, Rojo, and Wally; Vinegar downloads and installs Studio on first use, and Rojo still needs its Studio plugin. Start apps from the task desktop with `desktop_launch` (for example, `blender` or `vinegar`).
+
+These profiles provide software, not extra hardware. Tasks still use the configured resource limits (4 GB memory and 200% CPU by default), and the virtual X desktop does not guarantee hardware GPU acceleration. Blender and Studio may need a suitably provisioned GPU worker and higher memory limits; set those limits only when the host can support them. Roblox Studio through Vinegar is community-supported and can break when Studio changes.
+
+Unreal Engine is not bundled: Linux installs require an Epic account and a separately downloaded installed build or a source build. It needs a dedicated high-memory, GPU-capable worker; configure that engine on the worker and expose its executable in the sandbox before adding an Unreal profile.
+
 ### Without Nix
 
 Without `CLOUDAGENTS_SANDBOX_PATH`, `bun run dev` starts the box with `CLOUDAGENTS_SANDBOX=0`, which runs agents unsandboxed: fine for local work with the fake agent or your own key, never for a shared or production box. Set `CLOUDAGENTS_SANDBOX` yourself to override that.
