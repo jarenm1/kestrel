@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
-import { Navigate, NavLink, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
-import { LogOut } from "lucide-react"
-import { api, ApiError, onUnauthorized } from "@/api/client"
+import { useQuery } from "@tanstack/react-query"
+import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
+import { CreditCard, LogOut, Settings } from "lucide-react"
+import { ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
 import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
@@ -17,12 +17,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
 import { PricingPage } from "@/pages/PricingPage"
+import { BillingSettings, ProfileSettings, SettingsLayout } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
 import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
@@ -56,6 +58,11 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route element={<AppShell />}>
           <Route path="/connections" element={<ConnectionsPage />} />
+          <Route path="/settings" element={<SettingsLayout />}>
+            <Route index element={<Navigate to="profile" replace />} />
+            <Route path="profile" element={<ProfileSettings />} />
+            <Route path="billing" element={<BillingSettings />} />
+          </Route>
           <Route element={<WorkspaceLayout />}>
             <Route path={APP_HOME} element={<NewThreadPage />} />
             <Route path="/c/:taskId" element={<ThreadPage />} />
@@ -155,11 +162,7 @@ function NotFound() {
 }
 
 function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string }) {
-  const signOut = useMutation({
-    mutationFn: api.logout,
-    // Reload re-checks the session either way.
-    onSettled: () => window.location.reload(),
-  })
+  const signOut = useSignOut()
 
   return (
     <DropdownMenu>
@@ -173,6 +176,19 @@ function AccountMenu({ login, avatarUrl }: { login: string; avatarUrl: string })
         <DropdownMenuLabel>
           Signed in as <span className="text-foreground">{login}</span>
         </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link to="/settings/profile">
+            <Settings />
+            Settings
+          </Link>
+        </DropdownMenuItem>
+        <DropdownMenuItem asChild>
+          <Link to="/settings/billing">
+            <CreditCard />
+            Billing
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled={signOut.isPending} onSelect={() => signOut.mutate()}>
           <LogOut />

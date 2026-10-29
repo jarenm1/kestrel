@@ -16,6 +16,7 @@ import {
   Paths,
   type PullRequestLink,
   Run,
+  type Usage,
   SendMessageResponse,
   Task,
   type TaskStatus,
@@ -198,6 +199,8 @@ export interface CoreShape {
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
+  /** Agent usage of `user` in the billing period (UTC calendar month) containing `now`. */
+  readonly usage: (user: string, now: Date) => Effect.Effect<Usage>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
   /** A run's display items; another user's run is NotFound, like every other owned route. */
   readonly runItems: (user: string, runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
@@ -1148,6 +1151,32 @@ export const CoreLive = Layer.effect(
           yield* ownedTask(user, taskId)
           const state = yield* store.read
           return state.runs.filter((r) => r.taskId === taskId).map((r) => ({ ...r }))
+        }),
+
+      usage: (user, now) =>
+        Effect.map(store.read, (state) => {
+          const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+          const end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+          const owned = new Set(state.tasks.filter((t) => t.owner === user).map((t) => t.id))
+          const threads = new Set<string>()
+          let agentMs = 0
+          let runs = 0
+          for (const run of state.runs) {
+            if (!owned.has(run.taskId)) continue
+            const from = Math.max(Date.parse(run.startedAt), start)
+            const to = Math.min(run.endedAt === null ? now.getTime() : Date.parse(run.endedAt), end)
+            if (to <= from) continue
+            agentMs += to - from
+            runs += 1
+            threads.add(run.taskId)
+          }
+          return {
+            periodStart: new Date(start).toISOString(),
+            periodEnd: new Date(end).toISOString(),
+            agentSeconds: Math.round(agentMs / 1000),
+            runs,
+            threads: threads.size,
+          }
         }),
 
       cancelRun: (user, runId) =>

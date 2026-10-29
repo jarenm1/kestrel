@@ -1,3 +1,4 @@
+import { PLANS, type PlanId } from "@cloudagents/protocol"
 import { motion } from "framer-motion"
 import { ArrowRight, Check } from "lucide-react"
 import { APP_URL } from "@/components/PublicShell"
@@ -7,47 +8,9 @@ import { cn } from "@/lib/utils"
 const fadeInUp = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.5 } } }
 const staggerContainer = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } }
 
-const plans = [
-  {
-    name: "Hobby",
-    price: "$0",
-    period: "forever",
-    desc: "Try an agent box on a side project.",
-    features: ["1 box, shared compute", "10 agent hours / month", "Live desktop at 720p", "Bring your own model key"],
-    cta: "Start free",
-    highlight: false,
-  },
-  {
-    name: "Pro",
-    price: "$29",
-    period: "per month",
-    desc: "A dedicated box for daily agent work.",
-    features: [
-      "1 dedicated box",
-      "200 agent hours / month",
-      "Live desktop at 1080p, 60 fps",
-      "Parallel tasks with isolated worktrees",
-      "Priority support",
-    ],
-    cta: "Go Pro",
-    highlight: true,
-  },
-  {
-    name: "Team",
-    price: "$99",
-    period: "per seat / month",
-    desc: "Boxes for the whole team, managed in one place.",
-    features: [
-      "Dedicated box per seat",
-      "Unlimited agent hours (fair use)",
-      "GPU-accelerated desktops",
-      "Shared repos and connections",
-      "SSO and audit log",
-    ],
-    cta: "Contact us",
-    highlight: false,
-  },
-]
+/** Call to action per plan; the plans themselves are shared with billing settings. */
+const CTA: Record<PlanId, string> = { hobby: "Start free", pro: "Go Pro", team: "Contact us" }
+const HIGHLIGHT: PlanId = "pro"
 
 const faqs = [
   {
@@ -92,7 +55,7 @@ export function PricingPage() {
 
       <section className="relative z-10 px-8 py-12">
         <div className="mx-auto grid max-w-6xl gap-6 md:grid-cols-3">
-          {plans.map((plan, i) => (
+          {PLANS.map((plan, i) => (
             <motion.div
               key={plan.name}
               initial={{ opacity: 0, y: 20 }}
@@ -100,12 +63,12 @@ export function PricingPage() {
               transition={{ delay: i * 0.1, duration: 0.5 }}
               className={cn(
                 "relative flex flex-col rounded-2xl p-8 transition-[background-color,box-shadow] duration-300",
-                plan.highlight
+                plan.id === HIGHLIGHT
                   ? "bg-card shadow-glow md:scale-[1.02]"
                   : "bg-card/60 shadow-soft hover:bg-card hover:shadow-glow",
               )}
             >
-              {plan.highlight && (
+              {plan.id === HIGHLIGHT && (
                 <div className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-primary px-3 py-1 text-[10px] font-semibold tracking-wider text-primary-foreground uppercase shadow-glow">
                   Most popular
                 </div>
@@ -126,9 +89,9 @@ export function PricingPage() {
                   </li>
                 ))}
               </ul>
-              <Button asChild variant={plan.highlight ? "default" : "soft"} className="h-10 w-full">
+              <Button asChild variant={plan.id === HIGHLIGHT ? "default" : "soft"} className="h-10 w-full">
                 <a href={APP_URL}>
-                  {plan.cta} <ArrowRight />
+                  {CTA[plan.id]} <ArrowRight />
                 </a>
               </Button>
             </motion.div>

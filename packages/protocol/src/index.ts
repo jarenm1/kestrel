@@ -328,6 +328,77 @@ export type DiffResponse = typeof DiffResponse.Type
 export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
 export type Health = typeof Health.Type
 
+/**
+ * The signed-in user's agent usage in one billing period (a UTC calendar month). Agent time is the wall-clock time
+ * their runs were active within the period; a run still going counts up to now.
+ */
+export const Usage = Schema.Struct({
+  periodStart: Schema.String,
+  periodEnd: Schema.String,
+  agentSeconds: Schema.Number,
+  runs: Schema.Number,
+  threads: Schema.Number,
+})
+export type Usage = typeof Usage.Type
+
+export type PlanId = "hobby" | "pro" | "team"
+
+export interface Plan {
+  readonly id: PlanId
+  readonly name: string
+  readonly price: string
+  readonly period: string
+  readonly desc: string
+  /** Agent hours included per billing period; null is unlimited (fair use). */
+  readonly agentHours: number | null
+  readonly features: readonly string[]
+}
+
+/** Plans shown on the pricing page and in billing settings. */
+export const PLANS: readonly Plan[] = [
+  {
+    id: "hobby",
+    name: "Hobby",
+    price: "$0",
+    period: "forever",
+    desc: "Try an agent box on a side project.",
+    agentHours: 10,
+    features: ["1 box, shared compute", "10 agent hours / month", "Live desktop at 1080p, 60 fps", "Bring your own model key"],
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    price: "$29",
+    period: "per month",
+    desc: "A dedicated box for daily agent work.",
+    agentHours: 200,
+    features: [
+      "1 dedicated box",
+      "200 agent hours / month",
+      "Live desktop at 1080p, 60 fps",
+      "Priority support",
+    ],
+  },
+  {
+    id: "team",
+    name: "Team",
+    price: "$99",
+    period: "per seat / month",
+    desc: "Boxes for the whole team, managed in one place.",
+    agentHours: null,
+    features: [
+      "Dedicated box per seat",
+      "Unlimited agent hours (fair use)",
+      "GPU-accelerated desktops",
+      "Shared repos and connections",
+      "SSO and audit log",
+    ],
+  },
+]
+
+/** Billing is not live yet: every user is on this plan. */
+export const CURRENT_PLAN: PlanId = "hobby"
+
 // ---------------------------------------------------------------------------
 // Errors (serialized as JSON bodies with the matching HTTP status)
 // ---------------------------------------------------------------------------
@@ -354,6 +425,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 
 export const Paths = {
   health: "/api/health",
+  /** GET -> Usage of the signed-in user in the current billing period. */
+  usage: "/api/usage",
   /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
   tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,

@@ -23,6 +23,7 @@ import {
   SendMessageResponse,
   Task,
   UpdateAutomationBody,
+  Usage,
 } from "@cloudagents/protocol"
 import { SERVER_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
@@ -162,6 +163,7 @@ export const api = {
     run(request(PreviewSession, "POST", Paths.taskPreviewSession(taskId), {})),
 
   // Agent box (relayed by the Worker).
+  usage: () => run(request(Usage, "GET", Paths.usage)),
   listTasks: () => run(request(Schema.Array(Task), "GET", Paths.tasks)),
   createTask: (body: CreateTaskBody) => run(request(Task, "POST", Paths.tasks, body)),
   getTask: (taskId: string) => run(request(Task, "GET", Paths.task(taskId))),

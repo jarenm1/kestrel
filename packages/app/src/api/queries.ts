@@ -23,6 +23,7 @@ export const keys = {
   publicMe: ["public-me"] as const,
   box: ["box"] as const,
   connections: ["connections"] as const,
+  usage: ["usage"] as const,
   automations: ["automations"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
@@ -67,6 +68,7 @@ export const queries = {
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.box, refetchInterval: BOX_POLL_MS }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
+  usage: () => queryOptions({ queryKey: keys.usage, queryFn: api.usage }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks, refetchInterval: TASK_POLL_MS }),
   task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
