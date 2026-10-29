@@ -1,6 +1,6 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
-import { api } from "./client"
+import { api, signedInUser } from "./client"
 
 /** Agent box status poll; it feeds the top bar pill and the offline banner. */
 const BOX_POLL_MS = 10_000
@@ -19,6 +19,8 @@ export const queryClient = new QueryClient({
 /** Single source of truth for cache keys, so events and mutations update the same entries the pages read. */
 export const keys = {
   me: ["me"] as const,
+  /** The public site's view of the session on the app host (null when signed out). */
+  publicMe: ["public-me"] as const,
   box: ["box"] as const,
   connections: ["connections"] as const,
   automations: ["automations"] as const,
@@ -62,6 +64,7 @@ export function storeTask(client: QueryClient, task: Task): void {
 
 export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
+  publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.box, refetchInterval: BOX_POLL_MS }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),

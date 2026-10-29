@@ -24,6 +24,7 @@ import {
   UpdateAutomationBody,
 } from "@cloudagents/protocol"
 import { SERVER_URL } from "@/config"
+import { APP_ORIGIN } from "@/routes"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -105,6 +106,19 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
 /** Absolute URL of an attachment; the browser loads it with the session cookie, so it is safe to use in an `<img>`. */
 export const taskAttachmentUrl = (taskId: string, attachmentId: string): string =>
   SERVER_URL + Paths.taskAttachment(taskId, attachmentId)
+
+/**
+ * On the public site: who is signed in on the app host, or null. Reaches the app host directly (the public hosts
+ * only redirect `/api`), and treats any failure as signed out without firing the unauthorized listeners.
+ */
+export async function signedInUser(): Promise<Me | null> {
+  try {
+    const res = await fetch(APP_ORIGIN + ControlPaths.me, { credentials: "include" })
+    return res.ok ? Schema.decodeUnknownSync(Me)(await res.json()) : null
+  } catch {
+    return null
+  }
+}
 
 /**
  * Pending upload id of each `File` already stored on a task. A failed send leaves its uploads pending on the box (they

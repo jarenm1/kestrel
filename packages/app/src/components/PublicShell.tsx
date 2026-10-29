@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
+import { queries } from "@/api/queries"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -27,6 +29,8 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
  */
 export function PublicShell() {
   const { pathname } = useLocation()
+  // Signed in on the app host: the nav offers "Profile" instead of "Get Started".
+  const me = useQuery(queries.publicMe()).data
 
   // Page switches start at the top, like a full page load would. Block body: newer Chromium returns a Promise
   // from scrollTo, and React treats an effect's return value as its cleanup.
@@ -80,15 +84,28 @@ export function PublicShell() {
           >
             Docs
           </a>
-          {/* Dev-login exists only on local stacks (DEV_SESSION_LOGIN); production builds never show it. */}
-          {import.meta.env.DEV && (
-            <Button asChild variant="soft" size="sm" className="max-sm:hidden">
-              <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
+          {me ? (
+            <Button asChild size="sm" className="ml-1 h-8 pr-4 pl-1">
+              <a href={APP_URL} title={`Signed in as ${me.login}`}>
+                <span className="grid size-6 place-items-center overflow-hidden rounded-full bg-primary-foreground/10 text-[11px] font-semibold uppercase">
+                  {me.avatarUrl ? <img className="size-full" src={me.avatarUrl} alt="" /> : me.login.slice(0, 1)}
+                </span>
+                Profile
+              </a>
             </Button>
+          ) : (
+            <>
+              {/* Dev-login exists only on local stacks (DEV_SESSION_LOGIN); production builds never show it. */}
+              {import.meta.env.DEV && (
+                <Button asChild variant="soft" size="sm" className="max-sm:hidden">
+                  <a href={`${APP_ORIGIN}/auth/dev-login`}>Dev Login</a>
+                </Button>
+              )}
+              <Button asChild size="sm" className="ml-1 h-8 px-4">
+                <a href={APP_URL}>Get Started</a>
+              </Button>
+            </>
           )}
-          <Button asChild size="sm" className="ml-1 h-8 px-4">
-            <a href={APP_URL}>Get Started</a>
-          </Button>
         </nav>
       </header>
 
