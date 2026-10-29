@@ -81,9 +81,12 @@ The holder of that namespace also owns the task's own SysV IPC namespace (`unsha
 | `CLOUDAGENTS_TASK_MEMORY_MAX` | `4G` | systemd `MemoryMax` per task |
 | `CLOUDAGENTS_TASK_CPU_QUOTA` | `200%` | systemd `CPUQuota` per task (100% = one core) |
 | `CLOUDAGENTS_TASK_TASKS_MAX` | `1024` | systemd `TasksMax` (processes + threads) per task |
+| `CLOUDAGENTS_TASK_DISK_MAX` | `50G` | Storage per task (workspace, home and git shadow repos), enforced by the box; applies with or without systemd |
 | `CLOUDAGENTS_SYSTEMD` | on | `0` runs without limits (machines without a user systemd manager) |
 
 The box needs the user's systemd manager (`systemd-run --user`) with the memory, cpu and pids controllers delegated (the default on systemd distros). It checks this at startup and refuses to start otherwise; a box that outlives your login session (the production box) needs `loginctl enable-linger <user>`. At startup the box also stops its own slice, killing sandboxes a previous instance left behind; deleting or archiving a task stops its slice and drops its limits. Inspect live sandboxes with `systemd-cgls --user-unit kestrel.slice`.
+
+The storage limit is not a filesystem quota (the box runs unprivileged). The box measures every task's files at startup and every 30 s. A task over the limit has uploads and new checkouts refused (409), and a new run's prompt asks the agent to delete files first. If the task is over the limit and still growing (by more than 64 MiB since the last check) while a run or its desktop is going, the box stops them and says so in the chat. A task that is over the limit but shrinking keeps running, so an agent can clean up. Writes are never blocked mid-way, so a task can briefly pass the limit by whatever it writes in 30 s.
 
 Signed-in users can instead run agents on their own Claude or ChatGPT subscription: sign in under Settings › Connections (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
 
