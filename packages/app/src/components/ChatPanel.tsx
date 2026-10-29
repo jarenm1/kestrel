@@ -203,7 +203,15 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           })}
         </div>
       </div>
-      <div className="flex justify-center px-5 pt-2 pb-5">
+      <div className="relative flex justify-center px-5 pt-2 pb-5">
+        {/*
+          A short fade up from the dock's edge, ending just past the context bar's labels (which sit above the
+          composer, over the thread), so text scrolling under them softens instead of clashing.
+        */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-full h-5 bg-linear-to-t from-card to-transparent"
+        />
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
         ) : (
