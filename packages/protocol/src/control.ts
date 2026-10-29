@@ -176,8 +176,8 @@ export const Automation = Schema.Struct({
    */
   repo: Schema.NullOr(Schema.String),
   prompt: Schema.String,
-  /** Null uses the box's default model. */
-  model: Schema.NullOr(AgentModel),
+  /** Null uses the box's default model. Older responses omit the field; decode those to the same default. */
+  model: Schema.optionalWith(Schema.NullOr(AgentModel), { default: () => null, exact: true }),
   enabled: Schema.Boolean,
   trigger: AutomationTrigger,
   createdAt: Schema.String, // ISO-8601
