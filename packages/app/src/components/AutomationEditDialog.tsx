@@ -1,26 +1,41 @@
-import { useState, type ReactNode } from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { Fragment, useState, type ReactNode } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { ChevronDown } from "lucide-react"
+import { Schema } from "effect"
 import {
   GithubAutomationEvent,
+  AgentModel,
+  connectedModelProviders,
+  modelInfo,
   type Automation,
   type AutomationTrigger,
 } from "@cloudagents/protocol"
 import { api } from "@/api/client"
-import { keys } from "@/api/queries"
+import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
+import { useShownModels } from "@/hooks/useShownModels"
 import { EVENT_LABELS, splitList } from "@/lib/automations"
 import { errorText } from "@/util"
 
 const TIMEZONES = Intl.supportedValuesOf("timeZone")
 
 /**
- * Edits an automation's name, prompt and trigger settings. The trigger kind (schedule or GitHub) stays as it is;
+ * Edits an automation's name, prompt, model and trigger settings. The trigger kind (schedule or GitHub) stays as it is;
  * the server validates the rest and its messages (e.g. a bad cron) show inline.
  */
 export function AutomationEditDialog({ automation, onClose }: { automation: Automation | null; onClose: () => void }) {
@@ -40,6 +55,14 @@ export function AutomationEditDialog({ automation, onClose }: { automation: Auto
 
 function AutomationEditForm({ automation, onDone }: { automation: Automation; onDone: () => void }) {
   const queryClient = useQueryClient()
+  const connections = useQuery(queries.connections())
+  const shown = useShownModels()
+  const providers = connectedModelProviders(connections.data ?? [])
+  const [model, setModel] = useState<AgentModel | null>(automation.model)
+  const selected = model === null ? null : modelInfo(model)
+  const selectionListed = selected !== null && providers.some(
+    (provider) => shown[provider.id].some((candidate) => candidate.id === selected.id),
+  )
   const trigger = automation.trigger
   const [name, setName] = useState(automation.name)
   const [prompt, setPrompt] = useState(automation.prompt)
@@ -56,7 +79,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
 
   const save = useMutation({
     mutationFn: () =>
-      api.updateAutomation(automation.id, { name: name.trim(), prompt: prompt.trim(), trigger: buildTrigger() }),
+      api.updateAutomation(automation.id, { name: name.trim(), prompt: prompt.trim(), model, trigger: buildTrigger() }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: keys.automations })
       onDone()
@@ -100,6 +123,46 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
         </Field>
         <Field label="Prompt">
           <Textarea rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+        </Field>
+        <Field label="Model">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button type="button" variant="secondary" className="justify-between">
+                {selected?.name ?? "Default (box model)"}
+                <ChevronDown />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto">
+              <DropdownMenuRadioGroup
+                value={model ?? ""}
+                onValueChange={(value) => {
+                  if (value === "") setModel(null)
+                  else if (Schema.is(AgentModel)(value)) setModel(value)
+                }}
+              >
+                <DropdownMenuRadioItem value="">Default (box model)</DropdownMenuRadioItem>
+                {selected !== null && !selectionListed && (
+                  <DropdownMenuRadioItem value={selected.id}>{selected.name} (saved)</DropdownMenuRadioItem>
+                )}
+                {providers.map((provider) => (
+                  <Fragment key={provider.id}>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>{provider.name}</DropdownMenuLabel>
+                    {shown[provider.id].map((candidate) => (
+                      <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
+                        {candidate.name}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </Fragment>
+                ))}
+              </DropdownMenuRadioGroup>
+              {connections.isPending && <DropdownMenuLabel>Loading models…</DropdownMenuLabel>}
+              {connections.error && <DropdownMenuLabel>Could not load connected models.</DropdownMenuLabel>}
+              {connections.isSuccess && providers.length === 0 && (
+                <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </Field>
 
         {trigger._tag === "schedule" ? (

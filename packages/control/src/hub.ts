@@ -70,6 +70,7 @@ type AutomationRow = {
   name: string
   repo: string | null
   prompt: string
+  model: Automation["model"]
   enabled: number
   triggerJson: string
   nextRunAt: number | null
@@ -78,7 +79,7 @@ type AutomationRow = {
 }
 
 const AUTOMATION_COLUMNS =
-  "id, login, name, repo, prompt, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
 
 const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
 
@@ -91,6 +92,7 @@ const automationView = (row: AutomationRow): Automation => ({
   name: row.name,
   repo: row.repo,
   prompt: row.prompt,
+  model: row.model,
   enabled: row.enabled === 1,
   trigger: decodeTrigger(row.triggerJson),
   createdAt: row.createdAt,
@@ -400,6 +402,7 @@ export class Hub extends DurableObject<Env> {
       name: input.name,
       repo: input.repo,
       prompt: input.prompt,
+      model: input.model ?? null,
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(input.trigger),
       nextRunAt: nextRunMs(input.trigger, enabled, now),
@@ -407,13 +410,14 @@ export class Hub extends DurableObject<Env> {
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      `INSERT INTO automations (id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.login,
       row.name,
       row.repo,
       row.prompt,
+      row.model,
       row.enabled,
       row.triggerJson,
       row.nextRunAt,
@@ -434,15 +438,17 @@ export class Hub extends DurableObject<Env> {
       ...current,
       name: changes.name ?? current.name,
       prompt: changes.prompt ?? current.prompt,
+      model: changes.model === undefined ? current.model : changes.model,
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(trigger),
       nextRunAt: nextRunMs(trigger, enabled, now),
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      "UPDATE automations SET name = ?, prompt = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
+      "UPDATE automations SET name = ?, prompt = ?, model = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
       next.name,
       next.prompt,
+      next.model,
       next.enabled,
       next.triggerJson,
       next.nextRunAt,
@@ -585,17 +591,20 @@ export class Hub extends DurableObject<Env> {
       row.repo === null
         ? {}
         : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number }) } }
-    const outcome = await this.startTask(row.login, { title, ...checkout }, prompt)
+    const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model)
     return this.recordRun(row.id, reason, now, outcome)
   }
 
   /** Creates the task (with its repository checked out, if any) and sends the prompt to start its run. */
-  private async startTask(login: string, body: CreateTaskBody, prompt: string): Promise<RunOutcome> {
+  private async startTask(login: string, body: CreateTaskBody, prompt: string, model: Automation["model"]): Promise<RunOutcome> {
     const created = await this.boxCall(login, "POST", Paths.tasks, body)
     if (!created.ok) return { taskId: null, error: boxError(created) }
     const task = decodeJson(CreatedTask, created.body)
     if (task === null) return { taskId: null, error: "agent box returned an unexpected task" }
-    const sent = await this.boxCall(login, "POST", Paths.taskMessages(task.id), { text: prompt })
+    const sent = await this.boxCall(login, "POST", Paths.taskMessages(task.id), {
+      text: prompt,
+      ...(model === null ? {} : { model }),
+    })
     return sent.ok ? { taskId: task.id, error: null } : { taskId: task.id, error: boxError(sent) }
   }
 

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import {
+  AgentModel,
   type Automation,
   type AutomationTrigger,
   GithubAutomationEvent,
@@ -52,6 +53,7 @@ const formatAutomation = (automation: Automation): string =>
     `${automation.id} "${automation.name}" (${automation.enabled ? "enabled" : "disabled"})`,
     `  trigger: ${describeTrigger(automation.trigger)}`,
     `  repo: ${automation.repo ?? "none"}`,
+    `  model: ${automation.model ?? "default"}`,
     `  next run: ${automation.nextRunAt ?? "none"}`,
     `  prompt: ${automation.prompt}`,
   ].join("\n")
@@ -97,12 +99,13 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       inputSchema: {
         name: z.string().min(1).describe("Short name shown in the app"),
         prompt: z.string().min(1).describe("Prompt the run's agent receives"),
+        model: z.enum(AgentModel.literals).nullable().optional().describe("Model for each run; omitted or null uses the box default"),
         repo: z.string().optional().describe("GitHub repository (owner/name) that runs check out; required for github triggers"),
         trigger: triggerSchema,
         enabled: z.boolean().optional().describe("Whether it fires (default true)"),
       },
     },
-    ({ name, repo, prompt, trigger, enabled }) =>
+    ({ name, repo, prompt, model, trigger, enabled }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
@@ -111,6 +114,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
               name,
               repo,
               prompt,
+              model,
               trigger,
               enabled,
             })
@@ -125,21 +129,22 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
     {
       description:
         "Change an automation of this thread's owner. Only the fields given change: name, prompt, trigger (the whole " +
-        "trigger is replaced) or enabled. The repo cannot change.",
+        "trigger is replaced), model or enabled. The repo cannot change. Set model to null to restore the box default.",
       inputSchema: {
         id: z.string().describe("Automation id from automation_list"),
         name: z.string().min(1).optional().describe("New name"),
         prompt: z.string().min(1).optional().describe("New prompt"),
+        model: z.enum(AgentModel.literals).nullable().optional().describe("New model; null restores the box default"),
         trigger: triggerSchema.optional().describe("New trigger, replacing the old one"),
         enabled: z.boolean().optional().describe("Turn it on or off"),
       },
     },
-    ({ id, name, prompt, trigger, enabled }) =>
+    ({ id, name, prompt, model, trigger, enabled }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
             const { control, owner } = yield* scope
-            const updated = yield* control.update(owner, id, { name, prompt, trigger, enabled })
+            const updated = yield* control.update(owner, id, { name, prompt, model, trigger, enabled })
             return text(`updated automation ${updated.id}\n${formatAutomation(updated)}`)
           }),
         ),
