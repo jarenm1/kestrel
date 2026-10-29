@@ -210,7 +210,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
         */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-full h-3 bg-linear-to-t from-card to-transparent"
+          className="pointer-events-none absolute inset-x-0 bottom-full h-5 bg-linear-to-t from-card to-transparent"
         />
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
