@@ -5,7 +5,7 @@
  * Pure Effect Schema: no Node/DOM-specific imports here.
  */
 import { Schema } from "effect"
-import { AgentEffort, AgentModel, modelInfo } from "./models"
+import { AgentEffort, AgentModel, ModelProvider, modelInfo } from "./models"
 import { BranchName, RepoRef } from "./refs"
 
 // ---------------------------------------------------------------------------
@@ -116,6 +116,8 @@ export const Run = Schema.Struct({
   startedAt: Schema.String,
   endedAt: Schema.NullOr(Schema.String),
   exitCode: Schema.NullOr(Schema.Number),
+  /** The provider's CLI that ran it; absent on runs recorded before model switching stored it. */
+  provider: Schema.optional(ModelProvider),
 })
 export type Run = typeof Run.Type
 
@@ -305,6 +307,28 @@ export type CheckoutDiff = typeof CheckoutDiff.Type
 export const DiffResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutDiff) })
 export type DiffResponse = typeof DiffResponse.Type
 
+/**
+ * One command (Claude Code slash command, Codex skill) the authenticated harness offers in a thread's workspace.
+ * `name` carries no leading `/` or `$`: the app shows the provider's native invocation prefix.
+ */
+export const HarnessCommand = Schema.Struct({
+  name: Schema.String,
+  description: Schema.String,
+  /** The CLI's own argument hint, when it publishes one (e.g. `[issue description]`). */
+  argumentHint: Schema.optional(Schema.String),
+})
+export type HarnessCommand = typeof HarnessCommand.Type
+
+/**
+ * The commands of the harness the thread's next message will run on. `provider` is authoritative: while a run is
+ * active the message joins that run, so the box answers for the run's provider even if the composer picked another.
+ */
+export const HarnessCommands = Schema.Struct({
+  provider: ModelProvider,
+  commands: Schema.Array(HarnessCommand),
+})
+export type HarnessCommands = typeof HarnessCommands.Type
+
 export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
 export type Health = typeof Health.Type
 
@@ -340,6 +364,8 @@ export const Paths = {
   /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
+  /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
+  taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,

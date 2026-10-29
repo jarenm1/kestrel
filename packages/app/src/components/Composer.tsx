@@ -1,6 +1,7 @@
 import {
   Fragment,
   useEffect,
+  useId,
   useRef,
   useState,
   type ClipboardEvent,
@@ -18,7 +19,9 @@ import {
   EFFORT_LABELS,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
+  type HarnessCommand,
   type ModelInfo,
+  type ModelProvider,
   type ModelProviderInfo,
   type SendMessageBody,
 } from "@cloudagents/protocol"
@@ -35,6 +38,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
 import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { cn } from "@/lib/utils"
@@ -201,18 +205,42 @@ interface Props {
    */
   onStop?: (() => void) | undefined
   stopping?: boolean
+  /** The focused thread whose harness supplies slash commands. Omitted on the new-thread page, before a harness exists. */
+  taskId?: string | undefined
+  /** The turn the next message joins, if one is running: the server answers commands from its harness. */
+  activeRunId?: string | undefined
+  /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
+  activeRunProvider?: ModelProvider | undefined
   placeholder?: string
   autoFocus?: boolean
   className?: string
 }
 
-/** Message box with file attachments, the model and thinking-level pickers, and a round send / stop button. */
-export function Composer({ onSend, pending, error, onStop, stopping, placeholder, autoFocus, className }: Props) {
+/** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
+export function Composer({
+  onSend,
+  pending,
+  error,
+  onStop,
+  stopping,
+  taskId,
+  activeRunId,
+  activeRunProvider,
+  placeholder,
+  autoFocus,
+  className,
+}: Props) {
   const [text, setText] = useState("")
+  const [caret, setCaret] = useState(0)
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
   const [dragging, setDragging] = useState(false)
+  const [composerFocused, setComposerFocused] = useState(false)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0)
   const fileInput = useRef<HTMLInputElement>(null)
+  const textarea = useRef<HTMLTextAreaElement>(null)
+  const slashMenuId = useId()
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
   const connections = useQuery(queries.connections())
@@ -231,6 +259,73 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ]
   const empty = text.trim() === "" && files.length === 0
+
+  // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
+  // Codex accepts both the native `$` and `/`. The menu follows the caret while it stays inside the first word,
+  // then closes once an argument starts.
+  const firstSpace = text.search(/\s/)
+  const commandTokenEnd = firstSpace === -1 ? text.length : firstSpace
+  const trigger: "/" | "$" | undefined = text.startsWith("/") ? "/" : text.startsWith("$") ? "$" : undefined
+  const expectedProvider = activeRunProvider ?? model?.provider
+  // The running turn's provider wins over the picker. An older run without a stored provider is probed once.
+  const triggerAllowed =
+    trigger === "/" ||
+    (trigger === "$" &&
+      (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)))
+  const slashQuery =
+    taskId !== undefined &&
+    trigger !== undefined &&
+    triggerAllowed &&
+    caret > 0 &&
+    (firstSpace === -1 || caret <= firstSpace)
+      ? text.slice(1, caret)
+      : undefined
+  // Keyed by thread, model and running turn, and fetched only while a trigger token is present: a new thread never
+  // asks, and another thread's or provider's cached list can never be shown here.
+  const commandQuery = useQuery({
+    ...queries.commands(taskId, model?.id, activeRunId, activeRunProvider),
+    enabled: slashQuery !== undefined && taskId !== undefined && model !== undefined,
+  })
+  // The response is authoritative (an active run may use another provider than the picker); `$` only belongs to Codex.
+  const commandProvider = commandQuery.data?.provider ?? expectedProvider
+  const slashMenuOpen =
+    slashQuery !== undefined &&
+    (trigger !== "$" || commandProvider === "openai") &&
+    composerFocused &&
+    !slashDismissed
+  const commandMatches =
+    slashQuery === undefined
+      ? []
+      : (commandQuery.data?.commands ?? []).filter((c) =>
+          c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
+        )
+  const selectedCommandIndex =
+    commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
+  const selectedCommand = selectedCommandIndex === -1 ? undefined : commandMatches[selectedCommandIndex]
+
+  // A shorter prefix or a different harness reorders what is active; start at the top again.
+  useEffect(() => {
+    setActiveCommandIndex(0)
+  }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider])
+
+  /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
+  function chooseCommand(command: HarnessCommand) {
+    // Each harness has its own invocation syntax: Claude Code uses `/name`, Codex resolves `$skill-name`.
+    const prefix = commandQuery.data?.provider === "openai" ? "$" : "/"
+    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
+    const nextText = `${prefix}${command.name} ` + rest
+    const nextCaret = prefix.length + command.name.length + 1
+    setText(nextText)
+    setCaret(nextCaret)
+    setSlashDismissed(true)
+    // Wait for React to write the new value before moving the caret into it.
+    requestAnimationFrame(() => {
+      const el = textarea.current
+      if (el === null) return
+      el.focus()
+      el.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
 
   /** Adds files, refusing empty ones and any over the box's limit before they are uploaded. */
   function addFiles(added: readonly File[]) {
@@ -260,7 +355,35 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    // IME composition owns Enter/arrows; never pick a command or submit from a composition key.
+    const composing = e.nativeEvent.isComposing || e.keyCode === 229
+    if (!composing && slashMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setSlashDismissed(true)
+        return
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && commandMatches.length > 0) {
+        e.preventDefault()
+        const current = Math.min(activeCommandIndex, commandMatches.length - 1)
+        const delta = e.key === "ArrowDown" ? 1 : -1
+        setActiveCommandIndex((current + delta + commandMatches.length) % commandMatches.length)
+        return
+      }
+      // Enter always belongs to the open menu (even while loading): it selects the active command or does nothing.
+      // Tab selects too, but only when there is one, so it can still move focus out of an empty menu.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        if (selectedCommand !== undefined) chooseCommand(selectedCommand)
+        return
+      }
+      if (e.key === "Tab" && !e.shiftKey && selectedCommand !== undefined) {
+        e.preventDefault()
+        chooseCommand(selectedCommand)
+        return
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault()
       e.currentTarget.form?.requestSubmit()
     }
@@ -314,16 +437,56 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
             ))}
           </div>
         )}
-        <Textarea
-          className="min-h-12 resize-none bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
-          value={text}
-          placeholder={placeholder ?? "Message the agent (Enter to send, Shift+Enter for newline)"}
-          rows={2}
-          autoFocus={autoFocus}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKey}
-          onPaste={onPaste}
-        />
+        <div className="relative">
+          <Textarea
+            ref={textarea}
+            className="min-h-12 resize-none bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
+            value={text}
+            placeholder={placeholder ?? "Message the agent (Enter to send, Shift+Enter for newline)"}
+            rows={2}
+            autoFocus={autoFocus}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
+            aria-expanded={slashMenuOpen}
+            aria-controls={
+              slashMenuOpen && selectedCommand !== undefined ? slashListboxId(slashMenuId) : undefined
+            }
+            aria-activedescendant={
+              slashMenuOpen && selectedCommand !== undefined
+                ? slashOptionId(slashMenuId, selectedCommandIndex)
+                : undefined
+            }
+            onChange={(e) => {
+              setText(e.target.value)
+              setCaret(e.target.selectionStart)
+              setSlashDismissed(false)
+            }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+            onFocus={() => {
+              setComposerFocused(true)
+              setSlashDismissed(false)
+            }}
+            onBlur={() => setComposerFocused(false)}
+            onKeyDown={onKey}
+            onPaste={onPaste}
+          />
+          {slashMenuOpen && (
+            <SlashCommands
+              id={slashMenuId}
+              query={slashQuery ?? ""}
+              trigger={trigger ?? "/"}
+              provider={commandQuery.data?.provider ?? expectedProvider}
+              matches={commandMatches}
+              chosenModel={model !== undefined}
+              pending={commandQuery.isPending}
+              error={commandQuery.error}
+              activeIndex={selectedCommandIndex}
+              onActiveIndexChange={setActiveCommandIndex}
+              onSelect={chooseCommand}
+            />
+          )}
+        </div>
         <input
           ref={fileInput}
           type="file"

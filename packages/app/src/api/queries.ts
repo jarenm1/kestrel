@@ -1,5 +1,5 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
-import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
+import type { AgentModel, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
 
 /** Agent box status poll; it feeds the top bar pill and the offline banner. */
@@ -30,6 +30,13 @@ export const keys = {
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
   runItems: (runId: string) => ["runs", runId, "items"] as const,
+  /** Per thread, model, active run and its provider: another thread's or harness's commands never leak in. */
+  commands: (
+    taskId: string | undefined,
+    model: AgentModel | undefined,
+    activeRunId: string | undefined,
+    activeRunProvider: ModelProvider | undefined,
+  ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
 }
@@ -87,6 +94,27 @@ export const queries = {
       queryKey: keys.runItems(runId),
       queryFn: async (): Promise<RunItems> =>
         mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(keys.runItems(runId))),
+    }),
+  /**
+   * Disabled until there is both a focused thread and a model whose harness can answer. `activeRunId` and
+   * `activeRunProvider` are part of the cache key because the server answers from a running turn's harness; they
+   * are not sent on the wire.
+   */
+  commands: (
+    taskId: string | undefined,
+    model: AgentModel | undefined,
+    activeRunId: string | undefined,
+    activeRunProvider: ModelProvider | undefined,
+  ) =>
+    queryOptions({
+      queryKey: keys.commands(taskId, model, activeRunId, activeRunProvider),
+      queryFn: () => {
+        if (taskId === undefined || model === undefined) {
+          throw new Error("Slash commands need a thread and a model")
+        }
+        return api.commands(taskId, model)
+      },
+      enabled: taskId !== undefined && model !== undefined,
     }),
   diff: (taskId: string, running = false) =>
     queryOptions({

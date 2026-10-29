@@ -11,6 +11,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   Message,
   type AgentItem,
+  type AgentModel,
   type Attachment,
   NotFound,
   Paths,
@@ -21,9 +22,12 @@ import {
   type TaskStatus,
   type Checkout,
   type CheckoutRequest,
+  type CliProvider,
   type CreateTaskBody,
+  type HarnessCommands,
   modelInfo,
 } from "@cloudagents/protocol"
+import { CliAuth } from "../cliauth"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
@@ -32,6 +36,7 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
+import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
@@ -161,6 +166,15 @@ export interface CoreShape {
     input: CreateTaskBody,
   ) => Effect.Effect<Task, BadRequest | Conflict | NotFound | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
+  /**
+   * The commands the thread's next message can run, discovered from the authenticated harness in the thread
+   * workspace. While a run is active the next message joins it, so the run's provider wins over `model`.
+   */
+  readonly commands: (
+    user: string,
+    id: string,
+    model: AgentModel,
+  ) => Effect.Effect<HarnessCommands, NotFound | BadRequest | InternalError>
   readonly deleteTask: (user: string, id: string) => Effect.Effect<void, NotFound | InternalError>
   /** Tears down the thread's runtime (running runs, desktop, sandbox) and hides it from the active list; history and workspace stay. */
   readonly archiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
@@ -361,6 +375,7 @@ export const CoreLive = Layer.effect(
     const workspace = yield* WorkspaceService
     const credentials = yield* CredentialStore
     const github = yield* GitHub
+    const cliAuth = yield* CliAuth
     const sandboxSettings = sandboxSettingsOf(config)
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
@@ -851,6 +866,7 @@ export const CoreLive = Layer.effect(
               startedAt: now,
               endedAt: null,
               exitCode: null,
+              provider,
             }
             const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached }
             task.status = "running"
@@ -1052,6 +1068,20 @@ export const CoreLive = Layer.effect(
       createTask,
 
       getTask: ownedTask,
+
+      commands: (user, taskId, model) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          const state = yield* store.read
+          // A running run owns the next message, and therefore the harness and its commands. Its own provider is
+          // stored when the run starts, so a provider switch is right before the first session event arrives.
+          const running = state.runs.find((r) => r.taskId === taskId && r.status === "running")
+          const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
+          const provider = commandProvider(running, session, model)
+          const cliProvider: CliProvider = provider === "anthropic" ? "claude-cli" : "codex-cli"
+          const commands = yield* cliAuth.discoverCommands(user, cliProvider, threadDirOf(task.id))
+          return { provider, commands }
+        }),
 
       deleteTask: (user, id) => Effect.zipRight(ownedTask(user, id), deleteTask(id)),
       archiveTask,
