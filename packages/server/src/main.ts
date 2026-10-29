@@ -141,6 +141,7 @@ const program = Effect.gen(function* () {
     ask: core.ask,
     automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskOwner: core.taskOwner },
     inbox: core.inbox,
+    threads: { owner: core.taskOwner, list: core.listTasks, messages: core.listMessages, send: core.sendToThread },
     previewOpen: core.previewOpen,
   })
 

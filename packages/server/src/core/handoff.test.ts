@@ -34,4 +34,17 @@ describe("formatHandoff", () => {
     expect(prompt).not.toContain("oldest!")
     expect(prompt.indexOf("middle")).toBeLessThan(prompt.indexOf("newest"))
   })
+
+  test("attributes another thread's message to that thread's agent, not the user", () => {
+    const prompt = formatHandoff(
+      [
+        { role: "user", text: "typed by the user" },
+        { role: "user", text: "sent by a peer", fromThread: { id: "t2", title: "Fix login" } },
+      ],
+      "new prompt",
+    )
+
+    expect(prompt).toContain('User:\ntyped by the user')
+    expect(prompt).toContain('Agent of thread "Fix login" (t2):\nsent by a peer')
+  })
 })

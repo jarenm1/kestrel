@@ -187,6 +187,36 @@ const askAndListen = async (): Promise<{ answer: string; inbox: string } | null>
   return { answer: asked.text, inbox }
 }
 
+// Drives the thread tools: lists the owner's other threads, reads one (the named thread, or the first listed), sends
+// its agent "ping" and waits in the inbox for its "pong".
+const runThreadProbe = async (target: string | undefined): Promise<number> => {
+  const listed = await call("thread_list", {})
+  console.log(`fake-agent: thread list\n${listed.text}`)
+  const threadId = target ?? /^(\S+) "/m.exec(listed.text)?.[1]
+  if (listed.failed || threadId === undefined) {
+    await call("task_report", { status: "failed", message: "thread probe found no other thread" })
+    return 1
+  }
+  console.log(`fake-agent: thread read\n${(await call("thread_read", { threadId, limit: 5 })).text}`)
+  const sent = await call("thread_send", { threadId, message: "ping" })
+  console.log(`fake-agent: thread send failed=${sent.failed} text=${sent.text}`)
+  if (sent.failed) {
+    await call("task_report", { status: "failed", message: `thread probe could not send: ${sent.text}` })
+    return 1
+  }
+  let reply = ""
+  for (let attempt = 0; attempt < 30 && reply === ""; attempt++) {
+    const checked = await call("task_inbox", {})
+    if (!checked.text.startsWith("No new messages")) reply = checked.text
+    else await sleepMs(2000)
+  }
+  await call("task_report", {
+    status: reply === "" ? "failed" : "done",
+    message: reply === "" ? `no answer from thread ${threadId}` : `Thread ${threadId} answered:\n${reply}`,
+  })
+  return reply === "" ? 1 : 0
+}
+
 const main = async (): Promise<number> => {
   await client.connect(transport)
   console.log(`fake-agent: connected to ${mcpUrl}`)
@@ -196,6 +226,14 @@ const main = async (): Promise<number> => {
   if (prompt.trim() === "exec-probe") return runExecProbes()
   const [probe, arg] = prompt.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
+  if (probe === "thread-probe") return runThreadProbe(arg)
+  // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
+  const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(prompt)
+  if (ping !== null) {
+    const answered = await call("thread_send", { threadId: ping[1], message: "pong" })
+    await call("task_report", { status: answered.failed ? "failed" : "done", message: `answered ping: ${answered.text}` })
+    return answered.failed ? 1 : 0
+  }
   if (probe === "checkout-probe") return runCheckoutProbe(arg ?? "")
   if (prompt.trim() === "desktop-probe") return runDesktopProbes()
 

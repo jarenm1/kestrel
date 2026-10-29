@@ -58,6 +58,12 @@ function ThreadItem({
     case "user":
       return (
         <View style={styles.userWrap}>
+          {/* Sent by the agent of another of the user's threads (thread_send), not typed by the user. */}
+          {message.fromThread ? (
+            <Text style={styles.fromThread} numberOfLines={1}>
+              From the agent of {message.fromThread.title}
+            </Text>
+          ) : null}
           <View style={styles.userBubble}>
             <Text style={styles.userText} selectable>
               {message.text}
@@ -234,6 +240,7 @@ const styles = StyleSheet.create({
   thread: { flexGrow: 1, gap: 20, paddingHorizontal: spacing.lg, paddingVertical: spacing.lg },
   empty: { margin: "auto", color: colors.mutedForeground, fontSize: 14 },
   userWrap: { alignItems: "flex-end", gap: spacing.xs },
+  fromThread: { maxWidth: "85%", color: colors.mutedForeground, fontSize: 11 },
   userBubble: {
     maxWidth: "85%",
     borderRadius: radius.xxl,
