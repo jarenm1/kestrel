@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, type ReactNode } from "react"
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
@@ -6,7 +6,7 @@ import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
-import { formatClock } from "@/util"
+import { formatClock, formatElapsed } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer, type ElementContext } from "./Composer"
 import { Markdown } from "./Markdown"
@@ -30,15 +30,33 @@ interface Props {
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
 
-/** Under a thread block: a spinner while the turn runs, and the time. Finished turns get no icon. */
-function TurnFooter({ status, time }: { status: Run["status"] | undefined; time?: string }) {
-  const running = status === "running"
+/** How often the running turn's elapsed time is redrawn. */
+const ELAPSED_TICK_MS = 1000
+
+/** The run's time so far, redrawn every second. */
+function Elapsed({ startedAt }: { startedAt: string }) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), ELAPSED_TICK_MS)
+    return () => window.clearInterval(id)
+  }, [])
+  return <span className="tabular-nums">{formatElapsed(Date.parse(startedAt), now)}</span>
+}
+
+/** Under a thread block: a spinner and the time so far while the turn runs, and the time. Finished turns get no icon. */
+function TurnFooter({ run, time }: { run: Run | undefined; time?: string }) {
+  const running = run?.status === "running"
   if (!running && !time) return null
   return (
     <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground [&_svg]:size-3.5">
       {running && <StatusIcon status="running" />}
       {time && <span>{time}</span>}
-      {running && !time && <span>Working…</span>}
+      {running && !time && (
+        <>
+          <span>Working</span>
+          <Elapsed startedAt={run.startedAt} />
+        </>
+      )}
     </div>
   )
 }
@@ -53,7 +71,7 @@ function ThreadItem({
   message: Message
   /** The run transcript already renders this text; only what hangs off the message stays. */
   hideText?: boolean
-  turn: Run["status"] | undefined
+  turn: Run | undefined
   children?: ReactNode
 }) {
   switch (message.role) {
@@ -79,7 +97,7 @@ function ThreadItem({
           {/* No agent reply yet: the turn's status sits under the prompt, on the agent's side. */}
           {turn && (
             <div className="self-start">
-              <TurnFooter status={turn} />
+              <TurnFooter run={turn} />
             </div>
           )}
         </div>
@@ -87,12 +105,12 @@ function ThreadItem({
     case "agent": {
       // A duplicated message still holds attachments, and its footer is the running indicator; only the clock
       // goes, since the transcript's turn footer covers the finished turn.
-      if (hideText && (children === undefined || children === null)) return <TurnFooter status={turn} />
+      if (hideText && (children === undefined || children === null)) return <TurnFooter run={turn} />
       return (
         <div className={ENTER_CLASS}>
           {!hideText && <Markdown text={message.text} />}
           {children}
-          <TurnFooter status={turn} time={hideText ? undefined : formatClock(message.createdAt)} />
+          <TurnFooter run={turn} time={hideText ? undefined : formatClock(message.createdAt)} />
         </div>
       )
     }
@@ -101,7 +119,7 @@ function ThreadItem({
         <div className={cn("self-center text-xs text-muted-foreground italic", ENTER_CLASS)}>
           {message.text}
           {children}
-          <TurnFooter status={turn} />
+          <TurnFooter run={turn} />
         </div>
       )
   }
@@ -164,7 +182,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             const duplicate =
               m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
             const attachments = pending ? [] : (m.attachments ?? [])
-            const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId)?.status : undefined
+            const turn = m.runId && lastMessageOfRun.get(m.runId) === m.id ? runById.get(m.runId) : undefined
             // While the prompt is the run's last message, its status goes under the transcript once one exists.
             const turnBelowTranscript = startedRunId !== null && (itemCountByRun.get(startedRunId) ?? 0) > 0
             return (
@@ -179,7 +197,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
                   ) : null}
                 </ThreadItem>
                 {startedRunId !== null && <RunTranscript runId={startedRunId} />}
-                {turnBelowTranscript && <TurnFooter status={turn} />}
+                {turnBelowTranscript && <TurnFooter run={turn} />}
               </Fragment>
             )
           })}
