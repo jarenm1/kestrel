@@ -92,7 +92,8 @@ const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
     event.stopImmediatePropagation();
     const element = event.target;
     const label = element.getAttribute("aria-label") || element.getAttribute("alt") || (element.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 160) || element.localName;
-    parent.postMessage({ type: "kestrel-preview-selection", label, selector: selectorFor(element) }, "*");
+    const html = element.outerHTML.length > 2000 ? element.outerHTML.slice(0, 2000) + "…" : element.outerHTML;
+    parent.postMessage({ type: "kestrel-preview-selection", label, selector: selectorFor(element), html, page: location.pathname }, "*");
     enabled = false;
     document.documentElement.style.cursor = "";
     if (hovered) { hovered.removeAttribute("data-kestrel-preview-hover"); hovered = null; }
