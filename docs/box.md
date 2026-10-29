@@ -38,6 +38,25 @@ Each desktop's X server is a rootful Xwayland in a headless weston. On a host wi
 
 GPU access is not a tenant isolation boundary: desktop apps reach the host GPU driver and share its memory and scheduling. Keep the existing task CPU/RAM limits, but do not treat them as a VRAM quota.
 
+#### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
+
+The desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
+
+- The first frame after a quiet window goes out at once, so a keystroke or a click on an otherwise still desktop has no added latency.
+- Frames that come while one is held are concatenated into one message, sent when the window is up. A keyframe starts a new message; init segments are never bundled; a message is cut at 1 MiB.
+- Pending frames go out before any status message, so the viewer sees them in order. Acks and flow control count messages, not frames.
+
+What it costs, during continuous motion only: added latency per frame, and smoothness, because the browser paints only the newest frame of a message and so shows fewer frames. Simulated with frames at a steady rate:
+
+| Frame rate | Window | Messages/s (was) | Added latency, average / worst |
+|---|---|---|---|
+| 30 fps | 33 ms | 30 (30) | 0 / 0: saves nothing |
+| 30 fps | 50 ms | 20 (30) | 33 / 50 ms |
+| 60 fps | 33 ms | 30 (60) | 17 / 33 ms |
+| 60 fps | 50 ms | 20 (60) | 33 / 50 ms |
+
+Try `33` at 60 fps or `50` on the real box and watch typing, scrolling and video before keeping it.
+
 ### Toolkits
 
 Heavy desktop apps are opt-in per task, never in `sandboxEnv`. The agent installs one with the `toolkit_install` MCP tool: `blender` (Blender) or `roblox-studio` (Roblox Studio through Vinegar, plus Rojo and Wally). The box builds the flake's `toolkit-<name>` package with `nix build` on the host (the first install on a box downloads it, which can take minutes; later ones reuse `/nix/store`), keeps the out-link under the task home at `.kestrel/toolkits/<name>` as its GC root, and links its executables into `.kestrel/bin`, which is last on every sandbox `PATH`, the agent's already-running shell included. Toolkits need a box started through Nix (`CLOUDAGENTS_TOOLKITS_FLAKE`, set by the flake) on x86_64 Linux.
@@ -52,6 +71,7 @@ Roblox Studio through Vinegar is community-supported and can break when Studio c
 | `CLOUDAGENTS_TASK_CPU_QUOTA` | `200%` | systemd `CPUQuota` per task (100% = one core) |
 | `CLOUDAGENTS_TASK_TASKS_MAX` | `1024` | systemd `TasksMax` (processes + threads) per task |
 | `CLOUDAGENTS_TASK_DISK_MAX` | `50G` | Storage per task (workspace, home, git shadow repos and its attachment files, pending uploads included), enforced by the box; applies with or without systemd |
+| `CLOUDAGENTS_DESKTOP_BUNDLE_MS` | `0` (off) | Desktop stream bundling window, see [Desktop stream bundling](#desktop-stream-bundling-cloudagents_desktop_bundle_ms) |
 | `CLOUDAGENTS_SYSTEMD` | on | `0` runs without limits (machines without a user systemd manager) |
 
 The box needs the user's systemd manager (`systemd-run --user`) with the memory, cpu and pids controllers delegated (the default on systemd distros). It checks this at startup and refuses to start otherwise; a box that outlives your login session (the production box) needs `loginctl enable-linger <user>`. At startup the box also stops its own slice, killing sandboxes a previous instance left behind; deleting or archiving a task stops its slice and drops its limits. Inspect live sandboxes with `systemd-cgls --user-unit kestrel.slice`.

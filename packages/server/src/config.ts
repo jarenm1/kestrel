@@ -70,7 +70,7 @@ export interface ServerConfig {
    * Desktop frame bundling window in ms (CLOUDAGENTS_DESKTOP_BUNDLE_MS, default 0 = off). When set, the box sends at
    * most one relay message per window per viewer: the first fragment after a quiet window goes out at once, later ones
    * are held and sent together. Fewer billed relay messages, at up to the window of added latency during continuous
-   * motion. See the README.
+   * motion. See docs/box.md.
    */
   readonly desktopBundleMs: number
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
