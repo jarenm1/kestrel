@@ -244,20 +244,22 @@ const main = async (): Promise<number> => {
   // A resumed run (every run after a task's first) behaves like a fresh one; its report names the session it continued.
   if (resumeSession !== undefined) console.log(`fake-agent: resumed session ${resumeSession} with prompt: ${prompt}`)
   const resumed = resumeSession === undefined ? "" : ` Resumed session ${resumeSession}.`
-  if (prompt.trim() === "exec-probe") return runExecProbes()
-  const [probe, arg] = prompt.trim().split(/\s+/)
+  // Probes match the user's text, not the user context the box puts before it (core/user-context.ts).
+  const request = prompt.startsWith("The user is signed in to Kestrel as ") ? prompt.slice(prompt.indexOf("\n\n") + 2) : prompt
+  if (request.trim() === "exec-probe") return runExecProbes()
+  const [probe, arg] = request.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
   if (probe === "thread-probe") return runThreadProbe(arg)
   // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
-  const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(prompt)
+  const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(request)
   if (ping !== null) {
     const answered = await call("thread_send", { threadId: ping[1], message: "pong" })
     await call("task_report", { status: answered.failed ? "failed" : "done", message: `answered ping: ${answered.text}` })
     return answered.failed ? 1 : 0
   }
   if (probe === "checkout-probe") return runCheckoutProbe(arg ?? "")
-  if (probe === "toolkit-probe") return runToolkitProbe(arg ?? "", prompt.trim().split(/\s+/).slice(2).join(" "))
-  if (prompt.trim() === "desktop-probe") return runDesktopProbes()
+  if (probe === "toolkit-probe") return runToolkitProbe(arg ?? "", request.trim().split(/\s+/).slice(2).join(" "))
+  if (request.trim() === "desktop-probe") return runDesktopProbes()
 
   // The desktop starts only when the agent opens it: until then the desktop tools refuse.
   await call("desktop_screenshot", {})
