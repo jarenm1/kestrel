@@ -188,14 +188,32 @@ export type RunItems = typeof RunItems.Type
 export const DesktopState = Schema.Literal("stopped", "starting", "running", "failed")
 export type DesktopState = typeof DesktopState.Type
 
+/**
+ * How the desktop is streamed: the encoder scales the display down to this size and caps its frame rate. The desktop
+ * itself (`DesktopStatus.width`/`height`, screenshots, input) keeps its own resolution. One per desktop, shared by
+ * every viewer; a new desktop starts at `DEFAULT_DESKTOP_QUALITY`.
+ */
+export const DesktopQuality = Schema.Literal("1080p30", "720p60")
+export type DesktopQuality = typeof DesktopQuality.Type
+
+export const DESKTOP_QUALITIES: Readonly<Record<DesktopQuality, { label: string; width: number; height: number; fps: number }>> = {
+  "1080p30": { label: "1080p · 30 fps", width: 1920, height: 1080, fps: 30 },
+  "720p60": { label: "720p · 60 fps", width: 1280, height: 720, fps: 60 },
+}
+
+export const DEFAULT_DESKTOP_QUALITY: DesktopQuality = "1080p30"
+
 export const DesktopStatus = Schema.Struct({
   taskId: Schema.String,
   state: DesktopState,
   /** X display string, e.g. ":101". Null when stopped. Injected as DISPLAY into agent runs. */
   display: Schema.NullOr(Schema.String),
+  /** The desktop's own resolution; its aspect ratio is the stream's. */
   width: Schema.Number,
   height: Schema.Number,
+  /** The stream's frame rate cap, from `quality`. */
   fps: Schema.Number,
+  quality: DesktopQuality,
   /**
    * MIME + codec string for MediaSource, e.g. `video/mp4; codecs="avc1.42E01F"`.
    * Null until the stream is running. Clients MUST use this verbatim.
@@ -204,6 +222,10 @@ export const DesktopStatus = Schema.Struct({
   error: Schema.NullOr(Schema.String),
 })
 export type DesktopStatus = typeof DesktopStatus.Type
+
+/** PUT `Paths.taskDesktopQuality` -> DesktopStatus. The encoder restarts at the new quality; viewers get a new init segment. */
+export const SetDesktopQualityBody = Schema.Struct({ quality: DesktopQuality })
+export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
 
 /**
  * Client -> server input over the desktop WebSocket (JSON text frames).
@@ -462,6 +484,7 @@ export const Paths = {
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
+  taskDesktopQuality: (id: string) => `/api/tasks/${id}/desktop/quality`,
   /** Preview view path; the remaining path segments and query are proxied to the registered dev server. */
   taskPreview: (id: string) => `/api/tasks/${id}/preview`,
   /** POST -> PreviewSession: mints a short-lived token for the isolated/sandboxed browser preview. */

@@ -4,7 +4,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
 import { Context, Data, Deferred, Effect, Layer } from "effect"
-import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
+import {
+  DEFAULT_DESKTOP_QUALITY,
+  DESKTOP_QUALITIES,
+  type DesktopInput,
+  type DesktopQuality,
+  type DesktopState,
+  type DesktopStatus,
+} from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
@@ -94,13 +101,14 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly cachedGop: (taskId: string) => Effect.Effect<ReadonlyArray<Uint8Array> | null, DesktopError>
     readonly subscribe: (taskId: string, sink: DesktopSink) => Effect.Effect<Effect.Effect<void>, DesktopError>
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
+    /** Sets how the live desktop is streamed; a running encoder restarts at the new size and frame rate. */
+    readonly setQuality: (taskId: string, quality: DesktopQuality) => Effect.Effect<DesktopStatus, DesktopError>
     readonly stopAll: () => Effect.Effect<void>
   }
 >() {}
 
 const WIDTH = 2560
 const HEIGHT = 1440
-const FPS = 60
 const FIRST_DISPLAY = 101
 const LAST_DISPLAY = 199
 const X_SOCKET_TIMEOUT_MS = 10_000
@@ -116,8 +124,6 @@ const OUTPUT_TAIL_CHARS = 32 * 1024
  * Late joiners don't wait for it: they get the cached GOP.
  */
 const KEYFRAME_INTERVAL_S = 4
-/** Frame-count backstop for the encoder's GOP; at 60 fps it equals KEYFRAME_INTERVAL_S, so the clock normally fires first. */
-const GOP = 240
 /** Cap on the cached current GOP replayed to late joiners. Past it, joiners wait for the next keyframe. */
 const GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
 /** How long a live encoder keeps running after its last viewer leaves. */
@@ -164,6 +170,8 @@ interface Session {
   readonly display: string
   readonly terminal: DesktopStartOptions["terminal"]
   readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
+  /** Size and frame rate cap of the stream; the encoder is started with it. */
+  quality: DesktopQuality
   /**
    * Argv prefix for the box's MIT-SHM clients: joins Xvfb's IPC namespace. Xvfb lives as long as the session, so the
    * target cannot go stale the way a holder pid could. Set by boot once Xvfb is spawned; empty without a namespace.
@@ -289,73 +297,88 @@ const xdotoolLines = (e: DesktopInput): string[] => {
 }
 
 /**
- * Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of GOP frames and no B-frames.
+ * Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of `gop` frames and no B-frames.
  * NVENC takes the raw bgr0 frames directly and converts to 4:2:0 on the GPU (adding `-pix_fmt yuv420p`
  * moves that conversion to the CPU: ~50% of a core at 1080p60). `-delay 0 -zerolatency 1` stop NVENC from
  * holding output frames: screen change to fragment on stdout drops from 66 ms to 33 ms. p4/ll costs the same
  * CPU and latency as p1/ull at ~25-30% less bitrate on text and scrolling.
  */
-const ENCODER_ARGS: Record<EncoderKind, readonly string[]> = {
-  nvenc: [
-    "-c:v", "h264_nvenc",
-    "-preset", "p4",
-    "-tune", "ll",
-    "-delay", "0",
-    "-zerolatency", "1",
-    "-rc", "vbr",
-    "-cq", "23",
-    "-b:v", "0",
-    "-maxrate", "20M",
-    "-bufsize", "20M",
-    "-bf", "0",
-    "-profile:v", "high",
-    "-g", String(GOP),
-    "-forced-idr", "1",
-  ],
-  x264: [
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-tune", "zerolatency",
-    "-profile:v", "high",
-    "-crf", "23",
-    "-pix_fmt", "yuv420p",
-    "-g", String(GOP),
-    "-sc_threshold", "0",
-  ],
+const encoderArgs = (kind: EncoderKind, gop: number): readonly string[] => {
+  switch (kind) {
+    case "nvenc":
+      return [
+        "-c:v", "h264_nvenc",
+        "-preset", "p4",
+        "-tune", "ll",
+        "-delay", "0",
+        "-zerolatency", "1",
+        "-rc", "vbr",
+        "-cq", "23",
+        "-b:v", "0",
+        "-maxrate", "20M",
+        "-bufsize", "20M",
+        "-bf", "0",
+        "-profile:v", "high",
+        "-g", String(gop),
+        "-forced-idr", "1",
+      ]
+    case "x264":
+      return [
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "zerolatency",
+        "-profile:v", "high",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-g", String(gop),
+        "-sc_threshold", "0",
+      ]
+  }
 }
 
-/** ffmpeg reads the raw bgr0 frames that xdamage-capture writes to its stdin (xdamage-capture runs ffmpeg as its child). */
-const ffmpegArgs = (kind: EncoderKind): string[] => [
-  "-hide_banner",
-  "-loglevel",
-  "error",
-  // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
-  "-fflags",
-  "nobuffer",
-  "-f",
-  "rawvideo",
-  "-pix_fmt",
-  "bgr0",
-  "-video_size",
-  `${WIDTH}x${HEIGHT}`,
-  "-use_wallclock_as_timestamps",
-  "1",
-  "-i",
-  "pipe:0",
-  ...ENCODER_ARGS[kind],
-  "-force_key_frames",
-  `expr:gte(t-prev_forced_t,${KEYFRAME_INTERVAL_S})`,
-  // Keep the capture clock: a static desktop leaves gaps in the timeline instead of duplicating frames.
-  "-fps_mode",
-  "passthrough",
-  "-an",
-  "-f",
-  "flv",
-  // One video tag per frame: the muxer completes each frame as its tag arrives.
-  "-flush_packets",
-  "1",
-  "pipe:1",
-]
+/**
+ * ffmpeg reads the raw bgr0 frames that xdamage-capture writes to its stdin (xdamage-capture runs ffmpeg as its child)
+ * at the desktop's size, and scales them to the quality's. xdamage-capture caps the frame rate, so the rate needs no
+ * filter (an fps filter would duplicate frames on a static desktop).
+ */
+const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
+  const { width, height, fps } = DESKTOP_QUALITIES[quality]
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
+    "-fflags",
+    "nobuffer",
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "bgr0",
+    "-video_size",
+    `${WIDTH}x${HEIGHT}`,
+    "-use_wallclock_as_timestamps",
+    "1",
+    "-i",
+    "pipe:0",
+    // Area averaging keeps downscaled text legible.
+    "-vf",
+    `scale=${width}:${height}:flags=area`,
+    // GOP backstop: equal to KEYFRAME_INTERVAL_S at the capped rate, so the clock normally fires first.
+    ...encoderArgs(kind, fps * KEYFRAME_INTERVAL_S),
+    "-force_key_frames",
+    `expr:gte(t-prev_forced_t,${KEYFRAME_INTERVAL_S})`,
+    // Keep the capture clock: a static desktop leaves gaps in the timeline instead of duplicating frames.
+    "-fps_mode",
+    "passthrough",
+    "-an",
+    "-f",
+    "flv",
+    // One video tag per frame: the muxer completes each frame as its tag arrives.
+    "-flush_packets",
+    "1",
+    "pipe:1",
+  ]
+}
 
 const waitExit = (p: ChildProcess, ms: number): Promise<void> => {
   if (p.exitCode !== null || p.signalCode !== null) return Promise.resolve()
@@ -476,13 +499,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     const toStatus = (taskId: string, s: Session | undefined): DesktopStatus => {
       const live = s !== undefined && s.state !== "stopped"
+      const quality = live ? s.quality : DEFAULT_DESKTOP_QUALITY
       return {
         taskId,
         state: s?.state ?? "stopped",
         display: live ? s.display : null,
         width: WIDTH,
         height: HEIGHT,
-        fps: FPS,
+        fps: DESKTOP_QUALITIES[quality].fps,
+        quality,
         mime: live ? s.mime : null,
         error: live ? s.error : null,
       }
@@ -583,12 +608,14 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
-      const enc: Encoder = { kind, muxer: new Mp4Muxer(WIDTH, HEIGHT), child: null, initialized: false, stderr: "" }
+      const { width, height, fps } = DESKTOP_QUALITIES[s.quality]
+      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, stderr: "" }
       s.init = null
       s.gop = null
       s.gopBytes = 0
       s.awaiting = new Set(s.sinks)
-      enc.child = spawnTracked(s, "xdamage-capture", [String(WIDTH), String(HEIGHT), "ffmpeg", ...ffmpegArgs(kind)], {
+      const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality)]
+      enc.child = spawnTracked(s, "xdamage-capture", capture, {
         critical: false,
         prefix: s.ipc,
         onStdout: (d) => onEncoderBytes(s, enc, d),
@@ -826,6 +853,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 display: `:${num}`,
                 terminal: opts.terminal,
                 ipcNamespace: opts.ipcNamespace,
+                quality: DEFAULT_DESKTOP_QUALITY,
                 ipc: [],
                 ready,
                 procs: new Set(),
@@ -980,6 +1008,22 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           return Effect.sync(() => {
             watchers.delete(listener)
           })
+        }),
+
+      setQuality: (taskId, quality) =>
+        Effect.gen(function* () {
+          const s = yield* requireLive(taskId)
+          if (s.quality === quality) return toStatus(taskId, s)
+          s.quality = quality
+          // A live encoder restarts at the new size and rate, and viewers reconfigure from its init segment. An idle
+          // desktop (no encoder) starts at the new quality on its next subscribe.
+          const kind = s.encoder?.kind
+          if (kind !== undefined) {
+            stopEncoder(s)
+            launchEncoder(s, kind)
+          }
+          publish(s)
+          return toStatus(taskId, s)
         }),
 
       stopAll: () =>

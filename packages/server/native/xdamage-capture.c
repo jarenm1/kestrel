@@ -2,13 +2,13 @@
  * xdamage-capture: runs COMMAND with the X root window on its stdin as raw frames, but only when
  * something on screen changed. The remote desktop uses it to feed ffmpeg (`-f rawvideo -pix_fmt bgr0`).
  *
- * usage: xdamage-capture WIDTH HEIGHT COMMAND [ARGS...]   (display from $DISPLAY)
+ * usage: xdamage-capture WIDTH HEIGHT FPS COMMAND [ARGS...]   (display from $DISPLAY)
  *
  * Each frame is WIDTH*HEIGHT*4 bytes, 32-bit pixels laid out B G R 0. A frame is emitted when:
  *   - the screen has damage (XDamage), or
  *   - the cursor image changed (XFixes), or
  *   - the pointer moved (polled; the pointer produces no damage of its own).
- * Frames are rate-limited to 60 per second. The cursor is composited into the frame because the
+ * Frames are rate-limited to FPS per second. The cursor is composited into the frame because the
  * X server hides the software cursor from GetImage. COMMAND's stdout and stderr are inherited, so the
  * process group carries COMMAND's output. When COMMAND exits, so does this helper, with its status.
  */
@@ -34,7 +34,7 @@
 #include <X11/extensions/Xdamage.h>
 #include <X11/extensions/Xfixes.h>
 
-#define FRAME_NS 16666667LL
+static int64_t frame_ns = 0; /* one frame slot: 1 s / FPS */
 
 static int frame_fd = -1;
 static pid_t child = -1;
@@ -101,10 +101,13 @@ static void composite_cursor(uint8_t *dst, int width, int height, const XFixesCu
 }
 
 int main(int argc, char **argv) {
-	if (argc < 4) die("usage: xdamage-capture WIDTH HEIGHT COMMAND [ARGS...]");
+	if (argc < 5) die("usage: xdamage-capture WIDTH HEIGHT FPS COMMAND [ARGS...]");
 	int width = atoi(argv[1]);
 	int height = atoi(argv[2]);
+	int fps = atoi(argv[3]);
 	if (width <= 0 || height <= 0) die("invalid size");
+	if (fps <= 0 || fps > 240) die("invalid fps");
+	frame_ns = 1000000000LL / fps;
 
 	/* Start COMMAND first so the X connection is not inherited by it. */
 	int fds[2];
@@ -116,8 +119,8 @@ int main(int argc, char **argv) {
 		if (dup2(fds[0], STDIN_FILENO) < 0) _exit(127);
 		close(fds[0]);
 		signal(SIGPIPE, SIG_DFL);
-		execvp(argv[3], &argv[3]);
-		fprintf(stderr, "xdamage-capture: cannot run %s: %s\n", argv[3], strerror(errno));
+		execvp(argv[4], &argv[4]);
+		fprintf(stderr, "xdamage-capture: cannot run %s: %s\n", argv[4], strerror(errno));
 		_exit(127);
 	}
 	close(fds[0]);
@@ -197,14 +200,14 @@ int main(int argc, char **argv) {
 			if (!XShmGetImage(dpy, root, img, 0, 0, AllPlanes)) die("XShmGetImage failed");
 			if (cursor && have_pointer) composite_cursor((uint8_t *)img->data, width, height, cursor, px, py);
 			write_all((const uint8_t *)img->data, frame_bytes);
-			/* Fixed 60 Hz grid: wake-up latency must not accumulate into drift against the damage source. Restart the grid after a stall. */
-			next_slot += FRAME_NS;
-			if (now >= next_slot) next_slot = now + FRAME_NS;
+			/* Fixed FPS grid: wake-up latency must not accumulate into drift against the damage source. Restart the grid after a stall. */
+			next_slot += frame_ns;
+			if (now >= next_slot) next_slot = now + frame_ns;
 			pending = 0;
 		}
 
-		/* Wake for the next frame slot while pending, otherwise poll the pointer at 60 Hz. */
-		int64_t wait_ns = pending ? next_slot - now : FRAME_NS;
+		/* Wake for the next frame slot while pending, otherwise poll the pointer once per frame slot. */
+		int64_t wait_ns = pending ? next_slot - now : frame_ns;
 		if (wait_ns < 0) wait_ns = 0;
 		struct timespec timeout = { .tv_sec = wait_ns / 1000000000LL, .tv_nsec = wait_ns % 1000000000LL };
 		struct pollfd fds_poll[2] = {

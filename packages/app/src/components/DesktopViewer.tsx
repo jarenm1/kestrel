@@ -1,11 +1,27 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject, type WheelEvent } from "react"
+import { Schema } from "effect"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
+import { ChevronDown, Maximize2, Minimize2 } from "lucide-react"
+import {
+  DEFAULT_DESKTOP_QUALITY,
+  DESKTOP_QUALITIES,
+  DesktopQuality,
+  type DesktopInput,
+  type DesktopStatus,
+} from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { openDesktopStream, type DesktopConnection } from "@/api/events"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
@@ -15,6 +31,57 @@ const RECONNECT_MS = 2000
 
 /** A viewer nobody can see keeps its stream this long, so switching away and back costs nothing. */
 const UNSEEN_GRACE_MS = 5000
+
+/** Until the first status arrives the box assumes the usual 16:9 desktop. */
+const DEFAULT_ASPECT = 16 / 9
+
+/** Tracks whether `ref`'s element is the document's fullscreen element. */
+function useIsFullscreen(ref: RefObject<HTMLElement | null>): boolean {
+  const [fullscreen, setFullscreen] = useState(false)
+  useEffect(() => {
+    const update = () => setFullscreen(document.fullscreenElement !== null && document.fullscreenElement === ref.current)
+    document.addEventListener("fullscreenchange", update)
+    return () => document.removeEventListener("fullscreenchange", update)
+  }, [ref])
+  return fullscreen
+}
+
+/** The desktop's stream quality; shared by every viewer, so a pick here changes it for all of them. */
+function QualityPicker({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: DesktopQuality
+  disabled: boolean
+  onChange: (quality: DesktopQuality) => void
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" disabled={disabled} className="data-[state=open]:bg-white/[0.06]">
+          {DESKTOP_QUALITIES[value].label}
+          <ChevronDown className="opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        <DropdownMenuLabel>Stream quality</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={value}
+          onValueChange={(v) => {
+            if (Schema.is(DesktopQuality)(v)) onChange(v)
+          }}
+        >
+          {DesktopQuality.literals.map((q) => (
+            <DropdownMenuRadioItem key={q} value={q}>
+              {DESKTOP_QUALITIES[q].label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
 
 /**
  * Whether anyone can see the desktop: the tab is visible and the canvas is on screen. The stream is wanted while
@@ -57,6 +124,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const connRef = useRef<DesktopConnection | null>(null)
+  const frameRef = useRef<HTMLDivElement>(null)
+  const fullscreen = useIsFullscreen(frameRef)
   const desktop = useQuery(queries.desktop(taskId))
   const status = desktop.data ?? null
   const [streamError, setStreamError] = useState<string | null>(null)
@@ -137,6 +206,22 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     },
     onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
   })
+  const setQuality = useMutation({
+    mutationFn: (quality: DesktopQuality) => api.setDesktopQuality(taskId, { quality }),
+    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+  })
+
+  function toggleFullscreen() {
+    if (fullscreen) {
+      void document.exitFullscreen()
+      return
+    }
+    // The whole frame goes fullscreen so the button stays on it; the canvas keeps focus for keyboard input.
+    frameRef.current?.requestFullscreen().then(
+      () => canvasRef.current?.focus(),
+      (e: unknown) => setStreamError(`Fullscreen refused: ${errorText(e)}`),
+    )
+  }
 
   function send(input: DesktopInput) {
     connRef.current?.send(input)
@@ -176,8 +261,10 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     send(keyInput(e.nativeEvent, down))
   }
 
-  const actionError = toggle.error ?? desktop.error
+  const actionError = toggle.error ?? setQuality.error ?? desktop.error
   const error = actionError ? errorText(actionError) : (status?.error ?? streamError)
+  // The box takes the desktop's own aspect ratio, and the largest size that fits the panel.
+  const aspect = status && status.height > 0 ? status.width / status.height : DEFAULT_ASPECT
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -191,32 +278,52 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           {active ? "Stop" : "Start"}
         </Button>
         {status && <StatusIcon status={status.state} />}
+        <QualityPicker
+          value={status?.quality ?? DEFAULT_DESKTOP_QUALITY}
+          disabled={!active || setQuality.isPending}
+          onChange={(quality) => setQuality.mutate(quality)}
+        />
         {status && status.state === "running" && wanted && (
-          <span className="font-mono text-xs text-muted-foreground">
-            {status.width}×{status.height} · {stats?.fps ?? 0} fps · {(stats?.decodeMs ?? 0).toFixed(1)} ms decode ·{" "}
-            {status.display}
+          <span className="truncate font-mono text-xs text-muted-foreground">
+            {stats?.fps ?? 0} fps · {(stats?.decodeMs ?? 0).toFixed(1)} ms decode · {status.display}
           </span>
         )}
       </div>
       {error && <Alert className="mx-3 mb-2 w-auto">{error}</Alert>}
-      <div className="relative mx-3 mb-3 min-h-0 flex-1 overflow-hidden rounded-xl bg-black shadow-well">
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 size-full cursor-default object-contain outline-none focus:shadow-[inset_0_0_0_1px_var(--ring)]"
-          tabIndex={0}
-          onMouseMove={onMouseMove}
-          onMouseDown={(e) => onMouseButton(e, true)}
-          onMouseUp={(e) => onMouseButton(e, false)}
-          onWheel={onWheel}
-          onKeyDown={(e) => onKey(e, true)}
-          onKeyUp={(e) => onKey(e, false)}
-          onContextMenu={(e) => e.preventDefault()}
-        />
-        {overlay && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
-            {overlay}
-          </div>
-        )}
+      <div className="mx-3 mb-3 flex min-h-0 flex-1 justify-center [container-type:size]">
+        <div
+          ref={frameRef}
+          className="relative self-start overflow-hidden rounded-xl bg-black shadow-well [&:fullscreen]:rounded-none"
+          style={{ aspectRatio: aspect, width: `min(100cqw, 100cqh * ${aspect})` }}
+        >
+          <canvas
+            ref={canvasRef}
+            className="absolute inset-0 size-full cursor-default object-contain outline-none focus:shadow-[inset_0_0_0_1px_var(--ring)]"
+            tabIndex={0}
+            onMouseMove={onMouseMove}
+            onMouseDown={(e) => onMouseButton(e, true)}
+            onMouseUp={(e) => onMouseButton(e, false)}
+            onWheel={onWheel}
+            onKeyDown={(e) => onKey(e, true)}
+            onKeyUp={(e) => onKey(e, false)}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+          {overlay && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
+              {overlay}
+            </div>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="absolute right-2 bottom-2 bg-black/50 text-white/80 hover:bg-black/70 hover:text-white"
+            aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            onClick={toggleFullscreen}
+          >
+            {fullscreen ? <Minimize2 /> : <Maximize2 />}
+          </Button>
+        </div>
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, AgentModel } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
@@ -231,7 +231,8 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         ),
       ),
     ),
-
+  ).pipe(
+    // pipe takes at most 20 functions: the preview and desktop routes are their own group.
     HttpRouter.all(
       "/api/tasks/:id/preview",
       Effect.flatMap(pathId, (id) => servePreview(core, id)),
@@ -252,6 +253,16 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/desktop",
       Effect.flatMap(pathId, (id) =>
         respond(signedIn((user) => core.desktopStop(user, id).pipe(Effect.zipRight(core.desktopStatus(user, id))))),
+      ),
+    ),
+    HttpRouter.put(
+      "/api/tasks/:id/desktop/quality",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(SetDesktopQualityBody), (body) => core.desktopSetQuality(user, id, body.quality)),
+          ),
+        ),
       ),
     ),
   )
