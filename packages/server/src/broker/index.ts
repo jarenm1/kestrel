@@ -33,7 +33,7 @@ export interface CredentialBrokerShape {
   readonly grantForToken: (token: string) => Effect.Effect<BrokerGrant | null>
   /** Calls `listener` with the run id each time a run's token is revoked. Returns the unsubscribe. */
   readonly onRevoke: (listener: (runId: string) => void) => () => void
-  /** Real upstream key: the run user's control-plane credential first, then the host's env var. */
+  /** Real upstream key: the run user's control-plane credential, or null when they have none. */
   readonly upstreamKey: (provider: BrokerProvider, user: string) => Effect.Effect<string | null>
 }
 
@@ -41,11 +41,6 @@ export class CredentialBroker extends Context.Tag("cloudagents/CredentialBroker"
   CredentialBroker,
   CredentialBrokerShape
 >() {}
-
-const HOST_ENV_KEY: Record<BrokerProvider, string> = {
-  anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
-}
 
 export const CredentialBrokerLive = Layer.effect(
   CredentialBroker,
@@ -107,10 +102,7 @@ export const CredentialBrokerLive = Layer.effect(
       upstreamKey: (provider, user) =>
         Effect.gen(function* () {
           const creds = yield* store.get(user)
-          const fromStore = creds?.[provider]
-          if (fromStore) return fromStore
-          const fromEnv = process.env[HOST_ENV_KEY[provider]]
-          return fromEnv && fromEnv.trim() !== "" ? fromEnv : null
+          return creds?.[provider] || null
         }),
     }
     return broker
