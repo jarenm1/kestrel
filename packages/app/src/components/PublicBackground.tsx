@@ -11,11 +11,13 @@ export default function PublicBackground() {
     <GrainGradient
       className="size-full"
       colorBack="#0a0a0b"
-      colors={["#1c1c20", "#3d3d43", "#6e6e76"]}
-      shape="blob"
-      softness={0.8}
-      intensity={0.3}
-      noise={0.35}
+      // Small steps between neighbouring greys, full softness and little distortion: one continuous gradient
+      // rather than distinct shapes.
+      colors={["#141417", "#24242a", "#36363d", "#4a4a52"]}
+      shape="corners"
+      softness={1}
+      intensity={0.12}
+      noise={0.3}
       speed={REDUCED_MOTION ? 0 : 0.25}
       // A soft background needs nowhere near full resolution; this keeps the GPU cost low on big screens.
       maxPixelCount={1920 * 1080}
