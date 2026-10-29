@@ -15,6 +15,7 @@ import {
   DiffResponse,
   HarnessCommands,
   PreviewSession,
+  MachineStats,
   Me,
   Message,
   Paths,
@@ -206,4 +207,5 @@ export const api = {
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)))),
   setDesktopQuality: (taskId: string, body: SetDesktopQualityBody) =>
     run(request(DesktopStatus, "PUT", Paths.taskDesktopQuality(taskId), body)),
+  machineStats: () => run(request(MachineStats, "GET", Paths.machineStats)),
 }
