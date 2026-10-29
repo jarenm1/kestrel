@@ -128,7 +128,6 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
               taskStatus={state.task?.status}
               messages={state.messages}
               runs={state.runs}
-              output={state.output}
               archivedTask={archivedTask}
             />
           </View>
