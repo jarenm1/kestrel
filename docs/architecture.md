@@ -35,9 +35,9 @@ flowchart TB
   AUTH <-->|OAuth code to token| GH
   API -->|list repos| GH
   API --> HUB
-  HUB <-->|relay frames over WSS| RELAY
+  HUB <-->|WebSocket relay frames over WSS| RELAY
   VIEW -->|sandboxed preview + short-lived token| HUB
-  VIEW <-->|desktop stream WS| HUB
+  VIEW <-->|live fMP4 video + input over WebSocket| HUB
   VIEW -.->|planned: WebRTC direct| DESK
   RELAY --> REST
   REST -->|loopback proxy in task netns| SB
@@ -60,6 +60,7 @@ flowchart TB
 ## How it fits together
 
 - The browser only talks to Cloudflare. One Worker serves the API and one SPA build on two hosts: `app.kestrel-agent.com` is the app, and `kestrel-agent.com` (and `www.`) shows only its public landing and pricing pages, sending every other path, sign-in and the API to the app host.
+- Desktop streaming already works over WebSockets: the browser connects to the Hub, which relays stream frames to the box over its outbound WebSocket. The box captures the desktop, encodes H.264 and sends fragmented MP4; the browser decodes it with WebCodecs. Input and flow-control acknowledgements travel back over the stream connection. The dotted WebRTC line is a planned direct video transport for this existing stream.
 - The Hub Durable Object relays app requests to the box over the WebSocket the box dials out to, so nothing on the box is exposed to the internet.
 - The control plane signs users in; the box decides what they can see. Each thread is owned by the user who started it, and the box serves a thread and its runs, diffs and desktop only to that user (identity comes from the relay; the box's own port has no user and gets no thread data).
 - A thread starts in an empty workspace directory with no repository. The agent checks repositories out on demand with the `repo_checkout` MCP tool (a GitHub `owner/name` the owner's token can read, or a public `https://` URL; never local paths), at most one checkout per repository, each on its own thread branch. The box keeps one bare mirror per user and repository, fetched on the host with the owner's token before every checkout; a checkout is a clone that borrows the mirror's objects, so the sandbox sees that user's mirrors read-only and its own workspace read-write. Host-side git (diff, push) never runs inside a checkout's agent-writable git directory: it works from a host-owned shadow repository per checkout, so repository config the agent writes cannot make the host run commands.
@@ -77,7 +78,7 @@ flowchart TB
 - Agents manage automations with the `automation_list`, `automation_create`, `automation_update` and `automation_delete` MCP tools. The box calls the control plane at `/box/automations` over HTTPS with the box token and the thread's owner in `x-kestrel-box-user` (`BOX_USER_HEADER`, from `packages/protocol`). The control plane checks the token and that the user exists, then runs the same handlers as the browser. A tool sees and changes the automations of its thread's owner.
 - Each thread's agent can reach the owner's other threads: `thread_list` (active threads, archived ones left out), `thread_read` (a thread's latest messages) and `thread_send`. A sent message is stored on the target thread as a user message with `fromThread` (the sending thread's id and title) and shown there as coming from that agent. It goes into the target's running run's `task_inbox`, or starts a run that resumes the target's latest session (on that provider's default model); it never answers the target's open `task_ask` question, and an archived target refuses it with 409. The receiving agent reads who sent it and to answer with `thread_send` only when asked for something, so two agents do not keep waking each other. Everything stays on the box: another user's thread is NotFound, like on every owned route.
 - Archiving a thread (`POST /api/tasks/:id/archive`; `DELETE` lifts it) tears down its runtime: running runs are cancelled, the desktop stops, and the sandbox network and systemd slice are removed. The workspace, checkouts, branches, messages and runs stay, and the thread leaves the active list. While archived, sending a message or starting the desktop fails with 409 Conflict. Unarchiving restores both and starts nothing on its own.
-- Dotted WebRTC line: planned direct video path from the box to the browser, replacing today's stream relayed through the Hub.
+- Dotted WebRTC line: planned direct video path for today's working desktop stream, replacing the Hub relay for video.
 
 ## Owners
 

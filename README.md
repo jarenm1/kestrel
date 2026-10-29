@@ -42,7 +42,7 @@ flowchart LR
   MCP --> Desktop["Desktop: Weston / Xwayland / ffmpeg"]
 ```
 
-The clients talk only to the control plane; the box opens the relay connection. The broker keeps model API keys outside the agent sandbox. Local development replaces the deployed Worker with Wrangler and can replace the real harness with a scripted agent. See [docs/architecture.md](docs/architecture.md) for the detailed diagram and component responsibilities.
+The clients talk only to the control plane; the box opens the relay connection. Desktop streaming already works: the box captures and encodes the live desktop as fragmented MP4, sends it over a WebSocket through the Hub to the browser, and the browser decodes it with WebCodecs. The same stream connection carries desktop input and acknowledgements. Direct WebRTC is a planned transport for the existing live video stream, replacing the Hub relay for video. The broker keeps model API keys outside the agent sandbox. Local development replaces the deployed Worker with Wrangler and can replace the real harness with a scripted agent. See [docs/architecture.md](docs/architecture.md) for the detailed diagram and component responsibilities.
 
 - `packages/app`: the React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves two hosts, picked by hostname: the public landing and pricing pages on https://kestrel-agent.com (and `www.`), and the app on https://app.kestrel-agent.com (new chat at `/`, threads at `/c/:id`). Talks only to the control plane, same origin.
 - `packages/control`: the Cloudflare Worker control plane: GitHub sign-in, connections, and a relay to the agent box. Serves the built `packages/app` as static assets. Deployed as Worker `kestrel` on https://app.kestrel-agent.com, https://kestrel-agent.com and `www.` (and its workers.dev URL, which boxes dial). Sign-in and the API only answer on the app host; the public hosts redirect them there.
@@ -201,7 +201,7 @@ See the [fixture provenance and recording guide](packages/server/fixtures/agent/
 - **Preview scope:** pull-request Previews have no box or production secrets, so they support UI review only. In-thread browser previews intentionally omit app-origin storage, cookies, popups and service workers.
 - **Runtime availability:** production box updates restart the box and interrupt active runs. Optional Roblox Studio support depends on Vinegar and can break with upstream changes.
 
-The desktop stream already uses NVENC when it is available and falls back to libx264 if it cannot start. Next steps include direct WebRTC desktop streaming and adding real Claude recordings to complement the synthetic fixtures. These are planned improvements, not prerequisites for reproducing the demo; see [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
+The desktop stream already uses NVENC when it is available and falls back to libx264 if it cannot start. Next steps include sending the existing live video stream directly to the browser with WebRTC and adding real Claude recordings to complement the synthetic fixtures. These are planned improvements, not prerequisites for reproducing the demo; see [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
 
 ## Deploys
 
