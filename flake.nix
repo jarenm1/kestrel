@@ -82,8 +82,67 @@
           ];
         };
         sandboxSsl = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
+        # Toolkits: heavy desktop apps a task opts into (the agent's `toolkit_install`), never part of
+        # sandboxEnv. The box realizes `packages.toolkit-<name>` on demand with `nix build`, so a box
+        # downloads Blender or Wine only once some task asks for it. Names match packages/server/src/sandbox/toolkits.ts.
+        # Every binary is wrapped for the sandbox: Xvfb has no GPU and the sandbox has no /run/opengl-driver,
+        # so GL and Vulkan come from Mesa's software drivers (llvmpipe, lavapipe).
+        toolkitWrapArgs = pkgs.lib.escapeShellArgs [
+          "--prefix" "LD_LIBRARY_PATH" ":" "${pkgs.mesa}/lib"
+          "--set" "__EGL_VENDOR_LIBRARY_FILENAMES" "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
+          "--set" "VK_DRIVER_FILES" "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.uname.processor}.json"
+          "--set" "GALLIUM_DRIVER" "llvmpipe"
+          "--set-default" "FONTCONFIG_FILE" "${sandboxFontsConf}"
+          # Wine's X11 driver crashes on start when XDG_SESSION_TYPE is unset, as it is in the sandbox.
+          "--set-default" "XDG_SESSION_TYPE" "x11"
+        ];
+        mkToolkit = name: apps: pkgs.runCommand "kestrel-toolkit-${name}" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+          mkdir -p $out/bin
+          for app in ${toString apps}; do
+            for exe in "$app"/bin/*; do
+              makeWrapper "$exe" "$out/bin/$(basename "$exe")" ${toolkitWrapArgs}
+            done
+          done
+        '';
+        # Vinegar with this sandbox's defaults, written only where the user has none yet:
+        # - renderer Vulkan: Vinegar's default, DXVK, crashes Studio on lavapipe;
+        # - Web Pages off: the embedded WebView2 sign-in never loads under Wine here, so Studio goes
+        #   straight to its browser sign-in;
+        # - a `roblox-studio-auth:` handler, so Firefox hands the signed-in link back to Vinegar.
+        robloxVinegar = pkgs.writeShellScriptBin "vinegar" ''
+          config="''${XDG_CONFIG_HOME:-$HOME/.config}"
+          apps="''${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+          mkdir -p "$config/vinegar" "$apps"
+          if [ ! -e "$config/vinegar/config.toml" ]; then
+            printf '[studio]\nrenderer = "Vulkan"\nwebview = ""\n' > "$config/vinegar/config.toml"
+          fi
+          printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Vinegar' 'Exec=vinegar %u' 'NoDisplay=true' \
+            'MimeType=x-scheme-handler/roblox-studio;x-scheme-handler/roblox-studio-auth;' > "$apps/kestrel-vinegar.desktop"
+          if ! grep -qs 'roblox-studio-auth' "$config/mimeapps.list"; then
+            printf '%s\n' '[Default Applications]' 'x-scheme-handler/roblox-studio=kestrel-vinegar.desktop' \
+              'x-scheme-handler/roblox-studio-auth=kestrel-vinegar.desktop' >> "$config/mimeapps.list"
+          fi
+          exec ${pkgs.vinegar}/bin/vinegar "$@"
+        '';
+        # Wine opens links (Studio's "Login via Browser") with xdg-open, which the sandbox lacks.
+        robloxXdgOpen = pkgs.writeShellScriptBin "xdg-open" ''
+          case "$1" in
+            roblox-studio:* | roblox-studio-auth:*) exec vinegar "$1" ;;
+            *) exec firefox "$1" ;;
+          esac
+        '';
+        # Vinegar is x86_64-linux only; the box is too, in practice.
+        toolkits = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          toolkit-blender = mkToolkit "blender" [ pkgs.blender ];
+          # Roblox Studio through Vinegar (Wine); Vinegar downloads Studio itself on first `vinegar run`.
+          # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
+          toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
+        };
       in
       {
+        packages = toolkits;
+
         devShells.default = pkgs.mkShell {
           packages = systemDeps;
 
@@ -92,6 +151,7 @@
             export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-$PWD/.data}"
             export CLOUDAGENTS_SANDBOX_PATH="${sandboxEnv}/bin"
             export CLOUDAGENTS_SANDBOX_SSL="${sandboxSsl}"
+            export CLOUDAGENTS_TOOLKITS_FLAKE="${self}"
             export PATH="$PWD/node_modules/.bin:$PATH"
             echo "cloudagents dev shell: bun $(bun --version), ffmpeg $(ffmpeg -version | head -1 | cut -d' ' -f3)"
           '';
@@ -112,6 +172,7 @@
               export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-$PWD/.data}"
               export CLOUDAGENTS_SANDBOX_PATH="${sandboxEnv}/bin"
               export CLOUDAGENTS_SANDBOX_SSL="${sandboxSsl}"
+              export CLOUDAGENTS_TOOLKITS_FLAKE="${self}"
               if [ ! -d node_modules ]; then
                 bun install --frozen-lockfile
               fi

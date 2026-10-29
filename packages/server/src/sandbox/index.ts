@@ -14,6 +14,9 @@ export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./sy
 /** Where the per-task home is mounted inside the sandbox. */
 export const SANDBOX_HOME = "/home/agent"
 
+/** Under the task home: executables of the task's installed toolkits (`toolkits.ts`), last on every launch's PATH. */
+export const TOOLKIT_BIN = ".kestrel/bin"
+
 /** Host paths exposed read-only when present; enough for DNS, TLS and passwd lookups. */
 const SYSTEM_RO_FILES = [
   "/etc/resolv.conf",
@@ -24,6 +27,12 @@ const SYSTEM_RO_FILES = [
   "/etc/localtime",
   "/etc/ssl",
 ]
+
+/**
+ * Where nixpkgs' NSS (Firefox) reads its roots: its root module is p11-kit's trust module with these paths built in,
+ * not SSL_CERT_FILE. On NixOS the host files are symlinks into /etc/static, which the sandbox cannot follow.
+ */
+const CA_BUNDLE_PATHS = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-bundle.crt"]
 
 /** A host dir bound read-write at a path inside the sandbox. */
 export interface SandboxBind {
@@ -47,6 +56,8 @@ export interface BwrapOptions {
   readonly roBinds?: ReadonlyArray<string>
   /** Host dirs bound read-write inside the sandbox (a signed-in user's CLI logins). */
   readonly binds?: ReadonlyArray<SandboxBind>
+  /** CA bundle (CLOUDAGENTS_SANDBOX_SSL) bound at the standard bundle paths in place of the host's /etc/ssl. */
+  readonly caBundle?: string | null
 }
 
 /** Returns the full argv, starting with the `bwrap` executable name. */
@@ -92,8 +103,10 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   for (const bind of opts.binds ?? []) argv.push("--bind", bind.host, bind.sandbox)
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
   for (const file of SYSTEM_RO_FILES) {
+    if (file === "/etc/ssl" && opts.caBundle) continue
     if (existsSync(file)) argv.push("--ro-bind", file, file)
   }
+  if (opts.caBundle) for (const path of CA_BUNDLE_PATHS) argv.push("--ro-bind", opts.caBundle, path)
   if (opts.display !== undefined) {
     const socket = x11Socket(opts.display)
     argv.push("--bind", socket, socket)
@@ -548,7 +561,9 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     const home = agentHome(settings, req.homeDir)
     const env: Record<string, string> = {
       ...(settings.enabled ? {} : platformEnv()),
-      PATH: settings.enabled ? (settings.binPath as string) : (process.env.PATH ?? "/usr/bin:/bin"),
+      PATH: settings.enabled
+        ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
+        : `${process.env.PATH ?? "/usr/bin:/bin"}:${join(req.homeDir, TOOLKIT_BIN)}`,
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
       ...(settings.sslCertFile
@@ -572,6 +587,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
               command: req.command,
               roBinds: req.roBinds,
               binds: req.binds,
+              caBundle: settings.sslCertFile,
             }).slice(1)
             return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs] }
           },

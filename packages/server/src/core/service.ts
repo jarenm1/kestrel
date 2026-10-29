@@ -35,6 +35,7 @@ import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
@@ -255,6 +256,8 @@ export interface CoreShape {
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
+  /** Used by the MCP handler (`toolkit_install`): builds a toolkit and puts its executables on the task's PATH; returns their names. */
+  readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
   /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
   readonly checkout: (
     taskId: string,
@@ -1431,6 +1434,12 @@ export const CoreLive = Layer.effect(
           )
           const app = yield* desktop.launch(taskId, command, launch).pipe(Effect.mapError(toInternal("desktop launch")))
           return app.id
+        }),
+
+      toolkitInstall: (taskId, name) =>
+        Effect.gen(function* () {
+          yield* requireTask(taskId)
+          return yield* installToolkit(config.toolkitsFlake, join(config.homesDir, taskId), name)
         }),
 
       checkout: (taskId, input) => addCheckout(taskId, input),
