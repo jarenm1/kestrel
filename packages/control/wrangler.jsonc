@@ -16,7 +16,7 @@
     "directory": "../app/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/auth/*", "/box/*", "/webhooks/*"]
+    "run_worker_first": ["/api/*", "/auth/*", "/box/*", "/webhooks/*", "/_preview/*"]
   },
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "Hub" }]

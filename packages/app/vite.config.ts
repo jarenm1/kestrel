@@ -20,6 +20,7 @@ export default defineConfig({
       "/api": { target: CONTROL_PLANE, ws: true },
       "/auth": { target: CONTROL_PLANE },
       "/box": { target: CONTROL_PLANE, ws: true },
+      "/_preview": { target: CONTROL_PLANE, ws: true },
     },
   },
 })

@@ -35,7 +35,8 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
       instructions:
         "Tools for the task's remote desktop (a virtual X display streamed to the user) and its workspace (repositories come in through repo_checkout). " +
         "Desktop coordinates are pixels with the origin at the top-left. The desktop is not started with the run: call " +
-        "desktop_open before any other desktop tool, then desktop_screenshot to see the desktop and its size. Use task_report to tell the user when you are done, task_ask to ask them a question " +
+        "desktop_open before any other desktop tool, then desktop_screenshot to see the desktop and its size. After starting a web dev server, call " +
+        "preview_open with its port so the user can inspect it in the thread's Preview tab. Use task_report to tell the user when you are done, task_ask to ask them a question " +
         "and wait for the answer, and task_inbox between steps to read messages the user sent during the run.",
     },
   )

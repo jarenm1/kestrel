@@ -127,7 +127,9 @@ const connectOnce = (
           void serveHttp(frame, options.handle, store, send)
           return
         case "ws-open": {
-          const route = streamRoute(new URL(frame.path, BOX_ORIGIN).pathname)
+          const url = new URL(frame.path, BOX_ORIGIN)
+          const protocol = frame.headers["x-kestrel-preview-protocol"]?.split(",")[0]?.trim()
+          const route = streamRoute(url.pathname, frame.path, protocol)
           if (route === null) {
             send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_NOT_FOUND, reason: "not found" }))
             return

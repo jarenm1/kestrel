@@ -141,6 +141,7 @@ const program = Effect.gen(function* () {
     ask: core.ask,
     automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskOwner: core.taskOwner },
     inbox: core.inbox,
+    previewOpen: core.previewOpen,
   })
 
   const server = createServer((req, res) => {

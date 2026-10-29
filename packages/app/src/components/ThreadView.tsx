@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
-import { GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
+import { AppWindow, GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
+import { PreviewViewer } from "@/components/PreviewViewer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -9,15 +10,16 @@ import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
 import { repoShortName } from "@/util"
 
-type TabId = "desktop" | "diff"
+type TabId = "desktop" | "preview" | "diff"
 
 // Add a sidebar tab by adding an entry here and a case in SidebarBody.
 const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "desktop", label: "Desktop", icon: Monitor },
+  { id: "preview", label: "Preview", icon: AppWindow },
   { id: "diff", label: "Diff", icon: GitCompare },
 ]
 
-/** One thread (task): chat, plus a collapsible Desktop/Diff sidebar. Key it by taskId. */
+/** One thread (task): chat, plus a collapsible Desktop/Preview/Diff sidebar. Key it by taskId. */
 export function ThreadView({ taskId }: { taskId: string }) {
   const state = useTaskState(taskId)
   // Sidebar starts collapsed: chat is full width, and tab content only mounts while expanded,
@@ -103,6 +105,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
             taskId={taskId}
             archived={archivedTask !== undefined}
             running={state.task?.status === "running"}
+            previewPort={state.task?.previewPort}
           />
         </aside>
       ) : (
@@ -140,11 +143,13 @@ function SidebarBody({
   taskId,
   archived,
   running,
+  previewPort,
 }: {
   tab: TabId
   taskId: string
   archived: boolean
   running: boolean
+  previewPort: number | undefined
 }) {
   switch (tab) {
     case "desktop":
@@ -152,6 +157,11 @@ function SidebarBody({
         return <p className="p-4 text-sm text-muted-foreground">The desktop is off while this thread is archived.</p>
       }
       return <DesktopViewer taskId={taskId} />
+    case "preview":
+      if (archived) {
+        return <p className="p-4 text-sm text-muted-foreground">The preview is off while this thread is archived.</p>
+      }
+      return <PreviewViewer taskId={taskId} port={previewPort} />
     case "diff":
       return <DiffPanel taskId={taskId} running={running} />
   }
