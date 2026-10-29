@@ -5,7 +5,7 @@ import { queries } from "@/api/queries"
 import { KestrelMark } from "@/components/KestrelMark"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import { APP_ORIGIN } from "@/routes"
+import { ACCOUNT_PATH, APP_ORIGIN } from "@/routes"
 import "@/stylesfrontend.css"
 
 // WebGL shader code only loads on the public pages.
@@ -29,7 +29,7 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
  */
 export function PublicShell() {
   const { pathname } = useLocation()
-  // Signed in on the app host: the nav offers "Profile" instead of "Get Started".
+  // Signed in on the app host: the nav offers "Profile" (the account page) instead of "Get Started".
   const me = useQuery(queries.publicMe()).data
 
   // Page switches start at the top, like a full page load would. Block body: newer Chromium returns a Promise
@@ -86,12 +86,12 @@ export function PublicShell() {
           </a>
           {me ? (
             <Button asChild size="sm" className="ml-1 h-8 pr-4 pl-1">
-              <a href={APP_URL} title={`Signed in as ${me.login}`}>
+              <Link to={ACCOUNT_PATH} title={`Signed in as ${me.login}`}>
                 <span className="grid size-6 place-items-center overflow-hidden rounded-full bg-primary-foreground/10 text-[11px] font-semibold uppercase">
                   {me.avatarUrl ? <img className="size-full" src={me.avatarUrl} alt="" /> : me.login.slice(0, 1)}
                 </span>
                 Profile
-              </a>
+              </Link>
             </Button>
           ) : (
             <>

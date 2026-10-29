@@ -109,6 +109,23 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
 export const taskAttachmentUrl = (taskId: string, attachmentId: string): string =>
   SERVER_URL + Paths.taskAttachment(taskId, attachmentId)
 
+/** On the public site: the app host's answer for `path`, read with its session cookie; 401 is ApiError like the app's calls. */
+async function appHostGet<A, I>(schema: Schema.Schema<A, I>, path: string): Promise<A> {
+  const res = await fetch(APP_ORIGIN + path, { credentials: "include" })
+  const text = await res.text()
+  if (!res.ok) throw new ApiError(res.status, errorMessage(text, res.statusText))
+  return Schema.decodeUnknownSync(schema)(JSON.parse(text))
+}
+
+/** On the public site: the signed-in user's usage this billing period. */
+export const siteUsage = (): Promise<Usage> => appHostGet(Usage, Paths.usage)
+
+/** On the public site: ends the app host session. */
+export async function siteSignOut(): Promise<void> {
+  const res = await fetch(APP_ORIGIN + ControlPaths.logout, { method: "POST", credentials: "include" })
+  if (!res.ok) throw new ApiError(res.status, res.statusText)
+}
+
 /**
  * On the public site: who is signed in on the app host, or null. Reaches the app host directly (the public hosts
  * only redirect `/api`), and treats any failure as signed out without firing the unauthorized listeners.
@@ -163,7 +180,6 @@ export const api = {
     run(request(PreviewSession, "POST", Paths.taskPreviewSession(taskId), {})),
 
   // Agent box (relayed by the Worker).
-  usage: () => run(request(Usage, "GET", Paths.usage)),
   listTasks: () => run(request(Schema.Array(Task), "GET", Paths.tasks)),
   createTask: (body: CreateTaskBody) => run(request(Task, "POST", Paths.tasks, body)),
   getTask: (taskId: string) => run(request(Task, "GET", Paths.task(taskId))),

@@ -15,6 +15,16 @@ export const APP_ORIGIN = !IS_SITE_HOST
     ? `${protocol}//${hostname.slice("site.".length)}${port ? `:${port}` : ""}`
     : "https://app.kestrel-agent.com"
 
+/** Origin of the public site; the app links its account and billing pages there. */
+export const SITE_ORIGIN = IS_SITE_HOST
+  ? window.location.origin
+  : hostname === "app.kestrel-agent.com"
+    ? "https://kestrel-agent.com"
+    : `${protocol}//site.${hostname}${port ? `:${port}` : ""}`
+
+export const ACCOUNT_PATH = "/account"
+export const BILLING_PATH = "/account/billing"
+
 /** Home of the app: the new chat composer. */
 export const APP_HOME = "/"
 
