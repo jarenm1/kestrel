@@ -105,19 +105,24 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
 
 /**
  * bwrap args (without the executable) that run `command` with only `homeDir` writable: for the agent CLIs' own
- * sign-in/status/logout on the box. The process dies with the box (--die-with-parent) and sees nothing of the host
- * beyond /nix/store and the DNS/TLS files.
+ * sign-in/status/logout/discovery on the box. The process dies with the box (--die-with-parent) and sees nothing of
+ * the host beyond /nix/store and the DNS/TLS files. `network: "host"` shares the box's network (sign-in needs it).
+ * `network: "none"` gives the process an empty network namespace: discovery never needs the network, and the box's
+ * loopback services (broker, MCP, other tasks' servers) must stay out of reach. With `workspacePath` it runs there
+ * and sees that thread workspace read-only, so project commands and skills are discoverable.
  */
 export const cliBwrapArgs = (
   homeDir: string,
   env: Readonly<Record<string, string>>,
   command: ReadonlyArray<string>,
+  options: { readonly network: "host" | "none"; readonly workspacePath?: string },
 ): string[] => {
+  const workspacePath = options.workspacePath
   const argv = [
     "--die-with-parent",
     "--new-session",
     "--unshare-all",
-    "--share-net",
+    ...(options.network === "host" ? ["--share-net"] : []),
     "--clearenv",
     "--ro-bind",
     "/nix/store",
@@ -134,11 +139,12 @@ export const cliBwrapArgs = (
     homeDir,
     homeDir,
   ]
+  if (workspacePath !== undefined) argv.push("--ro-bind", workspacePath, workspacePath)
   for (const file of SYSTEM_RO_FILES) {
     if (existsSync(file)) argv.push("--ro-bind", file, file)
   }
   for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", homeDir, "--", ...command)
+  argv.push("--chdir", workspacePath ?? homeDir, "--", ...command)
   return argv
 }
 

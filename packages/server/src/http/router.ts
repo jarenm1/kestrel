@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, AgentModel } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
@@ -93,6 +93,16 @@ const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
   Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
 )
 
+/** The composer's chosen model (`?model=`); the box resolves the harness that will actually run. */
+const chosenModel = Effect.gen(function* () {
+  const req = yield* HttpServerRequest.HttpServerRequest
+  const raw = new URL(req.url, "http://localhost").searchParams.get("model") ?? ""
+  if (raw === "") return yield* Effect.fail(new BadRequest({ message: "model is required" }))
+  return yield* Schema.decodeUnknown(AgentModel)(raw).pipe(
+    Effect.mapError(() => new BadRequest({ message: `unknown model "${raw}"` })),
+  )
+})
+
 const servePreview = (core: CoreShape, taskId: string) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
@@ -160,6 +170,13 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     HttpRouter.get(
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listMessages(user, id)))),
+    ),
+    // Real commands of the harness the thread's next message runs on, discovered in the thread workspace.
+    HttpRouter.get(
+      "/api/tasks/:id/commands",
+      Effect.flatMap(pathId, (id) =>
+        respond(signedIn((user) => Effect.flatMap(chosenModel, (model) => core.commands(user, id, model)))),
+      ),
     ),
     HttpRouter.post(
       "/api/tasks/:id/messages",

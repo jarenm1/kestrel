@@ -1,5 +1,6 @@
 import { Effect, Either, Schema } from "effect"
 import {
+  type AgentModel,
   Attachment,
   Automation,
   BoxStatus,
@@ -12,6 +13,7 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  HarnessCommands,
   PreviewSession,
   Me,
   Message,
@@ -170,6 +172,15 @@ export const api = {
   archiveTask: (taskId: string) => run(request(Task, "POST", Paths.taskArchive(taskId))),
   unarchiveTask: (taskId: string) => run(request(Task, "DELETE", Paths.taskArchive(taskId))),
   listMessages: (taskId: string) => run(request(Schema.Array(Message), "GET", Paths.taskMessages(taskId))),
+  /** Slash commands of the harness for the composer's chosen model in this thread. */
+  commands: (taskId: string, model: AgentModel) =>
+    run(
+      request(
+        HarnessCommands,
+        "GET",
+        `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`,
+      ),
+    ),
   /**
    * Uploads `files` to the task, then sends the message with them attached after any ids already in `body`.
    * A resend after a failure uploads only the files that are not on the task yet.
