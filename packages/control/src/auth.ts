@@ -1,19 +1,19 @@
 import { ControlPaths } from "@cloudagents/protocol"
 import { findProvider, type OAuthProvider } from "./providers"
 import { UpstreamError, errorResponse, readCookie, safeReturnPath } from "./http"
-import { hub, isAllowedLogin, type Env } from "./env"
+import { hub, type Env } from "./env"
 import type { SessionRecord } from "./hub"
 
 export const SESSION_COOKIE = "session"
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const STATE_TTL_MS = 10 * 60 * 1000
 
-/** The signed-in user's session, or null when there is no live session for an allowed account. */
+/** The signed-in user's session, or null when there is no live session. */
 export const currentSession = async (request: Request, env: Env): Promise<SessionRecord | null> => {
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
   if (!id) return null
   const session = await hub(env).session(id)
-  if (!session || !isAllowedLogin(env, session.login)) return null
+  if (!session) return null
   return session
 }
 
@@ -115,9 +115,6 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   const account = await provider.fetchAccount(token)
 
   if (row.kind === "login") {
-    if (!isAllowedLogin(env, account.login)) {
-      return htmlPage(403, "Forbidden: this account is not allowed to use kestrel.")
-    }
     const stub = hub(env)
     await stub.upsertUser({ login: account.login, name: account.name, avatarUrl: account.avatarUrl })
     await stub.putConnection(account.login, provider.id, token, account.login)

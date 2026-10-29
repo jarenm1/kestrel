@@ -70,7 +70,7 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - **At most one stack per worktree.** The local Worker state (`.wrangler/`) is per directory; a second stack
   in the same worktree dies with `SQLITE_BUSY`. Need two stacks? Use two worktrees.
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
-  when you need a real agent (`ANTHROPIC_API_KEY=... bun run dev`, never committed).
+  when you need a real agent (add a key under Settings › Connections; never commit keys).
 - Sign in at `http://localhost:<app port>/auth/dev-login`. The public pages (landing, pricing) are at `http://site.localhost:<app port>/`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
 
 ## Before opening a PR

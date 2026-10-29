@@ -36,7 +36,7 @@ const boxPort = env.CLOUDAGENTS_PORT || String(8797 + offset)
 const varsPath = join(root, "packages/control/.dev.vars")
 if (!existsSync(varsPath)) {
   const token = randomBytes(32).toString("hex")
-  writeFileSync(varsPath, `BOX_TOKEN=${token}\nDEV_SESSION_LOGIN=dev\nALLOWED_GITHUB_LOGINS=dev\n`)
+  writeFileSync(varsPath, `BOX_TOKEN=${token}\nDEV_SESSION_LOGIN=dev\n`)
   console.log(`dev: created ${varsPath} (dev sign-in as 'dev')`)
 }
 const boxToken = /^BOX_TOKEN=(.+)$/m.exec(readFileSync(varsPath, "utf8"))?.[1]?.trim() ?? fail(`no BOX_TOKEN in ${varsPath}`)
