@@ -1,15 +1,36 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CliProvider, ControlPaths, type CliLoginStart, type Connection } from "@cloudagents/protocol"
+import {
+  CliProvider,
+  ControlPaths,
+  MODEL_PROVIDERS,
+  connectedModelProviders,
+  providerModels,
+  type CliLoginStart,
+  type Connection,
+  type AgentModel,
+  type ModelProviderInfo,
+} from "@cloudagents/protocol"
 import { Schema } from "effect"
+import { ChevronDown } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
+import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { errorText } from "@/util"
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
@@ -42,6 +63,75 @@ export function ConnectionsPage() {
           </CardContent>
         </Card>
       )}
+      {connections.data && <ModelListsCard connections={connections.data} />}
+    </div>
+  )
+}
+
+/** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
+function ModelListsCard({ connections }: { connections: readonly Connection[] }) {
+  const connected = new Set(connectedModelProviders(connections).map((p) => p.id))
+  return (
+    <div className="flex flex-col gap-2">
+      <div>
+        <h2 className="font-semibold tracking-tight">Models</h2>
+        <p className="text-muted-foreground">Choose which models each provider offers in the chat's model picker.</p>
+      </div>
+      <Card className="py-0">
+        <CardContent className="divide-y divide-white/[0.04] px-0">
+          {MODEL_PROVIDERS.map((provider) => (
+            <ModelListRow key={provider.id} provider={provider} connected={connected.has(provider.id)} />
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; connected: boolean }) {
+  const all = providerModels(provider.id)
+  const shown = useShownModels()[provider.id]
+  const shownIds = new Set(shown.map((m) => m.id))
+
+  function toggle(id: AgentModel, on: boolean) {
+    setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
+  }
+
+  return (
+    <div className="flex items-center gap-3 px-5 py-4">
+      <div className="flex flex-col gap-0.5">
+        <ConnectionHeader label={provider.name} connected={connected} />
+        {!connected && <span className="text-xs text-muted-foreground">Connect a key or subscription above to use these.</span>}
+      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="soft" size="sm" className="ml-auto">
+            {shown.length} of {all.length} shown
+            <ChevronDown className="opacity-60" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+        >
+          <DropdownMenuLabel>{provider.name} models in chat</DropdownMenuLabel>
+          {all.map((m) => (
+            <DropdownMenuCheckboxItem
+              key={m.id}
+              checked={shownIds.has(m.id)}
+              // Keeps the menu open so several models can be toggled in one go.
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={(on) => toggle(m.id, on)}
+            >
+              {m.name}
+            </DropdownMenuCheckboxItem>
+          ))}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem className="text-muted-foreground" onSelect={() => setShownModels(provider.id, null)}>
+            Reset to defaults
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   )
 }

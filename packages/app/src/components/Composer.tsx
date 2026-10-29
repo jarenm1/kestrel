@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useRef,
   useState,
@@ -7,38 +8,43 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react"
+import { Link } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, ChevronDown, FileText, Paperclip, Square, X } from "lucide-react"
-import { AgentEffort, AgentModel, MAX_ATTACHMENT_BYTES, type SendMessageBody } from "@cloudagents/protocol"
+import { ArrowUp, ChevronDown, FileText, Paperclip, Settings2, Square, X } from "lucide-react"
+import {
+  AgentEffort,
+  AgentModel,
+  EFFORT_LABELS,
+  MAX_ATTACHMENT_BYTES,
+  connectedModelProviders,
+  type ModelInfo,
+  type ModelProviderInfo,
+  type SendMessageBody,
+} from "@cloudagents/protocol"
+import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Textarea } from "@/components/ui/textarea"
+import { useShownModels } from "@/hooks/useShownModels"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 
-// `undefined` leaves the choice to the harness (the CLI's own default).
-const MODEL_OPTIONS: readonly { value: AgentModel | undefined; label: string }[] = [
-  { value: undefined, label: "Default" },
-  { value: "opus", label: "Opus" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "haiku", label: "Haiku" },
-]
-const EFFORT_OPTIONS: readonly { value: AgentEffort | undefined; label: string }[] = [
-  { value: undefined, label: "Default" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
-  { value: "max", label: "Max" },
-]
+/** A connected provider and the models the user keeps in the picker for it. */
+interface ModelSection {
+  readonly provider: ModelProviderInfo
+  readonly models: readonly ModelInfo[]
+}
 
 /** One pick, remembered in localStorage so it survives switching threads and reloads. */
 function useStoredChoice<A extends string>(key: string, schema: Schema.Schema<A>) {
@@ -85,6 +91,66 @@ function PillPicker<T extends string>({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/**
+ * Model menu: one group per connected provider, divided, with the models the user keeps for it (Connections).
+ * `sections` is null while connections load.
+ */
+function ModelPicker({
+  sections,
+  value,
+  onChange,
+}: {
+  sections: readonly ModelSection[] | null
+  value: ModelInfo | undefined
+  onChange: (value: AgentModel) => void
+}) {
+  const label = value?.name ?? (sections === null ? "Model" : "No models")
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" variant="ghost" size="sm" className="data-[state=open]:bg-white/[0.06]">
+          {label}
+          <ChevronDown className="opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+      >
+        {sections !== null && sections.length === 0 && (
+          <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
+        )}
+        <DropdownMenuRadioGroup
+          value={value?.id ?? ""}
+          onValueChange={(v) => {
+            if (Schema.is(AgentModel)(v)) onChange(v)
+          }}
+        >
+          {sections?.map((section, i) => (
+            <Fragment key={section.provider.id}>
+              {i > 0 && <DropdownMenuSeparator />}
+              <DropdownMenuLabel>{section.provider.name}</DropdownMenuLabel>
+              {section.models.map((m) => (
+                <DropdownMenuRadioItem key={m.id} value={m.id}>
+                  {m.name}
+                </DropdownMenuRadioItem>
+              ))}
+            </Fragment>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link to="/connections" className="text-muted-foreground">
+            <Settings2 />
+            Manage models
+          </Link>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -147,8 +213,23 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
   const [fileError, setFileError] = useState<string>()
   const [dragging, setDragging] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
-  const [model, setModel] = useStoredChoice("kestrel.model", AgentModel)
-  const [effort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
+  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  const connections = useQuery(queries.connections())
+  const shown = useShownModels()
+  const sections: readonly ModelSection[] | null = connections.data
+    ? connectedModelProviders(connections.data)
+        .map((provider) => ({ provider, models: shown[provider.id] }))
+        .filter((s) => s.models.length > 0)
+    : null
+  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
+  const offered = sections?.flatMap((s) => s.models) ?? []
+  const model = offered.find((m) => m.id === storedModel) ?? offered[0]
+  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined
+  const effortOptions: readonly { value: AgentEffort | undefined; label: string }[] = [
+    { value: undefined, label: "Default" },
+    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
+  ]
   const empty = text.trim() === "" && files.length === 0
 
   /** Adds files, refusing empty ones and any over the box's limit before they are uploaded. */
@@ -168,7 +249,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
-    onSend({ text: text.trim(), model, effort }, files).then(
+    onSend({ text: text.trim(), model: model?.id, effort }, files).then(
       () => {
         setText("")
         setFiles([])
@@ -265,8 +346,10 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
           >
             <Paperclip />
           </Button>
-          <PillPicker label="Model" value={model} options={MODEL_OPTIONS} onChange={setModel} />
-          <PillPicker label="Thinking" value={effort} options={EFFORT_OPTIONS} onChange={setEffort} />
+          <ModelPicker sections={sections} value={model} onChange={setModel} />
+          {model !== undefined && model.efforts.length > 0 && (
+            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+          )}
           {onStop && empty ? (
             <Button
               type="button"

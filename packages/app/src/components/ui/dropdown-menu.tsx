@@ -82,8 +82,28 @@ function DropdownMenuRadioItem({
   )
 }
 
+function DropdownMenuCheckboxItem({
+  className,
+  children,
+  ...props
+}: ComponentProps<typeof DropdownMenuPrimitive.CheckboxItem>) {
+  return (
+    <DropdownMenuPrimitive.CheckboxItem
+      data-slot="dropdown-menu-checkbox-item"
+      className={cn(ITEM_CLASS, "pr-8", className)}
+      {...props}
+    >
+      {children}
+      <DropdownMenuPrimitive.ItemIndicator className="absolute right-2.5 flex items-center">
+        <Check />
+      </DropdownMenuPrimitive.ItemIndicator>
+    </DropdownMenuPrimitive.CheckboxItem>
+  )
+}
+
 export {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,

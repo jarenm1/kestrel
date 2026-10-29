@@ -21,9 +21,17 @@ if (!mcpUrl || !mcpToken) {
   process.exit(1)
 }
 
-// The first line names the agent session, as `claude -p --output-format stream-json` does. A resumed run keeps its session.
+// The first line names the agent session in the shape the run's provider prints: Claude Code's stream-json init for
+// Anthropic models, codex's `thread.started` for OpenAI ones. A resumed run keeps its session.
 const resumeSession = process.env.CLOUDAGENTS_RESUME_SESSION
-console.log(JSON.stringify({ type: "system", subtype: "init", session_id: resumeSession ?? randomUUID() }))
+const sessionId = resumeSession ?? randomUUID()
+console.log(
+  JSON.stringify(
+    model?.startsWith("gpt-")
+      ? { type: "thread.started", thread_id: sessionId }
+      : { type: "system", subtype: "init", session_id: sessionId },
+  ),
+)
 
 const client = new Client({ name: "cloudagents-fake-agent", version: "0.1.0" })
 const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {

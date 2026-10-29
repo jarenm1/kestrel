@@ -5,6 +5,7 @@
  * Pure Effect Schema: no Node/DOM-specific imports here.
  */
 import { Schema } from "effect"
+import { AgentEffort, AgentModel, modelInfo } from "./models"
 import { BranchName, RepoRef } from "./refs"
 
 // ---------------------------------------------------------------------------
@@ -258,26 +259,27 @@ export const CreateTaskBody = Schema.Struct({
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
-/** Model alias passed to the agent CLI (`--model`). */
-export const AgentModel = Schema.Literal("opus", "sonnet", "haiku")
-export type AgentModel = typeof AgentModel.Type
-
-/** Thinking level passed to the agent CLI (`--effort`). */
-export const AgentEffort = Schema.Literal("low", "medium", "high", "xhigh", "max")
-export type AgentEffort = typeof AgentEffort.Type
-
 export const SendMessageBody = Schema.Struct({
   /** May be empty when `attachments` is not. */
   text: Schema.String,
-  /** Omitted = the harness default. */
+  /** Omitted = the box's default harness (Claude Code) with its default model. The model's provider picks the CLI. */
   model: Schema.optional(AgentModel),
+  /** Omitted = the model's default level. Must be one of the model's `ModelInfo.efforts`. */
   effort: Schema.optional(AgentEffort),
   /**
    * Ids of attachments uploaded to this task with `Paths.taskUploads` and not yet sent. They move onto the new
    * message in this order; the agent gets each as a file in its sandbox, named in its prompt or `task_inbox`.
    */
   attachments: Schema.optional(Schema.Array(Schema.String)),
-})
+}).pipe(
+  Schema.filter(
+    (body) =>
+      body.model === undefined ||
+      body.effort === undefined ||
+      modelInfo(body.model).efforts.includes(body.effort) ||
+      `${modelInfo(body.model).name} does not support the "${body.effort}" thinking level`,
+  ),
+)
 export type SendMessageBody = typeof SendMessageBody.Type
 
 export const SendMessageResponse = Schema.Struct({ message: Message, run: Run })
@@ -359,3 +361,4 @@ export const Paths = {
 export * from "./relay"
 export * from "./control"
 export * from "./refs"
+export * from "./models"

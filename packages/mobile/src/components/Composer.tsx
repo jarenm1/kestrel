@@ -1,7 +1,20 @@
-import React, { useState } from "react";
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import { AgentEffort, AgentModel, type SendMessageBody } from "@cloudagents/protocol";
+import React, { useMemo, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { useQuery } from "@tanstack/react-query";
+import {
+  AgentEffort,
+  AgentModel,
+  EFFORT_LABELS,
+  connectedModelProviders,
+  type ModelInfo,
+  type ModelProviderInfo,
+  type SendMessageBody,
+} from "@cloudagents/protocol";
+import { createQueries } from "@/api/queries";
+import { useApiClient } from "@/hooks/useApiClient";
+import { useShownModels } from "@/hooks/useShownModels";
 import { useStoredChoice } from "@/hooks/useStoredChoice";
+import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
 import { colors, radius, spacing } from "@/theme";
 
@@ -10,21 +23,11 @@ interface PickerOption<T extends string> {
   readonly label: string;
 }
 
-const MODEL_OPTIONS: readonly PickerOption<AgentModel>[] = [
-  { value: undefined, label: "Default" },
-  { value: "opus", label: "Opus" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "haiku", label: "Haiku" },
-];
-
-const EFFORT_OPTIONS: readonly PickerOption<AgentEffort>[] = [
-  { value: undefined, label: "Default" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
-  { value: "max", label: "Max" },
-];
+/** A connected provider and the models the user keeps in the picker for it. */
+interface ModelSection {
+  readonly provider: ModelProviderInfo;
+  readonly models: readonly ModelInfo[];
+}
 
 interface PillPickerProps<T extends string> {
   readonly label: string;
@@ -64,6 +67,78 @@ function PillPicker<T extends string>({ label, value, options, onChange }: PillP
   );
 }
 
+interface ModelPickerProps {
+  /** Null while connections load. */
+  readonly sections: readonly ModelSection[] | null;
+  readonly value: ModelInfo | undefined;
+  readonly onChange: (id: AgentModel) => void;
+  readonly onManage: () => void;
+}
+
+/**
+ * Model sheet: one group per connected provider, divided, listing the models the user keeps for it (Connections).
+ * With nothing to offer the pill says so and goes straight to Connections.
+ */
+function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) {
+  const [open, setOpen] = useState(false);
+  const nothingOffered = sections !== null && sections.length === 0;
+  const shown = nothingOffered ? "No models" : (value?.name ?? "Model");
+  return (
+    <>
+      <Pressable
+        style={styles.pill}
+        onPress={() => (nothingOffered ? onManage() : setOpen(true))}
+        accessibilityRole="button"
+        accessibilityLabel="Model"
+      >
+        <Text style={styles.pillText}>{shown} ▾</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <View style={styles.modalRoot}>
+          <Pressable style={styles.backdropFill} onPress={() => setOpen(false)} />
+          <View style={[styles.sheet, styles.sheetTall]}>
+            <Text style={styles.sheetTitle}>Model</Text>
+            <ScrollView style={styles.sheetScroll}>
+              {sections?.map((section, i) => (
+                <React.Fragment key={section.provider.id}>
+                  {i > 0 ? <View style={styles.divider} /> : null}
+                  <Text style={styles.sectionHeader}>{section.provider.name}</Text>
+                  {section.models.map((m) => (
+                    <Pressable
+                      key={m.id}
+                      style={styles.option}
+                      onPress={() => {
+                        onChange(m.id);
+                        setOpen(false);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: m.id === value?.id }}
+                    >
+                      <Text style={[styles.optionText, m.id === value?.id && styles.optionSelected]}>{m.name}</Text>
+                      {m.id === value?.id ? <Text style={styles.optionCheck}>✓</Text> : null}
+                    </Pressable>
+                  ))}
+                </React.Fragment>
+              ))}
+            </ScrollView>
+            <View style={styles.divider} />
+            <Pressable
+              style={styles.option}
+              onPress={() => {
+                setOpen(false);
+                onManage();
+              }}
+              accessibilityRole="button"
+            >
+              <Text style={styles.manageText}>Manage models</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
 interface ComposerProps {
   readonly onSend: (body: SendMessageBody) => Promise<unknown>;
   readonly pending: boolean;
@@ -75,9 +150,28 @@ interface ComposerProps {
 }
 
 export function Composer({ onSend, pending, error, onStop, stopping, placeholder }: ComposerProps) {
+  const { api } = useApiClient();
+  const navigation = useNavigation();
+  const queries = useMemo(() => createQueries(api), [api]);
+  const connections = useQuery(queries.connections());
+  const shown = useShownModels();
   const [text, setText] = useState("");
-  const [model, setModel] = useStoredChoice("kestrel.model", AgentModel);
-  const [effort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
+  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
+  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
+
+  const sections: readonly ModelSection[] | null = connections.data
+    ? connectedModelProviders(connections.data)
+        .map((provider) => ({ provider, models: shown[provider.id] }))
+        .filter((section) => section.models.length > 0)
+    : null;
+  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
+  const offered = sections?.flatMap((section) => section.models) ?? [];
+  const model = offered.find((m) => m.id === storedModel) ?? offered[0];
+  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined;
+  const effortOptions: readonly PickerOption<AgentEffort>[] = [
+    { value: undefined, label: "Default" },
+    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
+  ];
   const empty = text.trim() === "";
   const showStop = onStop !== undefined && empty;
 
@@ -85,7 +179,7 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
     const body = text.trim();
     if (body === "" || pending) return;
     // A failed send keeps the text so it can be resent; the error is shown through `error`.
-    void onSend({ text: body, model, effort }).then(
+    void onSend({ text: body, model: model?.id, effort }).then(
       () => setText(""),
       () => undefined
     );
@@ -104,8 +198,15 @@ export function Composer({ onSend, pending, error, onStop, stopping, placeholder
           multiline
         />
         <View style={styles.row}>
-          <PillPicker label="Model" value={model} options={MODEL_OPTIONS} onChange={setModel} />
-          <PillPicker label="Thinking" value={effort} options={EFFORT_OPTIONS} onChange={setEffort} />
+          <ModelPicker
+            sections={sections}
+            value={model}
+            onChange={setModel}
+            onManage={() => navigation.push({ name: "connections" })}
+          />
+          {model !== undefined && model.efforts.length > 0 ? (
+            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+          ) : null}
           <View style={styles.flex} />
           {showStop ? (
             <Pressable
@@ -172,6 +273,15 @@ const styles = StyleSheet.create({
   sendArrow: { color: colors.primaryForeground, fontSize: 18, fontWeight: "700" },
   stopSquare: { width: 12, height: 12, borderRadius: 2, backgroundColor: colors.primaryForeground },
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
+  modalRoot: { flex: 1, justifyContent: "flex-end" },
+  backdropFill: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: "rgba(0,0,0,0.4)",
+  },
   sheet: {
     backgroundColor: colors.card,
     borderTopLeftRadius: radius.xl,
@@ -179,8 +289,21 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     gap: spacing.xs,
   },
+  sheetTall: { maxHeight: "75%" },
+  sheetScroll: { flexGrow: 0, flexShrink: 1 },
   sheetTitle: { color: colors.mutedForeground, fontSize: 13, marginBottom: spacing.sm },
-  option: { paddingVertical: spacing.md },
+  sectionHeader: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    paddingVertical: spacing.xs,
+  },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: spacing.xs },
+  option: { paddingVertical: spacing.md, flexDirection: "row", alignItems: "center", gap: spacing.sm },
   optionText: { color: colors.foreground, fontSize: 16 },
   optionSelected: { fontWeight: "700" },
+  optionCheck: { color: colors.primary, fontSize: 16, fontWeight: "700" },
+  manageText: { color: colors.mutedForeground, fontSize: 16 },
 });

@@ -14,6 +14,7 @@ import {
   connectionStyles,
 } from "@/components/ConnectionsShared";
 import { ConnectionsCliRow } from "@/components/ConnectionsCliRow";
+import { ConnectionsModels } from "@/components/ConnectionsModels";
 import { colors, radius, spacing } from "@/theme";
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
@@ -39,6 +40,7 @@ export function ConnectionsScreen() {
             ))}
           </View>
         ) : null}
+        {connections.data ? <ConnectionsModels connections={connections.data} /> : null}
       </ScrollView>
     </View>
   );
