@@ -11,7 +11,7 @@ import { TOOLKIT_BIN, findExecutable, runProcess } from "./index"
 export const TOOLKITS = {
   blender: "Blender (3D modelling, rendering, Python scripting). `blender` opens the GUI; `blender -b file.blend -P script.py` runs headless.",
   "roblox-studio":
-    "Roblox Studio through Vinegar (Wine), plus Rojo and Wally. `vinegar run` downloads Studio on first use and opens it; the user signs in to Roblox on the desktop. Rojo syncs workspace files into Studio once its Studio plugin is installed.",
+    "Roblox Studio through Vinegar (Wine), plus Rojo and Wally. Before the first `vinegar run`, set `renderer = \"Vulkan\"` under `[studio]` in ~/.config/vinegar/config.toml: the default DXVK renderer crashes Studio on this software-rendered desktop. `vinegar run` downloads Studio on first use and opens it; Studio then needs the user to sign in to Roblox on the desktop, and its embedded sign-in page (WebView2 under Wine) can fail to load. Rojo syncs workspace files into Studio once its Studio plugin is installed.",
 } as const
 
 export type ToolkitName = keyof typeof TOOLKITS
