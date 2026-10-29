@@ -1,11 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
 import { Context, Data, Deferred, Effect, Layer } from "effect"
 import type { DesktopInput, DesktopState, DesktopStatus } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
+import { openboxRc } from "./scale"
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
 
@@ -95,8 +98,8 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
   }
 >() {}
 
-const WIDTH = 1920
-const HEIGHT = 1080
+const WIDTH = 2560
+const HEIGHT = 1440
 const FPS = 60
 const FIRST_DISPLAY = 101
 const LAST_DISPLAY = 199
@@ -740,7 +743,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         yield* Effect.try({
           try: () => {
-            spawnTracked(s, "openbox", ["--sm-disable"], { critical: false })
+            const rc = join(tmpdir(), "kestrel-openbox-rc.xml")
+            writeFileSync(rc, openboxRc())
+            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", rc], { critical: false })
             startEncoder(s, preferredEncoder())
           },
           catch: toErr,
