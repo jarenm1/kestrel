@@ -57,6 +57,11 @@
           export FONTCONFIG_FILE=${sandboxFontsConf}
           exec ${pkgs.firefox}/bin/firefox "$@"
         '';
+        # xterm's bitmap fonts don't scale, so it draws DejaVu at the desktop's HiDPI factor (GDK_SCALE, set by the box).
+        sandboxXterm = pkgs.writeShellScriptBin "xterm" ''
+          export FONTCONFIG_FILE=${sandboxFontsConf}
+          exec ${pkgs.xterm}/bin/xterm -fa 'DejaVu Sans Mono' -fs "$(( 10 * ''${GDK_SCALE:-1} ))" "$@"
+        '';
 
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
         sandboxEnv = pkgs.buildEnv {
@@ -77,7 +82,7 @@
             bun
             claude-code
             codex
-            xterm # the task desktop's terminal and what the agent launches on it run sandboxed
+            sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];
         };

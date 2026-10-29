@@ -4,6 +4,7 @@ import { accessSync, constants, existsSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
+import { desktopScaleEnv } from "../desktop/scale"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
 import { ensureTaskNet, joinTaskIpc, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
@@ -569,7 +570,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       ...(settings.sslCertFile
         ? { SSL_CERT_FILE: settings.sslCertFile, NIX_SSL_CERT_FILE: settings.sslCertFile }
         : {}),
-      ...(req.display ? { DISPLAY: req.display } : {}),
+      ...(req.display ? { DISPLAY: req.display, ...desktopScaleEnv } : {}),
       ...req.env,
     }
 
