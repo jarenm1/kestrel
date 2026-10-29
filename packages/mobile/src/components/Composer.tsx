@@ -108,6 +108,7 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
         variant="ghost"
         size="sm"
         active={open}
+        style={styles.modelPill}
         onPress={() => (nothingOffered ? onManage() : setOpen(true))}
         accessibilityLabel="Model"
       >
@@ -276,7 +277,8 @@ const styles = StyleSheet.create({
     textAlignVertical: "top",
   },
   row: { flexDirection: "row", alignItems: "center", gap: spacing.xs },
-  pillText: { color: colors.mutedForeground, fontSize: 12, fontWeight: "500" },
+  modelPill: { flexShrink: 1, minWidth: 0 },
+  pillText: { color: colors.mutedForeground, fontSize: 12, fontWeight: "500", flexShrink: 1 },
   backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
   sheet: {
     backgroundColor: colors.secondary,
