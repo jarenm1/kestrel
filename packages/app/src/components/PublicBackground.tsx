@@ -29,9 +29,9 @@ export default function PublicBackground() {
       colors={["#141417", "#24242a", "#36363d", "#4a4a52"]}
       shape="corners"
       softness={1}
-      intensity={0.12}
+      intensity={0.16}
       noise={0.3}
-      speed={REDUCED_MOTION ? 0 : 0.25}
+      speed={REDUCED_MOTION ? 0 : 0.45}
       // A soft background needs nowhere near full resolution; this keeps the GPU cost low on big screens.
       maxPixelCount={1920 * 1080}
     />
