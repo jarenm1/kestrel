@@ -12,7 +12,6 @@ import { errorText, formatClock } from "@/lib/format";
 import { colors, radius, shadows, spacing } from "@/theme";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
-import { RunPanel } from "./RunPanel";
 import { RunTranscript } from "./RunTranscript";
 
 interface Props {
@@ -20,7 +19,6 @@ interface Props {
   taskStatus: TaskStatus | undefined;
   messages: readonly Message[];
   runs: readonly Run[];
-  output: Record<string, string[]>;
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined;
 }
@@ -114,7 +112,7 @@ function ArchivedNotice({ task }: { task: Task }) {
   );
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, output, archivedTask }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: Props) {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
@@ -219,7 +217,6 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
           );
         })}
       </ScrollView>
-      <RunPanel runs={sortedRuns} output={output} />
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />
       ) : (

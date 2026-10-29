@@ -12,7 +12,6 @@ import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer } from "./Composer"
 import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
-import { RunPanel } from "./RunPanel"
 import { RunTranscript } from "./RunTranscript"
 import { StatusIcon } from "./StatusIcon"
 
@@ -21,7 +20,6 @@ interface Props {
   taskStatus: TaskStatus | undefined
   messages: readonly Message[]
   runs: readonly Run[]
-  output: Record<string, string[]>
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined
 }
@@ -105,7 +103,7 @@ function ThreadItem({
   }
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, output, archivedTask }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
 
@@ -200,7 +198,6 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, output, archived
           })}
         </div>
       </div>
-      <RunPanel runs={sortedRuns} output={output} />
       <div className="flex justify-center px-5 pt-2 pb-5">
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
