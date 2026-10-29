@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
@@ -173,10 +173,13 @@ interface Session {
   /** Size and frame rate cap of the stream; the encoder is started with it. */
   quality: DesktopQuality
   /**
-   * Argv prefix for the box's MIT-SHM clients: joins Xvfb's IPC namespace. Xvfb lives as long as the session, so the
-   * target cannot go stale the way a holder pid could. Set by boot once Xvfb is spawned; empty without a namespace.
+   * Argv prefix for the box's MIT-SHM clients: joins the X server's IPC namespace. The server lives as long as the
+   * session, so the target cannot go stale the way a holder pid could. Set by boot once it is spawned; empty without
+   * a namespace.
    */
   ipc: ReadonlyArray<string>
+  /** weston's XDG_RUNTIME_DIR (its Wayland socket); removed when the desktop stops. Null until boot makes it. */
+  runtimeDir: string | null
   /** Completes when the init segment has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
@@ -403,11 +406,19 @@ const waitForSocket = async (s: Session) => {
   const socket = `/tmp/.X11-unix/X${s.num}`
   const deadline = Date.now() + X_SOCKET_TIMEOUT_MS
   while (!existsSync(socket)) {
-    if (s.state !== "starting") throw new Error(s.error ?? "Xvfb stopped before accepting connections")
+    if (s.state !== "starting") throw new Error(s.error ?? "the X server stopped before accepting connections")
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${socket}`)
     const { promise, resolve } = Promise.withResolvers<void>()
     setTimeout(resolve, 50)
     await promise
+  }
+}
+
+const hasRenderNode = (): boolean => {
+  try {
+    return readdirSync("/dev/dri").some((name) => name.startsWith("renderD"))
+  } catch {
+    return false
   }
 }
 
@@ -753,19 +764,51 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const boot = (s: Session) =>
       Effect.gen(function* () {
         const ns = yield* s.ipcNamespace
-        const xvfb = yield* Effect.try({
-          // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the
-          // abstract socket (`local`) would let every task's agent reach every display.
-          try: () =>
-            spawnTracked(
+        // The desktop's X server: a rootful Xwayland window filling a headless weston output. Xwayland draws with
+        // glamor on the GPU weston renders with and gives X clients DRI3 + GLX on it, so desktop apps get hardware GL
+        // and Vulkan. Without a render node weston uses pixman and Xwayland software rendering (Mesa llvmpipe).
+        // Kiosk shell: the Xwayland window is the output's one fullscreen surface, with no panel or helper clients.
+        // Idle time 0: an idle output stops the frame callbacks that pace Xwayland's Present. weston exits with Xwayland.
+        // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the abstract socket
+        // (`local`) would let every task's agent reach every display.
+        const server = yield* Effect.try({
+          try: () => {
+            const runtimeDir = mkdtempSync(join(tmpdir(), `kestrel-wayland-${s.num}-`))
+            s.runtimeDir = runtimeDir
+            const env: Record<string, string> = { XDG_RUNTIME_DIR: runtimeDir }
+            for (const [name, value] of Object.entries(process.env)) {
+              if (value !== undefined && name !== "DISPLAY" && name !== "WAYLAND_DISPLAY" && name !== "XDG_RUNTIME_DIR") {
+                env[name] = value
+              }
+            }
+            return spawnTracked(
               s,
-              "Xvfb",
-              [s.display, "-screen", "0", `${WIDTH}x${HEIGHT}x24`, "-nolisten", "tcp", "-nolisten", "local"],
-              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder) },
-            ),
+              "weston",
+              [
+                "--backend=headless",
+                `--renderer=${hasRenderNode() ? "gl" : "pixman"}`,
+                `--width=${WIDTH}`,
+                `--height=${HEIGHT}`,
+                "--shell=kiosk",
+                "--no-config",
+                "--idle-time=0",
+                "--",
+                "Xwayland",
+                s.display,
+                "-geometry",
+                `${WIDTH}x${HEIGHT}`,
+                "-nolisten",
+                "tcp",
+                "-nolisten",
+                "local",
+              ],
+              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder), env },
+            )
+          },
           catch: toErr,
         })
-        if (ns !== null && xvfb.pid !== undefined) s.ipc = ns.join(xvfb.pid)
+        // Xwayland is weston's child, so it is in the same IPC namespace.
+        if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
         yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         yield* Effect.try({
@@ -811,6 +854,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         publish(s)
         s.sinks.clear()
         yield* Effect.promise(() => terminate(s.procs))
+        if (s.runtimeDir !== null) rmSync(s.runtimeDir, { recursive: true, force: true })
       })
 
     const lookup = (taskId: string) =>
@@ -830,14 +874,17 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     // Kill desktops on process exit even if shutdown hooks never ran.
     process.on("exit", () => {
-      for (const s of sessions.values()) for (const p of s.procs) killProcessGroup(p.pid, "SIGKILL")
+      for (const s of sessions.values()) {
+        for (const p of s.procs) killProcessGroup(p.pid, "SIGKILL")
+        if (s.runtimeDir !== null) rmSync(s.runtimeDir, { recursive: true, force: true })
+      }
     })
 
     return DesktopManager.of({
       start: (taskId, opts) =>
         Effect.gen(function* () {
           if (process.platform !== "linux") {
-            return yield* Effect.fail(new DesktopError({ message: "the task desktop needs Linux (Xvfb, x11grab)" }))
+            return yield* Effect.fail(new DesktopError({ message: "the task desktop needs Linux (Xwayland, x11grab)" }))
           }
           if (sessions.get(taskId)?.state === "failed") yield* stopTask(taskId)
           const ready = yield* Deferred.make<void, DesktopError>()
@@ -855,6 +902,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 ipcNamespace: opts.ipcNamespace,
                 quality: DEFAULT_DESKTOP_QUALITY,
                 ipc: [],
+                runtimeDir: null,
                 ready,
                 procs: new Set(),
                 sinks: new Set(),

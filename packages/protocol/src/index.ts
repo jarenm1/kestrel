@@ -181,7 +181,7 @@ export type RunItems = typeof RunItems.Type
 
 /**
  * stopped   no X display / capture running
- * starting  Xvfb + openbox + ffmpeg being spawned
+ * starting  X server (weston + Xwayland) + openbox + ffmpeg being spawned
  * running   stream is live; `mime` is set and binary frames are flowing
  * failed    see `error`
  */

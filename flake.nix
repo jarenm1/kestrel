@@ -41,7 +41,8 @@
           passt         # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
           util-linux    # `nsenter`: sandbox launches join their task's network namespace
           # Remote desktop stack (one virtual X display per task)
-          xvfb         # virtual X server (xorg.xvfb is deprecated)
+          weston        # headless Wayland compositor hosting each desktop's X server
+          xwayland      # rootful X server per desktop; GPU-accelerated (glamor, DRI3) when the host has one
           openbox       # minimal window manager
           xterm         # default app on agent desktops
           xdotool       # input injection (mouse/keyboard) from the web client / MCP
@@ -91,13 +92,18 @@
         # Toolkits: heavy desktop apps a task opts into (the agent's `toolkit_install`), never part of
         # sandboxEnv. The box realizes `packages.toolkit-<name>` on demand with `nix build`, so a box
         # downloads Blender or Wine only once some task asks for it. Names match packages/server/src/sandbox/toolkits.ts.
-        # Every binary is wrapped for the sandbox: Xvfb has no GPU and the sandbox has no /run/opengl-driver,
-        # so GL and Vulkan come from Mesa's software drivers (llvmpipe, lavapipe).
+        # Every binary is wrapped for the sandbox. Desktop sandboxes see the host GPU and its drivers at
+        # /run/opengl-driver (NixOS); without them, GL and Vulkan come from Mesa's software drivers (llvmpipe, lavapipe).
+        toolkitSoftwareGl = ''
+          if [ ! -d /run/opengl-driver/lib ]; then
+            export LD_LIBRARY_PATH="${pkgs.mesa}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            export __EGL_VENDOR_LIBRARY_FILENAMES=${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json
+            export VK_DRIVER_FILES=${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.uname.processor}.json
+            export GALLIUM_DRIVER=llvmpipe
+          fi
+        '';
         toolkitWrapArgs = pkgs.lib.escapeShellArgs [
-          "--prefix" "LD_LIBRARY_PATH" ":" "${pkgs.mesa}/lib"
-          "--set" "__EGL_VENDOR_LIBRARY_FILENAMES" "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json"
-          "--set" "VK_DRIVER_FILES" "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.uname.processor}.json"
-          "--set" "GALLIUM_DRIVER" "llvmpipe"
+          "--run" toolkitSoftwareGl
           "--set-default" "FONTCONFIG_FILE" "${sandboxFontsConf}"
           # Wine's X11 driver crashes on start when XDG_SESSION_TYPE is unset, as it is in the sandbox.
           "--set-default" "XDG_SESSION_TYPE" "x11"
