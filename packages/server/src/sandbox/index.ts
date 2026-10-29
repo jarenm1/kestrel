@@ -105,13 +105,15 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
 
 /**
  * bwrap args (without the executable) that run `command` with only `homeDir` writable: for the agent CLIs' own
- * sign-in/status/logout on the box. The process dies with the box (--die-with-parent) and sees nothing of the host
- * beyond /nix/store and the DNS/TLS files.
+ * sign-in/status/logout/discovery on the box. The process dies with the box (--die-with-parent) and sees nothing of
+ * the host beyond /nix/store and the DNS/TLS files. With `workspacePath` it runs there and sees that thread
+ * workspace read-only, so project commands and skills are discoverable.
  */
 export const cliBwrapArgs = (
   homeDir: string,
   env: Readonly<Record<string, string>>,
   command: ReadonlyArray<string>,
+  workspacePath?: string,
 ): string[] => {
   const argv = [
     "--die-with-parent",
@@ -134,11 +136,12 @@ export const cliBwrapArgs = (
     homeDir,
     homeDir,
   ]
+  if (workspacePath !== undefined) argv.push("--ro-bind", workspacePath, workspacePath)
   for (const file of SYSTEM_RO_FILES) {
     if (existsSync(file)) argv.push("--ro-bind", file, file)
   }
   for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", homeDir, "--", ...command)
+  argv.push("--chdir", workspacePath ?? homeDir, "--", ...command)
   return argv
 }
 

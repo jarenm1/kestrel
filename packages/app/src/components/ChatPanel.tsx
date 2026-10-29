@@ -208,6 +208,9 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <ArchivedNotice task={archivedTask} />
         ) : (
           <Composer
+            taskId={taskId}
+            activeRunId={activeRun?.id}
+            activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             error={send.error ?? cancel.error}

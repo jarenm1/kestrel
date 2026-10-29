@@ -1,17 +1,22 @@
 import { Context, Effect, Layer } from "effect"
 import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { chmod, mkdir, rm, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { isAbsolute, join, relative, resolve } from "node:path"
 import {
   BadRequest,
   InternalError,
   type CliAuthStatus,
   type CliLoginStart,
   type CliProvider,
+  type HarnessCommand,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
-import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "./process"
+import { CLAUDE_DISCOVERY_ARGS, CODEX_DISCOVERY_ARGS, discoverClaudeCommands, discoverCodexCommands, killActiveDiscovery } from "./harness-commands"
+import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { cliBwrapArgs, findExecutable } from "./sandbox"
+
+/** POSIX quoting for one argv element run through `sh -c`. */
+const posixQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
 
 /*
  * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). Each signed-in user's
@@ -79,6 +84,16 @@ export interface CliAuthShape {
   readonly logout: (user: string, provider: CliProvider) => Effect.Effect<void, BadRequest | InternalError>
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
+  /**
+   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace): Claude Code
+   * slash commands or Codex skills. Runs the CLI in the user's isolated login home with the workspace read-only,
+   * bounded and killed on answer, error or timeout; never tokens, paths or file contents.
+   */
+  readonly discoverCommands: (
+    user: string,
+    provider: CliProvider,
+    workspacePath: string,
+  ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
   /** Kills sign-ins still waiting for the user; called on box shutdown. */
   readonly shutdown: () => Effect.Effect<void>
 }
@@ -90,7 +105,7 @@ interface Output {
   readonly stderr: string
 }
 
-/** A concrete process to run: the CLI itself, or bwrap wrapping it. */
+/** A concrete process to run: the CLI itself, bwrap wrapping it, or (Windows, unsandboxed) the shell that runs its shim. */
 interface Invocation {
   readonly file: string
   readonly args: ReadonlyArray<string>
@@ -257,6 +272,7 @@ export const CliAuthLive = Layer.effect(
         }
         const ssl = config.sandboxSslCertFile
         return {
+          ...(config.sandboxEnabled ? {} : platformEnv()),
           PATH: path,
           HOME: root,
           CLAUDE_CONFIG_DIR: join(root, SPECS["claude-cli"].dir),
@@ -269,20 +285,91 @@ export const CliAuthLive = Layer.effect(
 
     /**
      * How to run `bin args` for `user`: inside bwrap with only the user's dir writable, so it dies with the box and
-     * sees nothing else of the host; directly only when the sandbox is disabled (local debugging).
+     * sees nothing else of the host; directly (or through POSIX sh for Windows `.cmd` shims) only when the sandbox
+     * is disabled (local debugging). `workspacePath` runs discovery in that read-only thread workspace.
      */
     const invoke = (
       user: string,
       bin: string,
       args: ReadonlyArray<string>,
+      workspacePath?: string,
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const env = yield* cliEnv(user)
-        if (!config.sandboxEnabled) return { file: bin, args, env }
+        if (!config.sandboxEnabled) {
+          // Windows installs the CLIs as `.cmd` shims, which spawn cannot launch directly; the repo's POSIX shell
+          // runs them like agent commands do, with SystemRoot and the rest of the platform env in place.
+          if (process.platform === "win32") {
+            return { file: shell(), args: ["-c", [bin, ...args].map(posixQuote).join(" ")], env }
+          }
+          return { file: bin, args, env }
+        }
         const bwrap = findExecutable("bwrap")
         if (bwrap === null) return yield* Effect.fail(new InternalError({ message: "bwrap (bubblewrap) not found on PATH" }))
         const root = yield* rootOf(user)
-        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args]), env: {} }
+        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args], workspacePath), env: {} }
+      })
+
+    /**
+     * A thread's workspace, and only a thread's workspace: discovery reads project commands/skills from it and must
+     * never be handed an arbitrary host path.
+     */
+    const threadWorkspace = (workspacePath: string): Effect.Effect<string, BadRequest> => {
+      const root = resolve(config.threadsDir)
+      const target = resolve(workspacePath)
+      const rel = relative(root, target)
+      return rel === "" || rel.startsWith("..") || isAbsolute(rel)
+        ? Effect.fail(new BadRequest({ message: "thread workspace is outside the threads directory" }))
+        : Effect.succeed(target)
+    }
+
+    const commandCache = new Map<string, { readonly at: number; readonly commands: ReadonlyArray<HarnessCommand> }>()
+    const discoveryRuns = new Map<string, Promise<ReadonlyArray<HarnessCommand>>>()
+    const COMMAND_CACHE_MS = 30_000
+    const COMMAND_CACHE_MAX = 64
+
+    /**
+     * Runs the provider CLI for `user` in `workspacePath` and returns its real command list. Concurrent requests for
+     * the same user, provider and workspace share one child; a short cache keeps the composer from spawning per key.
+     */
+    const discoverCommands = (
+      user: string,
+      provider: CliProvider,
+      workspacePath: string,
+    ): Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        const workspace = yield* threadWorkspace(workspacePath)
+        const key = `${user}\0${provider}\0${workspace}`
+        const cached = commandCache.get(key)
+        if (cached !== undefined && Date.now() - cached.at < COMMAND_CACHE_MS) return cached.commands
+        const spec = SPECS[provider]
+        const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
+        // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
+        yield* ensureUserDirs(user, provider)
+        const inv = yield* invoke(user, spec.bin, args, workspace)
+        return yield* Effect.tryPromise({
+          try: () => {
+            const running = discoveryRuns.get(key)
+            if (running !== undefined) return running
+            const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: workspace }
+            const pending = (provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch))
+              .then((commands) => {
+                commandCache.delete(key)
+                commandCache.set(key, { at: Date.now(), commands })
+                while (commandCache.size > COMMAND_CACHE_MAX) {
+                  const oldest = commandCache.keys().next().value
+                  if (oldest === undefined) break
+                  commandCache.delete(oldest)
+                }
+                return commands
+              })
+              .finally(() => discoveryRuns.delete(key))
+            discoveryRuns.set(key, pending)
+            return pending
+          },
+          catch: (e) =>
+            new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} command discovery failed` }),
+        })
       })
 
     const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest | InternalError> =>
@@ -423,6 +510,9 @@ export const CliAuthLive = Layer.effect(
           try: () => rm(dir, { recursive: true, force: true }),
           catch: () => new InternalError({ message: "cannot remove the sign-in directory" }),
         })
+        for (const key of [...commandCache.keys()]) {
+          if (key.startsWith(`${user}\0`)) commandCache.delete(key)
+        }
       })
 
     const loggedInDirs = (user: string): Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError> =>
@@ -448,8 +538,9 @@ export const CliAuthLive = Layer.effect(
     const shutdown = () =>
       Effect.sync(() => {
         for (const entry of [...pending.values()]) killEntry(entry)
+        killActiveDiscovery()
       })
 
-    return { status, startLogin, submitCode, logout, loggedInDirs, shutdown }
+    return { status, startLogin, submitCode, logout, loggedInDirs, discoverCommands, shutdown }
   }),
 )
