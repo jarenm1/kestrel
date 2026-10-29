@@ -180,7 +180,7 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     const provider = findProvider(providerId)
     if (!provider || provider.kind !== "oauth") return errorResponse(404, "NotFound", `unknown provider ${providerId}`)
     if (!(await currentSession(request, env))) return errorResponse(401, "Unauthorized", "sign in required")
-    const returnTo = safeReturnPath(url.searchParams.get("return"), "/connections")
+    const returnTo = safeReturnPath(url.searchParams.get("return"), "/settings/connections")
     return beginOAuth(env, url, "connect", provider, returnTo)
   }
 

@@ -155,7 +155,7 @@ function ModelPicker({
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link to="/connections" className="text-muted-foreground">
+          <Link to="/settings/connections" className="text-muted-foreground">
             <Settings2 />
             Manage models
           </Link>
