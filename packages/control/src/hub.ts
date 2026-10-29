@@ -28,7 +28,7 @@ import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
-import { SESSION_HEADER, isAllowedLogin, type Env } from "./env"
+import { SESSION_HEADER, type Env } from "./env"
 
 /**
  * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
@@ -693,13 +693,13 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * A browser API call the Worker forwarded with the caller's session id (`SESSION_HEADER`): resolving the session,
-   * checking the account is still allowed, attaching its credentials and relaying all happen in this one Durable
-   * Object request, instead of one RPC each. `GET /api/box` is answered here, since it needs no box round trip.
+   * attaching its credentials and relaying all happen in this one Durable Object request, instead of one RPC each.
+   * `GET /api/box` is answered here, since it needs no box round trip.
    */
   private signedInApi(request: Request, url: URL): Promise<Response> | Response {
     const sessionId = request.headers.get(SESSION_HEADER)
     const session = sessionId ? this.session(sessionId) : null
-    if (!session || !isAllowedLogin(this.env, session.login)) {
+    if (!session) {
       return errorResponse(401, "Unauthorized", "sign in required")
     }
     if (url.pathname === ControlPaths.box && request.method === "GET") return Response.json(this.boxStatus())
