@@ -1,10 +1,12 @@
 import { Fragment, useEffect, useRef, type ReactNode } from "react"
+import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
 import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { threadPath } from "@/routes"
 import { formatClock } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer } from "./Composer"
@@ -56,6 +58,15 @@ function ThreadItem({
     case "user":
       return (
         <div className={cn("flex flex-col items-end", ENTER_CLASS)}>
+          {/* Sent by the agent of another of the user's threads (thread_send), not typed by the user. */}
+          {message.fromThread && (
+            <div className="mb-1 max-w-[85%] truncate text-[11px] text-muted-foreground">
+              From the agent of{" "}
+              <Link to={threadPath(message.fromThread.id)} className="font-medium hover:underline">
+                {message.fromThread.title}
+              </Link>
+            </div>
+          )}
           {/* A message of only attachments has no text bubble. */}
           {message.text !== "" && (
             <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">

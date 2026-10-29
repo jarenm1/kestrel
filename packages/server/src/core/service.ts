@@ -23,6 +23,7 @@ import {
   type CheckoutRequest,
   type CreateTaskBody,
   modelInfo,
+  providerModels,
 } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
@@ -32,6 +33,7 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
+import { peerMessageText, type FromThread } from "./peer"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
@@ -181,6 +183,16 @@ export interface CoreShape {
     choice: AgentChoice,
     attachmentIds: ReadonlyArray<string>,
     dev: boolean,
+  ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
+  /**
+   * Used by the MCP handler (`thread_send`): delivers an agent's message to another thread of the same owner. It joins
+   * that thread's running run (read with task_inbox) or starts a run that resumes the thread's agent session. It never
+   * answers the thread's open question: that stays for the user. Another owner's thread is NotFound.
+   */
+  readonly sendToThread: (
+    fromTaskId: string,
+    toTaskId: string,
+    text: string,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
 
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
@@ -751,7 +763,22 @@ export const CoreLive = Layer.effect(
         return yield* requireTask(id)
       })
 
-    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
+    /** The text an agent reads for a message: the user's words with their uploads, or another agent's, framed as such. */
+    const deliveredText = (taskId: string, m: Pick<Message, "text" | "attachments" | "fromThread">): string => {
+      const typed = agentText(m.text, m.attachments ?? [], agentHome(sandboxSettings, join(config.homesDir, taskId)))
+      return m.fromThread === undefined ? typed : peerMessageText(m.fromThread, typed)
+    }
+
+    /** A message to a thread: from its user (`from` null), or from the agent of another of the owner's threads. */
+    const deliverMessage = (
+      user: string,
+      taskId: string,
+      text: string,
+      choice: AgentChoice,
+      attachmentIds: ReadonlyArray<string>,
+      dev: boolean,
+      from: FromThread | null,
+    ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
         const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
@@ -810,23 +837,25 @@ export const CoreLive = Layer.effect(
             if (Either.isLeft(picked)) return Either.left(picked.left)
             const attachments = picked.right
             s.uploads = s.uploads.filter((u) => !attachmentIds.includes(u.id))
-            const delivered = agentText(text, attachments, agentHome(sandboxSettings, join(config.homesDir, taskId)))
+            const sent = from === null ? {} : { fromThread: from }
+            const delivered = deliveredText(taskId, { text, attachments, ...sent })
             const attached = attachments.length === 0 ? {} : { attachments }
             const now = nowIso()
-            // Any message settles the task's question: it is the answer, or it is ignored once the question's run is gone.
-            const ask = s.pendingAsks.find((a) => a.taskId === taskId) ?? null
-            s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
+            // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
+            // run is gone. Another agent's message leaves the question to the user.
+            const ask = from === null ? (s.pendingAsks.find((a) => a.taskId === taskId) ?? null) : null
+            if (from === null) s.pendingAsks = s.pendingAsks.filter((a) => a.taskId !== taskId)
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
               // the answer; otherwise it waits in the run's inbox for task_inbox.
-              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached }
+              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
                 liveAsks.delete(running.id)
                 seenFor(running.id).add(message.id)
               }
-              if (task.status === "needs_input") task.status = "running"
+              if (task.status === "needs_input" && from === null) task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
               return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null })
@@ -852,7 +881,7 @@ export const CoreLive = Layer.effect(
               endedAt: null,
               exitCode: null,
             }
-            const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached }
+            const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
             task.updatedAt = now
             s.runs.push(run)
@@ -904,6 +933,32 @@ export const CoreLive = Layer.effect(
         const display = desktopNow.state === "running" ? desktopNow.display : null
         yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
+      })
+
+    const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
+      deliverMessage(user, taskId, text, choice, attachmentIds, dev, null)
+
+    /**
+     * The choice a run started by another agent's message runs with: the provider of the thread's latest session, so
+     * that session resumes, on the provider's default model (the box default for the default provider).
+     */
+    const resumeChoice = (state: Readonly<StoreState>, taskId: string): AgentChoice => {
+      const latest = state.runs.filter((r) => r.taskId === taskId).at(-1)
+      const provider = (latest && state.runSessions.find((x) => x.runId === latest.id)?.provider) ?? DEFAULT_MODEL_PROVIDER
+      if (provider === DEFAULT_MODEL_PROVIDER) return {}
+      const model = providerModels(provider).find((m) => m.shownByDefault)?.id
+      return model === undefined ? {} : { model }
+    }
+
+    const sendToThread: CoreShape["sendToThread"] = (fromTaskId, toTaskId, text) =>
+      Effect.gen(function* () {
+        const state = yield* store.read
+        const sender = yield* findTask(state, fromTaskId)
+        if (toTaskId === fromTaskId) {
+          return yield* Effect.fail(new BadRequest({ message: "that is this thread; name another thread" }))
+        }
+        const from = { id: sender.id, title: sender.title }
+        return yield* deliverMessage(sender.owner, toTaskId, text, resumeChoice(state, toTaskId), [], false, from)
       })
 
     /** Posts a question for the running run and waits for the user's answer. The question persists until it is answered. */
@@ -980,8 +1035,7 @@ export const CoreLive = Layer.effect(
           (m) => m.taskId === taskId && m.role === "user" && m.runId === runId && !seen.has(m.id),
         )
         for (const m of unread) seen.add(m.id)
-        const home = agentHome(sandboxSettings, join(config.homesDir, taskId))
-        return unread.map((m) => agentText(m.text, m.attachments ?? [], home))
+        return unread.map((m) => deliveredText(taskId, m))
       })
 
     const attachment: CoreShape["attachment"] = (user, taskId, attachmentId) =>
@@ -1085,6 +1139,7 @@ export const CoreLive = Layer.effect(
         }),
 
       sendMessage,
+      sendToThread,
 
       listRuns: (user, taskId) =>
         Effect.gen(function* () {

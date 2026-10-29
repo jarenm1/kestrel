@@ -101,6 +101,11 @@ export const Message = Schema.Struct({
   options: Schema.optional(Schema.Array(Schema.String)),
   /** Files attached by the agent (e.g. a desktop screenshot). Optional so messages persisted before attachments decode. */
   attachments: Schema.optional(Schema.Array(Attachment)),
+  /**
+   * Set when another agent of the thread's owner sent this message with the `thread_send` MCP tool: the thread it
+   * came from, with that thread's title when it was sent. Absent on messages the user typed.
+   */
+  fromThread: Schema.optional(Schema.Struct({ id: Schema.String, title: Schema.String })),
 })
 export type Message = typeof Message.Type
 

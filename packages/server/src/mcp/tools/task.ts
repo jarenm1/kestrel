@@ -180,15 +180,16 @@ export const registerTaskTools = (server: McpServer, ctx: RunContext, deps: Task
     "task_inbox",
     {
       description:
-        "Read the messages the user sent you while this run is going, and mark them read. Each message is returned " +
-        "once. Check it between steps of a long task, and whenever the user may have changed their mind.",
+        "Read the messages sent to you while this run is going, and mark them read: the user's, and those other agents " +
+        "of the user sent with thread_send (each says which thread it came from). Each message is returned once. " +
+        "Check it between steps of a long task, and whenever the user may have changed their mind.",
     },
     () =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
             const messages = yield* deps.inbox(ctx.taskId, ctx.runId)
-            if (messages.length === 0) return text("No new messages from the user.")
+            if (messages.length === 0) return text("No new messages.")
             return text(messages.join("\n\n"))
           }),
         ),
