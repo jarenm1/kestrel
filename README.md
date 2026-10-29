@@ -201,7 +201,7 @@ See the [fixture provenance and recording guide](packages/server/fixtures/agent/
 - **Preview scope:** pull-request Previews have no box or production secrets, so they support UI review only. In-thread browser previews intentionally omit app-origin storage, cookies, popups and service workers.
 - **Runtime availability:** production box updates restart the box and interrupt active runs. Optional Roblox Studio support depends on Vinegar and can break with upstream changes.
 
-The desktop stream already uses NVENC when it is available and falls back to libx264 if it cannot start. A possible future improvement is to evaluate direct WebRTC video if the Hub relay becomes a measured bottleneck. Adding real Claude recordings to complement the synthetic fixtures remains a next step. See [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
+Longer-term priorities are to scale box operation beyond its current single host with VPS-backed capacity, and to provide sandboxed compute runtimes for agent tasks so workloads can scale with isolated resources and lifecycles. See [architecture](docs/architecture.md) for the current system design.
 
 ## Deploys
 
