@@ -12,7 +12,7 @@ import {
   Lock,
   Monitor,
   Server,
-  Smartphone,
+  MonitorPlay,
   SquarePen,
   Terminal,
 } from "lucide-react"
@@ -27,7 +27,11 @@ const heroFeatures = [
   { icon: GitBranch, title: "Your repo, your branches", desc: "Every thread works in its own git worktree and branch." },
   { icon: Terminal, title: "Your harness", desc: "Claude Code or Codex, signed in with your own account or key." },
   { icon: Laptop, title: "Keeps going", desc: "Runs on the box, not your laptop. Close the lid; it keeps working." },
-  { icon: Smartphone, title: "Check in anywhere", desc: "Follow, answer and steer threads from any browser." },
+  {
+    icon: MonitorPlay,
+    title: "Test builds anywhere",
+    desc: "Run builds in a virtual desktop, and tell the agent what to change.",
+  },
 ]
 
 /** What the box adds on top. */
@@ -146,8 +150,8 @@ export function LandingPage() {
                 for your agents.
               </h1>
               <p className="max-w-md text-base leading-relaxed text-muted-foreground">
-                Cloud agents with everything good about local: your repos, your subscriptions, and builds and tests
-                that run just like on your own machine. They just keep going when you close the laptop.
+                Cloud agents with everything good about local: your repos, your subscriptions, and builds that run
+                just like on your own machine. They just keep going when you close the laptop.
               </p>
               <div className="flex items-center gap-3 pt-2">
                 <Button asChild size="lg">
