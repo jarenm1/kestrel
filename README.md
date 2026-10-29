@@ -201,7 +201,7 @@ See the [fixture provenance and recording guide](packages/server/fixtures/agent/
 - **Preview scope:** pull-request Previews have no box or production secrets, so they support UI review only. In-thread browser previews intentionally omit app-origin storage, cookies, popups and service workers.
 - **Runtime availability:** production box updates restart the box and interrupt active runs. Optional Roblox Studio support depends on Vinegar and can break with upstream changes.
 
-Next steps include direct WebRTC desktop streaming, NVENC encoding, and adding real Claude recordings to complement the synthetic fixtures. These are planned improvements, not prerequisites for reproducing the demo; see [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
+The desktop stream already uses NVENC when it is available and falls back to libx264 if it cannot start. Next steps include direct WebRTC desktop streaming and adding real Claude recordings to complement the synthetic fixtures. These are planned improvements, not prerequisites for reproducing the demo; see [architecture](docs/architecture.md) and the [fixture guide](packages/server/fixtures/agent/README.md).
 
 ## Deploys
 

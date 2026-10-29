@@ -24,7 +24,7 @@ flowchart TB
     MCP["MCP server /mcp/:taskId<br/>desktop_*, preview_open, workspace_exec, thread_*<br/>mcp/handler.ts<br/>👤 Person 3"]
     BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
     SB["bwrap sandbox in a systemd scope<br/>per-task memory/CPU/pids limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
-    DESK["Desktop manager<br/>weston + Xwayland (host GPU) + xdamage-capture → ffmpeg (damage-driven VFR; NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
+    DESK["Desktop manager<br/>weston + Xwayland (host GPU) + xdamage-capture → ffmpeg (damage-driven VFR; NVENC with libx264 fallback)<br/>desktop/*<br/>👤 Jaren"]
     STATE[("state.json, thread workspaces,<br/>repo mirrors<br/>core/state.ts")]
   end
 
@@ -83,7 +83,7 @@ flowchart TB
 
 | Owner | Area | Starter items |
 |---|---|---|
-| Jaren | Box runtime, relay, sandbox, broker, desktop/GPU streaming (NVENC, WebRTC) | Encoder switch, WebRTC sender, configurable dev ports |
+| Jaren | Box runtime, relay, sandbox, broker, desktop/GPU streaming | WebRTC sender, configurable dev ports |
 | caayd | `packages/app` (UI/UX) | Install-on-GitHub link, page titles, reconnect states |
 | Person 3 | Harness and MCP | `desktop_scroll`, `desktop_double_click`, fake-agent coverage, `docs/harness.md` |
 | Person 4 | OAuth / control plane | Friendlier "not allowed" page, repo pagination past 100, reconnect on 401, OG image, `/docs` page |
