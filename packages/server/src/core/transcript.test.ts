@@ -341,3 +341,70 @@ describe("codex exec --json", () => {
     ])
   })
 })
+
+describe("claude context use", () => {
+  const init = (model: string) => ({ type: "system", subtype: "init", session_id: "s1", model })
+  const call = (input: number, cacheRead: number, output: number, parentToolUseId: string | null = null) => ({
+    type: "assistant",
+    message: {
+      id: "msg_1",
+      content: [{ type: "text", text: "working" }],
+      usage: { input_tokens: input, cache_creation_input_tokens: 0, cache_read_input_tokens: cacheRead, output_tokens: output },
+    },
+    parent_tool_use_id: parentToolUseId,
+  })
+  const result = (modelUsage: Record<string, unknown>) => ({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    // Run totals: the sum of every call, not the context size.
+    usage: { input_tokens: 999_999, output_tokens: 999_999 },
+    modelUsage,
+    result: "done",
+  })
+
+  test("the main agent's last call against the session model's window, ignoring subagents and side models", () => {
+    const transcript = makeTranscript()
+    transcript.push(init("claude-opus-5-5"))
+    transcript.push(call(10, 40_000, 500))
+    // No window yet on a first session: nothing to report before the result.
+    expect(transcript.context()).toBeNull()
+    transcript.push(call(5, 60_000, 1_000))
+    transcript.push(call(3, 150_000, 200, "toolu_task"))
+    transcript.push(
+      result({
+        "claude-haiku-5-5": { contextWindow: 200_000 },
+        "claude-opus-5-5": { contextWindow: 1_000_000 },
+      }),
+    )
+    expect(transcript.context()).toEqual({ model: "claude-opus-5-5", usedTokens: 61_005, windowTokens: 1_000_000 })
+  })
+
+  test("a resumed session on the same model updates from its first call; after a compaction, from the next call", () => {
+    const transcript = makeTranscript({ model: "claude-opus-5-5", usedTokens: 900_000, windowTokens: 1_000_000 })
+    transcript.push(init("claude-opus-5-5"))
+    transcript.push(call(10, 920_000, 100))
+    expect(transcript.context()).toEqual({ model: "claude-opus-5-5", usedTokens: 920_110, windowTokens: 1_000_000 })
+    transcript.push({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 920_110 } })
+    transcript.push(call(10, 30_000, 100))
+    expect(transcript.context()).toEqual({ model: "claude-opus-5-5", usedTokens: 30_110, windowTokens: 1_000_000 })
+  })
+
+  test("a compaction with no call after it reports no size rather than the stale one", () => {
+    const transcript = makeTranscript()
+    transcript.push(init("claude-opus-5-5"))
+    transcript.push(call(10, 180_000, 100))
+    transcript.push({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 180_110 } })
+    transcript.push(result({ "claude-opus-5-5": { contextWindow: 200_000 } }))
+    expect(transcript.context()).toBeNull()
+  })
+
+  test("a session resumed on another model waits for that model's window", () => {
+    const transcript = makeTranscript({ model: "claude-opus-5-5", usedTokens: 50_000, windowTokens: 1_000_000 })
+    transcript.push(init("claude-sonnet-5-5"))
+    transcript.push(call(10, 50_000, 100))
+    expect(transcript.context()).toBeNull()
+    transcript.push(result({ "claude-sonnet-5-5": { contextWindow: 200_000 } }))
+    expect(transcript.context()).toEqual({ model: "claude-sonnet-5-5", usedTokens: 50_110, windowTokens: 200_000 })
+  })
+})

@@ -68,6 +68,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
           archivedTask={archivedTask}
           elements={elements}
           onElementsChange={setElements}
+          context={state.task?.context}
         />
       </section>
       {open ? (

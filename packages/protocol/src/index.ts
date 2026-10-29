@@ -51,6 +51,19 @@ export const Checkout = Schema.Struct({
 export type Checkout = typeof Checkout.Type
 
 /**
+ * How full a thread's agent session is: the prompt and reply of the main agent's latest model call, against the
+ * context window the harness reports for its model (Claude Code's `modelUsage.contextWindow`, codex's
+ * `model_context_window`). A compaction shrinks it at the session's next model call.
+ */
+export const ContextUsage = Schema.Struct({
+  /** Model id the harness reported for the session; null when it named none. */
+  model: Schema.NullOr(Schema.String),
+  usedTokens: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  windowTokens: Schema.Number.pipe(Schema.int(), Schema.positive()),
+})
+export type ContextUsage = typeof ContextUsage.Type
+
+/**
  * A thread = one chat + one workspace directory + (optional) one desktop. It starts with no repository;
  * the agent checks repositories out into the workspace as the work needs them.
  */
@@ -68,6 +81,8 @@ export const Task = Schema.Struct({
   previewPort: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 65535))),
   /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
   archivedAt: Schema.optional(Schema.String),
+  /** Context use of the thread's agent session as last reported; absent before a harness reports one and when a run starts a fresh session. */
+  context: Schema.optional(ContextUsage),
 })
 
 /** Short-lived bearer used by a sandboxed preview frame; grants access only to its own task preview. */

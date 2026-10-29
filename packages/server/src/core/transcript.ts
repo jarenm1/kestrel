@@ -1,4 +1,4 @@
-import type { AgentItem } from "@cloudagents/protocol"
+import type { AgentItem, ContextUsage } from "@cloudagents/protocol"
 
 /**
  * Turns one harness's stdout lines into the normalized `AgentItem`s the app renders.
@@ -11,6 +11,11 @@ export interface Transcript {
   readonly push: (line: unknown) => ReadonlyArray<AgentItem>
   /** Final assistant text of the run, once the harness has reported it. */
   readonly finalText: () => string | null
+  /**
+   * The session's context use once both its size and its model's window are known; Claude only (codex reports
+   * neither on stdout, see `codexContext`). Each change is a new object.
+   */
+  readonly context: () => ContextUsage | null
 }
 
 /** Claude `stream-json` line types. */
@@ -24,12 +29,12 @@ const CLAUDE_LINE_TYPES: Readonly<Record<string, true>> = {
 /** Codex `exec --json` line types. */
 const CODEX_LINE_TYPE = /^(thread|turn|item)\.[a-z_]+$|^error$/
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
+export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
 const asString = (value: unknown): string | null => (typeof value === "string" ? value : null)
 
-const asNumber = (value: unknown): number | null =>
+export const asNumber = (value: unknown): number | null =>
   typeof value === "number" && Number.isFinite(value) ? value : null
 
 const asArray = (value: unknown): ReadonlyArray<unknown> => (Array.isArray(value) ? value : [])
@@ -72,7 +77,23 @@ interface ToolCall {
   readonly input: unknown
 }
 
-export const makeTranscript = (): Transcript => {
+/**
+ * Claude Code's context window for `model` from a result's `modelUsage`, keyed by model id. Side calls (e.g. a
+ * small model titling the session) have entries of their own, so only the session's model counts.
+ */
+const claudeWindow = (modelUsage: unknown, model: string | null): number | null => {
+  if (!isRecord(modelUsage) || model === null) return null
+  const key = Object.keys(modelUsage).find((k) => k === model) ?? Object.keys(modelUsage).find((k) => k.startsWith(model))
+  const entry = key === undefined ? null : modelUsage[key]
+  const window = isRecord(entry) ? asNumber(entry.contextWindow) : null
+  return window !== null && window > 0 ? window : null
+}
+
+/**
+ * `seed` is the context the thread's session last reported; a run that resumes the same session on the same model
+ * reuses its window, so its context updates from the first model call rather than only at the result.
+ */
+export const makeTranscript = (seed: ContextUsage | null = null): Transcript => {
   /**
    * Ids for items the harness does not name. Unique per run: the same id later means
    * "replace that item", so counter ids are never reused.
@@ -84,12 +105,53 @@ export const makeTranscript = (): Transcript => {
   const tools = new Map<string, ToolCall>()
   /** Start of the current Codex turn; Codex reports no durations of its own. */
   let turnStartedAt: number | null = null
+  /** Claude session model (from `init`), its context window, and the main agent's latest prompt + reply size. */
+  let model: string | null = null
+  let windowTokens: number | null = null
+  let usedTokens: number | null = null
+  let contextValue: ContextUsage | null = null
+
+  const refreshContext = () => {
+    if (usedTokens === null || windowTokens === null) return
+    if (contextValue?.model === model && contextValue.usedTokens === usedTokens && contextValue.windowTokens === windowTokens) {
+      return
+    }
+    contextValue = { model, usedTokens, windowTokens }
+  }
+
+  const claudeSystem = (line: Record<string, unknown>) => {
+    switch (asString(line.subtype)) {
+      case "init":
+        model = asString(line.model)
+        windowTokens = seed !== null && seed.model === model ? seed.windowTokens : null
+        return
+      case "compact_boundary":
+        // The pre-compaction size no longer holds; the next model call reports the compacted one.
+        usedTokens = null
+        return
+    }
+  }
 
   const claudeAssistant = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     if (!isRecord(line.message)) return []
     // Claude Code prints every content block of one API message as its own line with the same
     // message id, so ids must come from a counter, not the message id.
     const parentToolId = asString(line.parent_tool_use_id)
+    // Subagents run in contexts of their own; only the main agent's calls fill the session.
+    const usage = parentToolId === null && isRecord(line.message.usage) ? line.message.usage : null
+    const used =
+      usage === null
+        ? null
+        : sumTokens([
+            asNumber(usage.input_tokens),
+            asNumber(usage.cache_creation_input_tokens),
+            asNumber(usage.cache_read_input_tokens),
+            asNumber(usage.output_tokens),
+          ])
+    if (used !== null) {
+      usedTokens = used
+      refreshContext()
+    }
     const items: AgentItem[] = []
     for (const block of asArray(line.message.content)) {
       if (!isRecord(block)) continue
@@ -140,6 +202,8 @@ export const makeTranscript = (): Transcript => {
     const subtype = asString(line.subtype) ?? "result"
     const isError = line.is_error === true
     const usage = isRecord(line.usage) ? line.usage : null
+    windowTokens = claudeWindow(line.modelUsage, model) ?? windowTokens
+    refreshContext()
     const items: AgentItem[] = [
       {
         _tag: "turn",
@@ -178,8 +242,11 @@ export const makeTranscript = (): Transcript => {
         return claudeUser(line)
       case "result":
         return claudeResult(line)
+      case "system":
+        claudeSystem(line)
+        return []
       default:
-        // system (init) and stream_event (partial messages) add display items.
+        // stream_event (partial messages) adds no display items.
         return []
     }
   }
@@ -325,5 +392,6 @@ export const makeTranscript = (): Transcript => {
       return []
     },
     finalText: () => finalTextValue,
+    context: () => contextValue,
   }
 }

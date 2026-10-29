@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
-import type { Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
+import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { Button } from "@/components/ui/button"
@@ -25,6 +25,8 @@ interface Props {
   /** Preview elements attached to the composer as context. */
   elements: readonly ElementContext[]
   onElementsChange: (elements: readonly ElementContext[]) => void
+  /** How full the thread's agent session is, shown on the composer. */
+  context: ContextUsage | undefined
 }
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
@@ -106,7 +108,7 @@ function ThreadItem({
   }
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
 
@@ -213,6 +215,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             stopping={cancel.isPending}
             elements={elements}
             onElementsChange={onElementsChange}
+            context={context}
           />
         )}
       </div>
