@@ -1,8 +1,9 @@
 import { Effect } from "effect"
 import { spawn } from "node:child_process"
-import { accessSync, constants, existsSync, readdirSync } from "node:fs"
+import { accessSync, constants, existsSync, readdirSync, realpathSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 import { desktopScaleEnv } from "../desktop/scale"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
@@ -61,6 +62,49 @@ const BASIC_RO_PATHS = [
   "/run/systemd/resolve",
 ]
 
+/** The agent CLIs and the runtime npm-installed ones need; `basic` makes these visible when installed in $HOME. */
+const HOME_TOOLS = ["claude", "codex", "node"]
+
+/**
+ * bwrap args that let `basic` run agent CLIs installed in the box user's home, which the sandbox otherwise hides:
+ * Claude Code's native installer (`~/.local/bin/claude` -> `~/.local/share/claude/versions/<v>`), npm prefixes and nvm.
+ * For each of HOME_TOOLS found on `pathEnv`: the file it resolves to and the npm package directory around it, bound
+ * read-only when under `home`, and the PATH entry itself recreated as the same symlink, so a node script still finds
+ * its package.json next to its real path. Nothing else of the home is exposed.
+ */
+export const homeToolArgs = (home: string, pathEnv: string): string[] => {
+  const inHome = (path: string) => path.startsWith(`${home}/`)
+  const binds = new Set<string>()
+  const links = new Map<string, string>()
+  for (const name of HOME_TOOLS) {
+    const found = findExecutable(name, pathEnv)
+    if (found === null) continue
+    let real: string
+    try {
+      real = realpathSync(found)
+    } catch {
+      continue
+    }
+    if (inHome(found) && found !== real) links.set(found, real)
+    if (!inHome(real)) continue
+    binds.add(real)
+    for (let dir = dirname(real); inHome(dir); dir = dirname(dir)) {
+      if (existsSync(join(dir, "package.json"))) {
+        binds.add(dir)
+        break
+      }
+    }
+  }
+  const sorted = [...binds].sort()
+  const kept = sorted.filter((path) => !sorted.some((other) => other !== path && path.startsWith(`${other}/`)))
+  const within = (path: string) => kept.some((bind) => path === bind || path.startsWith(`${bind}/`))
+  return [
+    // -try: a CLI that updated itself between this lookup and the launch leaves its old path behind.
+    ...kept.flatMap((path) => ["--ro-bind-try", path, path]),
+    ...[...links].filter(([link]) => !within(link)).flatMap(([link, target]) => ["--symlink", target, link]),
+  ]
+}
+
 /** A host dir bound read-write at a path inside the sandbox. */
 export interface SandboxBind {
   readonly host: string
@@ -87,6 +131,8 @@ export interface BwrapOptions {
   readonly binds?: ReadonlyArray<SandboxBind>
   /** CA bundle (CLOUDAGENTS_SANDBOX_SSL) bound at the standard bundle paths in place of the host's /etc/ssl. */
   readonly caBundle?: string | null
+  /** `basic` only: bwrap args exposing the agent CLIs installed in the box user's home (`homeToolArgs`). */
+  readonly homeToolArgs?: ReadonlyArray<string>
 }
 
 /**
@@ -135,6 +181,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   ]
   for (const bind of opts.binds ?? []) argv.push("--bind", bind.host, bind.sandbox)
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
+  if (opts.level === "basic") argv.push(...(opts.homeToolArgs ?? []))
   // Basic binds all of /etc, which holds these files.
   if (opts.level === "strict") {
     for (const file of SYSTEM_RO_FILES) {
@@ -155,17 +202,24 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
 
 /**
  * bwrap args (without the executable) that run `command` with only `homeDir` writable: for the agent CLIs' own
- * sign-in/status/logout/discovery on the box. The process dies with the box (--die-with-parent) and sees nothing of
- * the host beyond /nix/store and the DNS/TLS files. `network: "host"` shares the box's network (sign-in needs it).
- * `network: "none"` gives the process an empty network namespace: discovery never needs the network, and the box's
- * loopback services (broker, MCP, other tasks' servers) must stay out of reach. With `workspacePath` it runs there
- * and sees that thread workspace read-only, so project commands and skills are discoverable.
+ * sign-in/status/logout/discovery on the box. The process dies with the box (--die-with-parent) and sees only what the
+ * box's sandbox level shows agent runs: `strict` the nix store and the DNS/TLS files, `basic` the host's system
+ * directories and the agent CLIs installed in the box user's home (`homeToolArgs`). `network: "host"` shares the box's
+ * network (sign-in needs it). `network: "none"` gives the process an empty network namespace: discovery never needs
+ * the network, and the box's loopback services (broker, MCP, other tasks' servers) must stay out of reach. With
+ * `workspacePath` it runs there and sees that thread workspace read-only, so project commands and skills are
+ * discoverable.
  */
 export const cliBwrapArgs = (
   homeDir: string,
   env: Readonly<Record<string, string>>,
   command: ReadonlyArray<string>,
-  options: { readonly network: "host" | "none"; readonly workspacePath?: string },
+  options: {
+    readonly level: "strict" | "basic"
+    readonly homeToolArgs: ReadonlyArray<string>
+    readonly network: "host" | "none"
+    readonly workspacePath?: string
+  },
 ): string[] => {
   const workspacePath = options.workspacePath
   const argv = [
@@ -174,9 +228,9 @@ export const cliBwrapArgs = (
     "--unshare-all",
     ...(options.network === "host" ? ["--share-net"] : []),
     "--clearenv",
-    "--ro-bind",
-    "/nix/store",
-    "/nix/store",
+    ...(options.level === "strict"
+      ? ["--ro-bind", "/nix/store", "/nix/store"]
+      : BASIC_RO_PATHS.flatMap((path) => ["--ro-bind-try", path, path])),
     "--proc",
     "/proc",
     "--dev",
@@ -190,8 +244,12 @@ export const cliBwrapArgs = (
     homeDir,
   ]
   if (workspacePath !== undefined) argv.push("--ro-bind", workspacePath, workspacePath)
-  for (const file of SYSTEM_RO_FILES) {
-    if (existsSync(file)) argv.push("--ro-bind", file, file)
+  if (options.level === "strict") {
+    for (const file of SYSTEM_RO_FILES) {
+      if (existsSync(file)) argv.push("--ro-bind", file, file)
+    }
+  } else {
+    argv.push(...options.homeToolArgs)
   }
   for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
   argv.push("--chdir", workspacePath ?? homeDir, "--", ...command)
@@ -292,8 +350,14 @@ export const sandboxSettingsOf = (config: {
   boxPort: config.port,
 })
 
-export const findExecutable = (name: string): string | null => {
-  for (const dir of (process.env.PATH ?? "").split(":")) {
+/**
+ * `homeToolArgs` for this box user, for a `basic` launch. Looked up per launch, not at startup: Claude Code's native
+ * installer updates itself into a new versions directory.
+ */
+export const boxHomeToolArgs = (): string[] => homeToolArgs(homedir(), process.env.PATH ?? "")
+
+export const findExecutable = (name: string, pathEnv: string = process.env.PATH ?? ""): string | null => {
+  for (const dir of pathEnv.split(":")) {
     if (dir === "") continue
     const candidate = join(dir, name)
     try {
@@ -651,6 +715,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         roBinds: req.roBinds,
         binds: req.binds,
         caBundle: settings.sslCertFile,
+        homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
       }).slice(1)
 
     const inner: { file: string; args: string[] } =

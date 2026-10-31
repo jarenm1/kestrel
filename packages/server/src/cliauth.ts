@@ -20,7 +20,7 @@ import {
   limitDiscovery,
 } from "./harness-commands"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
-import { cliBwrapArgs, findExecutable } from "./sandbox"
+import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
 /** POSIX quoting for one argv element run through `sh -c`. */
 const posixQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
@@ -135,7 +135,8 @@ const parseClaudeStatus = (out: Output): Effect.Effect<CliAuthStatus, InternalEr
     try {
       parsed = JSON.parse(out.stdout)
     } catch {
-      return yield* Effect.fail(new InternalError({ message: "claude auth status: unreadable output" }))
+      const detail = out.stderr.trim().split("\n")[0]?.slice(0, 200) || "no output"
+      return yield* Effect.fail(new InternalError({ message: `claude auth status: unreadable output (${detail})` }))
     }
     if (typeof parsed !== "object" || parsed === null || !("loggedIn" in parsed) || typeof parsed.loggedIn !== "boolean") {
       return yield* Effect.fail(new InternalError({ message: "claude auth status: unexpected output" }))
@@ -319,7 +320,16 @@ export const CliAuthLive = Layer.effect(
           discovery === undefined
             ? { network: "host" as const }
             : { network: "none" as const, workspacePath: discovery.workspacePath }
-        return { file: bwrap, args: cliBwrapArgs(root, env, [bin, ...args], sandbox), env: {} }
+        const level = config.sandbox === "strict" ? "strict" : "basic"
+        return {
+          file: bwrap,
+          args: cliBwrapArgs(root, env, [bin, ...args], {
+            ...sandbox,
+            level,
+            homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
+          }),
+          env: {},
+        }
       })
 
     /**
@@ -386,17 +396,31 @@ export const CliAuthLive = Layer.effect(
         })
       })
 
-    const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest | InternalError> =>
+    /**
+     * One CLI's login as the box sees it. A CLI the box cannot run (not installed where the sandbox looks, or failing)
+     * reports why in `error` rather than failing the whole status, so the other CLI still shows.
+     */
+    const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest> =>
       Effect.gen(function* () {
+        const spec = SPECS[provider]
+        const env = yield* cliEnv(user)
+        // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
+        if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
+          return { provider, loggedIn: false, account: null, error: `${spec.bin} is not installed on the box (not on its PATH)` }
+        }
         // No directory means no login: skip spawning the CLI.
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         if (!present) return { provider, loggedIn: false, account: null }
-        const inv = yield* invoke(user, SPECS[provider].bin, SPECS[provider].status)
-        const out = yield* runCli(inv, `${SPECS[provider].bin} status`)
+        const inv = yield* invoke(user, spec.bin, spec.status)
+        const out = yield* runCli(inv, `${spec.bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
         return provider === "claude-cli" ? yield* parseClaudeStatus(out) : yield* parseCodexStatus(out)
-      })
+      }).pipe(
+        Effect.catchTag("InternalError", (e) =>
+          Effect.succeed<CliAuthStatus>({ provider, loggedIn: false, account: null, error: e.message }),
+        ),
+      )
 
     const status = (user: string) =>
       Effect.all(
