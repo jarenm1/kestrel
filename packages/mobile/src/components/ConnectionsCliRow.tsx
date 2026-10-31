@@ -109,7 +109,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     if (!connection.available) {
       return (
         <>
-          <Text style={connectionStyles.muted}>Agent box is offline.</Text>
+          <Text style={connectionStyles.muted}>{connection.error ?? "Agent box is offline."}</Text>
           <Button variant="soft" style={connectionStyles.fit} onPress={refresh}>
             Check again
           </Button>

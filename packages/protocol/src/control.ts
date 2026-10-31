@@ -111,6 +111,8 @@ export const Connection = Schema.Struct({
   account: Schema.NullOr(Schema.String),
   /** OAuth: false when the Worker lacks client id/secret. CLI: false when the box cannot report login status. */
   available: Schema.Boolean,
+  /** CLI only: why the box cannot use this CLI (e.g. it is not installed there); absent when it can. */
+  error: Schema.optional(Schema.String),
 })
 export type Connection = typeof Connection.Type
 
@@ -126,6 +128,8 @@ export const CliAuthStatus = Schema.Struct({
   provider: CliProvider,
   loggedIn: Schema.Boolean,
   account: Schema.NullOr(Schema.String),
+  /** Why the box could not read this CLI's login (not installed, or it failed); `loggedIn` is then false. */
+  error: Schema.optional(Schema.String),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
 

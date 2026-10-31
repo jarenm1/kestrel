@@ -47,7 +47,8 @@ const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Conn
   kind: provider.kind,
   connected: status?.loggedIn ?? false,
   account: status?.loggedIn ? status.account : null,
-  available: status !== undefined,
+  available: status !== undefined && status.error === undefined,
+  ...(status?.error === undefined ? {} : { error: status.error }),
 })
 
 /** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */

@@ -1,4 +1,7 @@
-import { existsSync } from "node:fs"
+import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { boxHomeToolArgs, cliBwrapArgs } from "../sandbox"
 import { DEFAULT_CONFIG, loadConfig } from "./config"
 import type { BoxConfig } from "./config"
 import { DESKTOP_TOOLS, desktopHelperPath } from "./desktop"
@@ -56,12 +59,34 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
     detail: onPath("git") ?? "not installed (sudo apt install git)",
   })
 
-  const agents = ["claude", "codex"].filter((name) => onPath(name) !== null)
+  // On PATH is not enough: the CLI must start inside the sandbox the box runs it in (which hides $HOME apart from the
+  // agent CLIs it finds there).
+  const sandboxed = (config ?? DEFAULT_CONFIG).sandbox === "basic"
+  const home = mkdtempSync(join(tmpdir(), "kestrel-doctor-"))
+  const agents = ["claude", "codex"].map((name) => {
+    if (onPath(name) === null) return { name, ok: false, detail: "not on PATH" }
+    const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
+    const run = sandboxed
+      ? exec("bwrap", cliBwrapArgs(home, env, [name, "--version"], {
+          level: "basic",
+          homeToolArgs: boxHomeToolArgs(),
+          network: "none",
+        }))
+      : exec(name, ["--version"])
+    const output = `${run.stdout}${run.stderr}`.trim().split("\n")[0] ?? ""
+    return { name, ok: run.status === 0, detail: output || `exit ${run.status ?? "?"}` }
+  })
+  rmSync(home, { recursive: true, force: true })
+  for (const agent of agents) {
+    checks.push({ name: `${agent.name}${sandboxed ? " (in sandbox)" : ""}`, required: false, ok: agent.ok, detail: agent.detail })
+  }
   checks.push({
     name: "agent CLI",
     required: true,
-    ok: agents.length > 0,
-    detail: agents.length > 0 ? agents.join(", ") : "neither claude nor codex is on PATH",
+    ok: agents.some((agent) => agent.ok),
+    detail: agents.some((agent) => agent.ok)
+      ? agents.filter((agent) => agent.ok).map((agent) => agent.name).join(", ")
+      : "neither claude nor codex runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex)",
   })
 
   const port = (config ?? DEFAULT_CONFIG).port

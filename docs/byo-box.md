@@ -59,6 +59,12 @@ and the macOS `install` (the Linux binary for the VM) download `releases/downloa
 must match the package version. Then `npm publish` in `packages/kestrel-box`. Box releases are the repo's only
 releases.
 
+The Linux binaries must load through the standard `/lib` loader. `build:box` uses bun's `baseline` build for linux-x64
+(when the target matches the host, bun would reuse its own runtime, and on NixOS that one loads through `/nix/store`),
+and fails if a Linux binary names any other loader. Before publishing, `bun scripts/box-ubuntu/test.ts
+dist/box/kestrel-box-linux-x64` (needs docker) runs the binary on Ubuntu 24.04 with Claude Code and Codex installed
+under `$HOME`, and checks that the box answers, reads both CLIs' logins and starts a real agent run in the sandbox.
+
 ### Manual setup
 
 Settings › Boxes › Add a box still works without the CLI: it shows the secret once, with
