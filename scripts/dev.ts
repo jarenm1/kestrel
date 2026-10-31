@@ -55,10 +55,10 @@ const boxEnv: Record<string, string> = {
   CLOUDAGENTS_CONTROL_URL: `http://127.0.0.1:${controlPort}`,
   CLOUDAGENTS_BOX_TOKEN: boxToken,
 }
-// The sandbox needs the Nix toolchain (CLOUDAGENTS_SANDBOX_PATH, set by the flake) and Linux. Without it agents
+// The strict sandbox needs the Nix toolchain (CLOUDAGENTS_SANDBOX_PATH, set by the flake) and Linux. Without it agents
 // run unsandboxed unless the caller decided otherwise.
 if (!env.CLOUDAGENTS_SANDBOX_PATH && env.CLOUDAGENTS_SANDBOX === undefined) {
-  boxEnv.CLOUDAGENTS_SANDBOX = "0"
+  boxEnv.CLOUDAGENTS_SANDBOX = "off"
   console.warn("dev: no Nix toolchain (CLOUDAGENTS_SANDBOX_PATH): agents run UNSANDBOXED on this machine")
 }
 // Resource limits are systemd scopes, which only exist on Linux.
@@ -140,6 +140,8 @@ start("worker", "packages/control", wrangler!, [
   String(9229 + offset),
   "--ip",
   "127.0.0.1",
+  "--var",
+  `APP_ORIGIN:http://localhost:${appPort}`,
 ])
 start("box", "packages/server", bun, ["run", "dev"], boxEnv)
 start("app", "packages/app", bun, ["run", "dev"], {

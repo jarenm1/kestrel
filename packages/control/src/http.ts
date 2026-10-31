@@ -1,3 +1,5 @@
+import { Schema } from "effect"
+
 /** Error body shape shared with the rest of the API: `{ _tag, message }`. */
 export const errorResponse = (status: number, tag: string, message: string): Response =>
   json({ _tag: tag, message }, status)
@@ -7,6 +9,18 @@ export const json = (body: unknown, status = 200, headers?: HeadersInit): Respon
   h.set("content-type", "application/json; charset=utf-8")
   h.set("cache-control", "no-store")
   return new Response(JSON.stringify(body), { status, headers: h })
+}
+
+/** The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. */
+export const decodeBody = async <A, I>(request: Request, schema: Schema.Schema<A, I>): Promise<A | Response> => {
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return errorResponse(400, "BadRequest", "body must be JSON")
+  }
+  const decoded = Schema.decodeUnknownEither(schema)(body)
+  return decoded._tag === "Left" ? errorResponse(400, "BadRequest", "invalid request body") : decoded.right
 }
 
 /** Failure talking to an upstream (GitHub, box) that should surface as 502. */

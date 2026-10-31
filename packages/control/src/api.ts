@@ -1,5 +1,6 @@
 import { Schema } from "effect"
 import {
+  ApprovePairingBody,
   CREDENTIALS_HEADER,
   CliAuthStatus,
   ControlPaths,
@@ -23,7 +24,7 @@ import {
   type OAuthProvider,
   type Provider,
 } from "./providers"
-import { UpstreamError, errorResponse, json, maskKey, readCookie } from "./http"
+import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
 import { SESSION_HEADER, hub, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
@@ -170,22 +171,12 @@ const isWorkerRoute = (path: string, method: string): boolean =>
 const USER_BOX_PATH = /^\/api\/boxes\/([^/]+)$/
 const USER_BOX_SECRET_PATH = /^\/api\/boxes\/([^/]+)\/secret$/
 const USER_BOX_TOKEN_PATH = /^\/api\/boxes\/([^/]+)\/token$/
+const PAIRING_PATH = /^\/api\/boxes\/pairings\/([^/]+)$/
+const PAIRING_APPROVE_PATH = /^\/api\/boxes\/pairings\/([^/]+)\/approve$/
 
 /** The Hub's outcome as a response: the value as JSON with `status`, or the failure as an error body. */
 const answerBox = <T>(outcome: BoxOutcome<T>, status = 200): Response =>
   outcome.ok ? json(outcome.value, status) : errorResponse(outcome.status, outcome.tag, outcome.message)
-
-/** The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. */
-const decodeBoxBody = async <A, I>(request: Request, schema: Schema.Schema<A, I>): Promise<A | Response> => {
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return errorResponse(400, "BadRequest", "body must be JSON")
-  }
-  const decoded = Schema.decodeUnknownEither(schema)(body)
-  return decoded._tag === "Left" ? errorResponse(400, "BadRequest", "invalid request body") : decoded.right
-}
 
 /**
  * Box management. The session cookie goes to the Hub with each call, which resolves it, so every call is one
@@ -198,16 +189,29 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
   const path = url.pathname
   const method = request.method
 
+  const pairing = PAIRING_PATH.exec(path)?.[1]
+  if (pairing !== undefined && method === "GET") {
+    const code = decodeURIComponent(pairing).replace(/-/g, "").toUpperCase()
+    return answerBox(await boxes.pendingPairing(sessionId, code))
+  }
+  const approve = PAIRING_APPROVE_PATH.exec(path)?.[1]
+  if (approve !== undefined && method === "POST") {
+    const body = await decodeBody(request, ApprovePairingBody)
+    if (body instanceof Response) return body
+    const code = decodeURIComponent(approve).replace(/-/g, "").toUpperCase()
+    return answerBox(await boxes.approvePairing(sessionId, code, body))
+  }
+
   if (path === ControlPaths.boxes) {
     if (method === "GET") return answerBox(await boxes.listBoxes(sessionId))
     if (method === "POST") {
-      const body = await decodeBoxBody(request, CreateBoxBody)
+      const body = await decodeBody(request, CreateBoxBody)
       if (body instanceof Response) return body
       return answerBox(await boxes.createBox(sessionId, body), 201)
     }
   }
   if (path === ControlPaths.activeBox && method === "PUT") {
-    const body = await decodeBoxBody(request, SetActiveBoxBody)
+    const body = await decodeBody(request, SetActiveBoxBody)
     if (body instanceof Response) return body
     return answerBox(await boxes.setActiveBox(sessionId, body.boxId))
   }
@@ -221,7 +225,7 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
   }
   const id = USER_BOX_PATH.exec(path)?.[1]
   if (id !== undefined && method === "PATCH") {
-    const body = await decodeBoxBody(request, UpdateBoxBody)
+    const body = await decodeBody(request, UpdateBoxBody)
     if (body instanceof Response) return body
     return answerBox(await boxes.updateBox(sessionId, decodeURIComponent(id), body))
   }
