@@ -47,6 +47,9 @@ Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (w
   runs past that wait in a queue shown in the thread. Edit `provisioning` in the config (`mode`: `guaranteed`,
   `pooled` or `per-thread`, plus the limits) and restart the service. The server's own defaults, used by Kestrel's
   shared box, stay hard per-thread caps.
+- Software: no install tool (Kestrel's toolkits need its Nix flake). Install what agents should use on the host; the
+  sandbox sees it read-only. Agents can install into their own home with `npm`, `uv` and the like, but cannot `sudo`
+  (see [box.md](box.md#software-on-other-boxes)).
 - Rendering: the live desktop uses the GPU only on native Linux with render nodes. WSL2 exposes the GPU as `/dev/dxg`,
   not a render node, and Linux VMs on macOS get no 3D GPU, so there the desktop renders and encodes (x264) on the CPU.
 

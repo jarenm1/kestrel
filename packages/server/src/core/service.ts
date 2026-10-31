@@ -270,7 +270,7 @@ export interface CoreShape {
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
-  /** Used by the MCP handler (`toolkit_install`): builds a toolkit and puts its executables on the task's PATH; returns their names. */
+  /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
   readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
   /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
   readonly checkout: (
@@ -1609,7 +1609,9 @@ export const CoreLive = Layer.effect(
       toolkitInstall: (taskId, name) =>
         Effect.gen(function* () {
           yield* requireTask(taskId)
-          return yield* installToolkit(config.toolkitsFlake, join(config.homesDir, taskId), name)
+          const flake = config.toolkitsFlake
+          if (flake === null) return yield* Effect.fail(new InternalError({ message: "toolkits need CLOUDAGENTS_TOOLKITS_FLAKE" }))
+          return yield* installToolkit(flake, join(config.homesDir, taskId), name)
         }),
 
       checkout: (taskId, input) => addCheckout(taskId, input),

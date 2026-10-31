@@ -5,12 +5,15 @@ import { TOOLKITS, TOOLKIT_NAMES, type ToolkitName } from "../../sandbox/toolkit
 import { type RunContext, guard, runTool, text } from "./common"
 
 export interface ToolkitToolDeps {
+  /** Null when the box has no flake to build toolkits from; the tool is not offered then. */
   readonly toolkits: {
     readonly install: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, unknown>
-  }
+  } | null
 }
 
 export const registerToolkitTools = (server: McpServer, ctx: RunContext, deps: ToolkitToolDeps): void => {
+  const toolkits = deps.toolkits
+  if (toolkits === null) return
   server.registerTool(
     "toolkit_install",
     {
@@ -27,7 +30,7 @@ export const registerToolkitTools = (server: McpServer, ctx: RunContext, deps: T
     },
     ({ name }) =>
       guard(() =>
-        runTool(Effect.map(deps.toolkits.install(ctx.taskId, name), (exes) => text(`installed ${name}; on PATH: ${exes.join(", ")}`))),
+        runTool(Effect.map(toolkits.install(ctx.taskId, name), (exes) => text(`installed ${name}; on PATH: ${exes.join(", ")}`))),
       ),
   )
 }
