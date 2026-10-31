@@ -1,11 +1,12 @@
 import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Image, type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
+import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
 import { createQueries, keys, upsert } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
+import { AttachmentImage } from "@/components/AttachmentImage";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatClock, formatElapsed } from "@/lib/format";
@@ -179,11 +180,11 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
                 {attachments.length > 0 ? (
                   <>
                     {attachments.map((a) => (
-                      <Image
+                      <AttachmentImage
                         key={a.id}
-                        source={api.attachmentSource(taskId, a.id)}
+                        taskId={taskId}
+                        attachmentId={a.id}
                         style={styles.attachment}
-                        resizeMode="contain"
                         accessibilityLabel="Attachment"
                       />
                     ))}
