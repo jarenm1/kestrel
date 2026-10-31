@@ -11,12 +11,14 @@ const DEFAULT_ANTHROPIC_COMMAND =
   'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
 
 /**
- * Codex reads `openai_base_url` from config, not from `OPENAI_BASE_URL`, so the broker URL is passed through
- * explicitly; its base includes `/v1` because codex appends `/responses`. Kestrel's bwrap sandbox replaces codex's
- * own, and `tool_timeout_sec` is ~2^31 ms in seconds, so a `task_ask` waits as long as the user takes.
+ * Codex runs as app-server on stdio; the harness opens the thread and its turn over JSON-RPC
+ * (`core/codex-app-server.ts`), with Codex's own sandbox and approvals off. Codex reads `openai_base_url` from
+ * config, not from `OPENAI_BASE_URL`, so the broker URL is passed through explicitly; its base includes `/v1`
+ * because codex appends `/responses`. `tool_timeout_sec` is ~2^31 ms in seconds, so a `task_ask` waits as long as
+ * the user takes.
  */
 const DEFAULT_OPENAI_COMMAND =
-  'codex exec ${CLOUDAGENTS_RESUME_SESSION:+resume "$CLOUDAGENTS_RESUME_SESSION"} --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} ${CLOUDAGENTS_MODEL:+-m "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+-c model_reasoning_effort="\\"$CLOUDAGENTS_EFFORT\\""} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647 -- "$CLOUDAGENTS_PROMPT"'
+  'codex app-server ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647'
 
 export interface ServerConfig {
   readonly port: number
@@ -36,12 +38,12 @@ export interface ServerConfig {
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
    * cwd = task worktree (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
-   * They read the prompt from `CLOUDAGENTS_PROMPT`, and `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the
-   * message chose them; the defaults turn the latter two into Claude Code's `--model` / `--effort` or codex's
-   * `-m` / `model_reasoning_effort`. Every run after a task's first gets `CLOUDAGENTS_RESUME_SESSION`, the session
-   * the task's previous run printed (Claude's stream-json `init` event, or codex's `thread.started`); the command
-   * must resume it (`claude --resume`, `codex exec resume`) for the agent to keep the thread's context. An
-   * OpenAI run reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
+   * The Anthropic command reads the prompt from `CLOUDAGENTS_PROMPT`, `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT`
+   * when the message chose them (Claude Code's `--model` / `--effort`), and `CLOUDAGENTS_RESUME_SESSION` on every
+   * run after a task's first: the session the previous run printed in its stream-json `init`, which it must resume
+   * (`claude --resume`) for the agent to keep the thread's context. The OpenAI command must start Codex app-server
+   * on stdio: the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run reaches the
+   * model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean

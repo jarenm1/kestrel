@@ -19,6 +19,7 @@ import {
   EFFORT_LABELS,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
+  harnessCommandPrefix,
   type ContextUsage,
   type HarnessCommand,
   type Message,
@@ -385,8 +386,8 @@ export function Composer({
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
-  // Codex accepts both the native `$` and `/`. The menu follows the caret while it stays inside the first word,
-  // then closes once an argument starts.
+  // Codex lists its commands and skills on `/`, and only its skills on their native `$`. The menu follows the caret
+  // while it stays inside the first word, then closes once an argument starts.
   const firstSpace = text.search(/\s/)
   const commandTokenEnd = firstSpace === -1 ? text.length : firstSpace
   const trigger: "/" | "$" | undefined = text.startsWith("/") ? "/" : text.startsWith("$") ? "$" : undefined
@@ -420,8 +421,10 @@ export function Composer({
   const commandMatches =
     slashQuery === undefined
       ? []
-      : (commandQuery.data?.commands ?? []).filter((c) =>
-          c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
+      : (commandQuery.data?.commands ?? []).filter(
+          (c) =>
+            (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
+            c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
         )
   const selectedCommandIndex =
     commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
@@ -434,8 +437,8 @@ export function Composer({
 
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
-    // Each harness has its own invocation syntax: Claude Code uses `/name`, Codex resolves `$skill-name`.
-    const prefix = commandQuery.data?.provider === "openai" ? "$" : "/"
+    // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
+    const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
     const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
     const nextText = `${prefix}${command.name} ` + rest
     const nextCaret = prefix.length + command.name.length + 1

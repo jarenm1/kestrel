@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react"
 import { useEffect, useRef, type ReactNode } from "react"
-import type { HarnessCommand, ModelProvider } from "@cloudagents/protocol"
+import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 
@@ -43,7 +43,7 @@ export function SlashCommands({
 }: {
   /** Stable base for the listbox and option ids. */
   id: string
-  /** Character that opened the menu: `/` for Claude, `/` or native `$` for Codex. */
+  /** Character that opened the menu: `/` for every command, `$` for Codex skills only. */
   trigger: "/" | "$"
   /** Text after the leading trigger, used in the empty state. */
   query: string
@@ -61,9 +61,8 @@ export function SlashCommands({
   const listboxId = slashListboxId(id)
   const selectedIndex = matches.length === 0 ? -1 : Math.min(activeIndex, matches.length - 1)
   const activeOption = useRef<HTMLDivElement>(null)
-  // Codex resolves `$skill-name`; Claude Code resolves `/name`. The slash menu itself triggers either list.
-  const prefix = provider === "openai" ? "$" : "/"
-  const noun = provider === "openai" ? "skills" : "slash commands"
+  // Each command shows how it is typed: `/` for commands, `$` for Codex skills.
+  const noun = provider !== "openai" ? "slash commands" : trigger === "$" ? "skills" : "commands or skills"
 
   // Keyboard navigation past the fold must bring the active option into the menu's view.
   useEffect(() => {
@@ -105,9 +104,10 @@ export function SlashCommands({
         >
           {matches.map((command, index) => {
             const selected = index === selectedIndex
+            const prefix = harnessCommandPrefix(command, provider)
             return (
               <div
-                key={command.name}
+                key={`${prefix}${command.name}`}
                 id={slashOptionId(id, index)}
                 ref={selected ? activeOption : undefined}
                 role="option"

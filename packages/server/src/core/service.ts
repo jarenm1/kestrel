@@ -972,7 +972,7 @@ export const CoreLive = Layer.effect(
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
-              // the answer; otherwise it waits in the run's inbox for task_inbox.
+              // the answer; otherwise it steers the run's live turn (Codex) or waits in the run's inbox for task_inbox.
               const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
@@ -1031,7 +1031,15 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "task.updated", task: reserved.task })
         publishMessage(reserved.message)
         if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
-        if (reserved.start === null) return { message: reserved.message, run: reserved.run }
+        if (reserved.start === null) {
+          if (reserved.answer === null) {
+            // Taken from the inbox before the steer is sent, so task_inbox cannot hand it over a second time.
+            const seen = seenFor(reserved.run.id)
+            seen.add(reserved.message.id)
+            if (!(yield* harness.steer(reserved.run.id, reserved.delivered))) seen.delete(reserved.message.id)
+          }
+          return { message: reserved.message, run: reserved.run }
+        }
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)

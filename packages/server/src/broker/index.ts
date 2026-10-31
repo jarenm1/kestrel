@@ -85,9 +85,8 @@ export const CredentialBrokerLive = Layer.effect(
               ANTHROPIC_API_KEY: token,
               // Codex appends `/responses` to its base URL, so the broker's OpenAI base carries the `/v1` segment.
               OPENAI_BASE_URL: `${base}/openai/v1`,
+              // A Codex run hands the token to app-server with `account/login/start`; app-server reads no key env.
               OPENAI_API_KEY: token,
-              // `codex exec` authenticates from CODEX_API_KEY, which takes precedence over OpenAI's env var.
-              CODEX_API_KEY: token,
             },
           }
         }),

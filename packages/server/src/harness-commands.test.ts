@@ -14,8 +14,8 @@ describe("parseClaudeCommands", () => {
         "not a command",
       ]),
     ).toEqual([
-      { name: "review", description: "Review a pull request", argumentHint: "[pr]" },
-      { name: "plain", description: "No hint" },
+      { name: "review", description: "Review a pull request", argumentHint: "[pr]", prefix: "/" },
+      { name: "plain", description: "No hint", prefix: "/" },
     ])
   })
 
@@ -72,7 +72,7 @@ describe("parseCodexSkills", () => {
           },
         ],
       }),
-    ).toEqual([{ name: "grilling", description: "Grill a plan" }])
+    ).toEqual([{ name: "grilling", description: "Grill a plan", prefix: "$" }])
     expect(JSON.stringify(parseCodexSkills({ data: [{ skills: [{ name: "x", description: "y", path: "/secret" }] }] }))).not.toContain(
       "/secret",
     )

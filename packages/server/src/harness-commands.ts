@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { createInterface } from "node:readline"
 import type { HarnessCommand } from "@cloudagents/protocol"
+import { CODEX_COMMANDS } from "./core/codex-app-server"
 import { VERSION } from "./config"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "./process"
 
@@ -8,10 +9,10 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "./process"
  * Real command discovery from the authenticated agent CLIs, in the thread's own workspace.
  *
  * Claude Code exposes its slash commands (built-ins, bundled skills, user/project commands and skills) in the
- * control response to an `initialize` request on its stream-json interface. Codex has no slash commands in
- * `codex exec` (openai/codex#3641); its native user-invocable surface is skills, discovered through app-server's
- * `skills/list`. Both launches are bounded: whatever the CLI starts is killed with its process group on answer,
- * error or timeout, so discovery never leaves a child behind.
+ * control response to an `initialize` request on its stream-json interface. Codex's slash commands drive its
+ * terminal UI; the ones a Kestrel run carries out over app-server are `CODEX_COMMANDS`, listed with the workspace's
+ * enabled skills from app-server's `skills/list`. Both launches are bounded: whatever the CLI starts is killed with
+ * its process group on answer, error or timeout, so discovery never leaves a child behind.
  */
 
 /** How to start a CLI: the executable (possibly bwrap), its args, its exact env and the working directory. */
@@ -107,8 +108,8 @@ const commandName = (value: unknown): string | null => {
   return NAME_PATTERN.test(name) ? name : null
 }
 
-/** Commands from one CLI payload, deduped by name, in the CLI's own order. */
-const toCommands = (rows: Iterable<unknown>): ReadonlyArray<HarnessCommand> => {
+/** Commands from one CLI payload, deduped by name, in the CLI's own order, typed with `prefix`. */
+const toCommands = (rows: Iterable<unknown>, prefix: "/" | "$"): ReadonlyArray<HarnessCommand> => {
   const seen = new Set<string>()
   const commands: HarnessCommand[] = []
   for (const row of rows) {
@@ -119,7 +120,7 @@ const toCommands = (rows: Iterable<unknown>): ReadonlyArray<HarnessCommand> => {
     seen.add(name)
     const description = cleanText(record.description, DESCRIPTION_MAX).replace(SOURCE_SUFFIX, "").trim()
     const argumentHint = cleanText(record.argumentHint, HINT_MAX)
-    commands.push({ name, description, ...(argumentHint === "" ? {} : { argumentHint }) })
+    commands.push({ name, description, ...(argumentHint === "" ? {} : { argumentHint }), prefix })
     if (commands.length >= MAX_COMMANDS) break
   }
   return commands
@@ -127,7 +128,7 @@ const toCommands = (rows: Iterable<unknown>): ReadonlyArray<HarnessCommand> => {
 
 /** Parses the `commands` array of a Claude Code initialize control response. */
 export const parseClaudeCommands = (value: unknown): ReadonlyArray<HarnessCommand> =>
-  Array.isArray(value) ? toCommands(value) : []
+  Array.isArray(value) ? toCommands(value, "/") : []
 
 /** Parses one Codex app-server `skills/list` result. Only enabled skills are exposed; their paths stay on the box. */
 export const parseCodexSkills = (value: unknown): ReadonlyArray<HarnessCommand> => {
@@ -145,7 +146,7 @@ export const parseCodexSkills = (value: unknown): ReadonlyArray<HarnessCommand> 
       skills.push(skill)
     }
   }
-  return toCommands(skills)
+  return toCommands(skills, "$")
 }
 
 /** Returns a result when the handler has the answer, undefined to keep reading, and throws on a refusal. */
@@ -275,8 +276,8 @@ export const discoverClaudeCommands = (
 }
 
 /**
- * Codex: initialize app-server, then list skills for the thread workspace. Skills are the harness's native
- * user-invocable commands (`$name` in a prompt); `codex exec` does not parse slash commands. Paths are dropped here.
+ * Codex: its commands, then the enabled skills app-server lists for the thread workspace (`$name` in a prompt).
+ * Skill paths are dropped here.
  */
 export const discoverCodexCommands = (
   launch: DiscoveryLaunch,
@@ -304,6 +305,6 @@ export const discoverCodexCommands = (
       }
       if (record.id !== skillsId) return undefined
       if (record.error !== undefined) throw new Error("codex command discovery could not list skills")
-      return parseCodexSkills(record.result)
+      return [...CODEX_COMMANDS, ...parseCodexSkills(record.result)]
     }
   })

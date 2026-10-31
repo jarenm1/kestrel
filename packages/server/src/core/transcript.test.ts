@@ -161,184 +161,179 @@ describe("claude stream-json", () => {
   })
 })
 
-describe("codex exec --json", () => {
-  test("command_execution is upserted from started to completed", () => {
+/** An app-server notification as Codex prints it. */
+const note = (method: string, params: Record<string, unknown>) => ({ method, params })
+const T = { threadId: "th1", turnId: "tu1" }
+const item = (phase: "started" | "completed", raw: Record<string, unknown>) => note(`item/${phase}`, { ...T, item: raw })
+const usage = (total: [number, number], last: [number, number], window = 272_000, turnId = "tu1") =>
+  note("thread/tokenUsage/updated", {
+    threadId: "th1",
+    turnId,
+    tokenUsage: {
+      total: { totalTokens: total[0] + total[1], inputTokens: total[0], cachedInputTokens: 0, outputTokens: total[1] },
+      last: { totalTokens: last[0] + last[1], inputTokens: last[0], cachedInputTokens: 0, outputTokens: last[1] },
+      modelContextWindow: window,
+    },
+  })
+const turnCompleted = (status: string, extra: Record<string, unknown> = {}) =>
+  note("turn/completed", { threadId: "th1", turn: { id: "tu1", items: [], status, error: null, durationMs: 1200, ...extra } })
+
+describe("codex app-server", () => {
+  test("an agent message streams from its deltas, and the completed message is the final text", () => {
     const transcript = makeTranscript()
-    expect(transcript.push({ type: "turn.started" })).toEqual([])
-    const started = valid(
-      transcript.push({
-        type: "item.started",
-        item: {
-          id: "item_1",
-          type: "command_execution",
-          command: "ls",
-          aggregated_output: "",
-          exit_code: null,
-          status: "in_progress",
-        },
-      }),
-    )
-    expect(started).toEqual([
+    const msg = { type: "agentMessage", id: "m1", text: "", phase: "final_answer" }
+    expect(transcript.push(item("started", msg))).toEqual([])
+    expect(valid(transcript.push(note("item/agentMessage/delta", { ...T, itemId: "m1", delta: "Hello" })))).toEqual([
+      { _tag: "text", id: "m1", parentToolId: null, text: "Hello" },
+    ])
+    expect(transcript.push(note("item/agentMessage/delta", { ...T, itemId: "m1", delta: " world" }))).toEqual([
+      { _tag: "text", id: "m1", parentToolId: null, text: "Hello world" },
+    ])
+    expect(transcript.finalText()).toBeNull()
+    transcript.push(item("completed", { ...msg, text: "Hello world." }))
+    expect(transcript.finalText()).toBe("Hello world.")
+  })
+
+  test("a command's output grows from deltas while it runs; a non-zero exit completes it as an error", () => {
+    const transcript = makeTranscript()
+    const cmd = { type: "commandExecution", id: "c1", command: "bash -lc 'cat missing.txt'", status: "inProgress", aggregatedOutput: null, exitCode: null }
+    expect(valid(transcript.push(item("started", cmd)))).toEqual([
+      { _tag: "tool", id: "c1", parentToolId: null, name: "command_execution", input: { command: cmd.command }, status: "running", output: null },
+    ])
+    expect(transcript.push(note("item/commandExecution/outputDelta", { ...T, itemId: "c1", delta: "cat: " }))[0]).toMatchObject({
+      status: "running",
+      output: "cat: ",
+    })
+    expect(transcript.push(note("item/commandExecution/outputDelta", { ...T, itemId: "c1", delta: "missing.txt" }))[0]).toMatchObject({
+      output: "cat: missing.txt",
+    })
+    expect(
+      valid(transcript.push(item("completed", { ...cmd, status: "failed", aggregatedOutput: "cat: missing.txt: No such file\n", exitCode: 1 }))),
+    ).toEqual([
       {
         _tag: "tool",
-        id: "item_1",
+        id: "c1",
         parentToolId: null,
         name: "command_execution",
-        input: { command: "ls" },
-        status: "running",
-        output: "",
+        input: { command: cmd.command },
+        status: "error",
+        output: "cat: missing.txt: No such file\n",
       },
     ])
-
-    const completed = valid(
-      transcript.push({
-        type: "item.completed",
-        item: {
-          id: "item_1",
-          type: "command_execution",
-          command: "ls",
-          aggregated_output: "a.txt\nb.txt\n",
-          exit_code: 0,
-          status: "completed",
-        },
-      }),
-    )
-    expect(completed[0]).toMatchObject({ id: "item_1", status: "ok", output: "a.txt\nb.txt\n" })
-
-    const failed = valid(
-      transcript.push({
-        type: "item.completed",
-        item: {
-          id: "item_1",
-          type: "command_execution",
-          command: "ls",
-          aggregated_output: "denied",
-          exit_code: 1,
-          status: "failed",
-        },
-      }),
-    )
-    expect(failed[0]).toMatchObject({ id: "item_1", status: "error", output: "denied" })
+    // A late delta for a finished command changes nothing.
+    expect(transcript.push(note("item/commandExecution/outputDelta", { ...T, itemId: "c1", delta: "late" }))).toEqual([])
   })
 
-  test("turn duration is measured and tokens come from the turn usage", () => {
+  test("reasoning, file changes, MCP calls and web searches become display items; review markers and user messages do not", () => {
     const transcript = makeTranscript()
-    const realNow = Date.now
-    try {
-      let now = 1_000
-      Date.now = () => now
-      transcript.push({ type: "turn.started" })
-      now = 1_345
-      const items = valid(
-        transcript.push({
-          type: "turn.completed",
-          usage: {
-            input_tokens: 100,
-            cached_input_tokens: 80,
-            cache_write_input_tokens: 0,
-            output_tokens: 9,
-            reasoning_output_tokens: 2,
-          },
-        }),
-      )
-      expect(items).toEqual([
-        {
-          _tag: "turn",
-          id: expect.any(String),
-          durationMs: 345,
-          inputTokens: 100,
-          outputTokens: 9,
-          costUsd: null,
-          isError: false,
-        },
-      ])
-    } finally {
-      Date.now = realNow
-    }
-  })
-
-  test("finalText is the last agent message", () => {
-    const transcript = makeTranscript()
-    const first = valid(
-      transcript.push({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "first" } }),
-    )
-    expect(first).toEqual([{ _tag: "text", id: "item_0", parentToolId: null, text: "first" }])
-    valid(transcript.push({ type: "item.completed", item: { id: "item_2", type: "agent_message", text: "second" } }))
-    expect(transcript.finalText()).toBe("second")
-  })
-
-  test("reasoning, file changes, mcp calls and web searches become display items", () => {
-    const transcript = makeTranscript()
-    expect(
-      valid(transcript.push({ type: "item.completed", item: { id: "item_r", type: "reasoning", text: "thinking" } })),
-    ).toEqual([{ _tag: "thinking", id: "item_r", parentToolId: null, text: "thinking" }])
-
-    const fileChange = valid(
-      transcript.push({
-        type: "item.completed",
-        item: { id: "item_f", type: "file_change", changes: [{ path: "a.ts", kind: "add" }], status: "completed" },
-      }),
-    )
-    expect(fileChange[0]).toMatchObject({
-      _tag: "tool",
-      id: "item_f",
-      name: "file_change",
-      input: { changes: [{ path: "a.ts", kind: "add" }] },
-      status: "ok",
-    })
-
-    const mcp = valid(
-      transcript.push({
-        type: "item.completed",
-        item: {
-          id: "item_m",
-          type: "mcp_tool_call",
-          server: "cloudagents",
-          tool: "task_report",
-          arguments: { status: "done" },
-          result: { ok: true },
-          error: null,
-          status: "completed",
-        },
-      }),
-    )
-    expect(mcp[0]).toMatchObject({
-      _tag: "tool",
-      id: "item_m",
-      name: "cloudagents.task_report",
-      input: { status: "done" },
-      status: "ok",
-      output: '{"ok":true}',
-    })
-
-    const search = valid(
-      transcript.push({ type: "item.completed", item: { id: "item_w", type: "web_search", query: "kestrel" } }),
-    )
-    expect(search[0]).toMatchObject({ _tag: "tool", name: "web_search", input: { query: "kestrel" }, status: "ok" })
-  })
-
-  test("turn.failed emits an error item plus a failed turn", () => {
-    const transcript = makeTranscript()
-    const realNow = Date.now
-    try {
-      let now = 5_000
-      Date.now = () => now
-      transcript.push({ type: "turn.started" })
-      now = 5_050
-      const items = valid(transcript.push({ type: "turn.failed", error: { message: "model exploded" } }))
-      expect(items).toHaveLength(2)
-      expect(items[0]).toEqual({ _tag: "error", id: expect.any(String), text: "model exploded" })
-      expect(items[1]).toMatchObject({ _tag: "turn", durationMs: 50, inputTokens: null, outputTokens: null, isError: true })
-    } finally {
-      Date.now = realNow
-    }
-  })
-
-  test("a top-level error becomes an error item", () => {
-    const transcript = makeTranscript()
-    expect(valid(transcript.push({ type: "error", message: "stream disconnected" }))).toEqual([
-      { _tag: "error", id: expect.any(String), text: "stream disconnected" },
+    expect(transcript.push(item("started", { type: "reasoning", id: "r1", summary: [], content: [] }))).toEqual([])
+    transcript.push(note("item/reasoning/summaryTextDelta", { ...T, itemId: "r1", delta: "First", summaryIndex: 0 }))
+    expect(valid(transcript.push(note("item/reasoning/summaryTextDelta", { ...T, itemId: "r1", delta: "Second", summaryIndex: 1 })))).toEqual([
+      { _tag: "thinking", id: "r1", parentToolId: null, text: "First\n\nSecond" },
     ])
+    expect(
+      valid(
+        transcript.push(
+          item("completed", {
+            type: "fileChange",
+            id: "f1",
+            changes: [{ path: "/home/agent/work/hello.ts", kind: { type: "add" }, diff: "+hi" }],
+            status: "completed",
+          }),
+        ),
+      ),
+    ).toEqual([
+      {
+        _tag: "tool",
+        id: "f1",
+        parentToolId: null,
+        name: "file_change",
+        input: { changes: [{ path: "/home/agent/work/hello.ts", kind: "add" }] },
+        status: "ok",
+        output: null,
+      },
+    ])
+    const call = { type: "mcpToolCall", id: "p1", server: "cloudagents", tool: "desktop_screenshot", arguments: {}, status: "completed", error: null }
+    expect(
+      valid(transcript.push(item("completed", { ...call, result: { content: [{ type: "text", text: "1280x720" }, { type: "image", data: "AAAA" }] } }))),
+    ).toEqual([
+      { _tag: "tool", id: "p1", parentToolId: null, name: "cloudagents.desktop_screenshot", input: {}, status: "ok", output: "1280x720\n[image]" },
+    ])
+    expect(transcript.push(item("completed", { ...call, id: "p2", status: "failed", result: null, error: { message: "desktop is stopped" } }))).toEqual([
+      { _tag: "tool", id: "p2", parentToolId: null, name: "cloudagents.desktop_screenshot", input: {}, status: "error", output: "desktop is stopped" },
+    ])
+    expect(valid(transcript.push(item("completed", { type: "webSearch", id: "w1", query: "bun test", action: null, results: null })))).toEqual([
+      { _tag: "tool", id: "w1", parentToolId: null, name: "web_search", input: { query: "bun test" }, status: "ok", output: null },
+    ])
+    expect(transcript.push(item("completed", { type: "exitedReviewMode", id: "x1", review: "Looks fine." }))).toEqual([])
+    expect(transcript.push(item("completed", { type: "userMessage", id: "u1", content: [] }))).toEqual([])
+  })
+
+  test("a turn's tokens are its own calls, not the thread's totals; context use is the last call against the window", () => {
+    // A resumed thread: 10k in / 1k out before this turn.
+    const transcript = makeTranscript()
+    transcript.push({ id: 2, result: { thread: { id: "th1" }, model: "gpt-6-luna" } })
+    transcript.push(usage([14_000, 1_200], [4_000, 200]))
+    expect(transcript.context()).toEqual({ model: "gpt-6-luna", usedTokens: 4_200, windowTokens: 272_000 })
+    transcript.push(usage([19_000, 1_500], [5_000, 300]))
+    const [turn] = valid(transcript.push(turnCompleted("completed")))
+    expect(turn).toEqual({ _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: 9_000, outputTokens: 500, costUsd: null, isError: false })
+    // After a compaction the next call reports the smaller size.
+    transcript.push(usage([19_000, 1_500], [800, 100], 272_000, "tu2"))
+    expect(transcript.context()).toEqual({ model: "gpt-6-luna", usedTokens: 900, windowTokens: 272_000 })
+  })
+
+  test("a failed turn reports its error once; a retried error is not reported", () => {
+    const transcript = makeTranscript()
+    expect(transcript.push(note("error", { ...T, error: { message: "Reconnecting... 2/5" }, willRetry: true }))).toEqual([])
+    expect(valid(transcript.push(note("error", { ...T, error: { message: "usage limit reached" }, willRetry: false })))).toEqual([
+      { _tag: "error", id: expect.any(String), text: "usage limit reached" },
+    ])
+    expect(valid(transcript.push(turnCompleted("failed", { error: { message: "usage limit reached" } })))).toEqual([
+      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+    ])
+    expect(valid(makeTranscript().push(turnCompleted("failed", { error: { message: "model refused" } })))).toEqual([
+      { _tag: "error", id: expect.any(String), text: "model refused" },
+      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+    ])
+  })
+
+  test("the turn's plan is a todo list that stops running when the turn ends", () => {
+    const transcript = makeTranscript()
+    const plan = (second: string) =>
+      note("turn/plan/updated", { ...T, explanation: null, plan: [{ step: "Read", status: "completed" }, { step: "Write", status: second }] })
+    expect(valid(transcript.push(plan("inProgress")))).toEqual([
+      {
+        _tag: "tool",
+        id: "plan-tu1",
+        parentToolId: null,
+        name: "todo_list",
+        input: { items: [{ text: "Read", completed: true }, { text: "Write", completed: false }] },
+        status: "running",
+        output: null,
+      },
+    ])
+    const ended = valid(transcript.push(turnCompleted("interrupted")))
+    expect(ended[0]).toMatchObject({ id: "plan-tu1", status: "ok" })
+    expect(ended[1]).toMatchObject({ _tag: "turn", isError: false })
+  })
+
+  test("a command an interrupt or a steer cut off ends as an error with its turn, keeping its output", () => {
+    const transcript = makeTranscript()
+    const cmd = { type: "commandExecution", id: "c1", command: "sleep 60", status: "inProgress", aggregatedOutput: null, exitCode: null }
+    transcript.push(item("started", cmd))
+    transcript.push(note("item/commandExecution/outputDelta", { ...T, itemId: "c1", delta: "tick 2\n" }))
+    const ended = valid(transcript.push(turnCompleted("interrupted")))
+    expect(ended[0]).toEqual({
+      _tag: "tool",
+      id: "c1",
+      parentToolId: null,
+      name: "command_execution",
+      input: { command: "sleep 60" },
+      status: "error",
+      output: "tick 2\n",
+    })
+    expect(ended[1]).toMatchObject({ _tag: "turn" })
   })
 })
 

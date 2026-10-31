@@ -1,6 +1,6 @@
 import React from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
-import type { HarnessCommand, ModelProvider } from "@cloudagents/protocol";
+import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol";
 import { colors, fonts, radius, shadows, spacing } from "@/theme";
 
 interface Props {
@@ -11,8 +11,6 @@ interface Props {
 }
 
 export function SlashCommands({ matches, provider, pending, onSelect }: Props) {
-  const prefix = provider === "openai" ? "$" : "/";
-
   if (pending) {
     return (
       <View style={styles.card}>
@@ -36,7 +34,7 @@ export function SlashCommands({ matches, provider, pending, onSelect }: Props) {
     <View style={styles.card}>
       <FlatList
         data={matches}
-        keyExtractor={(item) => item.name}
+        keyExtractor={(item) => `${harnessCommandPrefix(item, provider)}${item.name}`}
         keyboardShouldPersistTaps="always"
         style={styles.list}
         renderItem={({ item }) => (
@@ -47,7 +45,7 @@ export function SlashCommands({ matches, provider, pending, onSelect }: Props) {
           >
             <View style={styles.nameRow}>
               <Text style={styles.name}>
-                {prefix}
+                {harnessCommandPrefix(item, provider)}
                 {item.name}
               </Text>
               {item.argumentHint ? <Text style={styles.hint}>{item.argumentHint}</Text> : null}

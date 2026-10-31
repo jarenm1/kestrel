@@ -22,12 +22,12 @@ import {
 } from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
-import { Config } from "../config"
+import { Config, VERSION } from "../config"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
-import { codexContext } from "./rollout"
+import { makeCodexDriver, type CodexDriver, type CodexRunInput } from "./codex-app-server"
 import { makeTranscript, type Transcript } from "./transcript"
 
 export interface AgentHarnessShape {
@@ -47,8 +47,16 @@ export interface AgentHarnessShape {
     resumeSession: string | null,
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
-  /** Kills a running run and marks it cancelled; a cancelled run's question is dropped. */
+  /**
+   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. A Codex turn is interrupted
+   * first, so it ends cleanly in its session; the process is killed when it does not exit in time.
+   */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
+  /**
+   * Adds `text` to the run's live turn (Codex `turn/steer`). False when the run's harness cannot take it now (no
+   * Codex turn going); the message then waits in the run's inbox for task_inbox.
+   */
+  readonly steer: (runId: string, text: string) => Effect.Effect<boolean>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
@@ -78,19 +86,23 @@ interface ActiveRun {
   readonly stderrLines: string[]
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
+  /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
+  readonly published: Map<string, number>
+  readonly held: Map<string, AgentItem>
+  heldTimer: ReturnType<typeof setTimeout> | null
   readonly transcript: Transcript
   /** Context use last stored on the task. */
   context: ContextUsage | null
   /** Agent session id, once the CLI names it. */
   sessionId: string | null
-  /** Host path of the run's `CODEX_HOME` for a codex run, whose context use is read from its rollout; else null. */
-  readonly codexHome: string | null
+  /** The app-server conversation of a Codex run; null for Claude runs and replays, which only print. */
+  codex: CodexDriver | null
 }
 
-/** What a run starts from besides its process: the session's last context use and where codex keeps its rollouts. */
+/** What a run starts from besides its process: the session's last context use, and its Codex turn if it is one. */
 interface RunSession {
   readonly seed: ContextUsage | null
-  readonly codexHome: string | null
+  readonly codex: Omit<CodexRunInput, "clientVersion"> | null
 }
 
 /** How to start a run's child process; real agent launches and replays differ only here. */
@@ -102,11 +114,18 @@ interface ProcessSpec {
 }
 
 const KILL_GRACE_MS = 3000
+/**
+ * Least time between two publishes of the same item. Codex streams text, reasoning and command output a token at a
+ * time, and every event is a relay message; the latest version always goes out when the window ends.
+ */
+const ITEM_PUBLISH_MS = 100
+/** App-server notifications that stream a token at a time; their effect reaches the app as items, not raw lines. */
+const DELTA_METHOD = /\/(delta|outputDelta|summaryTextDelta|textDelta)$/
 
 /** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
 const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
   "claude-cli": { env: "CLAUDE_CONFIG_DIR", broker: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
-  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_API_KEY"] },
+  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
 }
 
 export const AgentHarnessLive = Layer.effect(
@@ -163,6 +182,33 @@ export const AgentHarnessLive = Layer.effect(
         if (changed !== null) publish({ _tag: "task.updated", task: changed })
       }).pipe(Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: could not store context use: ${e.message}`)))
 
+    /** Publishes the items held back by ITEM_PUBLISH_MS now. */
+    const flushHeld = (runId: string, entry: ActiveRun) => {
+      clearTimeout(entry.heldTimer ?? undefined)
+      entry.heldTimer = null
+      const now = Date.now()
+      for (const item of entry.held.values()) {
+        entry.published.set(item.id, now)
+        publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
+      }
+      entry.held.clear()
+    }
+
+    /** Stores a run's item and publishes it: a new item at once, a replacement at most every ITEM_PUBLISH_MS. */
+    const putItem = (runId: string, entry: ActiveRun, item: AgentItem) => {
+      entry.items.set(item.id, item)
+      const now = Date.now()
+      const last = entry.published.get(item.id)
+      if (last === undefined || now - last >= ITEM_PUBLISH_MS) {
+        entry.held.delete(item.id)
+        entry.published.set(item.id, now)
+        publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
+        return
+      }
+      entry.held.set(item.id, item)
+      entry.heldTimer ??= setTimeout(() => flushHeld(runId, entry), ITEM_PUBLISH_MS)
+    }
+
     const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
       Effect.gen(function* () {
         // The run's broker token dies with the run, whatever the outcome.
@@ -172,14 +218,15 @@ export const AgentHarnessLive = Layer.effect(
         active.delete(runId)
         entry.log.end()
         if (spawnError) entry.stderrLines.push(spawnError)
-
-        // Codex reports context use only in its rollout, complete once the CLI has exited.
-        if (entry.codexHome !== null && entry.sessionId !== null) {
-          const context = yield* Effect.tryPromise(() => codexContext(entry.codexHome as string, entry.sessionId as string)).pipe(
-            Effect.catchAll((e) => Effect.as(Effect.logWarning(`run ${runId}: cannot read codex rollout: ${String(e)}`), null)),
-          )
-          if (context !== null) yield* setContext(entry.taskId, context)
+        // A Codex run is over when its turn is, whatever app-server's exit code; a refused request or an early exit
+        // shows as the run's error, unless the run was stopped on purpose.
+        entry.codex?.close()
+        const codexOutcome = entry.codex?.outcome() ?? null
+        const cancelled = (yield* store.read).runs.find((r) => r.id === runId)?.status !== "running"
+        if (codexOutcome?.status === "failed" && codexOutcome.error !== null && !cancelled) {
+          putItem(runId, entry, { _tag: "error", id: "codex-run", text: codexOutcome.error })
         }
+        flushHeld(runId, entry)
         // The items are the run's display history; keep them next to the raw log for later reads.
         yield* Effect.tryPromise({
           try: () =>
@@ -193,7 +240,7 @@ export const AgentHarnessLive = Layer.effect(
           if (!run || run.status !== "running") return Either.right(null)
           const task = s.tasks.find((t) => t.id === run.taskId)
           if (!task) return Either.right(null)
-          const ok = exitCode === 0
+          const ok = entry.codex === null ? exitCode === 0 : codexOutcome?.status === "completed"
           const now = nowIso()
           run.status = ok ? "succeeded" : "failed"
           run.exitCode = exitCode
@@ -201,10 +248,13 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
+          // A Codex run's stderr is app-server's own log, not the agent's output.
+          const failure = codexOutcome?.status === "failed" ? codexOutcome.error : null
           const text =
             entry.transcript.finalText() ??
+            failure ??
             (entry.stdoutLines.join("\n").trim() ||
-              entry.stderrLines.join("\n").trim() ||
+              (entry.codex === null ? entry.stderrLines.join("\n").trim() : "") ||
               (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
           const message: Message = {
             id: newId(),
@@ -243,9 +293,17 @@ export const AgentHarnessLive = Layer.effect(
         yield* broker.revoke(runId)
         const entry = active.get(runId)
         if (entry) {
-          killProcessGroup(entry.child.pid, "SIGTERM")
+          // An interrupted Codex turn ends on its own and closes the process; anything else is signalled now.
+          const interrupted = entry.codex?.interrupt() ?? false
+          if (!interrupted) killProcessGroup(entry.child.pid, "SIGTERM")
           const timer = setTimeout(() => {
-            if (active.has(runId)) killProcessGroup(entry.child.pid, "SIGKILL")
+            if (!active.has(runId)) return
+            if (interrupted) {
+              killProcessGroup(entry.child.pid, "SIGTERM")
+              setTimeout(() => active.has(runId) && killProcessGroup(entry.child.pid, "SIGKILL"), KILL_GRACE_MS).unref()
+            } else {
+              killProcessGroup(entry.child.pid, "SIGKILL")
+            }
           }, KILL_GRACE_MS)
           timer.unref()
         }
@@ -273,11 +331,9 @@ export const AgentHarnessLive = Layer.effect(
       if (trimmed.startsWith("{")) {
         try {
           const parsed: unknown = JSON.parse(trimmed)
+          entry.codex?.receive(parsed)
           // Every parsed line goes through the run's transcript, whether or not it yields items.
-          for (const item of entry.transcript.push(parsed)) {
-            entry.items.set(item.id, item)
-            publish({ _tag: "agent.item", taskId: entry.taskId, runId, item })
-          }
+          for (const item of entry.transcript.push(parsed)) putItem(runId, entry, item)
           const context = entry.transcript.context()
           if (context !== null && context !== entry.context) {
             entry.context = context
@@ -288,7 +344,10 @@ export const AgentHarnessLive = Layer.effect(
             entry.sessionId = session.sessionId
             runFork(recordSession(runId, session.sessionId, session.provider))
           }
-          publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
+          const method = typeof parsed === "object" && parsed !== null && "method" in parsed ? parsed.method : null
+          if (typeof method !== "string" || !DELTA_METHOD.test(method)) {
+            publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
+          }
           return
         } catch {
           // not JSON after all; fall through to raw stdout
@@ -299,8 +358,8 @@ export const AgentHarnessLive = Layer.effect(
     }
 
     /**
-     * Starts the run's child and wires stdout/stderr into the shared line, finish and cancel
-     * paths. A real agent launch and a replay differ only in the `ProcessSpec`.
+     * Starts the run's child and wires stdout/stderr into the shared line, finish and cancel paths. A real agent
+     * launch and a replay differ only in the `ProcessSpec`; a Codex run also talks to app-server over stdin.
      */
     const startRun = (task: Task, run: Run, spec: ProcessSpec, session: RunSession): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
@@ -316,7 +375,7 @@ export const AgentHarnessLive = Layer.effect(
                 cwd: spec.cwd,
                 env: { ...spec.env },
                 detached: NEW_PROCESS_GROUP,
-                stdio: ["ignore", "pipe", "pipe"],
+                stdio: ["pipe", "pipe", "pipe"],
               }),
             )
             const log = createWriteStream(join(runDir, "output.log"), { flags: "a" })
@@ -327,10 +386,39 @@ export const AgentHarnessLive = Layer.effect(
               stdoutLines: [],
               stderrLines: [],
               items: new Map(),
+              published: new Map(),
+              held: new Map(),
+              heldTimer: null,
               transcript: makeTranscript(session.seed),
               context: session.seed,
               sessionId: null,
-              codexHome: session.codexHome,
+              codex: null,
+            }
+            const stdin = child.stdin
+            // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
+            stdin.on("error", () => undefined)
+            // Claude runs and replays only print; they read an empty stdin.
+            if (session.codex === null) stdin.end()
+            else {
+              entry.codex = makeCodexDriver(
+                { ...session.codex, clientVersion: VERSION },
+                {
+                  send: (message) => {
+                    const line = JSON.stringify(message)
+                    log.write(`>> ${line}\n`)
+                    stdin.write(`${line}\n`)
+                  },
+                  onThread: (threadId) => {
+                    entry.sessionId = threadId
+                    runFork(recordSession(run.id, threadId, "openai"))
+                  },
+                  // The turn is over: app-server exits once its stdin closes, or is killed when it does not.
+                  onDone: () => {
+                    stdin.end()
+                    setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
+                  },
+                },
+              )
             }
             active.set(run.id, entry)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
@@ -341,6 +429,7 @@ export const AgentHarnessLive = Layer.effect(
             child.on("close", (code) => {
               runFork(finish(run.id, code, null))
             })
+            entry.codex?.start()
           },
           catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
         })
@@ -437,18 +526,27 @@ export const AgentHarnessLive = Layer.effect(
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
 
-            // Codex writes its rollouts under CODEX_HOME: the user's login when there is one, else the task's home.
-            const codexHome =
-              provider === "openai"
-                ? (loginDirs.find((d) => d.provider === "codex-cli")?.host ?? join(homeDir, ".codex"))
-                : null
             // A fresh session starts empty; the previous session's context use no longer applies.
             if (resumeSession === null && task.context !== undefined) yield* setContext(task.id, null)
             yield* startRun(
               task,
               run,
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
-              { seed: resumeSession === null ? null : (task.context ?? null), codexHome },
+              {
+                seed: resumeSession === null ? null : (task.context ?? null),
+                codex:
+                  provider === "openai"
+                    ? {
+                        text: run.prompt,
+                        prompt,
+                        resumeThread: resumeSession,
+                        model: choice.model,
+                        effort: choice.effort,
+                        // The run's broker token, unless the user's own Codex login replaced it.
+                        apiKey: keptBroker.OPENAI_API_KEY,
+                      }
+                    : null,
+              },
             )
           }).pipe(Effect.either)
 
@@ -475,7 +573,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, codexHome: null },
+            { seed: null, codex: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
@@ -484,6 +582,9 @@ export const AgentHarnessLive = Layer.effect(
         }),
 
       cancel: (runId) => stopRun(runId, false),
+
+      steer: (runId, text) =>
+        Effect.promise(() => active.get(runId)?.codex?.steer(text) ?? Promise.resolve(false)),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
@@ -529,16 +630,12 @@ export const AgentHarnessLive = Layer.effect(
 
 /**
  * The agent session a JSON output line names, and the provider that minted it, or null. Claude Code's stream-json
- * opens with `{"type":"system","subtype":"init","session_id":…}`; `codex exec --json` opens with
- * `{"type":"thread.started","thread_id":…}`.
+ * opens with `{"type":"system","subtype":"init","session_id":…}`. A Codex run's thread comes from its driver.
  */
 const sessionOf = (event: unknown): { readonly sessionId: string; readonly provider: ModelProvider } | null => {
   if (typeof event !== "object" || event === null || !("type" in event)) return null
   if (event.type === "system" && "subtype" in event && event.subtype === "init" && "session_id" in event) {
     return typeof event.session_id === "string" ? { sessionId: event.session_id, provider: "anthropic" } : null
-  }
-  if (event.type === "thread.started" && "thread_id" in event) {
-    return typeof event.thread_id === "string" ? { sessionId: event.thread_id, provider: "openai" } : null
   }
   return null
 }

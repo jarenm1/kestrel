@@ -12,8 +12,8 @@ export interface Transcript {
   /** Final assistant text of the run, once the harness has reported it. */
   readonly finalText: () => string | null
   /**
-   * The session's context use once both its size and its model's window are known; Claude only (codex reports
-   * neither on stdout, see `codexContext`). Each change is a new object.
+   * The session's context use once both its size and its model's window are known. Claude reports it at its
+   * results; Codex in `thread/tokenUsage/updated`. Each change is a new object.
    */
   readonly context: () => ContextUsage | null
 }
@@ -26,8 +26,6 @@ const CLAUDE_LINE_TYPES: Readonly<Record<string, true>> = {
   result: true,
   stream_event: true,
 }
-/** Codex `exec --json` line types. */
-const CODEX_LINE_TYPE = /^(thread|turn|item)\.[a-z_]+$|^error$/
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -63,13 +61,6 @@ const toolResultText = (content: unknown): string => {
   return parts.join("\n")
 }
 
-/** Codex tool payloads are JSON values; strings stay as they are, the rest is shown as JSON. */
-const outputText = (value: unknown): string | null => {
-  if (value === null || value === undefined) return null
-  if (typeof value === "string") return value
-  return JSON.stringify(value) ?? null
-}
-
 /** One Claude `tool_use` block, remembered until its `tool_result` arrives. */
 interface ToolCall {
   readonly name: string
@@ -103,8 +94,20 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
 
   let finalTextValue: string | null = null
   const tools = new Map<string, ToolCall>()
-  /** Start of the current Codex turn; Codex reports no durations of its own. */
-  let turnStartedAt: number | null = null
+  /** Codex text built up from deltas, by item id: agent messages, reasoning parts, command output. */
+  const codexText = new Map<string, string>()
+  const codexParts = new Map<string, { summary: string[]; content: string[] }>()
+  /**
+   * Codex tool items still running, so an output delta can re-emit a command and a turn's end can close what it
+   * left unfinished (a steer or an interrupt stops a command without completing its item).
+   */
+  const codexRunning = new Map<string, AgentItem & { _tag: "tool" }>()
+  /** Each Codex turn's token totals: before its first model call, and the latest. */
+  const codexTurnTokens = new Map<string, { readonly baseInput: number; readonly baseOutput: number; input: number; output: number }>()
+  /** The turn's plan (`turn/plan/updated`), shown as a todo list until the turn ends. */
+  const codexPlans = new Map<string, AgentItem & { _tag: "tool" }>()
+  /** Text of the last top-level Codex error, so the failed turn that follows does not repeat it. */
+  let codexLastError: string | null = null
   /** Claude session model (from `init`), its context window, and the main agent's latest prompt + reply size. */
   let model: string | null = null
   let windowTokens: number | null = null
@@ -251,132 +254,248 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     }
   }
 
-  const codexItem = (eventType: string, raw: unknown): AgentItem | null => {
+  const codexThinking = (id: string): AgentItem | null => {
+    const parts = codexParts.get(id)
+    if (parts === undefined) return null
+    const text = (parts.summary.some((p) => p.trim() !== "") ? parts.summary : parts.content)
+      .filter((p) => p.trim() !== "")
+      .join("\n\n")
+    return text === "" ? null : { _tag: "thinking", id, parentToolId: null, text }
+  }
+
+  /** One app-server `ThreadItem` (from `item/started` or `item/completed`) as a display item, or null. */
+  const codexItem = (raw: unknown, completed: boolean): AgentItem | null => {
     if (!isRecord(raw)) return null
     const id = asString(raw.id)
-    const kind = asString(raw.type)
-    if (id === null || kind === null) return null
-    const started = eventType === "item.started"
+    if (id === null) return null
     const status = asString(raw.status)
-    const inProgress = started || status === "in_progress"
+    const running = !completed || status === "inProgress"
 
-    switch (kind) {
-      case "agent_message": {
-        const text = asString(raw.text)
-        if (text === null) return null
-        if (text.trim() !== "") finalTextValue = text
-        return { _tag: "text", id, parentToolId: null, text }
+    switch (asString(raw.type)) {
+      case "agentMessage": {
+        const text = asString(raw.text) ?? ""
+        // A message starts empty and fills from deltas; the completed item carries the whole text.
+        const full = text === "" ? (codexText.get(id) ?? "") : text
+        codexText.set(id, full)
+        if (full.trim() === "") return null
+        if (completed) finalTextValue = full
+        return { _tag: "text", id, parentToolId: null, text: full }
       }
       case "reasoning": {
-        const text = asString(raw.text)
-        if (text === null || text.trim() === "") return null
-        return { _tag: "thinking", id, parentToolId: null, text }
+        const summary = asArray(raw.summary).filter((p): p is string => typeof p === "string")
+        const content = asArray(raw.content).filter((p): p is string => typeof p === "string")
+        if (summary.length > 0 || content.length > 0 || !codexParts.has(id)) codexParts.set(id, { summary, content })
+        return codexThinking(id)
       }
-      case "command_execution": {
-        const exitCode = asNumber(raw.exit_code)
-        const failed = status === "failed" || (exitCode !== null && exitCode !== 0)
+      case "commandExecution": {
+        const exitCode = asNumber(raw.exitCode)
+        const failed = status === "failed" || status === "declined" || (exitCode !== null && exitCode !== 0)
         return {
           _tag: "tool",
           id,
           parentToolId: null,
           name: "command_execution",
           input: { command: asString(raw.command) ?? "" },
-          status: inProgress ? "running" : failed ? "error" : "ok",
-          output: outputText(raw.aggregated_output),
+          status: running ? "running" : failed ? "error" : "ok",
+          output: asString(raw.aggregatedOutput) ?? codexText.get(id) ?? null,
         }
       }
-      case "file_change":
+      case "fileChange":
         return {
           _tag: "tool",
           id,
           parentToolId: null,
           name: "file_change",
-          input: { changes: asArray(raw.changes) },
-          status: inProgress ? "running" : status === "failed" ? "error" : "ok",
+          input: {
+            changes: asArray(raw.changes).map((change) =>
+              isRecord(change) ? { path: asString(change.path), kind: isRecord(change.kind) ? asString(change.kind.type) : null } : null,
+            ),
+          },
+          status: running ? "running" : status === "failed" || status === "declined" ? "error" : "ok",
           output: null,
         }
-      case "mcp_tool_call": {
+      case "mcpToolCall": {
         const server = asString(raw.server)
         const tool = asString(raw.tool)
         if (server === null || tool === null) return null
-        const failed = (raw.error !== null && raw.error !== undefined) || status === "failed"
+        const error = isRecord(raw.error) ? asString(raw.error.message) : null
+        const failed = error !== null || status === "failed"
+        const result = isRecord(raw.result) ? toolResultText(raw.result.content) : null
         return {
           _tag: "tool",
           id,
           parentToolId: null,
           name: `${server}.${tool}`,
           input: raw.arguments ?? null,
-          status: inProgress ? "running" : failed ? "error" : "ok",
-          output: outputText(failed ? raw.error : raw.result),
+          status: running ? "running" : failed ? "error" : "ok",
+          output: failed ? error : result,
         }
       }
-      case "web_search":
+      case "webSearch":
         return {
           _tag: "tool",
           id,
           parentToolId: null,
           name: "web_search",
           input: { query: asString(raw.query) ?? "" },
-          status: inProgress ? "running" : "ok",
+          status: running ? "running" : "ok",
           output: null,
         }
-      case "todo_list":
+      case "contextCompaction":
+        if (completed) finalTextValue ??= "Compacted the conversation."
         return {
           _tag: "tool",
           id,
           parentToolId: null,
-          name: "todo_list",
-          input: { items: asArray(raw.items) },
-          status: inProgress ? "running" : "ok",
+          name: "context_compaction",
+          input: null,
+          status: running ? "running" : "ok",
           output: null,
         }
-      case "error":
-        return { _tag: "error", id, text: asString(raw.message) ?? "codex error" }
       default:
+        // User messages, review markers (the review arrives as an agent message), hooks and the rest add nothing.
         return null
     }
   }
 
+  const codexTurnEnd = (params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const turn = isRecord(params.turn) ? params.turn : null
+    if (turn === null) return []
+    const turnId = asString(turn.id)
+    const tokens = turnId === null ? undefined : codexTurnTokens.get(turnId)
+    const items: AgentItem[] = []
+    // What the turn left running ends with it: an unfinished plan is over, an unfinished tool did not complete.
+    const plan = turnId === null ? undefined : codexPlans.get(turnId)
+    if (plan !== undefined) items.push({ ...plan, status: "ok" })
+    for (const tool of codexRunning.values()) items.push({ ...tool, status: "error" })
+    codexRunning.clear()
+    const failed = turn.status === "failed"
+    const error = isRecord(turn.error) ? asString(turn.error.message) : null
+    if (failed && error !== codexLastError) items.push({ _tag: "error", id: nextId(), text: error ?? "codex turn failed" })
+    items.push({
+      _tag: "turn",
+      id: nextId(),
+      durationMs: asNumber(turn.durationMs),
+      // Codex's inputTokens already includes cachedInputTokens; adding them again would double-count the prompt.
+      inputTokens: tokens === undefined ? null : tokens.input - tokens.baseInput,
+      outputTokens: tokens === undefined ? null : tokens.output - tokens.baseOutput,
+      costUsd: null,
+      isError: failed,
+    })
+    return items
+  }
+
+  const codexTokenUsage = (params: Record<string, unknown>) => {
+    const usage = isRecord(params.tokenUsage) ? params.tokenUsage : null
+    const total = usage !== null && isRecord(usage.total) ? usage.total : null
+    const last = usage !== null && isRecord(usage.last) ? usage.last : null
+    const turnId = asString(params.turnId)
+    if (total === null || last === null) return
+    const input = asNumber(total.inputTokens)
+    const output = asNumber(total.outputTokens)
+    if (turnId !== null && input !== null && output !== null) {
+      const known = codexTurnTokens.get(turnId)
+      if (known === undefined) {
+        codexTurnTokens.set(turnId, {
+          baseInput: input - (asNumber(last.inputTokens) ?? 0),
+          baseOutput: output - (asNumber(last.outputTokens) ?? 0),
+          input,
+          output,
+        })
+      } else {
+        known.input = input
+        known.output = output
+      }
+    }
+    // The last model call's size against the model's window, as the composer's context bar shows it.
+    usedTokens = asNumber(last.totalTokens)
+    windowTokens = asNumber(usage?.modelContextWindow)
+    refreshContext()
+  }
+
+  /** A Codex JSON-RPC message: notifications carry the run; a thread's model comes from its start/resume response. */
   const codex = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
-    switch (asString(line.type)) {
-      case "turn.started":
-        turnStartedAt = Date.now()
+    if (isRecord(line.result) && typeof line.result.model === "string") {
+      model = line.result.model
+      return []
+    }
+    const method = asString(line.method)
+    const params = isRecord(line.params) ? line.params : null
+    if (method === null || params === null || line.id !== undefined) return []
+    switch (method) {
+      case "thread/settings/updated":
+        if (isRecord(params.threadSettings) && typeof params.threadSettings.model === "string") model = params.threadSettings.model
         return []
-      case "turn.completed": {
-        const usage = isRecord(line.usage) ? line.usage : null
-        const durationMs = turnStartedAt === null ? null : Date.now() - turnStartedAt
-        turnStartedAt = null
-        return [
-          {
-            _tag: "turn",
-            id: nextId(),
-            durationMs,
-            // Codex's input_tokens already includes cached_input_tokens; adding them again
-            // would double-count the prompt.
-            inputTokens: usage === null ? null : asNumber(usage.input_tokens),
-            outputTokens: usage === null ? null : asNumber(usage.output_tokens),
-            costUsd: null,
-            isError: false,
-          },
-        ]
-      }
-      case "turn.failed": {
-        const error = isRecord(line.error) ? line.error : null
-        const durationMs = turnStartedAt === null ? null : Date.now() - turnStartedAt
-        turnStartedAt = null
-        return [
-          { _tag: "error", id: nextId(), text: asString(error?.message) ?? "codex turn failed" },
-          { _tag: "turn", id: nextId(), durationMs, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
-        ]
-      }
-      case "error":
-        return [{ _tag: "error", id: nextId(), text: asString(line.message) ?? "codex error" }]
-      case "item.started":
-      case "item.updated":
-      case "item.completed": {
-        const item = codexItem(asString(line.type) ?? "item.completed", line.item)
+      case "thread/tokenUsage/updated":
+        codexTokenUsage(params)
+        return []
+      case "item/started":
+      case "item/completed": {
+        const item = codexItem(params.item, method === "item/completed")
+        if (item?._tag === "tool") {
+          if (item.status === "running") codexRunning.set(item.id, item)
+          else codexRunning.delete(item.id)
+        }
         return item === null ? [] : [item]
       }
+      case "item/agentMessage/delta": {
+        const id = asString(params.itemId)
+        const delta = asString(params.delta)
+        if (id === null || delta === null) return []
+        const text = (codexText.get(id) ?? "") + delta
+        codexText.set(id, text)
+        return text.trim() === "" ? [] : [{ _tag: "text", id, parentToolId: null, text }]
+      }
+      case "item/reasoning/summaryTextDelta":
+      case "item/reasoning/textDelta": {
+        const id = asString(params.itemId)
+        const delta = asString(params.delta)
+        if (id === null || delta === null) return []
+        const parts = codexParts.get(id) ?? { summary: [], content: [] }
+        codexParts.set(id, parts)
+        const list = method === "item/reasoning/textDelta" ? parts.content : parts.summary
+        const index = asNumber(method === "item/reasoning/textDelta" ? params.contentIndex : params.summaryIndex) ?? 0
+        list[index] = (list[index] ?? "") + delta
+        const item = codexThinking(id)
+        return item === null ? [] : [item]
+      }
+      case "item/commandExecution/outputDelta": {
+        const id = asString(params.itemId)
+        const delta = asString(params.delta)
+        if (id === null || delta === null) return []
+        const output = (codexText.get(id) ?? "") + delta
+        codexText.set(id, output)
+        const command = codexRunning.get(id)
+        if (command === undefined) return []
+        const item = { ...command, output }
+        codexRunning.set(id, item)
+        return [item]
+      }
+      case "turn/plan/updated": {
+        const turnId = asString(params.turnId)
+        if (turnId === null) return []
+        const steps = asArray(params.plan).filter(isRecord)
+        const item: AgentItem & { _tag: "tool" } = {
+          _tag: "tool",
+          id: `plan-${turnId}`,
+          parentToolId: null,
+          name: "todo_list",
+          input: { items: steps.map((s) => ({ text: asString(s.step) ?? "", completed: s.status === "completed" })) },
+          status: steps.length > 0 && steps.every((s) => s.status === "completed") ? "ok" : "running",
+          output: null,
+        }
+        codexPlans.set(turnId, item)
+        return [item]
+      }
+      case "error": {
+        // A retried error is not the turn's outcome.
+        if (params.willRetry === true) return []
+        const text = isRecord(params.error) ? (asString(params.error.message) ?? "codex error") : "codex error"
+        codexLastError = text
+        return [{ _tag: "error", id: nextId(), text }]
+      }
+      case "turn/completed":
+        return codexTurnEnd(params)
       default:
         return []
     }
@@ -386,9 +505,9 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     push: (line) => {
       if (!isRecord(line)) return []
       const type = asString(line.type)
-      if (type === null) return []
-      if (CLAUDE_LINE_TYPES[type] === true) return claude(line)
-      if (CODEX_LINE_TYPE.test(type)) return codex(line)
+      if (type !== null && CLAUDE_LINE_TYPES[type] === true) return claude(line)
+      // Codex app-server speaks JSON-RPC 2.0 without the `jsonrpc` field: `method` and/or `id`.
+      if (typeof line.method === "string" || line.id !== undefined) return codex(line)
       return []
     },
     finalText: () => finalTextValue,
