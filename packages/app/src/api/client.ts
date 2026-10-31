@@ -134,9 +134,23 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
     return result.right
   })
 
-/** The user box that box calls go to, or `null` for Kestrel's relayed box. Undefined until the box list is read. */
+/** A user box the apps call directly: its id and URL. Box calls to it carry a box token. */
 type DirectRoute = { readonly boxId: string; readonly url: string }
-let route: DirectRoute | null | undefined
+
+/** Where a box call goes: a user box directly, or `null` for Kestrel's relayed box (through the Worker). */
+export type Target = DirectRoute | null
+
+/** The box list as last read. Undefined until the first read. */
+let known: BoxList | undefined
+
+/**
+ * The box each thread lives on, by thread id: a user box's id, or `null` for Kestrel's relayed box. Filled by the
+ * thread lists and by `createTask`. A thread missing from it is found by reading every box's thread list again.
+ */
+const taskBoxes = new Map<string, string | null>()
+
+/** A box's thread list that takes longer than this is left out, so one slow box cannot hold up the others. */
+const BOX_LIST_TIMEOUT_MS = 10_000
 
 /** Box tokens are re-minted this long before they expire, so a call never leaves with a token about to lapse. */
 const TOKEN_REFRESH_MS = 60_000
@@ -144,10 +158,8 @@ const TOKEN_REFRESH_MS = 60_000
 const tokens = new Map<string, { readonly token: string; readonly refreshAt: number }>()
 const minting = new Map<string, Promise<string>>()
 
-/** Makes the list's active box the target of box calls. Its URL is the box's own, from the list. */
 function adoptBoxList(list: BoxList): BoxList {
-  const active = list.boxes.find((box) => box.id === list.activeBoxId)
-  route = active === undefined ? null : { boxId: active.id, url: active.url }
+  known = list
   return list
 }
 
@@ -155,13 +167,21 @@ async function loadBoxes(): Promise<BoxList> {
   return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)))
 }
 
+/** The target of a box id in the last box list read; undefined when that list has no such box. */
+function routeOf(boxId: string | null): Target | undefined {
+  if (boxId === null) return null
+  const box = known?.boxes.find((b) => b.id === boxId)
+  return box === undefined ? undefined : { boxId, url: box.url }
+}
+
 /**
- * The box calls' target. When the box list cannot be read, calls go to Kestrel's box (the default for everyone who
- * has not picked their own) and the list is read again on the next call, so a control-plane error never stops the app.
+ * The target of calls that are not about one thread: the active box. When the box list cannot be read, calls go to
+ * Kestrel's box (the default for everyone who has not picked their own) and the list is read again on the next call,
+ * so a control-plane error never stops the app.
  */
-async function activeRoute(): Promise<DirectRoute | null> {
-  if (route === undefined) await loadBoxes().catch(() => undefined)
-  return route ?? null
+async function activeTarget(): Promise<Target> {
+  if (known === undefined) await loadBoxes().catch(() => undefined)
+  return routeOf(known?.activeBoxId ?? null) ?? null
 }
 
 /** A box token for `boxId`: cached until shortly before it expires, with one mint in flight per box. */
@@ -185,39 +205,113 @@ function forgetBox(boxId: string): void {
   tokens.delete(boxId)
 }
 
-/** The active user box with a token for it, or `null` when Kestrel's relayed box is active. */
-async function directBox(): Promise<(DirectRoute & { readonly token: string }) | null> {
-  const active = await activeRoute()
-  if (active === null) return null
-  return { ...active, token: await boxToken(active.boxId) }
-}
-
 /**
- * A call the box serves. On Kestrel's box it goes through the Worker like any control call. On a user's box it goes
- * straight to the box's URL with a box token; a 401 means the token was refused, so it is minted again and the call
- * is retried once.
+ * A call the box serves. Kestrel's box is called through the Worker like any control call. A user box is called
+ * straight at its URL with a box token; a 401 means the token was refused, so it is minted again and the call is
+ * retried once.
  */
-const boxRequest = <A, I>(
+const boxCall = <A, I>(
+  target: Target,
   schema: Schema.Schema<A, I>,
   method: Method,
   path: string,
   body?: unknown,
   retried = false,
-): Effect.Effect<A, ApiError> =>
-  Effect.gen(function* () {
-    const box = yield* Effect.tryPromise({
-      try: () => directBox(),
+): Effect.Effect<A, ApiError> => {
+  if (target === null) return request(schema, method, path, body)
+  return Effect.flatMap(
+    Effect.tryPromise({
+      try: () => boxToken(target.boxId),
       catch: (e) => (e instanceof ApiError ? e : new ApiError(0, String(e))),
-    })
-    if (box === null) return yield* request(schema, method, path, body)
-    return yield* send(schema, method, box.url + path, body, false, { authorization: `Bearer ${box.token}` }).pipe(
-      Effect.catchAll((e) => {
-        if (e.status !== 401 || retried) return Effect.fail(e)
-        forgetBox(box.boxId)
-        return boxRequest(schema, method, path, body, true)
-      }),
-    )
+    }),
+    (token) =>
+      send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` }).pipe(
+        Effect.catchAll((e) => {
+          if (e.status !== 401 || retried) return Effect.fail(e)
+          forgetBox(target.boxId)
+          return boxCall(target, schema, method, path, body, true)
+        }),
+      ),
+  )
+}
+
+/** A box call on the box a thread lives on. */
+function onTask<A, I>(
+  taskId: string,
+  schema: Schema.Schema<A, I>,
+  method: Method,
+  path: string,
+  body?: unknown,
+): Promise<A> {
+  return taskTarget(taskId).then((target) => run(boxCall(target, schema, method, path, body)))
+}
+
+/** A box call on the active box: where new threads start, and the source of box-level state. */
+function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: string, body?: unknown): Promise<A> {
+  return activeTarget().then((target) => run(boxCall(target, schema, method, path, body)))
+}
+
+/**
+ * The box a thread lives on. A thread not seen yet is found by reading every box's thread list, so a thread opened
+ * straight from a link works before the list is loaded.
+ */
+export async function taskTarget(taskId: string): Promise<Target> {
+  const cached = taskBoxes.get(taskId)
+  const cachedTarget = cached === undefined ? undefined : routeOf(cached)
+  if (cachedTarget !== undefined) return cachedTarget
+  await listAllTasks()
+  const boxId = taskBoxes.get(taskId)
+  const target = boxId === undefined ? undefined : routeOf(boxId)
+  if (target === undefined) throw new ApiError(404, "Thread not found")
+  return target
+}
+
+let listing: Promise<Task[]> | undefined
+
+/** Every box's threads, merged. Concurrent callers share one read. */
+function listAllTasks(): Promise<Task[]> {
+  listing ??= readAllTasks().finally(() => {
+    listing = undefined
   })
+  return listing
+}
+
+/**
+ * Reads the thread list of Kestrel's box and of every user box at once, and records which box owns each thread. A box
+ * that fails or times out is left out; the read fails only when no box answers.
+ */
+async function readAllTasks(): Promise<Task[]> {
+  const boxes = (await loadBoxes().catch(() => known))?.boxes ?? []
+  const targets: Target[] = [null, ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
+  const results = await Promise.allSettled(
+    targets.map((target) =>
+      withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
+        (tasks) => ({ boxId: target?.boxId ?? null, tasks }),
+      ),
+    ),
+  )
+  const failed = results.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+  if (failed.length === results.length) throw failed[0]?.reason
+  const merged: Task[] = []
+  for (const result of results) {
+    if (result.status === "rejected") continue
+    const { boxId, tasks } = result.value
+    for (const [id, owner] of taskBoxes) if (owner === boxId) taskBoxes.delete(id)
+    for (const task of tasks) {
+      taskBoxes.set(task.id, boxId)
+      merged.push(task)
+    }
+  }
+  return merged
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: number | undefined
+  const expired = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new ApiError(0, "The box did not answer in time")), ms)
+  })
+  return Promise.race([promise, expired]).finally(() => window.clearTimeout(timer))
+}
 
 const OFFLINE: BoxStatus = { online: false, connectedAt: null, boxVersion: null }
 
@@ -237,26 +331,26 @@ async function checkBox(url: string): Promise<BoxStatus> {
 }
 
 /**
- * Absolute URL of a WebSocket path: through the Worker, or straight to the active box with its token in the query.
+ * Absolute URL of a WebSocket path on `target`: through the Worker, or straight to a user box with its token in the
+ * query.
  */
-export async function socketUrl(path: string): Promise<string> {
-  const box = await directBox()
-  if (box === null) return WS_URL + path
-  const url = new URL(path, box.url.replace(/^http/, "ws"))
-  url.searchParams.set(BOX_TOKEN_QUERY, box.token)
+export async function socketUrl(path: string, target: Target): Promise<string> {
+  if (target === null) return WS_URL + path
+  const url = new URL(path, target.url.replace(/^http/, "ws"))
+  url.searchParams.set(BOX_TOKEN_QUERY, await boxToken(target.boxId))
   return url.toString()
 }
 
 /**
- * Absolute URL of an attachment. An `<img>` or link loads it with the session cookie through the Worker, or with the
- * box token in the query when the box is direct.
+ * Absolute URL of an attachment of a thread. An `<img>` or link loads it with the session cookie through the Worker,
+ * or with the box token in the query when the thread's box is a user box.
  */
 export async function attachmentUrl(taskId: string, attachmentId: string): Promise<string> {
   const path = Paths.taskAttachment(taskId, attachmentId)
-  const box = await directBox()
-  if (box === null) return SERVER_URL + path
-  const url = new URL(path, box.url)
-  url.searchParams.set(BOX_TOKEN_QUERY, box.token)
+  const target = await taskTarget(taskId)
+  if (target === null) return SERVER_URL + path
+  const url = new URL(path, target.url)
+  url.searchParams.set(BOX_TOKEN_QUERY, await boxToken(target.boxId))
   return url.toString()
 }
 
@@ -283,8 +377,12 @@ const pendingUploads = new WeakMap<File, { readonly taskId: string; readonly id:
 const uploadOnce = async (taskId: string, file: File): Promise<string> => {
   const pending = pendingUploads.get(file)
   if (pending?.taskId === taskId) return pending.id
-  const { id } = await run(
-    boxRequest(Attachment, "POST", `${Paths.taskUploads(taskId)}?name=${encodeURIComponent(file.name)}`, file),
+  const { id } = await onTask(
+    taskId,
+    Attachment,
+    "POST",
+    `${Paths.taskUploads(taskId)}?name=${encodeURIComponent(file.name)}`,
+    file,
   )
   pendingUploads.set(file, { taskId, id })
   return id
@@ -335,39 +433,45 @@ export const api = {
   checkBox,
   /** Status of the box the apps talk to: Kestrel's relayed box, or the active user box's own health. */
   boxStatus: async (): Promise<BoxStatus> => {
-    const active = await activeRoute()
-    return active === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(active.url)
+    const target = await activeTarget()
+    return target === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(target.url)
   },
 
-  // Agent box (served by the box: relayed by the Worker, or direct).
-  cliAuth: () => run(boxRequest(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth)),
-  cliLoginStart: (provider: CliProvider) =>
-    run(boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider))),
+  // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
+  cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
+  cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
-    run(boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body)),
-  cliLogout: (provider: CliProvider) =>
-    run(Effect.asVoid(boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)))),
+    onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
+  cliLogout: async (provider: CliProvider): Promise<void> => {
+    await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
+  },
   attachmentUrl,
   /**
-   * The sandboxed preview document of a thread. The box mints the session; the frame is served from the box's URL
-   * when a user box is active, and from the app's own origin otherwise.
+   * The sandboxed preview document of a thread. It is served from the thread's box: a user box's URL, or the app's own
+   * origin for Kestrel's box.
    */
   previewFrame: async (taskId: string): Promise<string> => {
-    const active = await activeRoute()
-    const session = await run(boxRequest(PreviewSession, "POST", Paths.taskPreviewSession(taskId), {}))
-    return (active?.url ?? "") + Paths.taskPreviewFrame(session.token, taskId)
+    const target = await taskTarget(taskId)
+    const session = await run(boxCall(target, PreviewSession, "POST", Paths.taskPreviewSession(taskId), {}))
+    return (target?.url ?? "") + Paths.taskPreviewFrame(session.token, taskId)
   },
 
-  usage: () => run(boxRequest(Usage, "GET", Paths.usage)),
-  listTasks: () => run(boxRequest(Schema.Array(Task), "GET", Paths.tasks)),
-  createTask: (body: CreateTaskBody) => run(boxRequest(Task, "POST", Paths.tasks, body)),
-  getTask: (taskId: string) => run(boxRequest(Task, "GET", Paths.task(taskId))),
-  archiveTask: (taskId: string) => run(boxRequest(Task, "POST", Paths.taskArchive(taskId))),
-  unarchiveTask: (taskId: string) => run(boxRequest(Task, "DELETE", Paths.taskArchive(taskId))),
-  listMessages: (taskId: string) => run(boxRequest(Schema.Array(Message), "GET", Paths.taskMessages(taskId))),
+  usage: () => onActive(Usage, "GET", Paths.usage),
+  /** Every box's threads, merged; a box that does not answer is left out unless none does. */
+  listTasks: listAllTasks,
+  createTask: async (body: CreateTaskBody): Promise<Task> => {
+    const target = await activeTarget()
+    const task = await run(boxCall(target, Task, "POST", Paths.tasks, body))
+    taskBoxes.set(task.id, target?.boxId ?? null)
+    return task
+  },
+  getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),
+  archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
+  unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
+  listMessages: (taskId: string) => onTask(taskId, Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
   /** Slash commands of the harness for the composer's chosen model in this thread. */
   commands: (taskId: string, model: AgentModel) =>
-    run(boxRequest(HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`)),
+    onTask(taskId, HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`),
   /**
    * Uploads `files` to the task, then sends the message with them attached after any ids already in `body`.
    * A resend after a failure uploads only the files that are not on the task yet.
@@ -375,26 +479,26 @@ export const api = {
   sendMessage: async (taskId: string, body: SendMessageBody, files: readonly File[] = []) => {
     const uploaded = await Promise.all(files.map((file) => uploadOnce(taskId, file)))
     const attachments = [...(body.attachments ?? []), ...uploaded]
-    const sent = await run(
-      boxRequest(
-        SendMessageResponse,
-        "POST",
-        Paths.taskMessages(taskId),
-        attachments.length > 0 ? { ...body, attachments } : body,
-      ),
+    const sent = await onTask(
+      taskId,
+      SendMessageResponse,
+      "POST",
+      Paths.taskMessages(taskId),
+      attachments.length > 0 ? { ...body, attachments } : body,
     )
     // Sent ids are no longer pending; attaching the same `File` again must upload it anew.
     for (const file of files) pendingUploads.delete(file)
     return sent
   },
-  listRuns: (taskId: string) => run(boxRequest(Schema.Array(Run), "GET", Paths.taskRuns(taskId))),
-  runItems: (runId: string) => run(boxRequest(RunItems, "GET", Paths.runItems(runId))),
-  cancelRun: (runId: string) => run(boxRequest(Run, "POST", Paths.runCancel(runId))),
-  getDiff: (taskId: string) => run(boxRequest(DiffResponse, "GET", Paths.taskDiff(taskId))),
-  getDesktop: (taskId: string) => run(boxRequest(DesktopStatus, "GET", Paths.taskDesktop(taskId))),
-  startDesktop: (taskId: string) => run(boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId))),
-  stopDesktop: (taskId: string) =>
-    run(Effect.asVoid(boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)))),
+  listRuns: (taskId: string) => onTask(taskId, Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
+  runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
+  cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
+  getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
+  getDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "GET", Paths.taskDesktop(taskId)),
+  startDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "POST", Paths.taskDesktop(taskId)),
+  stopDesktop: async (taskId: string): Promise<void> => {
+    await onTask(taskId, Schema.Unknown, "DELETE", Paths.taskDesktop(taskId))
+  },
   setDesktopQuality: (taskId: string, body: SetDesktopQualityBody) =>
-    run(boxRequest(DesktopStatus, "PUT", Paths.taskDesktopQuality(taskId), body)),
+    onTask(taskId, DesktopStatus, "PUT", Paths.taskDesktopQuality(taskId), body),
 }

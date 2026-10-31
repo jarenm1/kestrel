@@ -1,27 +1,39 @@
-import { useEffect, useState } from "react"
-import { useQueryClient } from "@tanstack/react-query"
+import { useEffect } from "react"
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import type { Task } from "@cloudagents/protocol"
+import type { Target } from "@/api/client"
 import { openUserEvents } from "@/api/events"
-import { keys, storeTask } from "@/api/queries"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
+import { keys, queries, storeTask } from "@/api/queries"
 
 const RECONNECT_MS = 2000
 
 /**
- * Keeps the thread list current from the user events stream: `task.updated` writes the task into the list (new threads
- * included), `task.deleted` drops it. Each (re)connect refetches the list, which catches changes missed meanwhile.
- * Reconnects when the active box changes, since the stream belongs to that box.
+ * Keeps the thread list current from the thread list streams, one per box (Kestrel's and each user box): `task.updated`
+ * writes the task into the list (new threads included), `task.deleted` drops it. Each (re)connect refetches the list,
+ * which catches changes missed meanwhile. The streams are reopened when the set of boxes changes.
  */
 export function useThreadListEvents(): void {
   const queryClient = useQueryClient()
-  const [generation, setGeneration] = useState(0)
-  const activeBoxId = useActiveBoxId()
+  const boxes = useQuery(queries.boxes()).data?.boxes
+  const boxSet = JSON.stringify(boxes?.map((box) => [box.id, box.url]) ?? [])
 
   useEffect(() => {
-    let active = true
-    let retry: number | undefined
+    const targets: Target[] = [null, ...(boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))]
+    const stops = targets.map((target) => followBox(queryClient, target))
+    return () => stops.forEach((stop) => stop())
+  }, [boxSet, queryClient])
+}
 
-    const close = openUserEvents({
+/**
+ * Keeps one box's thread list stream open: reconnects 2 s after a close, and each (re)connect refetches the list.
+ * Returns a function that stops it.
+ */
+function followBox(queryClient: QueryClient, target: Target): () => void {
+  let active = true
+  let retry: number | undefined
+  let close = () => {}
+  const connect = () => {
+    close = openUserEvents(target, {
       onOpen: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
       onEvent: (event) => {
         switch (event._tag) {
@@ -37,15 +49,14 @@ export function useThreadListEvents(): void {
         }
       },
       onClose: () => {
-        if (!active) return
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
+        if (active) retry = window.setTimeout(connect, RECONNECT_MS)
       },
     })
-
-    return () => {
-      active = false
-      window.clearTimeout(retry)
-      close()
-    }
-  }, [generation, queryClient, activeBoxId])
+  }
+  connect()
+  return () => {
+    active = false
+    window.clearTimeout(retry)
+    close()
+  }
 }

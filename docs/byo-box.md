@@ -116,7 +116,7 @@ flowchart LR
 
 ### Direct data path
 
-- The app calls the active box's URL directly (`/api/*`, WebSockets, attachments, preview) with the box token:
+- The app calls each user box's URL directly (`/api/*`, WebSockets, attachments, preview) with the box token:
   `Authorization: Bearer`, or `?access_token=` where no header can be set (WebSockets, `<img>`).
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
@@ -125,8 +125,11 @@ flowchart LR
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.
-- Step 1 has one active box at a time. Later the app opens one event stream per box and merges the thread list (thread
-  ids are already globally unique UUIDs).
+- The web app shows the threads of every box at once. It opens one event stream per box (Kestrel's box through the
+  Worker, each user box directly) and merges the lists; thread ids are globally unique UUIDs. Each thread's requests go
+  to the box it lives on, found from the boxes' own listings. The control plane does not store the thread→box record
+  yet. Box-level state (usage, CLI logins, box status, the box new threads start on) still follows the active box.
+- The mobile app still uses only its active box.
 
 ### Placement and overflow
 

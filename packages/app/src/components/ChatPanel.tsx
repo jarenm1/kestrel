@@ -130,7 +130,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript,
   // and each arrival bumps `dataUpdatedAt`, which is what re-runs the scroll effect.
-  const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) })
+  const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(taskId, run.id)) })
   const itemCountByRun = new Map(
     sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]),
   )
@@ -154,7 +154,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
     },
   })
   const cancel = useMutation({
-    mutationFn: (runId: string) => api.cancelRun(runId),
+    mutationFn: (runId: string) => api.cancelRun(taskId, runId),
     onSuccess: (run) => queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, run)),
   })
   const latestRun = sortedRuns.at(-1)
@@ -187,7 +187,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
                     />
                   ) : null}
                 </ThreadItem>
-                {transcriptRunId !== null && <RunTranscript runId={transcriptRunId} />}
+                {transcriptRunId !== null && <RunTranscript taskId={taskId} runId={transcriptRunId} />}
               </Fragment>
             )
           })}

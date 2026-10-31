@@ -45,24 +45,19 @@ export const keys = {
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
-  /** Signed URL of an attachment on the box in use; keyed by box so a switch fetches it from the new box. */
-  attachment: (taskId: string, attachmentId: string, boxId: string | null | undefined) =>
-    ["attachment", taskId, attachmentId, boxId] as const,
+  /** Signed URL of an attachment of a thread, read from the box the thread lives on. */
+  attachment: (taskId: string, attachmentId: string) => ["attachment", taskId, attachmentId] as const,
 }
 
 /**
- * Roots of the queries that do not depend on the active box: the account, the box list and the health of each box,
- * the connections and automations (control plane). Every other root is read from the active box and is reset when
- * the active box changes.
+ * Roots of the queries read from the active box: box status and usage. Threads are read from the box each one lives
+ * on, so they are not here. These are reset when the active box changes, so no figure of the previous box stays on
+ * screen.
  */
-const BOX_INDEPENDENT: Record<string, true> = {
-  me: true,
-  "public-me": true,
-  boxes: true,
-  "box-health": true,
-  pairing: true,
-  connections: true,
-  automations: true,
+const ACTIVE_BOX_ROOTS: Record<string, true> = {
+  usage: true,
+  "cli-auth": true,
+  box: true,
 }
 
 type Keyed = { readonly id: string }
@@ -94,19 +89,22 @@ export function storeTask(client: QueryClient, task: Task): void {
 }
 
 /**
- * Stores a box list and, when the active box changes, drops everything read from the previous box: box-scoped
- * queries are cancelled and reset, so mounted views refetch from the new box and no thread or usage figure of the
- * old box stays on screen.
+ * Stores a box list. When the active box changes, the queries read from it are cancelled and reset, so mounted views
+ * refetch from the new box and no usage figure of the old box stays on screen. When the set of boxes changes (one
+ * added, removed or moved), the thread list refetches so it reads that set.
  */
 export async function applyBoxList(client: QueryClient, list: BoxList): Promise<void> {
-  const previous = client.getQueryData<BoxList>(keys.boxes)?.activeBoxId
-  if (previous !== list.activeBoxId) {
-    const boxScoped = {
-      predicate: (query: { queryKey: readonly unknown[] }) => BOX_INDEPENDENT[String(query.queryKey[0])] !== true,
+  const previous = client.getQueryData<BoxList>(keys.boxes)
+  if (previous?.activeBoxId !== list.activeBoxId) {
+    const activeScoped = {
+      predicate: (query: { queryKey: readonly unknown[] }) => ACTIVE_BOX_ROOTS[String(query.queryKey[0])] === true,
     }
-    await client.cancelQueries(boxScoped)
-    client.resetQueries(boxScoped)
+    await client.cancelQueries(activeScoped)
+    client.resetQueries(activeScoped)
   }
+  const before = JSON.stringify(previous?.boxes.map((box) => [box.id, box.url]) ?? [])
+  const after = JSON.stringify(list.boxes.map((box) => [box.id, box.url]))
+  if (before !== after) void client.invalidateQueries({ queryKey: keys.tasks })
   client.setQueryData(keys.boxes, list)
 }
 
@@ -136,11 +134,11 @@ export const queries = {
       queryFn: async (): Promise<Run[]> =>
         mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(keys.runs(taskId))),
     }),
-  runItems: (runId: string) =>
+  runItems: (taskId: string, runId: string) =>
     queryOptions({
       queryKey: keys.runItems(runId),
       queryFn: async (): Promise<RunItems> =>
-        mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(keys.runItems(runId))),
+        mergeSnapshot(await api.runItems(taskId, runId), queryClient.getQueryData(keys.runItems(runId))),
     }),
   /**
    * Disabled until there is both a focused thread and a model whose harness can answer. `activeRunId` and
@@ -166,9 +164,9 @@ export const queries = {
   diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
-  attachmentUrl: (taskId: string, attachmentId: string, boxId: string | null | undefined) =>
+  attachmentUrl: (taskId: string, attachmentId: string) =>
     queryOptions({
-      queryKey: keys.attachment(taskId, attachmentId, boxId),
+      queryKey: keys.attachment(taskId, attachmentId),
       queryFn: () => api.attachmentUrl(taskId, attachmentId),
     }),
 }

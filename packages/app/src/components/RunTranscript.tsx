@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert"
 import { Markdown } from "./Markdown"
 
 interface Props {
+  taskId: string
   runId: string
 }
 
@@ -98,8 +99,8 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ runId }: Props) {
-  const { data } = useQuery(queries.runItems(runId))
+export function RunTranscript({ taskId, runId }: Props) {
+  const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
 
   if (data === undefined || data.length === 0) return null
