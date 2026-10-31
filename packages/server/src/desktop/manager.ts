@@ -940,6 +940,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 stderrTail: "",
               }
               sessions.set(taskId, s)
+              // Viewers show the boot state while it comes up; the start call itself only returns once it is running.
+              publish(s)
               return { s, created: true }
             },
             catch: toErr,
