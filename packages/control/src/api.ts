@@ -3,10 +3,13 @@ import {
   CREDENTIALS_HEADER,
   CliAuthStatus,
   ControlPaths,
+  CreateBoxBody,
   Paths,
   PreviewSession,
   PutApiKeyBody,
+  SetActiveBoxBody,
   Task,
+  UpdateBoxBody,
   type Connection,
   type GithubRepo,
   type Me,
@@ -24,6 +27,7 @@ import { UpstreamError, errorResponse, json, maskKey, readCookie } from "./http"
 import { SESSION_HEADER, hub, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
+import type { BoxOutcome } from "./hub"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -163,6 +167,71 @@ const isWorkerRoute = (path: string, method: string): boolean =>
   path === ControlPaths.automations ||
   path.startsWith(`${ControlPaths.automations}/`)
 
+const USER_BOX_PATH = /^\/api\/boxes\/([^/]+)$/
+const USER_BOX_SECRET_PATH = /^\/api\/boxes\/([^/]+)\/secret$/
+const USER_BOX_TOKEN_PATH = /^\/api\/boxes\/([^/]+)\/token$/
+
+/** The Hub's outcome as a response: the value as JSON with `status`, or the failure as an error body. */
+const answerBox = <T>(outcome: BoxOutcome<T>, status = 200): Response =>
+  outcome.ok ? json(outcome.value, status) : errorResponse(outcome.status, outcome.tag, outcome.message)
+
+/** The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. */
+const decodeBoxBody = async <A, I>(request: Request, schema: Schema.Schema<A, I>): Promise<A | Response> => {
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return errorResponse(400, "BadRequest", "body must be JSON")
+  }
+  const decoded = Schema.decodeUnknownEither(schema)(body)
+  return decoded._tag === "Left" ? errorResponse(400, "BadRequest", "invalid request body") : decoded.right
+}
+
+/**
+ * Box management. The session cookie goes to the Hub with each call, which resolves it, so every call is one
+ * Durable Object request.
+ */
+const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
+  if (!sessionId) return errorResponse(401, "Unauthorized", "sign in required")
+  const boxes = hub(env)
+  const path = url.pathname
+  const method = request.method
+
+  if (path === ControlPaths.boxes) {
+    if (method === "GET") return answerBox(await boxes.listBoxes(sessionId))
+    if (method === "POST") {
+      const body = await decodeBoxBody(request, CreateBoxBody)
+      if (body instanceof Response) return body
+      return answerBox(await boxes.createBox(sessionId, body), 201)
+    }
+  }
+  if (path === ControlPaths.activeBox && method === "PUT") {
+    const body = await decodeBoxBody(request, SetActiveBoxBody)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.setActiveBox(sessionId, body.boxId))
+  }
+  const rotate = USER_BOX_SECRET_PATH.exec(path)?.[1]
+  if (rotate !== undefined && method === "POST") {
+    return answerBox(await boxes.rotateBoxSecret(sessionId, decodeURIComponent(rotate)))
+  }
+  const mint = USER_BOX_TOKEN_PATH.exec(path)?.[1]
+  if (mint !== undefined && method === "POST") {
+    return answerBox(await boxes.mintBoxToken(sessionId, decodeURIComponent(mint)))
+  }
+  const id = USER_BOX_PATH.exec(path)?.[1]
+  if (id !== undefined && method === "PATCH") {
+    const body = await decodeBoxBody(request, UpdateBoxBody)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.updateBox(sessionId, decodeURIComponent(id), body))
+  }
+  if (id !== undefined && method === "DELETE") {
+    const outcome = await boxes.deleteBox(sessionId, decodeURIComponent(id))
+    return outcome.ok ? new Response(null, { status: 204 }) : errorResponse(outcome.status, outcome.tag, outcome.message)
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
 /**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
@@ -170,6 +239,7 @@ const isWorkerRoute = (path: string, method: string): boolean =>
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
+  if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)
