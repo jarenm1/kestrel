@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react"
 import { MousePointer2, RefreshCw } from "lucide-react"
-import { Paths } from "@cloudagents/protocol"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { api } from "@/api/client"
+import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 import type { ElementContext } from "@/components/Composer"
 
@@ -21,23 +21,24 @@ export function PreviewViewer({
   /** Receives the picked element; the thread puts it in the composer as context. */
   onSelect: (element: ElementContext) => void
 }) {
-  const [previewToken, setPreviewToken] = useState<string>()
+  const [frameSrc, setFrameSrc] = useState<string>()
   const [sessionError, setSessionError] = useState<string>()
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [selecting, setSelecting] = useState(false)
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const [generation, setGeneration] = useState(0)
+  const activeBoxId = useActiveBoxId()
 
   useEffect(() => {
     setSelecting(false)
-    setPreviewToken(undefined)
+    setFrameSrc(undefined)
     setSessionError(undefined)
     if (port === undefined) return
     let active = true
-    void api.previewSession(taskId).then(
-      ({ token }) => {
-        if (active) setPreviewToken(token)
+    void api.previewFrame(taskId).then(
+      (src) => {
+        if (active) setFrameSrc(src)
       },
       (error: unknown) => {
         if (active) setSessionError(error instanceof Error ? error.message : String(error))
@@ -46,7 +47,7 @@ export function PreviewViewer({
     return () => {
       active = false
     }
-  }, [taskId, port, generation])
+  }, [taskId, port, generation, activeBoxId])
 
   useEffect(() => {
     const receive = (event: MessageEvent<unknown>) => {
@@ -88,7 +89,7 @@ export function PreviewViewer({
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-2">
       {sessionError && <Alert className="mx-1">{sessionError}</Alert>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant={selecting ? "soft" : "ghost"} size="sm" aria-pressed={selecting} disabled={!previewToken} onClick={toggleSelection}>
+        <Button variant={selecting ? "soft" : "ghost"} size="sm" aria-pressed={selecting} disabled={!frameSrc} onClick={toggleSelection}>
           <MousePointer2 />
           {selecting ? "Click an element…" : "Select element"}
         </Button>
@@ -102,7 +103,7 @@ export function PreviewViewer({
         key={`${taskId}:${port}:${generation}`}
         ref={frameRef}
         title="Thread browser preview"
-        src={previewToken ? Paths.taskPreviewFrame(previewToken, taskId) : undefined}
+        src={frameSrc}
         sandbox="allow-scripts allow-forms"
         referrerPolicy="strict-origin-when-cross-origin"
         className="min-h-0 flex-1 rounded-lg border border-border bg-white"
