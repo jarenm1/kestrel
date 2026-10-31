@@ -48,7 +48,7 @@ import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
-import { checkoutPinRef, WorkspaceService, type CheckoutSpec } from "./workspace"
+import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 
 const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
@@ -261,6 +261,13 @@ export interface CoreShape {
     user: string,
     taskId: string,
     attachmentId: string,
+  ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
+  /** Bytes of a checkout's repository icon (`Checkout.icon`), read from the owner's mirror; `blob` must be that icon's. */
+  readonly checkoutIcon: (
+    user: string,
+    taskId: string,
+    checkoutId: string,
+    blob: string,
   ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
   /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
@@ -850,7 +857,20 @@ export const CoreLive = Layer.effect(
             pinRef: checkoutPinRef(task.id, id),
           })
           .pipe(Effect.mapError(toInternal("create checkout")))
-        return { id, repo: ref.repo, dir, branch, baseBranch: fork.baseBranch, createdAt: nowIso() }
+        // The icon comes from the mirror at the fork point, never from the agent-writable checkout; a lookup that
+        // fails costs the checkout nothing but its icon.
+        const icon = yield* workspace.findIcon(mirrorPath, fork.startSha).pipe(
+          Effect.catchAll((e) => Effect.as(Effect.logWarning(`icon for ${ref.repo}: ${e.message}`), null)),
+        )
+        return {
+          id,
+          repo: ref.repo,
+          dir,
+          branch,
+          baseBranch: fork.baseBranch,
+          createdAt: nowIso(),
+          ...(icon === null ? {} : { icon }),
+        }
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 
@@ -1187,6 +1207,22 @@ export const CoreLive = Layer.effect(
         return { mimeType: stored.mimeType, bytes }
       })
 
+    const checkoutIcon: CoreShape["checkoutIcon"] = (user, taskId, checkoutId, blob) =>
+      Effect.gen(function* () {
+        const task = yield* ownedTask(user, taskId)
+        const checkout = task.checkouts.find((c) => c.id === checkoutId)
+        const icon = checkout?.icon
+        const ref = checkout === undefined ? null : parseRepoRef(checkout.repo)
+        const mimeType = icon === undefined ? null : iconMimeType(icon.path)
+        if (icon === undefined || icon.blob !== blob || ref === null || mimeType === null) {
+          return yield* Effect.fail(new NotFound({ message: `checkout ${checkoutId} has no icon ${blob}` }))
+        }
+        const bytes = yield* workspace
+          .readIcon(join(config.mirrorsDir, task.owner, ref.mirrorRel), blob)
+          .pipe(Effect.mapError(toInternal("read icon")))
+        return { mimeType, bytes }
+      })
+
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       Effect.gen(function* () {
@@ -1257,6 +1293,7 @@ export const CoreLive = Layer.effect(
       ask,
       inbox,
       attachment,
+      checkoutIcon,
       upload,
       health: () => Effect.void,
 

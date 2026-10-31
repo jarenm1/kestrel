@@ -3,6 +3,7 @@ import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
 import { createQueries, storeTask } from "@/api/queries";
+import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -85,6 +86,7 @@ function ArchivedRow({ task, now, unarchiving, onOpen, onUnarchive }: ArchivedRo
   return (
     <Card>
       <View style={styles.row}>
+        <ThreadAvatar task={task} />
         <View style={styles.rowText}>
           <Pressable onPress={onOpen} accessibilityRole="button" hitSlop={8} style={styles.titlePress}>
             <Text style={styles.threadTitle} numberOfLines={1}>

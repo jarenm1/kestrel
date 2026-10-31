@@ -1,8 +1,10 @@
 import { Context, Data, Effect, Layer } from "effect"
-import { spawn } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
+import { promisify } from "node:util"
 import { randomUUID } from "node:crypto"
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
-import { dirname, join, sep } from "node:path"
+import { dirname, join, posix, sep } from "node:path"
+import type { CheckoutIcon } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 
 export class WorkspaceError extends Data.TaggedError("WorkspaceError")<{ readonly message: string }> {}
@@ -58,6 +60,13 @@ export interface WorkspaceShape {
       readonly pinRef: string
     },
   ) => Effect.Effect<void, WorkspaceError>
+  /**
+   * The repository's own icon at `commit`, read from the mirror (never the agent-writable checkout): the first
+   * well-known favicon/icon path, else the `<link rel="icon">` an index or root route names. Null when there is none.
+   */
+  readonly findIcon: (mirrorPath: string, commit: string) => Effect.Effect<CheckoutIcon | null, WorkspaceError>
+  /** Bytes of a blob in the mirror, at most `ICON_MAX_BYTES`. */
+  readonly readIcon: (mirrorPath: string, blob: string) => Effect.Effect<Uint8Array, WorkspaceError>
   /** The commit the checkout's HEAD points at, read from its files. */
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
@@ -264,6 +273,125 @@ const ensureMirror = (mirrorPath: string): Effect.Effect<void, WorkspaceError> =
     yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "config", "gc.auto", "0"])
   })
 
+const execFileAsync = promisify(execFile)
+
+/** Largest repository icon the box reads and serves. */
+export const ICON_MAX_BYTES = 256 * 1024
+
+/** Image types a browser renders in an `<img>`, by extension. */
+const ICON_MIME: Readonly<Record<string, string>> = {
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+}
+
+export const iconMimeType = (path: string): string | null => ICON_MIME[posix.extname(path).toLowerCase()] ?? null
+
+/** Where repositories keep their favicon or app icon, most specific first (after t3code's project favicons). */
+const ICON_CANDIDATES = [
+  "favicon.svg",
+  "favicon.ico",
+  "favicon.png",
+  "public/favicon.svg",
+  "public/favicon.ico",
+  "public/favicon.png",
+  "app/favicon.ico",
+  "app/favicon.png",
+  "app/icon.svg",
+  "app/icon.png",
+  "app/icon.ico",
+  "src/favicon.ico",
+  "src/favicon.svg",
+  "src/app/favicon.ico",
+  "src/app/icon.svg",
+  "src/app/icon.png",
+  "assets/icon.svg",
+  "assets/icon.png",
+  "assets/logo.svg",
+  "assets/logo.png",
+  ".idea/icon.svg",
+] as const
+
+/** Files whose `<link rel="icon" href>` (HTML or a route's `links`/`head` object) names the icon. */
+const ICON_SOURCES = [
+  "index.html",
+  "public/index.html",
+  "app/routes/__root.tsx",
+  "src/routes/__root.tsx",
+  "app/root.tsx",
+  "src/root.tsx",
+  "src/index.html",
+] as const
+
+const ICON_SOURCE_MAX_BYTES = 256 * 1024
+const LINK_ICON_HTML = /<link\b(?=[^>]*\brel=["'](?:icon|shortcut icon)["'])(?=[^>]*\bhref=["']([^"'?#]+))[^>]*>/i
+const ICON_REL = /\brel\s*:\s*["'](?:icon|shortcut icon)["']/i
+const ICON_HREF = /\bhref\s*:\s*["']([^"'?#]+)/i
+const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/
+
+/** The icon href a source file declares, or null. Object literals are scanned one brace-free run at a time. */
+export const iconHref = (source: string): string | null => {
+  const html = LINK_ICON_HTML.exec(source)?.[1]
+  if (html) return html
+  for (const run of source.split("}")) {
+    if (!ICON_REL.test(run)) continue
+    const href = ICON_HREF.exec(run)?.[1]
+    if (href) return href
+  }
+  return null
+}
+
+/** Repository paths an icon href may name: under `public/` (where bundlers serve `/x` from) or at the root. */
+const hrefPaths = (href: string): ReadonlyArray<string> => {
+  if (/^[a-z][a-z0-9+.-]*:|^\/\//i.test(href)) return []
+  const clean = posix.normalize(href.replace(/^\/+/, ""))
+  if (clean === "." || clean.startsWith("../")) return []
+  return [`public/${clean}`, clean]
+}
+
+interface TreeBlob {
+  readonly path: string
+  readonly blob: string
+  readonly size: number
+}
+
+/** Regular files among `paths` at `commit`, keyed by path. Symlinks and submodules are not files and never match. */
+const listBlobs = (
+  mirrorPath: string,
+  commit: string,
+  paths: ReadonlyArray<string>,
+): Effect.Effect<ReadonlyMap<string, TreeBlob>, WorkspaceError> =>
+  git(dirname(mirrorPath), ["--literal-pathspecs", "--git-dir", mirrorPath, "ls-tree", "-z", "-l", commit, "--", ...paths]).pipe(
+    Effect.map((out) => {
+      const found = new Map<string, TreeBlob>()
+      for (const entry of out.split("\0")) {
+        const match = /^(100644|100755) blob ([0-9a-f]+) +(\d+)\t(.+)$/s.exec(entry)
+        if (match) found.set(match[4]!, { path: match[4]!, blob: match[2]!, size: Number(match[3]) })
+      }
+      return found
+    }),
+  )
+
+/** The first of `paths` (in order) that is a regular, renderable image file no larger than `ICON_MAX_BYTES`. */
+const firstIcon = (
+  mirrorPath: string,
+  commit: string,
+  paths: ReadonlyArray<string>,
+): Effect.Effect<CheckoutIcon | null, WorkspaceError> =>
+  Effect.map(listBlobs(mirrorPath, commit, paths), (found) => {
+    for (const path of paths) {
+      const entry = found.get(path)
+      if (entry && entry.size > 0 && entry.size <= ICON_MAX_BYTES && iconMimeType(path) !== null) {
+        return { path, blob: entry.blob }
+      }
+    }
+    return null
+  })
+
 const make: WorkspaceShape = {
   importClone: ({ mirrorPath, cloneDir, refspecs }) =>
     Effect.gen(function* () {
@@ -349,6 +477,38 @@ const make: WorkspaceShape = {
         catch: (e) => new WorkspaceError({ message: `write alternates failed: ${String(e)}` }),
       })
       yield* git(shadowPath, ["--git-dir", shadowPath, "update-ref", pinRef, baseSha])
+    }),
+
+  findIcon: (mirrorPath, commit) =>
+    Effect.gen(function* () {
+      const wellKnown = yield* firstIcon(mirrorPath, commit, ICON_CANDIDATES)
+      if (wellKnown !== null) return wellKnown
+      const sources = yield* listBlobs(mirrorPath, commit, ICON_SOURCES)
+      for (const path of ICON_SOURCES) {
+        const source = sources.get(path)
+        if (source === undefined || source.size > ICON_SOURCE_MAX_BYTES) continue
+        const text = yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "cat-file", "blob", source.blob])
+        const href = iconHref(text)
+        const linked = href === null ? null : yield* firstIcon(mirrorPath, commit, hrefPaths(href))
+        if (linked !== null) return linked
+      }
+      return null
+    }),
+
+  readIcon: (mirrorPath, blob) =>
+    Effect.gen(function* () {
+      if (!OBJECT_ID.test(blob)) return yield* Effect.fail(new WorkspaceError({ message: `not an object id: ${blob}` }))
+      const { stdout } = yield* Effect.tryPromise({
+        try: (signal) =>
+          execFileAsync("git", [...SAFE_GIT, "--git-dir", mirrorPath, "cat-file", "blob", blob], {
+            cwd: dirname(mirrorPath),
+            encoding: "buffer",
+            maxBuffer: ICON_MAX_BYTES,
+            signal,
+          }),
+        catch: (e) => new WorkspaceError({ message: `read icon ${blob}: ${String(e)}` }),
+      })
+      return new Uint8Array(stdout)
     }),
 
   headSha: (spec) =>

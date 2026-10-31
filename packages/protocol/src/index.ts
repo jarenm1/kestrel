@@ -29,6 +29,15 @@ export const PullRequestLink = Schema.Struct({
 })
 export type PullRequestLink = typeof PullRequestLink.Type
 
+/** The repository's own favicon/app icon, found in the checkout's starting commit. Bytes are served by `Paths.taskCheckoutIcon`. */
+export const CheckoutIcon = Schema.Struct({
+  /** Path of the icon in the repository, e.g. `public/favicon.svg`. */
+  path: Schema.String,
+  /** Git object id of the icon's bytes; it names the bytes, so URLs carrying it can be cached for good. */
+  blob: Schema.String,
+})
+export type CheckoutIcon = typeof CheckoutIcon.Type
+
 /**
  * A repository the agent checked out into its thread's workspace (MCP `repo_checkout`, or `CreateTaskBody.checkout`).
  * Each checkout is a clone of its own, on a branch created for the thread; a thread has at most one checkout per repo.
@@ -47,6 +56,8 @@ export const Checkout = Schema.Struct({
   createdAt: Schema.String,
   /** Set once a pull request has been opened for `branch`; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
+  icon: Schema.optional(CheckoutIcon),
 })
 export type Checkout = typeof Checkout.Type
 
@@ -539,6 +550,9 @@ export const Paths = {
   /** Sandboxed preview document path; `token` is scoped to `taskId` and cannot access the app session. */
   taskPreviewFrame: (token: string, taskId: string) => `/_preview/${token}/${taskId}/`,
   taskAttachment: (taskId: string, attachmentId: string) => `/api/tasks/${taskId}/attachments/${attachmentId}`,
+  /** The bytes of `CheckoutIcon.blob`; the blob in the path makes the URL immutable. */
+  taskCheckoutIcon: (taskId: string, checkoutId: string, blob: string) =>
+    `/api/tasks/${taskId}/checkouts/${checkoutId}/icon/${blob}`,
   /**
    * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the
    * optional `name` query parameter -> `Attachment`. The upload waits, unsent, until a `SendMessageBody.attachments`
@@ -570,3 +584,4 @@ export * from "./refs"
 export * from "./models"
 export * from "./boxtoken"
 export * from "./tool-names"
+export * from "./thread-identity"

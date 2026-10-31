@@ -6,6 +6,7 @@ import type { Task } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { KestrelMark } from "@/components/KestrelMark";
+import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -57,20 +58,23 @@ function ThreadRow({
     <Pressable
       onPress={() => nav.navigate({ name: "thread", taskId: task.id })}
       accessibilityRole="button"
-      accessibilityLabel={task.title}
+      accessibilityLabel={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
       accessibilityState={{ selected: active }}
       style={({ pressed }) => [styles.threadRow, (pressed || active) && styles.rowActive]}
     >
-      <View style={styles.statusWrap}>
-        <StatusIcon status={task.status} size={15} />
-      </View>
       <View style={styles.threadInfo}>
-        <Text style={[styles.threadTitle, active && styles.threadTitleActive]} numberOfLines={1}>
-          {task.title || "Untitled thread"}
-        </Text>
-        <Text style={styles.threadMeta} numberOfLines={1}>
-          {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
-        </Text>
+        <View style={styles.threadSummary}>
+          <ThreadAvatar task={task} />
+          <View style={styles.threadSummaryText}>
+            <Text style={[styles.threadTitle, active && styles.threadTitleActive]} numberOfLines={1}>
+              {task.title || "Untitled thread"}
+            </Text>
+            <View style={styles.threadMetaRow}>
+              <StatusIcon status={task.status} label={STATUS_LABEL[task.status]} size={12} />
+              <Text style={styles.threadMeta} numberOfLines={1}>· {formatAgo(task.updatedAt, now)}</Text>
+            </View>
+          </View>
+        </View>
         {checkouts.length > 0 ? (
           <View style={styles.chipRow}>
             {checkouts.map((checkout) => (
@@ -287,14 +291,13 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     marginVertical: 1,
   },
-  statusWrap: {
-    marginTop: 2,
-  },
   threadInfo: {
     flex: 1,
     gap: 2,
     minWidth: 0,
   },
+  threadSummary: { flexDirection: "row", alignItems: "center", gap: 10 },
+  threadSummaryText: { flex: 1, minWidth: 0, gap: 2 },
   threadTitle: {
     color: colors.mutedForeground,
     fontSize: 14,
@@ -304,9 +307,11 @@ const styles = StyleSheet.create({
     color: colors.foreground,
     fontWeight: "600",
   },
+  threadMetaRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   threadMeta: {
     color: colors.mutedForeground,
     fontSize: 12,
+    flexShrink: 1,
     opacity: 0.8,
   },
   chipRow: {
@@ -314,6 +319,7 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 4,
     marginTop: 4,
+    marginLeft: 38, // 28px avatar + 10px summary gap; chips stay under the text.
   },
   repoChip: {
     backgroundColor: colors.white06,

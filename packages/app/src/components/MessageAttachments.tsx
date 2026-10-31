@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import type { Attachment } from "@cloudagents/protocol"
+import { Paths, type Attachment } from "@cloudagents/protocol"
 import { FileText } from "lucide-react"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
@@ -33,7 +33,7 @@ function AttachmentLink({
   taskId: string
   attachment: Attachment
 }) {
-  const { data: url } = useQuery(queries.attachmentUrl(taskId, a.id))
+  const { data: url } = useQuery(queries.taskFileUrl(taskId, Paths.taskAttachment(taskId, a.id)))
   if (url === undefined) return null
   const label = a.name ?? (a.mimeType.startsWith("image/") ? "Image" : "File")
   return (

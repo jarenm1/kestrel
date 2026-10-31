@@ -342,11 +342,11 @@ export async function socketUrl(path: string, target: Target): Promise<string> {
 }
 
 /**
- * Absolute URL of an attachment of a thread. An `<img>` or link loads it with the session cookie through the Worker,
- * or with the box token in the query when the thread's box is a user box.
+ * Absolute URL of a file a thread's box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). An `<img>` or link
+ * loads it with the session cookie through the Worker, or with the box token in the query when the thread's box is a
+ * user box.
  */
-export async function attachmentUrl(taskId: string, attachmentId: string): Promise<string> {
-  const path = Paths.taskAttachment(taskId, attachmentId)
+export async function taskFileUrl(taskId: string, path: string): Promise<string> {
   const target = await taskTarget(taskId)
   if (target === null) return SERVER_URL + path
   const url = new URL(path, target.url)
@@ -445,7 +445,7 @@ export const api = {
   cliLogout: async (provider: CliProvider): Promise<void> => {
     await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
   },
-  attachmentUrl,
+  taskFileUrl,
   /**
    * The sandboxed preview document of a thread. It is served from the thread's box: a user box's URL, or the app's own
    * origin for Kestrel's box.
