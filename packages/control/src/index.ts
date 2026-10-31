@@ -1,8 +1,8 @@
-import { ControlPaths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, ControlPaths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
-import { errorResponse, safeEqual, UpstreamError } from "./http"
+import { errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { handleGithubWebhook } from "./webhooks"
 
@@ -19,6 +19,19 @@ const boxAuthorized = async (request: Request, env: Env): Promise<boolean> => {
 const connectBox = async (request: Request, env: Env): Promise<Response> => {
   if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
   return hub(env).fetch(request)
+}
+
+/**
+ * A user's own box asks who owns it and gets their connection secrets. It proves itself with its own secret rather
+ * than BOX_TOKEN, so only the box holding that secret can read them.
+ */
+const boxSelf = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
+  const self = secret === "" || boxId === "" ? null : await hub(env).boxSelf(boxId, secret)
+  return self === null ? errorResponse(401, "Unauthorized", "invalid box credentials") : json(self)
 }
 
 const isBoxAutomationPath = (pathname: string): boolean =>
@@ -67,6 +80,7 @@ export default {
     const url = new URL(request.url)
     try {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
+      if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (isBoxAutomationPath(url.pathname)) {
         if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
         return await handleBoxAutomations(request, env, url)
