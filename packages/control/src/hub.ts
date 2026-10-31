@@ -122,10 +122,12 @@ type PairingRow = {
   url: string | null
   expiresAt: number
   boxId: string | null
-  secret: string | null
 }
 
-const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS boxId, secret"
+const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS boxId"
+
+/** Pairings in flight at once, across all users; starting another answers 429. The start route needs no sign-in. */
+const MAX_LIVE_PAIRINGS = 500
 
 const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
 
@@ -252,9 +254,7 @@ export class Hub extends DurableObject<Env> {
         name TEXT,
         url TEXT,
         expires_at INTEGER NOT NULL,
-        box_id TEXT,
-        secret TEXT,
-        login TEXT
+        box_id TEXT
       )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS oauth_states (
         state TEXT PRIMARY KEY,
@@ -585,10 +585,15 @@ export class Hub extends DurableObject<Env> {
   // Each method is synchronous, so it runs as one transaction.
   // -------------------------------------------------------------------------
 
-  /** Starts a pairing with a fresh code and id; `appOrigin` is where the approval page is served. */
-  startPairing(body: PairingStartBody, appOrigin: string): PairingStart {
+  /**
+   * Starts a pairing with a fresh code and id; `appOrigin` is where the approval page is served. Null when too many
+   * pairings are live (the route is anonymous).
+   */
+  startPairing(body: PairingStartBody, appOrigin: string): PairingStart | null {
     this.purgePairings()
     const sql = this.ctx.storage.sql
+    const live = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM box_pairings").toArray()[0]?.n ?? 0
+    if (live >= MAX_LIVE_PAIRINGS) return null
     let code = newPairingCode()
     while (sql.exec("SELECT 1 FROM box_pairings WHERE code = ?", code).toArray().length > 0) code = newPairingCode()
     const id = newSecret()
@@ -610,17 +615,23 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  /** Pending, or the approved box with its secret: handed out once, after which the pairing is deleted. Null when unknown or expired. */
+  /**
+   * Pending, or the approved box with its current secret, on every poll until the pairing expires: a CLI that lost the
+   * answer polls again. Null when unknown or expired, or when the box was deleted since.
+   */
   pollPairing(pairingId: string): PairingPoll | null {
     const row = this.livePairing("id", pairingId)
     if (!row) return null
     if (row.boxId === null) return { status: "pending", expiresAt: new Date(row.expiresAt).toISOString() }
-    const sql = this.ctx.storage.sql
-    sql.exec("DELETE FROM box_pairings WHERE id = ?", row.id)
-    const box = sql
-      .exec<UserBox>("SELECT id, name, url, created_at AS createdAt FROM user_boxes WHERE id = ?", row.boxId)
+    const found = this.ctx.storage.sql
+      .exec<UserBox & { secret: string }>(
+        "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ?",
+        row.boxId,
+      )
       .toArray()[0]
-    return box && row.secret !== null ? { status: "approved", box, secret: row.secret } : null
+    if (!found) return null
+    const { secret, ...box } = found
+    return { status: "approved", box, secret }
   }
 
   pendingPairing(sessionId: string, code: string): BoxOutcome<PendingPairing> {
@@ -638,7 +649,10 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  /** Creates the box the pairing asks for (same limit as `createBox`) and parks it for the CLI's next poll. */
+  /**
+   * Creates the box the pairing asks for (same limit as `createBox`) for the CLI's next polls, which get a fresh TTL to
+   * collect it, so a code approved just before it expires still completes.
+   */
   approvePairing(sessionId: string, code: string, body: ApprovePairingBody): BoxOutcome<BoxList> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
@@ -649,10 +663,9 @@ export class Hub extends DurableObject<Env> {
     if (!created.ok) return created
     const sql = this.ctx.storage.sql
     sql.exec(
-      "UPDATE box_pairings SET box_id = ?, secret = ?, login = ? WHERE id = ?",
+      "UPDATE box_pairings SET box_id = ?, expires_at = ? WHERE id = ?",
       created.value.box.id,
-      created.value.secret,
-      session.login,
+      Date.now() + PAIRING_TTL_SECONDS * 1000,
       row.id,
     )
     if (body.activate) {

@@ -77,6 +77,12 @@ const PROVISION = [
   // its capture helper.
   "apt-get install -y bubblewrap git curl ca-certificates nodejs npm weston xwayland openbox hsetroot xterm xdotool ffmpeg build-essential libx11-dev libxext-dev libxdamage-dev libxfixes-dev",
   "npm install -g @anthropic-ai/claude-code @openai/codex",
+  // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; bubblewrap needs one. Give bwrap a profile
+  // that allows them, only when the VM's user (this runs under sudo) cannot already make one.
+  'if ! sudo -u "$SUDO_USER" bwrap --ro-bind / / true 2>/dev/null; then',
+  "  printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile kestrel-bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n}\\n' > /etc/apparmor.d/kestrel-bwrap",
+  "  apparmor_parser -r /etc/apparmor.d/kestrel-bwrap",
+  "fi",
 ].join("\n")
 
 const PLACE = [

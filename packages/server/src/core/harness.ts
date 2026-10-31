@@ -621,6 +621,14 @@ export const AgentHarnessLive = Layer.effect(
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
             })
 
+            // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
+            // only marked it cancelled and revoked the token it had then. Give up the token and slot it holds now.
+            if ((yield* store.read).runs.find((r) => r.id === run.id)?.status !== "running") {
+              yield* broker.revoke(run.id)
+              releaseSlot(run.id)
+              return
+            }
+
             // A fresh session starts empty; the previous session's context use no longer applies.
             if (resumeSession === null && task.context !== undefined) yield* setContext(task.id, null)
             yield* startRun(

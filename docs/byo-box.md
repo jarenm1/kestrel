@@ -54,8 +54,9 @@ Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (w
 
 `bun run build:box` builds `dist/box/kestrel-box-{linux,darwin}-{x64,arm64}` (version from
 `packages/server/package.json`, which `packages/kestrel-box/package.json` must match). Publish them as assets of a
-GitHub release tagged `box-v<version>`; `install-box.sh` and the npm launcher download
-`releases/latest/download/<asset>`. Then `npm publish` in `packages/kestrel-box`. Box releases are the repo's only
+GitHub release tagged `box-v<version>`. `install-box.sh` downloads `releases/latest/download/<asset>`; the npm launcher
+and the macOS `install` (the Linux binary for the VM) download `releases/download/box-v<version>/<asset>`, so the tag
+must match the package version. Then `npm publish` in `packages/kestrel-box`. Box releases are the repo's only
 releases.
 
 ### Manual setup

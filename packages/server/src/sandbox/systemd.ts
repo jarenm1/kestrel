@@ -92,22 +92,23 @@ export const sliceCgroup = (settings: SystemdSettings, taskId: string): Effect.E
     })
   })
 
-/** The `Key=Value` properties a task's slice carries under the box's provisioning mode. */
+/**
+ * The `Key=Value` properties a task's slice carries under the box's provisioning mode. Every mode sets every property:
+ * runtime drop-ins outlive the box, so a slice made under another mode must not keep that mode's caps or floors.
+ */
 const taskProperties = (settings: SystemdSettings): string[] => {
   const { limits } = settings
-  switch (settings.provisioning) {
-    case "guaranteed":
-      return [`MemoryLow=${limits.memoryMin}`, `CPUWeight=${limits.cpuWeight}`, `TasksMax=${limits.tasksMax}`]
-    case "pooled":
-      return [`TasksMax=${limits.tasksMax}`]
-    case "per-thread":
-      return [
-        `MemoryMax=${limits.memoryMax}`,
-        "MemorySwapMax=0",
-        `CPUQuota=${limits.cpuQuota}`,
-        `TasksMax=${limits.tasksMax}`,
-      ]
-  }
+  const guaranteed = settings.provisioning === "guaranteed"
+  const perThread = settings.provisioning === "per-thread"
+  return [
+    `MemoryLow=${guaranteed ? limits.memoryMin : "0"}`,
+    `CPUWeight=${guaranteed ? limits.cpuWeight : 100}`,
+    `MemoryMax=${perThread ? limits.memoryMax : "infinity"}`,
+    `MemorySwapMax=${perThread ? "0" : "infinity"}`,
+    // An empty CPUQuota clears it.
+    `CPUQuota=${perThread ? limits.cpuQuota : ""}`,
+    `TasksMax=${limits.tasksMax}`,
+  ]
 }
 
 /** The most memory and CPU one task can get: its own caps under per-thread provisioning, the box totals otherwise. */

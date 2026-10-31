@@ -56,7 +56,10 @@ const handleBoxPairing = async (request: Request, env: Env, url: URL): Promise<R
     // The approval page is on the host the CLI talks to (a Preview has its own Hub), except the marketing hosts, which
     // send the app to the app host. A local stack names its app origin, since `wrangler dev` rewrites request URLs.
     const appOrigin = env.APP_ORIGIN ?? (SITE_HOSTS[url.hostname] ? APP_ORIGIN : url.origin)
-    return json(await hub(env).startPairing(body, appOrigin), 201)
+    const started = await hub(env).startPairing(body, appOrigin)
+    return started === null
+      ? errorResponse(429, "TooManyRequests", "too many pairings in progress; try again in a few minutes")
+      : json(started, 201)
   }
   const body = await decodeBody(request, PairingPollBody)
   if (body instanceof Response) return body
