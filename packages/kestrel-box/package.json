@@ -1,0 +1,13 @@
+{
+  "name": "kestrel-box",
+  "version": "0.1.0",
+  "bin": {
+    "kestrel-box": "bin/kestrel-box.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
