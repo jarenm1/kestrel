@@ -200,6 +200,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
 
   // Over the canvas whenever no live frames can be shown: the stream is not running, or it is paused.
   const overlay = running ? (wanted ? null : "paused") : (status?.state ?? "loading")
+  const booting = overlay === "loading" || overlay === "starting"
 
   const toggle = useMutation({
     mutationFn: async (): Promise<DesktopStatus> => {
@@ -315,7 +316,17 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           />
           {overlay && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
-              {overlay}
+              {booting ? (
+                <div
+                  role="progressbar"
+                  aria-label="Starting desktop"
+                  className="h-1 w-40 overflow-hidden rounded-full bg-white/10"
+                >
+                  <div className="h-full w-1/3 animate-desktop-boot rounded-full bg-white/70 motion-reduce:animate-pulse" />
+                </div>
+              ) : (
+                overlay
+              )}
             </div>
           )}
           <Button

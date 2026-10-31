@@ -43,6 +43,16 @@
   --shadow-soft: inset 0 1px 0 0 rgb(255 255 255 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.7);
   --shadow-glow: 0 0 0 1px rgb(255 255 255 / 0.14), 0 0 22px -4px rgb(255 255 255 / 0.22);
   --shadow-well: inset 0 1px 3px 0 rgb(0 0 0 / 0.6);
+  /* The desktop's boot bar: a third-width segment sweeping across its track. */
+  --animate-desktop-boot: desktop-boot 1.4s ease-in-out infinite;
+  @keyframes desktop-boot {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(300%);
+    }
+  }
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
