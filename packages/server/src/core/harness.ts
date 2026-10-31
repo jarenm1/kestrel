@@ -115,12 +115,22 @@ interface ProcessSpec {
 
 const KILL_GRACE_MS = 3000
 /**
- * Least time between two publishes of the same item. Codex streams text, reasoning and command output a token at a
- * time, and every event is a relay message; the latest version always goes out when the window ends.
+ * Least time between two publishes of the same item. Codex and Claude stream text (and Codex command output) a few
+ * tokens at a time, and every event is a relay message; the latest version always goes out when the window ends.
  */
 const ITEM_PUBLISH_MS = 100
-/** App-server notifications that stream a token at a time; their effect reaches the app as items, not raw lines. */
+/** App-server notifications that stream a token at a time. */
 const DELTA_METHOD = /\/(delta|outputDelta|summaryTextDelta|textDelta)$/
+
+/**
+ * A line that streams a token at a time (a Codex delta, a Claude `stream_event`): its effect reaches the app as
+ * items, not as a raw output line.
+ */
+const isDeltaLine = (parsed: unknown): boolean => {
+  if (typeof parsed !== "object" || parsed === null) return false
+  if ("type" in parsed && parsed.type === "stream_event") return true
+  return "method" in parsed && typeof parsed.method === "string" && DELTA_METHOD.test(parsed.method)
+}
 
 /** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
 const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
@@ -344,8 +354,7 @@ export const AgentHarnessLive = Layer.effect(
             entry.sessionId = session.sessionId
             runFork(recordSession(runId, session.sessionId, session.provider))
           }
-          const method = typeof parsed === "object" && parsed !== null && "method" in parsed ? parsed.method : null
-          if (typeof method !== "string" || !DELTA_METHOD.test(method)) {
+          if (!isDeltaLine(parsed)) {
             publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
           }
           return
