@@ -67,6 +67,19 @@ export const ControlPaths = {
    */
   boxSelf: "/box/self",
   /**
+   * Pairing a box from the `kestrel-box` CLI, no auth. POST PairingStartBody -> PairingStart: the CLI shows `code` and
+   * `approveUrl`, then polls `boxPairingPoll` with the secret `pairingId` until the signed-in user approves the code.
+   */
+  boxPairing: "/box/pairings",
+  /** POST PairingPollBody -> PairingPoll. The approved box and its secret are handed out once, then forgotten. */
+  boxPairingPoll: "/box/pairings/poll",
+  /** App page where the signed-in user approves a pairing code (`?code=`). Not an API route. */
+  pairPage: "/pair",
+  /** GET -> PendingPairing for the approval page; 404 when unknown or expired. */
+  pairing: (code: string) => `/api/boxes/pairings/${code}`,
+  /** POST ApprovePairingBody -> BoxList: creates the box for the signed-in user (optionally making it active). */
+  pairingApprove: (code: string) => `/api/boxes/pairings/${code}/approve`,
+  /**
    * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user). Requires
    * `Authorization: Bearer <box token>` and the acting user's login in BOX_USER_HEADER. Never reached from a browser.
    */
@@ -225,6 +238,47 @@ export const BoxSelf = Schema.Struct({
   openai: Schema.optional(Schema.String),
 })
 export type BoxSelf = typeof BoxSelf.Type
+
+/** How long a pairing code stays valid. */
+export const PAIRING_TTL_SECONDS = 10 * 60
+
+/** What the CLI suggests for the new box; the user can change both before approving. */
+export const PairingStartBody = Schema.Struct({
+  name: Schema.optional(BoxName),
+  url: Schema.optional(BoxUrl),
+})
+export type PairingStartBody = typeof PairingStartBody.Type
+
+export const PairingStart = Schema.Struct({
+  /** Secret the CLI polls with; never shown to the user. */
+  pairingId: Schema.String,
+  /** Short code the user approves in the app, e.g. "KQ7M-4TXP". */
+  code: Schema.String,
+  /** `<app origin>/pair?code=<code>`. */
+  approveUrl: Schema.String,
+  expiresAt: Schema.String,
+})
+export type PairingStart = typeof PairingStart.Type
+
+export const PairingPollBody = Schema.Struct({ pairingId: Schema.String })
+export type PairingPollBody = typeof PairingPollBody.Type
+
+export const PairingPoll = Schema.Union(
+  Schema.Struct({ status: Schema.Literal("pending"), expiresAt: Schema.String }),
+  Schema.Struct({ status: Schema.Literal("approved"), box: UserBox, secret: Schema.String }),
+)
+export type PairingPoll = typeof PairingPoll.Type
+
+export const PendingPairing = Schema.Struct({
+  code: Schema.String,
+  name: Schema.NullOr(BoxName),
+  url: Schema.NullOr(BoxUrl),
+  expiresAt: Schema.String,
+})
+export type PendingPairing = typeof PendingPairing.Type
+
+export const ApprovePairingBody = Schema.Struct({ name: BoxName, url: BoxUrl, activate: Schema.Boolean })
+export type ApprovePairingBody = typeof ApprovePairingBody.Type
 
 /** GitHub pull-request webhook events an automation can start on (`pull_request` action, prefixed). */
 export const GithubAutomationEvent = Schema.Literal(
