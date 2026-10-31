@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { colors, fonts, radius, spacing } from "@/theme";
-import { Paths, type DesktopStatus } from "@cloudagents/protocol";
+import type { DesktopStatus } from "@cloudagents/protocol";
 
 const SafeWebView = WebView as unknown as React.ComponentType<any>;
 
@@ -20,13 +20,11 @@ const SafeWebView = WebView as unknown as React.ComponentType<any>;
  * HTML page inside a WebView to handle video playback.
  */
 export function DesktopViewer({ taskId }: { taskId: string }) {
-  const { api } = useApiClient();
+  const { api, serverUrl } = useApiClient();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const desktop = useQuery(queries.desktop(taskId));
   const status = desktop.data ?? null;
-  const [stream, setStream] = useState<{ taskId: string; url: string } | null>(null);
-  const [streamError, setStreamError] = useState<unknown>(null);
 
   const active = status?.state === "running" || status?.state === "starting";
 
@@ -50,29 +48,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     return () => sub.remove();
   }, []);
 
-  // The stream URL carries the box token. It is resolved outside render and kept while unchanged, so the WebView does not
-  // reload. It is re-resolved on each desktop state change, so a restarted stream gets a token that has not expired.
-  useEffect(() => {
-    let active = true;
-    api.socketUrl(Paths.taskDesktopWs(taskId)).then(
-      (url) => {
-        if (!active) return;
-        setStreamError(null);
-        setStream((prev) => (prev?.taskId === taskId && prev.url === url ? prev : { taskId, url }));
-      },
-      (error: unknown) => {
-        if (active) setStreamError(error);
-      }
-    );
-    return () => {
-      active = false;
-    };
-  }, [api, taskId, status?.state]);
-
   // Minimal MSE page for the desktop fMP4 stream. Every binary frame (init or fragment) goes into one
   // FIFO that is drained only while the SourceBuffer is idle: dropping a fragment corrupts H.264 decoding.
   const desktopHtml = useMemo(() => {
-    if (!stream || stream.taskId !== taskId || !status || status.state !== "running") return null;
+    if (!serverUrl || !status || status.state !== "running") return null;
+
+    const wsUrl = serverUrl.replace(/^http/, "ws") + `/api/tasks/${taskId}/desktop/stream`;
 
     return `
 <!DOCTYPE html>
@@ -192,7 +173,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     }
 
     function connect() {
-      ws = new WebSocket("${stream.url}");
+      ws = new WebSocket("${wsUrl}");
       ws.binaryType = "arraybuffer";
       ws.onmessage = onMessage;
       ws.onclose = function() {
@@ -242,9 +223,9 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   </script>
 </body>
 </html>`;
-  }, [stream, taskId, status?.state]);
+  }, [serverUrl, taskId, status?.state]);
 
-  const actionError = toggle.error ?? desktop.error ?? streamError;
+  const actionError = toggle.error ?? desktop.error;
   const error = actionError
     ? actionError instanceof Error
       ? actionError.message

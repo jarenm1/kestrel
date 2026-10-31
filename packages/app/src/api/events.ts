@@ -1,6 +1,6 @@
 import { Either, Schema } from "effect"
 import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent, TaskStats } from "@cloudagents/protocol"
-import { socketUrl } from "@/api/client"
+import { WS_URL } from "@/config"
 
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   try {
@@ -11,51 +11,23 @@ function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   }
 }
 
-/**
- * Opens a WebSocket to `path` once its URL is resolved (a user box's URL carries a fresh token), then hands it to
- * `attach`. Returns a function that closes it without firing `onClose`; closing before the socket exists cancels the
- * open. A failure to resolve the URL reports through `onFailure`.
- */
-function openSocket(path: string, attach: (socket: WebSocket) => void, onFailure: () => void): () => void {
-  let socket: WebSocket | undefined
-  let closed = false
-  socketUrl(path).then(
-    (url) => {
-      if (closed) return
-      socket = new WebSocket(url)
-      attach(socket)
-    },
-    () => {
-      if (!closed) onFailure()
-    },
-  )
-  return () => {
-    closed = true
-    if (socket !== undefined) {
-      socket.onclose = null
-      socket.close()
-    }
-  }
-}
-
 /** Opens a ServerEvent WebSocket and returns a function that closes it without firing `onClose`. */
 function openEvents(
   path: string,
   handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
 ): () => void {
-  return openSocket(
-    path,
-    (socket) => {
-      socket.onopen = handlers.onOpen
-      socket.onmessage = (msg: MessageEvent<unknown>) => {
-        if (typeof msg.data !== "string") return
-        const event = decodeText(ServerEvent, msg.data)
-        if (event) handlers.onEvent(event)
-      }
-      socket.onclose = handlers.onClose
-    },
-    handlers.onClose,
-  )
+  const socket = new WebSocket(WS_URL + path)
+  socket.onopen = handlers.onOpen
+  socket.onmessage = (msg: MessageEvent<unknown>) => {
+    if (typeof msg.data !== "string") return
+    const event = decodeText(ServerEvent, msg.data)
+    if (event) handlers.onEvent(event)
+  }
+  socket.onclose = handlers.onClose
+  return () => {
+    socket.onclose = null
+    socket.close()
+  }
 }
 
 /**
@@ -86,18 +58,17 @@ export function openTaskStats(
   taskId: string,
   handlers: { onFrame: (stats: TaskStats) => void; onClose: () => void },
 ): () => void {
-  return openSocket(
-    Paths.taskStatsWs(taskId),
-    (socket) => {
-      socket.onmessage = (msg: MessageEvent<unknown>) => {
-        if (typeof msg.data !== "string") return
-        const stats = decodeText(TaskStats, msg.data)
-        if (stats) handlers.onFrame(stats)
-      }
-      socket.onclose = handlers.onClose
-    },
-    handlers.onClose,
-  )
+  const socket = new WebSocket(WS_URL + Paths.taskStatsWs(taskId))
+  socket.onmessage = (msg: MessageEvent<unknown>) => {
+    if (typeof msg.data !== "string") return
+    const stats = decodeText(TaskStats, msg.data)
+    if (stats) handlers.onFrame(stats)
+  }
+  socket.onclose = handlers.onClose
+  return () => {
+    socket.onclose = null
+    socket.close()
+  }
 }
 
 export interface DesktopHandlers {
@@ -123,7 +94,8 @@ const ACK_EVERY_MS = 250
 
 /** Opens the desktop stream WebSocket: status text frames, fMP4 binary frames, input and ack text frames. */
 export function openDesktopStream(taskId: string, handlers: DesktopHandlers): DesktopConnection {
-  let socket: WebSocket | undefined
+  const socket = new WebSocket(WS_URL + Paths.taskDesktopWs(taskId))
+  socket.binaryType = "arraybuffer"
   let received = 0
   let acked = 0
   let ackedAt = performance.now()
@@ -134,36 +106,29 @@ export function openDesktopStream(taskId: string, handlers: DesktopHandlers): De
     acked = received
     ackedAt = performance.now()
     const ack: DesktopAck = { _tag: "stream.ack", frames: received }
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(ack))
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(ack))
   }
-  const closeSocket = openSocket(
-    Paths.taskDesktopWs(taskId),
-    (opened) => {
-      socket = opened
-      opened.binaryType = "arraybuffer"
-      opened.onmessage = (msg: MessageEvent<unknown>) => {
-        if (typeof msg.data === "string") {
-          const status = decodeText(DesktopStatus, msg.data)
-          if (status) handlers.onStatus(status)
-          return
-        }
-        if (!(msg.data instanceof ArrayBuffer)) return
-        received++
-        if (received - acked >= ACK_EVERY_FRAMES || performance.now() - ackedAt >= ACK_EVERY_MS) sendAck()
-        else ackTimer ??= window.setTimeout(sendAck, ACK_EVERY_MS)
-        handlers.onMedia(new Uint8Array(msg.data))
-      }
-      opened.onclose = handlers.onClose
-    },
-    handlers.onClose,
-  )
+  socket.onmessage = (msg: MessageEvent<unknown>) => {
+    if (typeof msg.data === "string") {
+      const status = decodeText(DesktopStatus, msg.data)
+      if (status) handlers.onStatus(status)
+      return
+    }
+    if (!(msg.data instanceof ArrayBuffer)) return
+    received++
+    if (received - acked >= ACK_EVERY_FRAMES || performance.now() - ackedAt >= ACK_EVERY_MS) sendAck()
+    else ackTimer ??= window.setTimeout(sendAck, ACK_EVERY_MS)
+    handlers.onMedia(new Uint8Array(msg.data))
+  }
+  socket.onclose = handlers.onClose
   return {
     send: (input) => {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(input))
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(input))
     },
     close: () => {
+      socket.onclose = null
       window.clearTimeout(ackTimer)
-      closeSocket()
+      socket.close()
     },
   }
 }

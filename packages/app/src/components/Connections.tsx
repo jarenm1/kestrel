@@ -1,12 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react"
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   CliProvider,
   ControlPaths,
   MODEL_PROVIDERS,
   connectedModelProviders,
   providerModels,
-  type CliAuthStatus,
   type CliLoginStart,
   type Connection,
   type AgentModel,
@@ -31,7 +30,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { errorText } from "@/util"
 
@@ -44,21 +42,15 @@ const CLI_POLL_MS = 3000
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
-  const activeBoxId = useActiveBoxId()
-  // With a user box active, the CLI sign-ins live on that box, so its login state replaces the relay's view of them.
-  const direct = typeof activeBoxId === "string"
-  const cliAuth = useQuery({ ...queries.cliAuth(), enabled: direct })
-  const list = connections.data && (direct ? withBoxCli(connections.data, cliAuth.data) : connections.data)
 
   return (
     <>
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-      {cliAuth.error && <Alert>{errorText(cliAuth.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
-      {list && (
+      {connections.data && (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
-            {list.map((connection) =>
+            {connections.data.map((connection) =>
               connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                 <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
               ) : (
@@ -68,26 +60,9 @@ export function Connections() {
           </CardContent>
         </Card>
       )}
-      {list && <ModelListsCard connections={list} />}
+      {connections.data && <ModelListsCard connections={connections.data} />}
     </>
   )
-}
-
-/**
- * Direct mode: the CLI rows take login state and availability from the user's box, where the CLI actually runs.
- * Labels and the provider list still come from the relay. Until the box answers, the CLI rows read as unavailable.
- */
-function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAuthStatus[] | undefined): Connection[] {
-  return connections.map((connection) => {
-    if (connection.kind !== "cli") return connection
-    const status = cliAuth?.find((s) => s.provider === connection.provider)
-    return {
-      ...connection,
-      connected: status?.loggedIn ?? false,
-      account: status?.account ?? null,
-      available: cliAuth !== undefined,
-    }
-  })
 }
 
 /** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
@@ -227,19 +202,13 @@ function ConnectionHeader({ label, connected, account }: { label: string; connec
   )
 }
 
-/** Re-reads the relay's connections and the box's CLI sign-ins, which the CLI rows show together. */
-function invalidateConnections(queryClient: QueryClient) {
-  void queryClient.invalidateQueries({ queryKey: keys.connections })
-  void queryClient.invalidateQueries({ queryKey: keys.cliAuth })
-}
-
 /** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */
 function CliConnectionRow({ connection, provider }: { connection: Connection; provider: CliProvider }) {
   const queryClient = useQueryClient()
   const [login, setLogin] = useState<CliLoginStart | null>(null)
   const [expired, setExpired] = useState(false)
   const [code, setCode] = useState("")
-  const refresh = () => invalidateConnections(queryClient)
+  const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.connections })
 
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
@@ -285,7 +254,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   const polling = login?.provider === "codex-cli" && !expired && !connection.connected
   useEffect(() => {
     if (!polling) return
-    const id = setInterval(() => invalidateConnections(queryClient), CLI_POLL_MS)
+    const id = setInterval(() => void queryClient.invalidateQueries({ queryKey: keys.connections }), CLI_POLL_MS)
     return () => clearInterval(id)
   }, [polling, queryClient])
 

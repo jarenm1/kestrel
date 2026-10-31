@@ -7,9 +7,6 @@ import {
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
   AutomationTrigger,
-  BOX_TOKEN_TTL_SECONDS,
-  MAX_USER_BOXES,
-  signBoxToken,
   decodeBinary,
   decodeFrame,
   encodeBinary,
@@ -19,20 +16,13 @@ import {
   type Automation,
   type AutomationRun,
   type BoxStatus,
-  type BoxList,
-  type BoxSelf,
-  type BoxToken,
   type CreateAutomationBody,
-  type CreateBoxBody,
   type CreateTaskBody,
-  type CreatedBox,
   type RelayCredentials,
   type RelayFrame,
   type UpdateAutomationBody,
-  type UpdateBoxBody,
-  type UserBox,
 } from "@cloudagents/protocol"
-import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
+import { errorResponse, headersToRecord, isHopByHop } from "./http"
 import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
@@ -40,22 +30,11 @@ import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, type Env } from "./env"
 
-/** A failed box call: the HTTP status and error body the Worker answers with. */
-export type BoxFailure = { ok: false; status: number; tag: string; message: string }
-export type BoxOutcome<T> = { ok: true; value: T } | BoxFailure
-
-const UNAUTHENTICATED: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "sign in required" }
-const NO_SUCH_BOX: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such box" }
-
-/** A box secret: 32 random bytes, base64url. */
-const newBoxSecret = (): string =>
-  toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-
 /**
  * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
  * outbound relay to the agent box.
  *
- * - SQLite tables: users, sessions, connections, user_boxes, oauth_states, automations, automation_runs, github_hooks,
+ * - SQLite tables: users, sessions, connections, oauth_states, automations, automation_runs, github_hooks,
  *   webhook_deliveries.
  * - The box holds one hibernatable WebSocket (tag "box"); its metadata lives in the socket attachment.
  * - Browser HTTP requests are tunnelled as `http` frames and resolved by `http-res` (30s timeout → 504).
@@ -190,11 +169,6 @@ export class Hub extends DurableObject<Env> {
         name TEXT,
         avatar_url TEXT NOT NULL
       )`)
-      // Users tables created before the `active_box_id` column get it here; existing users use Kestrel's box.
-      const userColumns = sql.exec<{ name: string }>("PRAGMA table_info(users)").toArray()
-      if (!userColumns.some((c) => c.name === "active_box_id")) {
-        sql.exec("ALTER TABLE users ADD COLUMN active_box_id TEXT")
-      }
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -213,14 +187,6 @@ export class Hub extends DurableObject<Env> {
         account TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (login, provider)
-      )`)
-      sql.exec(`CREATE TABLE IF NOT EXISTS user_boxes (
-        id TEXT PRIMARY KEY,
-        login TEXT NOT NULL,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL,
-        secret TEXT NOT NULL,
-        created_at TEXT NOT NULL
       )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS oauth_states (
         state TEXT PRIMARY KEY,
@@ -362,9 +328,9 @@ export class Hub extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM connections WHERE login = ? AND provider = ?", login, provider)
   }
 
-  /** The user's connection secrets, by provider. */
-  connectionSecrets(login: string): { github?: string; anthropic?: string; openai?: string } {
-    const out: { github?: string; anthropic?: string; openai?: string } = {}
+  /** Secrets forwarded to the box in the `x-cloudagents-credentials` header. */
+  credentials(login: string): RelayCredentials {
+    const out: { user: string; github?: string; anthropic?: string; openai?: string } = { user: login }
     const rows = this.ctx.storage.sql
       .exec<{ provider: string; secret: string }>("SELECT provider, secret FROM connections WHERE login = ?", login)
       .toArray()
@@ -382,163 +348,6 @@ export class Hub extends DurableObject<Env> {
       }
     }
     return out
-  }
-
-  /** Secrets forwarded to the box in the `x-cloudagents-credentials` header. */
-  credentials(login: string): RelayCredentials {
-    return { user: login, ...this.connectionSecrets(login) }
-  }
-
-  /**
-   * Version of the user's connections, `count:latest updated_at`. A box token carries it as `cv`, and `boxSelf`
-   * reports it, so a box refetches its credentials once they change.
-   */
-  private credentialsVersion(login: string): string {
-    const row = this.ctx.storage.sql
-      .exec<{ count: number; latest: number | null }>(
-        "SELECT COUNT(*) AS count, MAX(updated_at) AS latest FROM connections WHERE login = ?",
-        login,
-      )
-      .toArray()[0]
-    return `${row?.count ?? 0}:${row?.latest ?? ""}`
-  }
-
-  // -------------------------------------------------------------------------
-  // User boxes (bring your own box). Browser calls pass the session id and the Hub resolves it, so each call is one
-  // request. Failures come back as `BoxFailure` for the Worker to answer.
-  // -------------------------------------------------------------------------
-
-  listBoxes(sessionId: string): BoxOutcome<BoxList> {
-    const session = this.session(sessionId)
-    return session ? { ok: true, value: this.boxList(session.login) } : UNAUTHENTICATED
-  }
-
-  createBox(sessionId: string, body: CreateBoxBody): BoxOutcome<CreatedBox> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    const sql = this.ctx.storage.sql
-    const count =
-      sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM user_boxes WHERE login = ?", session.login).toArray()[0]
-        ?.count ?? 0
-    if (count >= MAX_USER_BOXES) {
-      return { ok: false, status: 409, tag: "Conflict", message: `at most ${MAX_USER_BOXES} boxes per user` }
-    }
-    const box: UserBox = { id: crypto.randomUUID(), name: body.name, url: body.url, createdAt: new Date().toISOString() }
-    const secret = newBoxSecret()
-    sql.exec(
-      "INSERT INTO user_boxes (id, login, name, url, secret, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-      box.id,
-      session.login,
-      box.name,
-      box.url,
-      secret,
-      box.createdAt,
-    )
-    return { ok: true, value: { box, secret } }
-  }
-
-  updateBox(sessionId: string, id: string, changes: UpdateBoxBody): BoxOutcome<UserBox> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    const owned = this.ownedBox(session.login, id)
-    if (!owned) return NO_SUCH_BOX
-    const box: UserBox = { ...owned.box, name: changes.name ?? owned.box.name, url: changes.url ?? owned.box.url }
-    this.ctx.storage.sql.exec(
-      "UPDATE user_boxes SET name = ?, url = ? WHERE id = ? AND login = ?",
-      box.name,
-      box.url,
-      id,
-      session.login,
-    )
-    return { ok: true, value: box }
-  }
-
-  deleteBox(sessionId: string, id: string): BoxOutcome<null> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    if (!this.ownedBox(session.login, id)) return NO_SUCH_BOX
-    const sql = this.ctx.storage.sql
-    sql.exec("UPDATE users SET active_box_id = NULL WHERE login = ? AND active_box_id = ?", session.login, id)
-    sql.exec("DELETE FROM user_boxes WHERE id = ? AND login = ?", id, session.login)
-    return { ok: true, value: null }
-  }
-
-  rotateBoxSecret(sessionId: string, id: string): BoxOutcome<CreatedBox> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    const owned = this.ownedBox(session.login, id)
-    if (!owned) return NO_SUCH_BOX
-    const secret = newBoxSecret()
-    this.ctx.storage.sql.exec("UPDATE user_boxes SET secret = ? WHERE id = ? AND login = ?", secret, id, session.login)
-    return { ok: true, value: { box: owned.box, secret } }
-  }
-
-  /** A token the owner gives their box: signed with the box's secret, audience is the box id. */
-  async mintBoxToken(sessionId: string, id: string): Promise<BoxOutcome<BoxToken>> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    const owned = this.ownedBox(session.login, id)
-    if (!owned) return NO_SUCH_BOX
-    const iat = Math.floor(Date.now() / 1000)
-    const exp = iat + BOX_TOKEN_TTL_SECONDS
-    const token = await signBoxToken(owned.secret, {
-      sub: session.login,
-      aud: id,
-      iat,
-      exp,
-      cv: this.credentialsVersion(session.login),
-      ...(session.dev ? { dev: true } : {}),
-    })
-    return { ok: true, value: { token, url: owned.box.url, expiresAt: new Date(exp * 1000).toISOString() } }
-  }
-
-  setActiveBox(sessionId: string, boxId: string | null): BoxOutcome<BoxList> {
-    const session = this.session(sessionId)
-    if (!session) return UNAUTHENTICATED
-    if (boxId !== null && !this.ownedBox(session.login, boxId)) return NO_SUCH_BOX
-    this.ctx.storage.sql.exec("UPDATE users SET active_box_id = ? WHERE login = ?", boxId, session.login)
-    return { ok: true, value: this.boxList(session.login) }
-  }
-
-  /** The box's owner and their connection secrets for `ControlPaths.boxSelf`; null unless `secret` is the box's. */
-  async boxSelf(boxId: string, secret: string): Promise<BoxSelf | null> {
-    const row = this.ctx.storage.sql
-      .exec<{ login: string; secret: string }>("SELECT login, secret FROM user_boxes WHERE id = ?", boxId)
-      .toArray()[0]
-    if (!row || !(await safeEqual(secret, row.secret))) return null
-    return {
-      owner: row.login,
-      credentialsVersion: this.credentialsVersion(row.login),
-      ...this.connectionSecrets(row.login),
-    }
-  }
-
-  private boxList(login: string): BoxList {
-    const sql = this.ctx.storage.sql
-    const boxes = sql
-      .exec<UserBox>(
-        "SELECT id, name, url, created_at AS createdAt FROM user_boxes WHERE login = ? ORDER BY created_at, rowid",
-        login,
-      )
-      .toArray()
-    const user = sql
-      .exec<{ activeBoxId: string | null }>("SELECT active_box_id AS activeBoxId FROM users WHERE login = ?", login)
-      .toArray()[0]
-    return { boxes, activeBoxId: user?.activeBoxId ?? null }
-  }
-
-  /** The box if `login` owns it, with its secret; null otherwise. */
-  private ownedBox(login: string, id: string): { box: UserBox; secret: string } | null {
-    const row = this.ctx.storage.sql
-      .exec<UserBox & { secret: string }>(
-        "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ? AND login = ?",
-        id,
-        login,
-      )
-      .toArray()[0]
-    if (!row) return null
-    const { secret, ...box } = row
-    return { box, secret }
   }
 
   // -------------------------------------------------------------------------

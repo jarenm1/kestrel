@@ -1,9 +1,8 @@
 import { useQuery } from "@tanstack/react-query"
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, LogOut, Plug, Server, User } from "lucide-react"
+import { Check, CreditCard, ExternalLink, LogOut, Plug, User } from "lucide-react"
 import { Link, NavLink, Outlet } from "react-router-dom"
 import { queries } from "@/api/queries"
-import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
 import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -16,7 +15,6 @@ import { errorText } from "@/util"
 const sections = [
   { to: "profile", label: "Profile", icon: User },
   { to: "connections", label: "Connections", icon: Plug },
-  { to: "boxes", label: "Boxes", icon: Server },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
 
@@ -132,15 +130,6 @@ export function ConnectionsSettings() {
     <>
       <SectionHeader title="Connections" desc="Accounts and keys Kestrel uses on your behalf." />
       <Connections />
-    </>
-  )
-}
-
-export function BoxesSettings() {
-  return (
-    <>
-      <SectionHeader title="Boxes" desc="Where your threads run: Kestrel's box, or your own machine reached directly." />
-      <Boxes />
     </>
   )
 }
