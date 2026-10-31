@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { TASK_STATS_WINDOW_MS, type TaskStats, type TaskStatsSample } from "@cloudagents/protocol"
 import { Config } from "./config"
 import { CoreService } from "./core/service"
-import { sliceCgroup } from "./sandbox/systemd"
+import { sliceCgroup, taskCeilings } from "./sandbox/systemd"
 import { parseCpuQuota, parseSize } from "./size"
 
 const INTERVAL_MS = 1_000
@@ -95,8 +95,9 @@ export const TaskStatsLive = Layer.effect(
     // The sampler outlives the request that starts it, so it runs on the box's runtime, not the HTTP handler's.
     const runFork = Runtime.runFork(yield* Effect.runtime<never>())
     const systemd = config.systemd
-    const ramMax = systemd ? (parseSize(systemd.limits.memoryMax) ?? totalmem()) : null
-    const cores = systemd ? (parseCpuQuota(systemd.limits.cpuQuota) ?? cpus().length) : null
+    const ceilings = systemd ? taskCeilings(systemd) : null
+    const ramMax = ceilings ? (parseSize(ceilings.memoryMax) ?? totalmem()) : null
+    const cores = ceilings ? (parseCpuQuota(ceilings.cpuQuota) ?? cpus().length) : null
     const watched = new Map<string, Watched>()
     let sampling = false
     let gpu = true

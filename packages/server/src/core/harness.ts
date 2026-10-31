@@ -35,7 +35,8 @@ import { makeTranscript, type Transcript } from "./transcript"
 export interface AgentHarnessShape {
   /**
    * Starts the harness for a run that is already persisted as `running` (see Core.sendMessage).
-   * On spawn failure the run is aborted before the error is returned. `user` is the signed-in user
+   * With a free slot (CLOUDAGENTS_MAX_CONCURRENT_RUNS) the run starts at once and, on spawn failure, is aborted before the
+   * error is returned. Otherwise it waits for a slot in the background, where a failure aborts it (logged). `user` is the signed-in user
    * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
    * `resumeSession` is the agent session this run continues, or null for a fresh run.
    * `choice` is the model/effort the user picked for this message; omitted fields use the harness default.
@@ -114,7 +115,25 @@ type RunConversation =
 interface RunSession {
   readonly seed: ContextUsage | null
   readonly conversation: RunConversation | null
+  /** The queue item the run showed while it waited for a slot; it seeds the run's items. Null when it got one at once. */
+  readonly queued: AgentItem | null
 }
+
+/** A run's slot: `queued` is the queue item it showed while it waited, null when it got a slot at once. */
+interface Admission {
+  readonly queued: AgentItem | null
+}
+
+/** The item a run shows while it waits for a run slot, and once it has one. */
+const queueItem = (status: "running" | "ok" | "error", output: string): AgentItem => ({
+  _tag: "tool",
+  id: "queue",
+  parentToolId: null,
+  name: "queue",
+  input: null,
+  status,
+  output,
+})
 
 /** How to start a run's child process; real agent launches and replays differ only here. */
 interface ProcessSpec {
@@ -161,7 +180,7 @@ export const AgentHarnessLive = Layer.effect(
     if (settings.systemd) {
       yield* initBox(settings.systemd)
       yield* Effect.logInfo(
-        `agent sandboxes run in systemd slice ${settings.systemd.boxSlice}.slice, per task: MemoryMax=${settings.systemd.limits.memoryMax} CPUQuota=${settings.systemd.limits.cpuQuota} TasksMax=${settings.systemd.limits.tasksMax}`,
+        `agent sandboxes run in systemd slice ${settings.systemd.boxSlice}.slice (${settings.systemd.provisioning} provisioning); per task ${JSON.stringify(settings.systemd.limits)}; per box ${JSON.stringify(settings.systemd.box)}`,
       )
     }
     const runtime = yield* Effect.runtime<never>()
@@ -169,6 +188,46 @@ export const AgentHarnessLive = Layer.effect(
     const active = new Map<string, ActiveRun>()
 
     const publish = hub.publish
+
+    /** Runs holding a run slot (`CLOUDAGENTS_MAX_CONCURRENT_RUNS`); a replay holds none. */
+    const holding = new Set<string>()
+    /** Runs waiting for a slot, first come first served; `grant` ends the wait (false: stopped while waiting). */
+    const waiting: Array<{ readonly runId: string; readonly grant: (granted: boolean) => void }> = []
+    /** The queue item each waiting run shows, with its task for publishing. */
+    const queuedItems = new Map<string, { readonly taskId: string; readonly item: AgentItem }>()
+
+    /** Frees a run's slot and hands it to the run that has waited longest. No-op for a run that holds no slot. */
+    const releaseSlot = (runId: string) => {
+      if (!holding.delete(runId)) return
+      const next = waiting.shift()
+      if (next === undefined) return
+      holding.add(next.runId)
+      next.grant(true)
+    }
+
+    /**
+     * Takes a run slot, or waits for one behind the runs already waiting (the run shows a queue item meanwhile).
+     * Null when the run was stopped while it waited.
+     */
+    const admit = (taskId: string, runId: string): Effect.Effect<Admission | null> =>
+      Effect.suspend(() => {
+        const limit = config.maxConcurrentRuns
+        if (limit === 0 || holding.size < limit) {
+          holding.add(runId)
+          return Effect.succeed<Admission | null>({ queued: null })
+        }
+        const waitingItem = queueItem("running", `Waiting for a free run slot; ${waiting.length} ahead of it.`)
+        queuedItems.set(runId, { taskId, item: waitingItem })
+        publish({ _tag: "agent.item", taskId, runId, item: waitingItem })
+        return Effect.promise(() => new Promise<boolean>((grant) => waiting.push({ runId, grant }))).pipe(
+          Effect.map((granted): Admission | null => {
+            queuedItems.delete(runId)
+            const item = granted ? queueItem("ok", "Started.") : queueItem("error", "Cancelled before it started.")
+            publish({ _tag: "agent.item", taskId, runId, item })
+            return granted ? { queued: item } : null
+          }),
+        )
+      })
 
     /** Applies `f` to a run and its task inside one state update; publishes what changed. */
     const patchRunAndTask = (
@@ -232,6 +291,7 @@ export const AgentHarnessLive = Layer.effect(
 
     const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
       Effect.gen(function* () {
+        releaseSlot(runId)
         // The run's broker token dies with the run, whatever the outcome.
         yield* broker.revoke(runId)
         const entry = active.get(runId)
@@ -311,6 +371,9 @@ export const AgentHarnessLive = Layer.effect(
     const stopRun = (runId: string, shutdown: boolean): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
         yield* broker.revoke(runId)
+        // A run still waiting for a slot never started: it leaves the line.
+        const waitIndex = waiting.findIndex((w) => w.runId === runId)
+        if (waitIndex >= 0) waiting.splice(waitIndex, 1)[0]?.grant(false)
         const entry = active.get(runId)
         if (entry) {
           // An interrupted turn ends on its own and closes the process; anything else is signalled now.
@@ -404,7 +467,7 @@ export const AgentHarnessLive = Layer.effect(
               taskId: task.id,
               stdoutLines: [],
               stderrLines: [],
-              items: new Map(),
+              items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
               heldTimer: null,
@@ -467,6 +530,8 @@ export const AgentHarnessLive = Layer.effect(
 
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {
+        const waitingItem = queuedItems.get(runId)
+        if (waitingItem) return [waitingItem.item]
         const entry = active.get(runId)
         if (entry) return [...entry.items.values()]
         const file = join(config.runsDir, runId, "items.json")
@@ -489,8 +554,8 @@ export const AgentHarnessLive = Layer.effect(
       })
 
     const shape: AgentHarnessShape = {
-      spawn: (task, run, prompt, display, user, resumeSession, choice) =>
-        Effect.gen(function* () {
+      spawn: (task, run, prompt, display, user, resumeSession, choice) => {
+        const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
           const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
@@ -521,7 +586,7 @@ export const AgentHarnessLive = Layer.effect(
               provider: login.provider,
               host: login.dir,
               // Sandboxed runs see the login under their home; unsandboxed runs read it in place.
-              inside: settings.enabled ? join(SANDBOX_HOME, ".kestrel", basename(login.dir)) : login.dir,
+              inside: settings.level === "off" ? login.dir : join(SANDBOX_HOME, ".kestrel", basename(login.dir)),
             }))
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
@@ -564,6 +629,7 @@ export const AgentHarnessLive = Layer.effect(
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
               {
                 seed: resumeSession === null ? null : (task.context ?? null),
+                queued: admission.queued,
                 conversation:
                   provider === "openai"
                     ? {
@@ -587,7 +653,27 @@ export const AgentHarnessLive = Layer.effect(
             yield* shape.abort(run.id, started.left.message)
             return yield* Effect.fail(started.left)
           }
-        }),
+        })
+        // With a slot free the run starts now and a launch failure reaches the caller, as it always did. Otherwise it
+        // waits for a slot in the background; a failure then can only abort the run (and is logged).
+        if (config.maxConcurrentRuns === 0 || holding.size < config.maxConcurrentRuns) {
+          return admit(task.id, run.id).pipe(Effect.flatMap((admission) => (admission === null ? Effect.void : launch(admission))))
+        }
+        return Effect.asVoid(
+          Effect.forkDaemon(
+            Effect.gen(function* () {
+              const admission = yield* admit(task.id, run.id)
+              if (admission === null) return
+              // Stopped after it got its slot but before it started: give the slot back.
+              if ((yield* store.read).runs.find((r) => r.id === run.id)?.status !== "running") {
+                releaseSlot(run.id)
+                return
+              }
+              yield* launch(admission)
+            }).pipe(Effect.catchAll((e) => Effect.logError(`run ${run.id} could not start: ${e.message}`))),
+          ),
+        )
+      },
 
       replay: (task, run, fixturePath) =>
         Effect.gen(function* () {
@@ -606,7 +692,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, conversation: null },
+            { seed: null, conversation: null, queued: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
@@ -621,6 +707,7 @@ export const AgentHarnessLive = Layer.effect(
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
+          releaseSlot(runId)
           yield* broker.revoke(runId)
           const now = nowIso()
           const outcome = yield* store.update((s) => {
@@ -653,7 +740,7 @@ export const AgentHarnessLive = Layer.effect(
       items: readItems,
 
       stopAll: () =>
-        Effect.forEach([...active.keys()], (runId) => stopRun(runId, true).pipe(Effect.ignore), {
+        Effect.forEach([...active.keys(), ...waiting.map((w) => w.runId)], (runId) => stopRun(runId, true).pipe(Effect.ignore), {
           discard: true,
         }),
     }

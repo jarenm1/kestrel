@@ -18,6 +18,15 @@ export const SANDBOX_HOME = "/home/agent"
 /** Under the task home: executables of the task's installed toolkits (`toolkits.ts`), last on every launch's PATH. */
 export const TOOLKIT_BIN = ".kestrel/bin"
 
+/**
+ * How tightly agent processes are isolated (`CLOUDAGENTS_SANDBOX`):
+ * - `strict`: bubblewrap over the nix store, in the task's own network and IPC namespaces (pasta).
+ * - `basic`: bubblewrap over the host's system directories, sharing the host's network and IPC. The task home and the
+ *   workspace are the only writable paths; the real $HOME is absent.
+ * - `off`: no sandbox; commands run under `sh -c`.
+ */
+export type SandboxLevel = "strict" | "basic" | "off"
+
 /** Host paths exposed read-only when present; enough for DNS, TLS and passwd lookups. */
 const SYSTEM_RO_FILES = [
   "/etc/resolv.conf",
@@ -35,6 +44,23 @@ const SYSTEM_RO_FILES = [
  */
 const CA_BUNDLE_PATHS = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs/ca-bundle.crt"]
 
+/**
+ * Host dirs `basic` binds read-only: the system, its configuration and the nix store. Missing ones are skipped; the
+ * rest of the host is absent inside the sandbox.
+ */
+const BASIC_RO_PATHS = [
+  "/usr",
+  "/bin",
+  "/sbin",
+  "/lib",
+  "/lib64",
+  "/etc",
+  "/opt",
+  "/nix",
+  "/run/current-system",
+  "/run/systemd/resolve",
+]
+
 /** A host dir bound read-write at a path inside the sandbox. */
 export interface SandboxBind {
   readonly host: string
@@ -42,6 +68,8 @@ export interface SandboxBind {
 }
 
 export interface BwrapOptions {
+  /** `strict`: the nix store and the DNS/TLS files, in the task's namespaces. `basic`: the host's system directories. */
+  readonly level: "strict" | "basic"
   /** The thread workspace: the agent's working directory, bound read-write. Absolute. */
   readonly workspacePath: string
   /** The owner's mirror directory, bound read-only: checkouts read their git objects from it. Absolute. */
@@ -61,14 +89,18 @@ export interface BwrapOptions {
   readonly caBundle?: string | null
 }
 
-/** Returns the full argv, starting with the `bwrap` executable name. */
+/**
+ * Returns the full argv, starting with the `bwrap` executable name. `strict` binds the nix store and runs in the task's
+ * network and IPC namespaces (joined by the launch, see netns.ts); `basic` binds the host's system directories and
+ * shares the host's network and IPC.
+ */
 export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   const argv: string[] = [
     "bwrap",
     "--die-with-parent",
     "--new-session",
-    // Every namespace bwrap's --unshare-all would make except network and IPC: both are the task's own, which the
-    // launch joins before bwrap (see netns.ts). The shared IPC namespace lets X clients use MIT-SHM with the desktop.
+    // Strict's network and IPC namespaces are the task's own, which the launch joins before bwrap (see netns.ts);
+    // basic unshares neither. The IPC namespace is shared with the desktop, so X clients can use MIT-SHM.
     "--unshare-user-try",
     "--unshare-pid",
     "--unshare-uts",
@@ -79,9 +111,9 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "--gid",
     String(process.getgid?.() ?? 0),
     "--clearenv",
-    "--ro-bind",
-    "/nix/store",
-    "/nix/store",
+    ...(opts.level === "strict"
+      ? ["--ro-bind", "/nix/store", "/nix/store"]
+      : BASIC_RO_PATHS.flatMap((path) => ["--ro-bind-try", path, path])),
     "--proc",
     "/proc",
     "--dev",
@@ -103,9 +135,12 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   ]
   for (const bind of opts.binds ?? []) argv.push("--bind", bind.host, bind.sandbox)
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
-  for (const file of SYSTEM_RO_FILES) {
-    if (file === "/etc/ssl" && opts.caBundle) continue
-    if (existsSync(file)) argv.push("--ro-bind", file, file)
+  // Basic binds all of /etc, which holds these files.
+  if (opts.level === "strict") {
+    for (const file of SYSTEM_RO_FILES) {
+      if (file === "/etc/ssl" && opts.caBundle) continue
+      if (existsSync(file)) argv.push("--ro-bind", file, file)
+    }
   }
   if (opts.caBundle) for (const path of CA_BUNDLE_PATHS) argv.push("--ro-bind", opts.caBundle, path)
   if (opts.display !== undefined) {
@@ -197,9 +232,9 @@ export const displayNumber = (display: string | null): number | undefined => {
 }
 
 export interface SandboxSettings {
-  /** False only with `CLOUDAGENTS_SANDBOX=0` (local debugging). */
-  readonly enabled: boolean
-  /** `CLOUDAGENTS_SANDBOX_PATH`; required when enabled. */
+  /** How launches are isolated; `strict` needs `binPath`. */
+  readonly level: SandboxLevel
+  /** `CLOUDAGENTS_SANDBOX_PATH`; required for `strict`. */
   readonly binPath: string | null
   /** `CLOUDAGENTS_SANDBOX_SSL`: CA bundle path, exposed as SSL_CERT_FILE. */
   readonly sslCertFile: string | null
@@ -240,18 +275,19 @@ export interface Launch {
 
 /** HOME as seen by the launched process; use it to build paths the process reads. */
 export const agentHome = (settings: SandboxSettings, homeDir: string): string =>
-  settings.enabled ? SANDBOX_HOME : homeDir
+  settings.level === "off" ? homeDir : SANDBOX_HOME
 
 export const sandboxSettingsOf = (config: {
-  readonly sandboxEnabled: boolean
+  readonly sandbox: SandboxLevel
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
   readonly systemd: SystemdSettings | null
   readonly port: number
 }): SandboxSettings => ({
-  enabled: config.sandboxEnabled,
+  level: config.sandbox,
   binPath: config.sandboxPath,
-  sslCertFile: config.sandboxSslCertFile,
+  // The CA bundle belongs to the Nix toolchain; `basic` uses the host's own /etc/ssl and `off` the host as is.
+  sslCertFile: config.sandbox === "strict" ? config.sandboxSslCertFile : null,
   systemd: config.systemd,
   boxPort: config.port,
 })
@@ -278,7 +314,7 @@ const requireSystemdRun = (settings: SandboxSettings): Effect.Effect<string | nu
     : Effect.succeed(systemdRun)
 }
 
-/** Holder pid of the task's namespaces (started on first use) and the nsenter that joins them. Sandbox enabled only. */
+/** Holder pid of the task's namespaces (started on first use) and the nsenter that joins them. Strict only. */
 const taskNamespaces = (
   settings: SandboxSettings,
   taskId: string,
@@ -351,7 +387,7 @@ export const taskPreviewFetch = (
     const env = { PATH: process.env.PATH ?? "", KESTREL_PREVIEW_REQUEST: serialized }
     let file = process.execPath
     let args = ["-e", PREVIEW_FETCH_SCRIPT]
-    if (settings.enabled) {
+    if (settings.level === "strict") {
       const systemdRun = yield* requireSystemdRun(settings)
       if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
       const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
@@ -463,7 +499,7 @@ export const openTaskPreviewSocket = (
   Effect.gen(function* () {
     let file = process.execPath
     let args = ["-e", PREVIEW_WEBSOCKET_SCRIPT]
-    if (settings.enabled) {
+    if (settings.level === "strict") {
       const systemdRun = yield* requireSystemdRun(settings)
       if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
       const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
@@ -534,14 +570,14 @@ export const openTaskPreviewSocket = (
 /**
  * The task's IPC namespace, for the task desktop's X server and the box's MIT-SHM clients of it (capture,
  * screenshots): a process in it now, and the argv prefix that joins a process's IPC namespace. Starts the task's
- * namespaces if needed. Null without the sandbox, where everything shares the host's.
+ * namespaces if needed. Null unless strict: the other levels share the host's IPC.
  */
 export const desktopNamespace = (
   settings: SandboxSettings,
   taskId: string,
 ): Effect.Effect<{ readonly holder: number; readonly join: (pid: number) => string[] } | null, InternalError> =>
   Effect.gen(function* () {
-    if (!settings.enabled) return null
+    if (settings.level !== "strict") return null
     const systemdRun = yield* requireSystemdRun(settings)
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
     const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
@@ -549,25 +585,26 @@ export const desktopNamespace = (
   })
 
 /**
- * Turns a launch request into the concrete process to spawn. Sandboxed launches join the task's
- * network and IPC namespaces (`nsenter`, started on first use) and run in bubblewrap; the env inside is
- * exactly the base allowlist plus `req.env`. With systemd limits on, the process starts through
- * `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned
- * pid is still the sandbox's and process-group signals reach it.
+ * Turns a launch request into the concrete process to spawn. `strict` joins the task's network and IPC namespaces
+ * (`nsenter`, started on first use) and runs in bubblewrap over the nix store; `basic` runs in bubblewrap over the
+ * host's system directories, sharing the host's network and IPC; `off` runs `sh -c`. The env inside is exactly the
+ * base allowlist plus `req.env` (`off` adds the platform env). With systemd limits on, the process starts through
+ * `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned pid is still the
+ * sandbox's and process-group signals reach it.
  */
 export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, InternalError> =>
   Effect.gen(function* () {
     const { settings } = req
-    if (settings.enabled && settings.binPath === null) {
+    if (settings.level === "strict" && settings.binPath === null) {
       return yield* Effect.fail(
         new InternalError({
           message:
-            "CLOUDAGENTS_SANDBOX_PATH is not set; start the box with `nix run .#box` or inside `nix develop` (or set CLOUDAGENTS_SANDBOX=0 for local debugging)",
+            "CLOUDAGENTS_SANDBOX_PATH is not set; start the box with `nix run .#box` or inside `nix develop` (or set CLOUDAGENTS_SANDBOX=off for local debugging)",
         }),
       )
     }
-    const bwrap = settings.enabled ? findExecutable("bwrap") : null
-    if (settings.enabled && bwrap === null) {
+    const bwrap = settings.level === "off" ? null : findExecutable("bwrap")
+    if (settings.level !== "off" && bwrap === null) {
       return yield* Effect.fail(
         new InternalError({ message: "bwrap (bubblewrap) not found on PATH; run inside `nix develop` or `nix run .#box`" }),
       )
@@ -584,11 +621,15 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       { discard: true },
     )
     const home = agentHome(settings, req.homeDir)
+    const hostPath = process.env.PATH ?? "/usr/bin:/bin"
     const env: Record<string, string> = {
-      ...(settings.enabled ? {} : platformEnv()),
-      PATH: settings.enabled
-        ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
-        : `${process.env.PATH ?? "/usr/bin:/bin"}:${join(req.homeDir, TOOLKIT_BIN)}`,
+      ...(settings.level === "off" ? platformEnv() : {}),
+      PATH:
+        settings.level === "strict"
+          ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
+          : settings.level === "basic"
+            ? `${hostPath}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
+            : `${hostPath}:${join(req.homeDir, TOOLKIT_BIN)}`,
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
       ...(settings.sslCertFile
@@ -598,26 +639,32 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       ...req.env,
     }
 
-    const inner: { file: string; args: string[] } = settings.enabled
-      ? yield* Effect.map(
-          taskNamespaces(settings, req.taskId, systemdRun),
-          ({ holder, nsenter }) => {
-            const [file, ...args] = joinTaskNet(nsenter, holder)
-            const bwrapArgs = buildBwrapArgv({
-              workspacePath: req.workspacePath,
-              mirrorDir: req.mirrorDir,
-              homeDir: req.homeDir,
-              display: displayNumber(req.display),
-              env,
-              command: req.command,
-              roBinds: req.roBinds,
-              binds: req.binds,
-              caBundle: settings.sslCertFile,
-            }).slice(1)
-            return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs] }
-          },
-        )
-      : { file: shell(), args: ["-c", req.command] }
+    const bwrapArgs = (level: "strict" | "basic"): string[] =>
+      buildBwrapArgv({
+        level,
+        workspacePath: req.workspacePath,
+        mirrorDir: req.mirrorDir,
+        homeDir: req.homeDir,
+        display: displayNumber(req.display),
+        env,
+        command: req.command,
+        roBinds: req.roBinds,
+        binds: req.binds,
+        caBundle: settings.sslCertFile,
+      }).slice(1)
+
+    const inner: { file: string; args: string[] } =
+      settings.level === "off"
+        ? { file: shell(), args: ["-c", req.command] }
+        : settings.level === "basic"
+          ? { file: bwrap as string, args: bwrapArgs("basic") }
+          : yield* Effect.map(
+              taskNamespaces(settings, req.taskId, systemdRun),
+              ({ holder, nsenter }) => {
+                const [file, ...args] = joinTaskNet(nsenter, holder)
+                return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs("strict")] }
+              },
+            )
 
     if (settings.systemd === null) return { ...inner, env, cwd: req.workspacePath, home }
 
