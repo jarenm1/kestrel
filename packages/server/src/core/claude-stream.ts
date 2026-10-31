@@ -41,12 +41,14 @@ export const makeClaudeDriver = (prompt: string, io: ClaudeDriverIo): RunDriver 
         return
       }
       if (message.type !== "result") return
-      // A later result (a message queued behind the first turn) decides the run's outcome.
-      outcome =
+      // A later result (a message queued behind the first turn) decides the run's outcome. The first
+      // result is not success for the whole run while Claude still reports queued work.
+      const result: RunOutcome =
         message.is_error !== true ? { status: "completed" } : interrupted ? { status: "interrupted" } : { status: "failed", error: null }
+      outcome = typeof message.queued_turn_count === "number" && message.queued_turn_count > 0 ? null : result
       if (!open) return
       open = false
-      io.onDone(outcome)
+      io.onDone(result)
     },
     steer: (text) => {
       if (!open) return Promise.resolve(false)

@@ -42,13 +42,14 @@ describe("codex app-server driver", () => {
       params: { approvalPolicy: "never", sandbox: "danger-full-access", model: "gpt-6-luna" },
     })
     h.reply({ thread: { id: "th1" }, model: "gpt-6-luna" })
-    expect(h.threads).toEqual(["th1"])
+    expect(h.threads).toEqual([])
     expect(h.last()).toEqual({
       method: "turn/start",
       id: expect.any(Number),
       params: { threadId: "th1", input: [{ type: "text", text: "user context\n\nfix the test", text_elements: [] }], effort: "high" },
     })
     h.reply({ turn: { id: "tu1", status: "inProgress" } })
+    expect(h.threads).toEqual(["th1"])
     expect(h.outcomes).toEqual([])
     h.driver.receive(turnCompleted("tu1", "completed"))
     expect(h.outcomes).toEqual([{ status: "completed" }])
@@ -67,6 +68,16 @@ describe("codex app-server driver", () => {
     expect(h.methods()).not.toContain("turn/start")
   })
 
+  test("a resumed thread is its run's session before the turn, so a refused turn keeps it", () => {
+    const h = harness({ resumeThread: "th-old" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ thread: { id: "th-old" } })
+    expect(h.threads).toEqual(["th-old"])
+    h.driver.receive({ id: h.last().id, error: { code: -32600, message: "thread busy" } })
+    expect(h.outcomes).toEqual([{ status: "failed", error: "turn/start: thread busy" }])
+  })
+
   test("/review runs a review with the given instructions and ends with its own turn, not the review's inner turns", () => {
     const h = harness({ text: "/review check the error handling", resumeThread: "th1" })
     h.driver.start()
@@ -80,6 +91,42 @@ describe("codex app-server driver", () => {
     h.driver.receive({ method: "turn/started", params: { threadId: "th1", turn: { id: "tu-inner" } } })
     h.driver.receive(turnCompleted("tu-inner", "completed"))
     expect(h.outcomes).toEqual([])
+    h.driver.receive(turnCompleted("tu-review", "completed"))
+    expect(h.outcomes).toEqual([{ status: "completed" }])
+  })
+
+  test("Stop during a review interrupts the reviewer's own turn", async () => {
+    const h = harness({ text: "/review", resumeThread: "th1" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ thread: { id: "th1" } })
+    expect(h.last()).toMatchObject({ method: "review/start" })
+    h.reply({ turn: { id: "tu-review" }, reviewThreadId: "th1" })
+    // The review turn exists but nothing runs until the reviewer's own turn starts.
+    expect(h.driver.interrupt()).toBe(false)
+    h.driver.receive({ method: "turn/started", params: { threadId: "th1", turn: { id: "tu-inner" } } })
+    // App-server refuses to steer a review turn, but the request still names the review's turn.
+    const accepted = h.driver.steer("check the tests")
+    expect(h.last()).toMatchObject({ method: "turn/steer", params: { expectedTurnId: "tu-review" } })
+    h.driver.receive({ id: h.last().id, error: { message: "cannot steer a review turn" } })
+    expect(await accepted).toBe(false)
+    expect(h.driver.interrupt()).toBe(true)
+    expect(h.last()).toMatchObject({ method: "turn/interrupt", params: { threadId: "th1", turnId: "tu-inner" } })
+    h.driver.receive(turnCompleted("tu-review", "interrupted"))
+    expect(h.outcomes).toEqual([{ status: "interrupted" }])
+  })
+
+  test("a reviewer turn that starts and ends before the review's response does not end the run", () => {
+    const h = harness({ text: "/review", resumeThread: "th1" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ thread: { id: "th1" } })
+    expect(h.threads).toEqual(["th1"])
+    h.driver.receive({ method: "turn/started", params: { threadId: "th1", turn: { id: "tu-inner" } } })
+    h.driver.receive(turnCompleted("tu-inner", "completed"))
+    expect(h.outcomes).toEqual([])
+    h.reply({ turn: { id: "tu-review" }, reviewThreadId: "th1" })
+    expect(h.threads).toEqual(["th1"])
     h.driver.receive(turnCompleted("tu-review", "completed"))
     expect(h.outcomes).toEqual([{ status: "completed" }])
   })
@@ -158,5 +205,16 @@ describe("codex app-server driver", () => {
     h.driver.close()
     expect(await pending).toBe(false)
     expect(h.outcomes).toEqual([{ status: "failed", error: "Codex exited before its turn finished." }])
+  })
+
+  test("an exit before the turn starts records no thread, which could not be resumed", () => {
+    const h = harness()
+    h.driver.start()
+    h.reply({})
+    h.reply({ thread: { id: "th1" } })
+    expect(h.last()).toMatchObject({ method: "turn/start" })
+    h.driver.close()
+    expect(h.threads).toEqual([])
+    expect(h.outcomes).toEqual([{ status: "failed", error: "turn/start: Codex exited" }])
   })
 })

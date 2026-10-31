@@ -37,6 +37,22 @@ describe("claude stream-json driver", () => {
     expect(h.driver.outcome()).toEqual({ status: "failed", error: null })
   })
 
+  test("queued work must finish before the run succeeds; an exit before its result fails", () => {
+    const h = harness()
+    h.driver.start()
+    h.driver.receive({ ...result(), queued_turn_count: 1 })
+    expect(h.driver.outcome()).toBeNull()
+    h.driver.close()
+    expect(h.driver.outcome()).toEqual({ status: "failed", error: "Claude Code exited before its turn finished." })
+
+    const finished = harness()
+    finished.driver.start()
+    finished.driver.receive({ ...result(), queued_turn_count: 1 })
+    finished.driver.receive({ ...result(), queued_turn_count: 0 })
+    finished.driver.close()
+    expect(finished.driver.outcome()).toEqual({ status: "completed" })
+  })
+
   test("Stop interrupts the turn and drops queued messages; the error result that follows is an interrupt", () => {
     const h = harness()
     h.driver.start()

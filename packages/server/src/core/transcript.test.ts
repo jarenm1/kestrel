@@ -386,6 +386,26 @@ describe("codex app-server", () => {
     ])
   })
 
+  test("a failed turn with no error message still reports one", () => {
+    const transcript = makeTranscript()
+    expect(valid(transcript.push(turnCompleted("failed")))).toEqual([
+      { _tag: "error", id: expect.any(String), text: "codex turn failed" },
+      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+    ])
+  })
+
+  test("a turn does not repeat the error notification before it, and a later turn reports the same failure again", () => {
+    const transcript = makeTranscript()
+    transcript.push(note("error", { ...T, error: { message: "usage limit reached" }, willRetry: false }))
+    expect(valid(transcript.push(turnCompleted("failed", { error: { message: "usage limit reached" } })))).toEqual([
+      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+    ])
+    expect(valid(transcript.push(turnCompleted("failed", { id: "tu2", error: { message: "usage limit reached" } })))).toEqual([
+      { _tag: "error", id: expect.any(String), text: "usage limit reached" },
+      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+    ])
+  })
+
   test("the turn's plan is a todo list that stops running when the turn ends", () => {
     const transcript = makeTranscript()
     const plan = (second: string) =>

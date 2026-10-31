@@ -106,8 +106,8 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
   const codexTurnTokens = new Map<string, { readonly baseInput: number; readonly baseOutput: number; input: number; output: number }>()
   /** The turn's plan (`turn/plan/updated`), shown as a todo list until the turn ends. */
   const codexPlans = new Map<string, AgentItem & { _tag: "tool" }>()
-  /** Text of the last top-level Codex error, so the failed turn that follows does not repeat it. */
-  let codexLastError: string | null = null
+  /** Last top-level Codex error and its turn, so only that turn's end does not repeat it. */
+  let codexLastError: { readonly turnId: string | null; readonly text: string } | null = null
   /** Claude session model (from `init`), its context window, and the main agent's latest prompt + reply size. */
   let model: string | null = null
   let windowTokens: number | null = null
@@ -437,7 +437,12 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     codexRunning.clear()
     const failed = turn.status === "failed"
     const error = isRecord(turn.error) ? asString(turn.error.message) : null
-    if (failed && error !== codexLastError) items.push({ _tag: "error", id: nextId(), text: error ?? "codex turn failed" })
+    // The notification that precedes a turn's end is that turn's error; a turn of its own still reports it.
+    const last = codexLastError
+    const belongsHere = last !== null && (last.turnId === null || last.turnId === turnId)
+    const reported = failed && last !== null && belongsHere && (error === null || error === last.text)
+    if (belongsHere) codexLastError = null
+    if (failed && !reported) items.push({ _tag: "error", id: nextId(), text: error ?? "codex turn failed" })
     items.push({
       _tag: "turn",
       id: nextId(),
@@ -557,7 +562,7 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
         // A retried error is not the turn's outcome.
         if (params.willRetry === true) return []
         const text = isRecord(params.error) ? (asString(params.error.message) ?? "codex error") : "codex error"
-        codexLastError = text
+        codexLastError = { turnId: asString(params.turnId), text }
         return [{ _tag: "error", id: nextId(), text }]
       }
       case "turn/completed":
