@@ -747,10 +747,14 @@ export const AgentHarnessLive = Layer.effect(
 
       items: readItems,
 
+      // Running, waiting for a slot, or holding one while still being launched (cancelled here, the launch gives up
+      // before it starts the agent).
       stopAll: () =>
-        Effect.forEach([...active.keys(), ...waiting.map((w) => w.runId)], (runId) => stopRun(runId, true).pipe(Effect.ignore), {
-          discard: true,
-        }),
+        Effect.forEach(
+          new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]),
+          (runId) => stopRun(runId, true).pipe(Effect.ignore),
+          { discard: true },
+        ),
     }
     return shape
   }),
