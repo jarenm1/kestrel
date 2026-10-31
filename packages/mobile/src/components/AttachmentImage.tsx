@@ -5,7 +5,7 @@ import type { FileSource } from "@/api/client";
 import { useApiClient } from "@/hooks/useApiClient";
 
 /**
- * A task attachment, contained in its frame. The source resolves asynchronously (the user's own box needs a minted token),
+ * A task attachment, contained in its frame. The source resolves asynchronously (the box needs a minted token),
  * so the frame stays empty until it resolves.
  */
 export function AttachmentImage({

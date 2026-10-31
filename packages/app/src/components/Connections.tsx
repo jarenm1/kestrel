@@ -31,7 +31,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { errorText } from "@/util"
 
@@ -44,11 +43,9 @@ const CLI_POLL_MS = 3000
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
-  const activeBoxId = useActiveBoxId()
-  // With a user box active, the CLI sign-ins live on that box, so its login state replaces the relay's view of them.
-  const direct = typeof activeBoxId === "string"
-  const cliAuth = useQuery({ ...queries.cliAuth(), enabled: direct })
-  const list = connections.data && (direct ? withBoxCli(connections.data, cliAuth.data) : connections.data)
+  // The CLI sign-ins live on the active box, so its login state is the view of them.
+  const cliAuth = useQuery(queries.cliAuth())
+  const list = connections.data && withBoxCli(connections.data, cliAuth.data)
 
   return (
     <>
@@ -75,7 +72,7 @@ export function Connections() {
 
 /**
  * Direct mode: the CLI rows take login state and availability from the user's box, where the CLI actually runs.
- * Labels and the provider list still come from the relay. Until the box answers, the CLI rows read as unavailable.
+ * Labels and the provider list still come from the control plane. Until the box answers, the CLI rows read as unavailable.
  */
 function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAuthStatus[] | undefined): Connection[] {
   return connections.map((connection) => {
@@ -228,7 +225,7 @@ function ConnectionHeader({ label, connected, account }: { label: string; connec
   )
 }
 
-/** Re-reads the relay's connections and the box's CLI sign-ins, which the CLI rows show together. */
+/** Re-reads the control plane's connections and the box's CLI sign-ins, which the CLI rows show together. */
 function invalidateConnections(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: keys.connections })
   void queryClient.invalidateQueries({ queryKey: keys.cliAuth })

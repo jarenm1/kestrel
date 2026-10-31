@@ -7,5 +7,3 @@ export const SERVER_URL: string = (import.meta.env.VITE_CLOUDAGENTS_SERVER || wi
   "",
 )
 
-/** WebSocket base URL derived from SERVER_URL (http -> ws, https -> wss). */
-export const WS_URL: string = SERVER_URL.replace(/^http/, "ws")

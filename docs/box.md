@@ -58,7 +58,7 @@ The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpape
 
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
-The desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
+Desktop media now goes straight to the box over WebSocket, never through a Durable Object. The encoder writes one fragment per frame, so continuous motion at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) reduces message overhead at the cost of latency, not DO request charges:
 
 - The first frame after a quiet window goes out at once, so a keystroke or a click on an otherwise still desktop has no added latency.
 - Frames that come while one is held are concatenated into one message, sent when the window is up. A keyframe starts a new message; init segments are never bundled; a message is cut at 1 MiB.
@@ -111,6 +111,103 @@ The storage limit is not a filesystem quota (the box runs unprivileged). The box
 
 ## Production box
 
-The production box runs on the host machine with `nix run .#box-auto`. It keeps its own clone of `main` in `~/.local/share/kestrel-box` (override with `KESTREL_BOX_DIR`), polls GitHub every 60 s (`KESTREL_BOX_POLL`), and on a new commit fast-forwards and restarts the box, which interrupts in-flight agent runs. It reads `CLOUDAGENTS_CONTROL_URL` and `CLOUDAGENTS_BOX_TOKEN` from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
+Managed-box data no longer passes through the Hub. Accounts, settings, signing grants and automation coordination
+remain in Cloudflare; REST, uploads, attachments, events, stats, desktop and previews use a separate public HTTPS/WSS
+origin. Missing URL/signing configuration advertises no managed box and returns 503 on grant mint; there is no relay
+fallback. `/box/connect`, Worker box API routes and Worker preview paths return 404.
 
-Don't run a box against production with the production token from your machine: the control plane keeps one box and a new connection replaces the live one.
+### Required deployment configuration
+
+Do not merge the transport cutover until the ingress and keys below are staged. Merging deploys the Worker and
+restarts the box; coordinate a maintenance window, updated mobile clients and a browser reload. Existing preview
+tokens from the Hub are discarded; clients mint box-local replacements.
+
+| Location | Setting | Value |
+|---|---|---|
+| Worker variable | `MANAGED_BOX_URL` | Public origin only, HTTPS with no trailing slash |
+| Worker secret | `MANAGED_BOX_SIGNING_KEY` | Private P-256 JWK JSON |
+| Worker secret | `BOX_TOKEN` | Managed service credential, matching the box |
+| Box service environment | `CLOUDAGENTS_CONTROL_URL` | Control-plane HTTPS origin |
+| Box service environment | `CLOUDAGENTS_BOX_TOKEN` | The same managed service credential |
+| Box service environment | `CLOUDAGENTS_BOX_PUBLIC_KEY` | Matching **public** P-256 JWK JSON |
+| Box service environment | `CLOUDAGENTS_HOST` | `0.0.0.0` when reached over WireGuard; firewall the listener to the tunnel |
+
+Managed and BYO authentication are mutually exclusive. Do not set `CLOUDAGENTS_BOX_ID` or
+`CLOUDAGENTS_BOX_SECRET` on the managed service. A service token without a public verification key fails startup.
+Keep the production sandbox `strict`; direct transport does not weaken the sandbox or resource limits.
+
+Generate a grant-signing pair outside the repository:
+
+```sh
+bun scripts/managed-box-keys.ts "$HOME/.config/kestrel-managed"
+bunx wrangler secret put MANAGED_BOX_SIGNING_KEY --config packages/control/wrangler.jsonc \
+  < "$HOME/.config/kestrel-managed/managed-private.jwk"
+```
+
+The generator uses owner-only files, refuses overwrites, and prints no key material. Install the contents of
+`managed-public.jwk` as `CLOUDAGENTS_BOX_PUBLIC_KEY` in the box service environment; never copy the private JWK to
+the box, sandbox or browser. Preserve the existing managed service credential when staging the cutover. Signing-key
+rotation requires updating both the Worker private key and the box public key; existing grants then stop verifying.
+
+### HTTPS ingress and private tunnel
+
+The NixOS modules in `deploy/` configure a standard Caddy reverse proxy and an outbound-established WireGuard link.
+Import `deploy/managed-ingress.nix` on a public ingress host and `deploy/managed-box-tunnel.nix` on the box host.
+Enable the corresponding service and supply these required options:
+
+| Module service | Option | Meaning |
+|---|---|---|
+| `services.kestrelIngress` | `hostname` | DNS-only hostname pointing at the ingress host |
+| `services.kestrelIngress` | `privateKeyFile` | Ingress WireGuard private-key file outside the Nix store |
+| `services.kestrelIngress` | `boxPublicKey` | Box host's WireGuard public key |
+| `services.kestrelBoxTunnel` | `privateKeyFile` | Box WireGuard private-key file outside the Nix store |
+| `services.kestrelBoxTunnel` | `ingressPublicKey` | Ingress host's WireGuard public key |
+| `services.kestrelBoxTunnel` | `endpoint` | Ingress public hostname/IP and UDP port |
+
+Both services default `boxPort` to 8787; set them identically if using another port. The ingress `listenPort`
+defaults to UDP 51820. Provision WireGuard keys separately from the ES256 signing keys. The private-key files must
+already exist with owner-only permissions. The tunnel uses `10.203.0.1/32` (ingress) and `10.203.0.2/32` (box);
+check these do not conflict with an existing network before applying it.
+
+Caddy opens TCP 80/443 for certificate issuance and HTTPS/WSS. Only the ingress opens the WireGuard UDP port;
+the box dials out and keeps its NAT mapping alive. The box module permits its API port only on the tunnel interface.
+Ensure no other firewall rule exposes that port on a public/LAN interface. No dev-server, MCP or broker port should
+be public. Caddy rejects `/mcp` and `/broker` paths, discards access logs, and removes request metadata from runtime
+error logs because WebSocket/attachment query strings and preview paths contain bearer capabilities.
+
+Use a **DNS-only** hostname, not the Cloudflare CDN proxy. Public Cloudflare Tunnel routes are subject to
+[Cloudflare's video-delivery terms](https://developers.cloudflare.com/fundamentals/reference/policies-compliances/delivering-videos-with-cloudflare/);
+do not assume they are an unrestricted desktop-video relay. The ingress operator is responsible for capacity,
+bandwidth and availability. Applying the NixOS modules and provisioning public DNS/certificates are operator actions,
+not something the application performs.
+
+### Grant and credential boundaries
+
+The Worker authenticates the session and issues a 15-minute ES256 grant for `aud: "managed"`. The box verifies
+signature, audience and time locally. Each user's provider credentials are fetched on first use or a newer
+credential version, with concurrent requests sharing one fetch. The trusted `/box/credentials` endpoint requires
+the managed service credential and a known user. These secrets never appear in browser grants.
+
+Grant-authenticated sockets close with 4401 at expiry, immediately release subscriptions, and reconnect with a new
+grant. Previews use separate, task-scoped 24-hour capabilities and strip app cookies and authorization before
+proxying. Offline grants are not centrally revoked on every request: a logout/revocation may leave an already-issued
+grant usable until its expiry. Provider credential changes propagate on the next refreshed grant; restart/rotate
+the verification key for an emergency cut-off rather than relying on a per-frame control-plane lookup.
+
+### Running and checking the cutover
+
+The production box still runs with `nix run .#box-auto`. It keeps a separate clone of `main` in
+`~/.local/share/kestrel-box` (`KESTREL_BOX_DIR`), polls every 60 s (`KESTREL_BOX_POLL`), and restarts on a new
+commit, interrupting in-flight runs. Its service environment is read from `.box.env` in that clone.
+`nix run .#box` runs once from the current checkout. Do not inspect, copy or change production credentials as
+part of a development smoke test.
+
+Before enabling the cutover, verify the ingress health route, grants for two users, cross-user denial, desktop
+media/input, preview assets/HMR, an upload/download and a manual automation. After credential bootstrap, repeated
+box data operations must add no Hub requests. Control-plane sign-ins, grant renewals, settings and automations still
+use the Hub. Do not merge until the operator has confirmed the ingress and matching key configuration.
+
+Local development (`bun run dev`, or `nix run`) generates its own signing key in the worktree's `.dev.vars`, gives
+only the public key to its box, and advertises `http://localhost:<box port>`. Every worktree needs its own dev slot.
+When reviewing remotely over SSH, forward both the printed app port and box port; forwarding only the app port no
+longer carries box traffic. No production token or ingress is required for local verification.

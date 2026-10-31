@@ -1,26 +1,19 @@
 import { DurableObject } from "cloudflare:workers"
 import { Option, Schema } from "effect"
 import {
-  CREDENTIALS_HEADER,
   ControlPaths,
   Paths,
-  RELAY_CONNECT_PATH,
-  RELAY_PROTOCOL_VERSION,
   AutomationTrigger,
   BOX_TOKEN_TTL_SECONDS,
+  MANAGED_BOX_ID,
+  MANAGED_BOX_TOKEN_TTL_SECONDS,
   MAX_USER_BOXES,
   PAIRING_TTL_SECONDS,
   signBoxToken,
-  decodeBinary,
-  decodeFrame,
-  encodeBinary,
-  encodeFrame,
-  fromBase64,
-  toBase64,
+  signManagedBoxToken,
   type ApprovePairingBody,
   type Automation,
   type AutomationRun,
-  type BoxStatus,
   type BoxList,
   type BoxSelf,
   type BoxToken,
@@ -32,19 +25,18 @@ import {
   type PairingStart,
   type PairingStartBody,
   type PendingPairing,
-  type RelayCredentials,
-  type RelayFrame,
   type UpdateAutomationBody,
   type UpdateBoxBody,
   type UserBox,
 } from "@cloudagents/protocol"
-import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
+import { safeEqual } from "./http"
 import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
-import { SESSION_HEADER, type Env } from "./env"
+import type { Env } from "./env"
+import { managedBoxUrl, managedSigningKey } from "./managed"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -53,10 +45,19 @@ export type BoxOutcome<T> = { ok: true; value: T } | BoxFailure
 const UNAUTHENTICATED: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "sign in required" }
 const NO_SUCH_BOX: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such box" }
 const NO_SUCH_PAIRING: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such pairing or it expired" }
+const MANAGED_UNAVAILABLE: BoxFailure = {
+  ok: false,
+  status: 503,
+  tag: "Unavailable",
+  message: "managed box is not configured",
+}
 
 /** 32 random bytes, base64url: a box secret, or the id a pairing is polled with. */
 const newSecret = (): string =>
-  toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+  btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "")
 
 /** Pairing codes: 8 characters from 32 symbols with no 0, O, 1 or I. 32 divides 256, so each byte is unbiased. */
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -64,23 +65,16 @@ const newPairingCode = (): string =>
   Array.from(crypto.getRandomValues(new Uint8Array(8)), (byte) => PAIRING_ALPHABET.charAt(byte & 31)).join("")
 
 /**
- * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
- * outbound relay to the agent box.
+ * Singleton Durable Object (`idFromName("main")`) holding all control-plane state. Box traffic never passes through it:
+ * browsers and boxes talk to the box directly, and the managed box is reached with a short-lived grant.
  *
  * - SQLite tables: users, sessions, connections, user_boxes, oauth_states, automations, automation_runs, github_hooks,
  *   webhook_deliveries, box_pairings.
- * - The box holds one hibernatable WebSocket (tag "box"); its metadata lives in the socket attachment.
- * - Browser HTTP requests are tunnelled as `http` frames and resolved by `http-res` (30s timeout → 504).
- * - Browser WebSockets are accepted with the standard API (they pin the object in memory) and
- *   piped to the box as `ws-open` / `ws-text` / binary / `ws-close`.
  *
- * Methods are RPC-callable from the Worker; `fetch` handles `/box/connect` and `/api/*` signed in by session id.
+ * Methods are RPC-callable from the Worker.
  */
 
-const BOX_TAG = "box"
 const HTTP_TIMEOUT_MS = 30_000
-/** Close code sent to browsers when the box goes away (custom range; 1001 is not settable). */
-const BOX_GONE_CLOSE_CODE = 4001
 
 /** Recent runs kept per automation. */
 const RUNS_KEPT = 50
@@ -161,20 +155,6 @@ const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A | null =
 const boxError = (res: BoxResult): string =>
   decodeJson(BoxErrorBody, res.body)?.message ?? `agent box responded ${res.status}`
 
-/** Headers the box must never see from the browser. Hop-by-hop headers are dropped by `headersToRecord`. */
-const DROP_FOR_BOX: Record<string, true> = {
-  cookie: true,
-  authorization: true,
-  "sec-websocket-key": true,
-  "sec-websocket-version": true,
-  "sec-websocket-extensions": true,
-  "sec-websocket-protocol": true,
-  "sec-websocket-accept": true,
-}
-
-/** Status codes whose responses must not carry a body. */
-const NULL_BODY_STATUS: Record<number, true> = { 101: true, 103: true, 204: true, 205: true, 304: true }
-
 export type OAuthKind = "login" | "connect"
 
 export type UserRecord = { login: string; name: string | null; avatarUrl: string }
@@ -184,29 +164,7 @@ export type SessionRecord = { login: string; dev: boolean }
 
 export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string }
 
-type PendingHttp = { resolve: (res: Response) => void; timer: number }
-
-type BoxAttachment = { connectedAt: string; boxVersion: string | null }
-
-type HttpFrame = Extract<RelayFrame, { t: "http" }>
-
-/** Valid close code for WebSocket.close(): 1000 or 3000–4999; anything else becomes 1000. */
-const closeCode = (code: number | undefined): number =>
-  code === 1000 || (code !== undefined && code >= 3000 && code <= 4999) ? code : 1000
-
-const closeQuietly = (ws: WebSocket, code: number, reason: string): void => {
-  try {
-    ws.close(code, reason)
-  } catch {
-    // already closed
-  }
-}
-
 export class Hub extends DurableObject<Env> {
-  private readonly pending = new Map<number, PendingHttp>()
-  private readonly streams = new Map<number, WebSocket>()
-  private nextId = 1
-
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
     void ctx.blockConcurrencyWhile(async () => {
@@ -282,12 +240,7 @@ export class Hub extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       )`)
-      sql.exec(`CREATE TABLE IF NOT EXISTS preview_sessions (
-        token TEXT PRIMARY KEY,
-        login TEXT NOT NULL,
-        task_id TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`)
+      sql.exec("DROP TABLE IF EXISTS preview_sessions")
     })
   }
 
@@ -332,37 +285,6 @@ export class Hub extends DurableObject<Env> {
 
   deleteSession(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
-  }
-
-  /** Short-lived preview-only capability; the browser never receives the app session cookie. */
-  createPreviewSession(login: string, taskId: string): string {
-    const now = Date.now()
-    const token = crypto.randomUUID()
-    const sql = this.ctx.storage.sql
-    sql.exec("DELETE FROM preview_sessions WHERE expires_at <= ?", now)
-    sql.exec(
-      "INSERT INTO preview_sessions (token, login, task_id, expires_at) VALUES (?, ?, ?, ?)",
-      token,
-      login,
-      taskId,
-      now + 24 * 60 * 60 * 1000,
-    )
-    return token
-  }
-
-  /** The owner and task for a live preview token; expired tokens are not valid. */
-  previewSession(token: string): { login: string; taskId: string } | null {
-    const sql = this.ctx.storage.sql
-    const now = Date.now()
-    sql.exec("DELETE FROM preview_sessions WHERE expires_at <= ?", now)
-    const row = sql
-      .exec<{ login: string; taskId: string }>(
-        "SELECT login, task_id AS taskId FROM preview_sessions WHERE token = ? AND expires_at > ?",
-        token,
-        now,
-      )
-      .toArray()[0]
-    return row ?? null
   }
 
   // -------------------------------------------------------------------------
@@ -418,11 +340,6 @@ export class Hub extends DurableObject<Env> {
     return out
   }
 
-  /** Secrets forwarded to the box in the `x-cloudagents-credentials` header. */
-  credentials(login: string): RelayCredentials {
-    return { user: login, ...this.connectionSecrets(login) }
-  }
-
   /**
    * Version of the user's connections, `count:latest updated_at`. A box token carries it as `cv`, and `boxSelf`
    * reports it, so a box refetches its credentials once they change.
@@ -442,9 +359,9 @@ export class Hub extends DurableObject<Env> {
   // request. Failures come back as `BoxFailure` for the Worker to answer.
   // -------------------------------------------------------------------------
 
-  listBoxes(sessionId: string): BoxOutcome<BoxList> {
+  async listBoxes(sessionId: string): Promise<BoxOutcome<BoxList>> {
     const session = this.session(sessionId)
-    return session ? { ok: true, value: this.boxList(session.login) } : UNAUTHENTICATED
+    return session ? { ok: true, value: await this.boxList(session.login) } : UNAUTHENTICATED
   }
 
   createBox(sessionId: string, body: CreateBoxBody): BoxOutcome<CreatedBox> {
@@ -531,12 +448,12 @@ export class Hub extends DurableObject<Env> {
     return { ok: true, value: { token, url: owned.box.url, expiresAt: new Date(exp * 1000).toISOString() } }
   }
 
-  setActiveBox(sessionId: string, boxId: string | null): BoxOutcome<BoxList> {
+  async setActiveBox(sessionId: string, boxId: string | null): Promise<BoxOutcome<BoxList>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     if (boxId !== null && !this.ownedBox(session.login, boxId)) return NO_SUCH_BOX
     this.ctx.storage.sql.exec("UPDATE users SET active_box_id = ? WHERE login = ?", boxId, session.login)
-    return { ok: true, value: this.boxList(session.login) }
+    return { ok: true, value: await this.boxList(session.login) }
   }
 
   /** The box's owner and their connection secrets for `ControlPaths.boxSelf`; null unless `secret` is the box's. */
@@ -552,7 +469,49 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
-  private boxList(login: string): BoxList {
+  /** A fresh managed grant for the signed-in user; the browser calls the managed box directly with it. */
+  async mintManagedBoxToken(sessionId: string): Promise<BoxOutcome<BoxToken>> {
+    const session = this.session(sessionId)
+    if (!session) return UNAUTHENTICATED
+    return this.managedGrant(session.login, session.dev)
+  }
+
+  /** The trusted managed-box service's read of a user's connection secrets; null for a user the control plane does not know. */
+  managedBoxCredentials(login: string): BoxSelf | null {
+    const known = this.ctx.storage.sql.exec("SELECT login FROM users WHERE login = ?", login).toArray()[0]
+    if (!known) return null
+    return { owner: login, credentialsVersion: this.credentialsVersion(login), ...this.connectionSecrets(login) }
+  }
+
+  /**
+   * A short-lived managed grant for `login`, signed with the managed signing key. The managed box verifies it offline
+   * and fetches the user's credentials from `/box/credentials` on first use or when `cv` changes.
+   */
+  private async managedGrant(login: string, dev: boolean): Promise<BoxOutcome<BoxToken>> {
+    const url = managedBoxUrl(this.env)
+    const key = await managedSigningKey(this.env)
+    if (url === null || key === null) return MANAGED_UNAVAILABLE
+    const iat = Math.floor(Date.now() / 1000)
+    const exp = iat + MANAGED_BOX_TOKEN_TTL_SECONDS
+    let token: string
+    try {
+      token = await signManagedBoxToken(key, {
+        sub: login,
+        aud: MANAGED_BOX_ID,
+        iat,
+        exp,
+        cv: this.credentialsVersion(login),
+        ...(dev ? { dev: true } : {}),
+      })
+    } catch {
+      // The key imports but cannot sign. The error may describe key material, so it is logged generically, not echoed.
+      console.error("managed box grant could not be signed")
+      return MANAGED_UNAVAILABLE
+    }
+    return { ok: true, value: { token, url, expiresAt: new Date(exp * 1000).toISOString() } }
+  }
+
+  private async boxList(login: string): Promise<BoxList> {
     const sql = this.ctx.storage.sql
     const boxes = sql
       .exec<UserBox>(
@@ -563,7 +522,9 @@ export class Hub extends DurableObject<Env> {
     const user = sql
       .exec<{ activeBoxId: string | null }>("SELECT active_box_id AS activeBoxId FROM users WHERE login = ?", login)
       .toArray()[0]
-    return { boxes, activeBoxId: user?.activeBoxId ?? null }
+    const managedUrl = managedBoxUrl(this.env)
+    const managedBox = managedUrl === null || (await managedSigningKey(this.env)) === null ? null : { url: managedUrl }
+    return { boxes, activeBoxId: user?.activeBoxId ?? null, managedBox }
   }
 
   /** The box if `login` owns it, with its secret; null otherwise. */
@@ -653,7 +614,7 @@ export class Hub extends DurableObject<Env> {
    * Creates the box the pairing asks for (same limit as `createBox`) for the CLI's next polls, which get a fresh TTL to
    * collect it, so a code approved just before it expires still completes.
    */
-  approvePairing(sessionId: string, code: string, body: ApprovePairingBody): BoxOutcome<BoxList> {
+  async approvePairing(sessionId: string, code: string, body: ApprovePairingBody): Promise<BoxOutcome<BoxList>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     const row = this.livePairing("code", code)
@@ -671,7 +632,7 @@ export class Hub extends DurableObject<Env> {
     if (body.activate) {
       sql.exec("UPDATE users SET active_box_id = ? WHERE login = ?", created.value.box.id, session.login)
     }
-    return { ok: true, value: this.boxList(session.login) }
+    return { ok: true, value: await this.boxList(session.login) }
   }
 
   private purgePairings(): void {
@@ -720,37 +681,31 @@ export class Hub extends DurableObject<Env> {
   }
 
   // -------------------------------------------------------------------------
-  // Box presence
+  // Managed box calls: one direct request to the managed box for `login`, with a fresh grant
   // -------------------------------------------------------------------------
 
-  boxStatus(): BoxStatus {
-    const ws = this.ctx.getWebSockets(BOX_TAG)[0]
-    if (!ws) return { online: false, connectedAt: null, boxVersion: null }
-    const att = this.attachment(ws)
-    return { online: true, connectedAt: att.connectedAt, boxVersion: att.boxVersion }
-  }
-
-  // -------------------------------------------------------------------------
-  // Box calls: one request to the box with `login`'s credentials
-  // -------------------------------------------------------------------------
-
-  boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
-    const box = this.ctx.getWebSockets(BOX_TAG)[0]
-    if (!box) {
-      return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
+  /**
+   * One request from the control plane straight to the managed box, as `login`. Provider credentials never travel as
+   * headers; the box fetches them itself from `/box/credentials`.
+   */
+  async boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    const grant = await this.managedGrant(login, false)
+    if (!grant.ok) return { ok: false, status: grant.status, body: JSON.stringify({ message: grant.message }) }
+    const body = payload === undefined ? undefined : JSON.stringify(payload)
+    try {
+      const res = await fetch(new URL(path, grant.value.url), {
+        method,
+        headers: {
+          authorization: `Bearer ${grant.value.token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body,
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      })
+      return { ok: res.ok, status: res.status, body: await res.text() }
+    } catch {
+      return { ok: false, status: 502, body: JSON.stringify({ message: "agent box is unreachable" }) }
     }
-    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(this.credentials(login)) }
-    const body = payload === undefined ? undefined : new TextEncoder().encode(JSON.stringify(payload))
-    if (body !== undefined) headers["content-type"] = "application/json"
-    const frame: HttpFrame = {
-      t: "http",
-      id: this.allocId(),
-      method,
-      path,
-      headers,
-      ...(body ? { body: toBase64(body) } : {}),
-    }
-    return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
   }
 
   // -------------------------------------------------------------------------
@@ -1013,278 +968,5 @@ export class Hub extends DurableObject<Env> {
       RUNS_KEPT,
     )
     return run
-  }
-
-  // -------------------------------------------------------------------------
-  // Worker-facing fetch: /box/connect (box upgrade) and /api/* (tunnelled to the box)
-  // -------------------------------------------------------------------------
-
-  override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url)
-    if (url.pathname === RELAY_CONNECT_PATH) return this.acceptBox(request)
-    if (url.pathname.startsWith("/_preview/") || this.previewReferer(request) !== null) {
-      return this.previewRelay(request, url)
-    }
-    if (url.pathname.startsWith("/api/")) return this.signedInApi(request, url)
-    return errorResponse(404, "NotFound", `no route for ${url.pathname}`)
-  }
-
-  /**
-   * A browser API call the Worker forwarded with the caller's session id (`SESSION_HEADER`): resolving the session,
-   * attaching its credentials and relaying all happen in this one Durable Object request, instead of one RPC each.
-   * `GET /api/box` is answered here, since it needs no box round trip.
-   */
-  private signedInApi(request: Request, url: URL): Promise<Response> | Response {
-    const sessionId = request.headers.get(SESSION_HEADER)
-    const session = sessionId ? this.session(sessionId) : null
-    if (!session) {
-      return errorResponse(401, "Unauthorized", "sign in required")
-    }
-    if (url.pathname === ControlPaths.box && request.method === "GET") return Response.json(this.boxStatus())
-    const creds = this.credentials(session.login)
-    const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
-    const headers = new Headers(request.headers)
-    headers.delete(SESSION_HEADER)
-    headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
-    return this.relay(new Request(request, { headers }), url)
-  }
-  private previewReferer(request: Request): { token: string; taskId: string } | null {
-    const referer = request.headers.get("referer")
-    if (referer === null) return null
-    let pathname: string
-    try {
-      pathname = new URL(referer).pathname
-    } catch {
-      return null
-    }
-    const match = /^\/_preview\/([0-9a-f-]{36})\/([^/]+)(?:\/.*)?$/.exec(pathname)
-    return match?.[1] && match[2] ? { token: match[1], taskId: decodeURIComponent(match[2]) } : null
-  }
-
-  private async previewRelay(request: Request, url: URL): Promise<Response> {
-    const direct = /^\/_preview\/([0-9a-f-]{36})\/([^/]+)(\/.*)?$/.exec(url.pathname)
-    const referer = this.previewReferer(request)
-    const token = direct?.[1] ?? referer?.token
-    const taskId = direct?.[2] ? decodeURIComponent(direct[2]) : referer?.taskId
-    if (!token || !taskId) return errorResponse(404, "NotFound", "preview not found")
-    const session = this.previewSession(token)
-    if (!session || session.taskId !== taskId) return errorResponse(404, "NotFound", "preview not found")
-    const suffix = direct ? (direct[3] || "/") : `${url.pathname}${url.search}`
-    const target = new URL(`${Paths.taskPreview(taskId)}${suffix}${direct ? url.search : ""}`, request.url)
-    const headers = new Headers(request.headers)
-    headers.delete("cookie")
-    headers.delete("authorization")
-    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.credentials(session.login)))
-    headers.set("x-kestrel-preview-token", token)
-    const protocol = request.headers.get("sec-websocket-protocol")
-    if (protocol) headers.set("x-kestrel-preview-protocol", protocol.split(",")[0]!.trim())
-    const forwarded = new Request(request, { headers })
-    const response = await this.relay(forwarded, target)
-    if (response.status === 101) return response
-    const outputHeaders = new Headers(response.headers)
-    outputHeaders.set("referrer-policy", "strict-origin-when-cross-origin")
-    return new Response(response.body, { status: response.status, headers: outputHeaders })
-  }
-
-  private acceptBox(request: Request): Response {
-    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return errorResponse(426, "UpgradeRequired", "expected a WebSocket upgrade")
-    }
-    // Latest connection wins: fail anything in flight on the previous box and drop its socket.
-    this.failAll()
-    for (const old of this.ctx.getWebSockets(BOX_TAG)) closeQuietly(old, 4000, "replaced")
-
-    const pair = new WebSocketPair()
-    const client = pair[0]
-    const server = pair[1]
-    const attachment: BoxAttachment = { connectedAt: new Date().toISOString(), boxVersion: null }
-    this.ctx.acceptWebSocket(server, [BOX_TAG])
-    server.serializeAttachment(attachment)
-    return new Response(null, { status: 101, webSocket: client })
-  }
-
-  private async relay(request: Request, url: URL): Promise<Response> {
-    const box = this.ctx.getWebSockets(BOX_TAG)[0]
-    if (!box) return errorResponse(503, "BoxOffline", "agent box is not connected")
-
-    const path = url.pathname + url.search
-    const headers = headersToRecord(request.headers, DROP_FOR_BOX)
-
-    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return this.openStream(box, path, headers, request.headers.get("sec-websocket-protocol")?.split(",")[0]?.trim())
-    }
-
-    const body =
-      request.method === "GET" || request.method === "HEAD" ? undefined : new Uint8Array(await request.arrayBuffer())
-    const frame: HttpFrame = {
-      t: "http",
-      id: this.allocId(),
-      method: request.method,
-      path,
-      headers,
-      ...(body && body.byteLength > 0 ? { body: toBase64(body) } : {}),
-    }
-    return this.request(box, frame)
-  }
-
-  private request(box: WebSocket, frame: HttpFrame): Promise<Response> {
-    const { promise, resolve } = Promise.withResolvers<Response>()
-    const timer = setTimeout(() => {
-      this.pending.delete(frame.id)
-      resolve(errorResponse(504, "GatewayTimeout", "agent box did not respond in time"))
-    }, HTTP_TIMEOUT_MS)
-    this.pending.set(frame.id, { resolve, timer })
-    try {
-      box.send(encodeFrame(frame))
-    } catch {
-      clearTimeout(timer)
-      this.pending.delete(frame.id)
-      resolve(errorResponse(502, "BadGateway", "agent box is unreachable"))
-    }
-    return promise
-  }
-
-  private openStream(box: WebSocket, path: string, headers: Record<string, string>, protocol?: string): Response {
-    const id = this.allocId()
-    const pair = new WebSocketPair()
-    const client = pair[0]
-    const server = pair[1]
-    server.accept()
-    this.streams.set(id, server)
-
-    server.addEventListener("message", (event) => {
-      try {
-        if (typeof event.data === "string") {
-          box.send(encodeFrame({ t: "ws-text", id, data: event.data }))
-        } else {
-          box.send(encodeBinary(id, new Uint8Array(event.data)))
-        }
-      } catch {
-        this.streams.delete(id)
-        closeQuietly(server, 1000, "agent box unreachable")
-      }
-    })
-
-    server.addEventListener("close", (event) => {
-      if (this.streams.get(id) !== server) return
-      this.streams.delete(id)
-      try {
-        box.send(encodeFrame({ t: "ws-close", id, code: closeCode(event.code), reason: (event.reason ?? "").slice(0, 40) }))
-      } catch {
-        // box already gone; failAll has or will close the rest
-      }
-      // Complete the closing handshake: without this the browser stays CLOSING and never drops the connection.
-      closeQuietly(server, closeCode(event.code), "")
-    })
-
-    try {
-      box.send(encodeFrame({ t: "ws-open", id, path, headers }))
-    } catch {
-      this.streams.delete(id)
-      closeQuietly(server, 1000, "agent box unreachable")
-      return errorResponse(502, "BadGateway", "agent box is unreachable")
-    }
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-      ...(protocol ? { headers: { "sec-websocket-protocol": protocol } } : {}),
-    })
-  }
-
-  // -------------------------------------------------------------------------
-  // Box socket (hibernatable)
-  // -------------------------------------------------------------------------
-
-  override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-    if (typeof message === "string") {
-      const frame = decodeFrame(message)
-      if (frame) this.onFrame(ws, frame)
-      return
-    }
-    const bin = decodeBinary(new Uint8Array(message))
-    if (bin) this.streams.get(bin.id)?.send(bin.payload)
-  }
-
-  override webSocketClose(ws: WebSocket, code: number): void {
-    this.boxLost(ws)
-    closeQuietly(ws, closeCode(code), "")
-  }
-
-  override webSocketError(ws: WebSocket): void {
-    this.boxLost(ws)
-    closeQuietly(ws, 1000, "")
-  }
-
-  private onFrame(ws: WebSocket, frame: RelayFrame): void {
-    switch (frame.t) {
-      case "hello":
-        if (frame.version !== RELAY_PROTOCOL_VERSION) {
-          closeQuietly(ws, 4002, "unsupported relay protocol version")
-          return
-        }
-        ws.serializeAttachment({ ...this.attachment(ws), boxVersion: frame.boxVersion })
-        return
-      case "ping":
-        ws.send(encodeFrame({ t: "pong" }))
-        return
-      case "http-res": {
-        const p = this.pending.get(frame.id)
-        if (!p) return
-        this.pending.delete(frame.id)
-        clearTimeout(p.timer)
-        p.resolve(this.toResponse(frame))
-        return
-      }
-      case "ws-text":
-        this.streams.get(frame.id)?.send(frame.data)
-        return
-      case "ws-close": {
-        const s = this.streams.get(frame.id)
-        this.streams.delete(frame.id)
-        if (s) closeQuietly(s, closeCode(frame.code), (frame.reason ?? "").slice(0, 40))
-        return
-      }
-      default:
-        // pong, and frames only the control plane sends (http, ws-open)
-        return
-    }
-  }
-
-  private toResponse(frame: Extract<RelayFrame, { t: "http-res" }>): Response {
-    const valid = frame.status >= 200 && frame.status <= 599
-    const status = valid ? frame.status : 502
-    const headers = new Headers()
-    for (const [name, value] of Object.entries(frame.headers)) {
-      if (!isHopByHop(name)) headers.set(name, value)
-    }
-    const body = frame.body && NULL_BODY_STATUS[status] !== true ? fromBase64(frame.body) : null
-    return new Response(body, { status, headers })
-  }
-
-  private boxLost(ws: WebSocket): void {
-    // A replaced box closes after its successor attached; only a true disconnect fails in-flight work.
-    if (this.ctx.getWebSockets(BOX_TAG).some((s) => s !== ws)) return
-    this.failAll()
-  }
-
-  private failAll(): void {
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer)
-      p.resolve(errorResponse(502, "BadGateway", "agent box disconnected"))
-    }
-    this.pending.clear()
-    for (const s of this.streams.values()) closeQuietly(s, BOX_GONE_CLOSE_CODE, "agent box disconnected")
-    this.streams.clear()
-  }
-
-  private attachment(ws: WebSocket): BoxAttachment {
-    const att = ws.deserializeAttachment() as BoxAttachment | null
-    return att ?? { connectedAt: new Date(0).toISOString(), boxVersion: null }
-  }
-
-  private allocId(): number {
-    const id = this.nextId
-    this.nextId = id >= 0xffffffff ? 1 : id + 1
-    return id
   }
 }

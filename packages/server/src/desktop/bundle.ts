@@ -20,7 +20,7 @@ const systemClock: BundleClock = {
 
 /**
  * Coalesces desktop media fragments into at most one WebSocket message per `windowMs`, trading smoothness for fewer
- * relayed messages (each incoming relay message is billed; outgoing ones are free). The first fragment after a quiet
+ * messages. The first fragment after a quiet
  * period goes out at once, so a lone keystroke or click costs no added latency; fragments arriving while a bundle is
  * held are concatenated into it and go out together at most `windowMs` after the last emit. `windowMs <= 0` passes
  * every fragment through on its own.

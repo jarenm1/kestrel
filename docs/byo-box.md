@@ -1,6 +1,6 @@
 # Bring your own box, with Kestrel cloud overflow (design)
 
-Status: step 1 (direct mode for a user's own box) is implemented; the rest is a proposal.
+Status: direct transport for user-owned and managed boxes is implemented; cloud overflow/placement below remains a proposal.
 
 ## Goal
 
@@ -31,8 +31,9 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
    needs a C compiler and the X11/Xdamage/Xfixes headers, otherwise the desktop is off), writes and starts the systemd
    user unit `kestrel-box.service`, and enables linger so it outlives logout. On macOS it does the same inside the VM.
 3. The box listens on `127.0.0.1:8787` and is used from the same machine at `http://localhost:8787`. To use it from
-   elsewhere (the mobile app, another computer), make that port reachable over HTTPS, e.g. `tailscale serve 8787` or a
-   Cloudflare Tunnel, and set that URL on the box in Settings › Boxes.
+   elsewhere, expose it over HTTPS/WSS with a private tunnel and reverse proxy, or an appropriate private-network
+   service, and set that URL in Settings > Boxes. Public Cloudflare Tunnel routes have video-delivery restrictions;
+   see [ingress guidance](box.md#https-ingress-and-private-tunnel). Do not expose `/mcp` or `/broker` publicly.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
@@ -79,17 +80,19 @@ approve, set `port` and `dataDir` in the config, and `run` (or `install`). A she
 `CLOUDAGENTS_*` variables (e.g. a dev shell entered from another checkout) wins over a `--env-file`; `run` sets them
 from the config.
 
-## Before step 1
+## Current transport
 
-- One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
-  still holds for Kestrel's own box.
-- One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic, including the desktop stream, goes browser → Worker → Hub → relay → box. Every relayed request is a
-  Durable Object request, which we pay for.
-- The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
-- Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
-- The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
-  mobile app has a configurable `serverUrl` and sends an explicit session header.
+- Managed and user-owned boxes both serve their REST, WebSockets, attachments and previews directly. The control
+  plane handles authentication, enrollment, grant issuance and automation coordination, not the data path.
+- User-owned boxes use their enrolled id and shared secret to verify HS256 tokens offline and fetch their owner's
+  credentials from `/box/self`. Managed boxes use ES256 grants and a separate service-authenticated credential
+  endpoint; they do not share a user's box secret.
+- The web app merges threads from every reachable box and routes each thread to its owner box. Mobile uses the
+  active box. Selecting `null` means the managed box, whose URL comes from `BoxList.managedBox`.
+- There is no outbound application relay socket or Worker API fallback. A deployment without a managed endpoint
+  may still use its enrolled user-owned boxes.
+- Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors remain on the box.
+
 
 ## Design
 

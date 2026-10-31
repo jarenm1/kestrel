@@ -42,8 +42,8 @@ const readBody = async <A, I>(
 }
 
 const githubToken = async (env: Env, login: string, message: string): Promise<string | Response> => {
-  const creds = await hub(env).credentials(login)
-  return creds.github ?? errorResponse(409, "Conflict", message)
+  const secrets = await hub(env).connectionSecrets(login)
+  return secrets.github ?? errorResponse(409, "Conflict", message)
 }
 
 const webhookUrl = (url: URL): string => new URL(ControlPaths.githubWebhook, url.origin).toString()
@@ -78,7 +78,7 @@ const releaseHook = async (env: Env, login: string, slug: string): Promise<void>
   const key = slug.toLowerCase()
   try {
     if (await hub(env).githubHookInUse(key)) return
-    const token = (await hub(env).credentials(login)).github
+    const token = (await hub(env).connectionSecrets(login)).github
     const hook = await hub(env).githubHook(key)
     if (token === undefined || hook === null) return
     await deletePullRequestHook(token, slug, hook.hookId)

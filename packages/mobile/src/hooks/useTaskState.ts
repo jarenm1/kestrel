@@ -1,12 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
-import { openTaskEvents } from "@/api/events";
+import { openEventStream, reconnectDelay } from "@/api/events";
 import { createQueries, keys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 
 const MAX_LOG_LINES = 2000;
-const RECONNECT_MS = 2000;
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -29,25 +28,27 @@ export function useTaskState(taskId: string) {
   const [output, setOutput] = useState<Record<string, string[]>>({});
   const [disconnected, setDisconnected] = useState(false);
   const [generation, setGeneration] = useState(0);
+  const failures = useRef(0);
   const [desktopOpens, setDesktopOpens] = useState(0);
 
   useEffect(() => {
     let active = true;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    let retry: number | undefined;
     let close: (() => void) | undefined;
 
     const reconnect = () => {
       if (!active) return;
       setDisconnected(true);
-      retry = setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS);
+      retry = setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(failures.current++));
     };
 
     // A box token that cannot be minted, or a socket that cannot be opened, reconnects like a dropped socket.
     const open = async () => {
       const url = await api.socketUrl(Paths.taskEventsWs(taskId));
       if (!active) return;
-      close = openTaskEvents(url, {
+      close = openEventStream(url, {
         onOpen: () => {
+          failures.current = 0;
           setDisconnected(false);
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
         },

@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query"
-import type { BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
+import type { BoxHealth } from "@/api/client"
 import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { useActiveBoxId } from "@/hooks/useActiveBox"
 
-/** Latest box status, or null while unknown (first poll pending or the last poll failed). */
-export function useBox(): BoxStatusInfo | null {
+/** Latest box status, or null while unknown (not read yet, or the read failed). */
+export function useBox(): BoxHealth | null {
   const box = useQuery(queries.box())
   return box.isError ? null : (box.data ?? null)
 }

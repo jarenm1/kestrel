@@ -9,7 +9,7 @@ import { TaskStatsService } from "../stats"
 export type WsServices = CoreService | DesktopManager | EventHub | Config | TaskStatsService
 
 /**
- * One bidirectional stream to a browser, tunnelled through the control plane relay.
+ * One bidirectional stream to a browser, carried by the box's direct WebSocket listener.
  * Sends on a closed socket are dropped.
  */
 export interface StreamSocket {
@@ -34,7 +34,7 @@ const EVENTS_PATH = /^\/api\/tasks\/([^/]+)\/events$/
 const DESKTOP_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/stream$/
 const PREVIEW_PATH = /^\/api\/tasks\/([^/]+)\/preview(?:\/.*)?$/
 
-/** Maps a relayed WebSocket URL to its thread stream route. */
+/** Maps a WebSocket URL to its thread stream route. */
 export const streamRoute = (pathname: string, requestPath = pathname, protocol?: string): StreamRoute | null => {
   if (pathname === USER_EVENTS_PATH) return { kind: "user-events" }
   const events = EVENTS_PATH.exec(pathname)

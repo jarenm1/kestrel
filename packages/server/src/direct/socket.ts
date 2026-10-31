@@ -2,8 +2,8 @@ import { WebSocket } from "ws"
 import type { StreamSocket } from "../http/streams"
 
 /**
- * Adapts a `ws` socket to the StreamSocket the relay also serves. Text received before a listener is registered is
- * held and delivered on registration; sends on a closed socket are dropped; the close listeners run once.
+ * Adapts a `ws` socket to the StreamSocket the stream routes serve. Text received before a listener is registered is
+ * held and delivered on registration; sends on a closed socket are dropped; text arriving once the socket is closing is dropped; the close listeners run once.
  */
 export const wsStreamSocket = (ws: WebSocket): StreamSocket => {
   let open = true
@@ -18,7 +18,7 @@ export const wsStreamSocket = (ws: WebSocket): StreamSocket => {
   }
 
   ws.on("message", (data, isBinary) => {
-    if (isBinary) return
+    if (isBinary || !open || ws.readyState !== WebSocket.OPEN) return
     const text = data.toString()
     if (textListener === null) pendingText.push(text)
     else textListener(text)

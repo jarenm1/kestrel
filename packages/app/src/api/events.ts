@@ -11,6 +11,15 @@ function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   }
 }
 
+/** Reconnect waits: the first retry after a drop waits the base, each further failed attempt doubles it up to the cap. */
+const RECONNECT_BASE_MS = 1_000
+const RECONNECT_CAP_MS = 30_000
+
+/** How long to wait before reconnect attempt `failures` (0 before the first retry). A socket that opens resets the count. */
+export function reconnectDelay(failures: number): number {
+  return Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** failures)
+}
+
 /**
  * Opens a WebSocket once its URL is resolved (a user box's URL carries a fresh token), then hands it to `attach`.
  * Returns a function that closes it without firing `onClose`; closing before the socket exists cancels the open. A
@@ -75,7 +84,7 @@ export function openTaskEvents(
 
 /**
  * Subscribes to the thread list stream of one box: `task.updated` for the user's threads on it, and `task.deleted`.
- * `target` is Kestrel's box (`null`) or a user box.
+ * `target` is the managed box or a user box.
  */
 export function openUserEvents(
   target: Target,
@@ -120,7 +129,7 @@ export interface DesktopConnection {
 
 /**
  * Acks go out after this many binary messages or this long, whichever comes first, so the server bounds what is in
- * flight. Acks are billed relay messages, hence the spacing: the lag an ack reports is about this interval plus a
+ * flight. Acks are counted messages, hence the spacing: the lag an ack reports is about this interval plus a
  * round trip, and the box's resync threshold (FLOW_LAG_LOW_MS = 400) has to sit above that. One message may carry
  * several fragments when the box bundles them; acks count messages, as the box's flow control does.
  */

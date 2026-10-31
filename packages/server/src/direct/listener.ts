@@ -4,8 +4,8 @@ import { Effect, Either, Runtime } from "effect"
 import { BOX_TOKEN_QUERY, BOX_USER_HEADER, Paths } from "@cloudagents/protocol"
 import { WebSocketServer } from "ws"
 import type { CoreShape } from "../core/service"
-import { BOX_DEV_HEADER } from "../relay/client"
-import { serveStream, streamRoute, type WsServices } from "../http/streams"
+import { serveStream, streamRoute, type StreamSocket, type WsServices, CLOSE_UNAUTHORIZED } from "../http/streams"
+import { BOX_DEV_HEADER, IDENTITY_HEADERS } from "./identity"
 import type { BoxAuth } from "./auth"
 import { wsStreamSocket } from "./socket"
 
@@ -31,6 +31,8 @@ interface Routed {
   /** Signed-in user the request acts for; null when no box token was presented. */
   readonly user: string | null
   readonly dev: boolean
+  /** Set when a grant authenticated the request: its expiry in ms since epoch. The socket closes then. */
+  readonly expiresAt: number | null
   /** Set only for preview frames: the frame's token, which the core checks against the task. */
   readonly previewToken: string | null
 }
@@ -88,12 +90,13 @@ const route = async (
       url: new URL(`${Paths.taskPreview(preview.taskId)}${preview.path}`, url),
       user: session.user,
       dev: false,
+      expiresAt: null,
       previewToken: preview.token,
     }
   }
   const token = bearerOrQueryToken(url, authorization)
   url.searchParams.delete(BOX_TOKEN_QUERY)
-  if (token === null) return { url, user: null, dev: false, previewToken: null }
+  if (token === null) return { url, user: null, dev: false, expiresAt: null, previewToken: null }
   const outcome = await Effect.runPromise(Effect.either(deps.auth.authenticate(token)))
   if (Either.isLeft(outcome)) {
     const error = outcome.left
@@ -101,10 +104,11 @@ const route = async (
       ? { status: 401, tag: "Unauthorized", message: error.message }
       : { status: 503, tag: "Unavailable", message: error.message }
   }
-  return { url, user: outcome.right.sub, dev: outcome.right.dev === true, previewToken: null }
+  return { url, user: outcome.right.sub, dev: outcome.right.dev === true, expiresAt: outcome.right.exp * 1000, previewToken: null }
 }
 
 const withIdentity = (headers: Headers, routed: Routed): Headers => {
+  for (const name of IDENTITY_HEADERS) headers.delete(name)
   if (routed.user !== null) headers.set(BOX_USER_HEADER, routed.user)
   if (routed.dev) headers.set(BOX_DEV_HEADER, "1")
   if (routed.previewToken !== null) {
@@ -113,6 +117,23 @@ const withIdentity = (headers: Headers, routed: Routed): Headers => {
     headers.set(PREVIEW_TOKEN_HEADER, routed.previewToken)
   }
   return headers
+}
+
+/** A grant-authenticated socket closes when its grant expires; the client reconnects with a fresh grant. The close goes through the stream, so its subscriptions release at once. */
+const closeAtExpiry = (stream: StreamSocket, expiresAt: number | null): void => {
+  if (expiresAt === null) return
+  const timer = setTimeout(() => stream.close(CLOSE_UNAUTHORIZED, "box token expired"), Math.max(0, expiresAt - Date.now()))
+  stream.onClose(() => clearTimeout(timer))
+}
+
+/** A REST rejection, with the CORS headers the web handler sets (any origin, no credentials) so browsers can read it. */
+const rejectionResponse = (rejection: Rejection, origin: string | null): Response => {
+  const headers = new Headers({ "content-type": "application/json" })
+  if (origin !== null) {
+    headers.set("access-control-allow-origin", origin)
+    headers.set("vary", "Origin")
+  }
+  return new Response(JSON.stringify({ _tag: rejection.tag, message: rejection.message }), { status: rejection.status, headers })
 }
 
 const withReferrerPolicy = (response: Response): Response => {
@@ -127,12 +148,7 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     const routed = await route(deps, url, request.headers.get("referer"), request.headers.get("authorization"))
-    if ("status" in routed) {
-      return new Response(JSON.stringify({ _tag: routed.tag, message: routed.message }), {
-        status: routed.status,
-        headers: { "content-type": "application/json" },
-      })
-    }
+    if ("status" in routed) return rejectionResponse(routed, request.headers.get("origin"))
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
     const headers = withIdentity(new Headers(request.headers), routed)
     const response = await deps.webHandler(new Request(routed.url, { method: request.method, headers, body }))
@@ -158,7 +174,9 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
       if (found === null) return rejectUpgrade(socket, { status: 404, tag: "NotFound", message: "no such stream" })
       const user = routed.user
       wss.handleUpgrade(request, socket, head, (ws) => {
-        Runtime.runFork(deps.runtime)(serveStream(found, user, wsStreamSocket(ws)))
+        const stream = wsStreamSocket(ws)
+        closeAtExpiry(stream, routed.expiresAt)
+        Runtime.runFork(deps.runtime)(serveStream(found, user, stream))
       })
     })
   }

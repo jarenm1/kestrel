@@ -5,7 +5,6 @@ import {
   AutomationRun,
   BOX_TOKEN_QUERY,
   BoxList,
-  BoxStatus,
   BoxToken,
   CliAuthStatus,
   CliLoginCodeBody,
@@ -60,23 +59,30 @@ function errorMessage(text: string, fallback: string): string {
   return text || fallback;
 }
 
-/** The user's own box that their apps use; `null` everywhere means Kestrel's box, relayed by the Worker. */
+/** The box the apps talk to: the user's own box, or the managed box under `MANAGED_BOX_ID`; `null` when none is configured. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
-/** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
+/** Image source for a file served directly by the box with an audience-bound token in its query. */
 export interface FileSource {
   uri: string;
-  headers: Record<string, string>;
 }
+
+/** A box's health as the apps show it. */
+export type BoxHealth = { readonly online: boolean; readonly boxVersion: string | null };
+
+const OFFLINE: BoxHealth = { online: false, boxVersion: null };
 
 /** A minted box token is replaced this long before the box says it expires. */
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
+
+/** The message of the error box calls fail with when the deployment has no managed box configured. */
+const MANAGED_UNAVAILABLE = "Kestrel's box is not available";
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
-  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is the user's own. */
+  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token. */
   socketUrl(path: string): Promise<string>;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
@@ -89,7 +95,7 @@ export interface ApiClient {
   githubRepos(): Promise<readonly GithubRepo[]>;
   boxes(): Promise<BoxList>;
   setActiveBox(boxId: string | null): Promise<BoxList>;
-  box(): Promise<BoxStatus>;
+  box(): Promise<BoxHealth>;
   cliLoginStart(provider: CliProvider): Promise<CliLoginStart>;
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
   cliLogout(provider: CliProvider): Promise<void>;
@@ -160,7 +166,7 @@ async function send<A, I>(
   }
 }
 
-/** Creates an API client bound to one server URL, session cookie and active box (`null` for Kestrel's box). */
+/** Creates an API client bound to one server URL, session cookie and active box (`null` when no box is configured). */
 export function createApiClient(
   serverUrl: string,
   sessionCookie: string | null,
@@ -199,15 +205,20 @@ export function createApiClient(
     return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body);
   }
 
-  // Box-served paths: Kestrel's box is relayed through the Worker with the session; the user's own box takes a bearer token.
+  // The box that serves box paths. A deployment without a managed box has none, and box calls fail rather than relay.
+  function requireBox(): ActiveBox {
+    if (activeBox === null) throw new ApiError(503, MANAGED_UNAVAILABLE);
+    return activeBox;
+  }
+
+  // Box-served paths go straight to the box, with a box token.
   async function boxRequest<A, I>(
     schema: Schema.Schema<A, I, never>,
     method: Method,
     path: string,
     body?: unknown
   ): Promise<A> {
-    if (activeBox === null) return request(schema, method, path, body);
-    const box = activeBox;
+    const box = requireBox();
     const attempt = async () =>
       send(schema, method, `${box.url}${path}`, { Authorization: `Bearer ${await mintBoxToken(box)}` }, body);
     try {
@@ -222,16 +233,17 @@ export function createApiClient(
 
   return {
     fileSource: async (path) => {
-      if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
-      const token = await mintBoxToken(activeBox);
-      return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
+      const box = requireBox();
+      const url = new URL(path, box.url);
+      url.searchParams.set(BOX_TOKEN_QUERY, await mintBoxToken(box));
+      return { uri: url.toString() };
     },
     socketUrl: async (path) => {
-      if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const token = await mintBoxToken(activeBox);
-      return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+      const box = requireBox();
+      const token = await mintBoxToken(box);
+      return `${box.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
-    previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
+    previewFrameUrl: (taskId, token) => requireBox().url + Paths.taskPreviewFrame(token, taskId),
 
     // Control plane (served by the Worker).
     me: () => request(Me, "GET", ControlPaths.me),
@@ -244,14 +256,13 @@ export function createApiClient(
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
-      if (activeBox === null) return request(BoxStatus, "GET", ControlPaths.box);
-      // The user's box is reached directly: its unauthenticated health route answers, and an unreachable box reads as offline.
+      // Health is read straight from the box's unauthenticated health route; no active box, or any failure, reads as offline.
+      if (activeBox === null) return OFFLINE;
       try {
         const health = await send(Health, "GET", `${activeBox.url}${Paths.health}`, {});
-        return { online: true, connectedAt: null, boxVersion: health.version };
-      } catch (error) {
-        if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
-        return { online: false, connectedAt: null, boxVersion: null };
+        return { online: true, boxVersion: health.version };
+      } catch {
+        return OFFLINE;
       }
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
@@ -265,7 +276,7 @@ export function createApiClient(
     listAutomationRuns: (id) => request(Schema.Array(AutomationRun), "GET", ControlPaths.automationRuns(id)),
     triggerAutomation: (id, body) => request(AutomationRun, "POST", ControlPaths.automationTrigger(id), body),
 
-    // Agent box (relayed by the Worker, or served directly by the user's own box).
+    // Agent box: served directly by the box the thread or the active box lives on.
     listTasks: () => boxRequest(Schema.Array(Task), "GET", Paths.tasks),
     createTask: (body) => boxRequest(Task, "POST", Paths.tasks, body),
     getTask: (taskId) => boxRequest(Task, "GET", Paths.task(taskId)),

@@ -10,7 +10,7 @@ import {
   type DesktopStatus,
 } from "@cloudagents/protocol"
 import { api } from "@/api/client"
-import { openDesktopStream, type DesktopConnection } from "@/api/events"
+import { openDesktopStream, reconnectDelay, type DesktopConnection } from "@/api/events"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -27,8 +27,6 @@ import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
 import { StatusIcon } from "./StatusIcon"
 import { ThreadGraphs } from "./ThreadGraphs"
-
-const RECONNECT_MS = 2000
 
 /** A viewer nobody can see keeps its stream this long, so switching away and back costs nothing. */
 const UNSEEN_GRACE_MS = 5000
@@ -125,6 +123,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const connRef = useRef<DesktopConnection | null>(null)
+  const failures = useRef(0)
   const frameRef = useRef<HTMLDivElement>(null)
   const fullscreen = useIsFullscreen(frameRef)
   const desktop = useQuery(queries.desktop(taskId))
@@ -139,9 +138,9 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    // Nobody can see the stream, or there is no desktop to stream: stay disconnected. Each connection is a billed
-    // relay request, and the box refuses a stream for a stopped desktop, so connecting anyway would retry every
-    // RECONNECT_MS. The thread's event stream moves `status` to "starting" when the desktop comes up.
+    // Nobody can see the stream, or there is no desktop to stream: stay disconnected. The box refuses a stream for a
+    // stopped desktop, so connecting anyway would retry on every backoff step. The thread's event stream moves `status`
+    // to "starting" when the desktop comes up.
     if (!wanted || !active) {
       setStreamError(null)
       setStats(null)
@@ -153,6 +152,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
 
     const conn = openDesktopStream(taskId, {
       onStatus: (s) => {
+        failures.current = 0
         queryClient.setQueryData(keys.desktop(taskId), s)
         if (s.state === "running") {
           mime = s.mime
@@ -185,7 +185,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         renderer = null
         setStats(null)
         setStreamError("Desktop connection lost; reconnecting…")
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
+        retry = window.setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(failures.current++))
       },
     })
     connRef.current = conn
@@ -340,7 +340,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </Button>
         </div>
-        <ThreadGraphs taskId={taskId} />
+        <ThreadGraphs taskId={taskId} live={wanted && running} />
       </div>
     </div>
   )

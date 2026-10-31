@@ -197,9 +197,9 @@
         };
 
         # `nix run`: full local stack with no cloud dependency: Worker control plane via `wrangler dev`
-        #   (http://127.0.0.1:8788, dev sign-in), a box connected to it, and Vite on http://localhost:5173.
+        #   (http://127.0.0.1:8788, dev sign-in), a directly reachable box, and Vite on http://localhost:5173.
         # `nix run .#box`: box only, sandboxed agents. Sources ./.box.env (gitignored) for the
-        #   production control-plane URL and box token.
+        #   control-plane URL, managed service token and public verification key.
         apps =
           let
             preflight = ''
@@ -258,7 +258,7 @@
                   if [ -f .box.env ]; then
                     install -m 600 .box.env "$dir/.box.env"
                   else
-                    echo "missing $dir/.box.env (CLOUDAGENTS_CONTROL_URL, CLOUDAGENTS_BOX_TOKEN)" >&2
+                    echo "missing $dir/.box.env (CLOUDAGENTS_CONTROL_URL, CLOUDAGENTS_BOX_TOKEN, CLOUDAGENTS_BOX_PUBLIC_KEY)" >&2
                     exit 1
                   fi
                 fi

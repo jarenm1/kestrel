@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import * as SecureStore from "expo-secure-store";
-import type { Me, UserBox } from "@cloudagents/protocol";
-import { createApiClient } from "@/api/client";
+import { AppState } from "react-native";
+import { MANAGED_BOX_ID, type Me, type UserBox } from "@cloudagents/protocol";
+import { createApiClient, type ActiveBox } from "@/api/client";
 import { clearBoxScopedQueries } from "@/api/queries";
 
 const SERVER_URL_KEY = "kestrel_server_url";
@@ -17,8 +18,12 @@ interface AuthState {
   user: Me | null;
   /** The user's own boxes (bring your own box); loaded with `/api/me` */
   boxes: readonly UserBox[];
-  /** The box the user's apps use; `null` is Kestrel's box */
+  /** The box the user's apps use; `null` is the managed box */
   activeBoxId: string | null;
+  /** Kestrel's managed box endpoint; `null` when the deployment has none */
+  managedBox: { readonly url: string } | null;
+  /** Whether the box list could not be read; it is read again on checkSession and when the app returns to the foreground. */
+  boxListFailed: boolean;
   /** Whether we're currently checking auth state */
   loading: boolean;
   /** Last auth error */
@@ -34,8 +39,8 @@ interface AuthActions {
   setActiveBox: (boxId: string | null) => Promise<void>;
 }
 
-/** `activeBox` is the box the app's requests go to; `null` is Kestrel's box. */
-type AuthContextValue = AuthState & AuthActions & { activeBox: UserBox | null };
+/** `activeBox` is the box the app's requests go to; `null` when no box is configured. */
+type AuthContextValue = AuthState & AuthActions & { activeBox: ActiveBox | null };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -48,12 +53,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     error: null,
     boxes: [],
     activeBoxId: null,
+    managedBox: null,
+    boxListFailed: false,
   });
   const queryClient = useQueryClient();
-  const activeBox = useMemo(
-    () => state.boxes.find((box) => box.id === state.activeBoxId) ?? null,
-    [state.boxes, state.activeBoxId]
-  );
+  const activeBox = useMemo<ActiveBox | null>(() => {
+    if (state.activeBoxId === null) {
+      return state.managedBox === null ? null : { id: MANAGED_BOX_ID, url: state.managedBox.url };
+    }
+    const box = state.boxes.find((b) => b.id === state.activeBoxId);
+    return box === undefined ? null : { id: box.id, url: box.url };
+  }, [state.boxes, state.activeBoxId, state.managedBox]);
 
   // Load saved server URL and session on mount
   useEffect(() => {
@@ -120,6 +130,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       sessionCookie: null,
       boxes: [],
       activeBoxId: null,
+      managedBox: null,
+      boxListFailed: false,
       user: null,
       error: null,
     }));
@@ -131,7 +143,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const list = await createApiClient(state.serverUrl, state.sessionCookie, null).setActiveBox(boxId);
       // Box-served data describes the box that was active; drop it before the switch takes effect.
       clearBoxScopedQueries(queryClient);
-      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId }));
+      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox, boxListFailed: false }));
     },
     [state.serverUrl, state.sessionCookie, queryClient]
   );
@@ -141,6 +153,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await fetchMe(state.serverUrl, state.sessionCookie, setState);
     }
   }, [state.serverUrl, state.sessionCookie]);
+
+  // A box list that could not be read is read again when the app returns to the foreground.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active" && state.user !== null && state.boxListFailed) void checkSession();
+    });
+    return () => sub.remove();
+  }, [checkSession, state.user, state.boxListFailed]);
 
   return (
     <AuthContext.Provider
@@ -194,11 +214,19 @@ async function fetchMe(
       return;
     }
     const user: Me = await res.json();
-    // Signing in never depends on the box list: when it cannot be read, the app stays on Kestrel's box.
+    // A box list that cannot be read is a failure, not a sign-out: checkSession or the next foreground resume reads it again.
     const boxes = await createApiClient(serverUrl, sessionCookie, null)
       .boxes()
-      .catch(() => ({ boxes: [], activeBoxId: null }));
-    setState((s) => ({ ...s, user, boxes: boxes.boxes, activeBoxId: boxes.activeBoxId, loading: false, error: null }));
+      .catch(() => null);
+    setState((s) => ({
+      ...s,
+      user,
+      ...(boxes === null
+        ? { boxListFailed: true }
+        : { boxes: boxes.boxes, activeBoxId: boxes.activeBoxId, managedBox: boxes.managedBox, boxListFailed: false }),
+      loading: false,
+      error: null,
+    }));
   } catch (e) {
     setState((s) => ({
       ...s,

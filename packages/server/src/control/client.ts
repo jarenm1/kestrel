@@ -27,7 +27,7 @@ export interface ControlClient {
 const TIMEOUT_MS = 15_000
 const INVALID_ANSWER = "control plane sent an unexpected answer"
 
-/** The control plane over HTTP(S): the scheme of the relay URL swapped, origin and base path kept, trailing slashes dropped. */
+/** The control plane over HTTP(S): the scheme of the control URL swapped, origin and base path kept, trailing slashes dropped. */
 export const controlBase = (controlUrl: string): string => {
   const url = new URL(controlUrl)
   url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol

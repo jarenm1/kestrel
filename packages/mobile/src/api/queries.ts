@@ -4,14 +4,12 @@ import type { ApiClient } from "@/api/client";
 
 /** Agent box status poll; it feeds the top bar pill. */
 const BOX_POLL_MS = 10_000;
-/** Task statuses change from agent runs with no list-level event stream, so the thread list is polled. */
-const TASK_POLL_MS = 2000;
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    // Every box call crosses the relay; failures surface immediately instead of being retried.
+    // Box calls go straight to their box; failures surface immediately instead of being retried.
     queries: { retry: false, refetchOnWindowFocus: false },
   },
 });
@@ -89,7 +87,7 @@ export function createQueries(api: ApiClient) {
         queryKey: keys.automationRuns(automationId),
         queryFn: () => api.listAutomationRuns(automationId),
       }),
-    tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
+    tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: () => api.listTasks() }),
     task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
     messages: (taskId: string) =>
       queryOptions({
