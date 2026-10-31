@@ -422,10 +422,13 @@ export const AgentHarnessLive = Layer.effect(
               log.write(`>> ${line}\n`)
               stdin.write(`${line}\n`)
             }
-            // The first turn is over: the CLI exits once its stdin closes, or is killed when it does not.
+            // Claude can still be answering queued messages after its first result and EOF. Only Codex's
+            // onDone means all model work is over and the process is merely waiting to exit.
             const onDone = () => {
               stdin.end()
-              setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
+              if (session.conversation?.kind === "codex") {
+                setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
+              }
             }
             const conversation = session.conversation
             if (conversation === null) {

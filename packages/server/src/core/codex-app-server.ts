@@ -97,7 +97,11 @@ export interface CodexRunInput {
 export interface CodexDriverIo {
   /** Writes one JSON-RPC message to the CLI's stdin. */
   readonly send: (message: unknown) => void
-  /** The run's Codex thread, once app-server has started or resumed it. */
+  /**
+   * The run's Codex thread: at its resume, which already has a rollout, or once a new thread has started a turn. A
+   * new thread that never started a turn has no rollout to resume, so reporting it earlier would record a session
+   * that cannot continue.
+   */
   readonly onThread: (threadId: string) => void
   /** The run's turn is over (or never started); the process can be let go. Called once. */
   readonly onDone: (outcome: RunOutcome) => void
@@ -123,6 +127,12 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
   let threadId: string | null = null
   /** The run's own turn: from the request that started it, or the first `turn/started` for `/compact`. */
   let turnId: string | null = null
+  /**
+   * The turn app-server runs now, which `turn/interrupt` names. A review runs reviewer turns of its own: its request's
+   * turn ends the run (and steering names it), but only the reviewer's own turn can be interrupted.
+   */
+  let activeTurnId: string | null = null
+  let threadReported = false
   let outcome: RunOutcome | null = null
 
   const request = (method: string, params: unknown, onResult: (message: Record<string, unknown>) => void) => {
@@ -137,6 +147,13 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
     io.onDone(result)
   }
 
+  /** Reports the thread once it is safe to resume: a resumed thread already is, a new one once it starts a turn. */
+  const reportThread = () => {
+    if (threadReported || threadId === null) return
+    threadReported = true
+    io.onThread(threadId)
+  }
+
   /** A failed request ends the run; its error is the run's error. */
   const orFail = (method: string, then: (result: Record<string, unknown>) => void) => (message: Record<string, unknown>) => {
     if (message.error !== undefined || !isRecord(message.result)) {
@@ -149,33 +166,49 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
   const startTurn = () => {
     const thread = threadId as string
     const effort = input.effort === undefined ? {} : { effort: input.effort }
-    const adoptTurn = (result: Record<string, unknown>) => {
+    const adoptTurn = (method: string, result: Record<string, unknown>, active: boolean) => {
       const turn = result.turn
-      if (isRecord(turn) && typeof turn.id === "string") turnId ??= turn.id
+      if (!isRecord(turn) || typeof turn.id !== "string") {
+        finish({ status: "failed", error: `${method}: no turn in the response` })
+        return
+      }
+      turnId ??= turn.id
+      if (active) activeTurnId = turn.id
+      reportThread()
     }
     switch (command?.name) {
       case "compact":
-        request("thread/compact/start", { threadId: thread }, orFail("thread/compact/start", () => undefined))
+        request("thread/compact/start", { threadId: thread }, orFail("thread/compact/start", reportThread))
         return
       case "review":
+        // The review's request returns the turn that ends the run; the reviewer's own turn (which interrupt names)
+        // starts later.
         request(
           "review/start",
           { threadId: thread, target: { type: "custom", instructions: command.args === "" ? REVIEW_CHANGES : command.args } },
-          orFail("review/start", adoptTurn),
+          orFail("review/start", (result) => adoptTurn("review/start", result, false)),
         )
         return
       case "init":
-        request("turn/start", { threadId: thread, input: textInput(INIT_PROMPT), ...effort }, orFail("turn/start", adoptTurn))
+        request(
+          "turn/start",
+          { threadId: thread, input: textInput(INIT_PROMPT), ...effort },
+          orFail("turn/start", (result) => adoptTurn("turn/start", result, true)),
+        )
         return
       default:
-        request("turn/start", { threadId: thread, input: textInput(input.prompt), ...effort }, orFail("turn/start", adoptTurn))
+        request(
+          "turn/start",
+          { threadId: thread, input: textInput(input.prompt), ...effort },
+          orFail("turn/start", (result) => adoptTurn("turn/start", result, true)),
+        )
     }
   }
 
   const openThread = () => {
     // Kestrel's bwrap sandbox replaces Codex's own, and nobody is there to approve: approvals never stop a turn.
     const policy = { approvalPolicy: "never", sandbox: "danger-full-access", ...(input.model === undefined ? {} : { model: input.model }) }
-    const onThread = (method: string) =>
+    const onThread = (method: string, persisted: boolean) =>
       orFail(method, (result) => {
         const thread = result.thread
         if (!isRecord(thread) || typeof thread.id !== "string") {
@@ -183,11 +216,12 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
           return
         }
         threadId = thread.id
-        io.onThread(thread.id)
+        // A resumed thread has a rollout already; a new one is only resumable once it has a turn.
+        if (persisted) reportThread()
         startTurn()
       })
-    if (input.resumeThread === null) request("thread/start", policy, onThread("thread/start"))
-    else request("thread/resume", { threadId: input.resumeThread, ...policy, excludeTurns: true }, onThread("thread/resume"))
+    if (input.resumeThread === null) request("thread/start", policy, onThread("thread/start", false))
+    else request("thread/resume", { threadId: input.resumeThread, ...policy, excludeTurns: true }, onThread("thread/resume", true))
   }
 
   const answerServerRequest = (message: Record<string, unknown>) => {
@@ -203,12 +237,20 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
   const onNotification = (method: string, params: unknown) => {
     if (!isRecord(params)) return
     if (method === "turn/started" && isRecord(params.turn) && typeof params.turn.id === "string") {
-      turnId ??= params.turn.id
+      // A review starts reviewer turns of its own; only its request's turn ends the run, but the reviewer's turn is
+      // the one running, so interrupt must name it.
+      if (command?.name !== "review") turnId ??= params.turn.id
+      activeTurnId = params.turn.id
+      reportThread()
       return
     }
     if (method !== "turn/completed" || !isRecord(params.turn)) return
+    const ended = params.turn.id
+    if (ended === activeTurnId) activeTurnId = null
     // A review runs inner turns of its own; only the run's turn ends the run.
-    if (turnId !== null && params.turn.id !== turnId) return
+    if (turnId !== null && ended !== turnId) return
+    // The review's own turn is unknown until its request answers, so this completion is an inner one.
+    if (turnId === null && command?.name === "review") return
     // The failed turn's error is in this notification, so the run's transcript shows it.
     switch (params.turn.status) {
       case "completed":
@@ -259,8 +301,8 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
       return promise
     },
     interrupt: () => {
-      if (threadId === null || turnId === null || outcome !== null) return false
-      request("turn/interrupt", { threadId, turnId }, () => undefined)
+      if (threadId === null || activeTurnId === null || outcome !== null) return false
+      request("turn/interrupt", { threadId, turnId: activeTurnId }, () => undefined)
       return true
     },
     close: () => {
