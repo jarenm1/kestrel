@@ -146,7 +146,7 @@ interface ProcessSpec {
 const KILL_GRACE_MS = 3000
 /**
  * Least time between two publishes of the same item. Codex and Claude stream text (and Codex command output) a few
- * tokens at a time, and every event is a relay message; the latest version always goes out when the window ends.
+ * tokens at a time, and every event is its own message; the latest version always goes out when the window ends.
  */
 const ITEM_PUBLISH_MS = 100
 /** App-server notifications that stream a token at a time. */

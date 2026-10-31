@@ -1,11 +1,11 @@
 /**
  * `bun run dev`: the whole local stack in one terminal, on Linux, macOS and Windows: the Worker control plane
- * (`wrangler dev`, dev sign-in), a box connected to it, and Vite. `nix run` runs this with the Nix toolchain,
+ * (`wrangler dev`, dev sign-in), a directly reachable box, and Vite. `nix run` runs this with the Nix toolchain,
  * which is what turns the agent sandbox on.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import { randomBytes } from "node:crypto"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../packages/server/src/process"
@@ -36,10 +36,25 @@ const boxPort = env.CLOUDAGENTS_PORT || String(8797 + offset)
 const varsPath = join(root, "packages/control/.dev.vars")
 if (!existsSync(varsPath)) {
   const token = randomBytes(32).toString("hex")
-  writeFileSync(varsPath, `BOX_TOKEN=${token}\nDEV_SESSION_LOGIN=dev\n`)
+  writeFileSync(varsPath, `BOX_TOKEN=${token}\nDEV_SESSION_LOGIN=dev\n`, { mode: 0o600 })
   console.log(`dev: created ${varsPath} (dev sign-in as 'dev')`)
 }
 const boxToken = /^BOX_TOKEN=(.+)$/m.exec(readFileSync(varsPath, "utf8"))?.[1]?.trim() ?? fail(`no BOX_TOKEN in ${varsPath}`)
+let signingKey = /^MANAGED_BOX_SIGNING_KEY=(.+)$/m.exec(readFileSync(varsPath, "utf8"))?.[1]?.trim()
+if (!signingKey) {
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])
+  signingKey = JSON.stringify(await crypto.subtle.exportKey("jwk", pair.privateKey))
+  appendFileSync(varsPath, `\nMANAGED_BOX_SIGNING_KEY=${signingKey}\n`, { mode: 0o600 })
+}
+let publicKey: string
+try {
+  const { kty, crv, x, y } = JSON.parse(signingKey) as JsonWebKey
+  const jwk = { kty, crv, x, y }
+  await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"])
+  publicKey = JSON.stringify(jwk)
+} catch {
+  fail("MANAGED_BOX_SIGNING_KEY must be a P-256 private JWK")
+}
 
 const bun = process.execPath
 // The Worker serves packages/app/dist; Vite serves the live app on its own port.
@@ -54,6 +69,7 @@ const boxEnv: Record<string, string> = {
   CLOUDAGENTS_DATA_DIR: env.CLOUDAGENTS_DEV_DATA_DIR || join(root, ".data-dev"),
   CLOUDAGENTS_CONTROL_URL: `http://127.0.0.1:${controlPort}`,
   CLOUDAGENTS_BOX_TOKEN: boxToken,
+  CLOUDAGENTS_BOX_PUBLIC_KEY: publicKey,
 }
 // The strict sandbox needs the Nix toolchain (CLOUDAGENTS_SANDBOX_PATH, set by the flake) and Linux. Without it agents
 // run unsandboxed unless the caller decided otherwise.
@@ -142,6 +158,8 @@ start("worker", "packages/control", wrangler!, [
   "127.0.0.1",
   "--var",
   `APP_ORIGIN:http://localhost:${appPort}`,
+  "--var",
+  `MANAGED_BOX_URL:http://localhost:${boxPort}`,
 ])
 start("box", "packages/server", bun, ["run", "dev"], boxEnv)
 start("app", "packages/app", bun, ["run", "dev"], {

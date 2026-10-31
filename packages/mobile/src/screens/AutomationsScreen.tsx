@@ -22,8 +22,8 @@ const switchTrack = { false: colors.secondary, true: colors.primary };
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
   const { api } = useApiClient();
-  const { activeBox } = useAuth();
-  const unavailable = activeBox !== null;
+  const { activeBoxId } = useAuth();
+  const unavailable = activeBoxId !== null;
   const queries = useMemo(() => createQueries(api), [api]);
   const automations = useQuery(queries.automations());
   const [editing, setEditing] = useState<AutomationEditorTarget | null>(null);

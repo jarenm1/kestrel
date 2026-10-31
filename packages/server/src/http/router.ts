@@ -4,7 +4,7 @@ import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, C
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
-import { BOX_DEV_HEADER } from "../relay/client"
+import { BOX_DEV_HEADER } from "../direct/identity"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
@@ -70,13 +70,13 @@ const uploadInput = Effect.gen(function* () {
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
 
-/** The user the relay signed in for this request (relay-set header, stripped on the box's own port); null otherwise. */
+/** The user the box's direct listener authenticated for this request (client-supplied values are stripped); null otherwise. */
 const requestUser = Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
   const user = req.headers[BOX_USER_HEADER]
   return user === undefined || user === "" ? null : user
 })
 
-/** `/auth/dev-login` sessions may use dev-only flows (a `/replay` chat message); the relay marks them. */
+/** `/auth/dev-login` sessions may use dev-only flows (a `/replay` chat message); the direct listener marks them. */
 const requestIsDev = Effect.map(
   HttpServerRequest.HttpServerRequest,
   (req) => req.headers[BOX_DEV_HEADER] === "1",

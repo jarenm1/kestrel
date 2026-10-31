@@ -2,9 +2,6 @@ import { QueryClient, queryOptions } from "@tanstack/react-query"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
 
-/** Agent box status poll; it feeds the offline banner. */
-const BOX_POLL_MS = 10_000
-
 export const queryClient = new QueryClient({
   defaultOptions: {
     // Box calls fail for reasons a retry would not fix (offline box, refused token); failures surface immediately.
@@ -91,7 +88,7 @@ export function storeTask(client: QueryClient, task: Task): void {
 /**
  * Stores a box list. When the active box changes, the queries read from it are cancelled and reset, so mounted views
  * refetch from the new box and no usage figure of the old box stays on screen. When the set of boxes changes (one
- * added, removed or moved), the thread list refetches so it reads that set.
+ * added, removed or moved, or the managed box's URL changes), the thread list refetches so it reads that set.
  */
 export async function applyBoxList(client: QueryClient, list: BoxList): Promise<void> {
   const previous = client.getQueryData<BoxList>(keys.boxes)
@@ -102,8 +99,8 @@ export async function applyBoxList(client: QueryClient, list: BoxList): Promise<
     await client.cancelQueries(activeScoped)
     client.resetQueries(activeScoped)
   }
-  const before = JSON.stringify(previous?.boxes.map((box) => [box.id, box.url]) ?? [])
-  const after = JSON.stringify(list.boxes.map((box) => [box.id, box.url]))
+  const before = JSON.stringify([previous?.managedBox?.url, previous?.boxes.map((box) => [box.id, box.url])])
+  const after = JSON.stringify([list.managedBox?.url, list.boxes.map((box) => [box.id, box.url])])
   if (before !== after) void client.invalidateQueries({ queryKey: keys.tasks })
   client.setQueryData(keys.boxes, list)
 }
@@ -113,9 +110,8 @@ export const queries = {
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
-  boxHealth: (url: string) =>
-    queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),
-  box: () => queryOptions({ queryKey: keys.box, queryFn: api.boxStatus, refetchInterval: BOX_POLL_MS }),
+  boxHealth: (url: string) => queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url) }),
+  box: () => queryOptions({ queryKey: keys.box, queryFn: api.boxStatus }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   usage: () => queryOptions({ queryKey: keys.usage, queryFn: api.usage }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),

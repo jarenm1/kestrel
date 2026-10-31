@@ -56,7 +56,7 @@ replace absolute paths with `/home/agent/work/...`, strip personal data and API 
 
 ## Using a fixture
 
-1. Run the dev stack and sign in at `/auth/dev-login` (fixture replay is dev-only; the relay marks dev-login
-   sessions so the box accepts it).
+1. Run the dev stack and sign in at `/auth/dev-login` (fixture replay is dev-only; the signed box grant marks
+   dev-login sessions so the direct listener can authorize replay).
 2. Open a task chat and send `/replay claude/markdown` (or `codex/kitchen-sink`, etc.).
 3. The run appears like any other run; `RunPanel` keeps showing the raw log while the chat shows the items.

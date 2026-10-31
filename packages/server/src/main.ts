@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
-import { Effect, Fiber, Layer } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
+import { Effect, Layer } from "effect"
+import { InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -18,8 +18,8 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { BOX_DEV_HEADER, runRelay } from "./relay/client"
-import { makeBoxAuth } from "./direct/auth"
+import { IDENTITY_HEADERS } from "./direct/identity"
+import { assertUsablePublicKey, makeBoxAuth } from "./direct/auth"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 
 const BaseLive = Layer.provideMerge(
@@ -47,8 +47,8 @@ const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
   const headers = new Headers()
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue
-    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
-    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER || name === CREDENTIALS_HEADER) continue
+    // Identity comes only from the grant the box authenticated; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
+    if (IDENTITY_HEADERS.includes(name)) continue
     if (Array.isArray(value)) for (const v of value) headers.append(name, v)
     else headers.set(name, value)
   }
@@ -145,7 +145,7 @@ const program = Effect.gen(function* () {
       reviewPullRequest: core.reviewPullRequest,
     },
     ask: core.ask,
-    automations: { control: config.relay === null ? null : makeControlClient(config.relay), taskOwner: core.taskOwner },
+    automations: { control: config.managed === null ? null : makeControlClient(config.managed), taskOwner: core.taskOwner },
     inbox: core.inbox,
     threads: { owner: core.taskOwner, list: core.listTasks, messages: core.listMessages, send: core.sendToThread },
     previewOpen: core.previewOpen,
@@ -153,6 +153,10 @@ const program = Effect.gen(function* () {
 
   let direct: DirectListener | null = null
   if (config.direct !== null) {
+    if (config.direct.mode === "managed") {
+      const publicKey = config.direct.publicKey
+      yield* Effect.tryPromise({ try: () => assertUsablePublicKey(publicKey), catch: (error) => error as Error })
+    }
     const store = yield* CredentialStore
     direct = makeDirectListener({
       auth: makeBoxAuth(config.direct, store),
@@ -173,23 +177,14 @@ const program = Effect.gen(function* () {
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
-  // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
+  // Task streams (events, desktop, preview) are served by the direct listener on this server.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
 
-  let relayFiber: Fiber.RuntimeFiber<void> | null = null
-  if (config.relay) {
-    relayFiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
-    )
-    yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  }
-
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
-  if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   yield* closeServer(server)

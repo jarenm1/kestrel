@@ -8,17 +8,10 @@ import { useAuth } from "@/auth/AuthContext";
  */
 export function useApiClient(): { api: ApiClient } {
   const { serverUrl, sessionCookie, activeBox } = useAuth();
-  const boxId = activeBox?.id ?? null;
-  const boxUrl = activeBox?.url ?? null;
 
   const api = useMemo(
-    () =>
-      createApiClient(
-        serverUrl ?? "",
-        sessionCookie,
-        boxId === null || boxUrl === null ? null : { id: boxId, url: boxUrl }
-      ),
-    [serverUrl, sessionCookie, boxId, boxUrl]
+    () => createApiClient(serverUrl ?? "", sessionCookie, activeBox),
+    [serverUrl, sessionCookie, activeBox]
   );
 
   return { api };

@@ -3,8 +3,8 @@ import { GithubRepoSlug } from "./refs"
 import { AgentModel } from "./models"
 
 /**
- * Control-plane API served by the Worker itself (not relayed to the box).
- * All other `/api/*` paths are relayed to the agent box. `cliAuth` is one of them; the Worker also calls it to merge connections.
+ * Control-plane API served by the Worker itself. Agent box routes (tasks, desktops, CLI logins, previews) are served by
+ * the box and called directly at its URL; the Worker answers other `/api/*` paths with 404.
  * Requests authenticate with the `session` cookie set by the GitHub OAuth callback;
  * unauthenticated `/api/*` requests get 401 `{ _tag: "Unauthorized", message }`.
  */
@@ -27,18 +27,16 @@ export const ControlPaths = {
   connection: (provider: string) => `/api/connections/${provider}`,
   /** GET -> GithubRepo[] for the signed-in user's GitHub connection. */
   githubRepos: "/api/github/repos",
-  /** GET -> BoxStatus */
-  box: "/api/box",
-  /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
+  /** GET -> CliAuthStatus[] for the signed-in user, served by the box; the Worker also merges it into connections. */
   cliAuth: "/api/cli-auth",
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
-   * user, replacing any login already pending for them. Relayed to the box.
+   * user, replacing any login already pending for them. Served by the box.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
-  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Relayed. */
+  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Served by the box. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
-  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
+  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Served by the box. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
   /** GET -> Automation[] / POST CreateAutomationBody -> Automation: the signed-in user's automations. */
   automations: "/api/automations",
@@ -50,22 +48,27 @@ export const ControlPaths = {
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
   /**
    * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
-   * The app talks to the active box directly at its `url` with a box token instead of through the relay.
+   * The app talks to the active box directly at its `url` with a box token.
    */
   boxes: "/api/boxes",
   /** PATCH UpdateBoxBody -> UserBox / DELETE -> 204 (clears it as the active box). Other users' ids are 404. */
   userBox: (id: string) => `/api/boxes/${id}`,
   /** POST -> CreatedBox: replaces the box's secret; tokens signed with the old one stop working. */
   userBoxSecret: (id: string) => `/api/boxes/${id}/secret`,
-  /** POST -> BoxToken: a fresh box token for the signed-in user and this box. */
+  /** POST -> BoxToken: a fresh token for the signed-in user and this box; `MANAGED_BOX_ID` mints a managed grant. */
   userBoxToken: (id: string) => `/api/boxes/${id}/token`,
-  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is Kestrel's relayed box. */
+  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is the managed box. */
   activeBox: "/api/boxes/active",
   /**
    * Box-only: GET -> BoxSelf for the box named in BOX_ID_HEADER, authenticated with `Authorization: Bearer <box
    * secret>`. How a user's own box learns its owner and the owner's connection secrets. Never reached from a browser.
    */
   boxSelf: "/box/self",
+  /**
+   * Box-only, trusted managed-box service only: GET -> BoxSelf for the user named in BOX_USER_HEADER, authenticated with
+   * `Authorization: Bearer <BOX_TOKEN>`. Gives the managed box a user's connection secrets. Never reached from a browser.
+   */
+  boxCredentials: "/box/credentials",
   /**
    * Pairing a box from the `kestrel-box` CLI, no auth. POST PairingStartBody -> PairingStart: the CLI shows `code` and
    * `approveUrl`, then polls `boxPairingPoll` with the secret `pairingId` until the signed-in user approves the code.
@@ -160,13 +163,6 @@ export const GithubRepo = Schema.Struct({
 })
 export type GithubRepo = typeof GithubRepo.Type
 
-export const BoxStatus = Schema.Struct({
-  online: Schema.Boolean,
-  connectedAt: Schema.NullOr(Schema.String),
-  boxVersion: Schema.NullOr(Schema.String),
-})
-export type BoxStatus = typeof BoxStatus.Type
-
 /** Header naming the box on box-only routes authenticated with a box secret (`ControlPaths.boxSelf`). */
 export const BOX_ID_HEADER = "x-kestrel-box-id"
 
@@ -205,8 +201,10 @@ export type UserBox = typeof UserBox.Type
 
 export const BoxList = Schema.Struct({
   boxes: Schema.Array(UserBox),
-  /** The box the user's apps use; null for Kestrel's relayed box. */
+  /** The box the user's apps use; null for the managed box. */
   activeBoxId: Schema.NullOr(Schema.String),
+  /** The managed box's direct endpoint; null when none is configured (never a relay). */
+  managedBox: Schema.NullOr(Schema.Struct({ url: BoxUrl })),
 })
 export type BoxList = typeof BoxList.Type
 

@@ -5,8 +5,12 @@ export interface Env {
   ASSETS: Fetcher
   /** Singleton control-plane Durable Object. */
   HUB: DurableObjectNamespace<Hub>
-  /** Shared secret the agent box presents as `Authorization: Bearer <BOX_TOKEN>`. */
+  /** Shared secret the trusted managed-box service presents as `Authorization: Bearer <BOX_TOKEN>`. Never sent to a browser. */
   BOX_TOKEN?: string
+  /** Origin of the managed agent box (https, or http on loopback). Unset: the managed box is unavailable (503), never relayed. */
+  MANAGED_BOX_URL?: string
+  /** Private P-256 signing key for managed box grants, as JWK JSON. Unset: the managed box is unavailable (503). */
+  MANAGED_BOX_SIGNING_KEY?: string
   GITHUB_CLIENT_ID?: string
   GITHUB_CLIENT_SECRET?: string
   /** Dev only: when set, enables `GET /auth/dev-login` as this login. Never set in production. */
@@ -21,9 +25,3 @@ export interface Env {
 /** RPC stub for the single control-plane Hub instance. */
 export const hub = (env: Env) => env.HUB.get(env.HUB.idFromName("main"))
 
-/**
- * Worker -> Hub only: the caller's session id (from the session cookie). The Hub resolves it, attaches credentials and
- * relays, all in the one Durable Object request. Whatever a browser sends in
- * this header is overwritten by the Worker.
- */
-export const SESSION_HEADER = "x-kestrel-session"

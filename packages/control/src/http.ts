@@ -60,30 +60,3 @@ export const safeReturnPath = (value: string | null | undefined, fallback: strin
 
 /** Masks an API key for display, e.g. `sk-…a1b2`. */
 export const maskKey = (key: string): string => `${key.slice(0, 3)}…${key.slice(-4)}`
-
-/** Hop-by-hop and framing headers that must not cross the relay or the response boundary. */
-const HOP_BY_HOP: Record<string, true> = {
-  connection: true,
-  "keep-alive": true,
-  "proxy-authenticate": true,
-  "proxy-authorization": true,
-  te: true,
-  trailer: true,
-  "transfer-encoding": true,
-  upgrade: true,
-  host: true,
-  "content-length": true,
-}
-
-export const isHopByHop = (name: string): boolean => HOP_BY_HOP[name.toLowerCase()] === true
-
-/** Copies headers into a plain record, dropping hop-by-hop headers and any names in `drop` (lowercase). */
-export const headersToRecord = (headers: Headers, drop: Record<string, true> = {}): Record<string, string> => {
-  const out: Record<string, string> = {}
-  headers.forEach((value, name) => {
-    const key = name.toLowerCase()
-    if (isHopByHop(key) || drop[key] === true) return
-    out[key] = value
-  })
-  return out
-}

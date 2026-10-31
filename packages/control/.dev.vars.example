@@ -2,5 +2,9 @@
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 BOX_TOKEN=
+# Managed box direct endpoint and private P-256 JWK (production: use Worker vars/secrets).
+# MANAGED_BOX_URL=https://box.example.com
+# MANAGED_BOX_SIGNING_KEY=
+# bun run dev creates a local signing key and configures the local endpoint automatically.
 # Dev only: enables GET /auth/dev-login as this GitHub login. Never set in production.
 # DEV_SESSION_LOGIN=jarenm1

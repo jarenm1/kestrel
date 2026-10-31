@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
-import { openTaskEvents } from "@/api/events"
+import { openTaskEvents, reconnectDelay } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
 import { errorText } from "@/util"
 
 const MAX_LOG_LINES = 2000
-const RECONNECT_MS = 2000
 /** Items arrive far faster than the diff is worth fetching; one invalidation per window bounds that traffic. */
 const DIFF_INVALIDATE_MS = 3000
 
@@ -25,6 +24,7 @@ export function useTaskState(taskId: string) {
   const [output, setOutput] = useState<Record<string, string[]>>({})
   const [disconnected, setDisconnected] = useState(false)
   const [generation, setGeneration] = useState(0)
+  const failures = useRef(0)
   const [desktopOpens, setDesktopOpens] = useState(0)
 
   useEffect(() => {
@@ -52,6 +52,7 @@ export function useTaskState(taskId: string) {
 
     const close = openTaskEvents(taskId, {
       onOpen: () => {
+        failures.current = 0
         setDisconnected(false)
         void queryClient.invalidateQueries({ queryKey: keys.task(taskId) })
       },
@@ -101,7 +102,7 @@ export function useTaskState(taskId: string) {
       onClose: () => {
         if (!active) return
         setDisconnected(true)
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
+        retry = window.setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(failures.current++))
       },
     })
 

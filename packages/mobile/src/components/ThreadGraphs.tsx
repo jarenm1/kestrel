@@ -102,8 +102,8 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
 /**
  * The thread's RAM, CPU and storage against its limits over the last minute, plus GPU's shared VRAM.
  */
-export function ThreadGraphs({ taskId }: { taskId: string }) {
-  const samples = useTaskStats(taskId);
+export function ThreadGraphs({ taskId, live }: { taskId: string; live: boolean }) {
+  const samples = useTaskStats(taskId, live);
 
   return (
     <View style={styles.container}>

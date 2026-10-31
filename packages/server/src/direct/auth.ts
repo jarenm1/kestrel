@@ -1,14 +1,16 @@
 import { Data, Effect, Either, Schema } from "effect"
 import {
   BOX_ID_HEADER,
+  BOX_USER_HEADER,
   BoxSelf,
   type BoxTokenClaims,
   ControlPaths,
-  type RelayCredentials,
   verifyBoxToken,
+  verifyManagedBoxToken,
 } from "@cloudagents/protocol"
+import type { DirectSettings } from "../config"
 import { controlBase } from "../control/client"
-import type { CredentialStoreShape } from "../credentials"
+import type { CredentialStoreShape, UserCredentials } from "../credentials"
 
 /** The token is missing, malformed, expired, for another box, or for a user who does not own this box. */
 export class Unauthorized extends Data.TaggedError("Unauthorized")<{ readonly message: string }> {}
@@ -16,16 +18,10 @@ export class Unauthorized extends Data.TaggedError("Unauthorized")<{ readonly me
 /** The control plane could not give the box its owner's credentials. */
 export class Unavailable extends Data.TaggedError("Unavailable")<{ readonly message: string }> {}
 
-export interface DirectSettings {
-  readonly controlUrl: string
-  readonly boxId: string
-  readonly boxSecret: string
-}
-
 export interface BoxAuth {
   /**
-   * Claims of a valid box token. When it returns, the token's user's credentials are current in the store:
-   * fetched from `/box/self` on first use and whenever the token's `cv` differs from the version last absorbed.
+   * Claims of a valid box grant. When it returns, the grant's user's credentials are current in the store: fetched
+   * on first use and whenever the grant's `cv` differs from the version last absorbed.
    */
   readonly authenticate: (token: string) => Effect.Effect<BoxTokenClaims, Unauthorized | Unavailable>
 }
@@ -34,27 +30,54 @@ const CONTROL_TIMEOUT_MS = 15_000
 
 const INVALID_ANSWER = "control plane gave an unexpected answer for the box's credentials"
 
+/**
+ * Refuses a managed box whose public key cannot verify ES256 signatures, so the server fails at startup rather than
+ * refusing every grant. The key itself is never part of the message.
+ */
+export const assertUsablePublicKey = async (publicKey: JsonWebKey): Promise<void> => {
+  try {
+    await crypto.subtle.importKey("jwk", publicKey, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"])
+  } catch {
+    throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY is not a usable P-256 public key")
+  }
+}
+
 export const makeBoxAuth = (
   settings: DirectSettings,
   store: CredentialStoreShape,
   fetchFn: typeof fetch = fetch,
 ): BoxAuth => {
   const base = controlBase(settings.controlUrl)
-  // Per user: the credentials version last absorbed and when (seconds) its fetch started. A token refetches only when
-  // it carries another version and was minted after that fetch began; older tokens cannot know anything newer, and
-  // two clients holding tokens of different ages would otherwise make the box refetch on every alternating request.
+  // Per user: the credentials version last absorbed and when (seconds) its fetch started. A grant refetches only when
+  // it carries another version and was minted after that fetch began; older grants cannot know anything newer, and
+  // two clients holding grants of different ages would otherwise make the box refetch on every alternating request.
   const absorbed = new Map<string, { readonly cv: string; readonly at: number }>()
   // One fetch per user and version at a time; concurrent requests share it.
   const inFlight = new Map<string, Promise<void>>()
 
+  const verifyGrant = (token: string, nowSeconds: number): Promise<BoxTokenClaims | null> =>
+    settings.mode === "user"
+      ? verifyBoxToken(settings.boxSecret, settings.boxId, token, nowSeconds)
+      : verifyManagedBoxToken(settings.publicKey, token, nowSeconds)
+
+  // User mode asks the control plane about its own box; managed mode asks about the grant's owner with the service token.
+  const credentialsRequest = (claims: BoxTokenClaims): { readonly url: string; readonly headers: Record<string, string> } =>
+    settings.mode === "user"
+      ? {
+          url: `${base}${ControlPaths.boxSelf}`,
+          headers: { authorization: `Bearer ${settings.boxSecret}`, [BOX_ID_HEADER]: settings.boxId },
+        }
+      : {
+          url: `${base}${ControlPaths.boxCredentials}`,
+          headers: { authorization: `Bearer ${settings.boxToken}`, [BOX_USER_HEADER]: claims.sub },
+        }
+
   const fetchCredentials = async (claims: BoxTokenClaims): Promise<void> => {
     const at = Math.floor(Date.now() / 1000)
+    const request = credentialsRequest(claims)
     let response: Response
     try {
-      response = await fetchFn(`${base}${ControlPaths.boxSelf}`, {
-        headers: { authorization: `Bearer ${settings.boxSecret}`, [BOX_ID_HEADER]: settings.boxId },
-        signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-      })
+      response = await fetchFn(request.url, { headers: request.headers, signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) })
     } catch {
       throw new Unavailable({ message: "control plane unreachable" })
     }
@@ -71,12 +94,11 @@ export const makeBoxAuth = (
     if (Either.isLeft(decoded)) throw new Unavailable({ message: INVALID_ANSWER })
     const self = decoded.right
     if (self.owner !== claims.sub) throw new Unauthorized({ message: "token is not for this box's owner" })
-    const creds: RelayCredentials = {
+    const creds: UserCredentials = {
       user: self.owner,
       github: self.github,
       anthropic: self.anthropic,
       openai: self.openai,
-      ...(claims.dev === true ? { dev: true } : {}),
     }
     await Effect.runPromise(store.set(creds))
     absorbed.set(self.owner, { cv: self.credentialsVersion, at })
@@ -93,9 +115,7 @@ export const makeBoxAuth = (
 
   const authenticate = (token: string): Effect.Effect<BoxTokenClaims, Unauthorized | Unavailable> =>
     Effect.gen(function* () {
-      const claims = yield* Effect.promise(() =>
-        verifyBoxToken(settings.boxSecret, settings.boxId, token, Math.floor(Date.now() / 1000)),
-      )
+      const claims = yield* Effect.promise(() => verifyGrant(token, Math.floor(Date.now() / 1000)))
       if (claims === null) return yield* Effect.fail(new Unauthorized({ message: "invalid or expired box token" }))
       const cached = yield* store.get(claims.sub)
       const last = absorbed.get(claims.sub)

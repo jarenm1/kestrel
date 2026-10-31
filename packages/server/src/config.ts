@@ -27,6 +27,15 @@ const DEFAULT_ANTHROPIC_COMMAND =
 const DEFAULT_OPENAI_COMMAND =
   'codex app-server ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647'
 
+/**
+ * Direct box auth (`direct/auth.ts`). `user` is a bring-your-own box: HS256 grants with the box secret, owner lookups
+ * on `/box/self`. `managed` is the managed box: ES256 grants checked with `publicKey`, owner lookups on
+ * `/box/credentials` with the service `boxToken`.
+ */
+export type DirectSettings =
+  | { readonly mode: "user"; readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string }
+  | { readonly mode: "managed"; readonly controlUrl: string; readonly boxToken: string; readonly publicKey: JsonWebKey }
+
 export interface ServerConfig {
   readonly port: number
   readonly host: string
@@ -56,13 +65,10 @@ export interface ServerConfig {
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
-  /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
-  readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
-  /**
-   * Direct mode (bring your own box): the box's own control-plane lookups and box-token verification.
-   * Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set.
-   */
-  readonly direct: { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string } | null
+  /** Direct box auth; null unless `CLOUDAGENTS_BOX_ID`+`CLOUDAGENTS_BOX_SECRET` (user) or `CLOUDAGENTS_BOX_PUBLIC_KEY` (managed) is set. */
+  readonly direct: DirectSettings | null
+  /** Control-plane client for the box's automations (MCP tools). Null unless `CLOUDAGENTS_BOX_TOKEN` is set alongside the control plane URL. */
+  readonly managed: { readonly controlUrl: string; readonly boxToken: string } | null
   /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
   readonly homesDir: string
   /**
@@ -89,8 +95,8 @@ export interface ServerConfig {
   readonly taskDiskMax: number
   /**
    * Desktop frame bundling window in ms (CLOUDAGENTS_DESKTOP_BUNDLE_MS, default 0 = off). When set, the box sends at
-   * most one relay message per window per viewer: the first fragment after a quiet window goes out at once, later ones
-   * are held and sent together. Fewer billed relay messages, at up to the window of added latency during continuous
+   * most one WebSocket message per window per viewer: the first fragment after a quiet window goes out at once, later ones
+   * are held and sent together. Fewer messages to the viewer, at up to the window of added latency during continuous
    * motion. See docs/box.md.
    */
   readonly desktopBundleMs: number
@@ -152,7 +158,7 @@ export const loadConfig = (): ServerConfig => {
   return {
     port,
     host,
-    relay: loadRelay(controlUrl, direct),
+    managed: loadManaged(direct),
     direct,
     mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
     dataDir,
@@ -254,30 +260,52 @@ const loadControlUrl = (): string | null => {
   return controlUrl
 }
 
-/** Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. */
-const loadDirect = (controlUrl: string | null): ServerConfig["direct"] => {
+/**
+ * Direct box auth. `CLOUDAGENTS_BOX_ID`+`CLOUDAGENTS_BOX_SECRET` select the user mode; `CLOUDAGENTS_BOX_PUBLIC_KEY`
+ * selects the managed mode (which also needs `CLOUDAGENTS_BOX_TOKEN`). The two modes never mix.
+ */
+const loadDirect = (controlUrl: string | null): DirectSettings | null => {
   const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
   const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() ?? ""
-  if (boxId === "" && boxSecret === "") return null
-  if (boxId === "" || boxSecret === "") {
-    throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
+  const publicKey = process.env.CLOUDAGENTS_BOX_PUBLIC_KEY?.trim() ?? ""
+  const serviceToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
+  if (publicKey === "") {
+    if (serviceToken !== "") throw new Error("CLOUDAGENTS_BOX_TOKEN is the managed box's service token; it needs CLOUDAGENTS_BOX_PUBLIC_KEY and cannot be set for a user box")
+    if (boxId === "" && boxSecret === "") return null
+    if (boxId === "" || boxSecret === "") {
+      throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
+    }
+    if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
+    return { mode: "user", controlUrl, boxId, boxSecret }
   }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
-  return { controlUrl, boxId, boxSecret }
+  if (boxId !== "" || boxSecret !== "") {
+    throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY (managed box) cannot be set with CLOUDAGENTS_BOX_ID or CLOUDAGENTS_BOX_SECRET")
+  }
+  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_PUBLIC_KEY is set")
+  if (serviceToken === "") throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_BOX_PUBLIC_KEY is set")
+  return { mode: "managed", controlUrl, boxToken: serviceToken, publicKey: publicKeyOf(publicKey) }
 }
 
-/** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */
-const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): ServerConfig["relay"] => {
-  const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
-  if (boxToken === "") {
-    if (controlUrl !== null && direct === null) {
-      throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set without CLOUDAGENTS_BOX_ID")
-    }
-    return null
+/** `CLOUDAGENTS_BOX_PUBLIC_KEY`: a public P-256 (ES256) JSON web key. Only its public members are kept; the value is never echoed. */
+const publicKeyOf = (raw: string): JsonWebKey => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY must be a JSON web key")
   }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
-  return { controlUrl, boxToken }
+  const jwk = parsed as Record<string, unknown> | null
+  if (typeof jwk !== "object" || jwk === null || jwk.kty !== "EC" || jwk.crv !== "P-256" || typeof jwk.x !== "string" || typeof jwk.y !== "string") {
+    throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY must be a public P-256 (ES256) JSON web key")
+  }
+  if (jwk.d !== undefined) throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY must hold the public key only, not private key material")
+  if (jwk.alg !== undefined && jwk.alg !== "ES256") throw new Error("CLOUDAGENTS_BOX_PUBLIC_KEY alg must be ES256")
+  return { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y }
 }
+
+/** The control-plane client for automations: the managed box's service token and the control plane's URL. */
+const loadManaged = (direct: DirectSettings | null): ServerConfig["managed"] =>
+  direct?.mode === "managed" ? { controlUrl: direct.controlUrl, boxToken: direct.boxToken } : null
 
 export const ConfigLive = Layer.sync(Config, loadConfig)
 

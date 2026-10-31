@@ -8,6 +8,7 @@ import { useAuth } from "@/auth/AuthContext";
 import { ThreadSidebar } from "@/components/ThreadSidebar";
 import { ContentPanel, TopBar } from "@/components/TopBar";
 import { useSwipePanel } from "@/hooks/useSwipePanel";
+import { useThreadListEvents } from "@/hooks/useThreadListEvents";
 import { type Navigation, NavigationContext, type Route, type Shell, ShellContext } from "@/nav/navigation";
 import { colors, radius, spacing } from "@/theme";
 import { ArchivedScreen } from "@/screens/ArchivedScreen";
@@ -32,6 +33,7 @@ export function MainNavigator() {
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
+  useThreadListEvents();
   const [stack, setStack] = useState<readonly Route[]>([HOME]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [swipeLocked, setSwipeLocked] = useState(false);

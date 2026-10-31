@@ -151,8 +151,8 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
  * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
  * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer.
  */
-export function ThreadGraphs({ taskId }: { taskId: string }) {
-  const samples = useTaskStats(taskId)
+export function ThreadGraphs({ taskId, live }: { taskId: string; live: boolean }) {
+  const samples = useTaskStats(taskId, live)
   return (
     <div className="flex flex-col gap-2">
       {GRAPHS.map((g) => (

@@ -3,6 +3,7 @@ import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from 
 import { WebView } from "react-native-webview";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
+import { useAppActive } from "@/hooks/useAppActive";
 import { createQueries, keys } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -27,6 +28,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const status = desktop.data ?? null;
   const [stream, setStream] = useState<{ taskId: string; url: string } | null>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
+  const [generation, setGeneration] = useState(0);
+  const foreground = useAppActive();
 
   const active = status?.state === "running" || status?.state === "starting";
 
@@ -53,21 +56,22 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   // The stream URL carries the box token. It is resolved outside render and kept while unchanged, so the WebView does not
   // reload. It is re-resolved on each desktop state change, so a restarted stream gets a token that has not expired.
   useEffect(() => {
-    let active = true;
+    if (!foreground || !active) return;
+    let mounted = true;
     api.socketUrl(Paths.taskDesktopWs(taskId)).then(
       (url) => {
-        if (!active) return;
+        if (!mounted) return;
         setStreamError(null);
         setStream((prev) => (prev?.taskId === taskId && prev.url === url ? prev : { taskId, url }));
       },
       (error: unknown) => {
-        if (active) setStreamError(error);
+        if (mounted) setStreamError(error);
       }
     );
     return () => {
-      active = false;
+      mounted = false;
     };
-  }, [api, taskId, status?.state]);
+  }, [api, taskId, status?.state, generation, foreground, active]);
 
   // Minimal MSE page for the desktop fMP4 stream. Every binary frame (init or fragment) goes into one
   // FIFO that is drained only while the SourceBuffer is idle: dropping a fragment corrupts H.264 decoding.
@@ -94,6 +98,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     const LIVE_EDGE_S = 0.5;
     const CATCH_UP_S = 0.08;
     let ws = null;
+    let failures = 0, retryTimer = null;
     const video = document.getElementById("v");
     const statusEl = document.getElementById("s");
     let ms = null, sb = null, mime = null;
@@ -192,17 +197,30 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     }
 
     function connect() {
+      clearTimeout(retryTimer);
+      retryTimer = null;
       ws = new WebSocket("${stream.url}");
       ws.binaryType = "arraybuffer";
+      ws.onopen = function() { failures = 0; };
       ws.onmessage = onMessage;
-      ws.onclose = function() {
+      ws.onclose = function(e) {
         ws = null;
+        disconnect();
         statusEl.textContent = "disconnected";
+        // The stream's box grant expired: only the app can mint a new one, so it re-resolves the URL.
+        if (e.code === 4401) {
+          if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage("expired");
+          return;
+        }
+        // Any other drop reconnects with a capped backoff while the viewer is active.
+        retryTimer = setTimeout(connect, Math.min(30000, 1000 * Math.pow(2, failures++)));
       };
     }
 
     // Closes the socket and drops the MSE state built on it; the next connect starts from a fresh init segment.
     function disconnect() {
+      clearTimeout(retryTimer);
+      retryTimer = null;
       if (ws) {
         ws.onmessage = null;
         ws.onclose = null;
@@ -273,10 +291,13 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       </View>
       {error ? <Alert style={styles.alert}>{error}</Alert> : null}
       <View style={[styles.well, { aspectRatio: aspect }]}>
-        {status?.state === "running" && desktopHtml ? (
+        {foreground && status?.state === "running" && desktopHtml ? (
           <SafeWebView
             ref={webView}
             source={{ html: desktopHtml }}
+            onMessage={(event: { nativeEvent: { data: string } }) => {
+              if (event.nativeEvent.data === "expired") setGeneration((g) => g + 1);
+            }}
             style={styles.webview}
             javaScriptEnabled
             mediaPlaybackRequiresUserAction={false}
@@ -293,7 +314,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           </View>
         )}
       </View>
-      <ThreadGraphs taskId={taskId} />
+      <ThreadGraphs taskId={taskId} live={status?.state === "running" && foreground} />
     </ScrollView>
   );
 }

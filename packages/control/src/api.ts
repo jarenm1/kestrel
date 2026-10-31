@@ -1,15 +1,12 @@
 import { Schema } from "effect"
 import {
   ApprovePairingBody,
-  CREDENTIALS_HEADER,
   CliAuthStatus,
   ControlPaths,
   CreateBoxBody,
-  Paths,
-  PreviewSession,
+  MANAGED_BOX_ID,
   PutApiKeyBody,
   SetActiveBoxBody,
-  Task,
   UpdateBoxBody,
   type Connection,
   type GithubRepo,
@@ -25,7 +22,7 @@ import {
   type Provider,
 } from "./providers"
 import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { SESSION_HEADER, hub, type Env } from "./env"
+import { hub, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
@@ -92,11 +89,11 @@ const putApiKey = async (request: Request, env: Env, login: string, provider: Pr
 }
 
 const listRepos = async (env: Env, login: string): Promise<Response> => {
-  const creds = await hub(env).credentials(login)
-  if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
+  const secrets = await hub(env).connectionSecrets(login)
+  if (!secrets.github) return errorResponse(404, "NotFound", "GitHub is not connected")
   const res = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
     headers: {
-      authorization: `Bearer ${creds.github}`,
+      authorization: `Bearer ${secrets.github}`,
       accept: "application/vnd.github+json",
       "x-github-api-version": "2022-11-28",
       "user-agent": "kestrel-control-plane",
@@ -120,48 +117,10 @@ const listRepos = async (env: Env, login: string): Promise<Response> => {
   return json(repos)
 }
 
-/**
- * Forwards a browser request to the Hub with the caller's session id. The Hub resolves the session, attaches the
- * caller's credentials (and dev-login marker) and relays to the box in that one Durable Object request; looking the
- * session and credentials up here first would cost two more.
- */
-const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> | Response => {
-  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-  if (!sessionId) return errorResponse(401, "Unauthorized", "sign in required")
-  const headers = new Headers(request.headers)
-  headers.delete(CREDENTIALS_HEADER)
-  headers.set(SESSION_HEADER, sessionId)
-  const hasBody = request.method !== "GET" && request.method !== "HEAD"
-  const forwarded = new Request(`https://hub${url.pathname}${url.search}`, {
-    method: request.method,
-    headers,
-    body: hasBody ? request.body : undefined,
-  })
-  return hub(env).fetch(forwarded)
-}
-
-const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
-  const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
-  if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
-  let value: unknown
-  try {
-    value = JSON.parse(result.body) as unknown
-  } catch {
-    return errorResponse(502, "BadGateway", "agent box returned an invalid task")
-  }
-  if (!Schema.is(Task)(value) || value.owner !== login) return errorResponse(404, "NotFound", "thread not found")
-  if (value.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
-  if (value.previewPort === undefined) return errorResponse(409, "Conflict", "the agent has not opened a preview")
-  const token = await hub(env).createPreviewSession(login, taskId)
-  return json(Schema.decodeSync(PreviewSession)({ token }))
-}
-
-const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
-  (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
   CONNECTION_PATH.test(path) ||
@@ -222,7 +181,9 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
   }
   const mint = USER_BOX_TOKEN_PATH.exec(path)?.[1]
   if (mint !== undefined && method === "POST") {
-    return answerBox(await boxes.mintBoxToken(sessionId, decodeURIComponent(mint)))
+    const boxId = decodeURIComponent(mint)
+    if (boxId === MANAGED_BOX_ID) return answerBox(await boxes.mintManagedBoxToken(sessionId))
+    return answerBox(await boxes.mintBoxToken(sessionId, boxId))
   }
   const id = USER_BOX_PATH.exec(path)?.[1]
   if (id !== undefined && method === "PATCH") {
@@ -238,23 +199,20 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
 }
 
 /**
- * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
- * `GET /api/box`) in one request to the Hub.
+ * Routes every `/api/*` request. Control routes are answered here. Box APIs are never proxied: browsers call the box
+ * directly at its own URL, so any other `/api/*` path is a 404.
  */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
-  if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
+  if (!isWorkerRoute(path, method)) {
+    return errorResponse(404, "NotFound", `no control route for ${path}: the agent box serves its own API`)
+  }
 
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
-
-  const previewSession = PREVIEW_SESSION_PATH.exec(path)
-  if (previewSession?.[1] && method === "POST") {
-    return createPreviewSession(env, login, decodeURIComponent(previewSession[1]))
-  }
 
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)
