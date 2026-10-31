@@ -1,6 +1,7 @@
 import { Effect, Either, Schema } from "effect"
 import {
   type AgentModel,
+  ApprovePairingBody,
   Attachment,
   Automation,
   BOX_TOKEN_QUERY,
@@ -23,6 +24,7 @@ import {
   Me,
   Message,
   Paths,
+  PendingPairing,
   PreviewSession,
   PutApiKeyBody,
   Run,
@@ -325,6 +327,11 @@ export const api = {
     const body: SetActiveBoxBody = { boxId }
     return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
   },
+  /** The pending pairing of a code the CLI showed, for the approval page; 404 when unknown or expired. */
+  pendingPairing: (code: string) => run(request(PendingPairing, "GET", ControlPaths.pairing(code))),
+  /** Approves a pairing: creates the box, made active when `activate`. Returns the box list, like `setActiveBox`. */
+  approvePairing: async (code: string, body: ApprovePairingBody): Promise<BoxList> =>
+    adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
   checkBox,
   /** Status of the box the apps talk to: Kestrel's relayed box, or the active user box's own health. */
   boxStatus: async (): Promise<BoxStatus> => {

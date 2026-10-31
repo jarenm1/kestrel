@@ -23,6 +23,8 @@ export const keys = {
   boxHealth: (url: string) => ["box-health", url] as const,
   /** Status of the box the apps talk to. */
   box: ["box"] as const,
+  /** A pairing code's pending approval, read by the approval page. */
+  pairing: (code: string) => ["pairing", code] as const,
   connections: ["connections"] as const,
   usage: ["usage"] as const,
   automations: ["automations"] as const,
@@ -58,6 +60,7 @@ const BOX_INDEPENDENT: Record<string, true> = {
   "public-me": true,
   boxes: true,
   "box-health": true,
+  pairing: true,
   connections: true,
   automations: true,
 }
@@ -111,6 +114,7 @@ export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
+  pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>
     queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.boxStatus, refetchInterval: BOX_POLL_MS }),
