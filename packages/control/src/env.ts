@@ -11,6 +11,11 @@ export interface Env {
   GITHUB_CLIENT_SECRET?: string
   /** Dev only: when set, enables `GET /auth/dev-login` as this login. Never set in production. */
   DEV_SESSION_LOGIN?: string
+  /**
+   * Dev only: the app's origin (Vite) for links the Worker hands out, such as a box pairing's approval page. `wrangler
+   * dev` rewrites request URLs to the configured route's host, so the request cannot tell. Unset in production.
+   */
+  APP_ORIGIN?: string
 }
 
 /** RPC stub for the single control-plane Hub instance. */

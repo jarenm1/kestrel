@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CreateBoxBody, MAX_USER_BOXES, type CreatedBox, type UserBox } from "@cloudagents/protocol"
+import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type CreatedBox, type UserBox } from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
+import { Link } from "react-router-dom"
 import { api } from "@/api/client"
 import { applyBoxList, keys, queries } from "@/api/queries"
 import { useBox } from "@/components/BoxStatus"
@@ -14,11 +15,11 @@ import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
 import { errorText } from "@/util"
 
-const BOX_FORM_ERROR =
+export const BOX_FORM_ERROR =
   "Name must be 1–64 characters. The URL must be an origin such as https://box.example.com (http is allowed only for localhost)."
 
 /** Validates a box name and URL the way the server does; a trailing slash is dropped first. */
-function parseBoxForm(name: string, url: string): CreateBoxBody | null {
+export function parseBoxForm(name: string, url: string): CreateBoxBody | null {
   const result = Schema.decodeUnknownEither(CreateBoxBody)({ name: name.trim(), url: url.trim().replace(/\/+$/, "") })
   return Either.isRight(result) ? result.right : null
 }
@@ -74,12 +75,15 @@ export function Boxes() {
         (list.length >= MAX_USER_BOXES ? (
           <p className="text-xs text-muted-foreground">You can add up to {MAX_USER_BOXES} boxes.</p>
         ) : (
-          <AddBoxForm
-            onCreated={(next) => {
-              setCreated(next)
-              void queryClient.invalidateQueries({ queryKey: keys.boxes })
-            }}
-          />
+          <>
+            <PairHint />
+            <AddBoxForm
+              onCreated={(next) => {
+                setCreated(next)
+                void queryClient.invalidateQueries({ queryKey: keys.boxes })
+              }}
+            />
+          </>
         ))}
     </>
   )
@@ -88,6 +92,23 @@ export function Boxes() {
 function OnlineBadge({ online }: { online: boolean | undefined }) {
   if (online === undefined) return <Badge variant="neutral">checking</Badge>
   return online ? <Badge variant="success">online</Badge> : <Badge variant="neutral">offline</Badge>
+}
+
+/** The quickest way to add a box: the CLI pairs it with your account, then the code is approved on the pairing page. */
+function PairHint() {
+  return (
+    <p className="text-muted-foreground">
+      Easiest: run <code className="font-mono text-xs">npx kestrel-box login</code> on the machine, or{" "}
+      <code className="break-all font-mono text-xs">
+        curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh
+      </code>
+      , then approve its code on the{" "}
+      <Link to={ControlPaths.pairPage} className="text-foreground underline underline-offset-4">
+        pairing page
+      </Link>
+      .
+    </p>
+  )
 }
 
 function UserBoxRow({

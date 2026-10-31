@@ -271,7 +271,7 @@ export const CliAuthLive = Layer.effect(
     const cliEnv = (user: string): Effect.Effect<Record<string, string>, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const root = yield* rootOf(user)
-        const path = config.sandboxPath ?? (config.sandboxEnabled ? null : (process.env.PATH ?? "/usr/bin:/bin"))
+        const path = config.sandboxPath ?? (config.sandbox === "strict" ? null : (process.env.PATH ?? "/usr/bin:/bin"))
         if (path === null) {
           return yield* Effect.fail(
             new InternalError({ message: "CLOUDAGENTS_SANDBOX_PATH is not set; the agent CLIs are not on the toolchain" }),
@@ -279,7 +279,7 @@ export const CliAuthLive = Layer.effect(
         }
         const ssl = config.sandboxSslCertFile
         return {
-          ...(config.sandboxEnabled ? {} : platformEnv()),
+          ...(config.sandbox === "off" ? platformEnv() : {}),
           PATH: path,
           HOME: root,
           CLAUDE_CONFIG_DIR: join(root, SPECS["claude-cli"].dir),
@@ -304,7 +304,7 @@ export const CliAuthLive = Layer.effect(
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const env = yield* cliEnv(user)
-        if (!config.sandboxEnabled) {
+        if (config.sandbox === "off") {
           // Windows installs the CLIs as `.cmd` shims, which spawn cannot launch directly; the repo's POSIX shell
           // runs them like agent commands do, with SystemRoot and the rest of the platform env in place.
           if (process.platform === "win32") {

@@ -13,20 +13,62 @@ migration.
 - Paid: Kestrel cloud compute (subscription with compute hours). Optionally later, our relay for boxes without a tunnel.
 - Full local (Worker + box + Vite on one machine, `bun run dev`) stays a developer setup, not a product.
 
-## Use your own box (step 1)
+## Install your own box
 
-1. In the app, Settings › Boxes › Add a box: a name and the URL the box will be reachable at (`https://…`, or
-   `http://localhost:<port>` from the same machine). The app shows the box's secret once, with the command to run.
-2. In a Kestrel checkout, start the box with that command:
-   `CLOUDAGENTS_CONTROL_URL=https://app.kestrel-agent.com CLOUDAGENTS_BOX_ID=… CLOUDAGENTS_BOX_SECRET=… nix run .#box`.
-   It listens on `127.0.0.1:8787` (`CLOUDAGENTS_PORT`). Without `CLOUDAGENTS_BOX_TOKEN` it opens no relay socket.
-3. Make that port reachable at the box's URL, e.g. `tailscale serve 8787` or a Cloudflare Tunnel.
-4. Use this box. Web and mobile now send box traffic to that URL; Settings › Boxes switches back to Kestrel's box.
+The `kestrel-box` CLI installs the box as a service and pairs it with your account. The box always runs on Linux:
+natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 
-Local test against a dev stack: add a box with `http://localhost:<port>`, then run a second box from
-`packages/server` with `CLOUDAGENTS_PORT=<port>`, its own `CLOUDAGENTS_DATA_DIR`, `CLOUDAGENTS_CONTROL_URL` set to the
-stack's worker port, and the box id and secret. Set the data dir explicitly: a shell that already exports
-`CLOUDAGENTS_DATA_DIR` (e.g. a dev shell entered from another checkout) wins over `bun --env-file`.
+| OS | Install |
+|---|---|
+| Linux, WSL2 | `curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh \| sh` or `npx kestrel-box login && npx kestrel-box install` |
+| Windows | WSL2 only: `irm https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.ps1 \| iex` checks WSL2 and systemd, then runs the Linux installer inside it |
+| macOS | `brew install lima`, then the same `curl … \| sh` (or `npx`): `install` creates the `kestrel-box` VM (Apple virtualization, Ubuntu LTS, half the CPUs and memory by default; `--cpus`, `--memory`), provisions it, and forwards port 8787 to the Mac |
+
+1. `kestrel-box login` prints a pairing code and opens `/pair?code=…` in the app. Approve it there (name and URL are
+   editable; "Use this box now" makes it your active box). The CLI then writes
+   `~/.config/kestrel-box/config.json` (mode 600) with the box id and secret. The secret is never shown.
+2. `kestrel-box install` runs `doctor`, copies itself to `~/.local/bin`, builds the desktop helper (`xdamage-capture`;
+   needs a C compiler and the X11/Xdamage/Xfixes headers, otherwise the desktop is off), writes and starts the systemd
+   user unit `kestrel-box.service`, and enables linger so it outlives logout. On macOS it does the same inside the VM.
+3. The box listens on `127.0.0.1:8787` and is used from the same machine at `http://localhost:8787`. To use it from
+   elsewhere (the mobile app, another computer), make that port reachable over HTTPS, e.g. `tailscale serve 8787` or a
+   Cloudflare Tunnel, and set that URL on the box in Settings › Boxes.
+
+Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
+`uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
+`codex`) on the host; the desktop also needs weston, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
+
+### What a user's box runs with
+
+- Sandbox `basic` (see [box.md](box.md#agent-sandbox)): bubblewrap over the host's own tools, only the thread's
+  workspace, home and `/tmp` writable, the real `$HOME` hidden. Kestrel's boxes keep `strict` with the Nix toolchain.
+- Provisioning, from the shipped config: `guaranteed` (each thread is guaranteed 1 GB and an equal CPU share and may
+  burst into whatever is idle), the whole box capped at 80% of memory and 80% of the cores, one agent run per core;
+  runs past that wait in a queue shown in the thread. Edit `provisioning` in the config (`mode`: `guaranteed`,
+  `pooled` or `per-thread`, plus the limits) and restart the service. The server's own defaults, used by Kestrel's
+  shared box, stay hard per-thread caps.
+- Rendering: the live desktop uses the GPU only on native Linux with render nodes. WSL2 exposes the GPU as `/dev/dxg`,
+  not a render node, and Linux VMs on macOS get no 3D GPU, so there the desktop renders and encodes (x264) on the CPU.
+
+### Releasing
+
+`bun run build:box` builds `dist/box/kestrel-box-{linux,darwin}-{x64,arm64}` (version from
+`packages/server/package.json`, which `packages/kestrel-box/package.json` must match). Publish them as assets of a
+GitHub release tagged `box-v<version>`. `install-box.sh` downloads `releases/latest/download/<asset>`; the npm launcher
+and the macOS `install` (the Linux binary for the VM) download `releases/download/box-v<version>/<asset>`, so the tag
+must match the package version. Then `npm publish` in `packages/kestrel-box`. Box releases are the repo's only
+releases.
+
+### Manual setup
+
+Settings › Boxes › Add a box still works without the CLI: it shows the secret once, with
+`CLOUDAGENTS_CONTROL_URL=… CLOUDAGENTS_BOX_ID=… CLOUDAGENTS_BOX_SECRET=… nix run .#box` for a Kestrel checkout.
+
+Local test against a dev stack: `bun run build:box`, then
+`dist/box/kestrel-box-linux-x64 login --control-url http://localhost:<app port> --url http://localhost:<box port>`,
+approve, set `port` and `dataDir` in the config, and `run` (or `install`). A shell that already exports
+`CLOUDAGENTS_*` variables (e.g. a dev shell entered from another checkout) wins over a `--env-file`; `run` sets them
+from the config.
 
 ## Before step 1
 
@@ -102,7 +144,7 @@ flowchart LR
 
 ### Multi-tenant sandboxing (separate workstream, required before cloud launch)
 
-Today's per-thread isolation (bubblewrap, a systemd slice with memory/CPU/pids caps, a pasta network namespace) shares
+Today's per-thread isolation (bubblewrap, a systemd slice with memory/CPU/pids caps, and under `strict` a pasta network namespace) shares
 the host kernel and assumes the users on a box trust the operator and not much else is at stake. Strangers on one
 machine need more:
 
@@ -123,12 +165,14 @@ machine need more:
 
 1. **Done:** direct mode. Per-user box registry and secrets in the Hub, box tokens, `/box/self`, the box's
    authenticated own port (REST, WebSockets, previews), web and mobile talking to the active box directly.
-2. Thread → box records; per-box event streams merged in the app.
-3. Box control sockets: presence, capacity reports, automations on user boxes.
-4. Placement, with auto-overflow for subscribers and the upgrade prompt for everyone else.
-5. Multi-tenant sandboxing (VM boundary, per-tenant host isolation), in parallel with 2–4.
-6. Cloud boxes: provisioning, credential handoff, metering and billing.
-7. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
+2. **Done:** `kestrel-box` install: single binary, pairing from the CLI, systemd user service (Linux, WSL2; Lima VM on
+   macOS), `basic` sandbox on host tools, provisioning modes and a run queue.
+3. Thread → box records; per-box event streams merged in the app.
+4. Box control sockets: presence, capacity reports, automations on user boxes, provisioning edited from the app.
+5. Placement, with auto-overflow for subscribers and the upgrade prompt for everyone else.
+6. Multi-tenant sandboxing (VM boundary, per-tenant host isolation), in parallel with 3–5.
+7. Cloud boxes: provisioning, credential handoff, metering and billing.
+8. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
 
 ## Protocol impact
 

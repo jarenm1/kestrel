@@ -1,8 +1,8 @@
-import { BOX_ID_HEADER, ControlPaths, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
-import { errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { handleGithubWebhook } from "./webhooks"
 
@@ -45,6 +45,29 @@ const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "www.kestr
 const APP_ORIGIN = "https://app.kestrel-agent.com"
 
 /**
+ * The CLI starts a pairing and polls it with the secret `pairingId`; no session is involved. The user approves the code
+ * in the app, and the next poll hands out the approved box.
+ */
+const handleBoxPairing = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  if (url.pathname === ControlPaths.boxPairing) {
+    const body = await decodeBody(request, PairingStartBody)
+    if (body instanceof Response) return body
+    // The approval page is on the host the CLI talks to (a Preview has its own Hub), except the marketing hosts, which
+    // send the app to the app host. A local stack names its app origin, since `wrangler dev` rewrites request URLs.
+    const appOrigin = env.APP_ORIGIN ?? (SITE_HOSTS[url.hostname] ? APP_ORIGIN : url.origin)
+    const started = await hub(env).startPairing(body, appOrigin)
+    return started === null
+      ? errorResponse(429, "TooManyRequests", "too many pairings in progress; try again in a few minutes")
+      : json(started, 201)
+  }
+  const body = await decodeBody(request, PairingPollBody)
+  if (body instanceof Response) return body
+  const poll = await hub(env).pollPairing(body.pairingId)
+  return poll === null ? errorResponse(404, "NotFound", "no such pairing or it expired") : json(poll)
+}
+
+/**
  * The public pages ask the app host who is signed in (to show "Profile" instead of "Get Started"). They are
  * same-site with the app host, so its `SameSite=Lax` session cookie rides along; this lets them read the answer.
  * Allowed: the marketing hosts, and on local stacks (dev sign-in enabled) any `site.*` origin.
@@ -81,6 +104,9 @@ export default {
     try {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
+      if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
+        return await handleBoxPairing(request, env, url)
+      }
       if (isBoxAutomationPath(url.pathname)) {
         if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
         return await handleBoxAutomations(request, env, url)

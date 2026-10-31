@@ -9,6 +9,7 @@ import {
   AutomationTrigger,
   BOX_TOKEN_TTL_SECONDS,
   MAX_USER_BOXES,
+  PAIRING_TTL_SECONDS,
   signBoxToken,
   decodeBinary,
   decodeFrame,
@@ -16,6 +17,7 @@ import {
   encodeFrame,
   fromBase64,
   toBase64,
+  type ApprovePairingBody,
   type Automation,
   type AutomationRun,
   type BoxStatus,
@@ -26,6 +28,10 @@ import {
   type CreateBoxBody,
   type CreateTaskBody,
   type CreatedBox,
+  type PairingPoll,
+  type PairingStart,
+  type PairingStartBody,
+  type PendingPairing,
   type RelayCredentials,
   type RelayFrame,
   type UpdateAutomationBody,
@@ -46,17 +52,23 @@ export type BoxOutcome<T> = { ok: true; value: T } | BoxFailure
 
 const UNAUTHENTICATED: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "sign in required" }
 const NO_SUCH_BOX: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such box" }
+const NO_SUCH_PAIRING: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such pairing or it expired" }
 
-/** A box secret: 32 random bytes, base64url. */
-const newBoxSecret = (): string =>
+/** 32 random bytes, base64url: a box secret, or the id a pairing is polled with. */
+const newSecret = (): string =>
   toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
+
+/** Pairing codes: 8 characters from 32 symbols with no 0, O, 1 or I. 32 divides 256, so each byte is unbiased. */
+const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+const newPairingCode = (): string =>
+  Array.from(crypto.getRandomValues(new Uint8Array(8)), (byte) => PAIRING_ALPHABET.charAt(byte & 31)).join("")
 
 /**
  * Singleton Durable Object (`idFromName("main")`) holding all control-plane state and the
  * outbound relay to the agent box.
  *
  * - SQLite tables: users, sessions, connections, user_boxes, oauth_states, automations, automation_runs, github_hooks,
- *   webhook_deliveries.
+ *   webhook_deliveries, box_pairings.
  * - The box holds one hibernatable WebSocket (tag "box"); its metadata lives in the socket attachment.
  * - Browser HTTP requests are tunnelled as `http` frames and resolved by `http-res` (30s timeout → 504).
  * - Browser WebSockets are accepted with the standard API (they pin the object in memory) and
@@ -102,6 +114,20 @@ type AutomationRow = {
 
 const AUTOMATION_COLUMNS =
   "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+
+type PairingRow = {
+  id: string
+  code: string
+  name: string | null
+  url: string | null
+  expiresAt: number
+  boxId: string | null
+}
+
+const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS boxId"
+
+/** Pairings in flight at once, across all users; starting another answers 429. The start route needs no sign-in. */
+const MAX_LIVE_PAIRINGS = 500
 
 const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownSync(AutomationTrigger)(JSON.parse(json))
 
@@ -221,6 +247,14 @@ export class Hub extends DurableObject<Env> {
         url TEXT NOT NULL,
         secret TEXT NOT NULL,
         created_at TEXT NOT NULL
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS box_pairings (
+        id TEXT PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL,
+        name TEXT,
+        url TEXT,
+        expires_at INTEGER NOT NULL,
+        box_id TEXT
       )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS oauth_states (
         state TEXT PRIMARY KEY,
@@ -416,19 +450,24 @@ export class Hub extends DurableObject<Env> {
   createBox(sessionId: string, body: CreateBoxBody): BoxOutcome<CreatedBox> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
+    return this.insertBox(session.login, body)
+  }
+
+  /** The one insertion path for a new box: `createBox` and pairing approval share it (same limit, new secret). */
+  private insertBox(login: string, body: CreateBoxBody): BoxOutcome<CreatedBox> {
     const sql = this.ctx.storage.sql
     const count =
-      sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM user_boxes WHERE login = ?", session.login).toArray()[0]
+      sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM user_boxes WHERE login = ?", login).toArray()[0]
         ?.count ?? 0
     if (count >= MAX_USER_BOXES) {
       return { ok: false, status: 409, tag: "Conflict", message: `at most ${MAX_USER_BOXES} boxes per user` }
     }
     const box: UserBox = { id: crypto.randomUUID(), name: body.name, url: body.url, createdAt: new Date().toISOString() }
-    const secret = newBoxSecret()
+    const secret = newSecret()
     sql.exec(
       "INSERT INTO user_boxes (id, login, name, url, secret, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       box.id,
-      session.login,
+      login,
       box.name,
       box.url,
       secret,
@@ -468,7 +507,7 @@ export class Hub extends DurableObject<Env> {
     if (!session) return UNAUTHENTICATED
     const owned = this.ownedBox(session.login, id)
     if (!owned) return NO_SUCH_BOX
-    const secret = newBoxSecret()
+    const secret = newSecret()
     this.ctx.storage.sql.exec("UPDATE user_boxes SET secret = ? WHERE id = ? AND login = ?", secret, id, session.login)
     return { ok: true, value: { box: owned.box, secret } }
   }
@@ -539,6 +578,114 @@ export class Hub extends DurableObject<Env> {
     if (!row) return null
     const { secret, ...box } = row
     return { box, secret }
+  }
+
+  // -------------------------------------------------------------------------
+  // Box pairing: the `kestrel-box` CLI starts a pairing and polls it; a signed-in user approves its code in the app.
+  // Each method is synchronous, so it runs as one transaction.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Starts a pairing with a fresh code and id; `appOrigin` is where the approval page is served. Null when too many
+   * pairings are live (the route is anonymous).
+   */
+  startPairing(body: PairingStartBody, appOrigin: string): PairingStart | null {
+    this.purgePairings()
+    const sql = this.ctx.storage.sql
+    const live = sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM box_pairings").toArray()[0]?.n ?? 0
+    if (live >= MAX_LIVE_PAIRINGS) return null
+    let code = newPairingCode()
+    while (sql.exec("SELECT 1 FROM box_pairings WHERE code = ?", code).toArray().length > 0) code = newPairingCode()
+    const id = newSecret()
+    const expiresAt = Date.now() + PAIRING_TTL_SECONDS * 1000
+    sql.exec(
+      "INSERT INTO box_pairings (id, code, name, url, expires_at) VALUES (?, ?, ?, ?, ?)",
+      id,
+      code,
+      body.name ?? null,
+      body.url ?? null,
+      expiresAt,
+    )
+    const shown = `${code.slice(0, 4)}-${code.slice(4)}`
+    return {
+      pairingId: id,
+      code: shown,
+      approveUrl: `${appOrigin}${ControlPaths.pairPage}?code=${shown}`,
+      expiresAt: new Date(expiresAt).toISOString(),
+    }
+  }
+
+  /**
+   * Pending, or the approved box with its current secret, on every poll until the pairing expires: a CLI that lost the
+   * answer polls again. Null when unknown or expired, or when the box was deleted since.
+   */
+  pollPairing(pairingId: string): PairingPoll | null {
+    const row = this.livePairing("id", pairingId)
+    if (!row) return null
+    if (row.boxId === null) return { status: "pending", expiresAt: new Date(row.expiresAt).toISOString() }
+    const found = this.ctx.storage.sql
+      .exec<UserBox & { secret: string }>(
+        "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ?",
+        row.boxId,
+      )
+      .toArray()[0]
+    if (!found) return null
+    const { secret, ...box } = found
+    return { status: "approved", box, secret }
+  }
+
+  pendingPairing(sessionId: string, code: string): BoxOutcome<PendingPairing> {
+    if (!this.session(sessionId)) return UNAUTHENTICATED
+    const row = this.livePairing("code", code)
+    if (!row) return NO_SUCH_PAIRING
+    return {
+      ok: true,
+      value: {
+        code: `${row.code.slice(0, 4)}-${row.code.slice(4)}`,
+        name: row.name,
+        url: row.url,
+        expiresAt: new Date(row.expiresAt).toISOString(),
+      },
+    }
+  }
+
+  /**
+   * Creates the box the pairing asks for (same limit as `createBox`) for the CLI's next polls, which get a fresh TTL to
+   * collect it, so a code approved just before it expires still completes.
+   */
+  approvePairing(sessionId: string, code: string, body: ApprovePairingBody): BoxOutcome<BoxList> {
+    const session = this.session(sessionId)
+    if (!session) return UNAUTHENTICATED
+    const row = this.livePairing("code", code)
+    if (!row) return NO_SUCH_PAIRING
+    if (row.boxId !== null) return { ok: false, status: 409, tag: "Conflict", message: "pairing code already approved" }
+    const created = this.insertBox(session.login, body)
+    if (!created.ok) return created
+    const sql = this.ctx.storage.sql
+    sql.exec(
+      "UPDATE box_pairings SET box_id = ?, expires_at = ? WHERE id = ?",
+      created.value.box.id,
+      Date.now() + PAIRING_TTL_SECONDS * 1000,
+      row.id,
+    )
+    if (body.activate) {
+      sql.exec("UPDATE users SET active_box_id = ? WHERE login = ?", created.value.box.id, session.login)
+    }
+    return { ok: true, value: this.boxList(session.login) }
+  }
+
+  private purgePairings(): void {
+    this.ctx.storage.sql.exec("DELETE FROM box_pairings WHERE expires_at <= ?", Date.now())
+  }
+
+  /** The pairing whose `column` equals `value`, if it has not expired (expired rows are purged first). */
+  private livePairing(column: "id" | "code", value: string): PairingRow | null {
+    this.purgePairings()
+    return (
+      this.ctx.storage.sql
+        .exec<PairingRow>(`SELECT ${PAIRING_COLUMNS} FROM box_pairings WHERE ${column} = ?`, value)
+        .toArray()[0] ?? null
+    )
   }
 
   // -------------------------------------------------------------------------

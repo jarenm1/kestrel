@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { ControlPaths } from "@cloudagents/protocol"
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom"
 import { ApiError, onUnauthorized } from "@/api/client"
 import { queries } from "@/api/queries"
@@ -10,6 +11,7 @@ import { Alert } from "@/components/ui/alert"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
+import { PairPage } from "@/pages/PairPage"
 import { PricingPage } from "@/pages/PricingPage"
 import { BillingSettings, BoxesSettings, ConnectionsSettings, ProfileSettings, SettingsLayout } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
@@ -42,6 +44,7 @@ export function App() {
           <Route path="/c/:taskId" element={<ThreadPage />} />
           <Route path="/automations" element={<AutomationsPanel />} />
           <Route path="/archived" element={<ArchivedPanel />} />
+          <Route path={ControlPaths.pairPage} element={<PairPage />} />
           <Route path="/settings" element={<SettingsLayout />}>
             <Route index element={<Navigate to="profile" replace />} />
             <Route path="profile" element={<ProfileSettings />} />

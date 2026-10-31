@@ -6,23 +6,43 @@ import { InternalError } from "@cloudagents/protocol"
 /**
  * Resource limits for every sandboxed process, enforced by the user's systemd manager.
  *
- * Each task gets a slice `<box>-t<task>.slice` carrying the limits; every sandbox launch for that
- * task (agent run, workspace_exec, desktop apps) is a transient scope inside it, so the limits cap
- * the task as a whole. Slice names nest on `-`: everything sits under `kestrel.slice`.
+ * Each task gets a slice `<box>-t<task>.slice` carrying its limits; every sandbox launch for that task (agent run,
+ * workspace_exec, desktop apps) is a transient scope inside it. Slice names nest on `-`: everything sits under the box's
+ * slice `<box>.slice`, which carries the box totals. How tasks share the box is the provisioning mode:
+ * - `guaranteed`: each task keeps `memoryMin` (MemoryLow) and a `cpuWeight` share; no task is capped below the box.
+ * - `pooled`: tasks share the box totals with no per-task guarantee or cap.
+ * - `per-thread`: each task is capped at `memoryMax` and `cpuQuota`, inside the box totals.
+ * Every mode bounds the processes of a task with `TasksMax`.
  */
+export type Provisioning = "guaranteed" | "pooled" | "per-thread"
+
 export interface TaskLimits {
-  /** systemd MemoryMax, e.g. "4G". Swap is disabled for the slice so this is a hard cap. */
+  /** systemd MemoryLow (guaranteed): memory a task keeps before the kernel reclaims it from others, e.g. "1G". */
+  readonly memoryMin: string
+  /** systemd CPUWeight (guaranteed): a task's CPU share relative to the others, 1-10000. */
+  readonly cpuWeight: number
+  /** systemd MemoryMax (per-thread), e.g. "4G". Swap is disabled for the slice so this is a hard cap. */
   readonly memoryMax: string
-  /** systemd CPUQuota, e.g. "200%" (two cores). */
+  /** systemd CPUQuota (per-thread), e.g. "200%" (two cores). */
   readonly cpuQuota: string
-  /** systemd TasksMax: processes + threads. */
+  /** systemd TasksMax: processes + threads per task. */
   readonly tasksMax: string
+}
+
+/** The whole box's memory and CPU, all tasks together. Swap is disabled for the box slice too. */
+export interface BoxLimits {
+  /** systemd MemoryMax, e.g. "80%". */
+  readonly memoryMax: string
+  /** systemd CPUQuota, e.g. "600%" (six cores). */
+  readonly cpuQuota: string
 }
 
 export interface SystemdSettings {
   /** Slice name without `.slice`, unique per box (e.g. `kestrel-box8787`). */
   readonly boxSlice: string
+  readonly provisioning: Provisioning
   readonly limits: TaskLimits
+  readonly box: BoxLimits
 }
 
 /** `net` is the task's network namespace holder (pasta); the rest are sandboxed processes. */
@@ -72,16 +92,44 @@ export const sliceCgroup = (settings: SystemdSettings, taskId: string): Effect.E
     })
   })
 
+/**
+ * The `Key=Value` properties a task's slice carries under the box's provisioning mode. Every mode sets every property:
+ * runtime drop-ins outlive the box, so a slice made under another mode must not keep that mode's caps or floors.
+ */
+const taskProperties = (settings: SystemdSettings): string[] => {
+  const { limits } = settings
+  const guaranteed = settings.provisioning === "guaranteed"
+  const perThread = settings.provisioning === "per-thread"
+  return [
+    `MemoryLow=${guaranteed ? limits.memoryMin : "0"}`,
+    `CPUWeight=${guaranteed ? limits.cpuWeight : 100}`,
+    `MemoryMax=${perThread ? limits.memoryMax : "infinity"}`,
+    `MemorySwapMax=${perThread ? "0" : "infinity"}`,
+    // An empty CPUQuota clears it.
+    `CPUQuota=${perThread ? limits.cpuQuota : ""}`,
+    `TasksMax=${limits.tasksMax}`,
+  ]
+}
+
+/** The most memory and CPU one task can get: its own caps under per-thread provisioning, the box totals otherwise. */
+export const taskCeilings = (settings: SystemdSettings): BoxLimits =>
+  settings.provisioning === "per-thread"
+    ? { memoryMax: settings.limits.memoryMax, cpuQuota: settings.limits.cpuQuota }
+    : settings.box
+
 /** Writes the task slice's limits (runtime drop-in); idempotent, so it runs before every launch. */
 export const applyTaskLimits = (settings: SystemdSettings, taskId: string): Effect.Effect<void, InternalError> =>
+  systemctl(["set-property", "--runtime", taskSlice(settings, taskId), ...taskProperties(settings)])
+
+/** Writes the box slice's totals (runtime drop-in) at box startup. */
+const applyBoxLimits = (settings: SystemdSettings): Effect.Effect<void, InternalError> =>
   systemctl([
     "set-property",
     "--runtime",
-    taskSlice(settings, taskId),
-    `MemoryMax=${settings.limits.memoryMax}`,
+    `${settings.boxSlice}.slice`,
+    `MemoryMax=${settings.box.memoryMax}`,
     "MemorySwapMax=0",
-    `CPUQuota=${settings.limits.cpuQuota}`,
-    `TasksMax=${settings.limits.tasksMax}`,
+    `CPUQuota=${settings.box.cpuQuota}`,
   ])
 
 /** systemd-run args (without the executable) that run the following command in a fresh task scope. */
@@ -113,6 +161,7 @@ export const removeTask = (settings: SystemdSettings, taskId: string): Effect.Ef
 export const initBox = (settings: SystemdSettings): Effect.Effect<void, InternalError> =>
   Effect.gen(function* () {
     yield* systemctl(["stop", `${settings.boxSlice}.slice`])
+    yield* applyBoxLimits(settings)
     const probe = "probe"
     yield* applyTaskLimits(settings, probe)
     yield* Effect.async<void, InternalError>((resume) => {

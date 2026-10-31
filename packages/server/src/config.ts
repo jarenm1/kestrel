@@ -1,8 +1,10 @@
 import { Context, Layer } from "effect"
 import { join, resolve } from "node:path"
+import { availableParallelism } from "node:os"
 import type { ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
-import type { SystemdSettings } from "./sandbox/systemd"
+import type { SandboxLevel } from "./sandbox"
+import type { Provisioning, SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
@@ -63,8 +65,11 @@ export interface ServerConfig {
   readonly direct: { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string } | null
   /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
   readonly homesDir: string
-  /** False when CLOUDAGENTS_SANDBOX=0: agent runs and MCP exec then run unsandboxed via `sh -c`. */
-  readonly sandboxEnabled: boolean
+  /**
+   * How agent runs and MCP exec are sandboxed (CLOUDAGENTS_SANDBOX): `strict` (Nix toolchain, own network namespace),
+   * `basic` (bubblewrap over the host filesystem and network), or `off` (plain `sh -c`).
+   */
+  readonly sandbox: SandboxLevel
   /** Toolchain dir (CLOUDAGENTS_SANDBOX_PATH) used as PATH inside the sandbox. */
   readonly sandboxPath: string | null
   /** CA bundle exposed inside the sandbox (CLOUDAGENTS_SANDBOX_SSL). */
@@ -75,6 +80,8 @@ export interface ServerConfig {
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
   readonly systemd: SystemdSettings | null
+  /** Agent runs that execute at once (CLOUDAGENTS_MAX_CONCURRENT_RUNS); 0 = unlimited. Runs past it wait for a slot. */
+  readonly maxConcurrentRuns: number
   /**
    * Per-thread storage limit in bytes (CLOUDAGENTS_TASK_DISK_MAX, default 50G): the thread's workspace, home and
    * shadow repos. The box enforces it itself (see `core/storage.ts`); it applies with or without systemd.
@@ -112,21 +119,31 @@ export const loadConfig = (): ServerConfig => {
         anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         openai: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
       }
-  const sandboxEnabled = process.env.CLOUDAGENTS_SANDBOX !== "0"
-  if (!sandboxEnabled) console.warn("CLOUDAGENTS_SANDBOX=0: agent runs are NOT sandboxed")
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
+  const sandbox = sandboxLevel(sandboxPath)
+  if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")
   const sandboxSsl = process.env.CLOUDAGENTS_SANDBOX_SSL?.trim() || null
   const fakeAgentRoBinds = fakeAgent ? [process.execPath, join(repoRoot, "packages/server"), join(repoRoot, "node_modules")] : []
   const systemdEnabled = process.env.CLOUDAGENTS_SYSTEMD !== "0"
   if (!systemdEnabled) console.warn("CLOUDAGENTS_SYSTEMD=0: agent runs have NO resource limits")
-  // One slice per box (ports are unique per box on a machine); task slices nest under it.
+  // One slice per box (ports are unique per box on a machine); task slices nest under it. Unset, these keep Kestrel's
+  // shared box as it was (per-thread caps, no box totals, no run limit); a user's own box gets the `kestrel-box`
+  // CLI's shipped config instead (packages/server/src/cli/config.ts).
+  const cores = availableParallelism()
   const systemd: SystemdSettings | null = systemdEnabled
     ? {
         boxSlice: `kestrel-box${port}`,
+        provisioning: provisioningEnv(),
         limits: {
+          memoryMin: limitEnv("CLOUDAGENTS_TASK_MEMORY_MIN", "1G"),
+          cpuWeight: intEnv("CLOUDAGENTS_TASK_CPU_WEIGHT", 100, 1, 10_000),
           memoryMax: limitEnv("CLOUDAGENTS_TASK_MEMORY_MAX", "4G"),
           cpuQuota: limitEnv("CLOUDAGENTS_TASK_CPU_QUOTA", "200%"),
           tasksMax: limitEnv("CLOUDAGENTS_TASK_TASKS_MAX", "1024"),
+        },
+        box: {
+          memoryMax: limitEnv("CLOUDAGENTS_BOX_MEMORY_MAX", "infinity"),
+          cpuQuota: limitEnv("CLOUDAGENTS_BOX_CPU_QUOTA", `${cores * 100}%`),
         },
       }
     : null
@@ -148,12 +165,13 @@ export const loadConfig = (): ServerConfig => {
     agentCommands,
     fakeAgent,
     homesDir: join(dataDir, "homes"),
-    sandboxEnabled,
+    sandbox,
     sandboxPath,
     sandboxSslCertFile: sandboxSsl,
     toolkitsFlake: process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null,
     fakeAgentRoBinds,
     systemd,
+    maxConcurrentRuns: intEnv("CLOUDAGENTS_MAX_CONCURRENT_RUNS", 0, 0),
     taskDiskMax: diskMaxEnv(),
     desktopBundleMs: bundleMsEnv(),
     githubApiUrl: loadGitHubApiUrl(),
@@ -164,6 +182,31 @@ export const loadConfig = (): ServerConfig => {
 const limitEnv = (name: string, fallback: string): string => {
   const value = process.env[name]?.trim() || fallback
   if (!/^[A-Za-z0-9.%]+$/.test(value)) throw new Error(`${name} must be a systemd limit value, got "${value}"`)
+  return value
+}
+
+/** CLOUDAGENTS_SANDBOX; unset means `strict` when the Nix toolchain is configured, `basic` otherwise. */
+const sandboxLevel = (sandboxPath: string | null): SandboxLevel => {
+  const raw = process.env.CLOUDAGENTS_SANDBOX?.trim()
+  if (raw === undefined || raw === "") return sandboxPath === null ? "basic" : "strict"
+  if (raw === "strict" || raw === "basic" || raw === "off") return raw
+  const hint = raw === "0" ? " (CLOUDAGENTS_SANDBOX=0 is now CLOUDAGENTS_SANDBOX=off)" : ""
+  throw new Error(`CLOUDAGENTS_SANDBOX must be strict, basic or off, got "${raw}"${hint}`)
+}
+
+const provisioningEnv = (): Provisioning => {
+  const raw = process.env.CLOUDAGENTS_PROVISIONING?.trim() || "per-thread"
+  if (raw === "guaranteed" || raw === "pooled" || raw === "per-thread") return raw
+  throw new Error(`CLOUDAGENTS_PROVISIONING must be guaranteed, pooled or per-thread, got "${raw}"`)
+}
+
+const intEnv = (name: string, fallback: number, min: number, max = Number.MAX_SAFE_INTEGER): number => {
+  const raw = process.env[name]?.trim()
+  if (raw === undefined || raw === "") return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max}, got "${raw}"`)
+  }
   return value
 }
 

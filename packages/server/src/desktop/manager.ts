@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
@@ -16,6 +16,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
+import wallpaper from "./wallpaper.png" with { type: "file" }
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
 
@@ -115,8 +116,11 @@ const X_SOCKET_TIMEOUT_MS = 10_000
 const READY_TIMEOUT_MS = 20_000
 const TERM_GRACE_MS = 2_000
 const COMMAND_TIMEOUT_MS = 15_000
-/** Shown centered on the black root window; 2560x1440-scale artwork, so it stays sharp at DESKTOP_SCALE. */
-const WALLPAPER = join(import.meta.dir, "wallpaper.png")
+/**
+ * Shown centered on the black root window; 2560x1440-scale artwork, so it stays sharp at DESKTOP_SCALE. Embedded in a
+ * compiled `kestrel-box`, where only this process can read it, so it is copied next to the openbox config for hsetroot.
+ */
+const WALLPAPER = wallpaper
 /** Output kept per launched app; older text is dropped. */
 const OUTPUT_TAIL_CHARS = 32 * 1024
 /**
@@ -509,8 +513,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
   Effect.gen(function* () {
     const sessions = new Map<string, Session>()
     const watchers = new Set<(s: DesktopStatus) => void>()
-    /** Openbox config and theme shared by this process's desktops; written on the first boot, removed on exit. */
-    let openboxConfig: { readonly dir: string; readonly rc: string } | null = null
+    /** Openbox config, theme and wallpaper shared by this process's desktops; written on the first boot, removed on exit. */
+    let openboxConfig: { readonly dir: string; readonly rc: string; readonly wallpaper: string } | null = null
 
     const toStatus = (taskId: string, s: Session | undefined): DesktopStatus => {
       const live = s !== undefined && s.state !== "stopped"
@@ -816,10 +820,21 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
         yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
+        const shared = yield* Effect.try({
+          try: () => {
+            if (openboxConfig !== null) return openboxConfig
+            const dir = mkdtempSync(join(tmpdir(), "kestrel-openbox-"))
+            const wallpaperFile = join(dir, "wallpaper.png")
+            writeFileSync(wallpaperFile, readFileSync(WALLPAPER))
+            openboxConfig = { dir, rc: writeOpenboxConfig(dir), wallpaper: wallpaperFile }
+            return openboxConfig
+          },
+          catch: toErr,
+        })
         // The wallpaper is cosmetic: a desktop without it still serves the agent. hsetroot keeps the root pixmap
         // after it exits; it joins the IPC namespace because Imlib2 draws through MIT-SHM.
         yield* Effect.tryPromise({
-          try: () => runCommand("hsetroot", ["-solid", "#000000", "-center", WALLPAPER], s.display, s.ipc),
+          try: () => runCommand("hsetroot", ["-solid", "#000000", "-center", shared.wallpaper], s.display, s.ipc),
           catch: toErr,
         }).pipe(
           Effect.flatMap((r) =>
@@ -829,11 +844,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         )
         yield* Effect.try({
           try: () => {
-            if (openboxConfig === null) {
-              const dir = mkdtempSync(join(tmpdir(), "kestrel-openbox-"))
-              openboxConfig = { dir, rc: writeOpenboxConfig(dir) }
-            }
-            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", openboxConfig.rc], { critical: false })
+            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false })
             startEncoder(s, preferredEncoder())
           },
           catch: toErr,

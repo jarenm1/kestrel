@@ -30,9 +30,15 @@ Threads are private to the user who started them: the box answers every thread, 
 
 ## Agent sandbox
 
-Everything an agent controls runs in bubblewrap inside a transient systemd scope: the agent run, every `workspace_exec`, the desktop terminal and apps started with `desktop_launch`. Each task gets a slice `kestrel-box<port>-t<task>.slice` (under `kestrel.slice`) whose limits cap all of the task's processes together; swap is off for it, so the memory limit is hard and the kernel OOM-kills inside the task only.
+Under the `strict` and `basic` levels, everything an agent controls runs in bubblewrap inside a transient systemd scope: the agent run, every `workspace_exec`, the desktop terminal and apps started with `desktop_launch`. Each task gets a slice `kestrel-box<port>-t<task>.slice` (under `kestrel.slice`) whose limits (see [Resource limits](#resource-limits)) apply to all of the task's processes together. With `CLOUDAGENTS_PROVISIONING=per-thread` they are hard caps with swap off, so the kernel OOM-kills inside the task only. `off` runs agents plainly (below).
 
-The sandbox exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake). Without `CLOUDAGENTS_SANDBOX_PATH`, `bun run dev` starts the box with `CLOUDAGENTS_SANDBOX=0`, which runs agents unsandboxed: fine for local work, never for a shared or production box.
+`CLOUDAGENTS_SANDBOX` picks the level:
+
+- `strict` (the default when `CLOUDAGENTS_SANDBOX_PATH` is set, as the flake does): the sandbox exposes only `/nix/store` and a toolchain directory from it (`CLOUDAGENTS_SANDBOX_PATH`, `CLOUDAGENTS_SANDBOX_SSL`, set by the flake), and runs in the task's own network namespace (see below).
+- `basic` (the default without `CLOUDAGENTS_SANDBOX_PATH`): bubblewrap over the host's own filesystem and network. The host's system directories (`/usr`, `/bin`, `/etc`, `/nix`, ...) are read-only; the thread workspace, the task home (`/home/agent`) and a private `/tmp` are writable; the real `$HOME` and the rest of `/home` are absent. Processes share the host network and IPC, so an agent can reach the box's own loopback services (broker, MCP). `basic` needs `bwrap` (bubblewrap) and, with systemd on, `systemd-run`, on the box's `PATH`; agent commands get the host's `PATH`, so tools an agent uses must be on it. CLIs installed under `$HOME` are not visible.
+- `off`: agent commands run as plain `sh -c`, with no bubblewrap. `bun run dev` starts the box this way when no Nix toolchain is configured. Fine for local work, never for a shared or production box.
+
+`CLOUDAGENTS_SANDBOX=0` (the old spelling of `off`) is rejected at startup.
 
 ### Network and IPC
 
@@ -77,11 +83,20 @@ Roblox Studio through Vinegar is community-supported and can break when Studio c
 
 ## Resource limits
 
+Defaults below are the server's, which keep Kestrel's shared box on hard per-thread caps. A user's own box installed with `kestrel-box` runs with the CLI's shipped config instead: `guaranteed`, box memory `80%`, box CPU 80% of the cores, one agent run per core (see [byo-box.md](byo-box.md#install-your-own-box)).
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLOUDAGENTS_TASK_MEMORY_MAX` | `4G` | systemd `MemoryMax` per task |
-| `CLOUDAGENTS_TASK_CPU_QUOTA` | `200%` | systemd `CPUQuota` per task (100% = one core) |
-| `CLOUDAGENTS_TASK_TASKS_MAX` | `1024` | systemd `TasksMax` (processes + threads) per task |
+| `CLOUDAGENTS_SANDBOX` | `strict` with `CLOUDAGENTS_SANDBOX_PATH`, else `basic` | `strict`, `basic` or `off`, see [Agent sandbox](#agent-sandbox) |
+| `CLOUDAGENTS_PROVISIONING` | `per-thread` | How each task's slice is provisioned. `guaranteed`: `MemoryLow` and `CPUWeight` (a floor, not a cap) plus `TasksMax`; a task may use spare memory and CPU. `pooled`: `TasksMax` only. `per-thread`: hard `MemoryMax`, `CPUQuota` and `TasksMax` per task, swap off |
+| `CLOUDAGENTS_TASK_MEMORY_MIN` | `1G` | `MemoryLow` per task under `guaranteed` |
+| `CLOUDAGENTS_TASK_MEMORY_MAX` | `4G` | `MemoryMax` per task under `per-thread` |
+| `CLOUDAGENTS_TASK_CPU_WEIGHT` | `100` | `CPUWeight` per task under `guaranteed` (1 to 10000) |
+| `CLOUDAGENTS_TASK_CPU_QUOTA` | `200%` | `CPUQuota` per task under `per-thread` (100% = one core) |
+| `CLOUDAGENTS_TASK_TASKS_MAX` | `1024` | `TasksMax` (processes + threads) per task, in every mode |
+| `CLOUDAGENTS_BOX_MEMORY_MAX` | `infinity` | `MemoryMax` of the whole box slice: all its tasks together, in every mode |
+| `CLOUDAGENTS_BOX_CPU_QUOTA` | all cores | `CPUQuota` of the whole box slice, in every mode |
+| `CLOUDAGENTS_MAX_CONCURRENT_RUNS` | `0` (unlimited) | Agent runs that execute at once; the rest wait in a queue, shown in the chat |
 | `CLOUDAGENTS_TASK_DISK_MAX` | `50G` | Storage per task (workspace, home, git shadow repos and its attachment files, pending uploads included), enforced by the box; applies with or without systemd |
 | `CLOUDAGENTS_DESKTOP_BUNDLE_MS` | `0` (off) | Desktop stream bundling window, see [Desktop stream bundling](#desktop-stream-bundling-cloudagents_desktop_bundle_ms) |
 | `CLOUDAGENTS_SYSTEMD` | on | `0` runs without limits (machines without a user systemd manager) |
