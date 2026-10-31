@@ -596,8 +596,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           s.mime = `video/mp4; codecs="${piece.codec}"`
           s.state = "running"
           Deferred.unsafeDone(s.ready, Effect.void)
-          for (const sink of s.sinks) sink.onMedia(piece.bytes, "init")
+          // Status first: a viewer needs the MIME type (and "running") before it can decode the init segment.
           publish(s)
+          for (const sink of s.sinks) sink.onMedia(piece.bytes, "init")
           scheduleStop(s)
           continue
         }
