@@ -27,7 +27,9 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
-import { makeCodexDriver, type CodexDriver, type CodexRunInput } from "./codex-app-server"
+import { makeClaudeDriver } from "./claude-stream"
+import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
+import type { RunDriver } from "./run-driver"
 import { makeTranscript, type Transcript } from "./transcript"
 
 export interface AgentHarnessShape {
@@ -48,13 +50,15 @@ export interface AgentHarnessShape {
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
-   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. A Codex turn is interrupted
-   * first, so it ends cleanly in its session; the process is killed when it does not exit in time.
+   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. The turn is interrupted
+   * first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
+   * process is killed when it does not exit in time.
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /**
-   * Adds `text` to the run's live turn (Codex `turn/steer`). False when the run's harness cannot take it now (no
-   * Codex turn going); the message then waits in the run's inbox for task_inbox.
+   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input). False
+   * when the run cannot take it now (no turn going yet, or its last turn is over); the message then waits in the
+   * run's inbox for task_inbox.
    */
   readonly steer: (runId: string, text: string) => Effect.Effect<boolean>
   /** Marks a run that never started as failed. */
@@ -95,14 +99,21 @@ interface ActiveRun {
   context: ContextUsage | null
   /** Agent session id, once the CLI names it. */
   sessionId: string | null
-  /** The app-server conversation of a Codex run; null for Claude runs and replays, which only print. */
-  codex: CodexDriver | null
+  /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
+  driver: RunDriver | null
+  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
+  readonly stderrIsLog: boolean
 }
 
-/** What a run starts from besides its process: the session's last context use, and its Codex turn if it is one. */
+/** How the harness talks to a run's CLI over stdin. */
+type RunConversation =
+  | { readonly kind: "codex"; readonly input: Omit<CodexRunInput, "clientVersion"> }
+  | { readonly kind: "claude"; readonly prompt: string }
+
+/** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
   readonly seed: ContextUsage | null
-  readonly codex: Omit<CodexRunInput, "clientVersion"> | null
+  readonly conversation: RunConversation | null
 }
 
 /** How to start a run's child process; real agent launches and replays differ only here. */
@@ -228,13 +239,13 @@ export const AgentHarnessLive = Layer.effect(
         active.delete(runId)
         entry.log.end()
         if (spawnError) entry.stderrLines.push(spawnError)
-        // A Codex run is over when its turn is, whatever app-server's exit code; a refused request or an early exit
-        // shows as the run's error, unless the run was stopped on purpose.
-        entry.codex?.close()
-        const codexOutcome = entry.codex?.outcome() ?? null
+        // A run is over when its turn is, whatever the CLI's exit code; a refused request or an early exit shows as
+        // the run's error, unless the run was stopped on purpose.
+        entry.driver?.close()
+        const turn = entry.driver?.outcome() ?? null
         const cancelled = (yield* store.read).runs.find((r) => r.id === runId)?.status !== "running"
-        if (codexOutcome?.status === "failed" && codexOutcome.error !== null && !cancelled) {
-          putItem(runId, entry, { _tag: "error", id: "codex-run", text: codexOutcome.error })
+        if (turn?.status === "failed" && turn.error !== null && !cancelled) {
+          putItem(runId, entry, { _tag: "error", id: "run-error", text: turn.error })
         }
         flushHeld(runId, entry)
         // The items are the run's display history; keep them next to the raw log for later reads.
@@ -250,7 +261,7 @@ export const AgentHarnessLive = Layer.effect(
           if (!run || run.status !== "running") return Either.right(null)
           const task = s.tasks.find((t) => t.id === run.taskId)
           if (!task) return Either.right(null)
-          const ok = entry.codex === null ? exitCode === 0 : codexOutcome?.status === "completed"
+          const ok = entry.driver === null ? exitCode === 0 : turn?.status === "completed"
           const now = nowIso()
           run.status = ok ? "succeeded" : "failed"
           run.exitCode = exitCode
@@ -258,13 +269,12 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
-          // A Codex run's stderr is app-server's own log, not the agent's output.
-          const failure = codexOutcome?.status === "failed" ? codexOutcome.error : null
+          const failure = turn?.status === "failed" ? turn.error : null
+          const stdout = entry.stdoutLines.join("\n").trim()
+          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
           const text =
             entry.transcript.finalText() ??
-            failure ??
-            (entry.stdoutLines.join("\n").trim() ||
-              (entry.codex === null ? entry.stderrLines.join("\n").trim() : "") ||
+            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
               (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
           const message: Message = {
             id: newId(),
@@ -303,8 +313,8 @@ export const AgentHarnessLive = Layer.effect(
         yield* broker.revoke(runId)
         const entry = active.get(runId)
         if (entry) {
-          // An interrupted Codex turn ends on its own and closes the process; anything else is signalled now.
-          const interrupted = entry.codex?.interrupt() ?? false
+          // An interrupted turn ends on its own and closes the process; anything else is signalled now.
+          const interrupted = entry.driver?.interrupt() ?? false
           if (!interrupted) killProcessGroup(entry.child.pid, "SIGTERM")
           const timer = setTimeout(() => {
             if (!active.has(runId)) return
@@ -341,7 +351,7 @@ export const AgentHarnessLive = Layer.effect(
       if (trimmed.startsWith("{")) {
         try {
           const parsed: unknown = JSON.parse(trimmed)
-          entry.codex?.receive(parsed)
+          entry.driver?.receive(parsed)
           // Every parsed line goes through the run's transcript, whether or not it yields items.
           for (const item of entry.transcript.push(parsed)) putItem(runId, entry, item)
           const context = entry.transcript.context()
@@ -401,33 +411,41 @@ export const AgentHarnessLive = Layer.effect(
               transcript: makeTranscript(session.seed),
               context: session.seed,
               sessionId: null,
-              codex: null,
+              driver: null,
+              stderrIsLog: session.conversation?.kind === "codex",
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
             stdin.on("error", () => undefined)
-            // Claude runs and replays only print; they read an empty stdin.
-            if (session.codex === null) stdin.end()
-            else {
-              entry.codex = makeCodexDriver(
-                { ...session.codex, clientVersion: VERSION },
+            const send = (message: unknown) => {
+              const line = JSON.stringify(message)
+              log.write(`>> ${line}\n`)
+              stdin.write(`${line}\n`)
+            }
+            // The first turn is over: the CLI exits once its stdin closes, or is killed when it does not.
+            const onDone = () => {
+              stdin.end()
+              setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
+            }
+            const conversation = session.conversation
+            if (conversation === null) {
+              // Replays only print; they read an empty stdin.
+              stdin.end()
+            } else if (conversation.kind === "codex") {
+              entry.driver = makeCodexDriver(
+                { ...conversation.input, clientVersion: VERSION },
                 {
-                  send: (message) => {
-                    const line = JSON.stringify(message)
-                    log.write(`>> ${line}\n`)
-                    stdin.write(`${line}\n`)
-                  },
+                  send,
                   onThread: (threadId) => {
                     entry.sessionId = threadId
                     runFork(recordSession(run.id, threadId, "openai"))
                   },
-                  // The turn is over: app-server exits once its stdin closes, or is killed when it does not.
-                  onDone: () => {
-                    stdin.end()
-                    setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
-                  },
+                  onDone,
                 },
               )
+            } else {
+              // Claude Code names its session in its stream-json `init`, which `handleLine` records.
+              entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
             }
             active.set(run.id, entry)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
@@ -438,7 +456,7 @@ export const AgentHarnessLive = Layer.effect(
             child.on("close", (code) => {
               runFork(finish(run.id, code, null))
             })
-            entry.codex?.start()
+            entry.driver?.start()
           },
           catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
         })
@@ -543,18 +561,21 @@ export const AgentHarnessLive = Layer.effect(
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
               {
                 seed: resumeSession === null ? null : (task.context ?? null),
-                codex:
+                conversation:
                   provider === "openai"
                     ? {
-                        text: run.prompt,
-                        prompt,
-                        resumeThread: resumeSession,
-                        model: choice.model,
-                        effort: choice.effort,
-                        // The run's broker token, unless the user's own Codex login replaced it.
-                        apiKey: keptBroker.OPENAI_API_KEY,
+                        kind: "codex",
+                        input: {
+                          text: run.prompt,
+                          prompt,
+                          resumeThread: resumeSession,
+                          model: choice.model,
+                          effort: choice.effort,
+                          // The run's broker token, unless the user's own Codex login replaced it.
+                          apiKey: keptBroker.OPENAI_API_KEY,
+                        },
                       }
-                    : null,
+                    : { kind: "claude", prompt },
               },
             )
           }).pipe(Effect.either)
@@ -582,7 +603,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, codex: null },
+            { seed: null, conversation: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
@@ -593,7 +614,7 @@ export const AgentHarnessLive = Layer.effect(
       cancel: (runId) => stopRun(runId, false),
 
       steer: (runId, text) =>
-        Effect.promise(() => active.get(runId)?.codex?.steer(text) ?? Promise.resolve(false)),
+        Effect.promise(() => active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {

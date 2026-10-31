@@ -1,7 +1,8 @@
 /**
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
- * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would. For OpenAI
- * models it is also the run's Codex app-server: it answers the harness's JSON-RPC on stdin and plays its turn.
+ * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would. Like the
+ * real CLIs it takes its prompt on stdin: Claude Code's stream-json input for Anthropic models, Codex app-server's
+ * JSON-RPC for OpenAI ones, and plays one turn.
  */
 import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
@@ -384,5 +385,39 @@ const serveAppServer = () => {
     .on("close", () => process.exit(0))
 }
 
+/** The Claude Code side of a run: the first stream-json user message is the prompt; later ones steer the turn. */
+const serveClaude = () => {
+  const send = (message: unknown) => console.log(JSON.stringify(message))
+  let started = false
+  let turnOver = false
+  let exitCode = 0
+  const endTurn = (code: number, interrupted = false) => {
+    if (turnOver) return
+    turnOver = true
+    exitCode = code
+    if (interrupted) send({ type: "user", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } })
+    send({ type: "result", subtype: code === 0 ? "success" : "error_during_execution", is_error: code !== 0 })
+  }
+  createInterface({ input: process.stdin })
+    .on("line", (line) => {
+      const message = JSON.parse(line) as { type?: string; request_id?: string; message?: { content?: unknown } }
+      if (message.type === "control_request") {
+        send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
+        endTurn(1, true)
+        return
+      }
+      if (message.type !== "user") return
+      const text = typeof message.message?.content === "string" ? message.message.content : ""
+      if (started) {
+        console.log(`fake-agent: steered with: ${text}`)
+        return
+      }
+      started = true
+      prompt = text
+      void run().then((code) => endTurn(code))
+    })
+    .on("close", () => process.exit(exitCode))
+}
+
 if (appServer) serveAppServer()
-else process.exit(await run())
+else serveClaude()
