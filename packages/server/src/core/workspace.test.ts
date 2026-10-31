@@ -224,3 +224,75 @@ describe("legacy state migration", () => {
     expect(existsSync(join(dataDir, "state.legacy.json"))).toBe(true)
   })
 })
+
+describe("repository icons", () => {
+  /**
+   * A mirror whose `main` holds `files`; a `{ symlink }` entry is committed as a symlink (mode 120000) without
+   * touching the file system, so it works where the OS refuses to create links.
+   */
+  const mirrorWith = async (files: Record<string, string | Uint8Array | { readonly symlink: string }>) => {
+    const root = await newRoot()
+    const seed = join(root, "seed")
+    git(root, ["init", "-q", "-b", "main", seed])
+    for (const [path, content] of Object.entries(files)) {
+      if (typeof content === "object" && "symlink" in content) {
+        const target = join(root, "link-target")
+        await writeFile(target, content.symlink)
+        const oid = git(seed, ["hash-object", "-w", target])
+        git(seed, ["update-index", "--add", "--cacheinfo", `120000,${oid},${path}`])
+      } else {
+        await mkdir(join(seed, path, ".."), { recursive: true })
+        await writeFile(join(seed, path), content)
+        git(seed, ["add", "--", path])
+      }
+    }
+    git(seed, ["commit", "-q", "-m", "icons"])
+    const mirrorPath = join(root, "mirror.git")
+    const commit = await withWorkspace((ws) =>
+      Effect.gen(function* () {
+        yield* ws.syncMirror({ mirrorPath, url: seed })
+        return yield* ws.resolveRef(mirrorPath, "refs/heads/main")
+      }),
+    )
+    return { mirrorPath, commit: commit! }
+  }
+
+  test("skips symlinks and takes the first regular icon in order, whose bytes it serves", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 255])
+    const { mirrorPath, commit } = await mirrorWith({
+      "favicon.svg": { symlink: "/etc/passwd" },
+      "public/favicon.png": png,
+      "assets/logo.svg": "<svg/>",
+    })
+    const icon = await withWorkspace((ws) => ws.findIcon(mirrorPath, commit))
+    expect(icon?.path).toBe("public/favicon.png")
+    const bytes = await withWorkspace((ws) => ws.readIcon(mirrorPath, icon!.blob))
+    expect([...bytes]).toEqual([...png])
+  })
+
+  test("follows the icon link an index page declares, under public/ or the root", async () => {
+    const { mirrorPath, commit } = await mirrorWith({
+      "index.html": `<html><head><link href="/brand/mark.svg?v=2" rel="icon" type="image/svg+xml"></head></html>`,
+      "public/brand/mark.svg": "<svg/>",
+    })
+    expect((await withWorkspace((ws) => ws.findIcon(mirrorPath, commit)))?.path).toBe("public/brand/mark.svg")
+  })
+
+  test("finds nothing for oversized icons, links out of the repository, or non-image files", async () => {
+    const { mirrorPath, commit } = await mirrorWith({
+      "favicon.svg": "x".repeat(256 * 1024 + 1),
+      "index.html": `<link rel="icon" href="../../etc/icon.png"><link rel="shortcut icon" href="https://cdn.example/x.png">`,
+      "app/routes/__root.tsx": `links: () => [{ rel: "icon", href: "/favicon.txt" }]`,
+      "favicon.txt": "not an image",
+    })
+    expect(await withWorkspace((ws) => ws.findIcon(mirrorPath, commit))).toBeNull()
+  })
+
+  test("reads only object ids", async () => {
+    const { mirrorPath } = await mirrorWith({ "favicon.svg": "<svg/>" })
+    const exit = await Effect.runPromiseExit(
+      Effect.provide(Effect.flatMap(WorkspaceService, (ws) => ws.readIcon(mirrorPath, "main:favicon.svg")), WorkspaceLive),
+    )
+    expect(Exit.isFailure(exit)).toBe(true)
+  })
+})

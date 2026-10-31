@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Image, type ImageStyle, type StyleProp, View } from "react-native";
-import type { AttachmentSource } from "@/api/client";
+import { Paths } from "@cloudagents/protocol";
+import type { FileSource } from "@/api/client";
 import { useApiClient } from "@/hooks/useApiClient";
 
 /**
@@ -19,14 +20,14 @@ export function AttachmentImage({
   accessibilityLabel: string;
 }) {
   const { api } = useApiClient();
-  const [source, setSource] = useState<AttachmentSource | null>(null);
+  const [source, setSource] = useState<FileSource | null>(null);
 
   useEffect(() => {
     let active = true;
     setSource(null);
     // A failed token mint leaves the frame empty; the box queries report the same failure.
     api
-      .attachmentSource(taskId, attachmentId)
+      .fileSource(Paths.taskAttachment(taskId, attachmentId))
       .then((resolved) => {
         if (active) setSource(resolved);
       })

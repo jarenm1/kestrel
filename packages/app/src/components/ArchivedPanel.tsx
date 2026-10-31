@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
 import { queries } from "@/api/queries"
+import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -36,6 +37,7 @@ export function ArchivedPanel() {
       {archived.map((task) => (
         <Card key={task.id}>
           <CardContent className="flex items-center gap-4">
+            <ThreadAvatar task={task} />
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               <Link to={threadPath(task.id)} className="truncate font-medium hover:underline">
                 {task.title}

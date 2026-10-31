@@ -4,6 +4,7 @@ import { Archive, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
+import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -148,11 +149,16 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
             <NavLink
               key={task.id}
               to={threadPath(task.id)}
-              aria-label={task.title}
-              title={`${task.title}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
-              className={(s) => cn(tabClass(s), "justify-center py-2")}
+              aria-label={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
+              title={`${task.title || "Untitled thread"}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
+              className={(s) => cn(tabClass(s), "justify-center py-1.5")}
             >
-              <StatusIcon status={task.status} />
+              <span className="relative inline-flex">
+                <ThreadAvatar task={task} />
+                <span className="absolute -right-1.5 -bottom-1.5 flex size-5 items-center justify-center rounded-full bg-[radial-gradient(closest-side,var(--secondary)_55%,transparent)]">
+                  <StatusIcon status={task.status} className="[&>svg]:size-3" />
+                </span>
+              </span>
             </NavLink>
           ))}
         </nav>
@@ -204,29 +210,30 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
                 title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
                   "\n",
                 )}
-                className={(s) => cn(tabClass(s), "flex-1 items-start py-2 pr-9 pl-2.5")}
+                className={(s) => cn(tabClass(s), "grid flex-1 grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-x-2.5 gap-y-0.5 py-2 pr-9 pl-2.5")}
               >
-                <StatusIcon status={task.status} className="mt-0.5" />
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <FadingTitle text={task.title} />
-                  <span className="text-xs text-muted-foreground">
-                    {STATUS_LABEL[task.status]} · {formatAgo(task.updatedAt, now)}
-                  </span>
-                  {task.checkouts.length > 0 && (
-                    <span className="flex flex-wrap gap-1 pt-0.5">
-                      {task.checkouts.map((checkout) => (
-                        <span
-                          key={checkout.id}
-                          title={checkout.repo}
-                          className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
-                        >
-                          {repoShortName(checkout.repo)}
-                          {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
-                        </span>
-                      ))}
-                    </span>
-                  )}
+                <span className="row-span-2 inline-flex self-center">
+                  <ThreadAvatar task={task} />
                 </span>
+                <FadingTitle text={task.title} />
+                <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+                  <StatusIcon status={task.status} label={STATUS_LABEL[task.status]} className="[&>svg]:size-3" />
+                  <span className="truncate">· {formatAgo(task.updatedAt, now)}</span>
+                </span>
+                {task.checkouts.length > 0 && (
+                  <span className="col-start-2 flex flex-wrap gap-1 pt-0.5">
+                    {task.checkouts.map((checkout) => (
+                      <span
+                        key={checkout.id}
+                        title={checkout.repo}
+                        className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
+                      >
+                        {repoShortName(checkout.repo)}
+                        {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                      </span>
+                    ))}
+                  </span>
+                )}
               </NavLink>
               <Button
                 variant="ghost"

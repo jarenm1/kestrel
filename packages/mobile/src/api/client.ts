@@ -63,8 +63,8 @@ function errorMessage(text: string, fallback: string): string {
 /** The user's own box that their apps use; `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
-/** Image source for an attachment; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
-export interface AttachmentSource {
+/** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
+export interface FileSource {
   uri: string;
   headers: Record<string, string>;
 }
@@ -74,7 +74,8 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
-  attachmentSource(taskId: string, attachmentId: string): Promise<AttachmentSource>;
+  /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
+  fileSource(path: string): Promise<FileSource>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is the user's own. */
   socketUrl(path: string): Promise<string>;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
@@ -220,8 +221,7 @@ export function createApiClient(
   }
 
   return {
-    attachmentSource: async (taskId, attachmentId) => {
-      const path = Paths.taskAttachment(taskId, attachmentId);
+    fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
       const token = await mintBoxToken(activeBox);
       return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };

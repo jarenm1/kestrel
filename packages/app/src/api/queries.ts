@@ -45,8 +45,8 @@ export const keys = {
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
-  /** Signed URL of an attachment of a thread, read from the box the thread lives on. */
-  attachment: (taskId: string, attachmentId: string) => ["attachment", taskId, attachmentId] as const,
+  /** URL of a file a thread's box serves (a `Paths` path), read from the box the thread lives on. */
+  taskFile: (taskId: string, path: string) => ["task-file", taskId, path] as const,
 }
 
 /**
@@ -164,9 +164,6 @@ export const queries = {
   diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
-  attachmentUrl: (taskId: string, attachmentId: string) =>
-    queryOptions({
-      queryKey: keys.attachment(taskId, attachmentId),
-      queryFn: () => api.attachmentUrl(taskId, attachmentId),
-    }),
+  taskFileUrl: (taskId: string, path: string) =>
+    queryOptions({ queryKey: keys.taskFile(taskId, path), queryFn: () => api.taskFileUrl(taskId, path) }),
 }

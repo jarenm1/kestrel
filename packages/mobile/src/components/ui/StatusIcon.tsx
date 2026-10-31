@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { Animated, Easing, StyleSheet, View } from "react-native";
+import { Animated, Easing, StyleSheet, Text, View } from "react-native";
 import { Ban, Check, CircleAlert, LoaderCircle, X, type LucideIcon } from "lucide-react-native";
 import { colors } from "@/theme";
 
@@ -26,28 +26,32 @@ function Spinner({ children }: { children: React.ReactNode }) {
   return <Animated.View style={{ transform: [{ rotate }] }}>{children}</Animated.View>;
 }
 
-/** Task, run and desktop states as one small icon (the web app's `StatusIcon`); the state name is its label. */
-export function StatusIcon({ status, size = 16 }: { status: string; size?: number }) {
-  const label = status.replace("_", " ");
+/** Icon and optional visible label share a status colour; only the glyph animates. */
+export function StatusIcon({ status, label, size = 16 }: { status: string; label?: string; size?: number }) {
   const entry = ICON_BY_STATUS[status];
-  if (!entry) {
-    // Idle and unknown states: a small filled dot.
-    return (
-      <View accessibilityRole="image" accessibilityLabel={label} style={[styles.box, { width: size, height: size }]}>
-        <View style={[styles.dot, { width: size / 2, height: size / 2, borderRadius: size / 4 }]} />
-      </View>
-    );
-  }
-  const Icon = entry.icon;
-  const glyph = <Icon size={size} color={entry.color} strokeWidth={2} />;
+  const color = entry?.color ?? colors.mutedForeground;
+  const Icon = entry?.icon;
+  const glyph = Icon ? (
+    <Icon size={size} color={color} strokeWidth={2} />
+  ) : (
+    <View style={[styles.box, { width: size, height: size }]}>
+      <View style={[styles.dot, { width: size / 2, height: size / 2, borderRadius: size / 4 }]} />
+    </View>
+  );
   return (
-    <View accessibilityRole="image" accessibilityLabel={label} style={styles.box}>
-      {entry.spin ? <Spinner>{glyph}</Spinner> : glyph}
+    <View
+      accessibilityRole="image"
+      accessibilityLabel={label ?? status.replace("_", " ")}
+      style={[styles.box, label !== undefined && styles.labelRow]}
+    >
+      {entry?.spin ? <Spinner>{glyph}</Spinner> : glyph}
+      {label !== undefined ? <Text style={{ color, fontSize: size }}>{label}</Text> : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   box: { alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  labelRow: { flexDirection: "row", gap: 4 },
   dot: { backgroundColor: colors.mutedForeground },
 });
