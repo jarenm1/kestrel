@@ -13,20 +13,3 @@ export const desktopScaleEnv: Readonly<Record<string, string>> = {
   QT_SCALE_FACTOR: String(DESKTOP_SCALE),
   XCURSOR_SIZE: String(24 * DESKTOP_SCALE),
 }
-
-/** Openbox config with title bar and menu fonts at DESKTOP_SCALE; openbox's defaults fill in everything else. */
-export const openboxRc = (): string => {
-  const font = (place: string, size: number) =>
-    `<font place="${place}"><name>sans</name><size>${size * DESKTOP_SCALE}</size></font>`
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <theme>
-    ${font("ActiveWindow", 8)}
-    ${font("InactiveWindow", 8)}
-    ${font("MenuHeader", 9)}
-    ${font("MenuItem", 9)}
-    ${font("OnScreenDisplay", 9)}
-  </theme>
-</openbox_config>
-`
-}

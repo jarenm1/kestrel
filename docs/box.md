@@ -38,6 +38,8 @@ Each desktop's X server is a rootful Xwayland in a headless weston. On a host wi
 
 GPU access is not a tenant isolation boundary: desktop apps reach the host GPU driver and share its memory and scheduling. Keep the existing task CPU/RAM limits, but do not treat them as a VRAM quota.
 
+The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpaper.png` (the logo on black) on the root window, openbox runs with the theme, fonts and bindings from `desktop/theme.ts`, and the flake's `xterm` wrapper uses the app's colors. Openbox gets an explicit set of bindings and an empty menu file, so nothing on the desktop runs a program outside the sandbox: its stock root menu launches programs as the box user. Right-clicking the desktop lists the open windows instead, which is also the way back to an iconified window.
+
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
 The desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:

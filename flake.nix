@@ -43,7 +43,8 @@
           # Remote desktop stack (one virtual X display per task)
           weston        # headless Wayland compositor hosting each desktop's X server
           xwayland      # rootful X server per desktop; GPU-accelerated (glamor, DRI3) when the host has one
-          openbox       # minimal window manager
+          openbox       # minimal window manager; themed by packages/server/src/desktop/theme.ts
+          hsetroot      # paints the desktop wallpaper on the root window
           xterm         # default app on agent desktops
           xdotool       # input injection (mouse/keyboard) from the web client / MCP
           ffmpeg-full   # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
@@ -59,9 +60,36 @@
           exec ${pkgs.firefox}/bin/firefox "$@"
         '';
         # xterm's bitmap fonts don't scale, so it draws DejaVu at the desktop's HiDPI factor (GDK_SCALE, set by the box).
+        # Colors and padding follow the app's palette (packages/app/src/styles.css).
+        xtermStyle = pkgs.lib.escapeShellArgs (pkgs.lib.concatMap (r: [ "-xrm" "XTerm*${r}" ]) [
+          "background: #0a0a0b"
+          "foreground: #ededef"
+          "cursorColor: #ededef"
+          "highlightColor: #2e2e33"
+          "highlightTextColor: #ededef"
+          "scrollBar: false"
+          "color0: #3a3a40"
+          "color1: #f2555a"
+          "color2: #4ade80"
+          "color3: #e3b341"
+          "color4: #6b9bff"
+          "color5: #c084fc"
+          "color6: #5ccfe6"
+          "color7: #c8c8cd"
+          "color8: #6b6b74"
+          "color9: #ff7b7f"
+          "color10: #86efac"
+          "color11: #f0c95e"
+          "color12: #93b6ff"
+          "color13: #d8b4fe"
+          "color14: #8fe1f0"
+          "color15: #f5f5f6"
+        ]);
         sandboxXterm = pkgs.writeShellScriptBin "xterm" ''
           export FONTCONFIG_FILE=${sandboxFontsConf}
-          exec ${pkgs.xterm}/bin/xterm -fa 'DejaVu Sans Mono' -fs "$(( 10 * ''${GDK_SCALE:-1} ))" "$@"
+          scale=''${GDK_SCALE:-1}
+          exec ${pkgs.xterm}/bin/xterm -fa 'DejaVu Sans Mono' -fs "$(( 10 * scale ))" -b "$(( 8 * scale ))" \
+            ${xtermStyle} "$@"
         '';
 
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.

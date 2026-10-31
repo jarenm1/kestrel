@@ -52,7 +52,7 @@ Open the printed URL (`http://localhost:5173/auth/dev-login`) to sign in as `dev
 
 - **Fake agent:** `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent that needs no model key. Drop it for a real agent and add a key or subscription in Settings › Connections.
 - **Sandbox and desktop (Linux + Nix):** `nix run` runs the same stack with the flake's toolchain and turns on the bubblewrap sandbox and the task desktop. Without Nix, agents run **unsandboxed** and there is no desktop on macOS and Windows. On NixOS use the flake (npm's `workerd` does not start there).
-- **Linux without Nix:** the desktop needs weston, Xwayland, openbox, xterm, xdotool, ffmpeg and the `xdamage-capture` helper from `packages/server/native`. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
+- **Linux without Nix:** the desktop needs weston, Xwayland, openbox, hsetroot, xterm, xdotool, ffmpeg and the `xdamage-capture` helper from `packages/server/native`. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
 - **Windows:** agent commands run through POSIX `sh` (from `PATH` or Git for Windows).
 - **Several stacks on one machine:** ports shift by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10`, so give each running stack its own `KESTREL_DEV_SLOT` (0-9). The ports are printed at startup; forward the app port with `ssh -L` to use a remote dev machine.
 
