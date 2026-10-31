@@ -1,6 +1,6 @@
 import { useMemo } from "react"
 import { useQuery } from "@tanstack/react-query"
-import type { AgentItem } from "@cloudagents/protocol"
+import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { Alert } from "@/components/ui/alert"
@@ -62,13 +62,14 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
         <details className="rounded-xl border border-border bg-card/40 px-3.5 py-2 shadow-soft">
           <summary
             className={cn(
-              "cursor-pointer font-mono text-xs select-none",
+              "cursor-pointer text-xs select-none",
               item.status === "error" && "text-destructive",
             )}
           >
-            {item.name} · {item.status}
+            {toolDisplayName(item.name)} · {item.status}
           </summary>
           <div className="mt-2 flex flex-col gap-2">
+            <div className="font-mono text-[11px] break-all text-muted-foreground">{item.name}</div>
             <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>
             {item.output !== null && <pre className={PRE_CLASS}>{item.output}</pre>}
             {(tree.children.get(item.id) ?? []).map((child) => (
