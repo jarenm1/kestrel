@@ -113,6 +113,13 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
   let windowTokens: number | null = null
   let usedTokens: number | null = null
   let contextValue: ContextUsage | null = null
+  /**
+   * Claude text and thinking blocks streaming in (`--include-partial-messages`), by API message id, in block order,
+   * with the item id each one shows under. The finished block's `assistant` line takes over that id.
+   */
+  const claudeStreams = new Map<string, Array<{ readonly kind: "text" | "thinking"; readonly index: number; readonly id: string; text: string }>>()
+  /** The API message each context is streaming: the main agent (null) or a subagent (its Task call id). */
+  const claudeStreaming = new Map<string | null, string>()
 
   const refreshContext = () => {
     if (usedTokens === null || windowTokens === null) return
@@ -156,17 +163,29 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
       refreshContext()
     }
     const items: AgentItem[] = []
+    // A block that streamed in keeps the id it was shown under; the next streamed block of the same kind is this one.
+    const messageId = asString(line.message.id)
+    const streamed = messageId === null ? undefined : claudeStreams.get(messageId)
+    const idFor = (kind: "text" | "thinking"): string => {
+      const at = streamed?.findIndex((block) => block.kind === kind) ?? -1
+      if (at === -1 || streamed === undefined) return nextId()
+      const [block] = streamed.splice(at, 1)
+      if (streamed.length === 0 && messageId !== null) claudeStreams.delete(messageId)
+      return block?.id ?? nextId()
+    }
     for (const block of asArray(line.message.content)) {
       if (!isRecord(block)) continue
       const kind = asString(block.type)
       if (kind === "text") {
+        const id = idFor("text")
         const text = asString(block.text)
         if (text === null || text.trim() === "") continue
-        items.push({ _tag: "text", id: nextId(), parentToolId, text })
+        items.push({ _tag: "text", id, parentToolId, text })
       } else if (kind === "thinking") {
+        const id = idFor("thinking")
         const text = asString(block.thinking)
         if (text === null || text.trim() === "") continue
-        items.push({ _tag: "thinking", id: nextId(), parentToolId, text })
+        items.push({ _tag: "thinking", id, parentToolId, text })
       } else if (kind === "tool_use") {
         const id = asString(block.id)
         const name = asString(block.name)
@@ -237,6 +256,43 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     return items
   }
 
+  /** One `stream_event` line: a text or thinking block growing by a delta. Tool input is shown once the call is made. */
+  const claudeStream = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const event = isRecord(line.event) ? line.event : null
+    if (event === null) return []
+    const parentToolId = asString(line.parent_tool_use_id)
+    switch (asString(event.type)) {
+      case "message_start": {
+        const id = isRecord(event.message) ? asString(event.message.id) : null
+        if (id !== null) claudeStreaming.set(parentToolId, id)
+        return []
+      }
+      case "content_block_start": {
+        const messageId = claudeStreaming.get(parentToolId)
+        const kind = isRecord(event.content_block) ? asString(event.content_block.type) : null
+        const index = asNumber(event.index)
+        if (messageId === undefined || index === null || (kind !== "text" && kind !== "thinking")) return []
+        const blocks = claudeStreams.get(messageId) ?? []
+        blocks.push({ kind, index, id: nextId(), text: "" })
+        claudeStreams.set(messageId, blocks)
+        return []
+      }
+      case "content_block_delta": {
+        const messageId = claudeStreaming.get(parentToolId)
+        const delta = isRecord(event.delta) ? event.delta : null
+        const block = messageId === undefined ? undefined : claudeStreams.get(messageId)?.find((b) => b.index === event.index)
+        if (block === undefined || delta === null) return []
+        const piece = block.kind === "text" ? asString(delta.text) : asString(delta.thinking)
+        if (piece === null) return []
+        block.text += piece
+        if (block.text.trim() === "") return []
+        return [{ _tag: block.kind, id: block.id, parentToolId, text: block.text }]
+      }
+      default:
+        return []
+    }
+  }
+
   const claude = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     switch (asString(line.type)) {
       case "assistant":
@@ -248,8 +304,9 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
       case "system":
         claudeSystem(line)
         return []
+      case "stream_event":
+        return claudeStream(line)
       default:
-        // stream_event (partial messages) adds no display items.
         return []
     }
   }

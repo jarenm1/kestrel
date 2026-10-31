@@ -151,13 +151,90 @@ describe("claude stream-json", () => {
     expect(subResult[0]).toMatchObject({ id: "toolu_sub", parentToolId: "toolu_task", status: "ok" })
   })
 
-  test("system and stream_event lines produce nothing", () => {
+  test("system lines, stray stream events and unknown lines produce nothing", () => {
     const transcript = makeTranscript()
     expect(transcript.push({ type: "system", subtype: "init", session_id: "s", tools: [] })).toEqual([])
-    expect(transcript.push({ type: "stream_event", event: { type: "content_block_delta" } })).toEqual([])
+    // A delta for a block that never started (no message_start / content_block_start) is not shown.
+    expect(transcript.push({ type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "x" } } })).toEqual([])
     expect(transcript.push({ type: "mystery" })).toEqual([])
     expect(transcript.push("not an object")).toEqual([])
     expect(transcript.finalText()).toBeNull()
+  })
+})
+
+/** A `stream_event` line as `--include-partial-messages` prints it. */
+const streamEvent = (event: Record<string, unknown>, parentToolUseId: string | null = null) => ({
+  type: "stream_event",
+  event,
+  parent_tool_use_id: parentToolUseId,
+  session_id: "s",
+  uuid: "u",
+})
+const messageStart = (id: string, parent: string | null = null) => streamEvent({ type: "message_start", message: { id } }, parent)
+const blockStart = (index: number, type: string, parent: string | null = null) =>
+  streamEvent({ type: "content_block_start", index, content_block: { type } }, parent)
+const delta = (index: number, delta: Record<string, unknown>, parent: string | null = null) =>
+  streamEvent({ type: "content_block_delta", index, delta }, parent)
+const assistantMessage = (id: string, content: ReadonlyArray<unknown>, parent: string | null = null) => ({
+  type: "assistant",
+  message: { id, role: "assistant", content },
+  parent_tool_use_id: parent,
+  uuid: "u",
+})
+
+describe("claude partial messages", () => {
+  test("a text block grows under one id, and its finished line replaces it in place", () => {
+    const transcript = makeTranscript()
+    transcript.push(messageStart("msg_1"))
+    transcript.push(blockStart(0, "text"))
+    const first = valid(transcript.push(delta(0, { type: "text_delta", text: "The command" })))
+    expect(first).toEqual([{ _tag: "text", id: expect.any(String), parentToolId: null, text: "The command" }])
+    const id = first[0]!.id
+    expect(transcript.push(delta(0, { type: "text_delta", text: " printed hello." }))).toEqual([
+      { _tag: "text", id, parentToolId: null, text: "The command printed hello." },
+    ])
+    expect(valid(transcript.push(assistantMessage("msg_1", [{ type: "text", text: "The command printed hello." }])))).toEqual([
+      { _tag: "text", id, parentToolId: null, text: "The command printed hello." },
+    ])
+    // The next message's text is a new item.
+    transcript.push(messageStart("msg_2"))
+    transcript.push(blockStart(0, "text"))
+    expect(transcript.push(delta(0, { type: "text_delta", text: "Done." }))[0]?.id).not.toBe(id)
+  })
+
+  test("thinking and text blocks of one message keep their own ids; tool input does not stream", () => {
+    const transcript = makeTranscript()
+    transcript.push(messageStart("msg_1"))
+    transcript.push(blockStart(0, "thinking"))
+    const [thinking] = transcript.push(delta(0, { type: "thinking_delta", thinking: "Check the file first." }))
+    expect(transcript.push(delta(0, { type: "signature_delta", signature: "sig" }))).toEqual([])
+    transcript.push(blockStart(1, "text"))
+    const [text] = transcript.push(delta(1, { type: "text_delta", text: "Reading it." }))
+    transcript.push(blockStart(2, "tool_use"))
+    expect(transcript.push(delta(2, { type: "input_json_delta", partial_json: "{\"file\"" }))).toEqual([])
+    expect(thinking).toMatchObject({ _tag: "thinking", text: "Check the file first." })
+    expect(text).toMatchObject({ _tag: "text", text: "Reading it." })
+    expect(thinking?.id).not.toBe(text?.id)
+
+    // Claude Code prints each finished block as its own line; each takes over its streamed item.
+    expect(transcript.push(assistantMessage("msg_1", [{ type: "thinking", thinking: "Check the file first." }]))[0]?.id).toBe(thinking?.id)
+    expect(transcript.push(assistantMessage("msg_1", [{ type: "text", text: "Reading it." }]))[0]?.id).toBe(text?.id)
+    expect(valid(transcript.push(assistantMessage("msg_1", [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file: "a" } }])))).toEqual([
+      { _tag: "tool", id: "toolu_1", parentToolId: null, name: "Read", input: { file: "a" }, status: "running", output: null },
+    ])
+  })
+
+  test("a subagent streams in its own context, under its Task call", () => {
+    const transcript = makeTranscript()
+    transcript.push(messageStart("msg_main"))
+    transcript.push(blockStart(0, "text"))
+    transcript.push(messageStart("msg_sub", "toolu_task"))
+    transcript.push(blockStart(0, "text", "toolu_task"))
+    const [sub] = valid(transcript.push(delta(0, { type: "text_delta", text: "Searching." }, "toolu_task")))
+    const [main] = valid(transcript.push(delta(0, { type: "text_delta", text: "Waiting on the search." })))
+    expect(sub).toMatchObject({ parentToolId: "toolu_task", text: "Searching." })
+    expect(main).toMatchObject({ parentToolId: null, text: "Waiting on the search." })
+    expect(sub?.id).not.toBe(main?.id)
   })
 })
 
