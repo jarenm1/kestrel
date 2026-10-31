@@ -39,6 +39,16 @@ Kestrel runs Claude Code or Codex on a box you own, driven from a chat in the br
   </tr>
 </table>
 
+## Use your own machine
+
+Run the box on your own computer and use it from app.kestrel-agent.com and the mobile app:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh   # or: npx kestrel-box login && npx kestrel-box install
+```
+
+It pairs the machine with your account and installs the box as a service. Linux runs it natively, Windows inside WSL2, macOS inside a Lima VM the installer manages. Details: [docs/byo-box.md](docs/byo-box.md#install-your-own-box).
+
 ## Run it locally
 
 Nothing in the cloud is required. Needs [Bun](https://bun.sh) and Node 22 (for `wrangler`); works on Linux, macOS and Windows.
@@ -64,7 +74,8 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 |---|---|
 | [`packages/app`](packages/app) | React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves the public pages on `kestrel-agent.com` and the app on `app.kestrel-agent.com`. |
 | [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API and the relay to the box. Serves the built app. |
-| [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. |
+| [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
+| [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
 
