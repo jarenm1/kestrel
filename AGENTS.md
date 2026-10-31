@@ -19,7 +19,7 @@ parallel on one shared machine, so the workflow below is mandatory.
 Start a change (from the main clone, e.g. `~/kestrel`):
 
 ```sh
-git fetch origin
+git fetch origin main                            # always first: never branch from a stale main
 git worktree add ../kestrel-worktrees/<topic> -b <github-login>/<topic> origin/main
 cd ../kestrel-worktrees/<topic>
 bun install --frozen-lockfile
@@ -72,6 +72,11 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent (no model key, exercises MCP and the desktop). Use a real key only
   when you need a real agent (add a key under Settings › Connections; never commit keys).
 - Sign in at `http://localhost:<app port>/auth/dev-login`. The public pages (landing, pricing) are at `http://site.localhost:<app port>/`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
+- **Windows:** `bun run dev` has no box desktop or sandbox. For those, use WSL2 Ubuntu with Nix (install as root via
+  `wsl -u root`, enable flakes). Run `nix run` from a clone in WSL's home (a Windows worktree's `.git` is a Windows path).
+  WSLg mounts `/tmp/.X11-unix` read-only; as root: `umount /tmp/.X11-unix && mkdir -m 1777 -p /tmp/.X11-unix`
+  (reverted by `wsl --shutdown`). Ports reach the Windows browser on `localhost`. A first desktop Start can time out
+  (NVENC fails in WSL, then falls back); press Start again.
 
 ## Before opening a PR
 
@@ -81,7 +86,9 @@ bun run build:app      # if packages/app changed
 ```
 
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and
-say in the PR what you ran and what you saw. There is no CI; the PR description is the evidence.
+say in the PR what you ran and what you saw. There is no CI; the PR description is the evidence. **Visual changes
+need screenshots in the PR:** push them to an orphan branch `<github-login>/<topic>-screenshots` and embed
+`https://github.com/jarenm1/kestrel/blob/<that branch>/<file>.png?raw=true`.
 
 ## Repo map
 
