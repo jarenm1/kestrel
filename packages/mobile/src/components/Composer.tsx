@@ -9,6 +9,7 @@ import {
   AgentModel,
   EFFORT_LABELS,
   connectedModelProviders,
+  harnessCommandPrefix,
   type ContextUsage,
   type HarnessCommand,
   type Message,
@@ -314,15 +315,18 @@ export function Composer({
     (trigger !== "$" || commandProvider === "openai") &&
     focused;
 
+  // Codex lists its commands and skills on `/`, and only its skills on their native `$`.
   const commandMatches =
     slashQuery === undefined
       ? []
-      : (commandQuery.data?.commands ?? []).filter((c) =>
-          c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
+      : (commandQuery.data?.commands ?? []).filter(
+          (c) =>
+            (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
+            c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
         );
 
   function chooseCommand(command: HarnessCommand) {
-    const prefix = commandQuery.data?.provider === "openai" ? "$" : "/";
+    const prefix = harnessCommandPrefix(command, commandQuery.data?.provider);
     const rest = text.slice(commandTokenEnd).replace(/^\s+/, "");
     setText(`${prefix}${command.name} ${rest}`);
   }

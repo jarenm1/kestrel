@@ -143,7 +143,7 @@ export type Run = typeof Run.Type
 
 /**
  * One display item of an agent run, normalized from the harness's own stream (Claude
- * `stream-json`, Codex `exec --json`) so the app renders every harness the same way.
+ * `stream-json`, Codex app-server notifications) so the app renders every harness the same way.
  * Ids are unique within a run; a later item with the same id replaces the earlier one
  * (a tool goes `running` -> `ok`/`error`).
  */
@@ -386,16 +386,22 @@ export const DiffResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutDiff
 export type DiffResponse = typeof DiffResponse.Type
 
 /**
- * One command (Claude Code slash command, Codex skill) the authenticated harness offers in a thread's workspace.
- * `name` carries no leading `/` or `$`: the app shows the provider's native invocation prefix.
+ * One command the authenticated harness offers in a thread's workspace: a Claude Code slash command, a Codex
+ * command (`/compact`, `/review`, `/init`) or a Codex skill. `name` carries no leading `/` or `$`.
  */
 export const HarnessCommand = Schema.Struct({
   name: Schema.String,
   description: Schema.String,
   /** The CLI's own argument hint, when it publishes one (e.g. `[issue description]`). */
   argumentHint: Schema.optional(Schema.String),
+  /** How the command is typed: `$` for a Codex skill. Absent from older boxes: `$` for Codex, `/` for Claude Code. */
+  prefix: Schema.optional(Schema.Literal("/", "$")),
 })
 export type HarnessCommand = typeof HarnessCommand.Type
+
+/** How `command` is typed in the composer: its own prefix, or the provider's default from boxes that send none. */
+export const harnessCommandPrefix = (command: HarnessCommand, provider: ModelProvider | undefined): "/" | "$" =>
+  command.prefix ?? (provider === "openai" ? "$" : "/")
 
 /**
  * The commands of the harness the thread's next message will run on. `provider` is authoritative: while a run is

@@ -20,7 +20,7 @@ export const EFFORT_LABELS: Record<AgentEffort, string> = {
   max: "Max",
 }
 
-/** Model id passed to the provider's CLI (`claude --model`, `codex exec -m`). */
+/** Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`). */
 export const AgentModel = Schema.Literal(
   "claude-fable-5-1",
   "claude-opus-5-5",

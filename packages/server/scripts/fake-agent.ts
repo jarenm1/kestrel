@@ -1,15 +1,17 @@
 /**
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
- * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would.
+ * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would. For OpenAI
+ * models it is also the run's Codex app-server: it answers the harness's JSON-RPC on stdin and plays its turn.
  */
 import { randomUUID } from "node:crypto"
+import { createInterface } from "node:readline"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 const mcpUrl = process.env.CLOUDAGENTS_MCP_URL
 const mcpToken = process.env.CLOUDAGENTS_MCP_TOKEN
-const prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
+let prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
 const model = process.env.CLOUDAGENTS_MODEL
 const effort = process.env.CLOUDAGENTS_EFFORT
 const choice = [model === undefined ? null : `model: ${model}`, effort === undefined ? null : `effort: ${effort}`]
@@ -21,17 +23,13 @@ if (!mcpUrl || !mcpToken) {
   process.exit(1)
 }
 
-// The first line names the agent session in the shape the run's provider prints: Claude Code's stream-json init for
-// Anthropic models, codex's `thread.started` for OpenAI ones. A resumed run keeps its session.
-const resumeSession = process.env.CLOUDAGENTS_RESUME_SESSION
-const sessionId = resumeSession ?? randomUUID()
-console.log(
-  JSON.stringify(
-    model?.startsWith("gpt-")
-      ? { type: "thread.started", thread_id: sessionId }
-      : { type: "system", subtype: "init", session_id: sessionId },
-  ),
-)
+const appServer = model?.startsWith("gpt-") === true
+// A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
+// `thread/start` or `thread/resume` response. A resumed run keeps its session.
+let resumeSession = appServer ? undefined : process.env.CLOUDAGENTS_RESUME_SESSION
+if (!appServer) {
+  console.log(JSON.stringify({ type: "system", subtype: "init", session_id: resumeSession ?? randomUUID() }))
+}
 
 const client = new Client({ name: "cloudagents-fake-agent", version: "0.1.0" })
 const transport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
@@ -318,12 +316,73 @@ const main = async (): Promise<number> => {
   return 0
 }
 
-try {
-  const code = await main()
-  await client.close()
-  process.exit(code)
-} catch (e) {
-  console.error(`fake-agent: failed: ${e instanceof Error ? e.message : String(e)}`)
-  await client.close().catch(() => undefined)
-  process.exit(1)
+const run = async (): Promise<number> => {
+  try {
+    const code = await main()
+    await client.close()
+    return code
+  } catch (e) {
+    console.error(`fake-agent: failed: ${e instanceof Error ? e.message : String(e)}`)
+    await client.close().catch(() => undefined)
+    return 1
+  }
 }
+
+/** The app-server side of a Codex run: one thread, one turn, played by `main`. Exits when the harness closes stdin. */
+const serveAppServer = () => {
+  const send = (message: unknown) => console.log(JSON.stringify(message))
+  const turnId = randomUUID()
+  let threadId = ""
+  let turnOver = false
+  const endTurn = (status: "completed" | "failed" | "interrupted") => {
+    if (turnOver) return
+    turnOver = true
+    const error = status === "failed" ? { message: "fake agent failed" } : null
+    send({ method: "turn/completed", params: { threadId, turn: { id: turnId, items: [], status, error, durationMs: null } } })
+  }
+  createInterface({ input: process.stdin })
+    .on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> }
+      if (message.id === undefined) return
+      const params = message.params ?? {}
+      switch (message.method) {
+        case "initialize":
+          send({ id: message.id, result: { userAgent: "kestrel-fake-agent" } })
+          return
+        case "account/login/start":
+          send({ id: message.id, result: { type: "apiKey" } })
+          return
+        case "thread/start":
+        case "thread/resume": {
+          threadId = message.method === "thread/resume" ? String(params.threadId) : randomUUID()
+          if (message.method === "thread/resume") resumeSession = threadId
+          send({ id: message.id, result: { thread: { id: threadId }, model: model ?? null } })
+          return
+        }
+        case "turn/start": {
+          const input = Array.isArray(params.input) ? (params.input[0] as { text?: string } | undefined) : undefined
+          prompt = input?.text ?? ""
+          send({ id: message.id, result: { turn: { id: turnId, items: [], status: "inProgress", error: null } } })
+          send({ method: "turn/started", params: { threadId, turn: { id: turnId, items: [], status: "inProgress", error: null } } })
+          void run().then((code) => endTurn(code === 0 ? "completed" : "failed"))
+          return
+        }
+        case "turn/steer": {
+          const input = Array.isArray(params.input) ? (params.input[0] as { text?: string } | undefined) : undefined
+          console.log(`fake-agent: steered with: ${input?.text ?? ""}`)
+          send({ id: message.id, result: { turnId } })
+          return
+        }
+        case "turn/interrupt":
+          send({ id: message.id, result: {} })
+          endTurn("interrupted")
+          return
+        default:
+          send({ id: message.id, error: { code: -32601, message: `${message.method} is not supported by the fake agent` } })
+      }
+    })
+    .on("close", () => process.exit(0))
+}
+
+if (appServer) serveAppServer()
+else process.exit(await run())
