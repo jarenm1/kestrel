@@ -2,7 +2,7 @@ import React, { type ReactNode, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react-native";
-import type { AgentItem } from "@cloudagents/protocol";
+import { toolDisplayName, type AgentItem } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { Markdown } from "@/components/Markdown";
 import { Alert } from "@/components/ui/Alert";
@@ -91,14 +91,14 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
           <Disclosure
             summary={
               <Text
-                style={[styles.summaryText, styles.mono, item.status === "error" && styles.error]}
-                numberOfLines={1}
+                style={[styles.summaryText, item.status === "error" && styles.error]}
               >
-                {item.name} · {item.status}
+                {toolDisplayName(item.name)} · {item.status}
               </Text>
             }
           >
             <View style={styles.toolBody}>
+              <Text style={[styles.summaryText, styles.mono]} selectable>{item.name}</Text>
               <Pre text={JSON.stringify(item.input, null, 2)} />
               {item.output !== null ? <Pre text={item.output} /> : null}
               {(tree.children.get(item.id) ?? []).map((child) => (
