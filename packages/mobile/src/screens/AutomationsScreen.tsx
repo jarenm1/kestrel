@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react-native";
 import type { Automation, AutomationRun, TriggerAutomationBody } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
+import { useAuth } from "@/auth/AuthContext";
 import { AutomationEditor, type AutomationEditorTarget } from "@/components/AutomationEditor";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -21,6 +22,8 @@ const switchTrack = { false: colors.secondary, true: colors.primary };
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
   const { api } = useApiClient();
+  const { activeBox } = useAuth();
+  const unavailable = activeBox !== null;
   const queries = useMemo(() => createQueries(api), [api]);
   const automations = useQuery(queries.automations());
   const [editing, setEditing] = useState<AutomationEditorTarget | null>(null);
@@ -33,8 +36,18 @@ export function AutomationsScreen() {
           <Text style={styles.title}>Automations</Text>
           <Text style={styles.subtitle}>Tasks the agent starts on a schedule or when a pull request changes.</Text>
         </View>
+        {unavailable ? (
+          <Alert variant="warning">
+            {"Automations run on Kestrel's box; not yet available on your own box"}
+          </Alert>
+        ) : null}
 
-        <Button icon={Plus} onPress={() => setEditing({ kind: "create" })} style={styles.newButton}>
+        <Button
+          icon={Plus}
+          disabled={unavailable}
+          onPress={() => setEditing({ kind: "create" })}
+          style={styles.newButton}
+        >
           New automation
         </Button>
 
@@ -58,6 +71,7 @@ export function AutomationsScreen() {
                 key={automation.id}
                 automation={automation}
                 divided={index > 0}
+                unavailable={unavailable}
                 onEdit={() => setEditing({ kind: "edit", automation })}
               />
             ))}
@@ -73,10 +87,12 @@ export function AutomationsScreen() {
 function AutomationRow({
   automation,
   divided,
+  unavailable,
   onEdit,
 }: {
   automation: Automation;
   divided: boolean;
+  unavailable: boolean;
   onEdit: () => void;
 }) {
   const { api } = useApiClient();
@@ -185,7 +201,7 @@ function AutomationRow({
         ) : null}
         <Button
           variant="soft"
-          disabled={run.isPending || (isGithub && !pullRequestValid)}
+          disabled={unavailable || run.isPending || (isGithub && !pullRequestValid)}
           onPress={() => run.mutate(isGithub ? { pullRequest: pullRequestNumber } : {})}
         >
           {run.isPending ? "Starting…" : "Run now"}

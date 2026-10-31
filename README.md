@@ -68,7 +68,7 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
 
-Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harnesses, sandbox and limits](docs/box.md).
+Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
 
 ## Deploys
 

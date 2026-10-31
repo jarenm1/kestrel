@@ -11,13 +11,16 @@ import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
 import { makeControlClient } from "./control/client"
-import { CredentialStoreLive } from "./credentials"
+import { CredentialStore, CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
+import type { WsServices } from "./http/streams"
 import { BOX_DEV_HEADER, runRelay } from "./relay/client"
+import { makeBoxAuth } from "./direct/auth"
+import { makeDirectListener, type DirectListener } from "./direct/listener"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -148,17 +151,30 @@ const program = Effect.gen(function* () {
     previewOpen: core.previewOpen,
   })
 
+  let direct: DirectListener | null = null
+  if (config.direct !== null) {
+    const store = yield* CredentialStore
+    direct = makeDirectListener({
+      auth: makeBoxAuth(config.direct, store),
+      core,
+      webHandler,
+      runtime: yield* Effect.runtime<WsServices>(),
+    })
+  }
+  const serve = direct === null ? webHandler : direct.handle
+
   const server = createServer((req, res) => {
     // The broker only answers sandboxed runs holding a live token; it is routed first on purpose.
     const handled = req.url?.startsWith(BROKER_PREFIX)
       ? handleBroker(broker, req, res)
       : req.url?.startsWith(MCP_PREFIX)
         ? mcpHandler(req, res)
-        : toWebRequest(req).then((web) => webHandler(web)).then((response) => writeWebResponse(res, response))
+        : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
-  // Task streams only come through the relay, which knows the signed-in user; the local listener has no upgrades.
+  // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
+  if (direct !== null) server.on("upgrade", direct.upgrade)
 
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)

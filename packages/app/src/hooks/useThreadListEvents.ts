@@ -3,16 +3,19 @@ import { useQueryClient } from "@tanstack/react-query"
 import type { Task } from "@cloudagents/protocol"
 import { openUserEvents } from "@/api/events"
 import { keys, storeTask } from "@/api/queries"
+import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 const RECONNECT_MS = 2000
 
 /**
  * Keeps the thread list current from the user events stream: `task.updated` writes the task into the list (new threads
  * included), `task.deleted` drops it. Each (re)connect refetches the list, which catches changes missed meanwhile.
+ * Reconnects when the active box changes, since the stream belongs to that box.
  */
 export function useThreadListEvents(): void {
   const queryClient = useQueryClient()
   const [generation, setGeneration] = useState(0)
+  const activeBoxId = useActiveBoxId()
 
   useEffect(() => {
     let active = true
@@ -44,5 +47,5 @@ export function useThreadListEvents(): void {
       window.clearTimeout(retry)
       close()
     }
-  }, [generation, queryClient])
+  }, [generation, queryClient, activeBoxId])
 }

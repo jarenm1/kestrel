@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
 import { openTaskStats } from "@/api/events"
+import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 const RECONNECT_MS = 2000
 
@@ -12,15 +13,16 @@ function withinWindow(samples: readonly TaskStatsSample[]): TaskStatsSample[] {
 
 /**
  * The thread's resource samples from the stats WebSocket: the first frame of a connection replaces them, later frames
- * append. Reconnects 2 s after a close; starts empty when the thread changes.
+ * append. Reconnects 2 s after a close; starts empty when the thread or the active box changes.
  */
 export function useTaskStats(taskId: string): readonly TaskStatsSample[] {
   const [samples, setSamples] = useState<readonly TaskStatsSample[]>([])
   const [generation, setGeneration] = useState(0)
+  const activeBoxId = useActiveBoxId()
 
   useEffect(() => {
     setSamples([])
-  }, [taskId])
+  }, [taskId, activeBoxId])
 
   useEffect(() => {
     let active = true
@@ -45,7 +47,7 @@ export function useTaskStats(taskId: string): readonly TaskStatsSample[] {
       window.clearTimeout(retry)
       close()
     }
-  }, [taskId, generation])
+  }, [taskId, generation, activeBoxId])
 
   return samples
 }
