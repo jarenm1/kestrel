@@ -16,7 +16,7 @@ export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./sy
 /** Where the per-task home is mounted inside the sandbox. */
 export const SANDBOX_HOME = "/home/agent"
 
-/** Under the task home: executables of the task's installed toolkits and nix packages (`nix.ts`), last on every launch's PATH. */
+/** Under the task home: executables of the task's installed toolkits (`toolkits.ts`), last on every launch's PATH. */
 export const TOOLKIT_BIN = ".kestrel/bin"
 
 /**

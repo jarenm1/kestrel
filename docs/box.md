@@ -81,19 +81,9 @@ Heavy desktop apps are opt-in per task, never in `sandboxEnv`. The agent install
 
 Roblox Studio through Vinegar is community-supported and can break when Studio changes. The toolkit's `vinegar` writes the sandbox's defaults on first run (only where the task has no Vinegar config yet): the `Vulkan` renderer, since DXVK crashes Studio on lavapipe, and Web Pages off, since Studio's embedded WebView2 sign-in never loads under Wine here. Studio then signs in through the browser: its "Login via Browser" goes through the toolkit's `xdg-open` to Firefox on the task desktop, where the user signs in to roblox.com (Quick Sign-in with a code approved on a device already signed in, or an emailed one-time code, avoids typing a password into the remote desktop), and Firefox hands the returned `roblox-studio-auth:` link to Vinegar, which passes it to Studio. Studio can outgrow the default 4 GB task memory limit.
 
-### Packages
+### Software on other boxes
 
-Other software comes in through the `package_install` MCP tool, backed by the package manager the box operator picks with `CLOUDAGENTS_PACKAGES` (on a `kestrel-box` box: `packages` in its config). The agent is told which one it has; with `off` it is not offered the tool. Names are checked against the manager's naming rules before anything runs, so none can pass as an option.
-
-- `nix` (the default when `nix` is on the box's `PATH`): `nix build nixpkgs#<name>` on the host, outside the sandbox, the same way as a toolkit: out-links in `.kestrel/packages/<name>/`, executables linked into `.kestrel/bin`. Per task, no root, and shared through the read-only `/nix/store`, so it suits a box several users share. With `CLOUDAGENTS_TOOLKITS_FLAKE` set, nixpkgs is the flake's locked input (`--inputs-from`); without it, the `nixpkgs` of the box user's flake registry.
-- `apt`: `sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- <names>` on the host, one install at a time. Packages land system-wide and stay after the task, so every thread on the box sees them: only for a box one user owns. It needs the `basic` sandbox (a `strict` sandbox cannot see `/usr`, and under `off` the agent could run that sudo itself; the box refuses to start otherwise) and a sudoers entry for the box user that allows exactly that command, e.g. `/etc/sudoers.d/kestrel-box`:
-
-  ```
-  <box user> ALL=(root) NOPASSWD:SETENV: /usr/bin/apt-get install -y --no-install-recommends -- *
-  ```
-
-  The box does not run `apt-get update`; keep the package lists fresh on the host (Ubuntu's `apt-daily` timer does).
-- `off`: no `package_install`. The agent can still install into its own home with user-space tools (`npm`, `uv`, `cargo`, ...).
+Toolkits are Kestrel's curated installs and exist only on boxes started from the flake. Other boxes have no install tool; agents use what the host has. Under `basic` the sandbox sees the host's `/usr`, `/opt` and so on read-only, so the operator installs apps on the host (`apt`, `dnf`, ...) and agents can run them. Agents can also install into their own home with user-space tools (`npm`, `uv`, `cargo install`, binaries in `~/.local/bin`). They cannot `sudo`: bubblewrap sets `no_new_privs`, which stops setuid binaries, and `/usr` is read-only anyway. Only with sandbox `off` and passwordless sudo for the box user can an agent run `sudo apt-get install` itself, which hands it the host.
 
 ## Resource limits
 

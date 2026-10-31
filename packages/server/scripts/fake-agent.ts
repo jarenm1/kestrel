@@ -184,15 +184,6 @@ const runToolkitProbe = async (name: string, gui: string): Promise<number> => {
   return launched.failed ? 1 : 0
 }
 
-// Installs packages with package_install and checks that `command` runs in a new process.
-const runPackageProbe = async (names: string[], command: string): Promise<number> => {
-  const installed = await call("package_install", { names }, UNBOUNDED_CALL_MS)
-  const ran = await call("workspace_exec", { command })
-  const ok = !installed.failed && ran.text.startsWith("exit code: 0")
-  await call("task_report", { status: ok ? "done" : "failed", message: `package probe: ${installed.text}\n${ran.text}` })
-  return ok ? 0 : 1
-}
-
 // Asks the user a question with options and a screenshot, then polls the inbox for a message sent during the run.
 const askAndListen = async (): Promise<{ answer: string; inbox: string } | null> => {
   // The question attaches the desktop, so it has to be running.
@@ -291,8 +282,6 @@ const main = async (): Promise<number> => {
   }
   if (probe === "checkout-probe") return runCheckoutProbe(arg ?? "")
   if (probe === "toolkit-probe") return runToolkitProbe(arg ?? "", request.trim().split(/\s+/).slice(2).join(" "))
-  // `package-probe <name,name> <command...>`
-  if (probe === "package-probe") return runPackageProbe((arg ?? "").split(","), request.trim().split(/\s+/).slice(2).join(" "))
   if (request.trim() === "desktop-probe") return runDesktopProbes()
 
   // The desktop starts only when the agent opens it: until then the desktop tools refuse.

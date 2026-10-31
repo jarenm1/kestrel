@@ -27,8 +27,6 @@ export const BoxConfig = Schema.Struct({
   port: Schema.Int.pipe(Schema.between(1, 65535)),
   dataDir: Schema.String,
   sandbox: Schema.Literal("basic", "off"),
-  /** `package_install`'s package manager; absent leaves the server's default (`nix` when nix is installed, else off). */
-  packages: Schema.optional(Schema.Literal("nix", "apt", "off")),
   provisioning: Provisioning,
 })
 export type BoxConfig = typeof BoxConfig.Type
@@ -103,7 +101,6 @@ export const serverEnv = (config: BoxConfig): Record<string, string | undefined>
     CLOUDAGENTS_PORT: String(config.port),
     CLOUDAGENTS_DATA_DIR: expandHome(config.dataDir),
     CLOUDAGENTS_SANDBOX: config.sandbox,
-    CLOUDAGENTS_PACKAGES: config.packages,
     CLOUDAGENTS_PROVISIONING: p.mode,
     CLOUDAGENTS_TASK_MEMORY_MIN: p.taskMemoryMin,
     CLOUDAGENTS_TASK_CPU_WEIGHT: String(p.taskCpuWeight),

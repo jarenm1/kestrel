@@ -10,7 +10,6 @@ import { type RunContext, describeError } from "./tools/common"
 import { type DesktopToolDeps, registerDesktopTools } from "./tools/desktop"
 import { type AutomationToolDeps, registerAutomationTools } from "./tools/automations"
 import { type GitHubToolDeps, registerGitHubTools } from "./tools/github"
-import { type PackageToolDeps, registerPackageTools } from "./tools/packages"
 import { type TaskToolDeps, registerTaskTools } from "./tools/task"
 import { type ThreadToolDeps, registerThreadTools } from "./tools/threads"
 import { type ToolkitToolDeps, registerToolkitTools } from "./tools/toolkits"
@@ -34,8 +33,7 @@ export type McpDeps = McpAuthDeps &
   ThreadToolDeps &
   GitHubToolDeps &
   AutomationToolDeps &
-  ToolkitToolDeps &
-  PackageToolDeps
+  ToolkitToolDeps
 
 const MCP_PATH = /^\/mcp\/([^/?#]+)/
 
@@ -48,7 +46,6 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
         "Desktop coordinates are pixels with the origin at the top-left. The desktop is not started with the run: call " +
         "desktop_open before any other desktop tool, then desktop_screenshot to see the desktop and its size. " +
         (deps.toolkits === null ? "" : "Optional apps (Blender, Roblox Studio) come in through toolkit_install. ") +
-        (deps.packages === null ? "" : "Other software the box lacks comes in through package_install. ") +
         "After starting a web dev server, call " +
         "preview_open with its port so the user can inspect it in the thread's Preview tab. Use task_report to tell the user when you are done, task_ask to ask them a question " +
         "and wait for the answer, and task_inbox between steps to read messages the user, or another of the user's agents, sent during the run. " +
@@ -61,7 +58,6 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   registerDesktopTools(server, ctx, deps)
   registerWorkspaceTools(server, ctx, deps)
   registerToolkitTools(server, ctx, deps)
-  registerPackageTools(server, ctx, deps)
   registerTaskTools(server, ctx, deps)
   registerThreadTools(server, ctx, deps)
   registerAutomationTools(server, ctx, deps)
