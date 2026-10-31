@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { codexCommandOf, makeCodexDriver, type CodexOutcome, type CodexRunInput } from "./codex-app-server"
+import { codexCommandOf, makeCodexDriver, type CodexRunInput } from "./codex-app-server"
+import type { RunOutcome } from "./run-driver"
 
 interface Sent {
   readonly id?: number
@@ -13,7 +14,7 @@ interface Sent {
 const harness = (overrides: Partial<CodexRunInput> = {}) => {
   const sent: Sent[] = []
   const threads: string[] = []
-  const outcomes: CodexOutcome[] = []
+  const outcomes: RunOutcome[] = []
   const driver = makeCodexDriver(
     { text: "fix the test", prompt: "user context\n\nfix the test", resumeThread: null, clientVersion: "1.2.3", ...overrides },
     { send: (m) => sent.push(m as Sent), onThread: (id) => threads.push(id), onDone: (o) => outcomes.push(o) },

@@ -135,6 +135,17 @@ describe("claude stream-json", () => {
     expect(transcript.finalText()).toBeNull()
   })
 
+  test("a turn stopped by an interrupt ends without an error, and the next failed turn is an error again", () => {
+    const transcript = makeTranscript()
+    transcript.push({ type: "user", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } })
+    expect(valid(transcript.push({ type: "result", subtype: "error_during_execution", is_error: true }))).toEqual([
+      { _tag: "turn", id: expect.any(String), durationMs: null, inputTokens: null, outputTokens: null, costUsd: null, isError: false },
+    ])
+    const next = valid(transcript.push({ type: "result", subtype: "error_during_execution", is_error: true }))
+    expect(next[0]).toMatchObject({ _tag: "turn", isError: true })
+    expect(next[1]).toMatchObject({ _tag: "error", text: "claude result: error_during_execution" })
+  })
+
   test("subagent blocks carry the parent tool id", () => {
     const transcript = makeTranscript()
     valid(

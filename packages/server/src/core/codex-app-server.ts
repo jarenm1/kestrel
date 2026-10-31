@@ -1,4 +1,5 @@
 import type { HarnessCommand } from "@cloudagents/protocol"
+import type { RunDriver, RunOutcome } from "./run-driver"
 import { isRecord } from "./transcript"
 
 /*
@@ -76,15 +77,6 @@ export const codexCommandOf = (text: string): { readonly name: CodexCommandName;
   return { name: match[1] as CodexCommandName, args: (match[2] ?? "").trim() }
 }
 
-/**
- * How a Codex run ended; null while its turn has not finished. A failure's `error` is set when nothing in the
- * stream reported it (a refused request, an exit); a failed turn reports its own error in a notification.
- */
-export type CodexOutcome =
-  | { readonly status: "completed" }
-  | { readonly status: "interrupted" }
-  | { readonly status: "failed"; readonly error: string | null }
-
 export interface CodexRunInput {
   /** The user's own message: decides whether the run is a Codex command. */
   readonly text: string
@@ -108,21 +100,7 @@ export interface CodexDriverIo {
   /** The run's Codex thread, once app-server has started or resumed it. */
   readonly onThread: (threadId: string) => void
   /** The run's turn is over (or never started); the process can be let go. Called once. */
-  readonly onDone: (outcome: CodexOutcome) => void
-}
-
-export interface CodexDriver {
-  /** Opens the session: `initialize`, then the thread and turn as the responses come in. */
-  readonly start: () => void
-  /** Every message the CLI prints, in order; answers responses and server requests, follows the turn. */
-  readonly receive: (message: unknown) => void
-  /** Adds `text` to the running turn. Resolves false when there is no turn to steer or app-server refuses. */
-  readonly steer: (text: string) => Promise<boolean>
-  /** Asks app-server to stop the running turn; false when there is none yet. */
-  readonly interrupt: () => boolean
-  /** The CLI has exited: unanswered requests fail, and a turn that never finished failed. */
-  readonly close: () => void
-  readonly outcome: () => CodexOutcome | null
+  readonly onDone: (outcome: RunOutcome) => void
 }
 
 /** Server requests that approve an action. Kestrel's sandbox is the boundary, so every action is approved. */
@@ -138,14 +116,14 @@ const textInput = (text: string) => [{ type: "text", text, text_elements: [] }]
 const errorText = (error: unknown): string =>
   isRecord(error) && typeof error.message === "string" ? error.message : "app-server refused the request"
 
-export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): CodexDriver => {
+export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDriver => {
   const command = codexCommandOf(input.text)
   let nextId = 1
   const pending = new Map<number, (message: Record<string, unknown>) => void>()
   let threadId: string | null = null
   /** The run's own turn: from the request that started it, or the first `turn/started` for `/compact`. */
   let turnId: string | null = null
-  let outcome: CodexOutcome | null = null
+  let outcome: RunOutcome | null = null
 
   const request = (method: string, params: unknown, onResult: (message: Record<string, unknown>) => void) => {
     const id = nextId++
@@ -153,7 +131,7 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): CodexD
     io.send({ method, id, params })
   }
 
-  const finish = (result: CodexOutcome) => {
+  const finish = (result: RunOutcome) => {
     if (outcome !== null) return
     outcome = result
     io.onDone(result)

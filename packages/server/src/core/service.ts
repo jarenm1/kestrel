@@ -972,7 +972,7 @@ export const CoreLive = Layer.effect(
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
-              // the answer; otherwise it steers the run's live turn (Codex) or waits in the run's inbox for task_inbox.
+              // the answer; otherwise it steers the run's live turn, or waits in the run's inbox for task_inbox.
               const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {

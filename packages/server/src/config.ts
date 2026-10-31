@@ -7,9 +7,13 @@ import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
 
-/** `--include-partial-messages` streams text and thinking as `stream_event` deltas next to the finished blocks. */
+/**
+ * The prompt goes in on stdin (`--input-format stream-json`), so the harness can add messages to a running turn and
+ * interrupt it (`core/claude-stream.ts`). `--include-partial-messages` streams text and thinking as `stream_event`
+ * deltas next to the finished blocks.
+ */
 const DEFAULT_ANTHROPIC_COMMAND =
-  'claude -p "$CLOUDAGENTS_PROMPT" ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
+  'claude -p --input-format stream-json ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
 
 /**
  * Codex runs as app-server on stdio; the harness opens the thread and its turn over JSON-RPC
@@ -39,12 +43,14 @@ export interface ServerConfig {
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
    * cwd = task worktree (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
-   * The Anthropic command reads the prompt from `CLOUDAGENTS_PROMPT`, `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT`
-   * when the message chose them (Claude Code's `--model` / `--effort`), and `CLOUDAGENTS_RESUME_SESSION` on every
-   * run after a task's first: the session the previous run printed in its stream-json `init`, which it must resume
-   * (`claude --resume`) for the agent to keep the thread's context. The OpenAI command must start Codex app-server
-   * on stdio: the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run reaches the
-   * model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
+   * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
+   * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
+   * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
+   * `--effort`), and `CLOUDAGENTS_RESUME_SESSION` on every run after a task's first: the session the previous run
+   * printed in its stream-json `init`, which it must resume (`claude --resume`) for the agent to keep the thread's
+   * context. `CLOUDAGENTS_PROMPT` still holds the prompt. The OpenAI command must start Codex app-server on stdio:
+   * the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run reaches the model through
+   * the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean

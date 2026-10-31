@@ -120,6 +120,8 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
   const claudeStreams = new Map<string, Array<{ readonly kind: "text" | "thinking"; readonly index: number; readonly id: string; text: string }>>()
   /** The API message each context is streaming: the main agent (null) or a subagent (its Task call id). */
   const claudeStreaming = new Map<string | null, string>()
+  /** Set by Claude Code's "[Request interrupted by user]" note, for the result that closes that turn. */
+  let claudeInterrupted = false
 
   const refreshContext = () => {
     if (usedTokens === null || windowTokens === null) return
@@ -202,6 +204,11 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     if (!isRecord(line.message)) return []
     const items: AgentItem[] = []
     for (const block of asArray(line.message.content)) {
+      // Claude Code records an interrupt as a user text; the turn's result that follows is an error only by name.
+      if (isRecord(block) && block.type === "text" && asString(block.text)?.startsWith("[Request interrupted by user") === true) {
+        claudeInterrupted = true
+        continue
+      }
       if (!isRecord(block) || block.type !== "tool_result") continue
       const id = asString(block.tool_use_id)
       if (id === null) continue
@@ -222,7 +229,9 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
 
   const claudeResult = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     const subtype = asString(line.subtype) ?? "result"
-    const isError = line.is_error === true
+    // A turn stopped on purpose ends without being an error.
+    const isError = line.is_error === true && !claudeInterrupted
+    claudeInterrupted = false
     const usage = isRecord(line.usage) ? line.usage : null
     windowTokens = claudeWindow(line.modelUsage, model) ?? windowTokens
     refreshContext()
