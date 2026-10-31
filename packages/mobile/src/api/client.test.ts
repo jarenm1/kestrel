@@ -35,7 +35,7 @@ test("saved session authenticates and logs out even when the WebView cookie jar 
   );
   const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(nativeCookieFetch);
   try {
-    const client = createApiClient(server.url.origin, "saved-session", null);
+    const client = createApiClient(server.url.origin, "saved-session");
     expect(await client.me()).toEqual(user);
     await client.logout();
     await expect(client.me()).rejects.toMatchObject({ status: 401 });

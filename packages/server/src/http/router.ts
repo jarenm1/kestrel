@@ -233,10 +233,6 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     ),
   ).pipe(
     // pipe takes at most 20 functions: the preview and desktop routes are their own group.
-    HttpRouter.post(
-      "/api/tasks/:id/preview/session",
-      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.previewSession(user, id)))),
-    ),
     HttpRouter.all(
       "/api/tasks/:id/preview",
       Effect.flatMap(pathId, (id) => servePreview(core, id)),
@@ -282,7 +278,7 @@ export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape) =>
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,
       allowedMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowedHeaders: ["content-type", "authorization"],
+      allowedHeaders: ["content-type"],
     })
     const handled = app.pipe(Effect.catchTag("RouteNotFound", () => Effect.succeed(notFound)))
     return HttpApp.toWebHandler(withCors(handled))

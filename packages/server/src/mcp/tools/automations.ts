@@ -63,7 +63,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   const scope = Effect.gen(function* () {
     const control = deps.automations.control
     if (control === null) {
-      return yield* Effect.fail(new ControlError({ message: "automations need the control plane; this box has no relay token (set CLOUDAGENTS_BOX_TOKEN)" }))
+      return yield* Effect.fail(new ControlError({ message: "automations need the control plane; this box has none" }))
     }
     const owner = yield* deps.automations.taskOwner(ctx.taskId)
     return { control, owner }

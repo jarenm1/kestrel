@@ -1,9 +1,6 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import * as SecureStore from "expo-secure-store";
-import type { Me, UserBox } from "@cloudagents/protocol";
-import { createApiClient } from "@/api/client";
-import { clearBoxScopedQueries } from "@/api/queries";
+import type { Me } from "@cloudagents/protocol";
 
 const SERVER_URL_KEY = "kestrel_server_url";
 const SESSION_COOKIE_KEY = "kestrel_session";
@@ -15,10 +12,6 @@ interface AuthState {
   sessionCookie: string | null;
   /** Current signed-in user, or null if not authenticated */
   user: Me | null;
-  /** The user's own boxes (bring your own box); loaded with `/api/me` */
-  boxes: readonly UserBox[];
-  /** The box the user's apps use; `null` is Kestrel's box */
-  activeBoxId: string | null;
   /** Whether we're currently checking auth state */
   loading: boolean;
   /** Last auth error */
@@ -31,11 +24,9 @@ interface AuthActions {
   setUser: (user: Me) => void;
   signOut: () => Promise<void>;
   checkSession: () => Promise<void>;
-  setActiveBox: (boxId: string | null) => Promise<void>;
 }
 
-/** `activeBox` is the box the app's requests go to; `null` is Kestrel's box. */
-type AuthContextValue = AuthState & AuthActions & { activeBox: UserBox | null };
+type AuthContextValue = AuthState & AuthActions;
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -46,14 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     user: null,
     loading: true,
     error: null,
-    boxes: [],
-    activeBoxId: null,
   });
-  const queryClient = useQueryClient();
-  const activeBox = useMemo(
-    () => state.boxes.find((box) => box.id === state.activeBoxId) ?? null,
-    [state.boxes, state.activeBoxId]
-  );
 
   // Load saved server URL and session on mount
   useEffect(() => {
@@ -118,23 +102,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setState((s) => ({
       ...s,
       sessionCookie: null,
-      boxes: [],
-      activeBoxId: null,
       user: null,
       error: null,
     }));
   }, [state.serverUrl, state.sessionCookie]);
-
-  const setActiveBox = useCallback(
-    async (boxId: string | null) => {
-      if (!state.serverUrl) throw new Error("Server URL is not set");
-      const list = await createApiClient(state.serverUrl, state.sessionCookie, null).setActiveBox(boxId);
-      // Box-served data describes the box that was active; drop it before the switch takes effect.
-      clearBoxScopedQueries(queryClient);
-      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId }));
-    },
-    [state.serverUrl, state.sessionCookie, queryClient]
-  );
 
   const checkSession = useCallback(async () => {
     if (state.serverUrl && state.sessionCookie) {
@@ -151,8 +122,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser,
         signOut,
         checkSession,
-        setActiveBox,
-        activeBox,
       }}
     >
       {children}
@@ -194,8 +163,7 @@ async function fetchMe(
       return;
     }
     const user: Me = await res.json();
-    const boxes = await createApiClient(serverUrl, sessionCookie, null).boxes();
-    setState((s) => ({ ...s, user, boxes: boxes.boxes, activeBoxId: boxes.activeBoxId, loading: false, error: null }));
+    setState((s) => ({ ...s, user, loading: false, error: null }));
   } catch (e) {
     setState((s) => ({
       ...s,

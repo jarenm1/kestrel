@@ -45,13 +45,8 @@ export interface ServerConfig {
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
-  /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
+  /** Control plane relay (outbound box connection). Null when `CLOUDAGENTS_CONTROL_URL` is unset. */
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
-  /**
-   * Direct mode (bring your own box): the box's own control-plane lookups and box-token verification.
-   * Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set.
-   */
-  readonly direct: { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string } | null
   /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
   readonly homesDir: string
   /** False when CLOUDAGENTS_SANDBOX=0: agent runs and MCP exec then run unsandboxed via `sh -c`. */
@@ -121,13 +116,10 @@ export const loadConfig = (): ServerConfig => {
         },
       }
     : null
-  const controlUrl = loadControlUrl()
-  const direct = loadDirect(controlUrl)
   return {
     port,
     host,
-    relay: loadRelay(controlUrl, direct),
-    direct,
+    relay: loadRelay(),
     mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
     dataDir,
     mirrorsDir: join(dataDir, "mirrors"),
@@ -186,8 +178,7 @@ const loadGitHubApiUrl = (): string => {
   return raw.replace(/\/+$/, "")
 }
 
-/** `CLOUDAGENTS_CONTROL_URL`, validated; null when unset. */
-const loadControlUrl = (): string | null => {
+const loadRelay = (): ServerConfig["relay"] => {
   const controlUrl = process.env.CLOUDAGENTS_CONTROL_URL?.trim() ?? ""
   if (controlUrl === "") return null
   let protocol: string
@@ -199,31 +190,8 @@ const loadControlUrl = (): string | null => {
   if (!["http:", "https:", "ws:", "wss:"].includes(protocol)) {
     throw new Error(`CLOUDAGENTS_CONTROL_URL must use http(s) or ws(s), got "${controlUrl}"`)
   }
-  return controlUrl
-}
-
-/** Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. */
-const loadDirect = (controlUrl: string | null): ServerConfig["direct"] => {
-  const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
-  const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() ?? ""
-  if (boxId === "" && boxSecret === "") return null
-  if (boxId === "" || boxSecret === "") {
-    throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
-  }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
-  return { controlUrl, boxId, boxSecret }
-}
-
-/** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */
-const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): ServerConfig["relay"] => {
   const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
-  if (boxToken === "") {
-    if (controlUrl !== null && direct === null) {
-      throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set without CLOUDAGENTS_BOX_ID")
-    }
-    return null
-  }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
+  if (boxToken === "") throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set")
   return { controlUrl, boxToken }
 }
 

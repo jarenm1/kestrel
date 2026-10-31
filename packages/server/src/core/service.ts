@@ -1,5 +1,4 @@
 import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
-import { randomUUID } from "node:crypto"
 import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
@@ -16,7 +15,6 @@ import {
   type AgentModel,
   type Attachment,
   NotFound,
-  PreviewSession,
   Paths,
   type PullRequestLink,
   Run,
@@ -252,10 +250,6 @@ export interface CoreShape {
   readonly previewRequest: (user: string, taskId: string, request: Request) => Effect.Effect<Response, NotFound | Conflict | BadRequest | InternalError>
   /** Authenticated HMR socket for the task's registered preview port. */
   readonly previewSocket: (user: string, taskId: string, path: string, protocol?: string) => Effect.Effect<TaskPreviewSocket, NotFound | Conflict | InternalError>
-  /** Direct mode: a token for the task's preview frame, minted for the signed-in user; valid 24 hours. */
-  readonly previewSession: (user: string, taskId: string) => Effect.Effect<PreviewSession, NotFound | Conflict>
-  /** Direct mode: the user and task a preview token was minted for; null when unknown or expired. */
-  readonly previewTokenFor: (token: string) => Effect.Effect<{ readonly user: string; readonly taskId: string } | null>
   /** Bytes of an attachment on one of the signed-in user's task messages. */
   readonly attachment: (
     user: string,
@@ -1241,10 +1235,6 @@ export const CoreLive = Layer.effect(
       ),
     )
 
-    /** Preview tokens minted for direct-mode browser frames, keyed to the user and task they were minted for. */
-    const PREVIEW_SESSION_MS = 24 * 60 * 60 * 1000
-    const previewSessions = new Map<string, { user: string; taskId: string; expiresAt: number }>()
-
     const shape: CoreShape = {
       ask,
       inbox,
@@ -1384,27 +1374,6 @@ export const CoreLive = Layer.effect(
             path,
             protocol,
           })
-        }),
-      previewSession: (user, taskId) =>
-        Effect.gen(function* () {
-          const task = yield* ownedTask(user, taskId)
-          if (task.archivedAt !== undefined) {
-            return yield* Effect.fail(new Conflict({ message: "task is archived; unarchive it first" }))
-          }
-          if (task.previewPort === undefined) {
-            return yield* Effect.fail(new NotFound({ message: "the agent has not opened a preview for this thread" }))
-          }
-          const now = Date.now()
-          for (const [token, session] of previewSessions) if (session.expiresAt <= now) previewSessions.delete(token)
-          const token = randomUUID()
-          previewSessions.set(token, { user, taskId, expiresAt: now + PREVIEW_SESSION_MS })
-          return { token }
-        }),
-      previewTokenFor: (token) =>
-        Effect.sync(() => {
-          const session = previewSessions.get(token)
-          if (session === undefined || session.expiresAt <= Date.now()) return null
-          return { user: session.user, taskId: session.taskId }
         }),
       previewRequest: (user, taskId, request) =>
         Effect.gen(function* () {

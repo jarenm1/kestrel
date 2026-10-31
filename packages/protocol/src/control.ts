@@ -49,24 +49,6 @@ export const ControlPaths = {
   /** POST TriggerAutomationBody -> AutomationRun: "run now". */
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
   /**
-   * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
-   * The app talks to the active box directly at its `url` with a box token instead of through the relay.
-   */
-  boxes: "/api/boxes",
-  /** PATCH UpdateBoxBody -> UserBox / DELETE -> 204 (clears it as the active box). Other users' ids are 404. */
-  userBox: (id: string) => `/api/boxes/${id}`,
-  /** POST -> CreatedBox: replaces the box's secret; tokens signed with the old one stop working. */
-  userBoxSecret: (id: string) => `/api/boxes/${id}/secret`,
-  /** POST -> BoxToken: a fresh box token for the signed-in user and this box. */
-  userBoxToken: (id: string) => `/api/boxes/${id}/token`,
-  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is Kestrel's relayed box. */
-  activeBox: "/api/boxes/active",
-  /**
-   * Box-only: GET -> BoxSelf for the box named in BOX_ID_HEADER, authenticated with `Authorization: Bearer <box
-   * secret>`. How a user's own box learns its owner and the owner's connection secrets. Never reached from a browser.
-   */
-  boxSelf: "/box/self",
-  /**
    * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user). Requires
    * `Authorization: Bearer <box token>` and the acting user's login in BOX_USER_HEADER. Never reached from a browser.
    */
@@ -149,82 +131,6 @@ export const BoxStatus = Schema.Struct({
   boxVersion: Schema.NullOr(Schema.String),
 })
 export type BoxStatus = typeof BoxStatus.Type
-
-/** Header naming the box on box-only routes authenticated with a box secret (`ControlPaths.boxSelf`). */
-export const BOX_ID_HEADER = "x-kestrel-box-id"
-
-/** At most this many boxes per user. */
-export const MAX_USER_BOXES = 10
-
-/**
- * A box's public base URL: an origin only, `https://`, or `http://` on loopback (`localhost`, `127.0.0.1`, `[::1]`)
- * since browsers treat those as secure. The app on an HTTPS origin cannot reach plain HTTP anywhere else.
- */
-export const BoxUrl = Schema.String.pipe(
-  Schema.filter((value) => {
-    let url: URL
-    try {
-      url = new URL(value)
-    } catch {
-      return "not a URL"
-    }
-    if (url.origin !== value) return "must be an origin only, like https://box.example.com (no path or trailing slash)"
-    if (url.protocol === "https:") return true
-    if (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return true
-    return "must be https://, or http:// on localhost"
-  }),
-)
-
-export const BoxName = Schema.String.pipe(Schema.trimmed(), Schema.minLength(1), Schema.maxLength(64))
-
-/** One of a user's own boxes. Its secret is shown only when created or replaced (`CreatedBox`). */
-export const UserBox = Schema.Struct({
-  id: Schema.String,
-  name: BoxName,
-  url: BoxUrl,
-  createdAt: Schema.String,
-})
-export type UserBox = typeof UserBox.Type
-
-export const BoxList = Schema.Struct({
-  boxes: Schema.Array(UserBox),
-  /** The box the user's apps use; null for Kestrel's relayed box. */
-  activeBoxId: Schema.NullOr(Schema.String),
-})
-export type BoxList = typeof BoxList.Type
-
-export const CreateBoxBody = Schema.Struct({ name: BoxName, url: BoxUrl })
-export type CreateBoxBody = typeof CreateBoxBody.Type
-
-export const UpdateBoxBody = Schema.Struct({ name: Schema.optional(BoxName), url: Schema.optional(BoxUrl) })
-export type UpdateBoxBody = typeof UpdateBoxBody.Type
-
-/** The box and its secret, which the box is configured with (`CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET`). */
-export const CreatedBox = Schema.Struct({ box: UserBox, secret: Schema.String })
-export type CreatedBox = typeof CreatedBox.Type
-
-export const SetActiveBoxBody = Schema.Struct({ boxId: Schema.NullOr(Schema.String) })
-export type SetActiveBoxBody = typeof SetActiveBoxBody.Type
-
-/** A box token (see `boxtoken.ts`) and where to use it: `Authorization: Bearer <token>`, or BOX_TOKEN_QUERY. */
-export const BoxToken = Schema.Struct({
-  token: Schema.String,
-  url: BoxUrl,
-  /** ISO time the token expires. */
-  expiresAt: Schema.String,
-})
-export type BoxToken = typeof BoxToken.Type
-
-/** What a user's own box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
-export const BoxSelf = Schema.Struct({
-  owner: Schema.String,
-  /** Matches the `cv` claim of tokens minted while these credentials were current. */
-  credentialsVersion: Schema.String,
-  github: Schema.optional(Schema.String),
-  anthropic: Schema.optional(Schema.String),
-  openai: Schema.optional(Schema.String),
-})
-export type BoxSelf = typeof BoxSelf.Type
 
 /** GitHub pull-request webhook events an automation can start on (`pull_request` action, prefixed). */
 export const GithubAutomationEvent = Schema.Literal(

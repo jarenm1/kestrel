@@ -1,31 +1,25 @@
 import React, { useMemo } from "react";
 import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { CreditCard, LogOut, Monitor, Plug, User } from "lucide-react-native";
+import { useQuery } from "@tanstack/react-query";
+import { CreditCard, LogOut, Plug, User } from "lucide-react-native";
 import { CURRENT_PLAN, PLANS } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { ScreenHeader } from "@/components/ScreenHeader";
-import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useApiClient } from "@/hooks/useApiClient";
-import { errorText } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, fonts, radius, spacing } from "@/theme";
 
 export function SettingsScreen() {
-  const { user, signOut, boxes, activeBoxId, setActiveBox } = useAuth();
+  const { user, signOut } = useAuth();
   const nav = useNavigation();
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const usageQuery = useQuery(queries.usage());
   const usage = usageQuery.data;
-
-  const switchBox = useMutation({
-    mutationFn: (boxId: string | null) => setActiveBox(boxId),
-  });
 
   const currentPlan = PLANS.find((p) => p.id === CURRENT_PLAN) ?? PLANS[0];
   const hoursUsed = usage ? (usage.agentSeconds / 3600).toFixed(1) : "0";
@@ -63,34 +57,6 @@ export function SettingsScreen() {
               Sign out
             </Button>
           </View>
-        </Card>
-      </View>
-      {/* Box Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionTitleRow}>
-          <Monitor size={16} color={colors.mutedForeground} />
-          <Text style={styles.sectionTitle}>Box</Text>
-        </View>
-        <Card style={styles.card}>
-          <BoxRow
-            name="Kestrel's box"
-            detail="Hosted by Kestrel"
-            active={activeBoxId === null}
-            disabled={switchBox.isPending}
-            onUse={() => switchBox.mutate(null)}
-          />
-          {boxes.map((box) => (
-            <BoxRow
-              key={box.id}
-              name={box.name}
-              detail={box.url}
-              active={activeBoxId === box.id}
-              disabled={switchBox.isPending}
-              onUse={() => switchBox.mutate(box.id)}
-            />
-          ))}
-          {switchBox.error ? <Alert variant="destructive">{errorText(switchBox.error)}</Alert> : null}
-          <Text style={styles.subText}>Boxes are created and deleted on the web app.</Text>
         </Card>
       </View>
 
@@ -154,38 +120,6 @@ export function SettingsScreen() {
   );
 }
 
-function BoxRow({
-  name,
-  detail,
-  active,
-  disabled,
-  onUse,
-}: {
-  name: string;
-  detail: string;
-  active: boolean;
-  disabled: boolean;
-  onUse: () => void;
-}) {
-  return (
-    <View style={styles.connectionsRow}>
-      <View style={styles.connectionsInfo}>
-        <Text style={styles.cardTitle}>{name}</Text>
-        <Text style={styles.monoText} numberOfLines={1}>
-          {detail}
-        </Text>
-      </View>
-      {active ? (
-        <Badge variant="success">Active</Badge>
-      ) : (
-        <Button variant="soft" size="sm" disabled={disabled} onPress={onUse}>
-          Use
-        </Button>
-      )}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   scroll: { flex: 1 },
   container: { padding: spacing.md, gap: spacing.lg, paddingBottom: spacing.xxl },
@@ -211,5 +145,4 @@ const styles = StyleSheet.create({
   connectionsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },
   connectionsInfo: { flex: 1 },
   cardTitle: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
-  monoText: { color: colors.mutedForeground, fontSize: 12, fontFamily: fonts.mono, marginTop: 2 },
 });

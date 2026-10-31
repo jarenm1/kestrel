@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { describeTrigger, formatNextRun, promptPreview } from "@/lib/automations"
 import { errorText } from "@/util"
 
@@ -17,10 +16,7 @@ import { errorText } from "@/util"
 export function AutomationsPanel() {
   const queryClient = useQueryClient()
   const automations = useQuery(queries.automations())
-  const activeBoxId = useActiveBoxId()
   const [editing, setEditing] = useState<Automation | null>(null)
-  // Automations only fire on Kestrel's box, so their enabled state can't change while a user box is active.
-  const onUserBox = typeof activeBoxId === "string"
 
   const toggle = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.updateAutomation(id, { enabled }),
@@ -44,11 +40,6 @@ export function AutomationsPanel() {
       </div>
 
       {error && <Alert>{errorText(error)}</Alert>}
-      {onUserBox && (
-        <Alert variant="warning">
-          Automations run on Kestrel's box, so they can't be switched on or off while your own box is active.
-        </Alert>
-      )}
       {automations.isPending && <p className="text-muted-foreground">Loading…</p>}
 
       {automations.data && rows.length === 0 && (
@@ -71,7 +62,6 @@ export function AutomationsPanel() {
                 key={automation.id}
                 automation={automation}
                 toggling={toggle.isPending && toggle.variables?.id === automation.id}
-                toggleDisabled={onUserBox}
                 removing={remove.isPending && remove.variables === automation.id}
                 onEdit={() => setEditing(automation)}
                 onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
@@ -90,7 +80,6 @@ export function AutomationsPanel() {
 function AutomationRow({
   automation,
   toggling,
-  toggleDisabled,
   removing,
   onEdit,
   onToggle,
@@ -98,7 +87,6 @@ function AutomationRow({
 }: {
   automation: Automation
   toggling: boolean
-  toggleDisabled: boolean
   removing: boolean
   onEdit: () => void
   onToggle: (enabled: boolean) => void
@@ -124,7 +112,7 @@ function AutomationRow({
         <Switch
           aria-label={`Enabled: ${automation.name}`}
           checked={automation.enabled}
-          disabled={toggling || toggleDisabled}
+          disabled={toggling}
           onCheckedChange={onToggle}
         />
       </div>
