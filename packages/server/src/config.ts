@@ -3,7 +3,8 @@ import { join, resolve } from "node:path"
 import { availableParallelism } from "node:os"
 import type { ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
-import type { SandboxLevel } from "./sandbox"
+import { type SandboxLevel, findExecutable } from "./sandbox"
+import type { PackageSettings } from "./sandbox/packages"
 import type { Provisioning, SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
 
@@ -74,8 +75,13 @@ export interface ServerConfig {
   readonly sandboxPath: string | null
   /** CA bundle exposed inside the sandbox (CLOUDAGENTS_SANDBOX_SSL). */
   readonly sandboxSslCertFile: string | null
-  /** Flake (CLOUDAGENTS_TOOLKITS_FLAKE, set by the flake) whose `toolkit-<name>` packages `toolkit_install` builds; null without Nix. */
+  /**
+   * Flake (CLOUDAGENTS_TOOLKITS_FLAKE, set by the flake) whose `toolkit-<name>` packages `toolkit_install` builds and
+   * whose nixpkgs input pins `package_install`'s nix packages; null without Nix (no `toolkit_install` then).
+   */
   readonly toolkitsFlake: string | null
+  /** Package manager behind `package_install` (CLOUDAGENTS_PACKAGES); null when the tool is off. */
+  readonly packages: PackageSettings | null
   /** Extra read-only binds the fake agent needs; empty for real agents. */
   readonly fakeAgentRoBinds: readonly string[]
   /** Per-task systemd resource limits; null when CLOUDAGENTS_SYSTEMD=0. */
@@ -123,6 +129,7 @@ export const loadConfig = (): ServerConfig => {
   const sandbox = sandboxLevel(sandboxPath)
   if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")
   const sandboxSsl = process.env.CLOUDAGENTS_SANDBOX_SSL?.trim() || null
+  const toolkitsFlake = process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null
   const fakeAgentRoBinds = fakeAgent ? [process.execPath, join(repoRoot, "packages/server"), join(repoRoot, "node_modules")] : []
   const systemdEnabled = process.env.CLOUDAGENTS_SYSTEMD !== "0"
   if (!systemdEnabled) console.warn("CLOUDAGENTS_SYSTEMD=0: agent runs have NO resource limits")
@@ -168,7 +175,8 @@ export const loadConfig = (): ServerConfig => {
     sandbox,
     sandboxPath,
     sandboxSslCertFile: sandboxSsl,
-    toolkitsFlake: process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null,
+    toolkitsFlake,
+    packages: packagesEnv(sandbox, toolkitsFlake),
     fakeAgentRoBinds,
     systemd,
     maxConcurrentRuns: intEnv("CLOUDAGENTS_MAX_CONCURRENT_RUNS", 0, 0),
@@ -192,6 +200,27 @@ const sandboxLevel = (sandboxPath: string | null): SandboxLevel => {
   if (raw === "strict" || raw === "basic" || raw === "off") return raw
   const hint = raw === "0" ? " (CLOUDAGENTS_SANDBOX=0 is now CLOUDAGENTS_SANDBOX=off)" : ""
   throw new Error(`CLOUDAGENTS_SANDBOX must be strict, basic or off, got "${raw}"${hint}`)
+}
+
+/**
+ * CLOUDAGENTS_PACKAGES: `nix`, `apt` or `off`; unset means `nix` when nix is on the box's PATH, `off` otherwise. `apt`
+ * runs `sudo -n apt-get` on the host and needs the `basic` sandbox: `strict` sandboxes cannot see `/usr`, and under
+ * `off` agents could run that sudo themselves.
+ */
+const packagesEnv = (sandbox: SandboxLevel, flake: string | null): PackageSettings | null => {
+  const raw = process.env.CLOUDAGENTS_PACKAGES?.trim() || null
+  if (raw === "off") return null
+  if (raw === null || raw === "nix") {
+    if (findExecutable("nix") !== null) return { manager: "nix", flake }
+    if (raw === null) return null
+    throw new Error("CLOUDAGENTS_PACKAGES=nix needs nix on the box's PATH")
+  }
+  if (raw !== "apt") throw new Error(`CLOUDAGENTS_PACKAGES must be nix, apt or off, got "${raw}"`)
+  if (sandbox !== "basic") throw new Error(`CLOUDAGENTS_PACKAGES=apt needs CLOUDAGENTS_SANDBOX=basic, got ${sandbox}`)
+  const sudo = findExecutable("sudo")
+  const aptGet = findExecutable("apt-get")
+  if (sudo === null || aptGet === null) throw new Error("CLOUDAGENTS_PACKAGES=apt needs sudo and apt-get on the box's PATH")
+  return { manager: "apt", sudo, aptGet }
 }
 
 const provisioningEnv = (): Provisioning => {

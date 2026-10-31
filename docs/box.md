@@ -77,9 +77,23 @@ Try `33` at 60 fps or `50` on the real box and watch typing, scrolling and video
 
 ### Toolkits
 
-Heavy desktop apps are opt-in per task, never in `sandboxEnv`. The agent installs one with the `toolkit_install` MCP tool: `blender` (Blender) or `roblox-studio` (Roblox Studio through Vinegar, plus Rojo and Wally). The box builds the flake's `toolkit-<name>` package with `nix build` on the host (the first install on a box downloads it, which can take minutes; later ones reuse `/nix/store`), keeps the out-link under the task home at `.kestrel/toolkits/<name>` as its GC root, and links its executables into `.kestrel/bin`, which is last on every sandbox `PATH`, the agent's already-running shell included. Toolkits need a box started through Nix (`CLOUDAGENTS_TOOLKITS_FLAKE`, set by the flake) on x86_64 Linux.
+Heavy desktop apps are opt-in per task, never in `sandboxEnv`. The agent installs one with the `toolkit_install` MCP tool: `blender` (Blender) or `roblox-studio` (Roblox Studio through Vinegar, plus Rojo and Wally). The box builds the flake's `toolkit-<name>` package with `nix build` on the host (the first install on a box downloads it, which can take minutes; later ones reuse `/nix/store`), keeps the out-links under the task home in `.kestrel/toolkits/<name>/` as their GC roots, and links its executables into `.kestrel/bin`, which is last on every sandbox `PATH`, the agent's already-running shell included. Toolkits need a box started through Nix (`CLOUDAGENTS_TOOLKITS_FLAKE`, set by the flake) on x86_64 Linux; without it the agent is not offered `toolkit_install`.
 
 Roblox Studio through Vinegar is community-supported and can break when Studio changes. The toolkit's `vinegar` writes the sandbox's defaults on first run (only where the task has no Vinegar config yet): the `Vulkan` renderer, since DXVK crashes Studio on lavapipe, and Web Pages off, since Studio's embedded WebView2 sign-in never loads under Wine here. Studio then signs in through the browser: its "Login via Browser" goes through the toolkit's `xdg-open` to Firefox on the task desktop, where the user signs in to roblox.com (Quick Sign-in with a code approved on a device already signed in, or an emailed one-time code, avoids typing a password into the remote desktop), and Firefox hands the returned `roblox-studio-auth:` link to Vinegar, which passes it to Studio. Studio can outgrow the default 4 GB task memory limit.
+
+### Packages
+
+Other software comes in through the `package_install` MCP tool, backed by the package manager the box operator picks with `CLOUDAGENTS_PACKAGES` (on a `kestrel-box` box: `packages` in its config). The agent is told which one it has; with `off` it is not offered the tool. Names are checked against the manager's naming rules before anything runs, so none can pass as an option.
+
+- `nix` (the default when `nix` is on the box's `PATH`): `nix build nixpkgs#<name>` on the host, outside the sandbox, the same way as a toolkit: out-links in `.kestrel/packages/<name>/`, executables linked into `.kestrel/bin`. Per task, no root, and shared through the read-only `/nix/store`, so it suits a box several users share. With `CLOUDAGENTS_TOOLKITS_FLAKE` set, nixpkgs is the flake's locked input (`--inputs-from`); without it, the `nixpkgs` of the box user's flake registry.
+- `apt`: `sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -- <names>` on the host, one install at a time. Packages land system-wide and stay after the task, so every thread on the box sees them: only for a box one user owns. It needs the `basic` sandbox (a `strict` sandbox cannot see `/usr`, and under `off` the agent could run that sudo itself; the box refuses to start otherwise) and a sudoers entry for the box user that allows exactly that command, e.g. `/etc/sudoers.d/kestrel-box`:
+
+  ```
+  <box user> ALL=(root) NOPASSWD:SETENV: /usr/bin/apt-get install -y --no-install-recommends -- *
+  ```
+
+  The box does not run `apt-get update`; keep the package lists fresh on the host (Ubuntu's `apt-daily` timer does).
+- `off`: no `package_install`. The agent can still install into its own home with user-space tools (`npm`, `uv`, `cargo`, ...).
 
 ## Resource limits
 

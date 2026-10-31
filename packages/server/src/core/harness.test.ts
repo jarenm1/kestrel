@@ -59,6 +59,7 @@ createInterface({ input: process.stdin })
     relay: null,
     direct: null,
     toolkitsFlake: null,
+    packages: null,
     taskDiskMax: 1024 ** 3,
     desktopBundleMs: 0,
     githubApiUrl: "https://api.github.com",

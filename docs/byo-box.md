@@ -47,6 +47,9 @@ Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (w
   runs past that wait in a queue shown in the thread. Edit `provisioning` in the config (`mode`: `guaranteed`,
   `pooled` or `per-thread`, plus the limits) and restart the service. The server's own defaults, used by Kestrel's
   shared box, stay hard per-thread caps.
+- Packages: `package_install` uses Nix when `nix` is installed and is off otherwise. On an Ubuntu or Debian box you
+  own, set `"packages": "apt"` in the config and add the sudoers entry from [box.md](box.md#packages) to let agents
+  `apt-get install` system-wide; `"off"` turns the tool off.
 - Rendering: the live desktop uses the GPU only on native Linux with render nodes. WSL2 exposes the GPU as `/dev/dxg`,
   not a render node, and Linux VMs on macOS get no 3D GPU, so there the desktop renders and encodes (x264) on the CPU.
 
@@ -156,7 +159,8 @@ machine need more:
 
 - A VM boundary per tenant or per thread (Firecracker, Cloud Hypervisor or gVisor), with bwrap kept inside it.
 - Host-side work that runs with user secrets (mirror fetches, `git_push`, the GitHub tools, the broker, `toolkit_install`
-  `nix build`s) isolated per tenant, so a compromised tenant cannot read another tenant's tokens, mirrors or CLI state.
+  and `package_install` builds) isolated per tenant, so a compromised tenant cannot read another tenant's tokens, mirrors
+  or CLI state.
 - Per-tenant storage quotas and encryption at rest; workspaces wiped on release.
 - Egress policy and abuse controls (rate limits, mining/spam detection) on the shared network.
 - GPU sharing: there is no per-thread VRAM limit today; cloud desktops need a share or a cap.

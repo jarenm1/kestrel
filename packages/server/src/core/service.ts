@@ -38,6 +38,7 @@ import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { makePackageInstaller } from "../sandbox/packages"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { AgentHarness, type AgentChoice } from "./harness"
@@ -270,8 +271,16 @@ export interface CoreShape {
   readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
-  /** Used by the MCP handler (`toolkit_install`): builds a toolkit and puts its executables on the task's PATH; returns their names. */
+  /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
   readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
+  /**
+   * Used by the MCP handler (`package_install`, only with a package manager): installs packages for the task with the
+   * box's package manager. Returns the executables put on the task's PATH, or null when apt installed them system-wide.
+   */
+  readonly packageInstall: (
+    taskId: string,
+    names: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<string> | null, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
   readonly checkout: (
     taskId: string,
@@ -415,6 +424,7 @@ export const CoreLive = Layer.effect(
     const sandboxSettings = sandboxSettingsOf(config)
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
+    const packages = config.packages === null ? null : yield* makePackageInstaller(config.packages)
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
@@ -1609,7 +1619,16 @@ export const CoreLive = Layer.effect(
       toolkitInstall: (taskId, name) =>
         Effect.gen(function* () {
           yield* requireTask(taskId)
-          return yield* installToolkit(config.toolkitsFlake, join(config.homesDir, taskId), name)
+          const flake = config.toolkitsFlake
+          if (flake === null) return yield* Effect.fail(new InternalError({ message: "toolkits need CLOUDAGENTS_TOOLKITS_FLAKE" }))
+          return yield* installToolkit(flake, join(config.homesDir, taskId), name)
+        }),
+
+      packageInstall: (taskId, names) =>
+        Effect.gen(function* () {
+          yield* requireTask(taskId)
+          if (packages === null) return yield* Effect.fail(new InternalError({ message: "package installs are off on this box" }))
+          return yield* packages.install(join(config.homesDir, taskId), names)
         }),
 
       checkout: (taskId, input) => addCheckout(taskId, input),
