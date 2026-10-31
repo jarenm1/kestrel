@@ -20,9 +20,11 @@ export interface AutomationToolDeps {
 }
 
 const eventEnum = z.enum(GithubAutomationEvent.literals)
-const eventList = z.tuple([eventEnum], eventEnum)
+// Validate non-emptiness without publishing a tuple's array-valued `items`, which Codex cannot read.
+const eventList = z.array(eventEnum).min(1).transform((events) => events as [GithubAutomationEvent, ...GithubAutomationEvent[]])
 
-const triggerSchema = z.discriminatedUnion("_tag", [
+// Codex preserves anyOf unions; oneOf discriminated unions can be lowered to strings.
+const triggerSchema = z.union([
   z.object({
     _tag: z.literal("schedule"),
     cron: z
