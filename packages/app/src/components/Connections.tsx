@@ -85,7 +85,8 @@ function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAut
       ...connection,
       connected: status?.loggedIn ?? false,
       account: status?.account ?? null,
-      available: cliAuth !== undefined,
+      available: status !== undefined && status.error === undefined,
+      error: status?.error,
     }
   })
 }
@@ -301,7 +302,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     if (!connection.available) {
       return (
         <>
-          <p className="text-muted-foreground">Agent box is offline.</p>
+          <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
           <Button variant="soft" className="w-fit" onClick={refresh}>
             Check again
           </Button>
