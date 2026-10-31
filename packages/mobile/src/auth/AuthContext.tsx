@@ -194,7 +194,10 @@ async function fetchMe(
       return;
     }
     const user: Me = await res.json();
-    const boxes = await createApiClient(serverUrl, sessionCookie, null).boxes();
+    // Signing in never depends on the box list: when it cannot be read, the app stays on Kestrel's box.
+    const boxes = await createApiClient(serverUrl, sessionCookie, null)
+      .boxes()
+      .catch(() => ({ boxes: [], activeBoxId: null }));
     setState((s) => ({ ...s, user, boxes: boxes.boxes, activeBoxId: boxes.activeBoxId, loading: false, error: null }));
   } catch (e) {
     setState((s) => ({

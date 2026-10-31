@@ -153,8 +153,12 @@ async function loadBoxes(): Promise<BoxList> {
   return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)))
 }
 
+/**
+ * The box calls' target. When the box list cannot be read, calls go to Kestrel's box (the default for everyone who
+ * has not picked their own) and the list is read again on the next call, so a control-plane error never stops the app.
+ */
 async function activeRoute(): Promise<DirectRoute | null> {
-  if (route === undefined) await loadBoxes()
+  if (route === undefined) await loadBoxes().catch(() => undefined)
   return route ?? null
 }
 
