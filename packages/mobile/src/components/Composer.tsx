@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Check, ChevronDown, Settings2, Square } from "lucide-react-native";
 import { Alert } from "@/components/ui/Alert";
@@ -17,6 +17,7 @@ import {
   type ModelProviderInfo,
   type SendMessageBody,
 } from "@cloudagents/protocol";
+import { AttachmentImage } from "@/components/AttachmentImage";
 import { createQueries } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
@@ -193,12 +194,10 @@ function AskPanel({
   ask,
   chosen,
   onChoose,
-  api,
 }: {
   ask: Message;
   chosen: number | undefined;
   onChoose: (index: number) => void;
-  api: ReturnType<typeof useApiClient>["api"];
 }) {
   const attachments = ask.attachments ?? [];
   const options = ask.options ?? [];
@@ -206,11 +205,11 @@ function AskPanel({
   return (
     <View style={styles.askPanel}>
       {attachments.map((a) => (
-        <Image
+        <AttachmentImage
           key={a.id}
-          source={api.attachmentSource(ask.taskId, a.id)}
+          taskId={ask.taskId}
+          attachmentId={a.id}
           style={styles.askImage}
-          resizeMode="contain"
           accessibilityLabel="Question attachment"
         />
       ))}
@@ -369,7 +368,6 @@ export function Composer({
             ask={ask}
             chosen={chosenIndex}
             onChoose={(index) => setChoice({ askId: ask.id, index })}
-            api={api}
           />
         ) : null}
         <TextInput

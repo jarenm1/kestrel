@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
+import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { errorText } from "@/util"
 import { StatusIcon } from "./StatusIcon"
 import { ThreadGraphs } from "./ThreadGraphs"
@@ -132,6 +133,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const [streamError, setStreamError] = useState<string | null>(null)
   const [stats, setStats] = useState<RenderStats | null>(null)
   const [generation, setGeneration] = useState(0)
+  const activeBoxId = useActiveBoxId()
   const wanted = useStreamWanted(canvasRef)
   const running = status?.state === "running"
   const active = status?.state === "running" || status?.state === "starting"
@@ -196,7 +198,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       renderer?.close()
       connRef.current = null
     }
-  }, [taskId, generation, queryClient, wanted, active])
+  }, [taskId, generation, queryClient, wanted, active, activeBoxId])
 
   // Over the canvas whenever no live frames can be shown: the stream is not running, or it is paused.
   const overlay = running ? (wanted ? null : "paused") : (status?.state ?? "loading")

@@ -3,6 +3,7 @@ import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
+import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { errorText } from "@/util"
 
 const MAX_LOG_LINES = 2000
@@ -13,10 +14,12 @@ const DIFF_INVALIDATE_MS = 3000
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
  * Each (re)connect re-snapshots; live events are written straight into the same cache entries.
+ * The stream belongs to the active box, so a switch reconnects it.
  * Callers should key by taskId.
  */
 export function useTaskState(taskId: string) {
   const queryClient = useQueryClient()
+  const activeBoxId = useActiveBoxId()
   // The desktop query is the baseline for desktop.updated transitions; keeping it live keeps that cache entry current.
   const [task, messages, runs] = useQueries({
     queries: [queries.task(taskId), queries.messages(taskId), queries.runs(taskId), queries.desktop(taskId)],
@@ -110,7 +113,7 @@ export function useTaskState(taskId: string) {
       window.clearTimeout(diffTimer)
       close()
     }
-  }, [taskId, generation, queryClient])
+  }, [taskId, generation, queryClient, activeBoxId])
 
   const failed = [task, messages, runs].find((q) => q.error)
   const error = disconnected

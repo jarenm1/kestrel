@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { WebView } from "react-native-webview";
 import { RefreshCw } from "lucide-react-native";
-import { Paths } from "@cloudagents/protocol";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -29,7 +28,7 @@ export function PreviewViewer({
   taskId: string;
   port: number | undefined;
 }) {
-  const { api, serverUrl } = useApiClient();
+  const { api } = useApiClient();
   const [previewToken, setPreviewToken] = useState<string>();
   const [sessionError, setSessionError] = useState<string>();
   const [generation, setGeneration] = useState(0);
@@ -63,7 +62,7 @@ export function PreviewViewer({
     );
   }
 
-  const previewUrl = previewToken ? serverUrl + Paths.taskPreviewFrame(previewToken, taskId) : undefined;
+  const previewUrl = previewToken ? api.previewFrameUrl(taskId, previewToken) : undefined;
 
   return (
     <View style={styles.container}>
