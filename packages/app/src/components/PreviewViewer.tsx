@@ -3,7 +3,6 @@ import { MousePointer2, RefreshCw } from "lucide-react"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { api } from "@/api/client"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 import type { ElementContext } from "@/components/Composer"
 
@@ -28,7 +27,6 @@ export function PreviewViewer({
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
   const [generation, setGeneration] = useState(0)
-  const activeBoxId = useActiveBoxId()
 
   useEffect(() => {
     setSelecting(false)
@@ -47,7 +45,7 @@ export function PreviewViewer({
     return () => {
       active = false
     }
-  }, [taskId, port, generation, activeBoxId])
+  }, [taskId, port, generation])
 
   useEffect(() => {
     const receive = (event: MessageEvent<unknown>) => {

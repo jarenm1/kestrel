@@ -1,6 +1,6 @@
 import { Either, Schema } from "effect"
 import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent, TaskStats } from "@cloudagents/protocol"
-import { socketUrl } from "@/api/client"
+import { socketUrl, taskTarget, type Target } from "@/api/client"
 
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   try {
@@ -12,14 +12,18 @@ function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
 }
 
 /**
- * Opens a WebSocket to `path` once its URL is resolved (a user box's URL carries a fresh token), then hands it to
- * `attach`. Returns a function that closes it without firing `onClose`; closing before the socket exists cancels the
- * open. A failure to resolve the URL reports through `onFailure`.
+ * Opens a WebSocket once its URL is resolved (a user box's URL carries a fresh token), then hands it to `attach`.
+ * Returns a function that closes it without firing `onClose`; closing before the socket exists cancels the open. A
+ * failure to resolve the URL reports through `onFailure`.
  */
-function openSocket(path: string, attach: (socket: WebSocket) => void, onFailure: () => void): () => void {
+function openSocket(
+  resolve: () => Promise<string>,
+  attach: (socket: WebSocket) => void,
+  onFailure: () => void,
+): () => void {
   let socket: WebSocket | undefined
   let closed = false
-  socketUrl(path).then(
+  resolve().then(
     (url) => {
       if (closed) return
       socket = new WebSocket(url)
@@ -40,11 +44,11 @@ function openSocket(path: string, attach: (socket: WebSocket) => void, onFailure
 
 /** Opens a ServerEvent WebSocket and returns a function that closes it without firing `onClose`. */
 function openEvents(
-  path: string,
+  resolve: () => Promise<string>,
   handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
 ): () => void {
   return openSocket(
-    path,
+    resolve,
     (socket) => {
       socket.onopen = handlers.onOpen
       socket.onmessage = (msg: MessageEvent<unknown>) => {
@@ -59,23 +63,25 @@ function openEvents(
 }
 
 /**
- * Subscribes to a task's ServerEvent stream. Callers re-snapshot over REST in `onOpen`; events that race
- * the snapshot are reconciled by id. Returns a function that closes the socket.
+ * Subscribes to a task's ServerEvent stream, on the box the thread lives on. Callers re-snapshot over REST in `onOpen`;
+ * events that race the snapshot are reconciled by id. Returns a function that closes the socket.
  */
 export function openTaskEvents(
   taskId: string,
   handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
 ): () => void {
-  return openEvents(Paths.taskEventsWs(taskId), handlers)
+  return openEvents(async () => socketUrl(Paths.taskEventsWs(taskId), await taskTarget(taskId)), handlers)
 }
 
-/** Subscribes to the signed-in user's thread list stream: `task.updated` for its own threads and `task.deleted`. */
-export function openUserEvents(handlers: {
-  onOpen: () => void
-  onEvent: (event: ServerEvent) => void
-  onClose: () => void
-}): () => void {
-  return openEvents(Paths.eventsWs, handlers)
+/**
+ * Subscribes to the thread list stream of one box: `task.updated` for the user's threads on it, and `task.deleted`.
+ * `target` is Kestrel's box (`null`) or a user box.
+ */
+export function openUserEvents(
+  target: Target,
+  handlers: { onOpen: () => void; onEvent: (event: ServerEvent) => void; onClose: () => void },
+): () => void {
+  return openEvents(() => socketUrl(Paths.eventsWs, target), handlers)
 }
 
 /**
@@ -87,7 +93,7 @@ export function openTaskStats(
   handlers: { onFrame: (stats: TaskStats) => void; onClose: () => void },
 ): () => void {
   return openSocket(
-    Paths.taskStatsWs(taskId),
+    async () => socketUrl(Paths.taskStatsWs(taskId), await taskTarget(taskId)),
     (socket) => {
       socket.onmessage = (msg: MessageEvent<unknown>) => {
         if (typeof msg.data !== "string") return
@@ -137,7 +143,7 @@ export function openDesktopStream(taskId: string, handlers: DesktopHandlers): De
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(ack))
   }
   const closeSocket = openSocket(
-    Paths.taskDesktopWs(taskId),
+    async () => socketUrl(Paths.taskDesktopWs(taskId), await taskTarget(taskId)),
     (opened) => {
       socket = opened
       opened.binaryType = "arraybuffer"
