@@ -317,6 +317,24 @@ describe("codex app-server", () => {
     expect(ended[0]).toMatchObject({ id: "plan-tu1", status: "ok" })
     expect(ended[1]).toMatchObject({ _tag: "turn", isError: false })
   })
+
+  test("a command an interrupt or a steer cut off ends as an error with its turn, keeping its output", () => {
+    const transcript = makeTranscript()
+    const cmd = { type: "commandExecution", id: "c1", command: "sleep 60", status: "inProgress", aggregatedOutput: null, exitCode: null }
+    transcript.push(item("started", cmd))
+    transcript.push(note("item/commandExecution/outputDelta", { ...T, itemId: "c1", delta: "tick 2\n" }))
+    const ended = valid(transcript.push(turnCompleted("interrupted")))
+    expect(ended[0]).toEqual({
+      _tag: "tool",
+      id: "c1",
+      parentToolId: null,
+      name: "command_execution",
+      input: { command: "sleep 60" },
+      status: "error",
+      output: "tick 2\n",
+    })
+    expect(ended[1]).toMatchObject({ _tag: "turn" })
+  })
 })
 
 describe("claude context use", () => {

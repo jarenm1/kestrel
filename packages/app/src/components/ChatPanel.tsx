@@ -123,6 +123,11 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   const threadRef = useRef<HTMLDivElement>(null)
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  // The first user message of a run started it; later ones joined it (a steer or an inbox message).
+  const runStarters = new Map<string, string>()
+  for (const m of sortedMessages) {
+    if (m.role === "user" && m.runId !== null && !runStarters.has(m.runId)) runStarters.set(m.runId, m.id)
+  }
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript,
   // and each arrival bumps `dataUpdatedAt`, which is what re-runs the scroll effect.
@@ -165,8 +170,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
           )}
           {sortedMessages.map((m) => {
-            // A user message starts its run: that run's transcript follows the prompt.
-            const startedRunId = m.role === "user" ? m.runId : null
+            // A user message that starts its run: that run's transcript follows the prompt.
+            const startedRunId = m.role === "user" && m.runId !== null && runStarters.get(m.runId) === m.id ? m.runId : null
             const pending = m.id === pendingAsk?.id
             // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
             const duplicate =

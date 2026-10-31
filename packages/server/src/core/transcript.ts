@@ -97,8 +97,11 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
   /** Codex text built up from deltas, by item id: agent messages, reasoning parts, command output. */
   const codexText = new Map<string, string>()
   const codexParts = new Map<string, { summary: string[]; content: string[] }>()
-  /** The latest display item of each running Codex command, so an output delta can re-emit it. */
-  const codexCommands = new Map<string, AgentItem & { _tag: "tool" }>()
+  /**
+   * Codex tool items still running, so an output delta can re-emit a command and a turn's end can close what it
+   * left unfinished (a steer or an interrupt stops a command without completing its item).
+   */
+  const codexRunning = new Map<string, AgentItem & { _tag: "tool" }>()
   /** Each Codex turn's token totals: before its first model call, and the latest. */
   const codexTurnTokens = new Map<string, { readonly baseInput: number; readonly baseOutput: number; input: number; output: number }>()
   /** The turn's plan (`turn/plan/updated`), shown as a todo list until the turn ends. */
@@ -287,7 +290,7 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
       case "commandExecution": {
         const exitCode = asNumber(raw.exitCode)
         const failed = status === "failed" || status === "declined" || (exitCode !== null && exitCode !== 0)
-        const item: AgentItem & { _tag: "tool" } = {
+        return {
           _tag: "tool",
           id,
           parentToolId: null,
@@ -296,9 +299,6 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
           status: running ? "running" : failed ? "error" : "ok",
           output: asString(raw.aggregatedOutput) ?? codexText.get(id) ?? null,
         }
-        if (running) codexCommands.set(id, item)
-        else codexCommands.delete(id)
-        return item
       }
       case "fileChange":
         return {
@@ -364,9 +364,11 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
     const turnId = asString(turn.id)
     const tokens = turnId === null ? undefined : codexTurnTokens.get(turnId)
     const items: AgentItem[] = []
-    // An unfinished plan stops being live with its turn.
+    // What the turn left running ends with it: an unfinished plan is over, an unfinished tool did not complete.
     const plan = turnId === null ? undefined : codexPlans.get(turnId)
     if (plan !== undefined) items.push({ ...plan, status: "ok" })
+    for (const tool of codexRunning.values()) items.push({ ...tool, status: "error" })
+    codexRunning.clear()
     const failed = turn.status === "failed"
     const error = isRecord(turn.error) ? asString(turn.error.message) : null
     if (failed && error !== codexLastError) items.push({ _tag: "error", id: nextId(), text: error ?? "codex turn failed" })
@@ -430,6 +432,10 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
       case "item/started":
       case "item/completed": {
         const item = codexItem(params.item, method === "item/completed")
+        if (item?._tag === "tool") {
+          if (item.status === "running") codexRunning.set(item.id, item)
+          else codexRunning.delete(item.id)
+        }
         return item === null ? [] : [item]
       }
       case "item/agentMessage/delta": {
@@ -459,10 +465,10 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
         if (id === null || delta === null) return []
         const output = (codexText.get(id) ?? "") + delta
         codexText.set(id, output)
-        const command = codexCommands.get(id)
+        const command = codexRunning.get(id)
         if (command === undefined) return []
         const item = { ...command, output }
-        codexCommands.set(id, item)
+        codexRunning.set(id, item)
         return [item]
       }
       case "turn/plan/updated": {
