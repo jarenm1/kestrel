@@ -214,7 +214,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
                 <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                   <ThreadAvatar task={task} small />
                   <span className="min-w-0 flex-1 truncate">
-                    {checkout ? repoShortName(checkout.repo) : "No repo"}
+                    {checkout ? repoShortName(checkout.repo) : null}
                     {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
                   </span>
                   {/* The archive button takes this corner on hover and on the open thread. */}
