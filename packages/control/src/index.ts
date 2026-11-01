@@ -1,6 +1,7 @@
 import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
+import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
 import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
@@ -64,7 +65,7 @@ const managedBoxAutomations = async (request: Request, env: Env, url: URL): Prom
   if (caller === null) return errorResponse(401, "Unauthorized", "invalid box token")
   const access = await hub(env).managedBoxAuthorize(caller.boxId, caller.secret, caller.login)
   if (!access.ok) return errorResponse(access.status, access.tag, access.message)
-  return handleBoxAutomations(request, env, url)
+  return url.pathname === "/box/automations/pr-watch" ? handlePrWatch(request, env, url) : handleBoxAutomations(request, env, url)
 }
 
 const isBoxAutomationPath = (pathname: string): boolean =>
@@ -142,7 +143,7 @@ export default {
         return await handleBoxPairing(request, env, url)
       }
       if (isBoxAutomationPath(url.pathname)) {
-        if (await boxAuthorized(request, env)) return await handleBoxAutomations(request, env, url)
+        if (await boxAuthorized(request, env)) return url.pathname === "/box/automations/pr-watch" ? await handlePrWatch(request, env, url) : await handleBoxAutomations(request, env, url)
         return await managedBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)

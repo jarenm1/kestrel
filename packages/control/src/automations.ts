@@ -52,7 +52,7 @@ const webhookUrl = (url: URL): string => new URL(ControlPaths.githubWebhook, url
  * Makes sure the repository has a `pull_request` webhook pointing here. One hook per repository serves every
  * automation on it; the secret stays in the Hub and is only used to verify deliveries.
  */
-const ensureHook = async (env: Env, token: string, slug: string, url: string): Promise<void> => {
+export const ensureHook = async (env: Env, token: string, slug: string, url: string): Promise<void> => {
   const key = slug.toLowerCase()
   const existing = await hub(env).githubHook(key)
   if (existing !== null && (await pullRequestHookExists(token, slug, existing.hookId))) return
@@ -74,7 +74,7 @@ const ensureHook = async (env: Env, token: string, slug: string, url: string): P
  * change, so a failure is logged instead of failing the request; the hook then stays for a later ensureHook to
  * reuse. Without a GitHub connection nothing is removed.
  */
-const releaseHook = async (env: Env, login: string, slug: string): Promise<void> => {
+export const releaseHook = async (env: Env, login: string, slug: string): Promise<void> => {
   const key = slug.toLowerCase()
   try {
     if (await hub(env).githubHookInUse(key)) return

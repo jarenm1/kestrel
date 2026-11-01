@@ -44,7 +44,7 @@ import {
   type UserBox,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
-import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
+import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
@@ -299,6 +299,15 @@ export class Hub extends DurableObject<Env> {
         repo TEXT PRIMARY KEY,
         hook_id INTEGER NOT NULL,
         secret TEXT NOT NULL
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS pr_watches (
+        login TEXT NOT NULL, task_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, pr_number INTEGER NOT NULL,
+        PRIMARY KEY (login, task_id)
+      )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS pr_activity_queue (
+        login TEXT NOT NULL, task_id TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
+        kind TEXT NOT NULL, delivery_id TEXT NOT NULL, due_at INTEGER NOT NULL,
+        PRIMARY KEY (login, task_id)
       )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS webhook_deliveries (
         delivery_id TEXT PRIMARY KEY,
@@ -1044,6 +1053,68 @@ export class Hub extends DurableObject<Env> {
     return { duplicate: false, matched }
   }
 
+  /** Associate a thread with one PR. Replacing the watch never creates another thread. */
+  watchPullRequest(login: string, taskId: string, repo: string, number: number): void {
+    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ?", login, taskId)
+    this.ctx.storage.sql.exec(
+      "INSERT INTO pr_watches (login, task_id, repo, pr_number) VALUES (?, ?, ?, ?) ON CONFLICT(login, task_id) DO UPDATE SET repo = excluded.repo, pr_number = excluded.pr_number",
+      login, taskId, repo, number,
+    )
+  }
+
+  watchedRepository(login: string, taskId: string): string | null {
+    return this.ctx.storage.sql.exec<{ repo: string }>("SELECT repo FROM pr_watches WHERE login = ? AND task_id = ?", login, taskId).toArray()[0]?.repo ?? null
+  }
+
+  unwatchPullRequest(login: string, taskId: string): void {
+    this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ?", login, taskId)
+    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ?", login, taskId)
+  }
+
+  closePullRequestWatches(repo: string, number: number): string[] {
+    const owners = this.ctx.storage.sql.exec<{ login: string }>("SELECT DISTINCT login FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number).toArray().map((row) => row.login)
+    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
+    this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
+    return owners
+  }
+
+  async githubActivity(deliveryId: string, activity: { repo: string; numbers: readonly number[]; kind: string; headSha?: string }): Promise<{ duplicate: boolean; queued: number }> {
+    const sql = this.ctx.storage.sql
+    if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) return { duplicate: true, queued: 0 }
+    const rows = sql.exec<{ login: string; taskId: string; number: number }>(
+      "SELECT login, task_id AS taskId, pr_number AS number FROM pr_watches WHERE repo = ? COLLATE NOCASE", activity.repo,
+    ).toArray()
+    const matching: typeof rows = []
+    for (const row of rows) {
+      if (activity.numbers.includes(row.number)) { matching.push(row); continue }
+      if (activity.kind !== "check" || activity.headSha === undefined) continue
+      const token = this.credentials(row.login).github
+      if (token === undefined) continue
+      const pr = await fetchPullRequest(token, activity.repo, row.number)
+      if (pr?.headSha === activity.headSha) matching.push(row)
+    }
+    const now = Date.now()
+    const inserted = this.ctx.storage.transactionSync(() => {
+      if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) return false
+      sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
+      sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
+      for (const row of matching) {
+        const stillWatching = sql.exec("SELECT 1 FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, activity.repo, row.number).toArray().length > 0
+        if (!stillWatching) continue
+        sql.exec(
+        `INSERT INTO pr_activity_queue (login, task_id, repo, pr_number, kind, delivery_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(login, task_id) DO UPDATE SET repo = excluded.repo, pr_number = excluded.pr_number,
+         kind = excluded.kind, delivery_id = excluded.delivery_id, due_at = excluded.due_at`,
+        row.login, row.taskId, activity.repo, row.number, activity.kind, deliveryId, now + 3000,
+        )
+      }
+      return true
+    })
+    if (!inserted) return { duplicate: true, queued: 0 }
+    await this.rearm()
+    return { duplicate: false, queued: matching.length }
+  }
+
   /** The webhook for a repository (key: lowercase "owner/name"), or null when none was created. */
   githubHook(repo: string): { hookId: number; secret: string } | null {
     return (
@@ -1064,6 +1135,7 @@ export class Hub extends DurableObject<Env> {
 
   /** True when an enabled GitHub automation still needs the repository's webhook. */
   githubHookInUse(repo: string): boolean {
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM pr_watches WHERE repo = ? COLLATE NOCASE LIMIT 1", repo).toArray().length > 0) return true
     return this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, repo)
       .toArray()
@@ -1083,6 +1155,19 @@ export class Hub extends DurableObject<Env> {
       )
       await this.fire(row, "schedule", null)
     }
+    const pending = this.ctx.storage.sql.exec<{ login: string; taskId: string; repo: string; number: number; kind: string; deliveryId: string }>(
+      "SELECT login, task_id AS taskId, repo, pr_number AS number, kind, delivery_id AS deliveryId FROM pr_activity_queue WHERE due_at <= ?", now,
+    ).toArray()
+    for (const row of pending) {
+      const result = await this.boxCall(row.login, "POST", `/api/tasks/${encodeURIComponent(row.taskId)}/github-activity`, row)
+      // A newer event can replace the row during the box call. Never delete or postpone that event.
+      if (result.ok) this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
+      else if (result.status === 404 || result.status === 409) {
+        this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
+        this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
+      }
+      else this.ctx.storage.sql.exec("UPDATE pr_activity_queue SET due_at = ? WHERE login = ? AND task_id = ? AND delivery_id = ?", Date.now() + 60000, row.login, row.taskId, row.deliveryId)
+    }
     await this.rearm()
   }
 
@@ -1099,7 +1184,9 @@ export class Hub extends DurableObject<Env> {
     const row = this.ctx.storage.sql
       .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
       .toArray()[0]
-    const at = row?.at ?? null
+    const activityAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
+    const scheduleAt = row?.at ?? null
+    const at = scheduleAt === null ? activityAt : activityAt === null ? scheduleAt : Math.min(scheduleAt, activityAt)
     if (at === null) await this.ctx.storage.deleteAlarm()
     else await this.ctx.storage.setAlarm(at)
   }

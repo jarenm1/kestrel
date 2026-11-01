@@ -57,6 +57,7 @@ export interface PullRequestStatus extends PullRequest {
   }
   /** Most recent review comments, newest first. */
   readonly reviewComments: readonly ReviewComment[]
+  readonly conversation: readonly { readonly author: string; readonly body: string; readonly url: string }[]
 }
 
 export interface NewPullRequest {
@@ -125,9 +126,13 @@ const CheckRunsBody = Schema.Struct({
 const ReviewsBody = Schema.Array(
   Schema.Struct({
     state: Schema.String,
+    body: Schema.optional(Schema.NullOr(Schema.String)),
+    html_url: Schema.optional(Schema.String),
     user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
   }),
 )
+
+const ConversationBody = Schema.Array(Schema.Struct({ body: Schema.String, html_url: Schema.String, user: Schema.NullOr(Schema.Struct({ login: Schema.String })) }))
 
 const ReviewCommentsBody = Schema.Array(
   Schema.Struct({
@@ -256,10 +261,13 @@ export const GitHubLive = Layer.effect(
             call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/comments?sort=created&direction=desc&per_page=10`).pipe(
               Effect.flatMap(decode(ReviewCommentsBody, "review comment list")),
             ),
+            call(token, repo, "GET", `${repoPath(repo)}/issues/${number}/comments?sort=created&direction=desc&per_page=20`).pipe(
+              Effect.flatMap(decode(ConversationBody, "issue comment list")),
+            ),
           ],
           { concurrency: "unbounded" },
         ).pipe(
-          Effect.flatMap(([pr, reviews, comments]) =>
+          Effect.flatMap(([pr, reviews, comments, conversation]) =>
             call(token, repo, "GET", `${repoPath(repo)}/commits/${pr.headSha}/check-runs?per_page=100`).pipe(
               Effect.flatMap(decode(CheckRunsBody, "check run list")),
               Effect.map((checks): PullRequestStatus => {
@@ -277,6 +285,10 @@ export const GitHubLive = Layer.effect(
                     reviews.map((review) => ({ state: review.state, login: review.user?.login ?? "ghost" })),
                   ),
                   checks: { total: checks.check_runs.length, passed, failing, pending },
+                  conversation: [
+                    ...reviews.filter((review) => review.body && review.html_url).slice(-20).map((review) => ({ author: review.user?.login ?? "ghost", body: review.body ?? "", url: review.html_url ?? "" })),
+                    ...conversation.map((comment) => ({ author: comment.user?.login ?? "ghost", body: comment.body, url: comment.html_url })),
+                  ],
                   reviewComments: comments.map((comment) => ({
                     path: comment.path,
                     line: comment.line ?? null,

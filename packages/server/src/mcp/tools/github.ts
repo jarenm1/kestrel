@@ -40,6 +40,10 @@ const formatStatus = (pr: PullRequestStatus): string => {
       lines.push(`- ${c.path}${c.line === null ? "" : `:${c.line}`} (${c.author}): ${c.body}`)
     }
   }
+  if (pr.conversation.length > 0) {
+    lines.push("recent review and conversation comments:")
+    for (const comment of pr.conversation) lines.push(`- ${comment.author}: ${comment.body} (${comment.url})`)
+  }
   return lines.join("\n")
 }
 

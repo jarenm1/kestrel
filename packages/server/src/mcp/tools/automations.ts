@@ -77,6 +77,28 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   })
 
   server.registerTool(
+    "github_pr_watch",
+    {
+      description: "Watch one pull request from this thread. GitHub review comments and completed checks wake this thread so it can address actionable feedback. Requires exactly one checkout linked to the PR with github_pr_create or github_pr_status. Use when the user asks you to babysit or follow a PR. Watching another PR replaces this thread's watch.",
+      inputSchema: { repo: z.string().describe("GitHub repository owner/name"), number: z.number().int().positive().describe("Pull request number") },
+    },
+    ({ repo, number }: { repo: string; number: number }) => guard(() => runTool(Effect.gen(function* () {
+      const { control, owner } = yield* scope
+      yield* control.watchPr(owner, ctx.taskId, repo, number)
+      return text(`Watching ${repo}#${number} in this thread.`)
+    }))),
+  )
+  server.registerTool(
+    "github_pr_unwatch",
+    { description: "Stop watching a pull request in this thread.", inputSchema: {} },
+    () => guard(() => runTool(Effect.gen(function* () {
+      const { control, owner } = yield* scope
+      yield* control.unwatchPr(owner, ctx.taskId)
+      return text("Stopped watching this thread's pull request.")
+    }))),
+  )
+
+  server.registerTool(
     "automation_list",
     {
       description: "List the automations of this thread's owner: id, name, enabled state, trigger, repo, next run and prompt.",

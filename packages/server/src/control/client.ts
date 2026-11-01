@@ -18,6 +18,8 @@ export type ControlConfig =
 
 /** The automations the box may manage for one user. Every call acts for `user`; the control plane enforces ownership. */
 export interface ControlClient {
+  readonly watchPr: (user: string, taskId: string, repo: string, number: number) => Effect.Effect<void, ControlError>
+  readonly unwatchPr: (user: string, taskId: string) => Effect.Effect<void, ControlError>
   readonly list: (user: string) => Effect.Effect<ReadonlyArray<Automation>, ControlError>
   readonly get: (user: string, id: string) => Effect.Effect<Automation, ControlError>
   readonly create: (user: string, body: CreateAutomationBody) => Effect.Effect<Automation, ControlError>
@@ -87,6 +89,8 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
     Schema.decodeUnknown(Automation)(value).pipe(Effect.mapError(() => new ControlError({ message: INVALID_ANSWER })))
 
   return {
+    watchPr: (user, taskId, repo, number) => call(user, "POST", "/box/automations/pr-watch", { taskId, repo, number }).pipe(Effect.asVoid),
+    unwatchPr: (user, taskId) => call(user, "DELETE", "/box/automations/pr-watch", { taskId }).pipe(Effect.asVoid),
     list: (user) =>
       call(user, "GET", ControlPaths.boxAutomations).pipe(
         Effect.flatMap((value) =>

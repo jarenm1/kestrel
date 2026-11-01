@@ -18,7 +18,7 @@ const PullRequestJson = Schema.Struct({
   html_url: Schema.String,
   draft: Schema.Boolean,
   user: Schema.Struct({ login: Schema.String }),
-  head: Schema.Struct({ ref: Schema.String }),
+  head: Schema.Struct({ ref: Schema.String, sha: Schema.optional(Schema.String) }),
   base: Schema.Struct({ ref: Schema.String }),
 })
 
@@ -41,6 +41,7 @@ export interface PullRequestInfo {
   readonly draft: boolean
   readonly author: string
   readonly headRef: string
+  readonly headSha?: string
   readonly baseRef: string
 }
 
@@ -62,6 +63,7 @@ const toPullRequestInfo = (pr: typeof PullRequestJson.Type): PullRequestInfo => 
   draft: pr.draft,
   author: pr.user.login,
   headRef: pr.head.ref,
+  headSha: pr.head.sha,
   baseRef: pr.base.ref,
 })
 
@@ -103,7 +105,7 @@ export const verifyGithubSignature = async (secret: string, body: string, header
   return safeEqual(expected, header.slice("sha256=".length))
 }
 
-const github = (token: string, method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<Response> =>
+const github = (token: string, method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<Response> =>
   fetch(`${API}${path}`, {
     method,
     headers: {
@@ -150,6 +152,14 @@ export const pullRequestHookExists = async (token: string, slug: string, hookId:
   if (res.status === 404) return false
   if (!res.ok) throw await failure(res, `read webhook on ${slug}`)
   return true
+}
+
+/** Subscribe an existing shared hook to PR activity. */
+export const enablePullRequestActivity = async (token: string, slug: string, hookId: number): Promise<void> => {
+  const res = await github(token, "PATCH", `/repos/${slug}/hooks/${hookId}`, {
+    add_events: ["pull_request_review", "pull_request_review_comment", "issue_comment", "check_run"],
+  })
+  if (!res.ok) throw await failure(res, `update webhook on ${slug}`)
 }
 
 /** Deletes the hook; an already-missing hook counts as deleted. */

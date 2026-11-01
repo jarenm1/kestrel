@@ -193,6 +193,13 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       ),
     ),
     HttpRouter.post(
+      "/api/tasks/:id/github-activity",
+      Effect.flatMap(pathId, (id) => noContent(signedIn((user) => Effect.flatMap(
+        jsonBody(Schema.Struct({ repo: Schema.String, number: Schema.Number, kind: Schema.String, deliveryId: Schema.String })),
+        (body) => core.githubActivity(user, id, body.repo, body.number, body.kind, body.deliveryId),
+      )))),
+    ),
+    HttpRouter.post(
       "/api/tasks/:id/uploads",
       Effect.flatMap(pathId, (id) =>
         respond(signedIn((user) => Effect.flatMap(uploadInput, (input) => core.upload(user, id, input)))),

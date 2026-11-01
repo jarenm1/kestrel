@@ -1,3 +1,5 @@
+import { releaseHook } from "./automations"
+import { pullRequestActivity } from "./pr-activity"
 import { Schema } from "effect"
 import { type Env, hub } from "./env"
 import { errorResponse, json } from "./http"
@@ -29,11 +31,22 @@ export const handleGithubWebhook = async (request: Request, env: Env): Promise<R
   }
   const event = request.headers.get("x-github-event")
   if (event === "ping") return new Response(null, { status: 200 })
-  if (event !== "pull_request") return new Response(null, { status: 204 })
+  if (event !== "pull_request") {
+    const activity = pullRequestActivity(event ?? "", payload)
+    if (activity === null) return new Response(null, { status: 204 })
+    const deliveryId = request.headers.get("x-github-delivery")
+    if (deliveryId === null) return errorResponse(400, "BadRequest", "missing X-GitHub-Delivery")
+    return json(await hub(env).githubActivity(deliveryId, activity), 202)
+  }
   const hookPayload = Schema.decodeUnknownEither(PullRequestWebhook)(payload)
   if (hookPayload._tag === "Left") return errorResponse(400, "BadRequest", "unexpected pull_request payload")
   const deliveryId = request.headers.get("x-github-delivery")
   if (deliveryId === null) return errorResponse(400, "BadRequest", "missing X-GitHub-Delivery")
-  const result = await hub(env).githubDelivery(deliveryId, pullRequestEventOf(hookPayload.right))
+  const prEvent = pullRequestEventOf(hookPayload.right)
+  const result = await hub(env).githubDelivery(deliveryId, prEvent)
+  if (!result.duplicate && prEvent.action === "closed") {
+    const owners = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
+    for (const owner of owners) await releaseHook(env, owner, prEvent.repo)
+  }
   return json(result, 202)
 }
