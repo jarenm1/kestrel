@@ -508,6 +508,11 @@ export const api = {
     return task
   },
   getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),
+  /** The user box a thread lives on, or `null` for Kestrel's box (managed or relayed). */
+  taskBox: async (taskId: string): Promise<string | null> => {
+    const target = await taskTarget(taskId)
+    return target === null || target.boxId === known?.managedBox?.id ? null : target.boxId
+  },
   archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
   unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
   listMessages: (taskId: string) => onTask(taskId, Schema.Array(Message), "GET", Paths.taskMessages(taskId)),

@@ -15,6 +15,7 @@ import { PreviewViewer } from "@/components/PreviewViewer"
 import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
+import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -110,7 +111,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
           : undefined
       }
     >
-      <section className="flex min-h-0 min-w-0 flex-col">
+      <section className="relative flex min-h-0 min-w-0 flex-col">
+        <ThreadBoxIndicator taskId={taskId} />
         {state.error && <Alert className="mx-5 mt-3 w-auto">{state.error}</Alert>}
         <ChatPanel
           taskId={taskId}

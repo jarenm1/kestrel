@@ -40,6 +40,8 @@ export const keys = {
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
+  /** The box a thread lives on: a user box id, or null for Kestrel's box. */
+  taskBox: (taskId: string) => ["tasks", taskId, "box"] as const,
   messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
   runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
   runItems: (runId: string) => ["runs", runId, "items"] as const,
@@ -133,6 +135,9 @@ export const queries = {
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
   task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
+  // A thread never moves to another box.
+  taskBox: (taskId: string) =>
+    queryOptions({ queryKey: keys.taskBox(taskId), queryFn: () => api.taskBox(taskId), staleTime: Infinity }),
   messages: (taskId: string) =>
     queryOptions({
       queryKey: keys.messages(taskId),

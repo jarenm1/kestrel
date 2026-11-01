@@ -28,7 +28,7 @@ export function useBoxOnline(boxId: string | null, list: BoxList | undefined): b
   return (url === undefined ? relayed : health).data?.online
 }
 
-function OnlineDot({ boxId, list }: { boxId: string | null; list: BoxList }) {
+export function OnlineDot({ boxId, list }: { boxId: string | null; list: BoxList }) {
   const online = useBoxOnline(boxId, list)
   return (
     <span
@@ -53,7 +53,7 @@ export function BoxPicker({
   onChange: (boxId: string | null) => void
   disabled?: boolean
 }) {
-  const name = value === null ? "Kestrel's box" : (list.boxes.find((box) => box.id === value)?.name ?? "Box")
+  const name = boxName(value, list)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -92,3 +92,7 @@ export function BoxPicker({
     </DropdownMenu>
   )
 }
+
+/** Display name of `boxId` (`null`: Kestrel's box) in `list`. */
+export const boxName = (boxId: string | null, list: BoxList): string =>
+  boxId === null ? "Kestrel's box" : (list.boxes.find((box) => box.id === boxId)?.name ?? "Box")
