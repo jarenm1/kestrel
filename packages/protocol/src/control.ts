@@ -36,6 +36,8 @@ export const ControlPaths = {
   box: "/api/box",
   /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
   cliAuth: "/api/cli-auth",
+  /** GET -> ProviderUsage[]: the signed-in user's subscription limits, as each CLI reports them on the box. Relayed. */
+  cliUsage: "/api/cli-auth/usage",
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
    * user, replacing any login already pending for them. Relayed to the box.
@@ -164,6 +166,31 @@ export const CliAuthStatus = Schema.Struct({
   error: Schema.optional(Schema.String),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
+
+/** One limit of a provider subscription, e.g. its 5-hour or weekly window. */
+export const ProviderUsageWindow = Schema.Struct({
+  id: Schema.String,
+  label: Schema.String,
+  usedPercent: Schema.Number.pipe(Schema.between(0, 100)),
+  /** When the window resets; null when the provider does not say. */
+  resetsAt: Schema.NullOr(Schema.String),
+})
+export type ProviderUsageWindow = typeof ProviderUsageWindow.Type
+
+/**
+ * What a provider's CLI reports about the user's subscription limits on the box. `signed_out` covers everything with
+ * no subscription to report, including API keys, which providers meter by spend instead.
+ */
+export const ProviderUsage = Schema.Struct({
+  provider: CliProvider,
+  status: Schema.Literal("ok", "signed_out", "unavailable"),
+  /** The subscription as the provider names it, e.g. `max` or `pro`. */
+  plan: Schema.NullOr(Schema.String),
+  windows: Schema.Array(ProviderUsageWindow),
+  /** Why the box could not read the limits; set with `unavailable`. */
+  error: Schema.optional(Schema.String),
+})
+export type ProviderUsage = typeof ProviderUsage.Type
 
 /**
  * A sign-in the box started with the unmodified CLI. The user finishes it on the provider's own page:
