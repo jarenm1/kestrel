@@ -125,6 +125,18 @@ describe("checkout git runs in the shadow", () => {
     expect(capped).toEqual({ files: [".gitignore", "README.md"], truncated: true })
   })
 
+  test("listFiles lists the files on disk while HEAD's branch has no commit yet", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const co = await makeCheckout(root, origin)
+
+    git(co.spec.dir, ["checkout", "-q", "--orphan", "fresh"])
+    await writeFile(join(co.spec.dir, "new.txt"), "n\n")
+
+    const listed = await withWorkspace((ws) => ws.listFiles({ ...co.spec, limit: 100 }))
+    expect(listed).toEqual({ files: ["README.md", "new.txt"], truncated: false })
+  })
+
   test("the checkout's own .git config and hooks never run on the host", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)

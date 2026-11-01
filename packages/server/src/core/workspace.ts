@@ -264,8 +264,11 @@ const readRefSha = (gitDir: string, ref: string): Effect.Effect<string, Workspac
     catch: (e) => new WorkspaceError({ message: `cannot read ${ref}: ${String(e)}` }),
   })
 
-/** The commit a verified checkout's HEAD points at, read from its files (never through git). */
-const readHeadSha = (real: string): Effect.Effect<string, WorkspaceError> =>
+/**
+ * The commit a verified checkout's HEAD points at, read from its files (never through git). Null while HEAD names a
+ * branch with no commit yet (an empty repository, `git checkout --orphan`).
+ */
+const readHeadSha = (real: string): Effect.Effect<string | null, WorkspaceError> =>
   Effect.gen(function* () {
     const gitDir = join(real, ".git")
     const head = yield* Effect.tryPromise({
@@ -274,7 +277,8 @@ const readHeadSha = (real: string): Effect.Effect<string, WorkspaceError> =>
     })
     const trimmed = head.trim()
     const sha = trimmed.startsWith("ref: ") ? yield* readRefSha(gitDir, trimmed.slice(5).trim()) : trimmed
-    if (!SHA.test(sha)) return yield* Effect.fail(new WorkspaceError({ message: "the checkout has no commit yet" }))
+    if (sha === "") return null
+    if (!SHA.test(sha)) return yield* Effect.fail(new WorkspaceError({ message: "HEAD does not name a commit" }))
     return sha
   })
 
@@ -548,7 +552,12 @@ const make: WorkspaceShape = {
       return new Uint8Array(stdout)
     }),
 
-  headSha: (spec) => Effect.flatMap(verifyCheckout(spec), readHeadSha),
+  headSha: (spec) =>
+    Effect.gen(function* () {
+      const sha = yield* readHeadSha(yield* verifyCheckout(spec))
+      if (sha === null) return yield* Effect.fail(new WorkspaceError({ message: "the checkout has no commit yet" }))
+      return sha
+    }),
 
   diff: (spec) =>
     Effect.gen(function* () {
@@ -574,8 +583,9 @@ const make: WorkspaceShape = {
       const files = new Set(others.split("\0").filter((p) => p !== "" && !p.endsWith("/")))
       // Files committed despite an ignore rule (force-added, `.env.example` under `.env*`) are tracked, so they show
       // too: the blobs of the checkout's HEAD commit (its objects reach the shadow through alternates) still on disk.
+      // A branch with no commit yet has none.
       const head = yield* readHeadSha(real)
-      const tree = yield* shadowGit(spec.shadowPath, real, ["ls-tree", "-r", "-z", "--full-tree", head])
+      const tree = head === null ? "" : yield* shadowGit(spec.shadowPath, real, ["ls-tree", "-r", "-z", "--full-tree", head])
       for (const entry of tree.split("\0")) {
         const tab = entry.indexOf("\t")
         // `<mode> <type> <object>\t<path>`; submodules are `commit` entries, not files.
