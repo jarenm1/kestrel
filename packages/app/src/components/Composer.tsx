@@ -45,6 +45,7 @@ import { SlashCommands, slashListboxId, slashOptionId } from "@/components/Slash
 import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
+import { useStoredDraft } from "@/hooks/useStoredDraft"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
@@ -308,6 +309,8 @@ interface Props {
   placeholder?: string
   autoFocus?: boolean
   className?: string
+  /** Names the unsent text kept in localStorage, so it survives leaving the thread and coming back. */
+  draftKey: string
   /** Preview elements to send as context; owned by the thread so the preview can add to them. */
   elements?: readonly ElementContext[]
   onElementsChange?: (elements: readonly ElementContext[]) => void
@@ -333,12 +336,13 @@ export function Composer({
   placeholder,
   autoFocus,
   className,
+  draftKey,
   elements = [],
   onElementsChange,
   context,
   ask,
 }: Props) {
-  const [text, setText] = useState("")
+  const [text, setText] = useStoredDraft(draftKey)
   const [caret, setCaret] = useState(0)
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()

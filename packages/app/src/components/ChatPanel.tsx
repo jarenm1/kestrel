@@ -266,6 +266,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
         ) : (
           <Composer
             taskId={taskId}
+            draftKey={taskId}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}

@@ -81,6 +81,7 @@ export function NewThreadPage() {
           onSend={(body, files) => start.mutateAsync({ body, files })}
           pending={start.isPending}
           error={start.error}
+          draftKey="new"
           placeholder={
             repo === undefined
               ? "Ask for anything — the agent checks out the repos it needs"
