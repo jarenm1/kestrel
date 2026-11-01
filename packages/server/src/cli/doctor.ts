@@ -102,6 +102,10 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
 
   for (const tool of DESKTOP_TOOLS) {
     const found = onPath(tool)
+    if (tool === "weston" && found !== null) {
+      checks.push(westonCheck(found))
+      continue
+    }
     checks.push({
       name: tool,
       required: false,
@@ -118,6 +122,24 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
   })
 
   return checks
+}
+
+/** The desktop starts Xwayland as weston's client (`weston … -- Xwayland …`), which weston supports from 14.0. */
+const MIN_WESTON_MAJOR = 14
+
+const westonCheck = (path: string): Check => {
+  const run = exec(path, ["--version"])
+  const version = /weston (\d+)\.\S*/.exec(run.stdout + run.stderr)
+  if (version === null) return { name: "weston", required: false, ok: false, detail: `${path}: version unknown` }
+  const ok = Number(version[1]) >= MIN_WESTON_MAJOR
+  return {
+    name: "weston",
+    required: false,
+    ok,
+    detail: ok
+      ? `${path} (${version[0]})`
+      : `${path} is ${version[0]}; desktop runs need weston ${MIN_WESTON_MAJOR} or newer (e.g. \`nix profile install nixpkgs#weston\`)`,
+  }
 }
 
 /** Prints each check and returns whether every required check passed. */

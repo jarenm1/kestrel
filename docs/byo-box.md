@@ -35,7 +35,7 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
-`codex`) on the host; the desktop also needs weston, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
+`codex`) on the host; the desktop also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
 
 ### What a user's box runs with
 
