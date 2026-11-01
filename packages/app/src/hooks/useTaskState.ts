@@ -58,6 +58,9 @@ export function useTaskState(taskId: string) {
     const close = openTaskEvents(taskId, {
       onOpen: () => {
         setDisconnected(false)
+        for (const run of queryClient.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []) {
+          void queryClient.invalidateQueries({ queryKey: keys.runItems(run.id) })
+        }
         void queryClient.invalidateQueries({ queryKey: keys.task(taskId) })
       },
       onEvent: (event) => {
