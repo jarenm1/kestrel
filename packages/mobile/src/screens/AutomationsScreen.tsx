@@ -35,7 +35,9 @@ export function AutomationsScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.heading}>
           <Text style={styles.title}>Automations</Text>
-          <Text style={styles.subtitle}>Tasks the agent starts on a schedule or when a pull request changes.</Text>
+          <Text style={styles.subtitle}>
+            Tasks the agent starts on a schedule, when a pull request changes, or on a webhook POST.
+          </Text>
         </View>
         {unavailable ? (
           <Alert variant="warning">
@@ -140,6 +142,11 @@ function AutomationRow({
             {automation.repo ?? "No repository"}
           </Text>
           <Text style={styles.meta}>{describeTrigger(automation.trigger)}</Text>
+          {automation.webhookUrl !== null ? (
+            <Text selectable style={styles.repo}>
+              {automation.webhookUrl}
+            </Text>
+          ) : null}
         </View>
         <Switch
           value={automation.enabled}

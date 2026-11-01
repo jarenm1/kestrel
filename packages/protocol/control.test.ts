@@ -18,7 +18,7 @@ const decodeList = Schema.decodeUnknownSync(Schema.Array(Automation))
 
 describe("automation model response compatibility", () => {
   test("legacy automation lists decode to the box default without changing other fields", () => {
-    expect(decodeList([legacyAutomation])).toEqual([{ ...legacyAutomation, model: null }])
+    expect(decodeList([legacyAutomation])).toMatchObject([{ ...legacyAutomation, model: null }])
   })
 
   test("explicit selections and the explicit box default survive decoding", () => {

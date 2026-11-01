@@ -20,7 +20,7 @@ Discovery uses `GET /api/tasks/:id/commands?model=<model-id>`, checks thread own
 
 ### Automation tools
 
-Agents manage their owner's automations with `automation_list`, `automation_create`, `automation_update` and `automation_delete`. Creation and trigger updates accept either a schedule object (`_tag: "schedule"`, five-field `cron`, IANA `timezone`) or a GitHub object (`_tag: "github"`, non-empty `events`, optional reviewer/branch/draft filters).
+Agents manage their owner's automations with `automation_list`, `automation_create`, `automation_update` and `automation_delete`. Creation and trigger updates accept a schedule object (`_tag: "schedule"`, five-field `cron`, IANA `timezone`), a GitHub object (`_tag: "github"`, non-empty `events`, optional reviewer/branch/draft filters), or a webhook object (`_tag: "webhook"`, no fields). A webhook automation's `webhookUrl` is the credential that starts it, so it is returned to the caller as the automation's URL.
 
 The MCP wire schema must expose these alternatives as `anyOf` and the GitHub event list as an array with one object-valued `items` schema, not a tuple. Older Codex CLIs lower `oneOf`-only triggers to strings and cannot deserialize tuple-valued `items`; either loses the usable create/update tools even though direct MCP calls and the control API work.
 

@@ -22,10 +22,15 @@ const COLUMNS = `
   trigger_json TEXT NOT NULL,
   next_run_at INTEGER,
   created_at TEXT NOT NULL,
+  webhook_token TEXT,
   updated_at TEXT NOT NULL`
 
 const COPIED_COLUMNS =
   "id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at"
+
+/** A new webhook credential: 32 random bytes as 64 hex characters. */
+export const newWebhookToken = (): string =>
+  Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("")
 
 /**
  * Creates the table, or rebuilds it when it still has the legacy `repo_id` column (NOT NULL, the box's repository
@@ -47,4 +52,13 @@ export const ensureAutomationsTable = (sql: AutomationsSql): void => {
     .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'model'")
     .toArray()
   if (modelColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN model TEXT")
+  const tokenColumn = sql
+    .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'webhook_token'")
+    .toArray()
+  if (tokenColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN webhook_token TEXT")
+  // Rows saved before webhooks existed get a token; SQLite's unique index allows any number of NULLs meanwhile.
+  sql.exec("CREATE UNIQUE INDEX IF NOT EXISTS automations_webhook_token ON automations (webhook_token)")
+  for (const row of sql.exec<{ id: string }>("SELECT id FROM automations WHERE webhook_token IS NULL").toArray()) {
+    sql.exec("UPDATE automations SET webhook_token = ? WHERE id = ?", newWebhookToken(), row.id)
+  }
 }

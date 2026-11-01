@@ -7,10 +7,16 @@ export interface PromptInput {
   readonly reason: string
   readonly repo: string | null
   readonly pr: PullRequestInfo | null
+  /** The raw webhook request body, for a webhook run; null otherwise. */
+  readonly payload: string | null
 }
 
 /** Where the box checks a repository out, under the task's working directory: its name without the owner. */
 const checkoutDir = (repo: string): string => repo.slice(repo.indexOf("/") + 1)
+
+/** Length of the longest backtick run in `text`, so a code fence around it can't be closed early. */
+const longestBacktickRun = (text: string): number =>
+  (text.match(/`+/g) ?? []).reduce((longest, run) => Math.max(longest, run.length), 0)
 
 /**
  * The message that starts an automation's task: the user's prompt followed by the trigger context. Every task
@@ -36,6 +42,10 @@ export const composePrompt = (input: PromptInput): string => {
       `This task starts at the pull request head. To see the PR's changes run \`git diff ${pr.baseRef}...HEAD\`${where}.`,
       `Post your review with the github_pr_review tool on pull request ${pr.number}.`,
     )
+  }
+  if (input.payload !== null) {
+    const fence = "`".repeat(Math.max(3, longestBacktickRun(input.payload) + 1))
+    lines.push("", "Webhook payload:", fence, input.payload, fence)
   }
   return lines.join("\n")
 }

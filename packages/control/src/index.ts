@@ -4,7 +4,7 @@ import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
 import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
-import { handleGithubWebhook } from "./webhooks"
+import { AUTOMATION_WEBHOOK_PREFIX, handleAutomationWebhook, handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
 
@@ -146,6 +146,7 @@ export default {
         return await managedBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
+      if (url.pathname.startsWith(AUTOMATION_WEBHOOK_PREFIX)) return await handleAutomationWebhook(request, env, url)
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }

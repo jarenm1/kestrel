@@ -39,9 +39,13 @@ const triggerSchema = z.union([
     baseBranches: z.array(z.string()).optional().describe("Only pull requests into one of these branches"),
     includeDrafts: z.boolean().optional().describe("Also run for draft pull requests (default false)"),
   }),
+  z.object({
+    _tag: z.literal("webhook"),
+  }),
 ])
 
 const describeTrigger = (trigger: AutomationTrigger): string => {
+  if (trigger._tag === "webhook") return "webhook (POST to its url starts a run)"
   if (trigger._tag === "schedule") return `schedule "${trigger.cron}" ${trigger.timezone}`
   const parts = [`on ${trigger.events.join(", ")}`]
   if (trigger.reviewers !== undefined) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
@@ -57,6 +61,7 @@ const formatAutomation = (automation: Automation): string =>
     `  repo: ${automation.repo ?? "none"}`,
     `  model: ${automation.model ?? "default"}`,
     `  next run: ${automation.nextRunAt ?? "none"}`,
+    ...(automation.webhookUrl === null ? [] : [`  webhook url: ${automation.webhookUrl}`]),
     `  prompt: ${automation.prompt}`,
   ].join("\n")
 

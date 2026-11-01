@@ -79,4 +79,38 @@ describe("ensureAutomationsTable", () => {
     ensureAutomationsTable(sql)
     expect(db.query("SELECT COUNT(*) AS n FROM automations").get()).toEqual({ n: 1 })
   })
+
+  test("gives every existing automation its own webhook token, and keeps it on later runs", () => {
+    db.run(`CREATE TABLE automations (
+      id TEXT PRIMARY KEY, login TEXT NOT NULL, name TEXT NOT NULL, repo TEXT,
+      prompt TEXT NOT NULL, enabled INTEGER NOT NULL, trigger_json TEXT NOT NULL, next_run_at INTEGER,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`)
+    db.run(`INSERT INTO automations VALUES
+      ('a1', 'octo', 'Daily', NULL, 'Summarize', 1, '{"_tag":"schedule"}', NULL, 'c1', 'u1'),
+      ('a2', 'octo', 'Triage', NULL, 'Triage', 1, '{"_tag":"webhook"}', NULL, 'c2', 'u2')`)
+
+    ensureAutomationsTable(sql)
+    const tokens = (): { id: string; token: string }[] =>
+      db.query("SELECT id, webhook_token AS token FROM automations ORDER BY id").all() as { id: string; token: string }[]
+    const first = tokens()
+
+    for (const row of first) expect(row.token).toMatch(/^[0-9a-f]{64}$/)
+    expect(new Set(first.map((row) => row.token)).size).toBe(2)
+    ensureAutomationsTable(sql)
+    expect(tokens()).toEqual(first)
+  })
+
+  test("refuses two automations sharing a webhook token", () => {
+    ensureAutomationsTable(sql)
+    db.run(
+      `INSERT INTO automations (id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at, webhook_token)
+       VALUES ('a1', 'octo', 'One', NULL, 'Do it', 1, '{}', NULL, 'now', 'now', 'shared')`,
+    )
+    expect(() =>
+      db.run(
+        `INSERT INTO automations (id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at, webhook_token)
+         VALUES ('a2', 'octo', 'Two', NULL, 'Do it', 1, '{}', NULL, 'now', 'now', 'shared')`,
+      ),
+    ).toThrow()
+  })
 })

@@ -47,7 +47,7 @@ import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
 import { matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
-import { ensureAutomationsTable } from "./automations-table"
+import { ensureAutomationsTable, newWebhookToken } from "./automations-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, type Env } from "./env"
 import {
@@ -118,6 +118,8 @@ export type BoxResult = { ok: boolean; status: number; body: string }
 
 /** Outcome of starting a task for a run. `error` is null when the task started. */
 type RunOutcome = { taskId: string | null; error: string | null }
+/** An automation as the Hub stores it. `webhookToken` is the credential of its webhook URL; the control plane builds `webhookUrl` from it. */
+export type StoredAutomation = Omit<Automation, "webhookUrl"> & { webhookToken: string }
 
 type AutomationRow = {
   id: string
@@ -131,10 +133,11 @@ type AutomationRow = {
   nextRunAt: number | null
   createdAt: string
   updatedAt: string
+  webhookToken: string
 }
 
 const AUTOMATION_COLUMNS =
-  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt, webhook_token AS webhookToken"
 
 type PairingRow = {
   id: string
@@ -156,7 +159,7 @@ const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownS
 const nextRunMs = (trigger: AutomationTrigger, enabled: boolean, now: number): number | null =>
   enabled && trigger._tag === "schedule" ? nextFireTime(trigger.cron, trigger.timezone, now) : null
 
-const automationView = (row: AutomationRow): Automation => ({
+const automationView = (row: AutomationRow): StoredAutomation => ({
   id: row.id,
   name: row.name,
   repo: row.repo,
@@ -167,6 +170,7 @@ const automationView = (row: AutomationRow): Automation => ({
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
   nextRunAt: row.nextRunAt === null ? null : new Date(row.nextRunAt).toISOString(),
+  webhookToken: row.webhookToken,
 })
 
 const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A | null => {
@@ -896,19 +900,19 @@ export class Hub extends DurableObject<Env> {
   // Automations: stored per user; schedules fire from the alarm, GitHub triggers from webhook deliveries
   // -------------------------------------------------------------------------
 
-  automations(login: string): Automation[] {
+  automations(login: string): StoredAutomation[] {
     return this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE login = ? ORDER BY created_at`, login)
       .toArray()
       .map(automationView)
   }
 
-  automation(login: string, id: string): Automation | null {
+  automation(login: string, id: string): StoredAutomation | null {
     const row = this.automationRow(login, id)
     return row === null ? null : automationView(row)
   }
 
-  async createAutomation(login: string, input: Omit<CreateAutomationBody, "repo"> & { repo: string | null }): Promise<Automation> {
+  async createAutomation(login: string, input: Omit<CreateAutomationBody, "repo"> & { repo: string | null }): Promise<StoredAutomation> {
     const now = Date.now()
     const enabled = input.enabled ?? true
     const row: AutomationRow = {
@@ -923,10 +927,11 @@ export class Hub extends DurableObject<Env> {
       nextRunAt: nextRunMs(input.trigger, enabled, now),
       createdAt: new Date(now).toISOString(),
       updatedAt: new Date(now).toISOString(),
+      webhookToken: newWebhookToken(),
     }
     this.ctx.storage.sql.exec(
-      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at, webhook_token)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.login,
       row.name,
@@ -938,12 +943,13 @@ export class Hub extends DurableObject<Env> {
       row.nextRunAt,
       row.createdAt,
       row.updatedAt,
+      row.webhookToken,
     )
     await this.rearm()
     return automationView(row)
   }
 
-  async updateAutomation(login: string, id: string, changes: UpdateAutomationBody): Promise<Automation | null> {
+  async updateAutomation(login: string, id: string, changes: UpdateAutomationBody): Promise<StoredAutomation | null> {
     const current = this.automationRow(login, id)
     if (current === null) return null
     const now = Date.now()
@@ -1005,7 +1011,21 @@ export class Hub extends DurableObject<Env> {
     pr: PullRequestInfo | null,
   ): Promise<AutomationRun | null> {
     const row = this.automationRow(login, id)
-    return row === null ? null : this.fire(row, reason, pr)
+    return row === null ? null : this.fire(row, reason, pr, null)
+  }
+
+  /**
+   * Runs the webhook automation whose URL carries `token`, with the request body as the payload. Null when no
+   * webhook automation has that token; "disabled" when it is switched off. Awaited, so the caller answers with the run.
+   */
+  async fireWebhook(token: string, payload: string | null): Promise<AutomationRun | "disabled" | null> {
+    const row =
+      this.ctx.storage.sql
+        .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE webhook_token = ?`, token)
+        .toArray()[0] ?? null
+    if (row === null || decodeTrigger(row.triggerJson)._tag !== "webhook") return null
+    if (row.enabled !== 1) return "disabled"
+    return this.fire(row, "webhook", null, payload)
   }
 
   /**
@@ -1030,7 +1050,7 @@ export class Hub extends DurableObject<Env> {
       const reason = matchGithubTrigger(trigger, event)
       if (reason === null) continue
       matched++
-      this.ctx.waitUntil(this.fire(row, reason, event.pr))
+      this.ctx.waitUntil(this.fire(row, reason, event.pr, null))
     }
     return { duplicate: false, matched }
   }
@@ -1072,7 +1092,7 @@ export class Hub extends DurableObject<Env> {
         nextRunMs(decodeTrigger(row.triggerJson), true, now),
         row.id,
       )
-      await this.fire(row, "schedule", null)
+      await this.fire(row, "schedule", null, null)
     }
     await this.rearm()
   }
@@ -1095,12 +1115,12 @@ export class Hub extends DurableObject<Env> {
     else await this.ctx.storage.setAlarm(at)
   }
 
-  private async fire(row: AutomationRow, reason: string, pr: PullRequestInfo | null): Promise<AutomationRun> {
+  private async fire(row: AutomationRow, reason: string, pr: PullRequestInfo | null, payload: string | null): Promise<AutomationRun> {
     const now = Date.now()
     const trigger = decodeTrigger(row.triggerJson)
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
-    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
+    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr, payload })
     // A PR run checks the repository out at the PR head; the base branch stays the diff base.
     const checkout =
       row.repo === null

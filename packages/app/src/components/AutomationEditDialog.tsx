@@ -35,7 +35,7 @@ import { errorText } from "@/util"
 const TIMEZONES = Intl.supportedValuesOf("timeZone")
 
 /**
- * Edits an automation's name, prompt, model and trigger settings. The trigger kind (schedule or GitHub) stays as it is;
+ * Edits an automation's name, prompt, model and trigger settings. The trigger kind (schedule, GitHub or webhook) stays as it is;
  * the server validates the rest and its messages (e.g. a bad cron) show inline.
  */
 export function AutomationEditDialog({ automation, onClose }: { automation: Automation | null; onClose: () => void }) {
@@ -64,6 +64,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
     (provider) => shown[provider.id].some((candidate) => candidate.id === selected.id),
   )
   const trigger = automation.trigger
+  const webhookUrl = automation.webhookUrl
   const [name, setName] = useState(automation.name)
   const [prompt, setPrompt] = useState(automation.prompt)
   const [cron, setCron] = useState(trigger._tag === "schedule" ? trigger.cron : "")
@@ -89,6 +90,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
     if (trigger._tag === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() }
+    if (trigger._tag === "webhook") return { _tag: "webhook" }
     const [first, ...rest] = events
     if (first === undefined) throw new Error("Pick at least one pull request event.")
     return {
@@ -103,13 +105,17 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
   const canSave =
     name.trim() !== "" &&
     prompt.trim() !== "" &&
-    (trigger._tag === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0)
+    (trigger._tag === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : trigger._tag !== "github" || events.length > 0)
 
   return (
     <>
       <DialogTitle>Edit automation</DialogTitle>
       <DialogDescription>
-        {trigger._tag === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+        {trigger._tag === "schedule"
+          ? "Runs on a schedule."
+          : trigger._tag === "webhook"
+            ? "Runs when its webhook URL receives a POST."
+            : "Runs on pull request events."}
       </DialogDescription>
       <form
         className="flex flex-col gap-4"
@@ -189,7 +195,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
               </datalist>
             </Field>
           </>
-        ) : (
+        ) : trigger._tag === "github" ? (
           <>
             <fieldset className="flex flex-col gap-2.5">
               <legend className="mb-1 text-xs text-muted-foreground">Pull request events</legend>
@@ -216,6 +222,27 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
               <Switch checked={includeDrafts} onCheckedChange={setIncludeDrafts} />
             </label>
           </>
+        ) : (
+          webhookUrl !== null && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs text-muted-foreground">Webhook URL</span>
+              <div className="flex gap-2">
+                <Input readOnly className="font-mono" value={webhookUrl} />
+                <Button
+                  type="button"
+                  variant="soft"
+                  size="sm"
+                  onClick={() => void navigator.clipboard.writeText(webhookUrl)}
+                >
+                  Copy
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Every POST to this URL starts a run and the request body is included in the prompt. Anyone with the URL
+                can start runs.
+              </p>
+            </div>
+          )
         )}
 
         {save.error && <Alert>{errorText(save.error)}</Alert>}

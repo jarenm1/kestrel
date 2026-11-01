@@ -5,6 +5,7 @@ import {
   CreateAutomationBody,
   TriggerAutomationBody,
   UpdateAutomationBody,
+  Automation,
   type AutomationTrigger,
 } from "@cloudagents/protocol"
 import { triggerProblem } from "./automation-rules"
@@ -47,6 +48,20 @@ const githubToken = async (env: Env, login: string, message: string): Promise<st
 }
 
 const webhookUrl = (url: URL): string => new URL(ControlPaths.githubWebhook, url.origin).toString()
+
+const StoredAutomationView = Schema.Struct({ ...Automation.fields, webhookToken: Schema.String })
+
+/**
+ * The API's view of a stored automation. `webhookUrl` is built on this request's origin; only webhook triggers have one.
+ * The Hub's RPC return type turns non-empty tuples into arrays, so the stored row is decoded through the protocol schema here.
+ */
+const presentAutomation = (stored: unknown, origin: string): Automation => {
+  const { webhookToken, ...automation } = Schema.decodeUnknownSync(StoredAutomationView)(stored)
+  return {
+    ...automation,
+    webhookUrl: automation.trigger._tag === "webhook" ? new URL(ControlPaths.automationWebhook(webhookToken), origin).toString() : null,
+  }
+}
 
 /**
  * Makes sure the repository has a `pull_request` webhook pointing here. One hook per repository serves every
@@ -93,7 +108,7 @@ const createAutomation = async (request: Request, env: Env, login: string, url: 
   if (body instanceof Response) return body
   const problem = triggerProblem(body.trigger, body.repo ?? null, Date.now())
   if (problem !== null) return badRequest(problem)
-  if (body.repo === undefined) return json(await hub(env).createAutomation(login, { ...body, repo: null }), 201)
+  if (body.repo === undefined) return json(presentAutomation(await hub(env).createAutomation(login, { ...body, repo: null }), url.origin), 201)
   const token = await githubToken(env, login, "connect GitHub to use repositories")
   if (token instanceof Response) return token
   // The owner's GitHub token must be able to read the repository; the stored name is GitHub's canonical casing.
@@ -102,7 +117,7 @@ const createAutomation = async (request: Request, env: Env, login: string, url: 
   if ((body.enabled ?? true) && body.trigger._tag === "github") {
     await ensureHook(env, token, repo, webhookUrl(url))
   }
-  return json(await hub(env).createAutomation(login, { ...body, repo }), 201)
+  return json(presentAutomation(await hub(env).createAutomation(login, { ...body, repo }), url.origin), 201)
 }
 
 const updateAutomation = async (request: Request, env: Env, login: string, url: URL, id: string): Promise<Response> => {
@@ -128,7 +143,7 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
   const updated = await hub(env).updateAutomation(login, id, body)
   if (updated === null) return notFound()
   if (slug !== null && wasHooked && !needsHook) await releaseHook(env, login, slug)
-  return json(updated)
+  return json(presentAutomation(updated, url.origin))
 }
 
 const deleteAutomation = async (env: Env, login: string, id: string): Promise<Response> => {
@@ -181,7 +196,7 @@ export const handleAutomations = async (
 ): Promise<Response> => {
   const method = request.method
   if (url.pathname === base) {
-    if (method === "GET") return json(await hub(env).automations(login))
+    if (method === "GET") return json((await hub(env).automations(login)).map((automation) => presentAutomation(automation, url.origin)))
     if (method === "POST") return createAutomation(request, env, login, url)
     return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
   }
@@ -195,7 +210,7 @@ export const handleAutomations = async (
   if (suffix === "/trigger" && method === "POST") return triggerAutomation(request, env, login, id)
   if (suffix === undefined && method === "GET") {
     const automation = await hub(env).automation(login, id)
-    return automation === null ? notFound() : json(automation)
+    return automation === null ? notFound() : json(presentAutomation(automation, url.origin))
   }
   if (suffix === undefined && method === "PATCH") return updateAutomation(request, env, login, url, id)
   if (suffix === undefined && method === "DELETE") return deleteAutomation(env, login, id)

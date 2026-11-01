@@ -110,6 +110,11 @@ export const ControlPaths = {
   boxAutomation: (id: string) => `/box/automations/${id}`,
   /** POST: GitHub repository webhook receiver. No session; authenticated by X-Hub-Signature-256. */
   githubWebhook: "/webhooks/github",
+  /**
+   * POST: a webhook automation's receiver. No session; the token in the path is the credential (see `Automation.webhookUrl`).
+   * 202 with the AutomationRun; 404 for an unknown token or a non-webhook automation; 409 while the automation is disabled.
+   */
+  automationWebhook: (token: string) => `/webhooks/automations/${token}`,
 } as const
 
 /** Header the control plane's box routes read the acting user's login from; the box sets it, never a browser. */
@@ -382,6 +387,7 @@ export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
  *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
  *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
  *   list means no filter.
+ * - webhook: starts on each `POST` to the automation's `webhookUrl`; the request body is passed to the run as the event payload.
  */
 export const AutomationTrigger = Schema.Union(
   Schema.Struct({
@@ -395,6 +401,9 @@ export const AutomationTrigger = Schema.Union(
     reviewers: Schema.optional(Schema.Array(Schema.String)),
     baseBranches: Schema.optional(Schema.Array(Schema.String)),
     includeDrafts: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({
+    _tag: Schema.Literal("webhook"),
   }),
 )
 export type AutomationTrigger = typeof AutomationTrigger.Type
@@ -416,6 +425,8 @@ export const Automation = Schema.Struct({
   updatedAt: Schema.String, // ISO-8601
   /** Next scheduled fire (ISO-8601); schedule automations only, null otherwise or when disabled. */
   nextRunAt: Schema.NullOr(Schema.String),
+  /** Public URL that starts a run on each POST, for webhook automations; null for other triggers. The URL is the credential. */
+  webhookUrl: Schema.optionalWith(Schema.NullOr(Schema.String), { default: () => null, exact: true }),
 })
 export type Automation = typeof Automation.Type
 
@@ -448,7 +459,7 @@ export const AutomationRun = Schema.Struct({
   id: Schema.String,
   automationId: Schema.String,
   firedAt: Schema.String, // ISO-8601
-  /** "schedule", "manual", "manual #12", or the webhook event, e.g. "pull_request.opened #12". */
+  /** "schedule", "manual", "manual #12", "webhook", or a GitHub event, e.g. "pull_request.opened #12". */
   reason: Schema.String,
   status: Schema.Literal("started", "failed"),
   taskId: Schema.NullOr(Schema.String),

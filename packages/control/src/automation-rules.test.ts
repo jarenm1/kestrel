@@ -5,6 +5,7 @@ import { triggerProblem } from "./automation-rules"
 const NOW = Date.UTC(2026, 0, 1)
 const schedule: AutomationTrigger = { _tag: "schedule", cron: "0 9 * * *", timezone: "UTC" }
 const github: AutomationTrigger = { _tag: "github", events: ["pull_request.opened"] }
+const webhook: AutomationTrigger = { _tag: "webhook" }
 
 describe("triggerProblem", () => {
   test("a schedule needs no repository", () => {
@@ -19,5 +20,10 @@ describe("triggerProblem", () => {
   test("a GitHub trigger needs a repository", () => {
     expect(triggerProblem(github, null, NOW)).toBe("GitHub triggers need a GitHub repository")
     expect(triggerProblem(github, "acme/app", NOW)).toBeNull()
+  })
+
+  test("a webhook trigger needs no repository, with or without one", () => {
+    expect(triggerProblem(webhook, null, NOW)).toBeNull()
+    expect(triggerProblem(webhook, "acme/app", NOW)).toBeNull()
   })
 })

@@ -39,7 +39,7 @@ export function AutomationsPanel() {
       <div>
         <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
         <p className="text-muted-foreground">
-          Tasks the agent starts on a schedule or when a pull request changes.
+          Tasks the agent starts on a schedule, when a pull request changes, or from a webhook.
         </p>
       </div>
 

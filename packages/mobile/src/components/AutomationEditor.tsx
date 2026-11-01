@@ -38,7 +38,7 @@ export type AutomationEditorTarget =
   | { readonly kind: "create" }
   | { readonly kind: "edit"; readonly automation: Automation };
 
-type TriggerKind = "schedule" | "github";
+type TriggerKind = "schedule" | "github" | "webhook";
 
 const switchTrack = { false: colors.secondary, true: colors.primary };
 
@@ -96,6 +96,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
     if (kind === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() };
+    if (kind === "webhook") return { _tag: "webhook" };
     const [first, ...rest] = events;
     if (first === undefined) throw new Error("Pick at least one pull request event.");
     return {
@@ -139,7 +140,8 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   }
 
   const repoRequired = target.kind === "create" && kind === "github";
-  const triggerReady = kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0;
+  const triggerReady =
+    kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : kind === "github" ? events.length > 0 : true;
   const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null);
 
   return (
@@ -147,7 +149,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
       <ScreenHeader title={target.kind === "edit" ? "Edit automation" : "New automation"} onBack={onClose} />
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.description}>
-          {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+          {kind === "schedule" ? "Runs on a schedule." : kind === "github" ? "Runs on pull request events." : "Runs when its URL receives a POST."}
         </Text>
 
         <Field label="Name">
@@ -169,6 +171,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             <View style={styles.segmented}>
               <Segment label="Schedule" selected={kind === "schedule"} onPress={() => setKind("schedule")} />
               <Segment label="Pull requests" selected={kind === "github"} onPress={() => setKind("github")} />
+              <Segment label="Webhook" selected={kind === "webhook"} onPress={() => setKind("webhook")} />
             </View>
           </Field>
         ) : null}
@@ -179,7 +182,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
           ) : (
             <Pressable style={styles.select} onPress={() => setPickingRepo(true)} accessibilityRole="button">
               <Text style={[styles.selectText, repo === null && styles.placeholder]}>
-                {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
+                {repo ?? (kind !== "github" ? "No repository" : "Select a repository")}
               </Text>
               <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
             </Pressable>
@@ -208,7 +211,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </Field>
           </>
-        ) : (
+        ) : kind === "github" ? (
           <>
             <Field label="Pull request events">
               {GithubAutomationEvent.literals.map((event) => {
@@ -258,7 +261,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </View>
           </>
-        )}
+        ) : null}
 
         {target.kind === "create" ? (
           <View style={styles.switchRow}>
@@ -288,7 +291,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
       <RepoPicker
         visible={pickingRepo}
         selected={repo}
-        allowNone={kind === "schedule"}
+        allowNone={kind !== "github"}
         onSelect={(picked) => {
           setRepo(picked);
           setPickingRepo(false);
