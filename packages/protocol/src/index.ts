@@ -72,6 +72,19 @@ export const ContextUsage = Schema.Struct({
   usedTokens: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
   windowTokens: Schema.Number.pipe(Schema.int(), Schema.positive()),
 })
+
+/** The durable relationship between a delegated task and the run that requested it. */
+export const Delegation = Schema.Struct({
+  parentTaskId: Schema.String,
+  parentRunId: Schema.String,
+  requestId: Schema.String,
+  fingerprint: Schema.String,
+  runId: Schema.optional(Schema.String),
+  cancelledAt: Schema.optional(Schema.String),
+  resultAcknowledged: Schema.optional(Schema.Boolean),
+  outputSchema: Schema.optional(Schema.Unknown),
+})
+export type Delegation = typeof Delegation.Type
 export type ContextUsage = typeof ContextUsage.Type
 
 /**
@@ -94,6 +107,8 @@ export const Task = Schema.Struct({
   archivedAt: Schema.optional(Schema.String),
   /** Context use of the thread's agent session as last reported; absent before a harness reports one and when a run starts a fresh session. */
   context: Schema.optional(ContextUsage),
+  /** Present for a thread created as delegated work. */
+  delegation: Schema.optional(Delegation),
 })
 
 /** Short-lived bearer used by a sandboxed preview frame; grants access only to its own task preview. */
@@ -149,6 +164,8 @@ export const Run = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Number),
   /** The provider's CLI that ran it; absent on runs recorded before model switching stored it. */
   provider: Schema.optional(ModelProvider),
+  /** Explicit model selected for this run; absent for runs using the box default. */
+  model: Schema.optional(AgentModel),
 })
 export type Run = typeof Run.Type
 
@@ -595,6 +612,8 @@ export const Paths = {
   /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
+  /** POST cancels a child delegation and its descendants, returning the child thread. */
+  taskDelegationCancel: (id: string, childId: string) => `/api/tasks/${id}/delegations/${childId}/cancel`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskFiles: (id: string) => `/api/tasks/${id}/files`,
   /**

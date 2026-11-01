@@ -122,6 +122,8 @@ const reconcile = (state: StoreState): void => {
   }
   for (const task of state.tasks) {
     if (task.status === "running") task.status = "failed"
+    // A delegation persisted before dispatch lost its launching process during restart.
+    if (task.delegation !== undefined && task.delegation.runId === undefined) task.status = "failed"
   }
 }
 

@@ -1,0 +1,151 @@
+import { expect, test } from "bun:test"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { Effect, Either, Layer } from "effect"
+import { Config, type ServerConfig } from "../config"
+import { DesktopManager } from "../desktop"
+import { CredentialStore } from "../credentials"
+import { CliAuth } from "../cliauth"
+import { GitHub } from "../github/api"
+import { AgentHarness, type AgentChoice } from "./harness"
+import { EventHubLive } from "./events"
+import { CoreLive, CoreService } from "./service"
+import { StateLive, StateStore, type StoreShape } from "./state"
+import { WorkspaceService } from "./workspace"
+
+test("delegation persists its lineage, deduplicates retries, and delivers one completion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-delegation-"))
+  const config: ServerConfig = {
+    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
+    shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
+    agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
+    sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null,
+    taskDiskMax: 1024 ** 3, desktopBundleMs: 0, githubApiUrl: "https://api.github.com",
+  }
+  const choices: AgentChoice[] = []
+  let testStore: StoreShape | undefined
+  const configLayer = Layer.succeed(Config, config)
+  const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
+  const deps = Layer.mergeAll(
+    configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
+    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
+    workspaceLayer, Layer.succeed(CredentialStore, {} as never),
+    Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
+    Layer.succeed(AgentHarness, {
+      spawn: (_task: unknown, _run: unknown, _prompt: unknown, _display: unknown, _user: unknown, _session: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
+      steer: () => Effect.succeed(false), cancel: (id: string) => testStore!.update((s) => {
+        const run = s.runs.find((r) => r.id === id)
+        if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }
+        return Either.right(undefined)
+      }), stopAll: () => Effect.void, items: () => Effect.succeed([]),
+    } as never),
+  )
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      testStore = store
+      const core = yield* CoreService
+      const now = new Date().toISOString()
+      yield* store.update((s) => {
+        s.tasks.push({ id: "parent", owner: "owner", title: "Parent", status: "running", createdAt: now, updatedAt: now, checkouts: [] })
+        s.tasks.push({ id: "other", owner: "other", title: "Other", status: "idle", createdAt: now, updatedAt: now, checkouts: [] })
+        s.runs.push({ id: "parent-run", taskId: "parent", prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "openai", model: "gpt-6.1-sol" })
+        return Either.right(undefined)
+      })
+      const input = { title: "Review", message: "Review the change", requestId: "retry-key" }
+      const [child, retry] = yield* Effect.all([core.delegate("parent", "parent-run", input), core.delegate("parent", "parent-run", input)], { concurrency: "unbounded" })
+      expect(retry.id).toBe(child.id)
+      expect(child.delegation?.runId).toBeDefined()
+      expect(choices).toEqual([{ model: "gpt-6.1-sol" }])
+      expect(Either.isLeft(yield* Effect.either(core.delegate("parent", "parent-run", { ...input, message: "different" })))).toBe(true)
+      expect(Either.isLeft(yield* Effect.either(core.delegatedStatus("other", child.id)))).toBe(true)
+      const runId = child.delegation!.runId!
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === runId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.messages.push({ id: "result", taskId: child.id, runId, role: "agent", text: "Review complete", createdAt: now })
+        return Either.right(undefined)
+      })
+      yield* Effect.sleep("2500 millis")
+      const state = yield* store.read
+      expect(state.messages.filter((m) => m.id === `delegation-result:${child.id}`)).toHaveLength(1)
+      expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Review complete")
+      expect((yield* core.inbox("parent", "parent-run"))).toHaveLength(0)
+      expect((yield* core.delegatedStatus("parent", child.id)).result).toBe("Review complete")
+      const second = yield* core.delegate("parent", "parent-run", { ...input, requestId: "second" })
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === second.delegation!.runId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        return Either.right(undefined)
+      })
+      expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(true)
+      expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(false)
+      yield* Effect.sleep("2500 millis")
+      expect((yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)).toHaveLength(0)
+      const nestedParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "nested-parent" })
+      const nestedRunId = nestedParent.delegation!.runId!
+      const grandchild = yield* core.delegate(nestedParent.id, nestedRunId, { ...input, requestId: "grandchild" })
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === nestedRunId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.messages.push({ id: "intermediate", taskId: nestedParent.id, runId: nestedRunId, role: "agent", text: "Waiting for child", createdAt: now })
+        return Either.right(undefined)
+      })
+      expect((yield* core.delegatedStatus("parent", nestedParent.id)).waitingForChildren).toBe(true)
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === grandchild.delegation!.runId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.messages.push({ id: "grandchild-result", taskId: grandchild.id, runId: run.id, role: "agent", text: "Nested answer", createdAt: now })
+        return Either.right(undefined)
+      })
+      yield* Effect.sleep("2500 millis")
+      const during = yield* store.read
+      expect(during.messages.some((m) => m.id === `delegation-result:${nestedParent.id}`)).toBe(false)
+      const continuation = during.messages.find((m) => m.id === `delegation-result:${grandchild.id}`)!.runId!
+      expect(continuation).not.toBe(nestedRunId)
+      expect((yield* core.delegatedStatus("parent", nestedParent.id)).waitingForChildren).toBe(true)
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === continuation)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.messages.push({ id: "integrated", taskId: nestedParent.id, runId: continuation, role: "agent", text: "Integrated answer", createdAt: now })
+        return Either.right(undefined)
+      })
+      yield* Effect.sleep("2500 millis")
+      expect((yield* core.delegatedStatus("parent", nestedParent.id)).result).toBe("Integrated answer")
+      expect((yield* store.read).messages.find((m) => m.id === `delegation-result:${nestedParent.id}`)?.text).toContain("Integrated answer")
+      const structured = yield* core.delegate("parent", "parent-run", { ...input, requestId: "structured", outputSchema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } } })
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === structured.delegation!.runId)!
+        run.status = "succeeded"
+        run.endedAt = now
+        s.messages.push({ id: "structured-result", taskId: structured.id, runId: run.id, role: "agent", text: '{"ok":true}', createdAt: now })
+        return Either.right(undefined)
+      })
+      expect((yield* core.delegatedStatus("parent", structured.id)).structured).toEqual({ valid: true, data: { ok: true } })
+      yield* store.update((s) => {
+        s.messages.find((m) => m.id === "structured-result")!.text = '{"ok":"wrong"}'
+        return Either.right(undefined)
+      })
+      expect((yield* core.delegatedStatus("parent", structured.id)).structured?.valid).toBe(false)
+      const cancelParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-parent" })
+      const cancelChild = yield* core.delegate(cancelParent.id, cancelParent.delegation!.runId!, { ...input, requestId: "cancel-child" })
+      expect(Either.isLeft(yield* Effect.either(core.cancelDelegation("other", cancelParent.id)))).toBe(true)
+      yield* core.cancelDelegation("parent", cancelParent.id)
+      const afterCancel = yield* store.read
+      expect(afterCancel.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
+      expect(afterCancel.runs.find((r) => r.id === cancelChild.delegation!.runId)?.status).toBe("cancelled")
+      expect(afterCancel.tasks.find((t) => t.id === cancelChild.id)?.delegation?.cancelledAt).toBeDefined()
+      const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))
+      expect(disk).toContain('"requestId":"retry-key"')
+    }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)

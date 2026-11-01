@@ -79,3 +79,33 @@ test("thread_spawn identifies the created thread when starting its agent fails",
     await server.close()
   }
 })
+
+test("delegate_batch validates every checkout before starting work and uses stable per-item keys", async () => {
+  const calls: Array<{ requestId: string; message: string }> = []
+  const deps = { threads: {
+    delegate: (_taskId: string, _runId: string, input: { requestId: string; message: string }) => Effect.sync(() => {
+      calls.push(input)
+      return { id: `child-${calls.length}` }
+    }),
+  } } as unknown as ThreadToolDeps
+  const server = new McpServer({ name: "test", version: "1" })
+  registerThreadTools(server, { taskId: "parent", runId: "run" }, deps)
+  const client = new Client({ name: "test", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  try {
+    const listed = await client.listTools()
+    expect(listed.tools.map((tool) => tool.name)).toContain("delegate_batch")
+    const invalid = await client.callTool({ name: "delegate_batch", arguments: { requestId: "batch", context: "context", tasks: [{ title: "One", message: "one" }, { title: "Two", message: "two", baseBranch: "main" }] } })
+    expect(invalid.isError).toBe(true)
+    expect(calls).toHaveLength(0)
+    const result = await client.callTool({ name: "delegate_batch", arguments: { requestId: "batch", context: "context", tasks: [{ title: "One", message: "one" }, { title: "Two", message: "two" }] } })
+    expect(result.isError).not.toBe(true)
+    expect(calls.map((call) => call.requestId)).toEqual(["batch:batch:0", "batch:batch:1"])
+    expect(calls[0]?.message).toContain("context")
+    expect(calls[1]?.message).toContain("two")
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})

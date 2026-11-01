@@ -107,12 +107,13 @@
     },
     "packages/server": {
       "name": "@cloudagents/server",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@cloudagents/protocol": "workspace:*",
         "@effect/platform": "^0.97.3",
         "@effect/platform-node": "^0.108.4",
         "@modelcontextprotocol/sdk": "^1",
+        "ajv": "^8.20.0",
         "effect": "^3.22.4",
         "ws": "^8",
         "zod": "^4.6.7",

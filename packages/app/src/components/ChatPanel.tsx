@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
@@ -62,6 +62,37 @@ function WorkingIndicator({ run }: { run: Run }) {
 /** Under an agent reply: the time it was sent. */
 function MessageTime({ iso }: { iso: string }) {
   return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
+}
+
+/** Delegated threads are independent conversations; their original run stays linked even after follow-ups. */
+function DelegatedTasks({ taskId }: { taskId: string }) {
+  const tasks = useQuery(queries.tasks()).data ?? []
+  const children = tasks.filter((task) => task.delegation?.parentTaskId === taskId)
+  const runs = useQueries({ queries: children.map((task) => queries.runs(task.id)) })
+  const queryClient = useQueryClient()
+  const cancel = useMutation({
+    mutationFn: (childId: string) => api.cancelDelegation(taskId, childId),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
+  })
+  if (children.length === 0) return null
+  return (
+    <section aria-label="Delegated tasks" className="mx-auto mb-3 w-full max-w-3xl rounded-xl border border-white/10 px-3 py-2 text-xs">
+      <div className="mb-1.5 font-medium text-muted-foreground">Delegated tasks</div>
+      <div className="space-y-1.5">
+        {children.map((child, index) => {
+          const run = runs[index]?.data?.find((r) => r.id === child.delegation?.runId)
+          const nestedActive = tasks.some((task) => task.delegation?.parentRunId === run?.id && task.delegation?.cancelledAt === undefined && (task.status === "running" || task.status === "needs_input"))
+          const status = child.delegation?.cancelledAt ? "Cancelled" : child.status === "needs_input" ? "Needs input" : run?.status === "succeeded" && nestedActive ? "Waiting for children" : run?.status === "succeeded" && child.status === "running" ? "Continuing" : run?.status ?? (child.status === "failed" ? "Failed to start" : "Starting")
+          return <div key={child.id} className="flex items-center gap-2">
+            <Link to={threadPath(child.id)} className="min-w-0 flex-1 truncate hover:underline">{child.title}</Link>
+            <span className="text-muted-foreground">{status}</span>
+            {!child.delegation?.cancelledAt && (run?.status === "running" || nestedActive || (run?.status === "succeeded" && child.status === "running")) && <button type="button" className="text-muted-foreground hover:text-foreground" disabled={cancel.isPending} onClick={() => cancel.mutate(child.id)}>Cancel</button>}
+          </div>
+        })}
+      </div>
+      {cancel.isError && <div role="alert" className="mt-1 text-destructive">Could not cancel the task.</div>}
+    </section>
+  )
 }
 
 /** `children`: what hangs off a message (attachments), shown under its text. */
@@ -162,6 +193,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <DelegatedTasks taskId={taskId} />
       {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
       <div className={cn("min-h-0 flex-1 overflow-auto px-5 pt-4", activeRun ? "pb-14" : "pb-4")} ref={threadRef}>
         <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">

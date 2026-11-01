@@ -1,5 +1,6 @@
 import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
+import Ajv from "ajv"
 import { copyFile, mkdir, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
@@ -30,6 +31,7 @@ import {
   type CheckoutRequest,
   type CliProvider,
   type CreateTaskBody,
+  type Delegation,
   type HarnessCommands,
   modelInfo,
   type FileRoot,
@@ -161,6 +163,56 @@ export interface AskInput {
   readonly attachments?: ReadonlyArray<AttachmentInput>
 }
 
+export interface DelegateInput {
+  readonly title: string
+  readonly message: string
+  readonly requestId: string
+  readonly checkout?: CheckoutRequest
+  readonly model?: AgentModel
+  readonly outputSchema?: Record<string, unknown>
+}
+
+export interface DelegatedStatus {
+  readonly task: Task
+  readonly run: Run | null
+  readonly result: string | null
+  readonly waitingForChildren: boolean
+  readonly resultStatus: Run["status"] | null
+  readonly usage: { readonly inputTokens: number | null; readonly outputTokens: number | null; readonly costUsd: number | null }
+  readonly structured: { readonly valid: boolean; readonly data?: unknown; readonly error?: string } | null
+}
+
+const schemaValidator = new Ajv({ strict: false, allErrors: true, addUsedSchema: false })
+
+/** A run is not done delegating until every child launched by that run has settled recursively. */
+const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): boolean =>
+  state.tasks.some((child) => {
+    const d = child.delegation
+    if (d?.parentRunId !== runId) return false
+    const run = state.runs.find((r) => r.id === d.runId)
+    if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
+    if (d.resultAcknowledged) return false
+    const notification = state.messages.find((m) => m.taskId === d.parentTaskId && m.id === `delegation-result:${child.id}`)
+    if (!notification) return true
+    if (notification.runId === null || notification.runId === runId) return false
+    const continuation = state.runs.find((r) => r.id === notification.runId)
+    return continuation?.status === "running" || (continuation !== undefined && hasPendingDelegations(state, continuation.id))
+  })
+
+/** Follow only automatic child-result continuations, never unrelated later user messages. */
+const delegationResultRun = (state: Readonly<StoreState>, taskId: string, firstRunId: string): string => {
+  let runId = firstRunId
+  const seen = new Set<string>()
+  while (!seen.has(runId)) {
+    seen.add(runId)
+    const childIds = state.tasks.filter((t) => t.delegation?.parentRunId === runId).map((t) => t.id)
+    const continuation = state.messages.filter((m) => m.taskId === taskId && m.runId !== null && m.runId !== runId && childIds.some((id) => m.id === `delegation-result:${id}`)).at(-1)
+    if (!continuation?.runId) break
+    runId = continuation.runId
+  }
+  return runId
+}
+
 /** The question's wait ended without an answer because the run ended first. */
 export class AskError extends Data.TaggedError("AskError")<{ readonly message: string }> {}
 
@@ -232,6 +284,10 @@ export interface CoreShape {
     toTaskId: string,
     text: string,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
+  readonly delegate: (parentTaskId: string, parentRunId: string, input: DelegateInput) => Effect.Effect<Task, NotFound | Conflict | BadRequest | InternalError>
+  readonly delegatedStatus: (parentTaskId: string, childTaskId: string) => Effect.Effect<DelegatedStatus, NotFound>
+  readonly cancelDelegation: (parentTaskId: string, childTaskId: string) => Effect.Effect<DelegatedStatus, NotFound | Conflict | InternalError>
+  readonly acknowledgeDelegation: (parentTaskId: string, childTaskId: string) => Effect.Effect<boolean, NotFound | InternalError>
 
   readonly githubActivity: (user: string, taskId: string, repo: string, number: number, kind: string, deliveryId: string) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
 
@@ -440,6 +496,8 @@ export const CoreLive = Layer.effect(
     const sandboxSettings = sandboxSettingsOf(config)
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
+    const delegationLock = yield* Effect.makeSemaphore(1)
+    const delegationDeliveryLock = yield* Effect.makeSemaphore(1)
 
     // Desktop status changes are pushed to every task's event stream.
     yield* desktop.watchStatus((desktopStatus) => hub.publish({ _tag: "desktop.updated", desktop: desktopStatus }))
@@ -892,14 +950,14 @@ export const CoreLive = Layer.effect(
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 
-    const createTask: CoreShape["createTask"] = (user, input) =>
+    const createTask = (user: string, input: CreateTaskBody, delegation?: Delegation) =>
       Effect.gen(function* () {
         const title = input.title?.trim() || "Untitled task"
         const request = input.checkout
         if (request !== undefined) yield* parseCheckoutRequest(request)
         const id = newId()
         const now = nowIso()
-        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [] }
+        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(delegation === undefined ? {} : { delegation }) }
         yield* Effect.tryPromise({
           try: () => mkdir(threadDirOf(id), { recursive: true }),
           catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),
@@ -940,6 +998,7 @@ export const CoreLive = Layer.effect(
       attachmentIds: ReadonlyArray<string>,
       dev: boolean,
       from: FromThread | null,
+      deliveryId?: string,
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
@@ -981,12 +1040,18 @@ export const CoreLive = Layer.effect(
               answer: Deferred.Deferred<AskOutcome> | null
               start: { readonly prompt: string; readonly resumeSession: string | null } | null
               delivered: string
+              duplicate: boolean
             },
             NotFound | Conflict | BadRequest
           > => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
             const task = found.right
+            const previous = deliveryId === undefined ? undefined : s.messages.find((m) => m.taskId === taskId && m.id === deliveryId)
+            if (previous) {
+              const run = s.runs.find((r) => r.id === previous.runId)
+              if (run) return Either.right({ task: { ...task }, message: { ...previous }, run: { ...run }, answer: null, delivered: "", start: null, duplicate: true })
+            }
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
             }
@@ -1011,7 +1076,7 @@ export const CoreLive = Layer.effect(
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
               // the answer; otherwise it steers the run's live turn, or waits in the run's inbox for task_inbox.
-              const message: Message = { id: newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
+              const message: Message = { id: deliveryId ?? newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
                 liveAsks.delete(running.id)
@@ -1020,7 +1085,7 @@ export const CoreLive = Layer.effect(
               if (task.status === "needs_input" && from === null) task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
-              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null })
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false })
             }
             // No run is going. The new run continues the agent session of the task's latest run, so the agent keeps the
             // thread's context. Only the latest run counts: a resume that failed before naming its session makes the next
@@ -1043,12 +1108,16 @@ export const CoreLive = Layer.effect(
               endedAt: null,
               exitCode: null,
               provider,
+              ...(choice.model === undefined ? {} : { model: choice.model }),
             }
-            const message: Message = { id: newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
+            const message: Message = { id: deliveryId ?? newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
             task.updatedAt = now
             s.runs.push(run)
             s.messages.push(message)
+            if (task.delegation !== undefined && task.delegation.runId === undefined) {
+              task.delegation = { ...task.delegation, runId: run.id }
+            }
             // The prompt is what the run starts with, not mail for its inbox.
             seenFor(run.id).add(message.id)
             const asked =
@@ -1062,10 +1131,12 @@ export const CoreLive = Layer.effect(
               run: { ...run },
               answer: null,
               delivered,
+              duplicate: false,
               start: { prompt, resumeSession },
             })
           },
         )
+        if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "task.updated", task: reserved.task })
         publishMessage(reserved.message)
         if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
@@ -1131,6 +1202,150 @@ export const CoreLive = Layer.effect(
         const from = { id: sender.id, title: sender.title }
         return yield* deliverMessage(sender.owner, toTaskId, text, resumeChoice(state, toTaskId), [], false, from)
       })
+
+    const delegatedStatus: CoreShape["delegatedStatus"] = (parentTaskId, childTaskId) =>
+      Effect.gen(function* () {
+        const state = yield* store.read
+        const parent = yield* findTask(state, parentTaskId)
+        const child = yield* findTask(state, childTaskId)
+        if (child.owner !== parent.owner || child.delegation?.parentTaskId !== parent.id) {
+          return yield* Effect.fail(new NotFound({ message: `delegated task ${childTaskId} not found` }))
+        }
+        const run = state.runs.find((r) => r.id === child.delegation?.runId) ?? null
+        const resultRunId = run === null ? null : delegationResultRun(state, child.id, run.id)
+        const resultStatus = state.runs.find((r) => r.id === resultRunId)?.status ?? null
+        const result = resultRunId === null ? null : [...state.messages].reverse().find((m) => m.runId === resultRunId && (m.role === "agent" || m.role === "system") && m.options === undefined)?.text ?? null
+        let structured: DelegatedStatus["structured"] = null
+        if (child.delegation.outputSchema !== undefined && result !== null) {
+          try {
+            const raw = result.trim().replace(/^```(?:json)?\s*\n/i, "").replace(/\n```\s*$/, "")
+            const data: unknown = JSON.parse(raw)
+            const validate = schemaValidator.compile(child.delegation.outputSchema as object)
+            structured = validate(data) ? { valid: true, data } : { valid: false, data, error: schemaValidator.errorsText(validate.errors).slice(0, 2000) }
+          } catch (e) {
+            structured = { valid: false, error: e instanceof Error ? e.message : String(e) }
+          }
+        }
+        const items = run === null ? [] : yield* harness.items(run.id).pipe(Effect.catchAll(() => Effect.succeed([])))
+        const turns = items.filter((item) => item._tag === "turn")
+        const sum = (values: ReadonlyArray<number | null>): number | null => values.some((v) => v !== null) ? values.reduce<number>((a, v) => a + (v ?? 0), 0) : null
+        const usage = { inputTokens: sum(turns.map((t) => t.inputTokens)), outputTokens: sum(turns.map((t) => t.outputTokens)), costUsd: sum(turns.map((t) => t.costUsd)) }
+        return { task: { ...child }, run: run === null ? null : { ...run }, result, resultStatus, structured, usage, waitingForChildren: child.delegation.cancelledAt === undefined && run !== null && run.status !== "cancelled" && hasPendingDelegations(state, run.id) }
+      })
+
+    const delegate: CoreShape["delegate"] = (parentTaskId, parentRunId, input) => delegationLock.withPermits(1)(
+      Effect.gen(function* () {
+        const state = yield* store.read
+        const parent = yield* findTask(state, parentTaskId)
+        const parentRun = state.runs.find((r) => r.id === parentRunId && r.taskId === parentTaskId && r.status === "running")
+        if (!parentRun) return yield* Effect.fail(new Conflict({ message: "parent run is no longer active" }))
+        if (input.outputSchema !== undefined) {
+          if (JSON.stringify(input.outputSchema).length > 16000) return yield* Effect.fail(new BadRequest({ message: "output schema exceeds 16000 characters" }))
+          try { schemaValidator.compile(input.outputSchema) } catch (e) { return yield* Effect.fail(new BadRequest({ message: `invalid output schema: ${String(e)}` })) }
+        }
+        const fingerprint = createHash("sha256").update(JSON.stringify([input.title, input.message, input.checkout ?? null, input.model ?? null, input.outputSchema ?? null])).digest("hex")
+        const existing = state.tasks.find((t) => t.delegation?.parentRunId === parentRunId && t.delegation.requestId === input.requestId)
+        if (existing) {
+          if (existing.delegation?.fingerprint !== fingerprint) return yield* Effect.fail(new Conflict({ message: "requestId was already used for a different task" }))
+          return { ...existing }
+        }
+        let ancestor: Task | undefined = parent
+        let depth = 0
+        while (ancestor?.delegation !== undefined) {
+          depth++
+          ancestor = state.tasks.find((t) => t.id === ancestor?.delegation?.parentTaskId)
+        }
+        if (depth >= 4) return yield* Effect.fail(new Conflict({ message: "delegation depth limit reached" }))
+        const task = yield* createTask(parent.owner, { title: input.title, ...(input.checkout === undefined ? {} : { checkout: input.checkout }) }, {
+          parentTaskId, parentRunId, requestId: input.requestId, fingerprint, ...(input.outputSchema === undefined ? {} : { outputSchema: input.outputSchema }),
+        })
+        const inheritedModel = parentRun.model ?? (parentRun.provider === undefined || parentRun.provider === DEFAULT_MODEL_PROVIDER
+          ? undefined : providerModels(parentRun.provider).find((m) => m.shownByDefault)?.id)
+        const model = input.model ?? inheritedModel
+        const choice: AgentChoice = model === undefined ? {} : { model }
+        const assignment = input.outputSchema === undefined ? input.message : `${input.message}\n\nYour final response must be a JSON value conforming to this JSON Schema:\n${JSON.stringify(input.outputSchema)}`
+        yield* deliverMessage(parent.owner, task.id, assignment, choice, [], false, { id: parent.id, title: parent.title }).pipe(
+          Effect.tapError(() => store.update((s) => {
+            const child = s.tasks.find((t) => t.id === task.id)
+            if (child && child.delegation?.runId === undefined) child.status = "failed"
+            return Either.right(undefined)
+          }).pipe(Effect.ignore)),
+          Effect.mapError((e) => new InternalError({ message: `Created delegated thread ${task.id}, but could not start it: ${e.message}. Retry with the same requestId or inspect the thread.` })),
+        )
+        return yield* requireTask(task.id)
+      }),
+    )
+
+    const cancelDelegatedTree = (rootRunId: string) => Effect.gen(function* () {
+        const state = yield* store.read
+        const ids: string[] = []
+        const visit = (runId: string): void => {
+          if (ids.includes(runId)) return
+          ids.push(runId)
+          for (const child of state.tasks) {
+            if (child.delegation?.parentRunId !== runId) continue
+            if (child.delegation.runId !== undefined) visit(child.delegation.runId)
+            const continuation = state.messages.find((m) => m.taskId === child.delegation!.parentTaskId && m.id === `delegation-result:${child.id}`)?.runId
+            if (continuation && continuation !== runId) visit(continuation)
+          }
+        }
+        visit(rootRunId)
+        yield* store.update((s) => {
+          for (const task of s.tasks) {
+            if (task.delegation?.runId && ids.includes(task.delegation.runId)) task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
+          }
+          return Either.right(undefined)
+        })
+        yield* Effect.forEach(ids, (id) => harness.cancel(id), { discard: true })
+      })
+
+    const cancelDelegation: CoreShape["cancelDelegation"] = (parentTaskId, childTaskId) =>
+      Effect.gen(function* () {
+        const status = yield* delegatedStatus(parentTaskId, childTaskId)
+        if (status.run && (status.run.status === "running" || status.waitingForChildren)) yield* cancelDelegatedTree(status.run.id)
+        return yield* delegatedStatus(parentTaskId, childTaskId)
+      })
+
+    const acknowledgeDelegation: CoreShape["acknowledgeDelegation"] = (parentTaskId, childTaskId) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
+      yield* delegatedStatus(parentTaskId, childTaskId)
+      return yield* store.update((s) => {
+        const child = s.tasks.find((t) => t.id === childTaskId)!
+        const delivered = s.messages.some((m) => m.taskId === parentTaskId && m.id === `delegation-result:${childTaskId}`)
+        if (delivered || child.delegation!.resultAcknowledged) return Either.right(false)
+        child.delegation = { ...child.delegation!, resultAcknowledged: true }
+        return Either.right(true)
+      })
+    }))
+
+    // Recover undelivered completions after a restart as well as delivering live completions. The stable message id
+    // is reserved with the parent message itself, so a retry cannot deliver the same completion twice.
+    const deliverDelegationResults = Effect.gen(function* () {
+      const state = yield* store.read
+      const pending = state.tasks.filter((child) => {
+        const d = child.delegation
+        if (!d) return false
+        const run = state.runs.find((r) => r.id === d.runId)
+        const parent = state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
+        const parentRun = state.runs.find((r) => r.id === d.parentRunId)
+        return (d.cancelledAt !== undefined || (run !== undefined && run.status !== "running" && (run.status === "cancelled" || !hasPendingDelegations(state, run.id))) || (run === undefined && child.status === "failed")) && parent !== undefined && parent.archivedAt === undefined &&
+          !d.resultAcknowledged && parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
+      })
+      yield* Effect.forEach(pending, (child) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
+        const latest = yield* store.read
+        if (latest.tasks.find((t) => t.id === child.id)?.delegation?.resultAcknowledged) return
+        const status = yield* delegatedStatus(child.delegation!.parentTaskId, child.id)
+        const summary = status.result === null ? "No final response was recorded." : status.result.slice(0, 3000)
+        const validation = status.structured === null ? "" : `\nStructured output: ${status.structured.valid ? "valid" : `invalid (${status.structured.error ?? "schema validation failed"})`}.`
+        const message = `Delegated task "${child.title}" (${child.id}) finished with status ${child.delegation?.cancelledAt ? "cancelled" : status.resultStatus ?? "failed to start"}.${validation}\n\n${summary}\n\nUse thread_read for the full conversation. This is an automatic result; do not send an acknowledgement.`
+        const current = yield* store.read
+        yield* deliverMessage(child.owner, child.delegation!.parentTaskId, message, resumeChoice(current, child.delegation!.parentTaskId), [], false,
+          { id: child.id, title: child.title }, `delegation-result:${child.id}`)
+      }).pipe(Effect.catchAll((e) => Effect.logWarning(`delegation ${child.id} notification failed: ${e.message}`)))), { discard: true })
+    })
+    yield* Effect.forkDaemon(deliverDelegationResults.pipe(
+      Effect.catchAllCause((cause) => Effect.logWarning(`delegation notifications failed: ${Cause.pretty(cause)}`)),
+      Effect.repeat(Schedule.spaced("2 seconds")),
+    ))
 
     const githubActivity: CoreShape["githubActivity"] = (user, taskId, repo, number, kind, deliveryId) =>
       Effect.gen(function* () {
@@ -1338,6 +1553,11 @@ export const CoreLive = Layer.effect(
 
       createTask,
 
+      delegate,
+      delegatedStatus,
+      cancelDelegation,
+      acknowledgeDelegation,
+
       getTask: ownedTask,
 
       commands: (user, taskId, model) =>
@@ -1482,7 +1702,9 @@ export const CoreLive = Layer.effect(
           if (run.status !== "running") {
             return yield* Effect.fail(new Conflict({ message: `run ${runId} is ${run.status}` }))
           }
-          yield* harness.cancel(runId)
+          const task = state.tasks.find((t) => t.id === run.taskId)
+          if (task?.delegation?.runId === runId) yield* cancelDelegatedTree(runId)
+          else yield* harness.cancel(runId)
           return yield* requireRun(runId)
         }),
 

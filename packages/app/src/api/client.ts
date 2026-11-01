@@ -535,6 +535,7 @@ export const api = {
   listRuns: (taskId: string) => onTask(taskId, Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
   runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
+  cancelDelegation: (taskId: string, childId: string) => onTask(taskId, Task, "POST", Paths.taskDelegationCancel(taskId, childId)),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),

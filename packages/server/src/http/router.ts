@@ -228,6 +228,12 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/messages",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listMessages(user, id)))),
     ),
+    HttpRouter.post(
+      "/api/tasks/:id/delegations/:childId/cancel",
+      Effect.flatMap(HttpRouter.params, (p) => respond(signedIn((user) =>
+        Effect.zipRight(core.getTask(user, p.id ?? ""), core.cancelDelegation(p.id ?? "", p.childId ?? "")).pipe(Effect.map((status) => status.task)),
+      ))),
+    ),
     // Real commands of the harness the thread's next message runs on, discovered in the thread workspace.
     HttpRouter.get(
       "/api/tasks/:id/commands",
