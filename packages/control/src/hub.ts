@@ -418,6 +418,15 @@ export class Hub extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM connections WHERE login = ? AND provider = ?", login, provider)
   }
 
+  /** The stored secret of one connection, or null when it is not connected. */
+  connectionSecret(login: string, provider: string): string | null {
+    return (
+      this.ctx.storage.sql
+        .exec<{ secret: string }>("SELECT secret FROM connections WHERE login = ? AND provider = ?", login, provider)
+        .toArray()[0]?.secret ?? null
+    )
+  }
+
   /** The user's connection secrets, by provider. */
   connectionSecrets(login: string): { github?: string; anthropic?: string; openai?: string } {
     const out: { github?: string; anthropic?: string; openai?: string } = {}

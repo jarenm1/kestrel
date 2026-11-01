@@ -34,13 +34,19 @@ import type { BoxOutcome } from "./hub"
 
 type ConnectionRow = { provider: string; account: string | null }
 
-const storedView = (provider: OAuthProvider | ApiKeyProvider, row: ConnectionRow | undefined, env: Env): Connection => ({
+const storedView = (
+  provider: OAuthProvider | ApiKeyProvider,
+  row: ConnectionRow | undefined,
+  env: Env,
+  expired: boolean,
+): Connection => ({
   provider: provider.id,
   label: provider.label,
   kind: provider.kind,
   connected: row !== undefined,
   account: row?.account ?? null,
   available: isAvailable(provider, env),
+  ...(expired ? { expired: true } : {}),
 })
 
 const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
@@ -66,12 +72,24 @@ const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthSt
   return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
 }
 
+/** True when the user has connected `provider` and the provider refuses the stored token. */
+const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: Env): Promise<boolean> => {
+  const token = await hub(env).connectionSecret(login, provider.id)
+  return token !== null && (await provider.tokenRejected(token))
+}
+
 const listConnections = async (login: string, env: Env): Promise<Connection[]> => {
-  const [rows, cli] = await Promise.all([hub(env).connections(login), fetchCliAuth(login, env)])
+  const oauth = PROVIDERS.filter((p): p is OAuthProvider => p.kind === "oauth")
+  const [rows, cli, rejected] = await Promise.all([
+    hub(env).connections(login),
+    fetchCliAuth(login, env),
+    Promise.all(oauth.map((p) => oauthTokenRejected(login, p, env))),
+  ])
+  const expired = new Set(oauth.filter((_, i) => rejected[i]).map((p) => p.id))
   return PROVIDERS.map((p) =>
     p.kind === "cli"
       ? cliView(p, cli.find((s) => s.provider === p.id))
-      : storedView(p, rows.find((r) => r.provider === p.id), env),
+      : storedView(p, rows.find((r) => r.provider === p.id), env, expired.has(p.id)),
   )
 }
 
@@ -90,7 +108,7 @@ const putApiKey = async (request: Request, env: Env, login: string, provider: Pr
   }
   const account = maskKey(body.apiKey)
   await hub(env).putConnection(login, provider.id, body.apiKey, account)
-  return json(storedView(provider, { provider: provider.id, account }, env))
+  return json(storedView(provider, { provider: provider.id, account }, env, false))
 }
 
 const listRepos = async (env: Env, login: string): Promise<Response> => {

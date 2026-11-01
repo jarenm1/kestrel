@@ -138,6 +138,8 @@ export const Connection = Schema.Struct({
   available: Schema.Boolean,
   /** CLI only: why the box cannot use this CLI (e.g. it is not installed there); absent when it can. */
   error: Schema.optional(Schema.String),
+  /** OAuth only: true when the provider refuses the stored token (revoked or expired), so Reconnect is needed. */
+  expired: Schema.optional(Schema.Boolean),
 })
 export type Connection = typeof Connection.Type
 

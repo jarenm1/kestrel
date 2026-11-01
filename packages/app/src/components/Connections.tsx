@@ -182,7 +182,12 @@ function ConnectionRow({ connection }: { connection: Connection }) {
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
-      <ConnectionHeader label={connection.label} connected={connection.connected} account={connection.account} />
+      <ConnectionHeader
+        label={connection.label}
+        connected={connection.connected}
+        account={connection.account}
+        expired={connection.expired === true}
+      />
       {connection.kind === "oauth" ? (
         connection.available ? (
           <Button asChild variant="soft" className="w-fit">
@@ -218,11 +223,25 @@ function ConnectionRow({ connection }: { connection: Connection }) {
   )
 }
 
-function ConnectionHeader({ label, connected, account }: { label: string; connected: boolean; account?: string | null }) {
+function ConnectionHeader({
+  label,
+  connected,
+  account,
+  expired = false,
+}: {
+  label: string
+  connected: boolean
+  account?: string | null
+  expired?: boolean
+}) {
   return (
     <div className="flex items-center gap-2">
       <strong>{label}</strong>
-      <Badge variant={connected ? "success" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>
+      {expired ? (
+        <Badge variant="warning">expired</Badge>
+      ) : (
+        <Badge variant={connected ? "success" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>
+      )}
       {connected && account && <span className="font-mono text-xs text-muted-foreground">{account}</span>}
     </div>
   )

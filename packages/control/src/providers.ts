@@ -25,6 +25,8 @@ export interface OAuthProvider extends ProviderBase {
   /** Path on this Worker that the provider redirects back to. */
   readonly callbackPath: string
   readonly fetchAccount: (token: string) => Promise<Account>
+  /** True when the provider refuses the stored token (revoked or expired); false when it accepts it or cannot be asked. */
+  readonly tokenRejected: (token: string) => Promise<boolean>
 }
 
 /** API-key provider: the user pastes a key; no OAuth. */
@@ -40,8 +42,8 @@ export interface CliProvider extends ProviderBase {
 
 export type Provider = OAuthProvider | ApiKeyProvider | CliProvider
 
-const githubAccount = async (token: string): Promise<Account> => {
-  const res = await fetch("https://api.github.com/user", {
+const githubUser = (token: string): Promise<Response> =>
+  fetch("https://api.github.com/user", {
     headers: {
       authorization: `Bearer ${token}`,
       accept: "application/vnd.github+json",
@@ -49,6 +51,9 @@ const githubAccount = async (token: string): Promise<Account> => {
       "user-agent": "kestrel-control-plane",
     },
   })
+
+const githubAccount = async (token: string): Promise<Account> => {
+  const res = await githubUser(token)
   if (!res.ok) throw new UpstreamError(`GitHub /user responded ${res.status}`)
   const body = (await res.json()) as { login?: unknown; name?: unknown; avatar_url?: unknown }
   if (typeof body.login !== "string" || typeof body.avatar_url !== "string") {
@@ -58,6 +63,17 @@ const githubAccount = async (token: string): Promise<Account> => {
     login: body.login,
     name: typeof body.name === "string" ? body.name : null,
     avatarUrl: body.avatar_url,
+  }
+}
+
+/** GitHub answers 401 only for a token it no longer honors; outages and rate limits are not a verdict on the token. */
+const githubTokenRejected = async (token: string): Promise<boolean> => {
+  try {
+    const res = await githubUser(token)
+    await res.body?.cancel()
+    return res.status === 401
+  } catch {
+    return false
   }
 }
 
@@ -74,6 +90,7 @@ export const PROVIDERS: readonly Provider[] = [
     // GitHub OAuth apps register a single callback URL; sign-in and re-consent share it.
     callbackPath: "/auth/github/callback",
     fetchAccount: githubAccount,
+    tokenRejected: githubTokenRejected,
   },
   { id: "anthropic", label: "Anthropic", kind: "apikey" },
   { id: "openai", label: "OpenAI", kind: "apikey" },
