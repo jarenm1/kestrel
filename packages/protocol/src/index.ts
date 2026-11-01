@@ -411,9 +411,50 @@ export const CheckoutFiles = Schema.Struct({
 })
 export type CheckoutFiles = typeof CheckoutFiles.Type
 
-/** One entry per checkout, in `Task.checkouts` order; empty for a thread without checkouts. */
-export const FilesResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutFiles) })
+/** A file outside the repositories, with what the Files tab shows about it. */
+export const FolderFile = Schema.Struct({
+  /** Relative to its folder, `/`-separated. */
+  path: Schema.String,
+  size: Schema.Number,
+  /** ISO-8601. */
+  modifiedAt: Schema.String,
+})
+export type FolderFile = typeof FolderFile.Type
+
+/**
+ * The regular files of a folder of the thread (symlinks left out), depth first with each directory's entries sorted by
+ * name. Hidden ones (a dot name, or `node_modules`/`__pycache__` anywhere on the path) only when asked for.
+ */
+export const FolderFiles = Schema.Struct({
+  files: Schema.Array(FolderFile),
+  /** True when the folder has more than `MAX_CHECKOUT_FILES` files and `files` holds only the first ones. */
+  truncated: Schema.Boolean,
+})
+export type FolderFiles = typeof FolderFiles.Type
+
+/** Older boxes send no folders; they decode as empty. */
+const noFolderFiles = (): FolderFiles => ({ files: [], truncated: false })
+
+/**
+ * `GET Paths.taskFiles(id)` (`?hidden=1` adds hidden files to the folders). `checkouts` has one entry per checkout, in
+ * `Task.checkouts` order. `workspace` is the thread's working directory without its checkouts; `home` is the agent's
+ * home, where desktop apps save.
+ */
+export const FilesResponse = Schema.Struct({
+  checkouts: Schema.Array(CheckoutFiles),
+  workspace: Schema.optionalWith(FolderFiles, { default: noFolderFiles, exact: true }),
+  home: Schema.optionalWith(FolderFiles, { default: noFolderFiles, exact: true }),
+})
 export type FilesResponse = typeof FilesResponse.Type
+
+/** Which folder a download path is relative to: the thread's workspace, the agent's home, or a checkout (by id). */
+export type FileRoot = "workspace" | "home" | { readonly checkoutId: string }
+
+/**
+ * Largest response the box sends through the legacy relay: a relay frame carries the body base64-encoded, and
+ * Cloudflare refuses WebSocket messages over 32 MiB. A larger one is answered 413. Direct boxes have no such limit.
+ */
+export const MAX_RELAY_RESPONSE_BYTES = 20 * 1024 * 1024
 
 /**
  * One command the authenticated harness offers in a thread's workspace: a Claude Code slash command, a Codex
@@ -556,6 +597,16 @@ export const Paths = {
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskFiles: (id: string) => `/api/tasks/${id}/files`,
+  /**
+   * GET -> the bytes of one file of the thread as a download (`Content-Disposition: attachment`). `path` is relative to
+   * `root`, `/`-separated; only regular files inside the root are served.
+   */
+  taskFileDownload: (id: string, root: FileRoot, path: string) =>
+    `/api/tasks/${id}/files/download?${new URLSearchParams({
+      root: typeof root === "string" ? root : "checkout",
+      ...(typeof root === "string" ? {} : { checkout: root.checkoutId }),
+      path,
+    }).toString()}`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
   taskDesktopQuality: (id: string) => `/api/tasks/${id}/desktop/quality`,
   /**

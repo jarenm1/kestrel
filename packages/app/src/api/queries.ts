@@ -51,6 +51,7 @@ export const keys = {
     activeRunProvider: ModelProvider | undefined,
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
+  /** Both listings of a thread's files (with and without hidden ones); invalidating this refetches either. */
   files: (taskId: string) => ["tasks", taskId, "files"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
   /** URL of a file a thread's box serves (a `Paths` path), read from the box the thread lives on. */
@@ -169,7 +170,8 @@ export const queries = {
       enabled: taskId !== undefined && model !== undefined,
     }),
   diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
-  files: (taskId: string) => queryOptions({ queryKey: keys.files(taskId), queryFn: () => api.getFiles(taskId) }),
+  files: (taskId: string, hidden: boolean) =>
+    queryOptions({ queryKey: [...keys.files(taskId), hidden] as const, queryFn: () => api.getFiles(taskId, hidden) }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
   taskFileUrl: (taskId: string, path: string) =>

@@ -6,6 +6,7 @@ import {
   RELAY_PROTOCOL_VERSION,
   decodeFrame,
   encodeFrame,
+  MAX_RELAY_RESPONSE_BYTES,
   fromBase64,
   toBase64,
   type RelayCredentials,
@@ -225,7 +226,22 @@ const serveHttp = async (
     const message = err instanceof Error ? err.message : String(err)
     res = Response.json({ error: "InternalError", message }, { status: 500 })
   }
-  const bytes = new Uint8Array(await res.arrayBuffer())
+  // One frame carries the whole body, and Cloudflare refuses messages over 32 MiB: a larger response would never
+  // arrive. Say so instead; a declared length spares reading a large file just to refuse it.
+  const tooLarge = () =>
+    Response.json(
+      { _tag: "PayloadTooLarge", message: `responses over ${MAX_RELAY_RESPONSE_BYTES} bytes cannot go through the relay` },
+      { status: 413 },
+    )
+  if (Number(res.headers.get("content-length") ?? 0) > MAX_RELAY_RESPONSE_BYTES) {
+    await res.body?.cancel()
+    res = tooLarge()
+  }
+  let bytes = new Uint8Array(await res.arrayBuffer())
+  if (bytes.byteLength > MAX_RELAY_RESPONSE_BYTES) {
+    res = tooLarge()
+    bytes = new Uint8Array(await res.arrayBuffer())
+  }
   const headers: Record<string, string> = {}
   res.headers.forEach((value, name) => {
     headers[name] = value

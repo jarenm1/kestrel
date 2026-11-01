@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, type FileRoot } from "@cloudagents/protocol"
+import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
@@ -102,6 +103,46 @@ const chosenModel = Effect.gen(function* () {
     Effect.mapError(() => new BadRequest({ message: `unknown model "${raw}"` })),
   )
 })
+
+/** The query parameters of the request. */
+const searchParams = Effect.map(HttpServerRequest.HttpServerRequest, (req) => new URL(req.url, "http://localhost").searchParams)
+
+/** `?root=workspace|home`, or `?root=checkout&checkout=<id>` (`Paths.taskFileDownload`). */
+const fileRoot = (params: URLSearchParams): Effect.Effect<FileRoot, BadRequest> => {
+  const root = params.get("root")
+  const checkoutId = params.get("checkout") ?? ""
+  if (root === "workspace" || root === "home") return Effect.succeed(root)
+  if (root === "checkout" && checkoutId !== "") return Effect.succeed({ checkoutId })
+  return Effect.fail(new BadRequest({ message: "root must be workspace, home or checkout (with checkout=<id>)" }))
+}
+
+/**
+ * Streams one of the thread's files as a download. The agent wrote it, so whatever it is, it never renders as a page
+ * on the app's origin: always `application/octet-stream`, an attachment, in a sandbox.
+ */
+const serveDownload = (core: CoreShape, taskId: string) =>
+  Effect.gen(function* () {
+    const params = yield* searchParams
+    const root = yield* fileRoot(params)
+    const path = params.get("path") ?? ""
+    const { handle, size } = yield* signedIn((user) => core.download(user, taskId, root, path))
+    const name = path.slice(path.lastIndexOf("/") + 1)
+    // The stream closes the file when it ends, fails, or the client goes away. It is a `node:stream/web` stream, which
+    // TypeScript does not see as the global `ReadableStream` a `Response` takes, though at runtime it is one.
+    const body = Readable.toWeb(handle.createReadStream())
+    return HttpServerResponse.fromWeb(
+      new Response(body as unknown as BodyInit, {
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": String(size),
+          "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+          "content-security-policy": "sandbox",
+          "x-content-type-options": "nosniff",
+          "cache-control": "no-store",
+        },
+      }),
+    )
+  }).pipe(Effect.catchAll((e) => Effect.succeed(errorResponse(e))))
 
 const servePreview = (core: CoreShape, taskId: string) =>
   Effect.gen(function* () {
@@ -224,8 +265,13 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     ),
     HttpRouter.get(
       "/api/tasks/:id/files",
-      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.files(user, id)))),
+      Effect.gen(function* () {
+        const id = yield* pathId
+        const hidden = (yield* searchParams).get("hidden") === "1"
+        return yield* respond(signedIn((user) => core.files(user, id, hidden)))
+      }),
     ),
+    HttpRouter.get("/api/tasks/:id/files/download", Effect.flatMap(pathId, (id) => serveDownload(core, id))),
     // Bytes of a file attached to one of the owner's task messages; the MIME type is the content type. Users upload
     // any type, so the response may not run as a page on the app's origin (e.g. an uploaded text/html).
     HttpRouter.get(

@@ -1,18 +1,19 @@
 import { useDeferredValue, useMemo, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
-import { ChevronRight, File, Folder, FolderOpen, Search } from "lucide-react"
-import type { CheckoutFiles } from "@cloudagents/protocol"
+import { keepPreviousData, useQuery } from "@tanstack/react-query"
+import { ChevronRight, Download, Eye, EyeOff, File, Folder, FolderOpen, Search } from "lucide-react"
+import type { FileRoot, FolderFiles } from "@cloudagents/protocol"
+import { api } from "@/api/client"
 import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { errorText } from "@/util"
+import { errorText, formatAgo } from "@/util"
 
 /** A directory of the tree: subdirectories, then file names, each sorted by name. */
 interface DirNode {
   readonly name: string
-  /** Path from the checkout root, the key of its open/closed state. */
+  /** Path from the root, the key of its open/closed state. */
   readonly path: string
   readonly dirs: DirNode[]
   readonly files: string[]
@@ -46,22 +47,55 @@ function buildTree(paths: readonly string[]): DirNode {
   return root
 }
 
-/** A filter shows at most this many matches per checkout, all expanded, so a one-letter query stays cheap to render. */
+/** A filter shows at most this many matches per root, all expanded, so a one-letter query stays cheap to render. */
 const MAX_FILTER_MATCHES = 500
+
+/** Recent lists at most this many files. */
+const RECENT_LIMIT = 8
 
 const NO_PATHS: ReadonlySet<string> = new Set()
 
+const ROOT_LABEL = { workspace: "Workspace", home: "Home" } as const
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ["KB", "MB", "GB", "TB"]
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
+}
+
+/** Starts a download; the size (unknown for repository files) lets the relay limit be checked first. */
+type StartDownload = (root: FileRoot, path: string, size: number | undefined) => void
+
 /**
- * The file tree of each repository the thread has checked out, as it is in the working tree now (ignored files left
- * out), with a filter over every checkout's paths. View only: files do not open. Refetched when the thread's run
- * events invalidate it.
+ * The thread's files: what changed outside its repositories during the thread (Recent), the tree of each repository it
+ * has checked out (ignored files left out), its working folder outside them (Workspace), and the agent's home, where
+ * desktop apps save (Home). Hidden files (dot names, dependency folders) show only on request. A filter narrows every
+ * list. Any file downloads. Refetched when the thread's run events invalidate it.
  */
 export function FilesPanel({ taskId }: { taskId: string }) {
-  const files = useQuery(queries.files(taskId))
-  const checkouts = files.data?.checkouts ?? []
+  const [hidden, setHidden] = useState(false)
+  // Toggling hidden files keeps showing the current listing until the other one arrives.
+  const files = useQuery({ ...queries.files(taskId, hidden), placeholderData: keepPreviousData })
+  const task = useQuery(queries.task(taskId))
   const [filter, setFilter] = useState("")
   // Typing stays responsive on a large tree: the trees catch up with the input instead of blocking it.
   const query = useDeferredValue(filter.trim().toLowerCase())
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+
+  const download: StartDownload = (root, path, size) => {
+    setDownloadError(null)
+    api.downloadFile(taskId, root, path, size ?? 0).catch((e: unknown) => setDownloadError(errorText(e)))
+  }
+
+  const data = files.data
+  const empty =
+    data !== undefined && data.checkouts.length === 0 && data.workspace.files.length === 0 && data.home.files.length === 0
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -79,38 +113,169 @@ export function FilesPanel({ taskId }: { taskId: string }) {
             className="h-8 pl-8 text-sm"
           />
         </div>
+        <Button
+          variant={hidden ? "soft" : "ghost"}
+          size="icon"
+          aria-pressed={hidden}
+          aria-label="Show hidden files"
+          title={hidden ? "Hide hidden files" : "Show hidden files (dotfiles, caches, node_modules)"}
+          onClick={() => setHidden((h) => !h)}
+        >
+          {hidden ? <Eye /> : <EyeOff />}
+        </Button>
         <Button variant="soft" size="sm" onClick={() => void files.refetch()} disabled={files.isFetching}>
           {files.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
       {files.error && <Alert className="mx-3 mb-2 w-auto">{errorText(files.error)}</Alert>}
+      {downloadError && <Alert className="mx-3 mb-2 w-auto">{downloadError}</Alert>}
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
         {files.isPending && <p className="text-muted-foreground">Loading…</p>}
-        {files.isSuccess && checkouts.length === 0 && (
+        {empty && (
           <p className="text-muted-foreground">
-            No repository checked out yet. The agent checks repos out when the work needs one.
+            No files yet. Repositories the agent checks out, its working folder and its home show up here.
           </p>
         )}
-        {checkouts.map((checkout) => (
-          <CheckoutTree key={checkout.checkoutId} checkout={checkout} query={query} />
+        {data && task.data && (
+          <RecentFiles data={data} since={task.data.createdAt} query={query} onDownload={download} />
+        )}
+        {data?.checkouts.map((checkout) => (
+          <RootTree
+            key={checkout.checkoutId}
+            title={checkout.repo}
+            root={{ checkoutId: checkout.checkoutId }}
+            paths={checkout.files}
+            truncated={checkout.truncated}
+            query={query}
+            onDownload={download}
+          />
         ))}
+        {data &&
+          (["workspace", "home"] as const).map(
+            (root) =>
+              data[root].files.length > 0 && (
+                <FolderTree key={root} root={root} folder={data[root]} query={query} onDownload={download} />
+              ),
+          )}
       </div>
     </div>
   )
 }
 
-/**
- * One checkout's tree. Open directories live here, since two repositories can have the same paths. Unfiltered, every
- * directory starts closed; filtered, the matches' directories start open and closing one lasts until the query changes.
- */
-function CheckoutTree({ checkout, query }: { checkout: CheckoutFiles; query: string }) {
-  const matches = useMemo(
-    () => (query === "" ? null : checkout.files.filter((path) => path.toLowerCase().includes(query))),
-    [checkout.files, query],
+/** Files outside the repositories changed since the thread started, newest first; repository changes are the Diff. */
+function RecentFiles({
+  data,
+  since,
+  query,
+  onDownload,
+}: {
+  data: { readonly workspace: FolderFiles; readonly home: FolderFiles }
+  since: string
+  query: string
+  onDownload: StartDownload
+}) {
+  const recent = useMemo(() => {
+    const start = new Date(since).getTime()
+    return (["workspace", "home"] as const)
+      .flatMap((root) => data[root].files.map((file) => ({ root, ...file, at: new Date(file.modifiedAt).getTime() })))
+      .filter((f) => f.at >= start && (query === "" || f.path.toLowerCase().includes(query)))
+      .sort((a, b) => b.at - a.at)
+      .slice(0, RECENT_LIMIT)
+  }, [data, since, query])
+  if (recent.length === 0) return null
+  const now = Date.now()
+
+  return (
+    <section className="flex shrink-0 flex-col gap-2">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">Recent</span>
+        <span>changed in this thread, outside the repositories</span>
+      </div>
+      <ul className="rounded-xl bg-code py-1 text-xs shadow-well">
+        {recent.map((file) => {
+          const slash = file.path.lastIndexOf("/")
+          const name = file.path.slice(slash + 1)
+          return (
+            <li
+              key={`${file.root}/${file.path}`}
+              title={`${ROOT_LABEL[file.root]} · ${file.path}`}
+              className="group flex items-center gap-2 px-3 py-1"
+            >
+              <File className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 shrink truncate text-foreground">
+                <Highlighted name={name} query={query} />
+              </span>
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                {ROOT_LABEL[file.root]}
+                {slash > 0 && ` · ${file.path.slice(0, slash)}/`}
+              </span>
+              <span className="shrink-0 text-muted-foreground">{formatAgo(file.modifiedAt, now)}</span>
+              <span className="w-14 shrink-0 text-right text-muted-foreground">{formatSize(file.size)}</span>
+              <DownloadButton name={name} onClick={() => onDownload(file.root, file.path, file.size)} />
+            </li>
+          )
+        })}
+      </ul>
+    </section>
   )
-  const root = useMemo(
-    () => buildTree(matches === null ? checkout.files : matches.slice(0, MAX_FILTER_MATCHES)),
-    [checkout.files, matches],
+}
+
+/** The workspace or home folder as a tree; its sizes go with downloads. */
+function FolderTree({
+  root,
+  folder,
+  query,
+  onDownload,
+}: {
+  root: "workspace" | "home"
+  folder: FolderFiles
+  query: string
+  onDownload: StartDownload
+}) {
+  const paths = useMemo(() => folder.files.map((f) => f.path), [folder.files])
+  const sizes = useMemo(() => new Map(folder.files.map((f) => [f.path, f.size])), [folder.files])
+  return (
+    <RootTree
+      title={ROOT_LABEL[root]}
+      root={root}
+      paths={paths}
+      sizes={sizes}
+      truncated={folder.truncated}
+      query={query}
+      onDownload={onDownload}
+    />
+  )
+}
+
+/**
+ * One root's tree (a repository, the workspace or the home). Open directories live here, since two roots can have the
+ * same paths. Unfiltered, every directory starts closed; filtered, the matches' directories start open and closing one
+ * lasts until the query changes.
+ */
+function RootTree({
+  title,
+  root,
+  paths,
+  sizes,
+  truncated,
+  query,
+  onDownload,
+}: {
+  title: string
+  root: FileRoot
+  paths: readonly string[]
+  sizes?: ReadonlyMap<string, number>
+  truncated: boolean
+  query: string
+  onDownload: StartDownload
+}) {
+  const matches = useMemo(
+    () => (query === "" ? null : paths.filter((path) => path.toLowerCase().includes(query))),
+    [paths, query],
+  )
+  const tree = useMemo(
+    () => buildTree(matches === null ? paths : matches.slice(0, MAX_FILTER_MATCHES)),
+    [paths, matches],
   )
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
   const [filterClosed, setFilterClosed] = useState<{ query: string; paths: ReadonlySet<string> }>({
@@ -135,11 +300,11 @@ function CheckoutTree({ checkout, query }: { checkout: CheckoutFiles; query: str
     <section className="flex shrink-0 flex-col gap-2">
       <div className="flex items-center gap-3 text-xs">
         <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
-          <span className="truncate font-medium text-foreground">{checkout.repo}</span>
+          <span className="truncate font-medium text-foreground">{title}</span>
           <span className="truncate">
             {matches !== null && `${matches.length} of `}
-            {checkout.truncated ? "first " : ""}
-            {checkout.files.length} {checkout.files.length === 1 ? "file" : "files"}
+            {truncated ? "first " : ""}
+            {paths.length} {paths.length === 1 ? "file" : "files"}
           </span>
         </span>
         <span className="flex-1" />
@@ -151,23 +316,27 @@ function CheckoutTree({ checkout, query }: { checkout: CheckoutFiles; query: str
       </div>
       <div
         role="tree"
-        aria-label={`Files of ${checkout.repo}`}
+        aria-label={`Files of ${title}`}
         className="max-h-[60vh] overflow-x-hidden overflow-y-auto rounded-xl bg-code py-1 text-xs shadow-well"
       >
-        {checkout.files.length === 0 && <p className="px-3 py-1.5 text-muted-foreground">No files.</p>}
-        {matches?.length === 0 && checkout.files.length > 0 && (
-          <p className="px-3 py-1.5 text-muted-foreground">No matches.</p>
-        )}
-        <DirChildren dir={root} depth={0} query={query} isOpen={isOpen} onToggle={toggle} />
+        {paths.length === 0 && <p className="px-3 py-1.5 text-muted-foreground">No files.</p>}
+        {matches?.length === 0 && paths.length > 0 && <p className="px-3 py-1.5 text-muted-foreground">No matches.</p>}
+        <DirChildren
+          dir={tree}
+          depth={0}
+          query={query}
+          isOpen={isOpen}
+          onToggle={toggle}
+          onDownload={(path) => onDownload(root, path, sizes?.get(path))}
+          sizes={sizes}
+        />
         {matches !== null && matches.length > MAX_FILTER_MATCHES && (
           <p className="px-3 py-1.5 text-muted-foreground">
             Showing the first {MAX_FILTER_MATCHES} matches; type more to narrow it down.
           </p>
         )}
-        {checkout.truncated && (
-          <p className="px-3 py-1.5 text-muted-foreground">
-            The tree has more files than this; the rest are not shown.
-          </p>
+        {truncated && (
+          <p className="px-3 py-1.5 text-muted-foreground">The tree has more files than this; the rest are not shown.</p>
         )}
       </div>
     </section>
@@ -187,6 +356,21 @@ function Highlighted({ name, query }: { name: string; query: string }) {
   )
 }
 
+/** Shown on hover or keyboard focus of its row, so the tree stays quiet. */
+function DownloadButton({ name, onClick }: { name: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={`Download ${name}`}
+      title="Download"
+      onClick={onClick}
+      className="shrink-0 rounded p-0.5 text-muted-foreground opacity-0 outline-none group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      <Download className="size-3.5" />
+    </button>
+  )
+}
+
 /** Rows are indented by depth: the chevron column plus this much per level. */
 const indent = (depth: number) => ({ paddingLeft: `${0.75 + depth * 0.875}rem` })
 
@@ -196,12 +380,16 @@ function DirChildren({
   query,
   isOpen,
   onToggle,
+  onDownload,
+  sizes,
 }: {
   dir: DirNode
   depth: number
   query: string
   isOpen: (path: string) => boolean
   onToggle: (path: string) => void
+  onDownload: (path: string) => void
+  sizes: ReadonlyMap<string, number> | undefined
 }) {
   return (
     <>
@@ -230,7 +418,15 @@ function DirChildren({
             </button>
             {expanded && (
               <div role="group">
-                <DirChildren dir={child} depth={depth + 1} query={query} isOpen={isOpen} onToggle={onToggle} />
+                <DirChildren
+                  dir={child}
+                  depth={depth + 1}
+                  query={query}
+                  isOpen={isOpen}
+                  onToggle={onToggle}
+                  onDownload={onDownload}
+                  sizes={sizes}
+                />
               </div>
             )}
           </div>
@@ -238,20 +434,22 @@ function DirChildren({
       })}
       {dir.files.map((name) => {
         const path = dir.path === "" ? name : `${dir.path}/${name}`
+        const size = sizes?.get(path)
         return (
           <div
             key={path}
             role="treeitem"
-            title={path}
+            title={size === undefined ? path : `${path} · ${formatSize(size)}`}
             style={indent(depth)}
-            className="flex items-center gap-1.5 py-0.5 pr-3 text-muted-foreground"
+            className="group flex items-center gap-1.5 py-0.5 pr-3 text-muted-foreground hover:bg-accent/40"
           >
             {/* Lines file names up with directory names, past the chevron column. */}
             <span className="size-3.5 shrink-0" />
             <File className="size-3.5 shrink-0" />
-            <span className="min-w-0 truncate">
+            <span className="min-w-0 flex-1 truncate">
               <Highlighted name={name} query={query} />
             </span>
+            <DownloadButton name={name} onClick={() => onDownload(path)} />
           </div>
         )
       })}

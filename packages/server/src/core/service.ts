@@ -1,6 +1,6 @@
 import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
 import { randomUUID } from "node:crypto"
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import {
   BadRequest,
@@ -32,6 +32,7 @@ import {
   type CreateTaskBody,
   type HarnessCommands,
   modelInfo,
+  type FileRoot,
   providerModels,
 } from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
@@ -42,6 +43,7 @@ import { GitHub, GitHubError, type NewReview, type PostedReview, type PullReques
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
+import { FileRefused, listFolder, openInside } from "./folder"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
 import { withUserContext } from "./user-context"
@@ -194,8 +196,18 @@ export interface CoreShape {
   readonly unarchiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
   /** One entry per checkout: everything on its branch and in its working tree, against its fork point. */
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
-  /** One entry per checkout: the paths of its working tree's files, without ignored ones. */
-  readonly files: (user: string, taskId: string) => Effect.Effect<FilesResponse, NotFound | InternalError>
+  /**
+   * One entry per checkout (the paths of its working tree's files, without ignored ones), and the files of the
+   * thread's workspace outside its checkouts and of its home; hidden ones in those only with `hidden`.
+   */
+  readonly files: (user: string, taskId: string, hidden: boolean) => Effect.Effect<FilesResponse, NotFound | InternalError>
+  /** An open file of the thread for download; the caller closes `handle`. Only regular files inside the root. */
+  readonly download: (
+    user: string,
+    taskId: string,
+    root: FileRoot,
+    path: string,
+  ) => Effect.Effect<{ readonly handle: FileHandle; readonly size: number }, NotFound | BadRequest>
 
   readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
   /**
@@ -1366,7 +1378,7 @@ export const CoreLive = Layer.effect(
           return { checkouts }
         }),
 
-      files: (user, taskId) =>
+      files: (user, taskId, hidden) =>
         Effect.gen(function* () {
           const task = yield* ownedTask(user, taskId)
           const checkouts = yield* Effect.forEach(task.checkouts, (checkout) =>
@@ -1381,7 +1393,39 @@ export const CoreLive = Layer.effect(
               Effect.mapError(toInternal("files")),
             ),
           )
-          return { checkouts }
+          const folder = (dir: string, skipTop: ReadonlySet<string>) =>
+            Effect.tryPromise({
+              try: () => listFolder(dir, { hidden, limit: MAX_CHECKOUT_FILES, skipTop }),
+              catch: (e) => new InternalError({ message: `list folder: ${String(e)}` }),
+            })
+          const [workspaceFiles, home] = yield* Effect.all(
+            [
+              folder(threadDirOf(task.id), new Set(task.checkouts.map((c) => c.dir))),
+              folder(join(config.homesDir, task.id), new Set()),
+            ],
+            { concurrency: 2 },
+          )
+          return { checkouts, workspace: workspaceFiles, home }
+        }),
+
+      download: (user, taskId, root, path) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          // A checkout's files are opened under the workspace, so a checkout directory swapped for a symlink cannot
+          // lead outside it.
+          const checkout = typeof root === "string" ? null : task.checkouts.find((c) => c.id === root.checkoutId)
+          if (checkout === undefined) return yield* Effect.fail(new NotFound({ message: "no such checkout" }))
+          const [folder, rel] =
+            root === "home"
+              ? [join(config.homesDir, task.id), path]
+              : [threadDirOf(task.id), checkout === null ? path : `${checkout.dir}/${path}`]
+          return yield* Effect.tryPromise({
+            try: () => openInside(folder, rel),
+            catch: (e) =>
+              e instanceof FileRefused && e.reason === "bad-path"
+                ? new BadRequest({ message: e.message })
+                : new NotFound({ message: `no file ${path}` }),
+          })
         }),
 
       listMessages: (user, taskId) =>

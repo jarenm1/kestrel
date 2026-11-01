@@ -21,7 +21,9 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  type FileRoot,
   FilesResponse,
+  MAX_RELAY_RESPONSE_BYTES,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -534,7 +536,24 @@ export const api = {
   runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
-  getFiles: (taskId: string) => onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId)),
+  getFiles: (taskId: string, hidden: boolean) =>
+    onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),
+  /**
+   * Starts the browser's download of one of a thread's files. Kestrel's relayed box cannot send a response over
+   * `MAX_RELAY_RESPONSE_BYTES`, so a larger file there is refused here instead of failing in the download bar.
+   */
+  downloadFile: async (taskId: string, root: FileRoot, path: string, size: number): Promise<void> => {
+    if ((await taskTarget(taskId)) === null && size > MAX_RELAY_RESPONSE_BYTES) {
+      throw new Error(
+        `${path.slice(path.lastIndexOf("/") + 1)} is over ${MAX_RELAY_RESPONSE_BYTES / 1024 / 1024} MB, the most Kestrel's shared box can send. Use your own or a managed box for larger files.`,
+      )
+    }
+    // The response is an attachment, so following the link saves the file and leaves the page as it is.
+    const link = document.createElement("a")
+    link.href = await taskFileUrl(taskId, Paths.taskFileDownload(taskId, root, path))
+    link.download = ""
+    link.click()
+  },
   getDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "GET", Paths.taskDesktop(taskId)),
   startDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "POST", Paths.taskDesktop(taskId)),
   stopDesktop: async (taskId: string): Promise<void> => {
