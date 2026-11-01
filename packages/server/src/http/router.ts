@@ -118,20 +118,29 @@ const fileRoot = (params: URLSearchParams): Effect.Effect<FileRoot, BadRequest> 
 
 /**
  * Streams one of the thread's files as a download. The agent wrote it, so whatever it is, it never renders as a page
- * on the app's origin: always `application/octet-stream`, an attachment, in a sandbox.
+ * on the app's origin: always `application/octet-stream`, an attachment, in a sandbox. `headOnly` answers with the
+ * headers alone, so the app can learn whether the download would succeed (and through the relay, whether it fits)
+ * before handing the URL to the browser.
  */
-const serveDownload = (core: CoreShape, taskId: string) =>
+const serveDownload = (core: CoreShape, taskId: string, headOnly: boolean) =>
   Effect.gen(function* () {
     const params = yield* searchParams
     const root = yield* fileRoot(params)
     const path = params.get("path") ?? ""
     const { handle, size } = yield* signedIn((user) => core.download(user, taskId, root, path))
     const name = path.slice(path.lastIndexOf("/") + 1)
-    // The stream closes the file when it ends, fails, or the client goes away. It is a `node:stream/web` stream, which
-    // TypeScript does not see as the global `ReadableStream` a `Response` takes, though at runtime it is one.
-    const body = Readable.toWeb(handle.createReadStream())
+    let body: BodyInit | null = null
+    if (headOnly || size === 0) {
+      yield* Effect.promise(() => handle.close())
+    } else {
+      // Exactly the `size` bytes declared: the agent may still be writing the file, and a body longer than its
+      // Content-Length breaks the response. One that shrank since ends short, and the download fails rather than
+      // pretending to be whole. The stream closes the file when it ends, fails, or the client goes away. It is a
+      // `node:stream/web` stream, which TypeScript does not see as the global `ReadableStream`, though it is one.
+      body = Readable.toWeb(handle.createReadStream({ start: 0, end: size - 1 })) as unknown as BodyInit
+    }
     return HttpServerResponse.fromWeb(
-      new Response(body as unknown as BodyInit, {
+      new Response(body, {
         headers: {
           "content-type": "application/octet-stream",
           "content-length": String(size),
@@ -143,6 +152,13 @@ const serveDownload = (core: CoreShape, taskId: string) =>
       }),
     )
   }).pipe(Effect.catchAll((e) => Effect.succeed(errorResponse(e))))
+
+/** GET downloads a thread file; HEAD answers the same headers without the body. */
+const downloadRoutes = (core: CoreShape) =>
+  HttpRouter.empty.pipe(
+    HttpRouter.get("/api/tasks/:id/files/download", Effect.flatMap(pathId, (id) => serveDownload(core, id, false))),
+    HttpRouter.head("/api/tasks/:id/files/download", Effect.flatMap(pathId, (id) => serveDownload(core, id, true))),
+  )
 
 const servePreview = (core: CoreShape, taskId: string) =>
   Effect.gen(function* () {
@@ -271,7 +287,7 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         return yield* respond(signedIn((user) => core.files(user, id, hidden)))
       }),
     ),
-    HttpRouter.get("/api/tasks/:id/files/download", Effect.flatMap(pathId, (id) => serveDownload(core, id))),
+    HttpRouter.concat(downloadRoutes(core)),
     // Bytes of a file attached to one of the owner's task messages; the MIME type is the content type. Users upload
     // any type, so the response may not run as a page on the app's origin (e.g. an uploaded text/html).
     HttpRouter.get(

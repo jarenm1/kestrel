@@ -69,8 +69,7 @@ function formatSize(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
 
-/** Starts a download; the size (unknown for repository files) lets the relay limit be checked first. */
-type StartDownload = (root: FileRoot, path: string, size: number | undefined) => void
+type StartDownload = (root: FileRoot, path: string) => void
 
 /**
  * The thread's files: what changed outside its repositories during the thread (Recent), the tree of each repository it
@@ -88,9 +87,9 @@ export function FilesPanel({ taskId }: { taskId: string }) {
   const query = useDeferredValue(filter.trim().toLowerCase())
   const [downloadError, setDownloadError] = useState<string | null>(null)
 
-  const download: StartDownload = (root, path, size) => {
+  const download: StartDownload = (root, path) => {
     setDownloadError(null)
-    api.downloadFile(taskId, root, path, size ?? 0).catch((e: unknown) => setDownloadError(errorText(e)))
+    api.downloadFile(taskId, root, path).catch((e: unknown) => setDownloadError(errorText(e)))
   }
 
   const data = files.data
@@ -211,7 +210,7 @@ function RecentFiles({
               </span>
               <span className="shrink-0 text-muted-foreground">{formatAgo(file.modifiedAt, now)}</span>
               <span className="w-14 shrink-0 text-right text-muted-foreground">{formatSize(file.size)}</span>
-              <DownloadButton name={name} onClick={() => onDownload(file.root, file.path, file.size)} />
+              <DownloadButton name={name} onClick={() => onDownload(file.root, file.path)} />
             </li>
           )
         })}
@@ -220,7 +219,7 @@ function RecentFiles({
   )
 }
 
-/** The workspace or home folder as a tree; its sizes go with downloads. */
+/** The workspace or home folder as a tree; each file's size shows in its tooltip. */
 function FolderTree({
   root,
   folder,
@@ -327,7 +326,7 @@ function RootTree({
           query={query}
           isOpen={isOpen}
           onToggle={toggle}
-          onDownload={(path) => onDownload(root, path, sizes?.get(path))}
+          onDownload={(path) => onDownload(root, path)}
           sizes={sizes}
         />
         {matches !== null && matches.length > MAX_FILTER_MATCHES && (

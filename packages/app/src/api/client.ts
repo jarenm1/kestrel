@@ -539,18 +539,25 @@ export const api = {
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),
   /**
-   * Starts the browser's download of one of a thread's files. Kestrel's relayed box cannot send a response over
-   * `MAX_RELAY_RESPONSE_BYTES`, so a larger file there is refused here instead of failing in the download bar.
+   * Starts the browser's download of one of a thread's files. A HEAD request first finds out whether it would work:
+   * handed straight to the browser, a failure would be saved as a file, or (cross-origin, on a user's own box) open as
+   * a page in place of the app. Through Kestrel's relayed box a file over `MAX_RELAY_RESPONSE_BYTES` cannot be sent;
+   * the relay answers that HEAD with 413 from the declared length alone.
    */
-  downloadFile: async (taskId: string, root: FileRoot, path: string, size: number): Promise<void> => {
-    if ((await taskTarget(taskId)) === null && size > MAX_RELAY_RESPONSE_BYTES) {
+  downloadFile: async (taskId: string, root: FileRoot, path: string): Promise<void> => {
+    const url = await taskFileUrl(taskId, Paths.taskFileDownload(taskId, root, path))
+    const name = path.slice(path.lastIndexOf("/") + 1)
+    const check = await fetch(url, { method: "HEAD" })
+    if (check.status === 413) {
       throw new Error(
-        `${path.slice(path.lastIndexOf("/") + 1)} is over ${MAX_RELAY_RESPONSE_BYTES / 1024 / 1024} MB, the most Kestrel's shared box can send. Use your own or a managed box for larger files.`,
+        `${name} is over ${MAX_RELAY_RESPONSE_BYTES / 1024 / 1024} MB, the most Kestrel's shared box can send. Use your own or a managed box for larger files.`,
       )
     }
+    if (check.status === 404) throw new Error(`${name} is no longer there; refresh the list.`)
+    if (!check.ok) throw new Error(`Could not download ${name} (HTTP ${check.status}).`)
     // The response is an attachment, so following the link saves the file and leaves the page as it is.
     const link = document.createElement("a")
-    link.href = await taskFileUrl(taskId, Paths.taskFileDownload(taskId, root, path))
+    link.href = url
     link.download = ""
     link.click()
   },
