@@ -156,7 +156,7 @@ type MessageHandler<A> = (message: unknown) => A | undefined
  * Runs one discovery child under a timeout and kills its whole process group whichever way it ends.
  * `setup` writes the requests and returns the reader for the CLI's JSON lines.
  */
-const discover = <A>(
+export const discover = <A>(
   launch: DiscoveryLaunch,
   label: string,
   timeoutMs: number,

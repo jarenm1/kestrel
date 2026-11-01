@@ -325,11 +325,17 @@ interface Props {
 }
 
 /** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
-const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show this month's agent usage", prefix: "/" }
+const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your Claude and Codex usage limits", prefix: "/" }
 
 /** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
 const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>
-  commands.filter((c) => !(c.name === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
+  commands.filter((c) => !(c.name.toLowerCase() === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
+
+/** What stays in the draft once its leading `/usage` has run; undefined when the draft does not start with it. */
+const afterUsageCommand = (text: string): string | undefined => {
+  const match = /^\s*\/usage(?:\s+|$)/i.exec(text)
+  return match === null ? undefined : text.slice(match[0].length)
+}
 
 /** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
 export function Composer({
@@ -442,18 +448,22 @@ export function Composer({
     setActiveCommandIndex(0)
   }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider])
 
+  function runUsageCommand(rest: string) {
+    setText(rest)
+    setCaret(0)
+    openUsagePanel()
+  }
+
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
-    // Kestrel's own command has no arguments and sends nothing, so picking it runs it.
+    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
+    // Kestrel's own command sends nothing, so picking it runs it and only its token leaves the draft.
     if (command === USAGE_COMMAND) {
-      setText("")
-      setCaret(0)
-      openUsagePanel()
+      runUsageCommand(rest)
       return
     }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
-    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
     const nextText = `${prefix}${command.name} ` + rest
     const nextCaret = prefix.length + command.name.length + 1
     setText(nextText)
@@ -482,11 +492,11 @@ export function Composer({
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    // Runs here and never reaches the agent, so it works during a turn too; attachments stay for the next message.
-    if (text.trim() === "/usage" && chosenOption === undefined) {
-      setText("")
-      setCaret(0)
-      openUsagePanel()
+    // Overrides the harness's `/usage`, typed any way: it never reaches the agent, so it works during a turn too, and
+    // any text after it and any attachments stay for the next message.
+    const afterUsage = afterUsageCommand(text)
+    if (afterUsage !== undefined && chosenOption === undefined) {
+      runUsageCommand(afterUsage)
       return
     }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.

@@ -32,6 +32,7 @@ import {
   Me,
   Message,
   Paths,
+  ProviderUsage,
   PendingPairing,
   PreviewSession,
   PutApiKeyBody,
@@ -479,6 +480,7 @@ export const api = {
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
   cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
+  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),

@@ -9,6 +9,7 @@ import {
   type CliLoginStart,
   type CliProvider,
   type HarnessCommand,
+  type ProviderUsage,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
 import {
@@ -19,6 +20,7 @@ import {
   killActiveDiscovery,
   limitDiscovery,
 } from "./harness-commands"
+import { probeClaudeUsage, probeCodexUsage } from "./provider-usage"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
@@ -101,6 +103,8 @@ export interface CliAuthShape {
     provider: CliProvider,
     workspacePath: string,
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
+  /** The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact. */
+  readonly providerUsage: (user: string) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
   /** Kills sign-ins still waiting for the user; called on box shutdown. */
   readonly shutdown: () => Effect.Effect<void>
 }
@@ -396,6 +400,69 @@ export const CliAuthLive = Layer.effect(
         })
       })
 
+    const usageCache = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>()
+    const usageRuns = new Map<string, Promise<ProviderUsage>>()
+    /** Providers throttle these reads, so a panel left open or several open tabs share one answer. */
+    const USAGE_CACHE_MS = 60_000
+    const USAGE_CACHE_MAX = 64
+
+    /**
+     * Asks the provider's CLI for `user`'s limits. It runs like a status check, in the user's own home with no thread
+     * workspace, because the provider must be reachable. A signed-out answer is not cached: a sign-in shows at once.
+     */
+    const readUsage = (user: string, provider: CliProvider): Effect.Effect<ProviderUsage, BadRequest> =>
+      Effect.gen(function* () {
+        const spec = SPECS[provider]
+        const env = yield* cliEnv(user)
+        if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
+          return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
+        }
+        const signedOut: ProviderUsage = { provider, status: "signed_out", plan: null, windows: [] }
+        const present = yield* Effect.promise(async () =>
+          stat(join(env.HOME ?? "", spec.dir)).then((s) => s.isDirectory(), () => false),
+        )
+        if (!present) return signedOut
+        const key = keyOf(user, provider)
+        const cached = usageCache.get(key)
+        if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
+        const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
+        const inv = yield* invoke(user, spec.bin, args)
+        const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
+        return yield* Effect.tryPromise({
+          try: () => {
+            const running = usageRuns.get(key)
+            if (running !== undefined) return running
+            const pending = limitDiscovery(() =>
+              provider === "claude-cli" ? probeClaudeUsage(launch) : probeCodexUsage(launch),
+            )
+              .then((usage) => {
+                usageCache.delete(key)
+                if (usage.status !== "signed_out") usageCache.set(key, { at: Date.now(), usage })
+                while (usageCache.size > USAGE_CACHE_MAX) {
+                  const oldest = usageCache.keys().next().value
+                  if (oldest === undefined) break
+                  usageCache.delete(oldest)
+                }
+                return usage
+              })
+              .finally(() => usageRuns.delete(key))
+            usageRuns.set(key, pending)
+            return pending
+          },
+          catch: (e) => new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} usage failed` }),
+        })
+      }).pipe(
+        Effect.catchTag("InternalError", (e) =>
+          Effect.succeed<ProviderUsage>({ provider, status: "unavailable", plan: null, windows: [], error: e.message }),
+        ),
+      )
+
+    const providerUsage = (user: string) =>
+      Effect.all(
+        PROVIDERS.map((provider) => readUsage(user, provider)),
+        { concurrency: "unbounded" },
+      )
+
     /**
      * One CLI's login as the box sees it. A CLI the box cannot run (not installed where the sandbox looks, or failing)
      * reports why in `error` rather than failing the whole status, so the other CLI still shows.
@@ -535,6 +602,7 @@ export const CliAuthLive = Layer.effect(
     const logout = (user: string, provider: CliProvider): Effect.Effect<void, BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* rootOf(user)
+        usageCache.delete(keyOf(user, provider))
         const current = pending.get(keyOf(user, provider))
         if (current) killEntry(current)
         const dir = yield* providerDir(user, provider)
@@ -579,6 +647,6 @@ export const CliAuthLive = Layer.effect(
         killActiveDiscovery()
       })
 
-    return { status, startLogin, submitCode, logout, loggedInDirs, discoverCommands, shutdown }
+    return { status, startLogin, submitCode, logout, loggedInDirs, discoverCommands, providerUsage, shutdown }
   }),
 )
