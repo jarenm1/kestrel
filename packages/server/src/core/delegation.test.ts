@@ -160,6 +160,18 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(afterCancel.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.runs.find((r) => r.id === cancelChild.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.tasks.find((t) => t.id === cancelChild.id)?.delegation?.cancelledAt).toBeDefined()
+      // Model startup reconciliation after the parent lost a run containing an automatic result.
+      yield* store.update((s) => {
+        const run = s.runs.find((r) => r.id === "parent-run")!
+        run.status = "failed"
+        run.interruptedByRestart = true
+        run.endedAt = now
+        return Either.right(undefined)
+      })
+      yield* Effect.sleep("2500 millis")
+      const recovered = (yield* store.read).messages.find((m) => m.id === `delegation-recovery:${child.id}:parent-run`)
+      expect(recovered?.text).toContain("Review complete") // result plus restart notice is delivered to a fresh run
+      expect(recovered?.runId).not.toBe("parent-run")
       const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))
       expect(disk).toContain('"requestId":"retry-key"')
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))

@@ -166,6 +166,8 @@ export const Run = Schema.Struct({
   provider: Schema.optional(ModelProvider),
   /** Explicit model selected for this run; absent for runs using the box default. */
   model: Schema.optional(AgentModel),
+  /** This run was still active when the box restarted and was reconciled as failed. */
+  interruptedByRestart: Schema.optional(Schema.Boolean),
 })
 export type Run = typeof Run.Type
 

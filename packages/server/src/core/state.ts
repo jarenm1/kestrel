@@ -119,6 +119,7 @@ const reconcile = (state: StoreState): void => {
     if (run.status !== "running") continue
     run.status = "failed"
     run.endedAt = now
+    run.interruptedByRestart = true
   }
   for (const task of state.tasks) {
     if (task.status === "running") task.status = "failed"

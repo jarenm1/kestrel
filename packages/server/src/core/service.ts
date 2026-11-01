@@ -183,6 +183,8 @@ export interface DelegatedStatus {
 }
 
 const schemaValidator = new Ajv({ strict: false, allErrors: true, addUsedSchema: false })
+const isDelegationResult = (messageId: string, childId: string): boolean =>
+  messageId === `delegation-result:${childId}` || messageId.startsWith(`delegation-recovery:${childId}:`)
 
 /** A run is not done delegating until every child launched by that run has settled recursively. */
 const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): boolean =>
@@ -192,7 +194,7 @@ const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): bool
     const run = state.runs.find((r) => r.id === d.runId)
     if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
     if (d.resultAcknowledged) return false
-    const notification = state.messages.find((m) => m.taskId === d.parentTaskId && m.id === `delegation-result:${child.id}`)
+    const notification = [...state.messages].reverse().find((m) => m.taskId === d.parentTaskId && isDelegationResult(m.id, child.id))
     if (!notification) return true
     if (notification.runId === null || notification.runId === runId) return false
     const continuation = state.runs.find((r) => r.id === notification.runId)
@@ -206,7 +208,7 @@ const delegationResultRun = (state: Readonly<StoreState>, taskId: string, firstR
   while (!seen.has(runId)) {
     seen.add(runId)
     const childIds = state.tasks.filter((t) => t.delegation?.parentRunId === runId).map((t) => t.id)
-    const continuation = state.messages.filter((m) => m.taskId === taskId && m.runId !== null && m.runId !== runId && childIds.some((id) => m.id === `delegation-result:${id}`)).at(-1)
+    const continuation = state.messages.filter((m) => m.taskId === taskId && m.runId !== null && m.runId !== runId && childIds.some((id) => isDelegationResult(m.id, id))).at(-1)
     if (!continuation?.runId) break
     runId = continuation.runId
   }
@@ -1285,7 +1287,7 @@ export const CoreLive = Layer.effect(
           for (const child of state.tasks) {
             if (child.delegation?.parentRunId !== runId) continue
             if (child.delegation.runId !== undefined) visit(child.delegation.runId)
-            const continuation = state.messages.find((m) => m.taskId === child.delegation!.parentTaskId && m.id === `delegation-result:${child.id}`)?.runId
+            const continuation = [...state.messages].reverse().find((m) => m.taskId === child.delegation!.parentTaskId && isDelegationResult(m.id, child.id))?.runId
             if (continuation && continuation !== runId) visit(continuation)
           }
         }
@@ -1341,6 +1343,23 @@ export const CoreLive = Layer.effect(
         yield* deliverMessage(child.owner, child.delegation!.parentTaskId, message, resumeChoice(current, child.delegation!.parentTaskId), [], false,
           { id: child.id, title: child.title }, `delegation-result:${child.id}`)
       }).pipe(Effect.catchAll((e) => Effect.logWarning(`delegation ${child.id} notification failed: ${e.message}`)))), { discard: true })
+      // A notification can have been persisted just before its parent run was lost in a restart. Retry that delivery
+      // with a stable id for the interrupted run. This is at-least-once: the old run may already have seen the result.
+      const recoveries = state.tasks.flatMap((child) => {
+        const d = child.delegation
+        const parent = d && state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
+        if (!d || !parent || parent.archivedAt || parent.delegation?.cancelledAt) return []
+        const message = [...state.messages].reverse().find((m) => m.taskId === parent.id && isDelegationResult(m.id, child.id))
+        const run = message?.runId && state.runs.find((r) => r.id === message.runId)
+        if (!message || !run || !run.interruptedByRestart) return []
+        const id = `delegation-recovery:${child.id}:${run.id}`
+        if (state.messages.some((m) => m.taskId === parent.id && m.id === id)) return []
+        return [{ child, parent, message, id }]
+      })
+      yield* Effect.forEach(recoveries, ({ child, parent, message, id }) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
+        const current = yield* store.read
+        yield* deliverMessage(child.owner, parent.id, `Result delivery resumed after a box restart. Check prior work before repeating side effects.\n\n${message.text}`, resumeChoice(current, parent.id), [], false, { id: child.id, title: child.title }, id)
+      }).pipe(Effect.catchAll((e) => Effect.logWarning(`delegation ${child.id} recovery failed: ${e.message}`)))), { discard: true })
       // A child's question belongs to the user. Notify the parent, but never send an answer on their behalf.
       const questions = state.pendingAsks.flatMap((ask) => {
         const child = state.tasks.find((t) => t.id === ask.taskId)
