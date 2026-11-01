@@ -30,6 +30,7 @@ export const keys = {
   connections: ["connections"] as const,
   usage: ["usage"] as const,
   automations: ["automations"] as const,
+  githubRepos: ["github-repos"] as const,
   /** CLI sign-ins on the box the apps talk to. */
   cliAuth: ["cli-auth"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
@@ -126,6 +127,7 @@ export const queries = {
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   usage: () => queryOptions({ queryKey: keys.usage, queryFn: api.usage }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
+  githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
   task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),

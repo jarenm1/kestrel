@@ -44,6 +44,7 @@ import {
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
 import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
+import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
@@ -54,19 +55,6 @@ import { MessageAttachments } from "./MessageAttachments"
 interface ModelSection {
   readonly provider: ModelProviderInfo
   readonly models: readonly ModelInfo[]
-}
-
-/** One pick, remembered in localStorage so it survives switching threads and reloads. */
-function useStoredChoice<A extends string>(key: string, schema: Schema.Schema<A>) {
-  const [value, setValue] = useState<A | undefined>(() => {
-    const stored = localStorage.getItem(key)
-    return stored !== null && Schema.is(schema)(stored) ? stored : undefined
-  })
-  useEffect(() => {
-    if (value === undefined) localStorage.removeItem(key)
-    else localStorage.setItem(key, value)
-  }, [key, value])
-  return [value, setValue] as const
 }
 
 /** A pill that opens a single-choice menu; shows its label until something other than Default is picked. */

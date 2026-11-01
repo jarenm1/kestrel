@@ -21,6 +21,7 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  GithubRepo,
   Health,
   HarnessCommands,
   FleetBox,
@@ -416,6 +417,8 @@ export const api = {
   deleteConnection: (provider: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
+  /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
+  githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
   updateAutomation: (id: string, body: UpdateAutomationBody) =>
     run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
   deleteAutomation: (id: string) =>
