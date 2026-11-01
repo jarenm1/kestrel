@@ -18,8 +18,9 @@ function glass([from, to]: readonly [string, string]): CSSProperties {
 /**
  * Local thread identity, independent of run state: the first checkout's repository icon once it has loaded, else
  * the monogram (of the repository name, or of the title before any checkout) on a tinted glass tile. A loaded icon
- * is the tile itself: it fills the frame, clipped to its corners, with no glass behind it. `small` is the inline
- * size used beside text, e.g. ahead of the repository name in the expanded thread list.
+ * is the tile itself: it covers the frame and is clipped to the tile's corner radius, so icons and monogram tiles
+ * share the same corners whatever the icon's own shape. `small` is the inline size used beside text, e.g. ahead
+ * of the repository name in the expanded thread list.
  */
 export function ThreadAvatar({
   task,
@@ -52,7 +53,7 @@ export function ThreadAvatar({
         <img
           src={src}
           alt=""
-          className={showIcon ? "size-full object-contain" : "hidden"}
+          className={showIcon ? "size-full object-cover" : "hidden"}
           onLoad={() => setLoaded(src)}
           onError={() => setLoaded(null)}
         />

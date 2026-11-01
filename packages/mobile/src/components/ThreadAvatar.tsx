@@ -12,7 +12,7 @@ const RADIUS = 8;
 /**
  * Same identity and glass as the web tile: the first checkout's repository icon once it has loaded, else the
  * monogram on glass. Glass is the tint, a hard sheen across the top half, and a border lit from above. A loaded
- * icon is the tile itself: it fills the frame, clipped to its corners, with no glass behind it.
+ * icon is the tile itself: it covers the frame and is clipped to the tile's corner radius, with no glass behind it.
  */
 export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "checkouts"> }) {
   const { monogram, tone, icon } = threadIdentity(task);
@@ -78,7 +78,7 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
       {source !== null && (
         <Image
           source={source}
-          resizeMode="contain"
+          resizeMode="cover"
           style={loaded ? styles.icon : styles.pending}
           onLoad={() => setLoaded(true)}
           onError={() => setLoaded(false)}
