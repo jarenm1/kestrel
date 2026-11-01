@@ -46,10 +46,8 @@ git pull --ff-only origin main
 
 `git worktree list` shows what is still around; clean up every merged one.
 
-**Windows:** `git worktree remove` unregisters the worktree, then fails with `Directory not empty` on bun's
-`node_modules` junctions and leaves the folder behind. Delete what's left with
-`cmd /c rmdir /s /q ..\kestrel-worktrees\<topic>` (it removes junctions without following them), then carry on with
-`git branch -D`.
+**Windows:** when `git worktree remove` fails with `Directory not empty`, finish with
+`cmd /c rmdir /s /q ..\kestrel-worktrees\<topic>`.
 
 - Branch names: `<github-login>/<topic>`, e.g. `caayd/install-link`.
 - Every PR gets a Preview: `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (app and public
