@@ -27,7 +27,11 @@ import {
   type CreateAutomationBody,
   type CreateBoxBody,
   type CreateTaskBody,
+  type CreateFleetBoxBody,
   type CreatedBox,
+  type CreatedFleetBox,
+  type FleetBox,
+  type FleetBoxList,
   type PairingPoll,
   type PairingStart,
   type PairingStartBody,
@@ -36,6 +40,7 @@ import {
   type RelayFrame,
   type UpdateAutomationBody,
   type UpdateBoxBody,
+  type UpdateFleetBoxBody,
   type UserBox,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
@@ -45,6 +50,18 @@ import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, type Env } from "./env"
+import {
+  deleteFleetBox,
+  ensureFleetTable,
+  fleetBox,
+  insertFleetBox,
+  listFleetBoxes,
+  managedBoxAccess,
+  managedBoxFor,
+  rotateFleetBoxSecret,
+  updateFleetBox,
+  type ManagedBoxRow,
+} from "./fleet-table"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -53,6 +70,8 @@ export type BoxOutcome<T> = { ok: true; value: T } | BoxFailure
 const UNAUTHENTICATED: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "sign in required" }
 const NO_SUCH_BOX: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such box" }
 const NO_SUCH_PAIRING: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such pairing or it expired" }
+const INVALID_BOX_CREDENTIALS: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "invalid box credentials" }
+const NOT_ASSIGNED: BoxFailure = { ok: false, status: 403, tag: "Forbidden", message: "user is not assigned to this box" }
 
 /** 32 random bytes, base64url: a box secret, or the id a pairing is polled with. */
 const newSecret = (): string =>
@@ -79,6 +98,8 @@ const newPairingCode = (): string =>
 
 const BOX_TAG = "box"
 const HTTP_TIMEOUT_MS = 30_000
+/** Lifetime of a token the Hub signs for one call to a managed box. */
+const MANAGED_CALL_TTL_SECONDS = 5 * 60
 /** Close code sent to browsers when the box goes away (custom range; 1001 is not settable). */
 const BOX_GONE_CLOSE_CODE = 4001
 
@@ -221,6 +242,7 @@ export class Hub extends DurableObject<Env> {
       if (!userColumns.some((c) => c.name === "active_box_id")) {
         sql.exec("ALTER TABLE users ADD COLUMN active_box_id TEXT")
       }
+      ensureFleetTable(sql)
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -512,15 +534,30 @@ export class Hub extends DurableObject<Env> {
     return { ok: true, value: { box: owned.box, secret } }
   }
 
-  /** A token the owner gives their box: signed with the box's secret, audience is the box id. */
+  /**
+   * A token the owner gives their box: signed with the box's secret, audience is the box id. A user's managed box is
+   * minted the same way, with the managed box's secret.
+   */
   async mintBoxToken(sessionId: string, id: string): Promise<BoxOutcome<BoxToken>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     const owned = this.ownedBox(session.login, id)
-    if (!owned) return NO_SUCH_BOX
+    if (owned) return this.signBoxFor(session, id, owned.secret, owned.box.url)
+    const managed = managedBoxFor(this.ctx.storage.sql, session.login)
+    if (managed === null || managed.id !== id) return NO_SUCH_BOX
+    return this.signBoxFor(session, id, managed.secret, managed.url)
+  }
+
+  /** A box token for the session's user, signed with `secret` and audienced to `id`; `url` is where the box lives. */
+  private async signBoxFor(
+    session: SessionRecord,
+    id: string,
+    secret: string,
+    url: string,
+  ): Promise<BoxOutcome<BoxToken>> {
     const iat = Math.floor(Date.now() / 1000)
     const exp = iat + BOX_TOKEN_TTL_SECONDS
-    const token = await signBoxToken(owned.secret, {
+    const token = await signBoxToken(secret, {
       sub: session.login,
       aud: id,
       iat,
@@ -528,7 +565,7 @@ export class Hub extends DurableObject<Env> {
       cv: this.credentialsVersion(session.login),
       ...(session.dev ? { dev: true } : {}),
     })
-    return { ok: true, value: { token, url: owned.box.url, expiresAt: new Date(exp * 1000).toISOString() } }
+    return { ok: true, value: { token, url, expiresAt: new Date(exp * 1000).toISOString() } }
   }
 
   setActiveBox(sessionId: string, boxId: string | null): BoxOutcome<BoxList> {
@@ -563,7 +600,12 @@ export class Hub extends DurableObject<Env> {
     const user = sql
       .exec<{ activeBoxId: string | null }>("SELECT active_box_id AS activeBoxId FROM users WHERE login = ?", login)
       .toArray()[0]
-    return { boxes, activeBoxId: user?.activeBoxId ?? null }
+    const managed = managedBoxFor(sql, login)
+    return {
+      boxes,
+      activeBoxId: user?.activeBoxId ?? null,
+      managedBox: managed === null ? null : { id: managed.id, url: managed.url },
+    }
   }
 
   /** The box if `login` owns it, with its secret; null otherwise. */
@@ -578,6 +620,62 @@ export class Hub extends DurableObject<Env> {
     if (!row) return null
     const { secret, ...box } = row
     return { box, secret }
+  }
+
+  // -------------------------------------------------------------------------
+  // Managed boxes: Kestrel's fleet. Each user is assigned to one; operators manage the fleet (the Worker checks).
+  // -------------------------------------------------------------------------
+
+  /** Whether a managed box's call for `login` is authorized: the box's own secret, and the user assigned to that box. */
+  async managedBoxAuthorize(boxId: string, secret: string, login: string): Promise<BoxOutcome<null>> {
+    const access = await managedBoxAccess(this.ctx.storage.sql, boxId, secret, login)
+    if (access === "unauthenticated") return INVALID_BOX_CREDENTIALS
+    if (access === "unassigned") return NOT_ASSIGNED
+    return { ok: true, value: null }
+  }
+
+  /** `ControlPaths.boxCredentials`: the user's credentials for a managed box, in the same shape as `boxSelf`. */
+  async managedBoxCredentials(boxId: string, secret: string, login: string): Promise<BoxOutcome<BoxSelf>> {
+    const access = await this.managedBoxAuthorize(boxId, secret, login)
+    if (!access.ok) return access
+    return {
+      ok: true,
+      value: { owner: login, credentialsVersion: this.credentialsVersion(login), ...this.connectionSecrets(login) },
+    }
+  }
+
+  fleetBoxes(): FleetBoxList {
+    return { boxes: listFleetBoxes(this.ctx.storage.sql) }
+  }
+
+  /** A new box in `pending` state, with its secret returned once. */
+  createFleetBox(body: CreateFleetBoxBody): CreatedFleetBox {
+    const sql = this.ctx.storage.sql
+    const id = crypto.randomUUID()
+    const secret = newSecret()
+    insertFleetBox(sql, { id, name: body.name, url: body.url, secret, createdAt: new Date().toISOString() })
+    const box = fleetBox(sql, id)
+    if (box === null) throw new Error("managed box was not stored")
+    return { box, secret }
+  }
+
+  /** Applies the given fields to a box; null when it does not exist. */
+  changeFleetBox(id: string, changes: UpdateFleetBoxBody): FleetBox | null {
+    return updateFleetBox(this.ctx.storage.sql, id, changes)
+  }
+
+  /** Removes a box and unassigns its users; false when it does not exist. */
+  removeFleetBox(id: string): boolean {
+    return deleteFleetBox(this.ctx.storage.sql, id)
+  }
+
+  /** Replaces a box's secret and returns the new one; null when the box does not exist. */
+  rotateFleetSecret(id: string): CreatedFleetBox | null {
+    const sql = this.ctx.storage.sql
+    const secret = newSecret()
+    if (!rotateFleetBoxSecret(sql, id, secret)) return null
+    const box = fleetBox(sql, id)
+    return box === null ? null : { box, secret }
   }
 
   // -------------------------------------------------------------------------
@@ -735,6 +833,8 @@ export class Hub extends DurableObject<Env> {
   // -------------------------------------------------------------------------
 
   boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    const managed = managedBoxFor(this.ctx.storage.sql, login)
+    if (managed !== null) return this.managedBoxCall(managed, login, method, path, payload)
     const box = this.ctx.getWebSockets(BOX_TAG)[0]
     if (!box) {
       return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
@@ -751,6 +851,45 @@ export class Hub extends DurableObject<Env> {
       ...(body ? { body: toBase64(body) } : {}),
     }
     return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
+  }
+
+  /**
+   * One request straight to the user's managed box, with a short token for `login`. The box fetches the user's
+   * credentials itself (`ControlPaths.boxCredentials`), so the Hub sends none.
+   */
+  private async managedBoxCall(
+    box: ManagedBoxRow,
+    login: string,
+    method: "GET" | "POST",
+    path: string,
+    payload?: unknown,
+  ): Promise<BoxResult> {
+    const iat = Math.floor(Date.now() / 1000)
+    const token = await signBoxToken(box.secret, {
+      sub: login,
+      aud: box.id,
+      iat,
+      exp: iat + MANAGED_CALL_TTL_SECONDS,
+      cv: this.credentialsVersion(login),
+    })
+    const body = payload === undefined ? undefined : JSON.stringify(payload)
+    try {
+      const res = await fetch(new URL(path, box.url), {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        body,
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      })
+      return { ok: res.ok, status: res.status, body: await res.text() }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "TimeoutError") {
+        return { ok: false, status: 504, body: JSON.stringify({ message: "agent box did not respond in time" }) }
+      }
+      return { ok: false, status: 502, body: JSON.stringify({ message: "agent box is unreachable" }) }
+    }
   }
 
   // -------------------------------------------------------------------------

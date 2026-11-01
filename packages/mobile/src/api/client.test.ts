@@ -7,7 +7,7 @@ import { createApiClient } from "./client";
  * headers. Emulate that transport step around real HTTP requests; a duplicate session is not a valid session id.
  */
 test("saved session authenticates and logs out even when the WebView cookie jar also has a session", async () => {
-  const user = { login: "mobile-user", name: null, avatarUrl: "" };
+  const user = { login: "mobile-user", name: null, avatarUrl: "", operator: false };
   let sessionExists = true;
   const server = Bun.serve({
     hostname: "127.0.0.1",

@@ -57,15 +57,36 @@ export const ControlPaths = {
   userBox: (id: string) => `/api/boxes/${id}`,
   /** POST -> CreatedBox: replaces the box's secret; tokens signed with the old one stop working. */
   userBoxSecret: (id: string) => `/api/boxes/${id}/secret`,
-  /** POST -> BoxToken: a fresh box token for the signed-in user and this box. */
+  /**
+   * POST -> BoxToken: a fresh box token for the signed-in user and this box: one of their own boxes, or the managed
+   * box they are assigned to (`BoxList.managedBox.id`). Any other id is 404.
+   */
   userBoxToken: (id: string) => `/api/boxes/${id}/token`,
-  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is Kestrel's relayed box. */
+  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is Kestrel's managed box. */
   activeBox: "/api/boxes/active",
   /**
    * Box-only: GET -> BoxSelf for the box named in BOX_ID_HEADER, authenticated with `Authorization: Bearer <box
    * secret>`. How a user's own box learns its owner and the owner's connection secrets. Never reached from a browser.
    */
   boxSelf: "/box/self",
+  /**
+   * Box-only, managed (fleet) boxes: GET -> BoxSelf for the user named in BOX_USER_HEADER, authenticated with
+   * `Authorization: Bearer <box secret>` and BOX_ID_HEADER. Answers only for users assigned to that box (403
+   * otherwise), so a box can read the credentials of its own users and nobody else's. Never reached from a browser.
+   */
+  boxCredentials: "/box/credentials",
+  /**
+   * Operator-only (`Me.operator`): Kestrel's managed boxes. GET -> FleetBoxList / POST CreateFleetBoxBody ->
+   * CreatedFleetBox (state `pending`). Everyone else gets 404.
+   */
+  fleetBoxes: "/api/fleet/boxes",
+  /**
+   * PATCH UpdateFleetBoxBody -> FleetBox / DELETE -> 204. Deleting unassigns its users, who are assigned to another
+   * active box on their next BoxList; their threads stay on the deleted box's disk.
+   */
+  fleetBox: (id: string) => `/api/fleet/boxes/${id}`,
+  /** POST -> CreatedFleetBox: replaces the managed box's secret; the box must be restarted with the new one. */
+  fleetBoxSecret: (id: string) => `/api/fleet/boxes/${id}/secret`,
   /**
    * Pairing a box from the `kestrel-box` CLI, no auth. POST PairingStartBody -> PairingStart: the CLI shows `code` and
    * `approveUrl`, then polls `boxPairingPoll` with the secret `pairingId` until the signed-in user approves the code.
@@ -80,8 +101,10 @@ export const ControlPaths = {
   /** POST ApprovePairingBody -> BoxList: creates the box for the signed-in user (optionally making it active). */
   pairingApprove: (code: string) => `/api/boxes/pairings/${code}/approve`,
   /**
-   * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user). Requires
-   * `Authorization: Bearer <box token>` and the acting user's login in BOX_USER_HEADER. Never reached from a browser.
+   * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user), for managed boxes.
+   * Requires `Authorization: Bearer <box secret>` with BOX_ID_HEADER, and the acting user's login in BOX_USER_HEADER;
+   * the user must be assigned to that box. The relayed box authenticates with the shared relay token instead.
+   * Never reached from a browser.
    */
   boxAutomations: "/box/automations",
   boxAutomation: (id: string) => `/box/automations/${id}`,
@@ -96,6 +119,8 @@ export const Me = Schema.Struct({
   login: Schema.String,
   name: Schema.NullOr(Schema.String),
   avatarUrl: Schema.String,
+  /** May manage Kestrel's managed boxes (`ControlPaths.fleetBoxes`); listed in the Worker's KESTREL_OPERATORS. */
+  operator: Schema.Boolean,
 })
 export type Me = typeof Me.Type
 
@@ -167,7 +192,10 @@ export const BoxStatus = Schema.Struct({
 })
 export type BoxStatus = typeof BoxStatus.Type
 
-/** Header naming the box on box-only routes authenticated with a box secret (`ControlPaths.boxSelf`). */
+/**
+ * Header naming the box on box-only routes authenticated with a box secret (`ControlPaths.boxSelf`,
+ * `ControlPaths.boxCredentials`, `ControlPaths.boxAutomations`).
+ */
 export const BOX_ID_HEADER = "x-kestrel-box-id"
 
 /** At most this many boxes per user. */
@@ -203,10 +231,22 @@ export const UserBox = Schema.Struct({
 })
 export type UserBox = typeof UserBox.Type
 
+/**
+ * The managed box a user is assigned to, reached directly at `url` with a token from `userBoxToken(id)`. A user keeps
+ * their assignment while the box is active or draining; deleting the box reassigns them.
+ */
+export const ManagedBox = Schema.Struct({ id: Schema.String, url: BoxUrl })
+export type ManagedBox = typeof ManagedBox.Type
+
 export const BoxList = Schema.Struct({
   boxes: Schema.Array(UserBox),
-  /** The box the user's apps use; null for Kestrel's relayed box. */
+  /** The box the user's apps use; null for Kestrel's managed box. */
   activeBoxId: Schema.NullOr(Schema.String),
+  /**
+   * Kestrel's managed box for this user, reached directly. Null while no managed box is active: the apps then reach
+   * Kestrel's box through the control plane's relay.
+   */
+  managedBox: Schema.NullOr(ManagedBox),
 })
 export type BoxList = typeof BoxList.Type
 
@@ -242,6 +282,46 @@ export const BoxSelf = Schema.Struct({
   openai: Schema.optional(Schema.String),
 })
 export type BoxSelf = typeof BoxSelf.Type
+
+/**
+ * Lifecycle of a managed box. `pending`: registered, gets no users (configure and check it first). `active`: new users
+ * are assigned to the active box with the fewest users. `draining`: keeps its users, gets no new ones.
+ */
+export const FleetBoxState = Schema.Literal("pending", "active", "draining")
+export type FleetBoxState = typeof FleetBoxState.Type
+
+/** One of Kestrel's managed boxes, as operators see it. Its secret is shown only when created or replaced. */
+export const FleetBox = Schema.Struct({
+  id: Schema.String,
+  name: BoxName,
+  url: BoxUrl,
+  state: FleetBoxState,
+  /** Users assigned to this box. */
+  users: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  createdAt: Schema.String,
+})
+export type FleetBox = typeof FleetBox.Type
+
+export const FleetBoxList = Schema.Struct({ boxes: Schema.Array(FleetBox) })
+export type FleetBoxList = typeof FleetBoxList.Type
+
+export const CreateFleetBoxBody = Schema.Struct({ name: BoxName, url: BoxUrl })
+export type CreateFleetBoxBody = typeof CreateFleetBoxBody.Type
+
+/** Every field optional. `state` can move between `active` and `draining`; nothing returns a box to `pending`. */
+export const UpdateFleetBoxBody = Schema.Struct({
+  name: Schema.optional(BoxName),
+  url: Schema.optional(BoxUrl),
+  state: Schema.optional(Schema.Literal("active", "draining")),
+})
+export type UpdateFleetBoxBody = typeof UpdateFleetBoxBody.Type
+
+/**
+ * The managed box and its secret. The box runs with `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and
+ * `CLOUDAGENTS_BOX_MANAGED=1`.
+ */
+export const CreatedFleetBox = Schema.Struct({ box: FleetBox, secret: Schema.String })
+export type CreatedFleetBox = typeof CreatedFleetBox.Type
 
 /** How long a pairing code stays valid. */
 export const PAIRING_TTL_SECONDS = 10 * 60

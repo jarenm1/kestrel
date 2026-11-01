@@ -1,8 +1,8 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import * as SecureStore from "expo-secure-store";
-import type { Me, UserBox } from "@cloudagents/protocol";
-import { createApiClient } from "@/api/client";
+import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
+import { createApiClient, type ActiveBox } from "@/api/client";
 import { clearBoxScopedQueries } from "@/api/queries";
 
 const SERVER_URL_KEY = "kestrel_server_url";
@@ -17,8 +17,10 @@ interface AuthState {
   user: Me | null;
   /** The user's own boxes (bring your own box); loaded with `/api/me` */
   boxes: readonly UserBox[];
-  /** The box the user's apps use; `null` is Kestrel's box */
+  /** The box the user's apps use; `null` is Kestrel's managed box */
   activeBoxId: string | null;
+  /** Kestrel's managed box assigned to the user, reached directly; `null` when none is assigned (the relay serves Kestrel's box). */
+  managedBox: ManagedBox | null;
   /** Whether we're currently checking auth state */
   loading: boolean;
   /** Last auth error */
@@ -34,8 +36,8 @@ interface AuthActions {
   setActiveBox: (boxId: string | null) => Promise<void>;
 }
 
-/** `activeBox` is the box the app's requests go to; `null` is Kestrel's box. */
-type AuthContextValue = AuthState & AuthActions & { activeBox: UserBox | null };
+/** `activeBox` is the box the app's requests go to, reached directly; `null` means Kestrel's box is relayed. */
+type AuthContextValue = AuthState & AuthActions & { activeBox: ActiveBox | null };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -48,11 +50,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     error: null,
     boxes: [],
     activeBoxId: null,
+    managedBox: null,
   });
   const queryClient = useQueryClient();
   const activeBox = useMemo(
-    () => state.boxes.find((box) => box.id === state.activeBoxId) ?? null,
-    [state.boxes, state.activeBoxId]
+    () => resolveActiveBox(state.boxes, state.activeBoxId, state.managedBox),
+    [state.boxes, state.activeBoxId, state.managedBox]
+  );
+  // The box the cached box-served data was read from.
+  const cachedBoxRef = useRef<ActiveBox | null>(null);
+
+  /**
+   * Every box-list read goes through here. The box-served cache describes the box it was read from, so when the box the
+   * apps reach changes (id or url), that cache is dropped before the new list takes effect.
+   */
+  const applyBoxList = useCallback(
+    (list: BoxList) => {
+      const next = resolveActiveBox(list.boxes, list.activeBoxId, list.managedBox);
+      if (!sameBox(cachedBoxRef.current, next)) clearBoxScopedQueries(queryClient);
+      cachedBoxRef.current = next;
+      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
+    },
+    [queryClient]
   );
 
   // Load saved server URL and session on mount
@@ -70,7 +89,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }));
 
         if (savedCookie) {
-          await fetchMe(urlToUse, savedCookie, setState);
+          await fetchMe(urlToUse, savedCookie, setState, applyBoxList);
         } else {
           setState((s) => ({ ...s, loading: false }));
         }
@@ -91,10 +110,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       await SecureStore.setItemAsync(SESSION_COOKIE_KEY, cookie);
       setState((s) => ({ ...s, sessionCookie: cookie, loading: true, error: null }));
       if (state.serverUrl) {
-        await fetchMe(state.serverUrl, cookie, setState);
+        await fetchMe(state.serverUrl, cookie, setState, applyBoxList);
       }
     },
-    [state.serverUrl]
+    [state.serverUrl, applyBoxList]
   );
 
   const setUser = useCallback((user: Me) => {
@@ -115,11 +134,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
     await SecureStore.deleteItemAsync(SESSION_COOKIE_KEY);
+    cachedBoxRef.current = null;
     setState((s) => ({
       ...s,
       sessionCookie: null,
       boxes: [],
       activeBoxId: null,
+      managedBox: null,
       user: null,
       error: null,
     }));
@@ -129,18 +150,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (boxId: string | null) => {
       if (!state.serverUrl) throw new Error("Server URL is not set");
       const list = await createApiClient(state.serverUrl, state.sessionCookie, null).setActiveBox(boxId);
-      // Box-served data describes the box that was active; drop it before the switch takes effect.
-      clearBoxScopedQueries(queryClient);
-      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId }));
+      applyBoxList(list);
     },
-    [state.serverUrl, state.sessionCookie, queryClient]
+    [state.serverUrl, state.sessionCookie, applyBoxList]
   );
 
   const checkSession = useCallback(async () => {
     if (state.serverUrl && state.sessionCookie) {
-      await fetchMe(state.serverUrl, state.sessionCookie, setState);
+      await fetchMe(state.serverUrl, state.sessionCookie, setState, applyBoxList);
     }
-  }, [state.serverUrl, state.sessionCookie]);
+  }, [state.serverUrl, state.sessionCookie, applyBoxList]);
 
   return (
     <AuthContext.Provider
@@ -169,7 +188,8 @@ export function useAuth(): AuthContextValue {
 async function fetchMe(
   serverUrl: string,
   sessionCookie: string | null,
-  setState: React.Dispatch<React.SetStateAction<AuthState>>
+  setState: React.Dispatch<React.SetStateAction<AuthState>>,
+  applyBoxList: (list: BoxList) => void
 ) {
   try {
     const headers: Record<string, string> = {};
@@ -194,11 +214,12 @@ async function fetchMe(
       return;
     }
     const user: Me = await res.json();
-    // Signing in never depends on the box list: when it cannot be read, the app stays on Kestrel's box.
+    // Signing in never depends on the box list: when it cannot be read, the box state already held stays.
     const boxes = await createApiClient(serverUrl, sessionCookie, null)
       .boxes()
-      .catch(() => ({ boxes: [], activeBoxId: null }));
-    setState((s) => ({ ...s, user, boxes: boxes.boxes, activeBoxId: boxes.activeBoxId, loading: false, error: null }));
+      .catch(() => null);
+    if (boxes !== null) applyBoxList(boxes);
+    setState((s) => ({ ...s, user, loading: false, error: null }));
   } catch (e) {
     setState((s) => ({
       ...s,
@@ -206,4 +227,23 @@ async function fetchMe(
       error: `Cannot reach server: ${e instanceof Error ? e.message : String(e)}`,
     }));
   }
+}
+
+/**
+ * The box the apps' requests go to: the user's chosen box, or with no choice (`activeBoxId` null) their managed box.
+ * `null` means no direct box applies and Kestrel's box is relayed through the control plane.
+ */
+function resolveActiveBox(
+  boxes: readonly UserBox[],
+  activeBoxId: string | null,
+  managedBox: ManagedBox | null
+): ActiveBox | null {
+  if (activeBoxId === null) return managedBox === null ? null : { id: managedBox.id, url: managedBox.url };
+  const box = boxes.find((b) => b.id === activeBoxId);
+  return box === undefined ? null : { id: box.id, url: box.url };
+}
+
+function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.id === b.id && a.url === b.url;
 }

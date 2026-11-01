@@ -23,6 +23,8 @@ export const keys = {
   boxHealth: (url: string) => ["box-health", url] as const,
   /** Status of the box the apps talk to. */
   box: ["box"] as const,
+  /** Kestrel's managed boxes, as operators see them (`Me.operator`). */
+  fleetBoxes: ["fleet-boxes"] as const,
   /** A pairing code's pending approval, read by the approval page. */
   pairing: (code: string) => ["pairing", code] as const,
   connections: ["connections"] as const,
@@ -89,22 +91,26 @@ export function storeTask(client: QueryClient, task: Task): void {
 }
 
 /**
- * Stores a box list. When the active box changes, the queries read from it are cancelled and reset, so mounted views
- * refetch from the new box and no usage figure of the old box stays on screen. When the set of boxes changes (one
- * added, removed or moved), the thread list refetches so it reads that set.
+ * Stores a box list. When the active box changes, or Kestrel's managed box changes (its id or URL), the queries read
+ * from the box that was replaced are cancelled and reset, so mounted views refetch from the new box and no usage
+ * figure of the old box stays on screen; the old managed box's cached token is dropped. When the set of boxes changes
+ * (one added, removed or moved) or the managed box changes, the thread list refetches so it reads that set.
  */
 export async function applyBoxList(client: QueryClient, list: BoxList): Promise<void> {
   const previous = client.getQueryData<BoxList>(keys.boxes)
-  if (previous?.activeBoxId !== list.activeBoxId) {
+  const previousManaged = previous?.managedBox ?? null
+  const managedChanged = previousManaged?.id !== list.managedBox?.id || previousManaged?.url !== list.managedBox?.url
+  if (previous?.activeBoxId !== list.activeBoxId || managedChanged) {
     const activeScoped = {
       predicate: (query: { queryKey: readonly unknown[] }) => ACTIVE_BOX_ROOTS[String(query.queryKey[0])] === true,
     }
     await client.cancelQueries(activeScoped)
     client.resetQueries(activeScoped)
   }
+  if (managedChanged && previousManaged !== null) api.forgetBox(previousManaged.id)
   const before = JSON.stringify(previous?.boxes.map((box) => [box.id, box.url]) ?? [])
   const after = JSON.stringify(list.boxes.map((box) => [box.id, box.url]))
-  if (before !== after) void client.invalidateQueries({ queryKey: keys.tasks })
+  if (before !== after || managedChanged) void client.invalidateQueries({ queryKey: keys.tasks })
   client.setQueryData(keys.boxes, list)
 }
 
@@ -112,6 +118,7 @@ export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
+  fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>
     queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),

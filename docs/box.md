@@ -58,7 +58,7 @@ The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpape
 
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
-The desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
+On the legacy relay, the desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
 
 - The first frame after a quiet window goes out at once, so a keystroke or a click on an otherwise still desktop has no added latency.
 - Frames that come while one is held are concatenated into one message, sent when the window is up. A keyframe starts a new message; init segments are never bundled; a message is cut at 1 MiB.
@@ -109,14 +109,132 @@ The box needs the user's systemd manager (`systemd-run --user`) with the memory,
 
 The storage limit is not a filesystem quota (the box runs unprivileged). The box measures every task's files at startup and every 30 s, and an upload counts as soon as it arrives: one that would take the task past the limit is refused (409). A task over the limit also has new checkouts refused, and a new run's prompt asks the agent to delete files first. If the task is over the limit and still growing (by more than 64 MiB since the last check) while a run or its desktop is going, the box stops them and says so in the chat. A task that is over the limit but shrinking keeps running, so an agent can clean up. The agent's own writes are never blocked mid-way, so a task can briefly pass the limit by whatever it writes in 30 s.
 
-## Production box
+## Managed boxes (fleet)
 
-The production box runs on the host machine with `nix run .#box-auto`. It keeps its own clone in `~/.local/share/kestrel-box` (override with `KESTREL_BOX_DIR`) and polls GitHub every 60 s (`KESTREL_BOX_POLL`). It follows the git ref in `KESTREL_BOX_REF` (default `main`), checking it out at startup. When the ref moves, box-auto fast-forwards to the new commit, reinstalls deps and restarts the box, but only once the box is idle: no agent runs and no desktops, as reported on the box's activity socket. While the box is busy the update is deferred and rechecked on every poll. An update that has waited `KESTREL_BOX_MAX_DEFER` seconds (default 21600, 6 h; 0 waits indefinitely) runs anyway and interrupts whatever is still running. If the activity socket does not answer, box-auto updates without an idle check.
+Kestrel runs its own boxes as a fleet. Each managed box is a row in the control plane's fleet registry (the Hub's `managed_boxes` table) with a public HTTPS URL and its own secret. One managed box serves many users. The control plane assigns each user to one box, and that user's apps call the box directly. Authentication is the same as for a user's own box: the box verifies HS256 box tokens offline with its own secret, `aud` is its box id and `sub` is the user's login.
+
+### Operators
+
+Operators are the GitHub logins in the Worker's `KESTREL_OPERATORS` secret, comma- or whitespace-separated. Set it from `packages/control`:
+
+```sh
+bunx wrangler secret put KESTREL_OPERATORS   # e.g. jarenm1,caayd
+```
+
+Operators see Settings › Fleet and the `/api/fleet/boxes` routes (`Me.operator` is `true`). Everyone else gets 404 there.
+
+### Assignment and states
+
+A user is assigned lazily, whenever the control plane builds their box list or needs their managed box:
+
+- A user keeps their box while it is `active` or `draining`.
+- Otherwise the user is assigned to the active box with the fewest users (ties go to the oldest box).
+- With no active box, the user has no managed box, and their apps use the [legacy relay](#legacy-relay).
+
+| State | Meaning |
+|---|---|
+| `pending` | Registered; gets no users. Configure and check it first. |
+| `active` | Gets new users, by the rule above. |
+| `draining` | Keeps its users; gets no new ones. |
+
+Nothing moves a box back to `pending`.
+
+### Adding a box
+
+1. In Settings › Fleet, add the box with a name and its public URL (see [Endpoint requirements](#endpoint-requirements)). The secret is shown once. The box starts `pending`.
+2. Run the box on its host in managed direct mode, with its id and secret. The same variables can go in `.box.env`, which `nix run .#box` reads:
+
+   ```sh
+   CLOUDAGENTS_BOX_ID=<id> CLOUDAGENTS_BOX_SECRET=<secret> CLOUDAGENTS_BOX_MANAGED=1 \
+   CLOUDAGENTS_CONTROL_URL=<control plane origin> nix run .#box
+   ```
+
+   The box listens on `CLOUDAGENTS_HOST:CLOUDAGENTS_PORT`, by default `127.0.0.1:8787`. If the proxy runs on another host, set `CLOUDAGENTS_HOST` to an address that proxy can reach (see [Deploy modules](#deploy-modules)).
+3. Check health: `curl -fsS https://<url>/api/health` must answer. The control plane checks the same URL for the box's status.
+4. Activate: set the state to `active`.
+
+### Drain, rotate, delete
+
+- **Drain** (`draining`): no new users. Current users stay assigned and keep using the box. Draining moves nobody, so use it to stop new assignments before maintenance; set `active` again to resume.
+- **Rotate the secret** (`POST /api/fleet/boxes/:id/secret`): returns the new secret once. Until the box restarts with it, the box rejects tokens minted under the new secret and cannot fetch credentials. Rotate and restart together, when the box is idle.
+- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users, or to the relay if there is none. Their threads stay on the deleted box's disk and do not move.
+
+### Endpoint requirements
+
+- HTTPS, and WSS for the event streams, on a DNS-only hostname (not proxied by Cloudflare).
+- `/mcp` and `/broker` are never public. They are local sandbox interfaces, so the proxy answers them with 404.
+- The box's port (8787 by default) is reachable only from the proxy, never from the internet.
+
+### Deploy modules
+
+The modules are in `deploy/`. Key files must be absolute paths outside `/nix/store`; the modules assert it.
+
+- **Box with a public IP** (a VPS, or the production host on a public address): import `deploy/box-ingress.nix` on the box's own host. Caddy terminates TLS on 80 and 443 and proxies to `127.0.0.1:8787`. No other box port is opened.
+
+  ```nix
+  imports = [ /path/to/kestrel/deploy/box-ingress.nix ];
+  services.kestrelBoxIngress = { enable = true; hostname = "box1.example.com"; };
+  ```
+
+- **Box behind NAT**: import `deploy/box-ingress.nix` on an ingress host with a public IP, and `deploy/box-tunnel.nix` on the box. The box dials out over WireGuard, and the ingress proxies to the box at its tunnel address, `10.203.0.2`.
+
+  ```nix
+  # ingress host
+  services.kestrelBoxIngress = {
+    enable = true;
+    hostname = "box1.example.com";
+    wireguard = {
+      enable = true;
+      privateKeyFile = "/var/lib/kestrel/wg-ingress.key";
+      peerPublicKey = "<box public key>";
+    };
+  };
+
+  # box host
+  services.kestrelBoxTunnel = {
+    enable = true;
+    privateKeyFile = "/var/lib/kestrel/wg-box.key";
+    ingressPublicKey = "<ingress public key>";
+    endpoint = "ingress.example.com:51820";
+  };
+  ```
+
+  Set `CLOUDAGENTS_HOST=10.203.0.2` on the box. That address exists only while the tunnel is up, so start the box after the tunnel. The box port opens only on the tunnel interface.
+
+### Cutover of the relayed production box
+
+The production box already dials the relay with `CLOUDAGENTS_BOX_TOKEN`. It keeps that token while it also serves direct traffic: the relay and managed direct mode run in one process, so no user loses the box during the switch.
+
+1. Register it: add the box in Settings › Fleet with its public URL. It is `pending` and gets no users.
+2. Configure the endpoint: serve that URL to `127.0.0.1:8787` on the production host, with `deploy/box-ingress.nix` or your own proxy that meets the [endpoint requirements](#endpoint-requirements).
+3. In `.box.env`, next to `CLOUDAGENTS_CONTROL_URL` and the kept `CLOUDAGENTS_BOX_TOKEN`, add `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and `CLOUDAGENTS_BOX_MANAGED=1`.
+4. Restart the box when it is idle. A restart interrupts agent runs, and `box-auto` defers its restarts while the box is busy.
+5. Verify through the public URL: `https://<url>/api/health` answers, and `https://<url>/mcp` answers 404.
+6. Activate. The box is then the only active box, so every user without a managed box is assigned to it on their next box list. Users keep it while it is `active` or `draining`.
+
+Rollback: Drain does not move users, so they keep the box. To move them back to the relay, delete the box. Its users go to another active box if one exists, otherwise to the relay. The relay works only while the box still runs with `CLOUDAGENTS_BOX_TOKEN`, so keep that token set until the cutover is final.
+
+### Production host
+
+The production host runs the box with `nix run .#box-auto`. It keeps its own clone in `~/.local/share/kestrel-box` (override with `KESTREL_BOX_DIR`) and polls GitHub every 60 s (`KESTREL_BOX_POLL`). It follows the git ref in `KESTREL_BOX_REF` (default `main`), checking it out at startup. When the ref moves, box-auto fast-forwards to the new commit, reinstalls deps and restarts the box, but only once the box is idle: no agent runs and no desktops, as reported on the box's activity socket. While the box is busy the update is deferred and rechecked on every poll. An update that has waited `KESTREL_BOX_MAX_DEFER` seconds (default 21600, 6 h; 0 waits indefinitely) runs anyway and interrupts whatever is still running. If the activity socket does not answer, box-auto updates without an idle check.
 
 The box serves the activity socket at `box.sock` in its data dir: `CLOUDAGENTS_DATA_DIR` from `.box.env` (must be an absolute path; box-auto refuses a relative one), otherwise `.data` in the clone. Only counts leave that socket, and it is owner-only.
 
 To ship a change to the box without merging to `main`, push the commit to a release branch and point the box at it: `git push origin <sha>:box-release`, then start box-auto with `KESTREL_BOX_REF=box-release`. Relaunching box-auto restarts the box once, interrupting any run in progress; after that, pushes to the ref follow the rules above.
 
-It reads `CLOUDAGENTS_CONTROL_URL` and `CLOUDAGENTS_BOX_TOKEN` from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
+It reads the box's environment (`CLOUDAGENTS_CONTROL_URL`, and the relay token and/or managed box id and secret above) from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
 
-Don't run a box against production with the production token from your machine: the control plane keeps one box and a new connection replaces the live one.
+### Control plane traffic per user
+
+Per user, the control plane (the Worker and its Hub Durable Object) handles only short control requests. None carries thread data:
+
+- the box list (`GET /api/boxes`), which assigns the managed box;
+- a box token from `POST /api/boxes/:id/token`, valid for an hour, for the user's own box or managed box;
+- credential bootstrap: the box fetches its user's connection secrets from `/box/credentials` when a token's credentials version changes;
+- automation dispatch: the control plane calls the box directly with a 5-minute token to start automation runs and fetch CLI sign-in state, and the box's automation tools call `/box/automations` with its own box auth.
+
+### Legacy relay
+
+Until every client and box is cut over, Kestrel's box is also reached through the relay. A box dials `/box/connect` with `CLOUDAGENTS_BOX_TOKEN`, and the control plane forwards each app request over that socket, one Durable Object request per request. Clients use the relay when `BoxList.managedBox` is `null`. Relay deletion is a later change.
+
+Don't run a box against production with the production token from your machine: the control plane keeps one relayed box and a new connection replaces the live one.

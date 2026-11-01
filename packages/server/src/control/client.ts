@@ -1,6 +1,7 @@
 import { Data, Effect, Schema } from "effect"
 import {
   Automation,
+  BOX_ID_HEADER,
   BOX_USER_HEADER,
   ControlPaths,
   type CreateAutomationBody,
@@ -10,10 +11,10 @@ import {
 /** The control plane refused or failed a call. `message` is the control plane's own message, shown to the agent as is. */
 export class ControlError extends Data.TaggedError("ControlError")<{ readonly message: string }> {}
 
-export interface ControlConfig {
-  readonly controlUrl: string
-  readonly boxToken: string
-}
+/** Who the box is to the control plane: the relayed box with the relay's token, or a managed box with its secret. */
+export type ControlConfig =
+  | { readonly controlUrl: string; readonly boxToken: string }
+  | { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string }
 
 /** The automations the box may manage for one user. Every call acts for `user`; the control plane enforces ownership. */
 export interface ControlClient {
@@ -52,6 +53,10 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
   const base = controlBase(config.controlUrl)
 
   // Every call is authenticated as the box, and names the user it acts for in BOX_USER_HEADER.
+  const boxAuth: Record<string, string> =
+    "boxSecret" in config
+      ? { authorization: `Bearer ${config.boxSecret}`, [BOX_ID_HEADER]: config.boxId }
+      : { authorization: `Bearer ${config.boxToken}` }
   const call = (user: string, method: string, path: string, body?: unknown): Effect.Effect<unknown, ControlError> =>
     Effect.gen(function* () {
       const response = yield* attempt(
@@ -59,7 +64,7 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
           fetch(`${base}${path}`, {
             method,
             headers: {
-              authorization: `Bearer ${config.boxToken}`,
+              ...boxAuth,
               [BOX_USER_HEADER]: user,
               ...(body === undefined ? {} : { "content-type": "application/json" }),
             },

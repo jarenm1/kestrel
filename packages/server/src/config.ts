@@ -59,10 +59,16 @@ export interface ServerConfig {
   /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
   /**
-   * Direct mode (bring your own box): the box's own control-plane lookups and box-token verification.
-   * Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set.
+   * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box without
+   * the relay. Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set. `managed`
+   * (`CLOUDAGENTS_BOX_MANAGED=1`) marks a Kestrel fleet box that serves many users; otherwise it is the user's own box.
    */
-  readonly direct: { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string } | null
+  readonly direct: {
+    readonly controlUrl: string
+    readonly boxId: string
+    readonly boxSecret: string
+    readonly managed: boolean
+  } | null
   /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
   readonly homesDir: string
   /**
@@ -254,16 +260,25 @@ const loadControlUrl = (): string | null => {
   return controlUrl
 }
 
-/** Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. */
+/**
+ * Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. A managed box
+ * (`CLOUDAGENTS_BOX_MANAGED=1`) must have all three.
+ */
 const loadDirect = (controlUrl: string | null): ServerConfig["direct"] => {
   const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
   const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() ?? ""
+  const managed = process.env.CLOUDAGENTS_BOX_MANAGED === "1"
+  if (managed && (boxId === "" || boxSecret === "" || controlUrl === null)) {
+    throw new Error(
+      "CLOUDAGENTS_BOX_MANAGED=1 requires CLOUDAGENTS_BOX_ID, CLOUDAGENTS_BOX_SECRET and CLOUDAGENTS_CONTROL_URL",
+    )
+  }
   if (boxId === "" && boxSecret === "") return null
   if (boxId === "" || boxSecret === "") {
     throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
   }
   if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
-  return { controlUrl, boxId, boxSecret }
+  return { controlUrl, boxId, boxSecret, managed }
 }
 
 /** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */

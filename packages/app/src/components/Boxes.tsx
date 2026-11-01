@@ -15,6 +15,12 @@ import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
 import { errorText } from "@/util"
 
+/** Kestrel's managed box: its own health, reached directly (Kestrel's box is the relay's only while none is assigned). */
+function ManagedOnline({ url }: { url: string }) {
+  const health = useQuery(queries.boxHealth(url))
+  return <OnlineBadge online={health.data?.online} />
+}
+
 export const BOX_FORM_ERROR =
   "Name must be 1–64 characters. The URL must be an origin such as https://box.example.com (http is allowed only for localhost)."
 
@@ -33,6 +39,7 @@ export function Boxes() {
   const kestrel = useBox()
   const [created, setCreated] = useState<CreatedBox | null>(null)
   const list = boxes.data?.boxes ?? []
+  const managed = boxes.data?.managedBox ?? null
 
   return (
     <>
@@ -48,7 +55,7 @@ export function Boxes() {
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="truncate font-medium">Kestrel&apos;s box</span>
                   {activeBoxId === null && <Badge variant="success">active</Badge>}
-                  <OnlineBadge online={kestrel?.online} />
+                  {managed === null ? <OnlineBadge online={kestrel?.online} /> : <ManagedOnline url={managed.url} />}
                 </div>
                 <span className="text-xs text-muted-foreground">Hosted by Kestrel. Used when no box of your own is active.</span>
               </div>
@@ -89,7 +96,7 @@ export function Boxes() {
   )
 }
 
-function OnlineBadge({ online }: { online: boolean | undefined }) {
+export function OnlineBadge({ online }: { online: boolean | undefined }) {
   if (online === undefined) return <Badge variant="neutral">checking</Badge>
   return online ? <Badge variant="success">online</Badge> : <Badge variant="neutral">offline</Badge>
 }

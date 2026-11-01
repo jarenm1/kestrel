@@ -10,15 +10,19 @@ const RECONNECT_MS = 2000
 /**
  * Keeps the thread list current from the thread list streams, one per box (Kestrel's and each user box): `task.updated`
  * writes the task into the list (new threads included), `task.deleted` drops it. Each (re)connect refetches the list,
- * which catches changes missed meanwhile. The streams are reopened when the set of boxes changes.
+ * which catches changes missed meanwhile. The streams are reopened when the set of boxes changes. Kestrel's stream
+ * comes straight from the user's managed box while one is assigned, else through the relay.
  */
 export function useThreadListEvents(): void {
   const queryClient = useQueryClient()
-  const boxes = useQuery(queries.boxes()).data?.boxes
-  const boxSet = JSON.stringify(boxes?.map((box) => [box.id, box.url]) ?? [])
+  const list = useQuery(queries.boxes()).data
+  const managed = list?.managedBox ?? null
+  const boxes = list?.boxes
+  const boxSet = JSON.stringify([managed?.id, managed?.url, boxes?.map((box) => [box.id, box.url]) ?? []])
 
   useEffect(() => {
-    const targets: Target[] = [null, ...(boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))]
+    const kestrel: Target = managed === null ? null : { boxId: managed.id, url: managed.url }
+    const targets: Target[] = [kestrel, ...(boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))]
     const stops = targets.map((target) => followBox(queryClient, target))
     return () => stops.forEach((stop) => stop())
   }, [boxSet, queryClient])

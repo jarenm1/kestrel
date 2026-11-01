@@ -13,7 +13,14 @@ import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
 import { PairPage } from "@/pages/PairPage"
 import { PricingPage } from "@/pages/PricingPage"
-import { BillingSettings, BoxesSettings, ConnectionsSettings, ProfileSettings, SettingsLayout } from "@/pages/SettingsPage"
+import {
+  BillingSettings,
+  BoxesSettings,
+  ConnectionsSettings,
+  FleetSettings,
+  ProfileSettings,
+  SettingsLayout,
+} from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
 import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
@@ -50,6 +57,7 @@ export function App() {
             <Route path="profile" element={<ProfileSettings />} />
             <Route path="connections" element={<ConnectionsSettings />} />
             <Route path="boxes" element={<BoxesSettings />} />
+            <Route path="fleet" element={<FleetSettings />} />
             <Route path="billing" element={<BillingSettings />} />
           </Route>
         </Route>
