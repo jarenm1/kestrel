@@ -1,9 +1,11 @@
 import { useRef } from "react"
-import { useMutation, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
-import { GithubRepoSlug, type SendMessageBody, type Task } from "@cloudagents/protocol"
+import { Schema } from "effect"
+import { GithubRepoSlug, type BoxList, type SendMessageBody, type Task } from "@cloudagents/protocol"
 import { api } from "@/api/client"
-import { keys, storeTask } from "@/api/queries"
+import { keys, queries, storeTask } from "@/api/queries"
+import { BoxPicker, KESTREL_BOX, useBoxOnline } from "@/components/BoxPicker"
 import { Composer } from "@/components/Composer"
 import { RepoPicker } from "@/components/RepoPicker"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
@@ -11,17 +13,31 @@ import { threadPath } from "@/routes"
 import { repoShortName, threadTitle } from "@/util"
 
 /**
- * Chat home: the first message creates a thread (task), sends the message to it and opens it. With a repository
- * picked in the bar under the box, the thread starts with it checked out; otherwise the agent checks out the ones it
- * needs.
+ * The box a new thread goes to: the stored pick while it is still in the list, else the active box. `undefined` while
+ * the box list loads (then `createTask` uses the active box).
+ */
+function chosenBox(stored: string | undefined, list: BoxList | undefined): string | null | undefined {
+  if (list === undefined) return undefined
+  if (stored === KESTREL_BOX) return null
+  return list.boxes.some((box) => box.id === stored) ? (stored ?? null) : list.activeBoxId
+}
+
+/**
+ * Chat home: the first message creates a thread (task), sends the message to it and opens it. The bar under the box
+ * picks the repository the thread starts with checked out (otherwise the agent checks out the ones it needs) and,
+ * for users with boxes of their own, the box it runs on; that pick leaves the active box as it is.
  */
 export function NewThreadPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug)
-  // The thread created by an earlier attempt, and the repository it was created with; a retry after a failed send
-  // reuses it instead of creating another, unless the repository was changed since.
-  const created = useRef<{ task: Task; repo: string | undefined } | null>(null)
+  const [storedBox, setStoredBox] = useStoredChoice("kestrel.newThreadBox", Schema.String)
+  const boxes = useQuery(queries.boxes())
+  const boxId = chosenBox(storedBox, boxes.data)
+  const boxOnline = useBoxOnline(boxId ?? null, boxes.data)
+  // The thread created by an earlier attempt, and the repository and box it was created with; a retry after a failed
+  // send reuses it instead of creating another, unless either was changed since.
+  const created = useRef<{ task: Task; repo: string | undefined; boxId: string | null | undefined } | null>(null)
 
   // TODO: let the agent name the thread from the conversation instead of the first line of the prompt.
   const start = useMutation({
@@ -29,11 +45,11 @@ export function NewThreadPage() {
       // A message of only files is titled after the first one.
       const title = threadTitle(body.text) || threadTitle(files[0]?.name ?? "")
       const previous = created.current
-      const task =
-        previous !== null && previous.repo === repo
-          ? previous.task
-          : await api.createTask({ title, ...(repo === undefined ? {} : { checkout: { repo } }) })
-      created.current = { task, repo }
+      let task: Task
+      if (previous !== null && previous.repo === repo && previous.boxId === boxId) task = previous.task
+      else if (boxOnline === false) throw new Error("That box is offline. Pick another box or start it first.")
+      else task = await api.createTask({ title, ...(repo === undefined ? {} : { checkout: { repo } }) }, boxId)
+      created.current = { task, repo, boxId }
       // The thread exists from here on, even if the message below fails.
       storeTask(queryClient, task)
       return { task, sent: await api.sendMessage(task.id, body, files) }
@@ -62,9 +78,17 @@ export function NewThreadPage() {
         />
         <div className="mx-4 flex min-w-0 items-center gap-2 rounded-b-xl bg-input px-1.5 py-1 text-xs text-muted-foreground shadow-well">
           <RepoPicker value={repo} onChange={setRepo} disabled={start.isPending} />
-          <span className="ml-auto truncate pr-1.5">
+          <span className="min-w-0 flex-1 truncate">
             {repo === undefined ? "The agent picks repositories as it goes" : "Checked out before the agent starts"}
           </span>
+          {boxes.data && boxes.data.boxes.length > 0 && boxId !== undefined && (
+            <BoxPicker
+              value={boxId}
+              list={boxes.data}
+              onChange={(next) => setStoredBox(next ?? KESTREL_BOX)}
+              disabled={start.isPending}
+            />
+          )}
         </div>
       </div>
     </div>
