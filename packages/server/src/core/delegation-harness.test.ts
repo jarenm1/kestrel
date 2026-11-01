@@ -1,0 +1,73 @@
+import { expect, test } from "bun:test"
+import { Effect, Either, Layer } from "effect"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { Config, type ServerConfig } from "../config"
+import { CredentialBroker } from "../broker"
+import { CredentialStore } from "../credentials"
+import { CliAuth } from "../cliauth"
+import { DesktopManager } from "../desktop"
+import { GitHub } from "../github/api"
+import { AgentHarness, AgentHarnessLive } from "./harness"
+import { EventHubLive } from "./events"
+import { CoreLive, CoreService } from "./service"
+import { StateLive, StateStore } from "./state"
+import { WorkspaceLive } from "./workspace"
+
+test("a real child harness run delivers its final response to the parent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-delegate-harness-"))
+  const cli = join(root, "agent.ts")
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin }).on("line", () => {
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
+})
+`)
+  const config: ServerConfig = {
+    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
+    shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
+    agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "" },
+    fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
+    maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3, desktopBundleMs: 0,
+    githubApiUrl: "https://api.github.com",
+  }
+  const configLayer = Layer.succeed(Config, config)
+  const deps = Layer.mergeAll(
+    configLayer, WorkspaceLive, StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))), EventHubLive,
+    Layer.succeed(CredentialBroker, {
+      issue: () => Effect.succeed({ token: "test-only", env: {} }), revoke: () => Effect.void,
+      grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
+    }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), shutdown: () => Effect.void }),
+    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
+    Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never),
+  )
+  const harness = AgentHarnessLive.pipe(Layer.provide(deps), Layer.provideMerge(deps))
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const core = yield* CoreService
+      const agent = yield* AgentHarness
+      const now = new Date().toISOString()
+      yield* store.update((s) => {
+        s.tasks.push({ id: "parent", owner: "owner", title: "Parent", status: "running", createdAt: now, updatedAt: now, checkouts: [] })
+        s.runs.push({ id: "parent-run", taskId: "parent", prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "anthropic" })
+        return Either.right(undefined)
+      })
+      try {
+        const child = yield* core.delegate("parent", "parent-run", { title: "Child", message: "Do the task", requestId: "once" })
+        let delivered = false
+        for (let i = 0; i < 60; i++) {
+          const state = yield* store.read
+          if (state.messages.some((m) => m.id === `delegation-result:${child.id}` && m.text.includes("Child finished successfully"))) { delivered = true; break }
+          yield* Effect.sleep("100 millis")
+        }
+        expect(delivered).toBe(true)
+        expect((yield* core.delegatedStatus("parent", child.id)).run?.status).toBe("succeeded")
+        expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Child finished successfully")
+      } finally { yield* agent.stopAll() }
+    }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness)))))
+  } finally { await rm(root, { recursive: true, force: true }) }
+}, 12_000)
