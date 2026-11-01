@@ -95,6 +95,28 @@ describe("checkout git runs in the shadow", () => {
     }
   })
 
+  test("listFiles lists tracked and untracked files without ignored ones, and caps the list", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const co = await makeCheckout(root, origin)
+
+    await writeFile(join(co.spec.dir, ".gitignore"), "node_modules/\n*.log\n")
+    await mkdir(join(co.spec.dir, "src", "lib"), { recursive: true })
+    await writeFile(join(co.spec.dir, "src", "lib", "a.ts"), "a\n")
+    git(co.spec.dir, ["add", "src/lib/a.ts"])
+    git(co.spec.dir, ["commit", "-m", "add a"])
+    await writeFile(join(co.spec.dir, "src", "b.ts"), "b\n")
+    await writeFile(join(co.spec.dir, "debug.log"), "x\n")
+    await mkdir(join(co.spec.dir, "node_modules", "pkg"), { recursive: true })
+    await writeFile(join(co.spec.dir, "node_modules", "pkg", "index.js"), "x\n")
+
+    const all = await withWorkspace((ws) => ws.listFiles({ ...co.spec, limit: 100 }))
+    expect(all).toEqual({ files: [".gitignore", "README.md", "src/b.ts", "src/lib/a.ts"], truncated: false })
+
+    const capped = await withWorkspace((ws) => ws.listFiles({ ...co.spec, limit: 2 }))
+    expect(capped).toEqual({ files: [".gitignore", "README.md"], truncated: true })
+  })
+
   test("the checkout's own .git config and hooks never run on the host", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)

@@ -50,6 +50,7 @@ export const keys = {
     activeRunProvider: ModelProvider | undefined,
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
+  files: (taskId: string) => ["tasks", taskId, "files"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
   /** URL of a file a thread's box serves (a `Paths` path), read from the box the thread lives on. */
   taskFile: (taskId: string, path: string) => ["task-file", taskId, path] as const,
@@ -178,6 +179,7 @@ export const queries = {
       enabled: taskId !== undefined && model !== undefined,
     }),
   diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
+  files: (taskId: string) => queryOptions({ queryKey: keys.files(taskId), queryFn: () => api.getFiles(taskId) }),
   desktop: (taskId: string) =>
     queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
   taskFileUrl: (taskId: string, path: string) =>

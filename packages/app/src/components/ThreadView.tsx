@@ -1,23 +1,34 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
-import { AppWindow, GitCompare, GitPullRequest, Monitor, PanelRightClose, PanelRightOpen, type LucideIcon } from "lucide-react"
+import {
+  AppWindow,
+  FolderTree,
+  GitCompare,
+  GitPullRequest,
+  Monitor,
+  PanelRightClose,
+  PanelRightOpen,
+  type LucideIcon,
+} from "lucide-react"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { PreviewViewer } from "@/components/PreviewViewer"
 import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
+import { FilesPanel } from "@/components/FilesPanel"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
 import { repoShortName } from "@/util"
 
-type TabId = "desktop" | "preview" | "diff"
+type TabId = "desktop" | "preview" | "diff" | "files"
 
 // Add a sidebar tab by adding an entry here and a case in SidebarBody.
 const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "desktop", label: "Desktop", icon: Monitor },
   { id: "preview", label: "Preview", icon: AppWindow },
   { id: "diff", label: "Diff", icon: GitCompare },
+  { id: "files", label: "Files", icon: FolderTree },
 ]
 
 /** The open sidebar's share of the thread's width, remembered across threads and reloads. */
@@ -35,7 +46,7 @@ function storedSidebarShare(): number {
   return Number.isFinite(stored) ? clampShare(stored) : DEFAULT_SIDEBAR_SHARE
 }
 
-/** One thread (task): chat, plus a collapsible Desktop/Preview/Diff sidebar. Key it by taskId. */
+/** One thread (task): chat, plus a collapsible Desktop/Preview/Diff/Files sidebar. Key it by taskId. */
 export function ThreadView({ taskId }: { taskId: string }) {
   const state = useTaskState(taskId)
   // Sidebar starts collapsed: chat is full width, and tab content only mounts while expanded,
@@ -238,5 +249,7 @@ function SidebarBody({
       return <PreviewViewer taskId={taskId} port={previewPort} onSelect={onSelectElement} />
     case "diff":
       return <DiffPanel taskId={taskId} />
+    case "files":
+      return <FilesPanel taskId={taskId} />
   }
 }

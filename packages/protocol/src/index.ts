@@ -396,6 +396,25 @@ export type CheckoutDiff = typeof CheckoutDiff.Type
 export const DiffResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutDiff) })
 export type DiffResponse = typeof DiffResponse.Type
 
+/** Most file paths a checkout lists in `FilesResponse`; a larger tree is cut off and marked `truncated`. */
+export const MAX_CHECKOUT_FILES = 20_000
+
+/** Files of one checkout's working tree: tracked and untracked, without what its `.gitignore` files ignore. */
+export const CheckoutFiles = Schema.Struct({
+  checkoutId: Schema.String,
+  repo: Schema.String,
+  dir: Schema.String,
+  /** Paths relative to the checkout, `/`-separated, sorted; directories are implied by their files. */
+  files: Schema.Array(Schema.String),
+  /** True when the tree has more than `MAX_CHECKOUT_FILES` files and `files` holds only the first ones. */
+  truncated: Schema.Boolean,
+})
+export type CheckoutFiles = typeof CheckoutFiles.Type
+
+/** One entry per checkout, in `Task.checkouts` order; empty for a thread without checkouts. */
+export const FilesResponse = Schema.Struct({ checkouts: Schema.Array(CheckoutFiles) })
+export type FilesResponse = typeof FilesResponse.Type
+
 /**
  * One command the authenticated harness offers in a thread's workspace: a Claude Code slash command, a Codex
  * command (`/compact`, `/review`, `/init`) or a Codex skill. `name` carries no leading `/` or `$`.
@@ -536,6 +555,7 @@ export const Paths = {
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
+  taskFiles: (id: string) => `/api/tasks/${id}/files`,
   taskDesktop: (id: string) => `/api/tasks/${id}/desktop`,
   taskDesktopQuality: (id: string) => `/api/tasks/${id}/desktop/quality`,
   /**

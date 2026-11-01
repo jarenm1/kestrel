@@ -222,6 +222,10 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/tasks/:id/diff",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.diff(user, id)))),
     ),
+    HttpRouter.get(
+      "/api/tasks/:id/files",
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.files(user, id)))),
+    ),
     // Bytes of a file attached to one of the owner's task messages; the MIME type is the content type. Users upload
     // any type, so the response may not run as a page on the app's origin (e.g. an uploaded text/html).
     HttpRouter.get(

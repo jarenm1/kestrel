@@ -33,20 +33,25 @@ export function useTaskState(taskId: string) {
     let diffTimer: number | undefined
     let diffInvalidatedAt = 0
 
-    /** At most one diff invalidation per interval: the first item goes through, later ones share one trailing run. */
-    const invalidateDiff = () => {
-      diffInvalidatedAt = Date.now()
+    /** The diff and file list follow the worktree; only open panels refetch. */
+    const refetchWorktree = () => {
       void queryClient.invalidateQueries({ queryKey: keys.diff(taskId) })
+      void queryClient.invalidateQueries({ queryKey: keys.files(taskId) })
     }
-    const invalidateDiffThrottled = () => {
+    /** At most one worktree invalidation per interval: the first item goes through, later ones share one trailing run. */
+    const invalidateWorktree = () => {
+      diffInvalidatedAt = Date.now()
+      refetchWorktree()
+    }
+    const invalidateWorktreeThrottled = () => {
       const wait = DIFF_INVALIDATE_MS - (Date.now() - diffInvalidatedAt)
       if (wait <= 0) {
-        invalidateDiff()
+        invalidateWorktree()
         return
       }
       diffTimer ??= window.setTimeout(() => {
         diffTimer = undefined
-        invalidateDiff()
+        invalidateWorktree()
       }, wait)
     }
 
@@ -70,8 +75,8 @@ export function useTaskState(taskId: string) {
             break
           case "run.updated":
             queryClient.setQueryData(keys.runs(taskId), (list: Run[] | undefined) => upsert(list, event.run))
-            // A run starting or ending is when the worktree changes; the diff has no events of its own.
-            void queryClient.invalidateQueries({ queryKey: keys.diff(taskId) })
+            // A run starting or ending is when the worktree changes; the diff and files have no events of their own.
+            refetchWorktree()
             break
           case "agent.output":
             setOutput((prev) => ({
@@ -84,8 +89,8 @@ export function useTaskState(taskId: string) {
             queryClient.setQueryData(keys.runItems(event.runId), (list: RunItems | undefined) =>
               upsert(list, event.item),
             )
-            // Items are what change the worktree, so the diff follows them; a run.updated covers the ends.
-            invalidateDiffThrottled()
+            // Items are what change the worktree, so the diff and files follow them; a run.updated covers the ends.
+            invalidateWorktreeThrottled()
             break
           case "desktop.updated": {
             // Only a move into "running" counts as the agent opening it.

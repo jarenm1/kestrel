@@ -21,6 +21,7 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  FilesResponse,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -533,6 +534,7 @@ export const api = {
   runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
+  getFiles: (taskId: string) => onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId)),
   getDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "GET", Paths.taskDesktop(taskId)),
   startDesktop: (taskId: string) => onTask(taskId, DesktopStatus, "POST", Paths.taskDesktop(taskId)),
   stopDesktop: async (taskId: string): Promise<void> => {

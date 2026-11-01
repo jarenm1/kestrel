@@ -71,6 +71,13 @@ export interface WorkspaceShape {
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
   readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
+  /**
+   * Paths of the checkout's files, sorted: tracked and untracked, without what its `.gitignore` files ignore. At most
+   * `limit`; `truncated` says there were more.
+   */
+  readonly listFiles: (
+    spec: CheckoutSpec & { readonly limit: number },
+  ) => Effect.Effect<{ readonly files: ReadonlyArray<string>; readonly truncated: boolean }, WorkspaceError>
   /** Pushes `head` to `refs/heads/<branch>` on `url`. Never forced. */
   readonly pushBranch: (
     spec: CheckoutSpec & { readonly url: string; readonly branch: string; readonly head: string; readonly githubToken?: string },
@@ -536,6 +543,18 @@ const make: WorkspaceShape = {
       } finally {
         yield* Effect.promise(() => rm(index, { force: true }))
       }
+    }),
+
+  listFiles: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      // Against an index that does not exist every file is "other", so this lists the whole working tree minus what
+      // is ignored, without hashing anything or reading the checkout's own index.
+      const env = { GIT_INDEX_FILE: join(spec.shadowPath, `index-${randomUUID()}.absent`) }
+      const out = yield* shadowGit(spec.shadowPath, real, ["ls-files", "-z", "--others", "--exclude-standard"], env)
+      // A nested repository is listed as `dir/` (git does not descend into it); the browser shows files only.
+      const all = out.split("\0").filter((p) => p !== "" && !p.endsWith("/")).sort()
+      return { files: all.slice(0, spec.limit), truncated: all.length > spec.limit }
     }),
 
   pushBranch: ({ shadowPath, dir, threadDir, url, branch, head, githubToken }) =>

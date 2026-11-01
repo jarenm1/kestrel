@@ -9,6 +9,8 @@ import {
   DesktopStatus,
   type DesktopQuality,
   DiffResponse,
+  FilesResponse,
+  MAX_CHECKOUT_FILES,
   InternalError,
   MAX_ATTACHMENT_BYTES,
   Message,
@@ -192,6 +194,8 @@ export interface CoreShape {
   readonly unarchiveTask: (user: string, id: string) => Effect.Effect<Task, NotFound | InternalError>
   /** One entry per checkout: everything on its branch and in its working tree, against its fork point. */
   readonly diff: (user: string, taskId: string) => Effect.Effect<DiffResponse, NotFound | InternalError>
+  /** One entry per checkout: the paths of its working tree's files, without ignored ones. */
+  readonly files: (user: string, taskId: string) => Effect.Effect<FilesResponse, NotFound | InternalError>
 
   readonly listMessages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, NotFound>
   /**
@@ -1358,6 +1362,24 @@ export const CoreLive = Layer.effect(
                 })),
                 Effect.mapError(toInternal("diff")),
               ),
+          )
+          return { checkouts }
+        }),
+
+      files: (user, taskId) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          const checkouts = yield* Effect.forEach(task.checkouts, (checkout) =>
+            workspace.listFiles({ ...checkoutSpec(task.id, checkout), limit: MAX_CHECKOUT_FILES }).pipe(
+              Effect.map(({ files, truncated }) => ({
+                checkoutId: checkout.id,
+                repo: checkout.repo,
+                dir: checkout.dir,
+                files,
+                truncated,
+              })),
+              Effect.mapError(toInternal("files")),
+            ),
           )
           return { checkouts }
         }),
