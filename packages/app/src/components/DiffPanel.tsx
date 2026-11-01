@@ -94,7 +94,7 @@ function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
           </Button>
         )}
       </div>
-      <div className="max-h-[60vh] overflow-x-hidden overflow-y-auto rounded-xl bg-code font-mono text-xs shadow-well">
+      <div className="overflow-clip rounded-xl bg-code font-mono text-xs shadow-well">
         {files.length === 0 && <p className="px-3 py-2.5 text-muted-foreground">No changes.</p>}
         {files.map((file) => (
           <FileSection key={fileKey(file)} file={file} collapsed={isCollapsed(file)} onToggle={() => toggle(file)} />
