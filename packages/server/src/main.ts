@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
-import { Effect, Fiber, Layer } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
+import { Effect, Layer } from "effect"
+import { BOX_USER_HEADER, InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config, type ServerConfig } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -19,8 +19,7 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { BOX_DEV_HEADER, runRelay } from "./relay/client"
-import { makeBoxAuth } from "./direct/auth"
+import { BOX_DEV_HEADER, makeBoxAuth } from "./direct/auth"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
 
@@ -44,8 +43,7 @@ const AppLive = Layer.provideMerge(TaskStatsLive, CoreWithBase)
 const MCP_PREFIX = "/mcp/"
 
 /**
- * The control plane the automation tools call: a managed box with its own secret, else the relayed box with the relay
- * token. A user's own box has no automations.
+ * The control plane the automation tools call: a managed box with its own secret. A user's own box has no automations.
  */
 const automationControl = (config: ServerConfig): ControlClient | null => {
   if (config.direct?.managed) {
@@ -55,7 +53,7 @@ const automationControl = (config: ServerConfig): ControlClient | null => {
       boxSecret: config.direct.boxSecret,
     })
   }
-  return config.relay === null ? null : makeControlClient(config.relay)
+  return null
 }
 
 /** Reads a node request body into a web Request so the Effect HttpApp can handle it. */
@@ -64,8 +62,9 @@ const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
   const headers = new Headers()
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue
-    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
-    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER || name === CREDENTIALS_HEADER) continue
+    // Identity comes only from a verified box token, which the direct listener turns into these headers. A local caller
+    // (e.g. a sandboxed agent) cannot claim a user or dev access.
+    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER) continue
     if (Array.isArray(value)) for (const v of value) headers.append(name, v)
     else headers.set(name, value)
   }
@@ -191,7 +190,7 @@ const program = Effect.gen(function* () {
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
-  // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
+  // Task streams are served on this listener's upgrade path.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
   yield* listen(server, config.host, config.port)
@@ -203,18 +202,9 @@ const program = Effect.gen(function* () {
     Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
   )
 
-  let relayFiber: Fiber.RuntimeFiber<void> | null = null
-  if (config.relay) {
-    relayFiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
-    )
-    yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  }
-
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   if (activity !== null) yield* activity.close
-  if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   yield* closeServer(server)

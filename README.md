@@ -73,10 +73,10 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 | Path | What |
 |---|---|
 | [`packages/app`](packages/app) | React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves the public pages on `kestrel-agent.com` and the app on `app.kestrel-agent.com`. |
-| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API, the managed-box fleet registry and the legacy relay to the box. Serves the built app. |
-| [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
+| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API, and the managed-box fleet registry. Serves the built app. |
+| [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Serves the apps directly at its own URL. Also the `kestrel-box` CLI (`src/cli`). |
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
-| [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
+| [`packages/protocol`](packages/protocol) | Shared Effect schemas: control API, domain and REST. |
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
 
 Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
@@ -86,5 +86,5 @@ Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harne
 - **App and control plane:** Workers Builds deploys `main` (`bun run build:app`, then `wrangler deploy` in `packages/control`). By hand: `bunx cf builds create d87f7f0a-5dee-45c5-bb88-e5829c3a7792 --branch main`.
 - **GitHub sign-in:** a GitHub OAuth app with callback `https://app.kestrel-agent.com/auth/github/callback`; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are secrets on Worker `kestrel`.
 - **Production box:** `nix run .#box-auto` on the host; it follows `main` (or `KESTREL_BOX_REF`) and restarts once the box is idle, so merges don't interrupt agent runs ([details](docs/box.md#production-host)).
-- **Kestrel's boxes:** a managed fleet that operators add and drain; users not yet assigned to a box use the legacy relay ([details](docs/box.md#managed-boxes-fleet)).
+- **Kestrel's boxes:** a managed fleet that operators add and drain; a user with no assigned box has none until one is assigned ([details](docs/box.md#managed-boxes-fleet)).
 - **Previews:** every branch gets `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (own empty Hub, no secrets, no box; UI review only).

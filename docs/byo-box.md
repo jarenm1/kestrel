@@ -80,12 +80,9 @@ from the config.
 
 ## Before step 1
 
-- One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
-  still holds for Kestrel's own box.
-- One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic, including the desktop stream, goes browser → Worker → Hub → relay → box. Every relayed request is a
-  Durable Object request, which we pay for.
-- The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
+- Each box has its own secret, and the control plane mints tokens per box. There is no shared box token.
+- App traffic goes browser → box directly, with a box token. The control plane handles sign-in, the box list and token minting, not thread data.
+- The box learns the user from the box token; its own port serves no thread data without one.
 - Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
 - The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
   mobile app has a configurable `serverUrl` and sends an explicit session header.
@@ -104,7 +101,7 @@ flowchart LR
 
 - Sign-in and accounts stay on `app.kestrel-agent.com`.
 - Box registry: per-user boxes, each with an id, a public URL and a secret. Boxes are owned by one user, who picks the
-  active box their apps use. `null` means Kestrel's own box: its managed box when `BoxList.managedBox` is set, otherwise the legacy relay (see [box.md](box.md#managed-boxes-fleet)).
+  active box their apps use. `null` means Kestrel's own managed box (see [box.md](box.md#managed-boxes-fleet)); with no managed box there is no box to call.
 - Box tokens: short-lived (1 h) HS256 JWTs the control plane mints for the owner (claims: `sub` user, `aud` box id,
   `exp`, `cv` credentials version, `dev`), keyed by that box's secret (`packages/protocol/src/boxtoken.ts`). The box
   verifies them offline, so the control plane is not on the request path.
@@ -120,7 +117,7 @@ flowchart LR
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
-- Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
+- Automations fire only on Kestrel's own managed boxes for now; the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.

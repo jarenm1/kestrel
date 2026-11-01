@@ -3,17 +3,21 @@ import { StyleSheet, Text, type StyleProp, type ViewStyle } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries } from "@/api/queries";
+import { useAuth } from "@/auth/AuthContext";
 import { Alert } from "@/components/ui/Alert";
-import { colors, fonts } from "@/theme";
+import { colors } from "@/theme";
 
 /** Warning shown only once the box is known to be offline, the web app's `BoxOfflineBanner`. */
 export function BoxOfflineBanner({ style }: { style?: StyleProp<ViewStyle> }) {
   const offline = useBoxOffline();
+  const { activeBoxId } = useAuth();
   if (!offline) return null;
   return (
     <Alert variant="warning" style={style}>
       <Text style={styles.bannerText}>
-        Agent box offline. Start it with <Text style={styles.code}>nix run .#box</Text>
+        {activeBoxId === null
+          ? "Kestrel's box is unavailable right now."
+          : "Your box is offline. Check that it is running and reachable from this device."}
       </Text>
     </Alert>
   );
@@ -31,9 +35,5 @@ const styles = StyleSheet.create({
     color: colors.warning,
     fontSize: 14,
     lineHeight: 20,
-  },
-  code: {
-    color: colors.foreground,
-    fontFamily: fonts.mono,
   },
 });

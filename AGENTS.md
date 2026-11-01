@@ -95,9 +95,9 @@ need screenshots in the PR:** push them to an orphan branch `<github-login>/<top
 | Path | What | Notes |
 |---|---|---|
 | `packages/app` | React SPA (Vite, Tailwind v4, shadcn/ui, TanStack Query) | Imports via `@/`. One build, two hosts (`src/routes.ts`): on `kestrel-agent.com` / `site.localhost` only the public pages (`/` landing, `/pricing`); on the app host the new chat at `/`, threads at `/c/:id`, everything behind `RequireAuth` in `App.tsx` except `/login`. UI primitives in `src/components/ui` (`bunx shadcn add <x>`). All query keys and options live in `src/api/queries.ts`; REST calls in `src/api/client.ts`; live events write into the query cache (`src/hooks/useTaskState.ts`). |
-| `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
+| `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, managed-box fleet | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
-| `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
+| `packages/protocol` | Effect Schema types shared by everything | Control API (`control.ts`), domain + REST (`index.ts`). |
 | `docs/architecture.md` | Diagram and who owns what | Read it before touching an area you don't own. |
 
 ## Conventions

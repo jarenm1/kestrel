@@ -578,7 +578,6 @@ export const Paths = {
   mcp: (taskId: string) => `/mcp/${taskId}`,
 } as const
 
-export * from "./relay"
 export * from "./control"
 export * from "./refs"
 export * from "./models"

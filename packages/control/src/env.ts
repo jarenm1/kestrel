@@ -5,8 +5,6 @@ export interface Env {
   ASSETS: Fetcher
   /** Singleton control-plane Durable Object. */
   HUB: DurableObjectNamespace<Hub>
-  /** Shared secret the agent box presents as `Authorization: Bearer <BOX_TOKEN>`. */
-  BOX_TOKEN?: string
   GITHUB_CLIENT_ID?: string
   GITHUB_CLIENT_SECRET?: string
   /** Dev only: when set, enables `GET /auth/dev-login` as this login. Never set in production. */
@@ -26,10 +24,3 @@ export const hub = (env: Env) => env.HUB.get(env.HUB.idFromName("main"))
 /** Whether `login` is one of `KESTREL_OPERATORS`; GitHub logins compare case-insensitively. */
 export const isOperator = (env: Env, login: string): boolean =>
   (env.KESTREL_OPERATORS ?? "").split(/[\s,]+/).some((op) => op !== "" && op.toLowerCase() === login.toLowerCase())
-
-/**
- * Worker -> Hub only: the caller's session id (from the session cookie). The Hub resolves it, attaches credentials and
- * relays, all in the one Durable Object request. Whatever a browser sends in
- * this header is overwritten by the Worker.
- */
-export const SESSION_HEADER = "x-kestrel-session"

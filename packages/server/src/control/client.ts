@@ -11,10 +11,12 @@ import {
 /** The control plane refused or failed a call. `message` is the control plane's own message, shown to the agent as is. */
 export class ControlError extends Data.TaggedError("ControlError")<{ readonly message: string }> {}
 
-/** Who the box is to the control plane: the relayed box with the relay's token, or a managed box with its secret. */
-export type ControlConfig =
-  | { readonly controlUrl: string; readonly boxToken: string }
-  | { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string }
+/** Who the box is to the control plane: a managed box, with its own id and secret. */
+export interface ControlConfig {
+  readonly controlUrl: string
+  readonly boxId: string
+  readonly boxSecret: string
+}
 
 /** The automations the box may manage for one user. Every call acts for `user`; the control plane enforces ownership. */
 export interface ControlClient {
@@ -28,7 +30,7 @@ export interface ControlClient {
 const TIMEOUT_MS = 15_000
 const INVALID_ANSWER = "control plane sent an unexpected answer"
 
-/** The control plane over HTTP(S): the scheme of the relay URL swapped, origin and base path kept, trailing slashes dropped. */
+/** The control plane over HTTP(S): ws(s) swapped to http(s), origin and base path kept, trailing slashes dropped. */
 export const controlBase = (controlUrl: string): string => {
   const url = new URL(controlUrl)
   url.protocol = url.protocol === "wss:" ? "https:" : url.protocol === "ws:" ? "http:" : url.protocol
@@ -53,10 +55,7 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
   const base = controlBase(config.controlUrl)
 
   // Every call is authenticated as the box, and names the user it acts for in BOX_USER_HEADER.
-  const boxAuth: Record<string, string> =
-    "boxSecret" in config
-      ? { authorization: `Bearer ${config.boxSecret}`, [BOX_ID_HEADER]: config.boxId }
-      : { authorization: `Bearer ${config.boxToken}` }
+  const boxAuth: Record<string, string> = { authorization: `Bearer ${config.boxSecret}`, [BOX_ID_HEADER]: config.boxId }
   const call = (user: string, method: string, path: string, body?: unknown): Effect.Effect<unknown, ControlError> =>
     Effect.gen(function* () {
       const response = yield* attempt(

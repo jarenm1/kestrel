@@ -56,7 +56,6 @@ createInterface({ input: process.stdin })
     sandboxSslCertFile: null,
     systemd: null,
     maxConcurrentRuns: 0,
-    relay: null,
     direct: null,
     toolkitsFlake: null,
     taskDiskMax: 1024 ** 3,

@@ -5,7 +5,7 @@ import {
   AutomationRun,
   BOX_TOKEN_QUERY,
   BoxList,
-  BoxStatus,
+  type BoxStatus,
   BoxToken,
   CliAuthStatus,
   CliLoginCodeBody,
@@ -60,7 +60,7 @@ function errorMessage(text: string, fallback: string): string {
   return text || fallback;
 }
 
-/** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
+/** A box the apps reach directly: the user's own box, or their managed box. `null` means there is no box to call. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
@@ -76,7 +76,7 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 export interface ApiClient {
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
-  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
+  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token. */
   socketUrl(path: string): Promise<string>;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
@@ -160,7 +160,7 @@ async function send<A, I>(
   }
 }
 
-/** Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box). */
+/** Creates an API client bound to one server URL, session cookie and active box (`null` when there is no box to call). */
 export function createApiClient(
   serverUrl: string,
   sessionCookie: string | null,
@@ -199,15 +199,20 @@ export function createApiClient(
     return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body);
   }
 
-  // Box-served paths: the relayed Kestrel box goes through the Worker with the session; a direct box takes a bearer token.
+  // The box the calls go to. Without one there is nothing to call: no managed box while no box of the user's own is active.
+  function requireBox(): ActiveBox {
+    if (activeBox === null) throw new ApiError(0, "Kestrel's box is not available");
+    return activeBox;
+  }
+
+  // Box-served paths: every call goes straight to the box's URL with a bearer token.
   async function boxRequest<A, I>(
     schema: Schema.Schema<A, I, never>,
     method: Method,
     path: string,
     body?: unknown
   ): Promise<A> {
-    if (activeBox === null) return request(schema, method, path, body);
-    const box = activeBox;
+    const box = requireBox();
     const attempt = async () =>
       send(schema, method, `${box.url}${path}`, { Authorization: `Bearer ${await mintBoxToken(box)}` }, body);
     try {
@@ -222,16 +227,16 @@ export function createApiClient(
 
   return {
     fileSource: async (path) => {
-      if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
-      const token = await mintBoxToken(activeBox);
-      return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
+      const box = requireBox();
+      const token = await mintBoxToken(box);
+      return { uri: `${box.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
     },
     socketUrl: async (path) => {
-      if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const token = await mintBoxToken(activeBox);
-      return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+      const box = requireBox();
+      const token = await mintBoxToken(box);
+      return `${box.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
-    previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
+    previewFrameUrl: (taskId, token) => requireBox().url + Paths.taskPreviewFrame(token, taskId),
 
     // Control plane (served by the Worker).
     me: () => request(Me, "GET", ControlPaths.me),
@@ -244,14 +249,14 @@ export function createApiClient(
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
-      if (activeBox === null) return request(BoxStatus, "GET", ControlPaths.box);
+      if (activeBox === null) return { online: false, boxVersion: null };
       // A direct box is reached at its own URL: its unauthenticated health route answers, and an unreachable box reads as offline.
       try {
         const health = await send(Health, "GET", `${activeBox.url}${Paths.health}`, {});
-        return { online: true, connectedAt: null, boxVersion: health.version };
+        return { online: true, boxVersion: health.version };
       } catch (error) {
         if (error instanceof ApiError && error.status >= 400 && error.status < 500) throw error;
-        return { online: false, connectedAt: null, boxVersion: null };
+        return { online: false, boxVersion: null };
       }
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
@@ -265,7 +270,7 @@ export function createApiClient(
     listAutomationRuns: (id) => request(Schema.Array(AutomationRun), "GET", ControlPaths.automationRuns(id)),
     triggerAutomation: (id, body) => request(AutomationRun, "POST", ControlPaths.automationTrigger(id), body),
 
-    // Agent box (relayed by the Worker, or served directly by the user's own box).
+    // Agent box: served directly by the box at its own URL.
     listTasks: () => boxRequest(Schema.Array(Task), "GET", Paths.tasks),
     createTask: (body) => boxRequest(Task, "POST", Paths.tasks, body),
     getTask: (taskId) => boxRequest(Task, "GET", Paths.task(taskId)),

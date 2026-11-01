@@ -271,7 +271,7 @@
                   if [ -f .box.env ]; then
                     install -m 600 .box.env "$dir/.box.env"
                   else
-                    echo "missing $dir/.box.env (CLOUDAGENTS_CONTROL_URL, CLOUDAGENTS_BOX_TOKEN)" >&2
+                    echo "missing $dir/.box.env (CLOUDAGENTS_CONTROL_URL, CLOUDAGENTS_BOX_ID, CLOUDAGENTS_BOX_SECRET, CLOUDAGENTS_BOX_MANAGED)" >&2
                     exit 1
                   fi
                 fi

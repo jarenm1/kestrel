@@ -19,7 +19,7 @@ interface AuthState {
   boxes: readonly UserBox[];
   /** The box the user's apps use; `null` is Kestrel's managed box */
   activeBoxId: string | null;
-  /** Kestrel's managed box assigned to the user, reached directly; `null` when none is assigned (the relay serves Kestrel's box). */
+  /** Kestrel's managed box assigned to the user, reached directly; `null` when none is assigned. */
   managedBox: ManagedBox | null;
   /** Whether we're currently checking auth state */
   loading: boolean;
@@ -36,7 +36,7 @@ interface AuthActions {
   setActiveBox: (boxId: string | null) => Promise<void>;
 }
 
-/** `activeBox` is the box the app's requests go to, reached directly; `null` means Kestrel's box is relayed. */
+/** `activeBox` is the box the app's requests go to, reached directly; `null` means there is no box to call. */
 type AuthContextValue = AuthState & AuthActions & { activeBox: ActiveBox | null };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -231,7 +231,7 @@ async function fetchMe(
 
 /**
  * The box the apps' requests go to: the user's chosen box, or with no choice (`activeBoxId` null) their managed box.
- * `null` means no direct box applies and Kestrel's box is relayed through the control plane.
+ * `null` means there is no box to call.
  */
 function resolveActiveBox(
   boxes: readonly UserBox[],

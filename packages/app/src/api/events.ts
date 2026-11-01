@@ -75,7 +75,7 @@ export function openTaskEvents(
 
 /**
  * Subscribes to the thread list stream of one box: `task.updated` for the user's threads on it, and `task.deleted`.
- * `target` is Kestrel's box (`null`) or a user box.
+ * `target` is the box to subscribe to: Kestrel's managed box or a user box.
  */
 export function openUserEvents(
   target: Target,
@@ -120,9 +120,9 @@ export interface DesktopConnection {
 
 /**
  * Acks go out after this many binary messages or this long, whichever comes first, so the server bounds what is in
- * flight. Acks are billed relay messages, hence the spacing: the lag an ack reports is about this interval plus a
- * round trip, and the box's resync threshold (FLOW_LAG_LOW_MS = 400) has to sit above that. One message may carry
- * several fragments when the box bundles them; acks count messages, as the box's flow control does.
+ * flight. The lag an ack reports is about this interval plus a round trip, and the box's resync threshold
+ * (FLOW_LAG_LOW_MS = 400) has to sit above that. One message may carry several fragments when the box bundles them;
+ * acks count messages, as the box's flow control does.
  */
 const ACK_EVERY_FRAMES = 15
 const ACK_EVERY_MS = 250

@@ -45,7 +45,7 @@ const CLI_POLL_MS = 3000
 export function Connections() {
   const connections = useQuery(queries.connections())
   const activeBoxId = useActiveBoxId()
-  // With a user box active, the CLI sign-ins live on that box, so its login state replaces the relay's view of them.
+  // With a user box active, the CLI sign-ins live on that box, so its login state replaces the control plane's view of them.
   const direct = typeof activeBoxId === "string"
   const cliAuth = useQuery({ ...queries.cliAuth(), enabled: direct })
   const list = connections.data && (direct ? withBoxCli(connections.data, cliAuth.data) : connections.data)
@@ -75,7 +75,7 @@ export function Connections() {
 
 /**
  * Direct mode: the CLI rows take login state and availability from the user's box, where the CLI actually runs.
- * Labels and the provider list still come from the relay. Until the box answers, the CLI rows read as unavailable.
+ * Labels and the provider list still come from the control plane. Until the box answers, the CLI rows read as unavailable.
  */
 function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAuthStatus[] | undefined): Connection[] {
   return connections.map((connection) => {
@@ -228,7 +228,7 @@ function ConnectionHeader({ label, connected, account }: { label: string; connec
   )
 }
 
-/** Re-reads the relay's connections and the box's CLI sign-ins, which the CLI rows show together. */
+/** Re-reads the control plane's connections and the box's CLI sign-ins, which the CLI rows show together. */
 function invalidateConnections(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: keys.connections })
   void queryClient.invalidateQueries({ queryKey: keys.cliAuth })

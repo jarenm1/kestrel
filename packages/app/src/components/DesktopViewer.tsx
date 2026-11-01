@@ -139,8 +139,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    // Nobody can see the stream, or there is no desktop to stream: stay disconnected. Each connection is a billed
-    // relay request, and the box refuses a stream for a stopped desktop, so connecting anyway would retry every
+    // Nobody can see the stream, or there is no desktop to stream: stay disconnected. The box refuses a stream for a
+    // stopped desktop, so connecting anyway would retry every
     // RECONNECT_MS. The thread's event stream moves `status` to "starting" when the desktop comes up.
     if (!wanted || !active) {
       setStreamError(null)

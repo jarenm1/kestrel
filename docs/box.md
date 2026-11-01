@@ -4,7 +4,7 @@ How the agent box (`packages/server`) runs agents. For the big picture see [arch
 
 ## Models and harnesses
 
-Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override either command (the OpenAI one must start app-server on stdio). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. Streamed items are published at most every 100 ms each, so a token stream is not one relay message per token. The thinking picker offers only the levels the chosen model supports. A thread resumes its agent session while the provider stays the same; after a switch to the other provider the new run starts a fresh session whose prompt carries the conversation so far (the newest ~60k characters). A message sent with no model (nothing connected) runs on Claude Code's default.
+Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override either command (the OpenAI one must start app-server on stdio). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. Streamed items are published at most every 100 ms each, so a token stream is not one WebSocket message per token. The thinking picker offers only the levels the chosen model supports. A thread resumes its agent session while the provider stays the same; after a switch to the other provider the new run starts a fresh session whose prompt carries the conversation so far (the newest ~60k characters). A message sent with no model (nothing connected) runs on Claude Code's default.
 
 A Claude result with `queued_turn_count > 0` is not the run's final outcome: the queued turns must finish too. Those turns have no process-exit deadline after stdin closes; Codex's three-second exit grace applies only after its turn is done. If Claude exits before a queued turn produces its result, the run fails rather than reporting the earlier turn's success.
 
@@ -58,7 +58,7 @@ The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpape
 
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
-On the legacy relay, the desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
+The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
 
 - The first frame after a quiet window goes out at once, so a keystroke or a click on an otherwise still desktop has no added latency.
 - Frames that come while one is held are concatenated into one message, sent when the window is up. A keyframe starts a new message; init segments are never bundled; a message is cut at 1 MiB.
@@ -129,7 +129,7 @@ A user is assigned lazily, whenever the control plane builds their box list or n
 
 - A user keeps their box while it is `active` or `draining`.
 - Otherwise the user is assigned to the active box with the fewest users (ties go to the oldest box).
-- With no active box, the user has no managed box, and their apps use the [legacy relay](#legacy-relay).
+- With no active box, the user has no managed box, and Kestrel's box is unavailable to their apps.
 
 | State | Meaning |
 |---|---|
@@ -157,7 +157,7 @@ Nothing moves a box back to `pending`.
 
 - **Drain** (`draining`): no new users. Current users stay assigned and keep using the box. Draining moves nobody, so use it to stop new assignments before maintenance; set `active` again to resume.
 - **Rotate the secret** (`POST /api/fleet/boxes/:id/secret`): returns the new secret once. Until the box restarts with it, the box rejects tokens minted under the new secret and cannot fetch credentials. Rotate and restart together, when the box is idle.
-- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users, or to the relay if there is none. Their threads stay on the deleted box's disk and do not move.
+- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users. With no other active box, they have no managed box until one is activated. Their threads stay on the deleted box's disk and do not move.
 
 ### Endpoint requirements
 
@@ -201,19 +201,6 @@ The modules are in `deploy/`. Key files must be absolute paths outside `/nix/sto
 
   Set `CLOUDAGENTS_HOST=10.203.0.2` on the box. That address exists only while the tunnel is up, so start the box after the tunnel. The box port opens only on the tunnel interface.
 
-### Cutover of the relayed production box
-
-The production box already dials the relay with `CLOUDAGENTS_BOX_TOKEN`. It keeps that token while it also serves direct traffic: the relay and managed direct mode run in one process, so no user loses the box during the switch.
-
-1. Register it: add the box in Settings › Fleet with its public URL. It is `pending` and gets no users.
-2. Configure the endpoint: serve that URL to `127.0.0.1:8787` on the production host, with `deploy/box-ingress.nix` or your own proxy that meets the [endpoint requirements](#endpoint-requirements).
-3. In `.box.env`, next to `CLOUDAGENTS_CONTROL_URL` and the kept `CLOUDAGENTS_BOX_TOKEN`, add `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and `CLOUDAGENTS_BOX_MANAGED=1`.
-4. Restart the box when it is idle. A restart interrupts agent runs, and `box-auto` defers its restarts while the box is busy.
-5. Verify through the public URL: `https://<url>/api/health` answers, and `https://<url>/mcp` answers 404.
-6. Activate. The box is then the only active box, so every user without a managed box is assigned to it on their next box list. Users keep it while it is `active` or `draining`.
-
-Rollback: Drain does not move users, so they keep the box. To move them back to the relay, delete the box. Its users go to another active box if one exists, otherwise to the relay. The relay works only while the box still runs with `CLOUDAGENTS_BOX_TOKEN`, so keep that token set until the cutover is final.
-
 ### Production host
 
 The production host runs the box with `nix run .#box-auto`. It keeps its own clone in `~/.local/share/kestrel-box` (override with `KESTREL_BOX_DIR`) and polls GitHub every 60 s (`KESTREL_BOX_POLL`). It follows the git ref in `KESTREL_BOX_REF` (default `main`), checking it out at startup. When the ref moves, box-auto fast-forwards to the new commit, reinstalls deps and restarts the box, but only once the box is idle: no agent runs and no desktops, as reported on the box's activity socket. While the box is busy the update is deferred and rechecked on every poll. An update that has waited `KESTREL_BOX_MAX_DEFER` seconds (default 21600, 6 h; 0 waits indefinitely) runs anyway and interrupts whatever is still running. If the activity socket does not answer, box-auto updates without an idle check.
@@ -222,7 +209,7 @@ The box serves the activity socket at `box.sock` in its data dir: `CLOUDAGENTS_D
 
 To ship a change to the box without merging to `main`, push the commit to a release branch and point the box at it: `git push origin <sha>:box-release`, then start box-auto with `KESTREL_BOX_REF=box-release`. Relaunching box-auto restarts the box once, interrupting any run in progress; after that, pushes to the ref follow the rules above.
 
-It reads the box's environment (`CLOUDAGENTS_CONTROL_URL`, and the relay token and/or managed box id and secret above) from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
+It reads the box's environment (`CLOUDAGENTS_CONTROL_URL`, and the managed box id and secret above) from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
 
 ### Control plane traffic per user
 
@@ -232,9 +219,3 @@ Per user, the control plane (the Worker and its Hub Durable Object) handles only
 - a box token from `POST /api/boxes/:id/token`, valid for an hour, for the user's own box or managed box;
 - credential bootstrap: the box fetches its user's connection secrets from `/box/credentials` when a token's credentials version changes;
 - automation dispatch: the control plane calls the box directly with a 5-minute token to start automation runs and fetch CLI sign-in state, and the box's automation tools call `/box/automations` with its own box auth.
-
-### Legacy relay
-
-Until every client and box is cut over, Kestrel's box is also reached through the relay. A box dials `/box/connect` with `CLOUDAGENTS_BOX_TOKEN`, and the control plane forwards each app request over that socket, one Durable Object request per request. Clients use the relay when `BoxList.managedBox` is `null`. Relay deletion is a later change.
-
-Don't run a box against production with the production token from your machine: the control plane keeps one relayed box and a new connection replaces the live one.

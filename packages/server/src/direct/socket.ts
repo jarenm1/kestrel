@@ -2,7 +2,7 @@ import { WebSocket } from "ws"
 import type { StreamSocket } from "../http/streams"
 
 /**
- * Adapts a `ws` socket to the StreamSocket the relay also serves. Text received before a listener is registered is
+ * Adapts a `ws` socket to the StreamSocket the shared stream handlers serve. Text received before a listener is registered is
  * held and delivered on registration; sends on a closed socket are dropped; the close listeners run once.
  */
 export const wsStreamSocket = (ws: WebSocket): StreamSocket => {

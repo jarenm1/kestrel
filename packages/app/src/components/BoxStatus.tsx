@@ -28,7 +28,7 @@ export function BoxOfflineBanner({ className }: { className?: string }) {
   }
   return (
     <Alert variant="warning" className={className}>
-      Agent box offline. Start it with <code className="font-mono text-foreground">nix run .#box</code>
+      Kestrel's box is unavailable right now. Threads on your own boxes still work.
     </Alert>
   )
 }

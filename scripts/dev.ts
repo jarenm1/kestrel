@@ -4,7 +4,6 @@
  * which is what turns the agent sandbox on.
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
-import { randomBytes } from "node:crypto"
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
@@ -36,12 +35,10 @@ const boxPort = env.CLOUDAGENTS_PORT || String(8797 + offset)
 
 const varsPath = join(root, "packages/control/.dev.vars")
 if (!existsSync(varsPath)) {
-  const token = randomBytes(32).toString("hex")
-  writeFileSync(varsPath, `BOX_TOKEN=${token}\nDEV_SESSION_LOGIN=dev\nKESTREL_OPERATORS=dev\n`)
+  writeFileSync(varsPath, `DEV_SESSION_LOGIN=dev\nKESTREL_OPERATORS=dev\n`)
   console.log(`dev: created ${varsPath} (dev sign-in as 'dev')`)
 }
 const varsText = readFileSync(varsPath, "utf8")
-const boxToken = /^BOX_TOKEN=(.+)$/m.exec(varsText)?.[1]?.trim() ?? fail(`no BOX_TOKEN in ${varsPath}`)
 const devLogin = /^DEV_SESSION_LOGIN=(.+)$/m.exec(varsText)?.[1]?.trim() ?? fail(`no DEV_SESSION_LOGIN in ${varsPath}`)
 // The dev sign-in must be an operator to manage the dev managed box. Files made before that existed get the line.
 const operators = /^KESTREL_OPERATORS=(.*)$/m.exec(varsText)?.[1]
@@ -64,7 +61,6 @@ const boxEnv: Record<string, string> = {
   // Separate from a production box on the same machine.
   CLOUDAGENTS_DATA_DIR: dataDir,
   CLOUDAGENTS_CONTROL_URL: `http://127.0.0.1:${controlPort}`,
-  CLOUDAGENTS_BOX_TOKEN: boxToken,
 }
 // The strict sandbox needs the Nix toolchain (CLOUDAGENTS_SANDBOX_PATH, set by the flake) and Linux. Without it agents
 // run unsandboxed unless the caller decided otherwise.
@@ -154,8 +150,7 @@ start("worker", "packages/control", wrangler!, [
   "--var",
   `APP_ORIGIN:http://localhost:${appPort}`,
 ])
-// The dev stack also runs one managed box next to the legacy relay: both run in the same box process, which is how a
-// production box cuts over. The Worker's dev sign-in is an operator, so it registers and activates the box itself.
+// The dev stack runs one managed box. The Worker's dev sign-in is an operator, so it registers and activates the box itself.
 const fleet = await provisionDevFleetBox({
   workerUrl: `http://127.0.0.1:${controlPort}`,
   boxUrl: `http://127.0.0.1:${boxPort}`,

@@ -3,8 +3,8 @@ import { GithubRepoSlug } from "./refs"
 import { AgentModel } from "./models"
 
 /**
- * Control-plane API served by the Worker itself (not relayed to the box).
- * All other `/api/*` paths are relayed to the agent box. `cliAuth` is one of them; the Worker also calls it to merge connections.
+ * Control-plane API served by the Worker itself. Every other `/api/*` path is served by the box, which the apps reach
+ * directly at its URL; `cliAuth` is one of them, and the Worker also calls it to merge connections.
  * Requests authenticate with the `session` cookie set by the GitHub OAuth callback;
  * unauthenticated `/api/*` requests get 401 `{ _tag: "Unauthorized", message }`.
  */
@@ -27,18 +27,16 @@ export const ControlPaths = {
   connection: (provider: string) => `/api/connections/${provider}`,
   /** GET -> GithubRepo[] for the signed-in user's GitHub connection. */
   githubRepos: "/api/github/repos",
-  /** GET -> BoxStatus */
-  box: "/api/box",
-  /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
+  /** GET -> CliAuthStatus[] for the signed-in user, served by the box; the Worker also merges it into connections. */
   cliAuth: "/api/cli-auth",
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
-   * user, replacing any login already pending for them. Relayed to the box.
+   * user, replacing any login already pending for them. Served by the box.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
-  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Relayed. */
+  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Served by the box. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
-  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
+  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Served by the box. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
   /** GET -> Automation[] / POST CreateAutomationBody -> Automation: the signed-in user's automations. */
   automations: "/api/automations",
@@ -50,7 +48,7 @@ export const ControlPaths = {
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
   /**
    * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
-   * The app talks to the active box directly at its `url` with a box token instead of through the relay.
+   * The app talks to the active box directly at its `url` with a box token.
    */
   boxes: "/api/boxes",
   /** PATCH UpdateBoxBody -> UserBox / DELETE -> 204 (clears it as the active box). Other users' ids are 404. */
@@ -103,7 +101,7 @@ export const ControlPaths = {
   /**
    * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user), for managed boxes.
    * Requires `Authorization: Bearer <box secret>` with BOX_ID_HEADER, and the acting user's login in BOX_USER_HEADER;
-   * the user must be assigned to that box. The relayed box authenticates with the shared relay token instead.
+   * the user must be assigned to that box.
    * Never reached from a browser.
    */
   boxAutomations: "/box/automations",
@@ -185,12 +183,15 @@ export const GithubRepo = Schema.Struct({
 })
 export type GithubRepo = typeof GithubRepo.Type
 
-export const BoxStatus = Schema.Struct({
-  online: Schema.Boolean,
-  connectedAt: Schema.NullOr(Schema.String),
-  boxVersion: Schema.NullOr(Schema.String),
-})
-export type BoxStatus = typeof BoxStatus.Type
+/** Connection secrets of the signed-in user, which a box fetches for itself; the sandbox never receives them. */
+export interface BoxCredentials {
+  readonly user: string // GitHub login of the signed-in user
+  readonly github?: string // GitHub OAuth access token
+  readonly anthropic?: string // Anthropic API key
+  readonly openai?: string // OpenAI API key
+  /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
+  readonly dev?: boolean
+}
 
 /**
  * Header naming the box on box-only routes authenticated with a box secret (`ControlPaths.boxSelf`,
@@ -238,13 +239,19 @@ export type UserBox = typeof UserBox.Type
 export const ManagedBox = Schema.Struct({ id: Schema.String, url: BoxUrl })
 export type ManagedBox = typeof ManagedBox.Type
 
+/** A box's status as the apps read it: `online` is false when the box does not answer its health route. */
+export interface BoxStatus {
+  readonly online: boolean;
+  readonly boxVersion: string | null;
+}
+
 export const BoxList = Schema.Struct({
   boxes: Schema.Array(UserBox),
   /** The box the user's apps use; null for Kestrel's managed box. */
   activeBoxId: Schema.NullOr(Schema.String),
   /**
-   * Kestrel's managed box for this user, reached directly. Null while no managed box is active: the apps then reach
-   * Kestrel's box through the control plane's relay.
+   * Kestrel's managed box for this user, reached directly. Null while no managed box is available; the apps then have
+   * no box to reach.
    */
   managedBox: Schema.NullOr(ManagedBox),
 })

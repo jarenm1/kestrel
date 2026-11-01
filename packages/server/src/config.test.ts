@@ -6,7 +6,6 @@ const BOX_VARS = [
   "CLOUDAGENTS_BOX_ID",
   "CLOUDAGENTS_BOX_SECRET",
   "CLOUDAGENTS_BOX_MANAGED",
-  "CLOUDAGENTS_BOX_TOKEN",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -55,19 +54,6 @@ describe("managed box settings", () => {
       CLOUDAGENTS_BOX_MANAGED: "1",
     })
     expect(config.direct).toEqual({ controlUrl: CONTROL, boxId: "box_fleet_1", boxSecret: "secret", managed: true })
-    expect(config.relay).toBeNull()
-  })
-
-  test("the relay token and managed direct mode coexist", () => {
-    const config = configWith({
-      CLOUDAGENTS_CONTROL_URL: CONTROL,
-      CLOUDAGENTS_BOX_ID: "box_fleet_1",
-      CLOUDAGENTS_BOX_SECRET: "secret",
-      CLOUDAGENTS_BOX_MANAGED: "1",
-      CLOUDAGENTS_BOX_TOKEN: "relay-token",
-    })
-    expect(config.direct?.managed).toBe(true)
-    expect(config.relay).toEqual({ controlUrl: CONTROL, boxToken: "relay-token" })
   })
 
   test("a user's own box stays unmanaged", () => {
@@ -75,10 +61,8 @@ describe("managed box settings", () => {
     expect(config.direct).toEqual({ controlUrl: CONTROL, boxId: "box_own", boxSecret: "secret", managed: false })
   })
 
-  test("without box id or secret there is no direct mode, and the relay needs only its token", () => {
-    const config = configWith({ CLOUDAGENTS_CONTROL_URL: CONTROL, CLOUDAGENTS_BOX_TOKEN: "relay-token" })
-    expect(config.direct).toBeNull()
-    expect(config.relay).toEqual({ controlUrl: CONTROL, boxToken: "relay-token" })
+  test("without box id or secret there is no direct mode", () => {
+    expect(configWith({ CLOUDAGENTS_CONTROL_URL: CONTROL }).direct).toBeNull()
   })
 
   test("a box id without the control plane URL is refused", () => {

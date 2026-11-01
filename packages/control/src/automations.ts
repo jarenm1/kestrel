@@ -42,7 +42,7 @@ const readBody = async <A, I>(
 }
 
 const githubToken = async (env: Env, login: string, message: string): Promise<string | Response> => {
-  const creds = await hub(env).credentials(login)
+  const creds = await hub(env).connectionSecrets(login)
   return creds.github ?? errorResponse(409, "Conflict", message)
 }
 
@@ -78,7 +78,7 @@ const releaseHook = async (env: Env, login: string, slug: string): Promise<void>
   const key = slug.toLowerCase()
   try {
     if (await hub(env).githubHookInUse(key)) return
-    const token = (await hub(env).credentials(login)).github
+    const token = (await hub(env).connectionSecrets(login)).github
     const hook = await hub(env).githubHook(key)
     if (token === undefined || hook === null) return
     await deletePullRequestHook(token, slug, hook.hookId)
@@ -203,8 +203,8 @@ export const handleAutomations = async (
 }
 
 /**
- * Every `/box/automations` route. The box holds BOX_TOKEN (checked by the caller) and names the user it acts for in
- * BOX_USER_HEADER; that user must exist. Ownership is then enforced by the same handlers the browser uses.
+ * Every `/box/automations` route, for the user named in BOX_USER_HEADER, which must exist. The caller has already checked
+ * the managed box's secret and assignment. Ownership is then enforced by the same handlers the browser uses.
  */
 export const handleBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const login = request.headers.get(BOX_USER_HEADER) ?? ""

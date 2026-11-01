@@ -2,14 +2,17 @@ import { Data, Effect, Either, Schema } from "effect"
 import {
   BOX_ID_HEADER,
   BOX_USER_HEADER,
+  type BoxCredentials,
   BoxSelf,
   type BoxTokenClaims,
   ControlPaths,
-  type RelayCredentials,
   verifyBoxToken,
 } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { CredentialStoreShape } from "../credentials"
+
+/** Set to "1" on a request from a `/auth/dev-login` session (dev-only flows such as fixture replay). Only the direct listener sets it, from the verified token. */
+export const BOX_DEV_HEADER = "x-kestrel-box-dev"
 
 /**
  * The token is missing, malformed, expired, for another box, or for a user who does not own this box (for a managed
@@ -82,7 +85,7 @@ export const makeBoxAuth = (
     if (Either.isLeft(decoded)) throw new Unavailable({ message: INVALID_ANSWER })
     const self = decoded.right
     if (self.owner !== claims.sub) throw new Unauthorized({ message: "token is not for this box's owner" })
-    const creds: RelayCredentials = {
+    const creds: BoxCredentials = {
       user: self.owner,
       github: self.github,
       anthropic: self.anthropic,

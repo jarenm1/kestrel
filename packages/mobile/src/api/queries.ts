@@ -11,7 +11,7 @@ const DIFF_POLL_MS = 3000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    // Every box call crosses the relay; failures surface immediately instead of being retried.
+    // Failures surface immediately instead of being retried.
     queries: { retry: false, refetchOnWindowFocus: false },
   },
 });

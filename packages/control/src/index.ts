@@ -1,29 +1,16 @@
-import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
-import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { decodeBody, errorResponse, json, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
 
-/** The relay's box holds BOX_TOKEN; its dial-in and its legacy automation routes require it. */
-const boxAuthorized = async (request: Request, env: Env): Promise<boolean> => {
-  const auth = request.headers.get("authorization") ?? ""
-  const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
-  return env.BOX_TOKEN !== undefined && token !== "" && (await safeEqual(token, env.BOX_TOKEN))
-}
-
-/** The agent box dials in here; the Durable Object accepts the socket once the token matches. */
-const connectBox = async (request: Request, env: Env): Promise<Response> => {
-  if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
-  return hub(env).fetch(request)
-}
-
 /**
- * A user's own box asks who owns it and gets their connection secrets. It proves itself with its own secret rather
- * than BOX_TOKEN, so only the box holding that secret can read them.
+ * A user's own box asks who owns it and gets their connection secrets. It proves itself with its own secret, so only the
+ * box holding that secret can read them.
  */
 const boxSelf = async (request: Request, env: Env): Promise<Response> => {
   if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
@@ -57,7 +44,6 @@ const boxCredentials = async (request: Request, env: Env): Promise<Response> => 
 
 /**
  * Automation calls from a managed box, for the user in `BOX_USER_HEADER` when that user is assigned to the box.
- * The legacy relay token is checked before this.
  */
 const managedBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const caller = managedBoxHeaders(request)
@@ -120,37 +106,24 @@ const withCors = (response: Response, origin: string): Response => {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
-const previewAssetRequest = (request: Request, url: URL): boolean => {
-  if (url.pathname.startsWith("/_preview/")) return true
-  const referer = request.headers.get("referer")
-  if (referer === null) return false
-  try {
-    return /^\/_preview\/[0-9a-f-]{36}\/[^/]+(?:\/|$)/.test(new URL(referer).pathname)
-  } catch {
-    return false
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     try {
-      if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }
-      if (isBoxAutomationPath(url.pathname)) {
-        if (await boxAuthorized(request, env)) return await handleBoxAutomations(request, env, url)
-        return await managedBoxAutomations(request, env, url)
+      if (isBoxAutomationPath(url.pathname)) return await managedBoxAutomations(request, env, url)
+      if (url.pathname.startsWith("/box/")) {
+        return errorResponse(404, "NotFound", "no such route; boxes are reached directly at their own URL")
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
-      if (previewAssetRequest(request, url)) return await hub(env).fetch(request)
       if (url.pathname.startsWith("/api/")) {
         const response = await handleApi(request, env, url)
         const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null

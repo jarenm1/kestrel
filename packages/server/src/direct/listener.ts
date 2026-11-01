@@ -4,9 +4,8 @@ import { Effect, Either, Runtime } from "effect"
 import { BOX_TOKEN_QUERY, BOX_USER_HEADER, Paths } from "@cloudagents/protocol"
 import { WebSocketServer } from "ws"
 import type { CoreShape } from "../core/service"
-import { BOX_DEV_HEADER } from "../relay/client"
 import { serveStream, streamRoute, type WsServices } from "../http/streams"
-import type { BoxAuth } from "./auth"
+import { BOX_DEV_HEADER, type BoxAuth } from "./auth"
 import { wsStreamSocket } from "./socket"
 
 /** Carries a preview frame's token to the core, which checks it belongs to the task. */

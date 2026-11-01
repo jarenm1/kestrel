@@ -56,11 +56,9 @@ export interface ServerConfig {
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
-  /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
-  readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
   /**
-   * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box without
-   * the relay. Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set. `managed`
+   * Direct mode: the box's own control-plane lookups and box-token verification; apps reach the box at its own URL. Null
+   * unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set. `managed`
    * (`CLOUDAGENTS_BOX_MANAGED=1`) marks a Kestrel fleet box that serves many users; otherwise it is the user's own box.
    */
   readonly direct: {
@@ -95,8 +93,8 @@ export interface ServerConfig {
   readonly taskDiskMax: number
   /**
    * Desktop frame bundling window in ms (CLOUDAGENTS_DESKTOP_BUNDLE_MS, default 0 = off). When set, the box sends at
-   * most one relay message per window per viewer: the first fragment after a quiet window goes out at once, later ones
-   * are held and sent together. Fewer billed relay messages, at up to the window of added latency during continuous
+   * most one WebSocket message per window per viewer: the first fragment after a quiet window goes out at once, later ones
+   * are held and sent together. Fewer messages, at up to the window of added latency during continuous
    * motion. See docs/box.md.
    */
   readonly desktopBundleMs: number
@@ -158,7 +156,6 @@ export const loadConfig = (): ServerConfig => {
   return {
     port,
     host,
-    relay: loadRelay(controlUrl, direct),
     direct,
     mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
     dataDir,
@@ -279,19 +276,6 @@ const loadDirect = (controlUrl: string | null): ServerConfig["direct"] => {
   }
   if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
   return { controlUrl, boxId, boxSecret, managed }
-}
-
-/** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */
-const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): ServerConfig["relay"] => {
-  const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
-  if (boxToken === "") {
-    if (controlUrl !== null && direct === null) {
-      throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set without CLOUDAGENTS_BOX_ID")
-    }
-    return null
-  }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
-  return { controlUrl, boxToken }
 }
 
 export const ConfigLive = Layer.sync(Config, loadConfig)
