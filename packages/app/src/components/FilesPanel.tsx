@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react"
+import { useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { ChevronRight, Download, Eye, EyeOff, File, Folder, FolderOpen, Search } from "lucide-react"
 import type { FileRoot, FolderFiles } from "@cloudagents/protocol"
@@ -71,6 +71,18 @@ function formatSize(bytes: number): string {
 
 type StartDownload = (root: FileRoot, path: string) => void
 
+/** Sections the user folded away (`recent`, `workspace`, `home`, `repo:<owner/name>`), remembered across threads. */
+const COLLAPSED_SECTIONS_KEY = "kestrel.filesCollapsed"
+
+function storedCollapsedSections(): ReadonlySet<string> {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(COLLAPSED_SECTIONS_KEY) ?? "[]")
+    return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : [])
+  } catch {
+    return new Set()
+  }
+}
+
 /**
  * The thread's files: what changed outside its repositories during the thread (Recent), the tree of each repository it
  * has checked out (ignored files left out), its working folder outside them (Workspace), and the agent's home, where
@@ -86,6 +98,21 @@ export function FilesPanel({ taskId }: { taskId: string }) {
   // Typing stays responsive on a large tree: the trees catch up with the input instead of blocking it.
   const query = useDeferredValue(filter.trim().toLowerCase())
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [collapsed, setCollapsed] = useState(storedCollapsedSections)
+  useEffect(() => {
+    localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsed]))
+  }, [collapsed])
+
+  /** Props that make a section foldable under `id`. */
+  const foldable = (id: string) => ({
+    collapsed: collapsed.has(id),
+    onToggleSection: () =>
+      setCollapsed((prev) => {
+        const next = new Set(prev)
+        if (!next.delete(id)) next.add(id)
+        return next
+      }),
+  })
 
   const download: StartDownload = (root, path) => {
     setDownloadError(null)
@@ -136,7 +163,13 @@ export function FilesPanel({ taskId }: { taskId: string }) {
           </p>
         )}
         {data && task.data && (
-          <RecentFiles data={data} since={task.data.createdAt} query={query} onDownload={download} />
+          <RecentFiles
+            data={data}
+            since={task.data.createdAt}
+            query={query}
+            onDownload={download}
+            {...foldable("recent")}
+          />
         )}
         {data?.checkouts.map((checkout) => (
           <RootTree
@@ -147,17 +180,64 @@ export function FilesPanel({ taskId }: { taskId: string }) {
             truncated={checkout.truncated}
             query={query}
             onDownload={download}
+            {...foldable(`repo:${checkout.repo}`)}
           />
         ))}
         {data &&
           (["workspace", "home"] as const).map(
             (root) =>
               data[root].files.length > 0 && (
-                <FolderTree key={root} root={root} folder={data[root]} query={query} onDownload={download} />
+                <FolderTree
+                  key={root}
+                  root={root}
+                  folder={data[root]}
+                  query={query}
+                  onDownload={download}
+                  {...foldable(root)}
+                />
               ),
           )}
       </div>
     </div>
+  )
+}
+
+/** What a section needs to fold: whether it is folded, and how to flip that. */
+interface Foldable {
+  collapsed: boolean
+  onToggleSection: () => void
+}
+
+/**
+ * A titled block of the panel. Its title folds the body away. The header row keeps one height whatever `action` it
+ * shows, so the content below never moves when the action appears.
+ */
+function Section({
+  title,
+  detail,
+  action,
+  collapsed,
+  onToggleSection,
+  children,
+}: Foldable & { title: string; detail?: ReactNode; action?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="flex shrink-0 flex-col gap-1.5">
+      <div className="flex h-7 items-center gap-2 text-xs">
+        <button
+          type="button"
+          aria-expanded={!collapsed}
+          onClick={onToggleSection}
+          className="flex min-w-0 items-center gap-1.5 rounded text-left text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", !collapsed && "rotate-90")} />
+          <span className="truncate font-medium text-foreground">{title}</span>
+          {detail !== undefined && <span className="truncate">{detail}</span>}
+        </button>
+        <span className="flex-1" />
+        {!collapsed && action}
+      </div>
+      {!collapsed && children}
+    </section>
   )
 }
 
@@ -167,7 +247,8 @@ function RecentFiles({
   since,
   query,
   onDownload,
-}: {
+  ...fold
+}: Foldable & {
   data: { readonly workspace: FolderFiles; readonly home: FolderFiles }
   since: string
   query: string
@@ -185,11 +266,7 @@ function RecentFiles({
   const now = Date.now()
 
   return (
-    <section className="flex shrink-0 flex-col gap-2">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span className="font-medium text-foreground">Recent</span>
-        <span>changed in this thread, outside the repositories</span>
-      </div>
+    <Section title="Recent" {...fold}>
       <ul className="rounded-xl bg-code py-1 text-xs shadow-well">
         {recent.map((file) => {
           const slash = file.path.lastIndexOf("/")
@@ -215,7 +292,7 @@ function RecentFiles({
           )
         })}
       </ul>
-    </section>
+    </Section>
   )
 }
 
@@ -225,7 +302,8 @@ function FolderTree({
   folder,
   query,
   onDownload,
-}: {
+  ...fold
+}: Foldable & {
   root: "workspace" | "home"
   folder: FolderFiles
   query: string
@@ -242,6 +320,7 @@ function FolderTree({
       truncated={folder.truncated}
       query={query}
       onDownload={onDownload}
+      {...fold}
     />
   )
 }
@@ -259,7 +338,8 @@ function RootTree({
   truncated,
   query,
   onDownload,
-}: {
+  ...fold
+}: Foldable & {
   title: string
   root: FileRoot
   paths: readonly string[]
@@ -296,23 +376,19 @@ function RootTree({
   }
 
   return (
-    <section className="flex shrink-0 flex-col gap-2">
-      <div className="flex items-center gap-3 text-xs">
-        <span className="flex min-w-0 items-center gap-2 text-muted-foreground">
-          <span className="truncate font-medium text-foreground">{title}</span>
-          <span className="truncate">
-            {matches !== null && `${matches.length} of `}
-            {truncated ? "first " : ""}
-            {paths.length} {paths.length === 1 ? "file" : "files"}
-          </span>
-        </span>
-        <span className="flex-1" />
-        {matches === null && open.size > 0 && (
-          <Button variant="ghost" size="sm" onClick={() => setOpen(new Set())}>
+    <Section
+      title={title}
+      detail={`${matches !== null ? `${matches.length} of ` : ""}${truncated ? "first " : ""}${paths.length} ${paths.length === 1 ? "file" : "files"}`}
+      action={
+        matches === null &&
+        open.size > 0 && (
+          <Button variant="ghost" size="sm" className="h-6" onClick={() => setOpen(new Set())}>
             Collapse all
           </Button>
-        )}
-      </div>
+        )
+      }
+      {...fold}
+    >
       <div
         role="tree"
         aria-label={`Files of ${title}`}
@@ -338,7 +414,7 @@ function RootTree({
           <p className="px-3 py-1.5 text-muted-foreground">The tree has more files than this; the rest are not shown.</p>
         )}
       </div>
-    </section>
+    </Section>
   )
 }
 
