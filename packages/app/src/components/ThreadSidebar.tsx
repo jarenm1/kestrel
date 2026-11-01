@@ -100,8 +100,9 @@ interface Props {
 }
 
 /**
- * The user's threads (tasks) as vertical tabs, most recent first. Collapsed, it is an icon rail; the button that
- * expands it again lives in the page panel (`WorkspaceLayout`).
+ * The user's threads (tasks) as vertical tabs: those waiting on the user first, working ones last, each group most
+ * recent first. Collapsed, it is an icon rail; the button that expands it again lives in the page panel
+ * (`WorkspaceLayout`).
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const now = useNow(CLOCK_TICK_MS)
@@ -111,7 +112,11 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
-  const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  // Working threads need nothing from the user, so they sink below the ones that do.
+  const byRecent = [...(tasks ?? [])].sort(
+    (a, b) =>
+      Number(a.status === "running") - Number(b.status === "running") || b.updatedAt.localeCompare(a.updatedAt),
+  )
   const sorted = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - sorted.length
 
