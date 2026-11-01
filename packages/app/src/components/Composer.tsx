@@ -42,6 +42,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
+import { useOpenUsagePanel } from "@/components/UsagePanel"
 import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
@@ -320,6 +321,13 @@ interface Props {
   ask?: Message | undefined
 }
 
+/** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
+const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show this month's agent usage", prefix: "/" }
+
+/** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
+const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>
+  commands.filter((c) => !(c.name === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
+
 /** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
 export function Composer({
   onSend,
@@ -354,6 +362,7 @@ export function Composer({
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex]
   const slashMenuId = useId()
+  const openUsagePanel = useOpenUsagePanel()
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
   const connections = useQuery(queries.connections())
@@ -385,8 +394,9 @@ export function Composer({
     trigger === "/" ||
     (trigger === "$" &&
       (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)))
+  // A new thread has no harness to ask, so only Kestrel's own `/` commands list there.
   const slashQuery =
-    taskId !== undefined &&
+    (taskId !== undefined || trigger === "/") &&
     trigger !== undefined &&
     triggerAllowed &&
     caret > 0 &&
@@ -401,19 +411,24 @@ export function Composer({
   })
   // The response is authoritative (an active run may use another provider than the picker); `$` only belongs to Codex.
   const commandProvider = commandQuery.data?.provider ?? expectedProvider
-  const slashMenuOpen =
-    slashQuery !== undefined &&
-    (trigger !== "$" || commandProvider === "openai") &&
-    composerFocused &&
-    !slashDismissed
   const commandMatches =
     slashQuery === undefined
       ? []
-      : (commandQuery.data?.commands ?? []).filter(
+      : [
+          ...(trigger === "/" ? [USAGE_COMMAND] : []),
+          ...withoutShadowed(commandQuery.data?.commands ?? [], commandProvider),
+        ].filter(
           (c) =>
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
         )
+  // On a new thread nothing but those commands can match, and any other `/text` is an ordinary first message to send.
+  const slashMenuOpen =
+    slashQuery !== undefined &&
+    (trigger !== "$" || commandProvider === "openai") &&
+    (taskId !== undefined || commandMatches.length > 0) &&
+    composerFocused &&
+    !slashDismissed
   const selectedCommandIndex =
     commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
   const selectedCommand = selectedCommandIndex === -1 ? undefined : commandMatches[selectedCommandIndex]
@@ -425,6 +440,13 @@ export function Composer({
 
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
+    // Kestrel's own command has no arguments and sends nothing, so picking it runs it.
+    if (command === USAGE_COMMAND) {
+      setText("")
+      setCaret(0)
+      openUsagePanel()
+      return
+    }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
     const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
@@ -456,6 +478,13 @@ export function Composer({
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
+    // Runs here and never reaches the agent, so it works during a turn too; attachments stay for the next message.
+    if (text.trim() === "/usage" && chosenOption === undefined) {
+      setText("")
+      setCaret(0)
+      openUsagePanel()
+      return
+    }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
@@ -630,8 +659,8 @@ export function Composer({
               trigger={trigger ?? "/"}
               provider={commandQuery.data?.provider ?? expectedProvider}
               matches={commandMatches}
-              chosenModel={model !== undefined}
-              pending={commandQuery.isPending}
+              chosenModel={taskId === undefined || model !== undefined}
+              pending={taskId !== undefined && commandQuery.isPending}
               error={commandQuery.error}
               activeIndex={selectedCommandIndex}
               onActiveIndexChange={setActiveCommandIndex}
