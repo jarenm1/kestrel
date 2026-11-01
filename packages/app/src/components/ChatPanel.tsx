@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react"
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
@@ -32,6 +32,9 @@ const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
 
 /** How often the running turn's elapsed time is redrawn. */
 const ELAPSED_TICK_MS = 1000
+
+/** Within this distance of the bottom, keep following new content. */
+const STICK_PX = 80
 
 /** The run's time so far, redrawn every second. */
 function Elapsed({ startedAt }: { startedAt: string }) {
@@ -152,6 +155,8 @@ function ThreadItem({
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
   const threadRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const atEnd = useRef(true)
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   // A run's transcript follows the last user message it took: the prompt, or a later message that steered it or
@@ -159,22 +164,38 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   const transcriptAfter = new Map<string, string>()
   for (const m of sortedMessages) if (m.role === "user" && m.runId !== null) transcriptAfter.set(m.runId, m.id)
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-  // Items of every run in the thread: their count says whether an agent message duplicates its transcript,
-  // and each arrival bumps `dataUpdatedAt`, which is what re-runs the scroll effect.
+  // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(taskId, run.id)) })
   const itemCountByRun = new Map(
     sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]),
   )
-  const itemsRevision = runItemQueries.map((query) => query.dataUpdatedAt).join(",")
   // `task_ask` questions are the messages with `options` (possibly none). The latest one, while the agent is blocked
   // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
   const lastAsk = [...sortedMessages].reverse().find((m) => m.options !== undefined)
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = threadRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [sortedMessages.length, itemsRevision])
+    const content = contentRef.current
+    if (!el || !content) return
+
+    // A newly opened thread starts at the bottom, even if the previous thread was paused.
+    atEnd.current = true
+    const follow = () => {
+      if (atEnd.current) el.scrollTop = el.scrollHeight
+    }
+    follow()
+    // Also follow late layout changes, such as images loading and transcript expansion.
+    const observer = new ResizeObserver(follow)
+    observer.observe(content)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [taskId])
+
+  function onThreadScroll() {
+    const el = threadRef.current
+    if (el) atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX
+  }
 
   const send = useMutation({
     mutationFn: ({ body, files = [] }: { body: SendMessageBody; files?: readonly File[] }) =>
@@ -195,8 +216,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
     <div className="flex min-h-0 flex-1 flex-col">
       <DelegatedTasks taskId={taskId} />
       {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
-      <div className={cn("min-h-0 flex-1 overflow-auto px-5 pt-4", activeRun ? "pb-14" : "pb-4")} ref={threadRef}>
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
+      <div className={cn("min-h-0 flex-1 overflow-auto px-5 pt-4", activeRun ? "pb-14" : "pb-4")} ref={threadRef} onScroll={onThreadScroll}>
+        <div ref={contentRef} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
           {sortedMessages.length === 0 && (
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
           )}
