@@ -28,6 +28,7 @@ export interface ThreadToolDeps {
     readonly delegatedStatus: (taskId: string, childId: string) => Effect.Effect<DelegatedStatus, unknown>
     readonly cancelDelegation: (taskId: string, childId: string) => Effect.Effect<DelegatedStatus, unknown>
     readonly acknowledgeDelegation: (taskId: string, childId: string) => Effect.Effect<boolean, unknown>
+    readonly withSlotReleased: <A, E>(taskId: string, runId: string, wait: Effect.Effect<A, E>) => Effect.Effect<A, E>
   }
 }
 
@@ -127,9 +128,9 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
   }, ({ threadId }) => guard(() => runTool(Effect.map(deps.threads.delegatedStatus(ctx.taskId, threadId), (status) => text(formatDelegation(status))))))
 
   server.registerTool("delegation_wait", {
-    description: "Wait for a delegated task to finish or need user input. Timeout leaves it running; completion is also delivered automatically.",
+    description: "Wait for a delegated task to finish or need user input. While blocked, this run lends its execution slot to queued work and reacquires it before returning. Timeout leaves the child running; reacquiring a busy slot may delay the return beyond the timeout. Completion is also delivered automatically.",
     inputSchema: { threadId: z.string().min(1), timeoutSec: z.number().int().min(1).max(30).optional().describe("Maximum wait in seconds (default 30)") },
-  }, ({ threadId, timeoutSec }) => guard(() => runTool(Effect.gen(function* () {
+  }, ({ threadId, timeoutSec }) => guard(() => runTool(deps.threads.withSlotReleased(ctx.taskId, ctx.runId, Effect.gen(function* () {
     const deadline = Date.now() + (timeoutSec ?? 30) * 1000
     while (true) {
       const status = yield* deps.threads.delegatedStatus(ctx.taskId, threadId)
@@ -142,7 +143,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
       if (Date.now() >= deadline) return text(`${formatDelegation(status)}\nWait timed out; the task continues.`)
       yield* Effect.sleep("1 second")
     }
-  }))))
+  })))))
 
   server.registerTool("delegation_cancel", {
     description: "Cancel the original run of a task delegated by this thread. The child thread and its history remain available.",

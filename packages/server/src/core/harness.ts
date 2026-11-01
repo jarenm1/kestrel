@@ -73,6 +73,8 @@ export interface AgentHarnessShape {
   readonly replay: (task: Task, run: Run, fixturePath: string) => Effect.Effect<void, InternalError>
   /** Runs this box is working on: running, holding a run slot, or waiting for one. */
   readonly activeRunCount: () => Effect.Effect<number>
+  /** Temporarily lend a blocked run's slot to queued work, reacquiring it before the wait returns. */
+  readonly withSlotReleased: <A, E>(taskId: string, runId: string, wait: Effect.Effect<A, E>) => Effect.Effect<A, E>
   /** Stops every active run at shutdown; their questions stay pending for the next start. */
   readonly stopAll: () => Effect.Effect<void>
 }
@@ -197,6 +199,7 @@ export const AgentHarnessLive = Layer.effect(
     const waiting: Array<{ readonly runId: string; readonly grant: (granted: boolean) => void }> = []
     /** The queue item each waiting run shows, with its task for publishing. */
     const queuedItems = new Map<string, { readonly taskId: string; readonly item: AgentItem }>()
+    const suspended = new Map<string, { count: number; closing: boolean; done: Promise<void>; resolve: () => void }>()
 
     /** Frees a run's slot and hands it to the run that has waited longest. No-op for a run that holds no slot. */
     const releaseSlot = (runId: string) => {
@@ -556,6 +559,34 @@ export const AgentHarnessLive = Layer.effect(
       })
 
     const shape: AgentHarnessShape = {
+      withSlotReleased: (taskId, runId, wait) => Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const existing = suspended.get(runId)
+          if (existing?.closing) {
+            yield* restore(Effect.promise(() => existing.done))
+            return yield* shape.withSlotReleased(taskId, runId, wait)
+          }
+          if (existing) existing.count++
+          else if (holding.has(runId)) {
+            const { promise, resolve } = Promise.withResolvers<void>()
+            suspended.set(runId, { count: 1, closing: false, done: promise, resolve })
+            releaseSlot(runId)
+          }
+          const scope = suspended.get(runId)
+          if (!scope) return yield* restore(wait)
+          return yield* restore(wait).pipe(Effect.ensuring(Effect.gen(function* () {
+            scope.count--
+            if (scope.count === 0) {
+              scope.closing = true
+              const running = (yield* store.read).runs.some((r) => r.id === runId && r.status === "running")
+              if (running) yield* admit(taskId, runId)
+              suspended.delete(runId)
+              scope.resolve()
+            }
+            yield* Effect.promise(() => scope.done)
+          })))
+        }),
+      ),
       spawn: (task, run, prompt, display, user, resumeSession, choice) => {
         const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider

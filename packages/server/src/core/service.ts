@@ -1249,6 +1249,7 @@ export const CoreLive = Layer.effect(
         const existing = state.tasks.find((t) => t.delegation?.parentRunId === parentRunId && t.delegation.requestId === input.requestId)
         if (existing) {
           if (existing.delegation?.fingerprint !== fingerprint) return yield* Effect.fail(new Conflict({ message: "requestId was already used for a different task" }))
+          if (existing.delegation?.runId === undefined && existing.status === "failed") return yield* Effect.fail(new Conflict({ message: `Delegated thread ${existing.id} failed before its run was reserved. Inspect it; use a new requestId to start a new task.` }))
           return { ...existing }
         }
         let ancestor: Task | undefined = parent
@@ -1272,7 +1273,7 @@ export const CoreLive = Layer.effect(
             if (child && child.delegation?.runId === undefined) child.status = "failed"
             return Either.right(undefined)
           }).pipe(Effect.ignore)),
-          Effect.mapError((e) => new InternalError({ message: `Created delegated thread ${task.id}, but could not start it: ${e.message}. Retry with the same requestId or inspect the thread.` })),
+          Effect.mapError((e) => new InternalError({ message: `Created delegated thread ${task.id}, but could not start it: ${e.message}. Inspect the thread before deciding whether to start a new task.` })),
         )
         return yield* requireTask(task.id)
       }),

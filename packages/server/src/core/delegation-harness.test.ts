@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Layer } from "effect"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Config, type ServerConfig } from "../config"
@@ -15,13 +15,13 @@ import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore } from "./state"
 import { WorkspaceLive } from "./workspace"
 
-test("a real child harness run delivers its final response to the parent", async () => {
+test("a waiting parent releases the only run slot so a real child can finish", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-delegate-harness-"))
   const cli = join(root, "agent.ts")
   await writeFile(cli, `
 import { createInterface } from "node:readline"
 createInterface({ input: process.stdin }).on("line", () => {
-  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
+  if (!process.env.CLOUDAGENTS_PROMPT?.includes("hold parent")) console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
 })
 `)
   const config: ServerConfig = {
@@ -30,7 +30,7 @@ createInterface({ input: process.stdin }).on("line", () => {
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "" },
     fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
-    maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3, desktopBundleMs: 0,
+    maxConcurrentRuns: 1, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3, desktopBundleMs: 0,
     githubApiUrl: "https://api.github.com",
   }
   const configLayer = Layer.succeed(Config, config)
@@ -53,20 +53,43 @@ createInterface({ input: process.stdin }).on("line", () => {
       const now = new Date().toISOString()
       yield* store.update((s) => {
         s.tasks.push({ id: "parent", owner: "owner", title: "Parent", status: "running", createdAt: now, updatedAt: now, checkouts: [] })
-        s.runs.push({ id: "parent-run", taskId: "parent", prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "anthropic" })
+        s.runs.push({ id: "parent-run", taskId: "parent", prompt: "hold parent", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "anthropic" })
         return Either.right(undefined)
       })
       try {
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, "parent"), { recursive: true }))
+        const initial = yield* store.read
+        yield* agent.spawn(initial.tasks.find((t) => t.id === "parent")!, initial.runs.find((r) => r.id === "parent-run")!, "hold parent", null, "owner", null, {})
         const child = yield* core.delegate("parent", "parent-run", { title: "Child", message: "Do the task", requestId: "once" })
+        const sibling = yield* core.delegate("parent", "parent-run", { title: "Sibling", message: "Do the other task", requestId: "twice" })
+        let queued = false
+        for (let i = 0; i < 20; i++) {
+          if ((yield* agent.items(child.delegation!.runId!)).some((item) => item._tag === "tool" && item.output?.includes("Waiting for a free run slot"))) { queued = true; break }
+          yield* Effect.sleep("50 millis")
+        }
+        expect(queued).toBe(true)
+        const waitFor = (id: string) => agent.withSlotReleased("parent", "parent-run", Effect.gen(function* () {
+          for (let i = 0; i < 60; i++) {
+            if ((yield* core.delegatedStatus("parent", id)).run?.status === "succeeded") return true
+            yield* Effect.sleep("100 millis")
+          }
+          return false
+        }))
+        expect(yield* Effect.all([waitFor(child.id), waitFor(sibling.id)], { concurrency: "unbounded" })).toEqual([true, true])
         let delivered = false
-        for (let i = 0; i < 60; i++) {
-          const state = yield* store.read
-          if (state.messages.some((m) => m.id === `delegation-result:${child.id}` && m.text.includes("Child finished successfully"))) { delivered = true; break }
+        for (let i = 0; i < 30; i++) {
+          if ((yield* store.read).messages.some((m) => m.id === `delegation-result:${child.id}` && m.text.includes("Child finished successfully"))) { delivered = true; break }
           yield* Effect.sleep("100 millis")
         }
         expect(delivered).toBe(true)
         expect((yield* core.delegatedStatus("parent", child.id)).run?.status).toBe("succeeded")
-        expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Child finished successfully")
+        const third = yield* core.delegate("parent", "parent-run", { title: "Third", message: "Do more work", requestId: "third" })
+        let thirdQueued = false
+        for (let i = 0; i < 20; i++) {
+          if ((yield* agent.items(third.delegation!.runId!)).some((item) => item._tag === "tool" && item.output?.includes("Waiting for a free run slot"))) { thirdQueued = true; break }
+          yield* Effect.sleep("50 millis")
+        }
+        expect(thirdQueued).toBe(true)
       } finally { yield* agent.stopAll() }
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness)))))
   } finally { await rm(root, { recursive: true, force: true }) }

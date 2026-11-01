@@ -62,6 +62,11 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(child.delegation?.runId).toBeDefined()
       expect(choices).toEqual([{ model: "gpt-6.1-sol" }])
       expect(Either.isLeft(yield* Effect.either(core.delegate("parent", "parent-run", { ...input, message: "different" })))).toBe(true)
+      const badDispatch = { title: "Bad", message: " ", requestId: "failed-before-run" }
+      expect(Either.isLeft(yield* Effect.either(core.delegate("parent", "parent-run", badDispatch)))).toBe(true)
+      const badRetry = yield* Effect.either(core.delegate("parent", "parent-run", badDispatch))
+      expect(Either.isLeft(badRetry)).toBe(true)
+      if (Either.isLeft(badRetry)) expect(badRetry.left.message).toContain("failed before its run was reserved")
       expect(Either.isLeft(yield* Effect.either(core.delegatedStatus("other", child.id)))).toBe(true)
       const runId = child.delegation!.runId!
       yield* store.update((s) => {
