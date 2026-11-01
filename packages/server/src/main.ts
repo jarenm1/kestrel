@@ -165,7 +165,7 @@ const program = Effect.gen(function* () {
     ask: core.ask,
     automations: { control: automationControl(config), taskOwner: core.taskOwner },
     inbox: core.inbox,
-    threads: { owner: core.taskOwner, list: core.listTasks, messages: core.listMessages, send: core.sendToThread },
+    threads: { owner: core.taskOwner, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread },
     previewOpen: core.previewOpen,
   })
 

@@ -11,6 +11,7 @@ export interface ThreadToolDeps {
   readonly threads: {
     /** The user a thread belongs to: the tools reach that user's threads only. */
     readonly owner: (taskId: string) => Effect.Effect<string, unknown>
+    readonly archive: (user: string, taskId: string) => Effect.Effect<Task, unknown>
     readonly list: (user: string) => Effect.Effect<ReadonlyArray<Task>, unknown>
     readonly messages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, unknown>
     readonly send: (fromTaskId: string, toTaskId: string, text: string) => Effect.Effect<SendMessageResponse, unknown>
@@ -39,6 +40,30 @@ const formatMessage = (message: Message): string => {
 }
 
 export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: ThreadToolDeps): void => {
+  server.registerTool(
+    "thread_close",
+    {
+      description:
+        "Archive this thread when its work is finished and the user does not need to read the final response or take " +
+        "any action. This is useful for automation runs with nothing to report, such as a scheduled check that found " +
+        "no issues. Do not close when the user needs a result, review, decision, follow-up, or explanation of a failure; " +
+        "leave the thread active so they can see it. Call only as the final action after all work is complete. Closing " +
+        "moves the thread to the archive, stops the current run and desktop, and preserves its history and files; " +
+        "the user can unarchive it later. The call may end the run before it returns.",
+      inputSchema: {},
+    },
+    () =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const owner = yield* deps.threads.owner(ctx.taskId)
+            yield* deps.threads.archive(owner, ctx.taskId)
+            return text("Thread archived.")
+          }),
+        ),
+      ),
+  )
+
   server.registerTool(
     "thread_list",
     {
