@@ -399,7 +399,7 @@ export type DiffResponse = typeof DiffResponse.Type
 /** Most file paths a checkout lists in `FilesResponse`; a larger tree is cut off and marked `truncated`. */
 export const MAX_CHECKOUT_FILES = 20_000
 
-/** Files of one checkout's working tree: tracked and untracked, without what its `.gitignore` files ignore. */
+/** Files of one checkout's working tree: what its `.gitignore` files do not ignore, plus files committed at its HEAD. */
 export const CheckoutFiles = Schema.Struct({
   checkoutId: Schema.String,
   repo: Schema.String,

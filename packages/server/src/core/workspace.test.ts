@@ -95,7 +95,7 @@ describe("checkout git runs in the shadow", () => {
     }
   })
 
-  test("listFiles lists tracked and untracked files without ignored ones, and caps the list", async () => {
+  test("listFiles lists files on disk without ignored ones, except committed ones, and caps the list", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)
     const co = await makeCheckout(root, origin)
@@ -103,15 +103,23 @@ describe("checkout git runs in the shadow", () => {
     await writeFile(join(co.spec.dir, ".gitignore"), "node_modules/\n*.log\n")
     await mkdir(join(co.spec.dir, "src", "lib"), { recursive: true })
     await writeFile(join(co.spec.dir, "src", "lib", "a.ts"), "a\n")
+    // Committed despite the ignore rule: it is tracked, so it shows; one deleted since does not.
+    await writeFile(join(co.spec.dir, "keep.log"), "k\n")
+    await writeFile(join(co.spec.dir, "gone.log"), "g\n")
     git(co.spec.dir, ["add", "src/lib/a.ts"])
+    git(co.spec.dir, ["add", "-f", "keep.log", "gone.log"])
     git(co.spec.dir, ["commit", "-m", "add a"])
+    await rm(join(co.spec.dir, "gone.log"))
     await writeFile(join(co.spec.dir, "src", "b.ts"), "b\n")
     await writeFile(join(co.spec.dir, "debug.log"), "x\n")
     await mkdir(join(co.spec.dir, "node_modules", "pkg"), { recursive: true })
     await writeFile(join(co.spec.dir, "node_modules", "pkg", "index.js"), "x\n")
 
     const all = await withWorkspace((ws) => ws.listFiles({ ...co.spec, limit: 100 }))
-    expect(all).toEqual({ files: [".gitignore", "README.md", "src/b.ts", "src/lib/a.ts"], truncated: false })
+    expect(all).toEqual({
+      files: [".gitignore", "README.md", "keep.log", "src/b.ts", "src/lib/a.ts"],
+      truncated: false,
+    })
 
     const capped = await withWorkspace((ws) => ws.listFiles({ ...co.spec, limit: 2 }))
     expect(capped).toEqual({ files: [".gitignore", "README.md"], truncated: true })
