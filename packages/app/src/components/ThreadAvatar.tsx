@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Paths, THREAD_TINTS, threadIdentity, type Task } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
+import { cn } from "@/lib/utils"
 
 /** Glass: a hard sheen across the top half over the tint, inside a border lit from above. */
 function glass([from, to]: readonly [string, string]): CSSProperties {
@@ -16,9 +17,16 @@ function glass([from, to]: readonly [string, string]): CSSProperties {
 
 /**
  * Local thread identity, independent of run state: the first checkout's repository icon once it has loaded, else
- * the monogram (of the repository name, or of the title before any checkout).
+ * the monogram (of the repository name, or of the title before any checkout). `small` is the inline size used
+ * beside text, e.g. ahead of the repository name in the expanded thread list.
  */
-export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "checkouts"> }) {
+export function ThreadAvatar({
+  task,
+  small = false,
+}: {
+  task: Pick<Task, "id" | "title" | "checkouts">
+  small?: boolean
+}) {
   const { monogram, tone, icon } = threadIdentity(task)
   const { data: src } = useQuery({
     ...queries.taskFileUrl(task.id, icon === null ? "" : Paths.taskCheckoutIcon(task.id, icon.checkoutId, icon.blob)),
@@ -32,7 +40,10 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
       aria-hidden="true"
       // Icons bring their own colours: they sit on the neutral graphite glass.
       style={glass(THREAD_TINTS[showIcon ? 7 : tone])}
-      className="inline-flex size-7 shrink-0 items-center justify-center rounded-[0.5rem] border border-transparent font-sans text-[11px] leading-none font-semibold tracking-[0.01em] text-white/95 shadow-soft [text-shadow:0_1px_1px_rgb(0_0_0/0.35)]"
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center border border-transparent font-sans leading-none font-semibold text-white/95 shadow-soft [text-shadow:0_1px_1px_rgb(0_0_0/0.35)]",
+        small ? "size-4.5 rounded-[0.3125rem] text-[7.5px]" : "size-7 rounded-[0.5rem] text-[11px] tracking-[0.01em]",
+      )}
     >
       {/* Trim to cap height so the letters, not the line box, sit on the tile's center. */}
       {!showIcon && <span className="[text-box:trim-both_cap_alphabetic]">{monogram}</span>}
@@ -40,7 +51,7 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
         <img
           src={src}
           alt=""
-          className={showIcon ? "size-4.5 object-contain" : "hidden"}
+          className={showIcon ? (small ? "size-3 object-contain" : "size-4.5 object-contain") : "hidden"}
           onLoad={() => setLoaded(src)}
           onError={() => setLoaded(null)}
         />

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
+import { Archive, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
@@ -203,43 +203,55 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
         )}
         {sorted.map((task) => {
           const isOpen = task.id === openTaskId
+          const [checkout, ...otherCheckouts] = task.checkouts
           return (
             <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
               <NavLink
                 to={threadPath(task.id)}
-                title={[task.title, ...task.checkouts.map((checkout) => `${checkout.repo} · ${checkout.branch}`)].join(
-                  "\n",
-                )}
-                className={(s) => cn(tabClass(s), "grid flex-1 grid-cols-[1.75rem_minmax(0,1fr)] items-center gap-x-2.5 gap-y-0.5 py-2 pr-9 pl-2.5")}
+                title={[task.title, ...task.checkouts.map((c) => `${c.repo} · ${c.branch}`)].join("\n")}
+                className={(s) => cn(tabClass(s), "flex-1 flex-col gap-1 py-2 pr-2.5 pl-2.5")}
               >
-                <span className="row-span-2 inline-flex self-center">
-                  <ThreadAvatar task={task} />
+                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <ThreadAvatar task={task} small />
+                  <span className="min-w-0 flex-1 truncate">
+                    {checkout ? repoShortName(checkout.repo) : "No repo"}
+                    {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
+                  </span>
+                  {/* The archive button takes this corner on hover and on the open thread. */}
+                  <span
+                    className={cn(
+                      "shrink-0 tabular-nums transition-opacity",
+                      isOpen ? "opacity-0" : "group-hover/thread:opacity-0 group-has-[button:focus-visible]/thread:opacity-0",
+                    )}
+                  >
+                    {formatAgo(task.updatedAt, now)}
+                  </span>
                 </span>
                 <FadingTitle text={task.title} />
-                <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-                  <StatusIcon status={task.status} label={STATUS_LABEL[task.status]} className="[&>svg]:size-3" />
-                  <span className="truncate">· {formatAgo(task.updatedAt, now)}</span>
-                </span>
-                {task.checkouts.length > 0 && (
-                  <span className="col-start-2 flex flex-wrap gap-1 pt-0.5">
-                    {task.checkouts.map((checkout) => (
-                      <span
-                        key={checkout.id}
-                        title={checkout.repo}
-                        className="rounded-full bg-white/[0.06] px-1.5 py-px font-mono text-[0.65rem] text-muted-foreground"
-                      >
-                        {repoShortName(checkout.repo)}
+                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  {checkout ? (
+                    <>
+                      {checkout.pullRequest ? (
+                        <GitPullRequest aria-hidden="true" className="size-3.5 shrink-0" />
+                      ) : (
+                        <GitBranch aria-hidden="true" className="size-3.5 shrink-0" />
+                      )}
+                      <span className="min-w-0 flex-1 truncate">
+                        {checkout.branch}
                         {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
                       </span>
-                    ))}
-                  </span>
-                )}
+                    </>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate">{STATUS_LABEL[task.status]}</span>
+                  )}
+                  <StatusIcon status={task.status} className="[&>svg]:size-3.5" />
+                </span>
               </NavLink>
               <Button
                 variant="ghost"
                 size="icon"
                 className={cn(
-                  "absolute top-1.5 right-1.5 size-7 transition-opacity",
+                  "absolute top-1 right-1 size-6 transition-opacity",
                   isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
                 )}
                 aria-label="Archive thread"
