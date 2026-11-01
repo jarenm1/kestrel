@@ -62,6 +62,24 @@ const BASIC_RO_PATHS = [
   "/run/systemd/resolve",
 ]
 
+/**
+ * `basic`'s read-only system binds: BASIC_RO_PATHS, plus the file /etc/resolv.conf resolves to when it lies outside
+ * them, without which nothing in the sandbox resolves names. WSL links /etc/resolv.conf to /mnt/wsl/resolv.conf.
+ * Where the target is already bound (a plain file, NixOS' /etc/static into /nix, systemd-resolved's
+ * /run/systemd/resolve) nothing is added.
+ */
+const basicRoArgs = (): string[] => {
+  const argv = BASIC_RO_PATHS.flatMap((path) => ["--ro-bind-try", path, path])
+  let resolv: string
+  try {
+    resolv = realpathSync("/etc/resolv.conf")
+  } catch {
+    return argv
+  }
+  if (!BASIC_RO_PATHS.some((dir) => resolv.startsWith(`${dir}/`))) argv.push("--ro-bind-try", resolv, resolv)
+  return argv
+}
+
 /** The agent CLIs and the runtime npm-installed ones need; `basic` makes these visible when installed in $HOME. */
 const HOME_TOOLS = ["claude", "codex", "node"]
 
@@ -157,9 +175,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "--gid",
     String(process.getgid?.() ?? 0),
     "--clearenv",
-    ...(opts.level === "strict"
-      ? ["--ro-bind", "/nix/store", "/nix/store"]
-      : BASIC_RO_PATHS.flatMap((path) => ["--ro-bind-try", path, path])),
+    ...(opts.level === "strict" ? ["--ro-bind", "/nix/store", "/nix/store"] : basicRoArgs()),
     "--proc",
     "/proc",
     "--dev",
@@ -228,9 +244,7 @@ export const cliBwrapArgs = (
     "--unshare-all",
     ...(options.network === "host" ? ["--share-net"] : []),
     "--clearenv",
-    ...(options.level === "strict"
-      ? ["--ro-bind", "/nix/store", "/nix/store"]
-      : BASIC_RO_PATHS.flatMap((path) => ["--ro-bind-try", path, path])),
+    ...(options.level === "strict" ? ["--ro-bind", "/nix/store", "/nix/store"] : basicRoArgs()),
     "--proc",
     "/proc",
     "--dev",
