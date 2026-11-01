@@ -87,12 +87,26 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
         s.tasks.find((t) => t.id === blocked.id)!.status = "needs_input"
         s.messages.push({ id: "question", taskId: blocked.id, runId: blocked.delegation!.runId!, role: "agent", text: "Which option?", options: ["A", "B"], createdAt: now })
         s.pendingAsks.push({ taskId: blocked.id, runId: blocked.delegation!.runId!, messageId: "question" })
+        // Match restart reconciliation: the run fails, but its question survives.
+        const interrupted = s.runs.find((r) => r.id === blocked.delegation!.runId)!
+        interrupted.status = "failed"
+        interrupted.interruptedByRestart = true
+        interrupted.endedAt = now
         return Either.right(undefined)
       })
       yield* Effect.sleep("2500 millis")
       expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Which option?")
       expect((yield* store.read).pendingAsks.some((ask) => ask.messageId === "question")).toBe(true)
-      yield* store.update((s) => { s.pendingAsks = s.pendingAsks.filter((ask) => ask.messageId !== "question"); return Either.right(undefined) })
+      expect((yield* store.read).messages.some((m) => m.id === `delegation-result:${blocked.id}`)).toBe(false)
+      const resumed = yield* core.sendMessage("owner", blocked.id, "A", { model: "gpt-6.1-sol" }, [], false)
+      expect(resumed.run.id).not.toBe(blocked.delegation!.runId)
+      expect((yield* core.delegatedStatus("parent", blocked.id)).run?.id).toBe(resumed.run.id)
+      yield* store.update((s) => {
+        s.runs.find((r) => r.id === resumed.run.id)!.status = "succeeded"
+        s.tasks.find((t) => t.id === blocked.id)!.status = "idle"
+        s.messages.push({ id: "answered-result", taskId: blocked.id, runId: resumed.run.id, role: "agent", text: "Finished using option A", createdAt: now })
+        return Either.right(undefined)
+      })
       const second = yield* core.delegate("parent", "parent-run", { ...input, requestId: "second" })
       yield* store.update((s) => {
         const run = s.runs.find((r) => r.id === second.delegation!.runId)!
@@ -103,6 +117,9 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(true)
       expect(yield* core.acknowledgeDelegation("parent", second.id)).toBe(false)
       yield* Effect.sleep("2500 millis")
+      const answeredResults = (yield* store.read).messages.filter((m) => m.id === `delegation-result:${blocked.id}`)
+      expect(answeredResults).toHaveLength(1)
+      expect(answeredResults[0]?.text).toContain("Finished using option A")
       expect((yield* store.read).messages.filter((m) => m.id === `delegation-result:${second.id}`)).toHaveLength(0)
       const nestedParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "nested-parent" })
       const nestedRunId = nestedParent.delegation!.runId!

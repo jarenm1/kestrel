@@ -113,10 +113,11 @@ test("delegate_batch validates every checkout before starting work and uses stab
 test("delegation_wait acknowledges only after regaining capacity and preserves recovery on interruption", async () => {
   let acknowledged = false
   let failReacquisition = true
+  let needsInput = false
   const deps = { threads: {
     delegatedStatus: () => Effect.succeed({
-      task: { id: "child", title: "Child", status: "completed" },
-      run: { id: "child-run", status: "succeeded" },
+      task: { id: "child", title: "Child", status: needsInput ? "needs_input" : "completed" },
+      run: { id: "child-run", status: needsInput ? "failed" : "succeeded" },
       result: "Completed work", resultStatus: "succeeded", waitingForChildren: false,
       usage: { inputTokens: null, outputTokens: null, costUsd: null }, structured: null,
     }),
@@ -139,6 +140,12 @@ test("delegation_wait acknowledges only after regaining capacity and preserves r
     expect(interrupted.isError).toBe(true)
     expect(acknowledged).toBe(false)
     failReacquisition = false
+    needsInput = true
+    const question = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
+    expect(question.isError).not.toBe(true)
+    expect(JSON.stringify(question)).toContain("needs user input")
+    expect(acknowledged).toBe(false)
+    needsInput = false
     const completed = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
     expect(completed.isError).not.toBe(true)
     expect(JSON.stringify(completed)).toContain("Completed work")

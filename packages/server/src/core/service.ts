@@ -191,6 +191,7 @@ const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): bool
   state.tasks.some((child) => {
     const d = child.delegation
     if (d?.parentRunId !== runId) return false
+    if (d.cancelledAt === undefined && state.pendingAsks.some((ask) => ask.taskId === child.id)) return true
     const run = state.runs.find((r) => r.id === d.runId)
     if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
     if (d.resultAcknowledged) return false
@@ -1119,6 +1120,14 @@ export const CoreLive = Layer.effect(
             s.messages.push(message)
             if (task.delegation !== undefined && task.delegation.runId === undefined) {
               task.delegation = { ...task.delegation, runId: run.id }
+            } else if (task.delegation?.runId !== undefined && ask !== null &&
+              task.delegation.cancelledAt === undefined && !task.delegation.resultAcknowledged &&
+              delegationResultRun(s, taskId, task.delegation.runId) === ask.runId &&
+              s.runs.some((r) => r.id === ask.runId && r.interruptedByRestart) &&
+              !s.messages.some((m) => m.id === `delegation-result:${taskId}`)) {
+              // Answering a question preserved across restart continues the delegated
+              // work, rather than leaving its result attached to the interrupted run.
+              task.delegation = { ...task.delegation, runId: run.id }
             }
             // The prompt is what the run starts with, not mail for its inbox.
             seenFor(run.id).add(message.id)
@@ -1327,6 +1336,7 @@ export const CoreLive = Layer.effect(
       const pending = state.tasks.filter((child) => {
         const d = child.delegation
         if (!d) return false
+        if (d.cancelledAt === undefined && state.pendingAsks.some((ask) => ask.taskId === child.id)) return false
         const run = state.runs.find((r) => r.id === d.runId)
         const parent = state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
         const parentRun = state.runs.find((r) => r.id === d.parentRunId)
@@ -1337,6 +1347,7 @@ export const CoreLive = Layer.effect(
         const latest = yield* store.read
         if (latest.tasks.find((t) => t.id === child.id)?.delegation?.resultAcknowledged) return
         const status = yield* delegatedStatus(child.delegation!.parentTaskId, child.id)
+        if (status.task.delegation?.cancelledAt === undefined && (status.task.status === "needs_input" || status.run?.status === "running" || status.waitingForChildren)) return
         const summary = status.result === null ? "No final response was recorded." : status.result.slice(0, 3000)
         const validation = status.structured === null ? "" : `\nStructured output: ${status.structured.valid ? "valid" : `invalid (${status.structured.error ?? "schema validation failed"})`}.`
         const message = `Delegated task "${child.title}" (${child.id}) finished with status ${child.delegation?.cancelledAt ? "cancelled" : status.resultStatus ?? "failed to start"}.${validation}\n\n${summary}\n\nUse thread_read for the full conversation. This is an automatic result; do not send an acknowledgement.`

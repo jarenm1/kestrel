@@ -135,9 +135,9 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
     const deadline = Date.now() + (timeoutSec ?? 30) * 1000
     while (true) {
       const status = yield* deps.threads.delegatedStatus(ctx.taskId, threadId)
+      if (status.task.status === "needs_input" && !status.task.delegation?.cancelledAt) return { status, finished: false, timedOut: false }
       const finished = status.task.delegation?.cancelledAt || (status.run !== null && status.run.status !== "running" && !status.waitingForChildren) || (status.run === null && status.task.status === "failed")
       if (finished) return { status, finished: true, timedOut: false }
-      if (status.task.status === "needs_input") return { status, finished: false, timedOut: false }
       if (Date.now() >= deadline) return { status, finished: false, timedOut: true }
       yield* Effect.sleep("1 second")
     }
