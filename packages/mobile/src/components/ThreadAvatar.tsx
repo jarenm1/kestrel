@@ -11,7 +11,8 @@ const RADIUS = 8;
 
 /**
  * Same identity and glass as the web tile: the first checkout's repository icon once it has loaded, else the
- * monogram. Glass is the tint, a hard sheen across the top half, and a border lit from above.
+ * monogram on glass. Glass is the tint, a hard sheen across the top half, and a border lit from above. A loaded
+ * icon is the tile itself: it fills the frame, clipped to its corners, with no glass behind it.
  */
 export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "checkouts"> }) {
   const { monogram, tone, icon } = threadIdentity(task);
@@ -37,42 +38,42 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
     };
   }, [api, path]);
 
-  // Icons bring their own colours: they sit on the neutral graphite glass.
-  const finish = loaded ? 7 : tone;
-  const [from, to] = THREAD_TINTS[finish];
-  const id = `thread-avatar-${finish}`;
+  const [from, to] = THREAD_TINTS[tone];
+  const id = `thread-avatar-${tone}`;
   return (
     <View style={styles.tile}>
-      <Svg width={SIZE} height={SIZE} style={StyleSheet.absoluteFill}>
-        <Defs>
-          <LinearGradient id={`${id}-tint`} x1="0" y1="0" x2="1" y2="1">
-            <Stop offset="0" stopColor={from} />
-            <Stop offset="1" stopColor={to} />
-          </LinearGradient>
-          <LinearGradient id={`${id}-sheen`} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor="#ffffff" stopOpacity={0.18} />
-            <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0.07} />
-            <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0} />
-          </LinearGradient>
-          <LinearGradient id={`${id}-edge`} x1="0" y1="0" x2="0" y2="1">
-            <Stop offset="0" stopColor="#ffffff" stopOpacity={0.32} />
-            <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0.06} />
-            <Stop offset="1" stopColor="#ffffff" stopOpacity={0.02} />
-          </LinearGradient>
-        </Defs>
-        <Rect width={SIZE} height={SIZE} rx={RADIUS} fill={`url(#${id}-tint)`} />
-        <Rect width={SIZE} height={SIZE} rx={RADIUS} fill={`url(#${id}-sheen)`} />
-        <Rect
-          x={0.5}
-          y={0.5}
-          width={SIZE - 1}
-          height={SIZE - 1}
-          rx={RADIUS - 0.5}
-          fill="none"
-          stroke={`url(#${id}-edge)`}
-          strokeWidth={1}
-        />
-      </Svg>
+      {!loaded && (
+        <Svg width={SIZE} height={SIZE} style={StyleSheet.absoluteFill}>
+          <Defs>
+            <LinearGradient id={`${id}-tint`} x1="0" y1="0" x2="1" y2="1">
+              <Stop offset="0" stopColor={from} />
+              <Stop offset="1" stopColor={to} />
+            </LinearGradient>
+            <LinearGradient id={`${id}-sheen`} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor="#ffffff" stopOpacity={0.18} />
+              <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0.07} />
+              <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0} />
+            </LinearGradient>
+            <LinearGradient id={`${id}-edge`} x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor="#ffffff" stopOpacity={0.32} />
+              <Stop offset="0.5" stopColor="#ffffff" stopOpacity={0.06} />
+              <Stop offset="1" stopColor="#ffffff" stopOpacity={0.02} />
+            </LinearGradient>
+          </Defs>
+          <Rect width={SIZE} height={SIZE} rx={RADIUS} fill={`url(#${id}-tint)`} />
+          <Rect width={SIZE} height={SIZE} rx={RADIUS} fill={`url(#${id}-sheen)`} />
+          <Rect
+            x={0.5}
+            y={0.5}
+            width={SIZE - 1}
+            height={SIZE - 1}
+            rx={RADIUS - 0.5}
+            fill="none"
+            stroke={`url(#${id}-edge)`}
+            strokeWidth={1}
+          />
+        </Svg>
+      )}
       {!loaded && <Text style={styles.monogram} accessible={false}>{monogram}</Text>}
       {source !== null && (
         <Image
@@ -89,7 +90,7 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
 
 const styles = StyleSheet.create({
   tile: { width: SIZE, height: SIZE, flexShrink: 0, alignItems: "center", justifyContent: "center" },
-  icon: { width: 18, height: 18 },
+  icon: { width: SIZE, height: SIZE, borderRadius: RADIUS },
   // Loads invisibly; a failure (not decodable, e.g. some .ico) keeps the monogram.
   pending: { position: "absolute", width: 18, height: 18, opacity: 0 },
   monogram: {

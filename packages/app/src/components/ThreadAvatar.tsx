@@ -17,8 +17,9 @@ function glass([from, to]: readonly [string, string]): CSSProperties {
 
 /**
  * Local thread identity, independent of run state: the first checkout's repository icon once it has loaded, else
- * the monogram (of the repository name, or of the title before any checkout). `small` is the inline size used
- * beside text, e.g. ahead of the repository name in the expanded thread list.
+ * the monogram (of the repository name, or of the title before any checkout) on a tinted glass tile. A loaded icon
+ * is the tile itself: it fills the frame, clipped to its corners, with no glass behind it. `small` is the inline
+ * size used beside text, e.g. ahead of the repository name in the expanded thread list.
  */
 export function ThreadAvatar({
   task,
@@ -38,10 +39,10 @@ export function ThreadAvatar({
   return (
     <span
       aria-hidden="true"
-      // Icons bring their own colours: they sit on the neutral graphite glass.
-      style={glass(THREAD_TINTS[showIcon ? 7 : tone])}
+      style={showIcon ? undefined : glass(THREAD_TINTS[tone])}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center border border-transparent font-sans leading-none font-semibold text-white/95 shadow-soft [text-shadow:0_1px_1px_rgb(0_0_0/0.35)]",
+        "inline-flex shrink-0 items-center justify-center overflow-hidden font-sans leading-none font-semibold text-white/95",
+        !showIcon && "border border-transparent shadow-soft [text-shadow:0_1px_1px_rgb(0_0_0/0.35)]",
         small ? "size-4.5 rounded-[0.3125rem] text-[7.5px]" : "size-7 rounded-[0.5rem] text-[11px] tracking-[0.01em]",
       )}
     >
@@ -51,7 +52,7 @@ export function ThreadAvatar({
         <img
           src={src}
           alt=""
-          className={showIcon ? (small ? "size-3 object-contain" : "size-4.5 object-contain") : "hidden"}
+          className={showIcon ? "size-full object-contain" : "hidden"}
           onLoad={() => setLoaded(src)}
           onError={() => setLoaded(null)}
         />
