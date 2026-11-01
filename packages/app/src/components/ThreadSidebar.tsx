@@ -68,13 +68,17 @@ function FadingTitle({ text, working }: { text: string; working: boolean }) {
       <span
         ref={innerRef}
         style={style}
-        className={cn(
-          "inline-block pr-6 transition-transform duration-300 ease-in-out group-hover:[transform:translateX(var(--shift))] group-hover:delay-300 group-hover:[transition-duration:var(--scroll)] motion-reduce:transition-none",
-          working &&
-            "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent",
-        )}
+        className="inline-block pr-6 transition-transform duration-300 ease-in-out group-hover:[transform:translateX(var(--shift))] group-hover:delay-300 group-hover:[transition-duration:var(--scroll)] motion-reduce:transition-none"
       >
-        {text}
+        {/* Its own element: hover restyles the scrolling span, which would jolt an animation running on it. */}
+        <span
+          className={cn(
+            working &&
+              "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent",
+          )}
+        >
+          {text}
+        </span>
       </span>
     </span>
   )
