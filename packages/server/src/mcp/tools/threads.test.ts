@@ -109,3 +109,42 @@ test("delegate_batch validates every checkout before starting work and uses stab
     await server.close()
   }
 })
+
+test("delegation_wait acknowledges only after regaining capacity and preserves recovery on interruption", async () => {
+  let acknowledged = false
+  let failReacquisition = true
+  const deps = { threads: {
+    delegatedStatus: () => Effect.succeed({
+      task: { id: "child", title: "Child", status: "completed" },
+      run: { id: "child-run", status: "succeeded" },
+      result: "Completed work", resultStatus: "succeeded", waitingForChildren: false,
+      usage: { inputTokens: null, outputTokens: null, costUsd: null }, structured: null,
+    }),
+    acknowledgeDelegation: () => Effect.sync(() => { acknowledged = true; return true }),
+    withSlotReleased: <A, E>(_task: string, _run: string, wait: Effect.Effect<A, E>) => Effect.gen(function* () {
+      const result = yield* wait
+      // The child finished, but the parent still cannot receive the response.
+      expect(acknowledged).toBe(false)
+      if (failReacquisition) return yield* Effect.fail(new Error("interrupted while reacquiring capacity"))
+      return result
+    }),
+  } } as unknown as ThreadToolDeps
+  const server = new McpServer({ name: "test", version: "1" })
+  registerThreadTools(server, { taskId: "parent", runId: "run" }, deps)
+  const client = new Client({ name: "test", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  try {
+    const interrupted = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
+    expect(interrupted.isError).toBe(true)
+    expect(acknowledged).toBe(false)
+    failReacquisition = false
+    const completed = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
+    expect(completed.isError).not.toBe(true)
+    expect(JSON.stringify(completed)).toContain("Completed work")
+    expect(acknowledged).toBe(true)
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})

@@ -130,20 +130,26 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
   server.registerTool("delegation_wait", {
     description: "Wait for a delegated task to finish or need user input. While blocked, this run lends its execution slot to queued work and reacquires it before returning. Timeout leaves the child running; reacquiring a busy slot may delay the return beyond the timeout. Completion is also delivered automatically.",
     inputSchema: { threadId: z.string().min(1), timeoutSec: z.number().int().min(1).max(30).optional().describe("Maximum wait in seconds (default 30)") },
-  }, ({ threadId, timeoutSec }) => guard(() => runTool(deps.threads.withSlotReleased(ctx.taskId, ctx.runId, Effect.gen(function* () {
+  }, ({ threadId, timeoutSec }) => guard(() => runTool(Effect.gen(function* () {
+    const outcome = yield* deps.threads.withSlotReleased(ctx.taskId, ctx.runId, Effect.gen(function* () {
     const deadline = Date.now() + (timeoutSec ?? 30) * 1000
     while (true) {
       const status = yield* deps.threads.delegatedStatus(ctx.taskId, threadId)
       const finished = status.task.delegation?.cancelledAt || (status.run !== null && status.run.status !== "running" && !status.waitingForChildren) || (status.run === null && status.task.status === "failed")
-      if (finished) {
-        const claimed = yield* deps.threads.acknowledgeDelegation(ctx.taskId, threadId)
-        return text(claimed ? formatDelegation(status) : `${formatDelegation({ ...status, result: null })}\nResult was already delivered or acknowledged; use delegation_status to read it again.`)
-      }
-      if (status.task.status === "needs_input") return text(formatDelegation(status))
-      if (Date.now() >= deadline) return text(`${formatDelegation(status)}\nWait timed out; the task continues.`)
+      if (finished) return { status, finished: true, timedOut: false }
+      if (status.task.status === "needs_input") return { status, finished: false, timedOut: false }
+      if (Date.now() >= deadline) return { status, finished: false, timedOut: true }
       yield* Effect.sleep("1 second")
     }
-  })))))
+    }))
+    // Reacquiring capacity can block or be interrupted. Keep automatic delivery
+    // recoverable until the parent can receive the tool result.
+    if (outcome.finished) {
+      const claimed = yield* deps.threads.acknowledgeDelegation(ctx.taskId, threadId)
+      return text(claimed ? formatDelegation(outcome.status) : `${formatDelegation({ ...outcome.status, result: null })}\nResult was already delivered or acknowledged; use delegation_status to read it again.`)
+    }
+    return text(`${formatDelegation(outcome.status)}${outcome.timedOut ? "\nWait timed out; the task continues." : ""}`)
+  }))))
 
   server.registerTool("delegation_cancel", {
     description: "Cancel the original run of a task delegated by this thread. The child thread and its history remain available.",
