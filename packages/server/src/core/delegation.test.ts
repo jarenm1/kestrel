@@ -155,6 +155,24 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       yield* Effect.sleep("2500 millis")
       expect((yield* core.delegatedStatus("parent", nestedParent.id)).result).toBe("Integrated answer")
       expect((yield* store.read).messages.find((m) => m.id === `delegation-result:${nestedParent.id}`)?.text).toContain("Integrated answer")
+      // A -> R2 -> C -> R4 and B -> R3: the latest result is R4, not R3.
+      const branched = yield* core.delegate("parent", "parent-run", { ...input, requestId: "branched" })
+      const firstRun = branched.delegation!.runId!
+      yield* store.update((s) => {
+        const original = s.runs.find((r) => r.id === firstRun)!
+        original.status = "succeeded"
+        for (const id of ["R2", "R3", "R4", "unrelated"]) {
+          s.runs.push({ ...original, id })
+          s.messages.push({ id: `answer:${id}`, taskId: branched.id, runId: id, role: "agent", text: `Answer from ${id}`, createdAt: now })
+        }
+        for (const [id, parentRunId, continuationId] of [["A", firstRun, "R2"], ["B", firstRun, "R3"], ["C", "R2", "R4"]]) {
+          s.tasks.push({ ...branched, id: id!, delegation: { ...branched.delegation!, parentTaskId: branched.id, parentRunId: parentRunId!, runId: `run:${id}` } })
+          s.runs.push({ ...original, id: `run:${id}`, taskId: id! })
+          s.messages.push({ id: `delegation-result:${id}`, taskId: branched.id, runId: continuationId!, role: "user", text: `Result ${id}`, createdAt: now })
+        }
+        return Either.right(undefined)
+      })
+      expect((yield* core.delegatedStatus("parent", branched.id)).result).toBe("Answer from R4")
       const structured = yield* core.delegate("parent", "parent-run", { ...input, requestId: "structured", outputSchema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } } })
       yield* store.update((s) => {
         const run = s.runs.find((r) => r.id === structured.delegation!.runId)!
@@ -216,6 +234,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       })
       yield* Effect.sleep("2500 millis")
       const recovered = (yield* store.read).messages.find((m) => m.id === `delegation-recovery:${child.id}:parent-run`)
+      expect((yield* store.read).messages.find((m) => m.id === `delegation-result:${branched.id}`)?.text).toContain("Answer from R4")
       expect(recovered?.text).toContain("Review complete") // result plus restart notice is delivered to a fresh run
       expect(recovered?.runId).not.toBe("parent-run")
       const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))

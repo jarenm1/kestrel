@@ -204,16 +204,19 @@ const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): bool
 
 /** Follow only automatic child-result continuations, never unrelated later user messages. */
 const delegationResultRun = (state: Readonly<StoreState>, taskId: string, firstRunId: string): string => {
-  let runId = firstRunId
-  const seen = new Set<string>()
-  while (!seen.has(runId)) {
-    seen.add(runId)
+  const seen = new Set<string>([firstRunId])
+  const pending = [firstRunId]
+  for (const runId of pending) {
     const childIds = state.tasks.filter((t) => t.delegation?.parentRunId === runId).map((t) => t.id)
-    const continuation = state.messages.filter((m) => m.taskId === taskId && m.runId !== null && m.runId !== runId && childIds.some((id) => isDelegationResult(m.id, id))).at(-1)
-    if (!continuation?.runId) break
-    runId = continuation.runId
+    for (const message of state.messages) {
+      if (message.taskId !== taskId || message.runId === null || seen.has(message.runId) || !childIds.some((id) => isDelegationResult(message.id, id))) continue
+      seen.add(message.runId)
+      pending.push(message.runId)
+    }
   }
-  return runId
+  // Runs are appended when reserved. Choose the latest reachable continuation
+  // across every branch, excluding unrelated subsequent user work.
+  return [...state.runs].reverse().find((run) => run.taskId === taskId && seen.has(run.id))?.id ?? firstRunId
 }
 
 /** The question's wait ended without an answer because the run ended first. */
