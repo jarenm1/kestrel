@@ -1,7 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { keepPreviousData, useQuery } from "@tanstack/react-query"
 import { ChevronRight, Download, Eye, EyeOff, File, Folder, FolderOpen, Search } from "lucide-react"
-import type { FileRoot, FolderFiles } from "@cloudagents/protocol"
+import type { FileRoot, FilesResponse, FolderFiles } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { queries } from "@/api/queries"
 import { Alert } from "@/components/ui/alert"
@@ -93,6 +93,10 @@ export function FilesPanel({ taskId }: { taskId: string }) {
   const [hidden, setHidden] = useState(false)
   // Toggling hidden files keeps showing the current listing until the other one arrives.
   const files = useQuery({ ...queries.files(taskId, hidden), placeholderData: keepPreviousData })
+  // The placeholder lasts only while loading: if the other listing then fails, the last one stays on screen (with the
+  // error above it) instead of every section vanishing.
+  const lastListing = useRef<FilesResponse | undefined>(undefined)
+  if (files.data !== undefined) lastListing.current = files.data
   const task = useQuery(queries.task(taskId))
   const [filter, setFilter] = useState("")
   // Typing stays responsive on a large tree: the trees catch up with the input instead of blocking it.
@@ -119,7 +123,7 @@ export function FilesPanel({ taskId }: { taskId: string }) {
     api.downloadFile(taskId, root, path).catch((e: unknown) => setDownloadError(errorText(e)))
   }
 
-  const data = files.data
+  const data = files.data ?? lastListing.current
   const empty =
     data !== undefined && data.checkouts.length === 0 && data.workspace.files.length === 0 && data.home.files.length === 0
 
@@ -153,7 +157,12 @@ export function FilesPanel({ taskId }: { taskId: string }) {
           {files.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
-      {files.error && <Alert className="mx-3 mb-2 w-auto">{errorText(files.error)}</Alert>}
+      {files.error && (
+        <Alert className="mx-3 mb-2 w-auto">
+          {hidden ? "Hidden files could not be listed: " : ""}
+          {errorText(files.error)}
+        </Alert>
+      )}
       {downloadError && <Alert className="mx-3 mb-2 w-auto">{downloadError}</Alert>}
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
         {files.isPending && <p className="text-muted-foreground">Loading…</p>}
