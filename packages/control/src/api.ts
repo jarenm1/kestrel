@@ -6,6 +6,7 @@ import {
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
+  GithubRepoSlug,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -111,17 +112,20 @@ const putApiKey = async (request: Request, env: Env, login: string, provider: Pr
   return json(storedView(provider, { provider: provider.id, account }, env, false))
 }
 
-const listRepos = async (env: Env, login: string): Promise<Response> => {
-  const creds = await hub(env).credentials(login)
-  if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
-  const res = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", {
+const githubGet = (token: string, url: string): Promise<Response> =>
+  fetch(url, {
     headers: {
-      authorization: `Bearer ${creds.github}`,
+      authorization: `Bearer ${token}`,
       accept: "application/vnd.github+json",
       "x-github-api-version": "2022-11-28",
       "user-agent": "kestrel-control-plane",
     },
   })
+
+const listRepos = async (env: Env, login: string): Promise<Response> => {
+  const creds = await hub(env).credentials(login)
+  if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
+  const res = await githubGet(creds.github, "https://api.github.com/user/repos?per_page=100&sort=updated")
   if (!res.ok) throw new UpstreamError(`GitHub repos responded ${res.status}`)
   const raw = (await res.json()) as {
     full_name: string
@@ -138,6 +142,39 @@ const listRepos = async (env: Env, login: string): Promise<Response> => {
     updatedAt: r.updated_at,
   }))
   return json(repos)
+}
+
+/** Branch pages read per request: GitHub lists 100 per page, alphabetically; larger repositories are cut off here. */
+const MAX_BRANCH_PAGES = 10
+
+const GithubRepoMeta = Schema.Struct({ default_branch: Schema.String })
+const GithubBranchPage = Schema.Array(Schema.Struct({ name: Schema.String }))
+
+/** A GitHub response body as `schema`; a body of another shape is GitHub misbehaving (502). */
+const decodeGithub = async <A, I>(res: Response, schema: Schema.Schema<A, I>): Promise<A> => {
+  const decoded = Schema.decodeUnknownEither(schema)(await res.json())
+  if (decoded._tag === "Left") throw new UpstreamError("GitHub returned an unexpected response")
+  return decoded.right
+}
+
+/** Branch names of `repo`, the default branch first and the rest in GitHub's (alphabetical) order. */
+const listBranches = async (env: Env, login: string, repo: GithubRepoSlug): Promise<Response> => {
+  const creds = await hub(env).credentials(login)
+  if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
+  const token = creds.github
+  const meta = await githubGet(token, `https://api.github.com/repos/${repo}`)
+  if (meta.status === 404) return errorResponse(404, "NotFound", `${repo} is not visible to your GitHub connection`)
+  if (!meta.ok) throw new UpstreamError(`GitHub repository responded ${meta.status}`)
+  const { default_branch: defaultBranch } = await decodeGithub(meta, GithubRepoMeta)
+  const names: string[] = []
+  for (let page = 1; page <= MAX_BRANCH_PAGES; page++) {
+    const res = await githubGet(token, `https://api.github.com/repos/${repo}/branches?per_page=100&page=${page}`)
+    if (!res.ok) throw new UpstreamError(`GitHub branches responded ${res.status}`)
+    const batch = await decodeGithub(res, GithubBranchPage)
+    for (const branch of batch) if (branch.name !== defaultBranch) names.push(branch.name)
+    if (batch.length < 100) break
+  }
+  return json([defaultBranch, ...names])
 }
 
 /**
@@ -178,6 +215,7 @@ const createPreviewSession = async (env: Env, login: string, taskId: string): Pr
 
 const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
+const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
@@ -186,6 +224,7 @@ const isWorkerRoute = (path: string, method: string): boolean =>
   (path === ControlPaths.connections && method === "GET") ||
   CONNECTION_PATH.test(path) ||
   (path === ControlPaths.githubRepos && method === "GET") ||
+  (GITHUB_BRANCHES_PATH.test(path) && method === "GET") ||
   path === ControlPaths.automations ||
   path.startsWith(`${ControlPaths.automations}/`)
 
@@ -347,6 +386,13 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
 
   if (path === ControlPaths.githubRepos && method === "GET") {
     return listRepos(env, login)
+  }
+
+  const branches = GITHUB_BRANCHES_PATH.exec(path)?.[1]
+  if (branches !== undefined && method === "GET") {
+    const repo = decodeURIComponent(branches)
+    if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
+    return listBranches(env, login, repo)
   }
 
   return handleAutomations(request, env, login, url, ControlPaths.automations)

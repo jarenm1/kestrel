@@ -424,6 +424,8 @@ export const api = {
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
   /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
+  /** Branch names of a repository ("owner/name") the GitHub connection can read, the default branch first. */
+  githubBranches: (repo: string) => run(request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo))),
   updateAutomation: (id: string, body: UpdateAutomationBody) =>
     run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
   deleteAutomation: (id: string) =>

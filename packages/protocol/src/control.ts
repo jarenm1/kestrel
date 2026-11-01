@@ -27,6 +27,11 @@ export const ControlPaths = {
   connection: (provider: string) => `/api/connections/${provider}`,
   /** GET -> GithubRepo[] for the signed-in user's GitHub connection. */
   githubRepos: "/api/github/repos",
+  /**
+   * GET -> string[]: branch names of a repository the signed-in user's GitHub connection can read ("owner/name"),
+   * the default branch first. 404 when GitHub is not connected or the repository is not visible.
+   */
+  githubBranches: (repo: string) => `/api/github/repos/${repo}/branches`,
   /** GET -> BoxStatus */
   box: "/api/box",
   /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */

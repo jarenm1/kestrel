@@ -11,6 +11,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { BAR_TRIGGER_CLASS } from "@/components/RepoPicker"
 import { cn } from "@/lib/utils"
 
 /** Radio value of Kestrel's box, whose id is `null`; also how the new-thread page stores that pick. */
@@ -62,7 +63,7 @@ export function BoxPicker({
           size="sm"
           disabled={disabled}
           title="The box this thread runs on"
-          className="min-w-0 text-xs data-[state=open]:bg-white/[0.06]"
+          className={BAR_TRIGGER_CLASS}
         >
           <Server className="opacity-70" />
           <span className="truncate">{name}</span>
