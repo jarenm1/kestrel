@@ -1,8 +1,8 @@
-import type { Message, SendMessageResponse, Task } from "@cloudagents/protocol"
+import { CheckoutRequest, type CreateTaskBody, type Message, type SendMessageResponse, type Task } from "@cloudagents/protocol"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { z } from "zod"
-import { type RunContext, guard, runTool, text, truncate } from "./common"
+import { type RunContext, describeError, guard, runTool, text, truncate } from "./common"
 
 const DEFAULT_READ_LIMIT = 20
 const MAX_READ_LIMIT = 100
@@ -11,6 +11,7 @@ export interface ThreadToolDeps {
   readonly threads: {
     /** The user a thread belongs to: the tools reach that user's threads only. */
     readonly owner: (taskId: string) => Effect.Effect<string, unknown>
+    readonly create: (user: string, input: CreateTaskBody) => Effect.Effect<Task, unknown>
     readonly archive: (user: string, taskId: string) => Effect.Effect<Task, unknown>
     readonly list: (user: string) => Effect.Effect<ReadonlyArray<Task>, unknown>
     readonly messages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, unknown>
@@ -40,6 +41,39 @@ const formatMessage = (message: Message): string => {
 }
 
 export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: ThreadToolDeps): void => {
+  server.registerTool(
+    "thread_spawn",
+    {
+      description:
+        "Create a new thread for the user and start its agent on a task. The new thread has its own workspace and " +
+        "conversation; it does not inherit this thread's files or conversation. Include all context it needs in the " +
+        "message and say whether to reply using thread_send. Optionally check out a repository before starting. " +
+        "Returns the thread and run ids; use thread_read and thread_send to follow up.",
+      inputSchema: {
+        title: z.string().trim().min(1).describe("Short title for the new thread"),
+        message: z.string().trim().min(1).describe("Task and context for the new agent"),
+        repo: z.string().optional().describe("Repository to check out: GitHub owner/name or HTTPS clone URL"),
+        baseBranch: z.string().optional().describe("Branch to fork from; requires repo"),
+        pullRequest: z.number().int().positive().optional().describe("Pull request to check out; requires repo"),
+      },
+    },
+    ({ title, message, repo, baseBranch, pullRequest }: { title: string; message: string; repo?: string; baseBranch?: string; pullRequest?: number }) =>
+      guard(() => runTool(Effect.gen(function* () {
+        if (repo === undefined && (baseBranch !== undefined || pullRequest !== undefined)) {
+          return yield* Effect.fail(new Error("baseBranch and pullRequest require repo"))
+        }
+        const checkout = repo === undefined ? undefined : yield* Schema.decodeUnknown(CheckoutRequest)({ repo, baseBranch, pullRequest }).pipe(
+          Effect.mapError((e) => new Error(`invalid checkout arguments: ${e.message}`)),
+        )
+        const owner = yield* deps.threads.owner(ctx.taskId)
+        const task = yield* deps.threads.create(owner, { title, ...(checkout === undefined ? {} : { checkout }) })
+        const sent = yield* deps.threads.send(ctx.taskId, task.id, message).pipe(
+          Effect.mapError((e) => new Error(`Created thread ${task.id}, but could not start its agent: ${describeError(e)}. Inspect the thread before retrying.`)),
+        )
+        return text(`created thread ${task.id} "${task.title}" (run ${sent.run.id})`)
+      }))),
+  )
+
   server.registerTool(
     "thread_close",
     {

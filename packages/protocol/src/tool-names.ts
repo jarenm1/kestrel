@@ -19,6 +19,7 @@ const KESTREL_TOOLS: Readonly<Record<string, string>> = {
   task_ask: "Ask you a question",
   task_inbox: "Read incoming messages",
   thread_list: "List other threads",
+  thread_spawn: "Start another thread",
   thread_read: "Read thread messages",
   thread_send: "Message another agent",
   automation_list: "List automations",
