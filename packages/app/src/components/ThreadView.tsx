@@ -111,7 +111,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
           : undefined
       }
     >
-      <section className="flex min-h-0 min-w-0 flex-col">
+      <section className="relative flex min-h-0 min-w-0 flex-col">
         <ThreadBoxIndicator taskId={taskId} />
         {state.error && <Alert className="mx-5 mt-3 w-auto">{state.error}</Alert>}
         <ChatPanel
