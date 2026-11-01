@@ -182,6 +182,30 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(afterCancel.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.runs.find((r) => r.id === cancelChild.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.tasks.find((t) => t.id === cancelChild.id)?.delegation?.cancelledAt).toBeDefined()
+      // Questions survive reconciliation even though their runs are no longer live.
+      const cancelQuestion = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-question" })
+      const nestedQuestion = yield* core.delegate(cancelQuestion.id, cancelQuestion.delegation!.runId!, { ...input, requestId: "nested-question" })
+      yield* store.update((s) => {
+        for (const task of [cancelQuestion, nestedQuestion]) {
+          s.tasks.find((t) => t.id === task.id)!.status = "needs_input"
+          const run = s.runs.find((r) => r.id === task.delegation!.runId)!
+          run.status = "failed"
+          run.interruptedByRestart = true
+          s.pendingAsks.push({ taskId: task.id, runId: run.id, messageId: `question:${task.id}` })
+        }
+        return Either.right(undefined)
+      })
+      // A leaf with no children must be cancellable as well as its parent.
+      const cancelledLeaf = yield* core.cancelDelegation(cancelQuestion.id, nestedQuestion.id)
+      expect(cancelledLeaf.task.delegation?.cancelledAt).toBeDefined()
+      const cancelledQuestion = yield* core.cancelDelegation("parent", cancelQuestion.id)
+      expect(cancelledQuestion.task.delegation?.cancelledAt).toBeDefined()
+      expect(cancelledQuestion.task.status).not.toBe("needs_input")
+      expect((yield* store.read).pendingAsks.some((a) => [cancelQuestion.id, nestedQuestion.id].includes(a.taskId))).toBe(false)
+      // Later user work may start independently, but cannot resume the cancelled delegation.
+      const later = yield* core.sendMessage("owner", cancelQuestion.id, "New work", { model: "gpt-6.1-sol" }, [], false)
+      expect(later.run.id).not.toBe(cancelQuestion.delegation!.runId)
+      expect((yield* core.delegatedStatus("parent", cancelQuestion.id)).run?.id).toBe(cancelQuestion.delegation!.runId)
       // Model startup reconciliation after the parent lost a run containing an automatic result.
       yield* store.update((s) => {
         const run = s.runs.find((r) => r.id === "parent-run")!

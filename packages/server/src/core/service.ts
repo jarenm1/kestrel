@@ -1302,19 +1302,27 @@ export const CoreLive = Layer.effect(
           }
         }
         visit(rootRunId)
-        yield* store.update((s) => {
+        const updated = yield* store.update((s) => {
+          const changed: Task[] = []
           for (const task of s.tasks) {
-            if (task.delegation?.runId && ids.includes(task.delegation.runId)) task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
+            if (task.delegation?.runId && ids.includes(task.delegation.runId)) {
+              task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
+              if (task.status === "needs_input") task.status = "idle"
+              task.updatedAt = nowIso()
+              changed.push({ ...task })
+            }
           }
-          return Either.right(undefined)
+          s.pendingAsks = s.pendingAsks.filter((ask) => !ids.includes(ask.runId))
+          return Either.right(changed)
         })
+        for (const task of updated) hub.publish({ _tag: "task.updated", task })
         yield* Effect.forEach(ids, (id) => harness.cancel(id), { discard: true })
       })
 
     const cancelDelegation: CoreShape["cancelDelegation"] = (parentTaskId, childTaskId) =>
       Effect.gen(function* () {
         const status = yield* delegatedStatus(parentTaskId, childTaskId)
-        if (status.run && (status.run.status === "running" || status.waitingForChildren)) yield* cancelDelegatedTree(status.run.id)
+        if (status.run && (status.run.status === "running" || status.waitingForChildren || status.task.status === "needs_input")) yield* cancelDelegatedTree(status.run.id)
         return yield* delegatedStatus(parentTaskId, childTaskId)
       })
 
