@@ -15,6 +15,7 @@ import { PreviewViewer } from "@/components/PreviewViewer"
 import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
+import { ThreadRepoButton } from "@/components/ThreadRepoButton"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
@@ -175,6 +176,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
                   </Button>
                 ))}
               </div>
+              <ThreadRepoButton checkouts={checkouts} />
               <Button
                 variant="ghost"
                 size="icon"
@@ -217,6 +219,10 @@ export function ThreadView({ taskId }: { taskId: string }) {
               </a>
             </Button>
           ))}
+          {/* Bottom of the rail, under the tabs and pull requests. */}
+          <div className="mt-auto">
+            <ThreadRepoButton checkouts={checkouts} />
+          </div>
         </aside>
       )}
     </div>
