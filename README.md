@@ -85,5 +85,5 @@ Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harne
 
 - **App and control plane:** Workers Builds deploys `main` (`bun run build:app`, then `wrangler deploy` in `packages/control`). By hand: `bunx cf builds create d87f7f0a-5dee-45c5-bb88-e5829c3a7792 --branch main`.
 - **GitHub sign-in:** a GitHub OAuth app with callback `https://app.kestrel-agent.com/auth/github/callback`; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are secrets on Worker `kestrel`.
-- **Production box:** `nix run .#box-auto` on the host; it follows `main` and restarts on every merge ([details](docs/box.md#production-box)).
+- **Production box:** `nix run .#box-auto` on the host; it follows `main` (or `KESTREL_BOX_REF`) and restarts once the box is idle, so merges don't interrupt agent runs ([details](docs/box.md#production-box)).
 - **Previews:** every branch gets `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (own empty Hub, no secrets, no box; UI review only).

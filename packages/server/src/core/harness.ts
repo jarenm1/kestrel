@@ -71,6 +71,8 @@ export interface AgentHarnessShape {
    * of launching an agent. Dev-only `/replay` flow; the fixture path is trusted repo state.
    */
   readonly replay: (task: Task, run: Run, fixturePath: string) => Effect.Effect<void, InternalError>
+  /** Runs this box is working on: running, holding a run slot, or waiting for one. */
+  readonly activeRunCount: () => Effect.Effect<number>
   /** Stops every active run at shutdown; their questions stay pending for the next start. */
   readonly stopAll: () => Effect.Effect<void>
 }
@@ -746,6 +748,8 @@ export const AgentHarnessLive = Layer.effect(
         }),
 
       items: readItems,
+
+      activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 
       // Running, waiting for a slot, or holding one while still being launched (cancelled here, the launch gives up
       // before it starts the agent).

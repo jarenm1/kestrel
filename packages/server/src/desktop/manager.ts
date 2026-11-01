@@ -104,6 +104,8 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
     /** Sets how the live desktop is streamed; a running encoder restarts at the new size and frame rate. */
     readonly setQuality: (taskId: string, quality: DesktopQuality) => Effect.Effect<DesktopStatus, DesktopError>
+    /** Desktops that are starting or running (a failed desktop has already had its processes terminated). */
+    readonly activeCount: () => Effect.Effect<number>
     readonly stopAll: () => Effect.Effect<void>
   }
 >() {}
@@ -1105,6 +1107,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           publish(s)
           return toStatus(taskId, s)
         }),
+
+      activeCount: () =>
+        Effect.sync(() => [...sessions.values()].filter((s) => s.state === "starting" || s.state === "running").length),
 
       stopAll: () =>
         Effect.gen(function* () {

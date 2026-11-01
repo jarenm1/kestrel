@@ -1,11 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
+import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
 import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
 import { ConfigLive, Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
 import { EventHubLive } from "./core/events"
-import { AgentHarnessLive } from "./core/harness"
+import { AgentHarness, AgentHarnessLive } from "./core/harness"
 import { StateLive } from "./core/state"
 import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
@@ -21,6 +22,7 @@ import type { WsServices } from "./http/streams"
 import { BOX_DEV_HEADER, runRelay } from "./relay/client"
 import { makeBoxAuth } from "./direct/auth"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
+import { openActivitySocket } from "./activity"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -117,6 +119,7 @@ const program = Effect.gen(function* () {
   const desktop = yield* DesktopManager
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
+  const harness = yield* AgentHarness
   const webHandler = yield* makeWebHandler(core, cliAuth)
 
   const mcpHandler = createMcpHandler({
@@ -179,6 +182,12 @@ const program = Effect.gen(function* () {
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
 
+  // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
+  const activity = yield* openActivitySocket(
+    join(config.dataDir, "box.sock"),
+    Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
+  )
+
   let relayFiber: Fiber.RuntimeFiber<void> | null = null
   if (config.relay) {
     relayFiber = yield* Effect.forkDaemon(
@@ -189,6 +198,7 @@ const program = Effect.gen(function* () {
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
+  if (activity !== null) yield* activity.close
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
