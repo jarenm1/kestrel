@@ -15,12 +15,16 @@ import {
   Connection,
   ControlPaths,
   CreateBoxBody,
+  CreateFleetBoxBody,
   CreatedBox,
+  CreatedFleetBox,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
   Health,
   HarnessCommands,
+  FleetBox,
+  FleetBoxList,
   Me,
   Message,
   Paths,
@@ -36,6 +40,7 @@ import {
   Task,
   UpdateAutomationBody,
   UpdateBoxBody,
+  UpdateFleetBoxBody,
   UserBox,
   Usage,
 } from "@cloudagents/protocol"
@@ -167,11 +172,24 @@ async function loadBoxes(): Promise<BoxList> {
   return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)))
 }
 
-/** The target of a box id in the last box list read; undefined when that list has no such box. */
+/**
+ * The target of a box id in the last box list read; undefined when that list has no such box. `null` is Kestrel's box,
+ * which is the managed box while one is assigned (see `kestrelTarget`).
+ */
 function routeOf(boxId: string | null): Target | undefined {
-  if (boxId === null) return null
+  if (boxId === null) return kestrelTarget()
+  if (known?.managedBox?.id === boxId) return { boxId, url: known.managedBox.url }
   const box = known?.boxes.find((b) => b.id === boxId)
   return box === undefined ? undefined : { boxId, url: box.url }
+}
+
+/**
+ * Kestrel's box as the last box list read has it: the managed box the user is assigned to, reached directly, or `null`
+ * (the legacy relay) while there is none.
+ */
+function kestrelTarget(): Target {
+  const managed = known?.managedBox
+  return managed ? { boxId: managed.id, url: managed.url } : null
 }
 
 /**
@@ -282,7 +300,7 @@ function listAllTasks(): Promise<Task[]> {
  */
 async function readAllTasks(): Promise<Task[]> {
   const boxes = (await loadBoxes().catch(() => known))?.boxes ?? []
-  const targets: Target[] = [null, ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
+  const targets: Target[] = [kestrelTarget(), ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
   const results = await Promise.allSettled(
     targets.map((target) =>
       withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
@@ -296,7 +314,7 @@ async function readAllTasks(): Promise<Task[]> {
   for (const result of results) {
     if (result.status === "rejected") continue
     const { boxId, tasks } = result.value
-    for (const [id, owner] of taskBoxes) if (owner === boxId) taskBoxes.delete(id)
+    for (const [id, owner] of taskBoxes) if ((owner ?? kestrelTarget()?.boxId ?? null) === boxId) taskBoxes.delete(id)
     for (const task of tasks) {
       taskBoxes.set(task.id, boxId)
       merged.push(task)
@@ -430,8 +448,18 @@ export const api = {
   /** Approves a pairing: creates the box, made active when `activate`. Returns the box list, like `setActiveBox`. */
   approvePairing: async (code: string, body: ApprovePairingBody): Promise<BoxList> =>
     adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
+  /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
+  fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
+  createFleetBox: (body: CreateFleetBoxBody) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxes, body)),
+  updateFleetBox: (id: string, body: UpdateFleetBoxBody) =>
+    run(request(FleetBox, "PATCH", ControlPaths.fleetBox(id), body)),
+  deleteFleetBox: async (id: string): Promise<void> => {
+    await run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.fleetBox(id))))
+  },
+  rotateFleetBoxSecret: (id: string) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxSecret(id))),
   checkBox,
-  /** Status of the box the apps talk to: Kestrel's relayed box, or the active user box's own health. */
+  forgetBox,
+/** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */
   boxStatus: async (): Promise<BoxStatus> => {
     const target = await activeTarget()
     return target === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(target.url)

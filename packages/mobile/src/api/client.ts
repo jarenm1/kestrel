@@ -60,7 +60,7 @@ function errorMessage(text: string, fallback: string): string {
   return text || fallback;
 }
 
-/** The user's own box that their apps use; `null` everywhere means Kestrel's box, relayed by the Worker. */
+/** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
@@ -76,7 +76,7 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 export interface ApiClient {
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
-  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is the user's own. */
+  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
   socketUrl(path: string): Promise<string>;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
@@ -160,7 +160,7 @@ async function send<A, I>(
   }
 }
 
-/** Creates an API client bound to one server URL, session cookie and active box (`null` for Kestrel's box). */
+/** Creates an API client bound to one server URL, session cookie and active box (`null` for the relayed Kestrel box). */
 export function createApiClient(
   serverUrl: string,
   sessionCookie: string | null,
@@ -199,7 +199,7 @@ export function createApiClient(
     return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body);
   }
 
-  // Box-served paths: Kestrel's box is relayed through the Worker with the session; the user's own box takes a bearer token.
+  // Box-served paths: the relayed Kestrel box goes through the Worker with the session; a direct box takes a bearer token.
   async function boxRequest<A, I>(
     schema: Schema.Schema<A, I, never>,
     method: Method,
@@ -245,7 +245,7 @@ export function createApiClient(
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
       if (activeBox === null) return request(BoxStatus, "GET", ControlPaths.box);
-      // The user's box is reached directly: its unauthenticated health route answers, and an unreachable box reads as offline.
+      // A direct box is reached at its own URL: its unauthenticated health route answers, and an unreachable box reads as offline.
       try {
         const health = await send(Health, "GET", `${activeBox.url}${Paths.health}`, {});
         return { online: true, connectedAt: null, boxVersion: health.version };

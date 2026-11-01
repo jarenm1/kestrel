@@ -5,12 +5,14 @@ import {
   CliAuthStatus,
   ControlPaths,
   CreateBoxBody,
+  CreateFleetBoxBody,
   Paths,
   PreviewSession,
   PutApiKeyBody,
   SetActiveBoxBody,
   Task,
   UpdateBoxBody,
+  UpdateFleetBoxBody,
   type Connection,
   type GithubRepo,
   type Me,
@@ -25,7 +27,7 @@ import {
   type Provider,
 } from "./providers"
 import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { SESSION_HEADER, hub, type Env } from "./env"
+import { SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
@@ -174,6 +176,8 @@ const USER_BOX_SECRET_PATH = /^\/api\/boxes\/([^/]+)\/secret$/
 const USER_BOX_TOKEN_PATH = /^\/api\/boxes\/([^/]+)\/token$/
 const PAIRING_PATH = /^\/api\/boxes\/pairings\/([^/]+)$/
 const PAIRING_APPROVE_PATH = /^\/api\/boxes\/pairings\/([^/]+)\/approve$/
+const FLEET_BOX_PATH = /^\/api\/fleet\/boxes\/([^/]+)$/
+const FLEET_BOX_SECRET_PATH = /^\/api\/fleet\/boxes\/([^/]+)\/secret$/
 
 /** The Hub's outcome as a response: the value as JSON with `status`, or the failure as an error body. */
 const answerBox = <T>(outcome: BoxOutcome<T>, status = 200): Response =>
@@ -238,6 +242,44 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
 }
 
 /**
+ * Fleet management for operators (`KESTREL_OPERATORS`). Anyone else gets 404, so the routes are not discoverable.
+ */
+const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  const fleet = hub(env)
+  const path = url.pathname
+  const method = request.method
+
+  if (path === ControlPaths.fleetBoxes) {
+    if (method === "GET") return json(await fleet.fleetBoxes())
+    if (method === "POST") {
+      const body = await decodeBody(request, CreateFleetBoxBody)
+      if (body instanceof Response) return body
+      return json(await fleet.createFleetBox(body), 201)
+    }
+  }
+  const rotate = FLEET_BOX_SECRET_PATH.exec(path)?.[1]
+  if (rotate !== undefined && method === "POST") {
+    const created = await fleet.rotateFleetSecret(decodeURIComponent(rotate))
+    return created === null ? errorResponse(404, "NotFound", "no such box") : json(created)
+  }
+  const id = FLEET_BOX_PATH.exec(path)?.[1]
+  if (id !== undefined && method === "PATCH") {
+    const body = await decodeBody(request, UpdateFleetBoxBody)
+    if (body instanceof Response) return body
+    const box = await fleet.changeFleetBox(decodeURIComponent(id), body)
+    return box === null ? errorResponse(404, "NotFound", "no such box") : json(box)
+  }
+  if (id !== undefined && method === "DELETE") {
+    const removed = await fleet.removeFleetBox(decodeURIComponent(id))
+    return removed ? new Response(null, { status: 204 }) : errorResponse(404, "NotFound", "no such box")
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
+/**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
  */
@@ -245,6 +287,9 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   const path = url.pathname
   const method = request.method
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
+  if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
+    return handleFleetBoxes(request, env, url)
+  }
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)
@@ -259,7 +304,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)
     if (!user) return errorResponse(401, "Unauthorized", "unknown user")
-    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl }
+    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl, operator: isOperator(env, login) }
     return json(me)
   }
 

@@ -1,4 +1,4 @@
-import { BOX_ID_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handleBoxAutomations } from "./automations"
@@ -8,7 +8,7 @@ import { handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
 
-/** Only the agent box holds BOX_TOKEN; the box's dial-in and its automation routes both require it. */
+/** The relay's box holds BOX_TOKEN; its dial-in and its legacy automation routes require it. */
 const boxAuthorized = async (request: Request, env: Env): Promise<boolean> => {
   const auth = request.headers.get("authorization") ?? ""
   const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
@@ -32,6 +32,39 @@ const boxSelf = async (request: Request, env: Env): Promise<Response> => {
   const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
   const self = secret === "" || boxId === "" ? null : await hub(env).boxSelf(boxId, secret)
   return self === null ? errorResponse(401, "Unauthorized", "invalid box credentials") : json(self)
+}
+
+/** The bearer secret, box id and user a managed box's request carries; null when any of them is missing. */
+const managedBoxHeaders = (request: Request): { boxId: string; secret: string; login: string } | null => {
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
+  const login = request.headers.get(BOX_USER_HEADER) ?? ""
+  return secret === "" || boxId === "" || login === "" ? null : { boxId, secret, login }
+}
+
+/**
+ * A managed box fetches a user's credentials for them. It proves itself with its own secret and id and names the user
+ * in `BOX_USER_HEADER`; the Hub answers 403 unless that user is assigned to the box.
+ */
+const boxCredentials = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const caller = managedBoxHeaders(request)
+  if (caller === null) return errorResponse(401, "Unauthorized", "invalid box credentials")
+  const outcome = await hub(env).managedBoxCredentials(caller.boxId, caller.secret, caller.login)
+  return outcome.ok ? json(outcome.value) : errorResponse(outcome.status, outcome.tag, outcome.message)
+}
+
+/**
+ * Automation calls from a managed box, for the user in `BOX_USER_HEADER` when that user is assigned to the box.
+ * The legacy relay token is checked before this.
+ */
+const managedBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const caller = managedBoxHeaders(request)
+  if (caller === null) return errorResponse(401, "Unauthorized", "invalid box token")
+  const access = await hub(env).managedBoxAuthorize(caller.boxId, caller.secret, caller.login)
+  if (!access.ok) return errorResponse(access.status, access.tag, access.message)
+  return handleBoxAutomations(request, env, url)
 }
 
 const isBoxAutomationPath = (pathname: string): boolean =>
@@ -104,12 +137,13 @@ export default {
     try {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
+      if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }
       if (isBoxAutomationPath(url.pathname)) {
-        if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
-        return await handleBoxAutomations(request, env, url)
+        if (await boxAuthorized(request, env)) return await handleBoxAutomations(request, env, url)
+        return await managedBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {

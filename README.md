@@ -21,7 +21,7 @@ Kestrel runs Claude Code or Codex on a box you own, driven from a chat in the br
 - **Live desktop.** Browsers, Blender, Roblox Studio: watch the GUI apps the agent drives and take control.
 - **Sandboxed by default.** Every run is locked into bubblewrap with per-thread CPU, memory and disk limits and its own network namespace. Model keys stay on the host; agents only get short-lived tokens.
 - **Built-in tools.** An MCP server for screenshots, the shell, questions, previews, automations and messaging other threads.
-- **No ports to open.** The box dials out to a Cloudflare control plane, so it runs anywhere.
+- **No ports to open.** The box dials out to a Cloudflare control plane, so it runs anywhere. Kestrel's managed boxes are reached over HTTPS instead.
 
 <p align="center">
   <img src="docs/screenshots/thread-streaming.png" alt="A thread streaming the agent's tool calls and command output" width="900"><br>
@@ -73,7 +73,7 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 | Path | What |
 |---|---|
 | [`packages/app`](packages/app) | React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves the public pages on `kestrel-agent.com` and the app on `app.kestrel-agent.com`. |
-| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API and the relay to the box. Serves the built app. |
+| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API, the managed-box fleet registry and the legacy relay to the box. Serves the built app. |
 | [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
@@ -85,5 +85,6 @@ Deeper docs: [architecture and ownership](docs/architecture.md), [the box: harne
 
 - **App and control plane:** Workers Builds deploys `main` (`bun run build:app`, then `wrangler deploy` in `packages/control`). By hand: `bunx cf builds create d87f7f0a-5dee-45c5-bb88-e5829c3a7792 --branch main`.
 - **GitHub sign-in:** a GitHub OAuth app with callback `https://app.kestrel-agent.com/auth/github/callback`; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are secrets on Worker `kestrel`.
-- **Production box:** `nix run .#box-auto` on the host; it follows `main` (or `KESTREL_BOX_REF`) and restarts once the box is idle, so merges don't interrupt agent runs ([details](docs/box.md#production-box)).
+- **Production box:** `nix run .#box-auto` on the host; it follows `main` (or `KESTREL_BOX_REF`) and restarts once the box is idle, so merges don't interrupt agent runs ([details](docs/box.md#production-host)).
+- **Kestrel's boxes:** a managed fleet that operators add and drain; users not yet assigned to a box use the legacy relay ([details](docs/box.md#managed-boxes-fleet)).
 - **Previews:** every branch gets `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (own empty Hub, no secrets, no box; UI review only).

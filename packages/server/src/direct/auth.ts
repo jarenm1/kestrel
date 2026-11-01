@@ -1,6 +1,7 @@
 import { Data, Effect, Either, Schema } from "effect"
 import {
   BOX_ID_HEADER,
+  BOX_USER_HEADER,
   BoxSelf,
   type BoxTokenClaims,
   ControlPaths,
@@ -10,7 +11,10 @@ import {
 import { controlBase } from "../control/client"
 import type { CredentialStoreShape } from "../credentials"
 
-/** The token is missing, malformed, expired, for another box, or for a user who does not own this box. */
+/**
+ * The token is missing, malformed, expired, for another box, or for a user who does not own this box (for a managed
+ * box: who is not assigned to it).
+ */
 export class Unauthorized extends Data.TaggedError("Unauthorized")<{ readonly message: string }> {}
 
 /** The control plane could not give the box its owner's credentials. */
@@ -20,12 +24,15 @@ export interface DirectSettings {
   readonly controlUrl: string
   readonly boxId: string
   readonly boxSecret: string
+  /** A Kestrel fleet box serving many users: its credentials come from `/box/credentials`, per user. */
+  readonly managed: boolean
 }
 
 export interface BoxAuth {
   /**
    * Claims of a valid box token. When it returns, the token's user's credentials are current in the store:
-   * fetched from `/box/self` on first use and whenever the token's `cv` differs from the version last absorbed.
+   * fetched from the control plane (`/box/self` for a user's own box, `/box/credentials` for a managed box) on first use
+   * and whenever the token's `cv` differs from the version last absorbed.
    */
   readonly authenticate: (token: string) => Effect.Effect<BoxTokenClaims, Unauthorized | Unavailable>
 }
@@ -49,14 +56,18 @@ export const makeBoxAuth = (
 
   const fetchCredentials = async (claims: BoxTokenClaims): Promise<void> => {
     const at = Math.floor(Date.now() / 1000)
+    const path = settings.managed ? ControlPaths.boxCredentials : ControlPaths.boxSelf
+    const headers: Record<string, string> = { authorization: `Bearer ${settings.boxSecret}`, [BOX_ID_HEADER]: settings.boxId }
+    // A managed box names the user it wants credentials for; the control plane answers only for users assigned to it.
+    if (settings.managed) headers[BOX_USER_HEADER] = claims.sub
     let response: Response
     try {
-      response = await fetchFn(`${base}${ControlPaths.boxSelf}`, {
-        headers: { authorization: `Bearer ${settings.boxSecret}`, [BOX_ID_HEADER]: settings.boxId },
-        signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-      })
+      response = await fetchFn(`${base}${path}`, { headers, signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) })
     } catch {
       throw new Unavailable({ message: "control plane unreachable" })
+    }
+    if (settings.managed && response.status === 403) {
+      throw new Unauthorized({ message: "user is not assigned to this managed box" })
     }
     if (!response.ok) {
       throw new Unavailable({ message: `control plane answered ${response.status} for the box's credentials` })

@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query"
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, LogOut, Plug, Server, User } from "lucide-react"
-import { Link, NavLink, Outlet } from "react-router-dom"
+import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
+import { Link, Navigate, NavLink, Outlet } from "react-router-dom"
 import { queries } from "@/api/queries"
 import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
+import { Fleet } from "@/components/Fleet"
 import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -20,7 +21,11 @@ const sections = [
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
 
+const operatorSections = [{ to: "fleet", label: "Fleet", icon: Layers }] as const
+
 export function SettingsLayout() {
+  const me = useQuery(queries.me())
+  const navSections = me.data?.operator ? [...sections, ...operatorSections] : sections
   return (
     // Sized by the panel it sits in (beside the threads strip), not the viewport.
     <div className="@container min-h-0 flex-1 overflow-auto">
@@ -29,7 +34,7 @@ export function SettingsLayout() {
         <aside className="flex shrink-0 flex-col gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Settings</h1>
           <nav className="flex gap-1 @5xl:flex-col">
-            {sections.map(({ to, label, icon: Icon }) => (
+            {navSections.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -141,6 +146,20 @@ export function BoxesSettings() {
     <>
       <SectionHeader title="Boxes" desc="Where your threads run: Kestrel's box, or your own machine reached directly." />
       <Boxes />
+    </>
+  )
+}
+
+export function FleetSettings() {
+  const me = useQuery(queries.me())
+  if (me.data && !me.data.operator) return <Navigate to="/settings/profile" replace />
+  return (
+    <>
+      <SectionHeader
+        title="Fleet"
+        desc="Kestrel's managed boxes. Each serves many users; a new user is assigned to the active box with the fewest."
+      />
+      <Fleet />
     </>
   )
 }
