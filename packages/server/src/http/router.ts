@@ -277,6 +277,7 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       "/api/runs/:id/cancel",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
     ),
+  ).pipe(
     HttpRouter.get(
       "/api/runs/:id/items",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.runItems(user, id)))),

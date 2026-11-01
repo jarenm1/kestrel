@@ -13,6 +13,8 @@ import { EventHubLive } from "./events"
 import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore, type StoreShape } from "./state"
 import { WorkspaceService } from "./workspace"
+import { BOX_USER_HEADER } from "@cloudagents/protocol"
+import { makeWebHandler } from "../http/router"
 
 test("delegation persists its lineage, deduplicates retries, and delivers one completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-delegation-"))
@@ -75,6 +77,17 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Review complete")
       expect((yield* core.inbox("parent", "parent-run"))).toHaveLength(0)
       expect((yield* core.delegatedStatus("parent", child.id)).result).toBe("Review complete")
+      const blocked = yield* core.delegate("parent", "parent-run", { ...input, requestId: "blocked" })
+      yield* store.update((s) => {
+        s.tasks.find((t) => t.id === blocked.id)!.status = "needs_input"
+        s.messages.push({ id: "question", taskId: blocked.id, runId: blocked.delegation!.runId!, role: "agent", text: "Which option?", options: ["A", "B"], createdAt: now })
+        s.pendingAsks.push({ taskId: blocked.id, runId: blocked.delegation!.runId!, messageId: "question" })
+        return Either.right(undefined)
+      })
+      yield* Effect.sleep("2500 millis")
+      expect((yield* core.inbox("parent", "parent-run")).join("\n")).toContain("Which option?")
+      expect((yield* store.read).pendingAsks.some((ask) => ask.messageId === "question")).toBe(true)
+      yield* store.update((s) => { s.pendingAsks = s.pendingAsks.filter((ask) => ask.messageId !== "question"); return Either.right(undefined) })
       const second = yield* core.delegate("parent", "parent-run", { ...input, requestId: "second" })
       yield* store.update((s) => {
         const run = s.runs.find((r) => r.id === second.delegation!.runId)!
@@ -137,7 +150,12 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const cancelParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-parent" })
       const cancelChild = yield* core.delegate(cancelParent.id, cancelParent.delegation!.runId!, { ...input, requestId: "cancel-child" })
       expect(Either.isLeft(yield* Effect.either(core.cancelDelegation("other", cancelParent.id)))).toBe(true)
-      yield* core.cancelDelegation("parent", cancelParent.id)
+      const handler = yield* makeWebHandler(core, {} as never)
+      const url = `http://localhost/api/tasks/parent/delegations/${cancelParent.id}/cancel`
+      const forbidden = yield* Effect.promise(() => handler(new Request(url, { method: "POST", headers: { [BOX_USER_HEADER]: "other" } })))
+      expect(forbidden.status).toBe(404)
+      const cancelled = yield* Effect.promise(() => handler(new Request(url, { method: "POST", headers: { [BOX_USER_HEADER]: "owner" } })))
+      expect(cancelled.status).toBe(200)
       const afterCancel = yield* store.read
       expect(afterCancel.runs.find((r) => r.id === cancelParent.delegation!.runId)?.status).toBe("cancelled")
       expect(afterCancel.runs.find((r) => r.id === cancelChild.delegation!.runId)?.status).toBe("cancelled")

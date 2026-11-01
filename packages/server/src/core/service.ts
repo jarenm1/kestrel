@@ -1341,6 +1341,23 @@ export const CoreLive = Layer.effect(
         yield* deliverMessage(child.owner, child.delegation!.parentTaskId, message, resumeChoice(current, child.delegation!.parentTaskId), [], false,
           { id: child.id, title: child.title }, `delegation-result:${child.id}`)
       }).pipe(Effect.catchAll((e) => Effect.logWarning(`delegation ${child.id} notification failed: ${e.message}`)))), { discard: true })
+      // A child's question belongs to the user. Notify the parent, but never send an answer on their behalf.
+      const questions = state.pendingAsks.flatMap((ask) => {
+        const child = state.tasks.find((t) => t.id === ask.taskId)
+        const d = child?.delegation
+        const parent = d && state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child?.owner)
+        const parentRun = d && state.runs.find((r) => r.id === d.parentRunId)
+        const question = state.messages.find((m) => m.id === ask.messageId)
+        const id = `delegation-question:${ask.messageId}`
+        if (!child || !d || !parent || !question || d.cancelledAt || parent.archivedAt || parentRun?.status === "cancelled" || state.messages.some((m) => m.taskId === parent.id && m.id === id)) return []
+        return [{ child, parent, question, id }]
+      })
+      yield* Effect.forEach(questions, ({ child, parent, question, id }) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
+        const latest = yield* store.read
+        if (!latest.pendingAsks.some((a) => a.messageId === question.id)) return
+        const message = `Delegated task "${child.title}" (${child.id}) needs the user to answer a question in its thread:\n\n${question.text.slice(0, 3000)}\n\nThe question belongs to the user; do not answer it yourself. This is an automatic notification.`
+        yield* deliverMessage(child.owner, parent.id, message, resumeChoice(latest, parent.id), [], false, { id: child.id, title: child.title }, id)
+      }).pipe(Effect.catchAll((e) => Effect.logWarning(`delegation ${child.id} question notification failed: ${e.message}`)))), { discard: true })
     })
     yield* Effect.forkDaemon(deliverDelegationResults.pipe(
       Effect.catchAllCause((cause) => Effect.logWarning(`delegation notifications failed: ${Cause.pretty(cause)}`)),
