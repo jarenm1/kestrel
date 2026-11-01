@@ -1,6 +1,7 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
+import { fetchSnapshot } from "./snapshot"
 
 /** Agent box status poll; it feeds the offline banner. */
 const BOX_POLL_MS = 10_000
@@ -77,14 +78,6 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   return next
 }
 
-/** Snapshot entries first; entries already in the cache from live events (newer) override them. */
-function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonly T[] | undefined): T[] {
-  const byId = new Map<string, T>()
-  for (const item of snapshot) byId.set(item.id, item)
-  for (const item of current ?? []) byId.set(item.id, item)
-  return [...byId.values()]
-}
-
 /**
  * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
  * stays unloaded; its query fetches it, so no partial list is ever cached.
@@ -141,20 +134,17 @@ export const queries = {
   messages: (taskId: string) =>
     queryOptions({
       queryKey: keys.messages(taskId),
-      queryFn: async (): Promise<Message[]> =>
-        mergeSnapshot(await api.listMessages(taskId), queryClient.getQueryData(keys.messages(taskId))),
+      queryFn: () => fetchSnapshot(queryClient, keys.messages(taskId), () => api.listMessages(taskId)),
     }),
   runs: (taskId: string) =>
     queryOptions({
       queryKey: keys.runs(taskId),
-      queryFn: async (): Promise<Run[]> =>
-        mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(keys.runs(taskId))),
+      queryFn: () => fetchSnapshot(queryClient, keys.runs(taskId), () => api.listRuns(taskId)),
     }),
   runItems: (taskId: string, runId: string) =>
     queryOptions({
       queryKey: keys.runItems(runId),
-      queryFn: async (): Promise<RunItems> =>
-        mergeSnapshot(await api.runItems(taskId, runId), queryClient.getQueryData(keys.runItems(runId))),
+      queryFn: () => fetchSnapshot(queryClient, keys.runItems(runId), () => api.runItems(taskId, runId)),
     }),
   /**
    * Disabled until there is both a focused thread and a model whose harness can answer. `activeRunId` and
