@@ -37,9 +37,10 @@ function useNow(intervalMs: number): number {
 
 /**
  * One line of text that fades out at the right edge instead of truncating. Hovering the enclosing `group` scrolls
- * the hidden rest into view; the trailing padding lets the last characters land clear of the fade.
+ * the hidden rest into view; the trailing padding lets the last characters land clear of the fade. `working`
+ * sweeps a highlight across the text while the agent runs.
  */
-function FadingTitle({ text }: { text: string }) {
+function FadingTitle({ text, working }: { text: string; working: boolean }) {
   const outerRef = useRef<HTMLSpanElement>(null)
   const innerRef = useRef<HTMLSpanElement>(null)
   const [overflow, setOverflow] = useState(0)
@@ -67,7 +68,11 @@ function FadingTitle({ text }: { text: string }) {
       <span
         ref={innerRef}
         style={style}
-        className="inline-block pr-6 transition-transform duration-300 ease-in-out group-hover:[transform:translateX(var(--shift))] group-hover:delay-300 group-hover:[transition-duration:var(--scroll)] motion-reduce:transition-none"
+        className={cn(
+          "inline-block pr-6 transition-transform duration-300 ease-in-out group-hover:[transform:translateX(var(--shift))] group-hover:delay-300 group-hover:[transition-duration:var(--scroll)] motion-reduce:transition-none",
+          working &&
+            "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent",
+        )}
       >
         {text}
       </span>
@@ -227,7 +232,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
                     {formatAgo(task.updatedAt, now)}
                   </span>
                 </span>
-                <FadingTitle text={task.title} />
+                <FadingTitle text={task.title} working={task.status === "running"} />
                 <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
                   {checkout ? (
                     <>
