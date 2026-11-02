@@ -361,7 +361,8 @@ const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
     "-hide_banner",
     "-loglevel",
     "error",
-    // Preserve the first frame even when the desktop stays still; timestamps come from the arrival clock.
+    // No -fflags nobuffer: with it, the x264 fallback after a stalled NVENC never produced an init segment on a still
+    // desktop (startup.integration.test.ts, real xterm). Timestamps still come from the arrival clock.
     "-f",
     "rawvideo",
     "-pix_fmt",
