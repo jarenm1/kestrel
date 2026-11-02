@@ -4,7 +4,7 @@ import type { Task } from "@cloudagents/protocol"
 import type { Target } from "@/api/client"
 import { openUserEvents } from "@/api/events"
 import { keys, queries, storeTask } from "@/api/queries"
-import { getTurnSound, playTurnSound } from "@/lib/turnSound"
+import { getTurnSound, observeTask, playTurnSound, type SeenTasks } from "@/lib/turnSound"
 
 const RECONNECT_MS = 2000
 
@@ -17,11 +17,11 @@ const RECONNECT_MS = 2000
 export function useThreadListEvents(): void {
   const queryClient = useQueryClient()
   const tasks = useQuery(queries.tasks()).data
-  const statuses = useRef(new Map<string, Task["status"]>())
+  const seen = useRef<SeenTasks>(new Map())
   useEffect(() => {
-    for (const task of tasks ?? []) {
-      if (!statuses.current.has(task.id)) statuses.current.set(task.id, task.status)
-    }
+    // One clip however many threads a reconnect's refetch finds finished.
+    const turns = (tasks ?? []).filter((task) => observeTask(seen.current, task))
+    if (turns.length > 0) playTurnSound(getTurnSound())
   }, [tasks])
   const list = useQuery(queries.boxes()).data
   const managed = list?.managedBox ?? null
@@ -31,7 +31,7 @@ export function useThreadListEvents(): void {
   useEffect(() => {
     const kestrel: Target = managed === null ? null : { boxId: managed.id, url: managed.url }
     const targets: Target[] = [kestrel, ...(boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))]
-    const stops = targets.map((target) => followBox(queryClient, target, statuses.current))
+    const stops = targets.map((target) => followBox(queryClient, target, seen.current))
     return () => stops.forEach((stop) => stop())
   }, [boxSet, queryClient])
 }
@@ -40,7 +40,7 @@ export function useThreadListEvents(): void {
  * Keeps one box's thread list stream open: reconnects 2 s after a close, and each (re)connect refetches the list.
  * Returns a function that stops it.
  */
-function followBox(queryClient: QueryClient, target: Target, statuses: Map<string, Task["status"]>): () => void {
+function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): () => void {
   let active = true
   let retry: number | undefined
   let close = () => {}
@@ -49,17 +49,12 @@ function followBox(queryClient: QueryClient, target: Target, statuses: Map<strin
       onOpen: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
       onEvent: (event) => {
         switch (event._tag) {
-          case "task.updated": {
-            const previous = statuses.get(event.task.id)
-            statuses.set(event.task.id, event.task.status)
-            if (previous === "running" && ["done", "failed", "needs_input"].includes(event.task.status) && !event.task.archivedAt) {
-              playTurnSound(getTurnSound())
-            }
+          case "task.updated":
+            if (observeTask(seen, event.task)) playTurnSound(getTurnSound())
             storeTask(queryClient, event.task)
             break
-          }
           case "task.deleted":
-            statuses.delete(event.taskId)
+            seen.delete(event.taskId)
             queryClient.setQueryData(keys.tasks, (list: readonly Task[] | undefined) =>
               list?.filter((task) => task.id !== event.taskId),
             )
