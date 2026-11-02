@@ -43,7 +43,7 @@ import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
@@ -145,6 +145,17 @@ export interface OpenPullRequestInput {
   readonly draft: boolean
   /** Checkout to open the pull request from; required when the thread has several. */
   readonly checkoutId?: string
+  /** Branch to merge into; default: the checkout's base branch. */
+  readonly base?: string
+}
+
+/** A checkout of the thread as the `gh` shim sees it: where it lives on disk and its GitHub repository, if any. */
+export interface GhCheckout {
+  readonly checkout: Checkout
+  /** Absolute path of the checkout; sandboxed processes see the same path. */
+  readonly dir: string
+  /** null for a checkout that is not on github.com. */
+  readonly github: RepoSlug | null
 }
 
 export interface ReviewPullRequestInput extends NewReview {
@@ -456,6 +467,27 @@ export interface CoreShape {
     taskId: string,
     input: PullRequestTarget & LabelChange,
   ) => Effect.Effect<void, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: the thread's checkouts, with their paths and GitHub repositories. */
+  readonly ghCheckouts: (taskId: string) => Effect.Effect<ReadonlyArray<GhCheckout>, NotFound>
+  /**
+   * Used by the `gh` shim: runs a GraphQL document with the thread owner's token for a checkout's GitHub repository.
+   * The shim builds every document itself and scopes it to that repository; the token stays host-side.
+   */
+  readonly githubGraphql: (
+    taskId: string,
+    checkoutId: string,
+    query: string,
+    variables: Readonly<Record<string, unknown>>,
+  ) => Effect.Effect<GraphQLResponse, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: a pull request's diff or patch series in a checkout's GitHub repository. */
+  readonly pullRequestDiff: (
+    taskId: string,
+    checkoutId: string,
+    number: number,
+    format: "diff" | "patch",
+  ) => Effect.Effect<string, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: the checkout's own commits (since it was created), as `WorkspaceShape.commitLog` prints them. */
+  readonly checkoutCommitLog: (taskId: string, checkoutId: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the automations: the user a thread belongs to, whom its automations act for. */
   readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
   /** Bytes the thread's files took at the last storage check; null before its first check. */
@@ -2165,7 +2197,7 @@ export const CoreLive = Layer.effect(
                 title,
                 body: input.body,
                 head: checkout.branch,
-                base: checkout.baseBranch,
+                base: input.base ?? checkout.baseBranch,
                 draft: input.draft,
               })
               .pipe(Effect.mapError(fromGitHub)))
@@ -2255,6 +2287,42 @@ export const CoreLive = Layer.effect(
           for (const label of input.labels) {
             yield* github.removeLabel(token, slug, number, label).pipe(Effect.mapError(fromGitHub))
           }
+        }),
+
+      ghCheckouts: (taskId) =>
+        Effect.map(requireTask(taskId), (task) =>
+          task.checkouts.map((checkout): GhCheckout => ({
+            checkout,
+            dir: checkoutSpec(taskId, checkout).dir,
+            github: parseRepoRef(checkout.repo)?.github ?? null,
+          })),
+        ),
+
+      githubGraphql: (taskId, checkoutId, query, variables) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId)
+          const { token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
+          return yield* github.graphql(token, query, variables).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      pullRequestDiff: (taskId, checkoutId, number, format) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId)
+          const { slug, token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
+          return yield* github.pullRequestDiff(token, slug, number, format).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      checkoutCommitLog: (taskId, checkoutId) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId).pipe(
+            Effect.catchTag("BadRequest", (e) => Effect.fail(new NotFound({ message: e.message }))),
+          )
+          return yield* workspace
+            .commitLog({ ...checkoutSpec(taskId, checkout), baseRef: checkoutPinRef(taskId, checkout.id) })
+            .pipe(Effect.mapError(toInternal("read commits")))
         }),
 
       shutdown: () =>

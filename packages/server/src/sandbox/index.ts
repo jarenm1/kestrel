@@ -334,6 +334,8 @@ export interface LaunchRequest {
   readonly roBinds?: ReadonlyArray<string>
   /** Host dirs bound read-write inside the sandbox (a signed-in user's CLI logins). */
   readonly binds?: ReadonlyArray<SandboxBind>
+  /** Directories put first on PATH, as the launched process sees them (the run's `gh` shim). */
+  readonly pathPrefix?: ReadonlyArray<string>
 }
 
 export interface Launch {
@@ -702,12 +704,14 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     const hostPath = process.env.PATH ?? "/usr/bin:/bin"
     const env: Record<string, string> = {
       ...(settings.level === "off" ? platformEnv() : {}),
-      PATH:
+      PATH: [
+        ...(req.pathPrefix ?? []),
         settings.level === "strict"
           ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
           : settings.level === "basic"
             ? `${hostPath}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
             : `${hostPath}:${join(req.homeDir, TOOLKIT_BIN)}`,
+      ].join(":"),
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
       ...(settings.sslCertFile

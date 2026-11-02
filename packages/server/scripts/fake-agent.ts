@@ -5,6 +5,7 @@
  * JSON-RPC for OpenAI ones, and plays one turn.
  */
 import { randomUUID } from "node:crypto"
+import { spawnSync } from "node:child_process"
 import { createInterface } from "node:readline"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -68,6 +69,15 @@ const runExecProbes = async (): Promise<number> => {
   const timeout = await call("workspace_exec", { command: "yes", timeoutSec: 3 })
   console.log(`fake-agent: probe timeout firstLine=${timeout.text.split("\n")[0]}`)
   await call("task_report", { status: "done", message: "exec probes finished" })
+  return 0
+}
+
+// Runs `gh <command>` through the shell, as an agent's shell tool would, and reports what it printed and its exit code.
+const runGhProbe = async (command: string): Promise<number> => {
+  const result = spawnSync("sh", ["-c", `gh ${command}`], { encoding: "utf8" })
+  const message = `gh ${command}\nexit: ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+  console.log(`fake-agent: probe ${message}`)
+  await call("task_report", { status: result.status === 0 ? "done" : "failed", message })
   return 0
 }
 
@@ -272,6 +282,7 @@ const main = async (): Promise<number> => {
   const [probe, arg] = request.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
   if (probe === "thread-probe") return runThreadProbe(arg)
+  if (probe === "gh-probe") return runGhProbe(request.trim().split(/\s+/).slice(1).join(" ") || "--version")
   if (probe === "ask-probe") return runAskProbe()
   // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
   const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(request)

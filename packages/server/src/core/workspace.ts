@@ -72,6 +72,11 @@ export interface WorkspaceShape {
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
   readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
   /**
+   * Commits on the checkout's HEAD and not on `baseRef` (a ref in the shadow), newest first, as `git log --cherry`
+   * prints them with `%H%x00%s%x00%b%x00`. Empty when there are none.
+   */
+  readonly commitLog: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
+  /**
    * Paths of the checkout's files on disk, sorted: everything its `.gitignore` files do not ignore, plus files committed
    * at HEAD even when ignored. At most `limit`; `truncated` says there were more.
    */
@@ -570,6 +575,20 @@ const make: WorkspaceShape = {
       } finally {
         yield* Effect.promise(() => rm(index, { force: true }))
       }
+    }),
+
+  commitLog: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const head = yield* readHeadSha(real)
+      if (head === null) return ""
+      return yield* shadowGit(spec.shadowPath, real, [
+        "log",
+        "--no-show-signature",
+        "--pretty=format:%H%x00%s%x00%b%x00",
+        "--cherry",
+        `${spec.baseRef}...${head}`,
+      ])
     }),
 
   listFiles: (spec) =>

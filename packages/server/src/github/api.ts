@@ -216,6 +216,19 @@ export interface ReviewerRequest {
   readonly teamReviewers: readonly string[]
 }
 
+/** One entry of a GraphQL `errors` array, as GitHub sends it. */
+export interface GraphQLErrorItem {
+  readonly message: string
+  readonly path?: ReadonlyArray<string | number>
+  readonly type?: string
+}
+
+/** A GraphQL answer as GitHub sent it: `errors` may sit beside partial `data`. */
+export interface GraphQLResponse {
+  readonly data: unknown
+  readonly errors: ReadonlyArray<GraphQLErrorItem>
+}
+
 export interface GitHubShape {
   /** Open pull request whose head branch is `head` in `repo`, or null. */
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
@@ -247,6 +260,13 @@ export interface GitHubShape {
   readonly removeReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly addLabels: (token: string, repo: RepoSlug, number: number, labels: readonly string[]) => Effect.Effect<void, GitHubError>
   readonly removeLabel: (token: string, repo: RepoSlug, number: number, label: string) => Effect.Effect<void, GitHubError>
+  /**
+   * Runs a GraphQL query or mutation. GraphQL-level errors come back in `errors`, not as a failure; an HTTP failure
+   * is a GitHubError whose message reads like the GitHub CLI's (`HTTP 502: Bad Gateway (<url>)`).
+   */
+  readonly graphql: (token: string, query: string, variables: Readonly<Record<string, unknown>>) => Effect.Effect<GraphQLResponse, GitHubError>
+  /** The pull request's diff (`diff`) or its commits as patches (`patch`), as GitHub renders them. Failures read like `graphql`'s. */
+  readonly pullRequestDiff: (token: string, repo: RepoSlug, number: number, format: "diff" | "patch") => Effect.Effect<string, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
@@ -369,6 +389,19 @@ const summarizeChecks = (checks: Schema.Schema.Type<typeof CheckRunsBody>): Pull
   return { total: checks.check_runs.length, passed, failing, pending }
 }
 
+const GraphQLAnswer = Schema.Struct({
+  data: Schema.optional(Schema.Unknown),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        message: Schema.String,
+        path: Schema.optional(Schema.Array(Schema.Union(Schema.String, Schema.Number))),
+        type: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
+})
+
 /** Latest review state per reviewer, then the strongest signal wins. Dismissed reviews drop out. */
 const reviewDecisionOf = (reviews: readonly { state: string; login: string }[]): PullRequestStatus["reviewDecision"] => {
   const latest = new Map<string, string>()
@@ -388,26 +421,30 @@ export const GitHubLive = Layer.effect(
   Effect.map(Config, (config) => {
     const apiBase = config.githubApiUrl
 
-    const call = (token: string, repo: RepoSlug, method: string, path: string, body?: unknown) =>
+    /** One HTTP exchange with GitHub; the status is the caller's to judge. */
+    const send = (token: string, method: string, path: string, options: { readonly body?: unknown; readonly accept?: string } = {}) =>
       Effect.tryPromise({
         try: async () => {
           const response = await fetch(`${apiBase}${path}`, {
             method,
             headers: {
               authorization: `Bearer ${token}`,
-              accept: "application/vnd.github+json",
+              accept: options.accept ?? "application/vnd.github+json",
               "x-github-api-version": "2022-11-28",
               "user-agent": "kestrel-mcp",
-              ...(body === undefined ? {} : { "content-type": "application/json" }),
+              ...(options.body === undefined ? {} : { "content-type": "application/json" }),
             },
-            body: body === undefined ? undefined : JSON.stringify(body),
+            body: options.body === undefined ? undefined : JSON.stringify(options.body),
             signal: AbortSignal.timeout(30_000),
           })
           const text = await response.text()
           return { status: response.status, text }
         },
         catch: () => new GitHubError({ message: "could not reach the GitHub API" }),
-      }).pipe(
+      })
+
+    const call = (token: string, repo: RepoSlug, method: string, path: string, body?: unknown) =>
+      send(token, method, path, { body }).pipe(
         Effect.flatMap(({ status, text }) => {
           if (status >= 200 && status < 300) {
             return Effect.try({
@@ -418,6 +455,20 @@ export const GitHubLive = Layer.effect(
           return Effect.fail(new GitHubError({ message: describeFailure(status, text, repo), status }))
         }),
       )
+
+    /** A non-2xx answer described the way the GitHub CLI prints it. */
+    const cliFailure = (status: number, text: string, path: string): GitHubError => {
+      const url = `${apiBase}${path}`
+      const message = githubMessage(text)
+      const lines = message.split("\n")
+      const described =
+        lines.length > 1
+          ? `HTTP ${status}: ${lines[0]} (${url})\n${lines.slice(1).join("\n")}`
+          : message !== ""
+            ? `HTTP ${status}: ${message} (${url})`
+            : `HTTP ${status} (${url})`
+      return new GitHubError({ message: described, status })
+    }
 
     const decode = <A, I>(schema: Schema.Schema<A, I>, label: string) => (json: unknown) =>
       Schema.decodeUnknown(schema)(json).pipe(
@@ -739,21 +790,48 @@ export const GitHubLive = Layer.effect(
         call(token, repo, "POST", `${repoPath(repo)}/issues/${number}/labels`, { labels: [...labels] }).pipe(Effect.asVoid),
       removeLabel: (token, repo, number, label) =>
         call(token, repo, "DELETE", `${repoPath(repo)}/issues/${number}/labels/${encodeURIComponent(label)}`).pipe(Effect.asVoid),
+      graphql: (token, query, variables) =>
+        send(token, "POST", "/graphql", { body: { query, variables } }).pipe(
+          Effect.flatMap(({ status, text }) => {
+            if (status < 200 || status >= 300) return Effect.fail(cliFailure(status, text, "/graphql"))
+            return Effect.try({
+              try: () => JSON.parse(text) as unknown,
+              catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
+            }).pipe(Effect.flatMap(decode(GraphQLAnswer, "GraphQL")))
+          }),
+          Effect.map((answer): GraphQLResponse => ({
+            data: answer.data ?? null,
+            errors: (answer.errors ?? []).map((e) => ({
+              message: e.message,
+              ...(e.path === undefined ? {} : { path: e.path }),
+              ...(e.type === undefined ? {} : { type: e.type }),
+            })),
+          })),
+        ),
+      pullRequestDiff: (token, repo, number, format) => {
+        const path = `${repoPath(repo)}/pulls/${number}`
+        return send(token, "GET", path, { accept: `application/vnd.github.v3.${format}` }).pipe(
+          Effect.flatMap(({ status, text }) => (status === 200 ? Effect.succeed(text) : Effect.fail(cliFailure(status, text, path)))),
+        )
+      },
     }
     return service
   }),
 )
 
+/** The `message` of a GitHub error body, or "" when there is none. */
+const githubMessage = (text: string): string => {
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown }
+    return typeof parsed.message === "string" ? parsed.message : ""
+  } catch {
+    return ""
+  }
+}
+
 const describeFailure = (status: number, text: string, repo: RepoSlug): string => {
   const slug = `${repo.owner}/${repo.name}`
-  const detail = (() => {
-    try {
-      const parsed = JSON.parse(text) as { message?: unknown }
-      return typeof parsed.message === "string" ? parsed.message : ""
-    } catch {
-      return ""
-    }
-  })()
+  const detail = githubMessage(text)
   if (status === 401) return "GitHub rejected the connected token (expired or revoked): reconnect GitHub and retry"
   if (status === 403) return `GitHub denied access to ${slug} (the connected account lacks permission): ${detail}`.trimEnd()
   if (status === 404) return `GitHub repository ${slug} not found or not visible to the connected account`

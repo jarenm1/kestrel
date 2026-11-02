@@ -11,6 +11,8 @@ import { StateLive } from "./core/state"
 import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
+import { coreGhBackend } from "./gh/backend"
+import { createGhHandler, GH_PREFIX } from "./gh/handler"
 import { type ControlClient, makeControlClient } from "./control/client"
 import { CredentialStore, CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
@@ -174,6 +176,12 @@ const program = Effect.gen(function* () {
     previewOpen: core.previewOpen,
   })
 
+  const ghHandler = createGhHandler({
+    grantFor: broker.grantForToken,
+    runFor: core.runFor,
+    backend: (taskId) => coreGhBackend(core, taskId),
+  })
+
   let direct: DirectListener | null = null
   if (config.direct !== null) {
     const store = yield* CredentialStore
@@ -192,7 +200,9 @@ const program = Effect.gen(function* () {
       ? handleBroker(broker, req, res)
       : req.url?.startsWith(MCP_PREFIX)
         ? mcpHandler(req, res)
-        : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+        : req.url?.startsWith(GH_PREFIX)
+          ? ghHandler(req, res)
+          : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
     handled.catch((error: unknown) => failResponse(res, error))
   })
 

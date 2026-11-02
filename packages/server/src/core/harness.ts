@@ -23,6 +23,7 @@ import {
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { Config, VERSION } from "../config"
+import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
@@ -595,6 +596,9 @@ export const AgentHarnessLive = Layer.effect(
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
           const mcpConfigAgent = join(agentHome(settings, homeDir), ".cloudagents", "mcp.json")
+          // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
+          const ghBinHost = join(homeDir, ".kestrel", "gh")
+          const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
 
           const started = yield* Effect.gen(function* () {
             // The run's token authorizes its MCP session as well as its model calls.
@@ -610,6 +614,9 @@ export const AgentHarnessLive = Layer.effect(
                 // The file carries the run's token: owner-only, including when it already existed.
                 await writeFile(mcpConfigHost, JSON.stringify(mcpJson, null, 2), { encoding: "utf8", mode: 0o600 })
                 await chmod(mcpConfigHost, 0o600)
+                await mkdir(ghBinHost, { recursive: true })
+                await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
+                await chmod(join(ghBinHost, "gh"), 0o755)
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
@@ -642,6 +649,8 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
                 CLOUDAGENTS_MCP_TOKEN: lease.token,
+                KESTREL_GH_URL: `${config.mcpBaseUrl}/gh/${task.id}`,
+                KESTREL_GH_TOKEN: lease.token,
                 // Claude Code's MCP tool-call timeout (ms). task_ask has no timeout of its own: the largest timer
                 // delay lets a question wait as long as the user takes to answer.
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
@@ -653,6 +662,7 @@ export const AgentHarnessLive = Layer.effect(
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
+              pathPrefix: [ghBinAgent],
             })
 
             // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
