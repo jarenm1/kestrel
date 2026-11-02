@@ -169,8 +169,6 @@ product copy should say so plainly.
 
 - **Ship the desktop dependencies.** The desktop needs weston 14 or newer, but Ubuntu 24.04 ships 13. A stock Ubuntu box
   on either native Linux or WSL therefore needs a manual install today.
-- **Handle WSLg.** WSLg mounts `/tmp/.X11-unix` read-only, and the documented fix is a manual root `umount` that
-  `wsl --shutdown` reverts. The box should make this work without either step.
 - **Fix the first start on WSL.** The first desktop start can time out while NVENC fails and falls back to x264. Skip
   NVENC there, or do not count the failed attempt against the startup timeout.
 - **Fix hardware graphics on native Linux.** The sandbox exposes host drivers only at `/run/opengl-driver`, and the docs
