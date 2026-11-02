@@ -190,7 +190,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const cancelParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-parent" })
       const cancelChild = yield* core.delegate(cancelParent.id, cancelParent.delegation!.runId!, { ...input, requestId: "cancel-child" })
       expect(Either.isLeft(yield* Effect.either(core.cancelDelegation("other", cancelParent.id)))).toBe(true)
-      const handler = yield* makeWebHandler(core, {} as never)
+      const handler = yield* makeWebHandler(core, {} as never, { version: 1, platform: "other", sandbox: "off", desktop: "unavailable" })
       const url = `http://localhost/api/tasks/parent/delegations/${cancelParent.id}/cancel`
       const forbidden = yield* Effect.promise(() => handler(new Request(url, { method: "POST", headers: { [BOX_USER_HEADER]: "other" } })))
       expect(forbidden.status).toBe(404)

@@ -3,6 +3,7 @@ import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerRespo
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
+import type { BoxCapabilities } from "@cloudagents/protocol"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
 import { dayFormat } from "../core/activity"
@@ -184,12 +185,13 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
+export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
       Effect.succeed(HttpServerResponse.unsafeJson(Schema.decodeSync(Health)({ ok: true, version: VERSION }))),
     ),
+    HttpRouter.get("/api/capabilities", Effect.succeed(HttpServerResponse.unsafeJson(capabilities))),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
     HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
     HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user)))),
@@ -422,9 +424,9 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape) =>
+export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,
