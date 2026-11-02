@@ -78,8 +78,7 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - **Windows:** `bun run dev` has no box desktop or sandbox. For those, use WSL2 Ubuntu with Nix (install as root via
   `wsl -u root`, enable flakes). Run `nix run` from a clone in WSL's home (a Windows worktree's `.git` is a Windows path).
   WSLg mounts `/tmp/.X11-unix` read-only; as root: `umount /tmp/.X11-unix && mkdir -m 1777 -p /tmp/.X11-unix`
-  (reverted by `wsl --shutdown`). Ports reach the Windows browser on `localhost`. A first desktop Start can time out
-  (NVENC fails in WSL, then falls back); press Start again.
+  (reverted by `wsl --shutdown`). Ports reach the Windows browser on `localhost`. WSL uses CPU encoding for the desktop.
 
 ## Before opening a PR
 

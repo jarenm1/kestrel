@@ -16,6 +16,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
+import { isWsl } from "./platform"
 import wallpaper from "./wallpaper.png" with { type: "file" }
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
@@ -630,8 +631,10 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       }
     }
 
+    // WSL desktops use CPU encoding: trying NVENC there can consume the first startup timeout.
+    const wsl = isWsl()
     /** NVENC when it is usable, libx264 otherwise. */
-    const preferredEncoder = (): EncoderKind => (!nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
+    const preferredEncoder = (): EncoderKind => (!wsl && !nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
