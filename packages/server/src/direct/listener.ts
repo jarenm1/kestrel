@@ -31,6 +31,8 @@ interface Routed {
   readonly url: URL
   /** Signed-in user the request acts for; null when no box token was presented. */
   readonly user: string | null
+  /** When the box token lapses, epoch seconds; null unless a box token was presented. */
+  readonly expiresAt: number | null
   readonly dev: boolean
   /** Set only for preview frames: the frame's token, which the core checks against the task. */
   readonly previewToken: string | null
@@ -91,11 +93,12 @@ const route = async (
       user: session.user,
       dev: false,
       previewToken: preview.token,
+      expiresAt: null,
     }
   }
   const token = bearerOrQueryToken(url, authorization)
   url.searchParams.delete(BOX_TOKEN_QUERY)
-  if (token === null) return { url, user: null, dev: false, previewToken: null }
+  if (token === null) return { url, user: null, expiresAt: null, dev: false, previewToken: null }
   const outcome = await Effect.runPromise(Effect.either(deps.auth.authenticate(token)))
   if (Either.isLeft(outcome)) {
     const error = outcome.left
@@ -103,7 +106,13 @@ const route = async (
       ? { status: 401, tag: "Unauthorized", message: error.message }
       : { status: 503, tag: "Unavailable", message: error.message }
   }
-  return { url, user: outcome.right.sub, dev: outcome.right.dev === true, previewToken: null }
+  return {
+    url,
+    user: outcome.right.sub,
+    expiresAt: outcome.right.exp,
+    dev: outcome.right.dev === true,
+    previewToken: null,
+  }
 }
 
 const withIdentity = (headers: Headers, routed: Routed): Headers => {
@@ -137,7 +146,7 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
   const rtc = makeRtcServer({ webHandler: deps.webHandler, runtime: deps.runtime })
 
   const answerOffer = async (request: Request, routed: Routed): Promise<Response> => {
-    if (routed.user === null) {
+    if (routed.user === null || routed.expiresAt === null) {
       return Response.json({ _tag: "Unauthorized", message: "box token is required" }, { status: 401 })
     }
     const offer = Schema.decodeUnknownEither(Schema.parseJson(WebRtcOffer))(await request.text())
@@ -146,7 +155,7 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
     }
     let answer: WebRtcAnswer | null
     try {
-      answer = await rtc.answer({ user: routed.user, dev: routed.dev }, offer.right)
+      answer = await rtc.answer({ user: routed.user, dev: routed.dev }, offer.right, routed.expiresAt)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return Response.json({ _tag: "BadRequest", message }, { status: 400 })

@@ -24,10 +24,11 @@ export interface RtcDeps {
 
 export interface RtcServer {
   /**
-   * Answers a browser's offer for `identity`. Resolves once this box's candidates are gathered, so the answer is
-   * complete. Resolves null when the box already serves `MAX_CHANNELS` channels.
+   * Answers a browser's offer for `identity`. The channel closes at `expiresAt` (epoch seconds), when the token that
+   * opened it lapses. Resolves once this box's candidates are gathered, so the answer is complete. Resolves null when
+   * the box already serves `MAX_CHANNELS` channels.
    */
-  readonly answer: (identity: TunnelIdentity, offer: WebRtcOffer) => Promise<WebRtcAnswer | null>
+  readonly answer: (identity: TunnelIdentity, offer: WebRtcOffer, expiresAt: number) => Promise<WebRtcAnswer | null>
   /** Closes every open channel and the streams on it. */
   readonly close: () => void
 }
@@ -119,15 +120,22 @@ const serveChannel = (
 export const makeRtcServer = (deps: RtcDeps): RtcServer => {
   const closers = new Set<() => void>()
 
-  const answer = async (identity: TunnelIdentity, offer: WebRtcOffer): Promise<WebRtcAnswer | null> => {
+  const answer = async (
+    identity: TunnelIdentity,
+    offer: WebRtcOffer,
+    expiresAt: number,
+  ): Promise<WebRtcAnswer | null> => {
     if (closers.size >= MAX_CHANNELS) return null
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
     let closed = false
     let opened = false
+    let served = false
     const closeChannel = (): void => {
       if (closed) return
       closed = true
       closers.delete(closeChannel)
+      clearTimeout(openTimer)
+      clearTimeout(expiryTimer)
       void pc.close()
     }
     closers.add(closeChannel)
@@ -136,19 +144,23 @@ export const makeRtcServer = (deps: RtcDeps): RtcServer => {
       if (state === "failed" || state === "closed") closeChannel()
     })
     pc.onDataChannel.subscribe((dc) => {
-      if (dc.label !== RTC_CHANNEL_LABEL) {
+      // One channel per connection: a second one with the same label would be served beside the first.
+      if (dc.label !== RTC_CHANNEL_LABEL || served) {
         dc.close()
         return
       }
+      served = true
       dc.stateChanged.subscribe((state) => {
         if (state === "open") opened = true
       })
       serveChannel(deps, identity, dc, closeChannel)
     })
-    const timer = setTimeout(() => {
+    const openTimer = setTimeout(() => {
       if (!opened) closeChannel()
     }, OPEN_TIMEOUT_MS)
-    timer.unref()
+    openTimer.unref()
+    const expiryTimer = setTimeout(closeChannel, Math.max(0, expiresAt * 1000 - Date.now()))
+    expiryTimer.unref()
 
     try {
       await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp })
