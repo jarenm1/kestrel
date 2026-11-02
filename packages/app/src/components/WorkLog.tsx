@@ -142,8 +142,8 @@ const CHANGE_CLASS: Record<string, string> = { add: "text-success", delete: "tex
 function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; nested: ReactNode }) {
   const output = outputText(item.output)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
-  // What the summary line and the views below don't already show.
-  const showInput = view.kind === "other" && view.note === undefined && hasInput
+  // An unrecognized call shows its input as is; a recognized one summarizes it, so the whole input sits one click away.
+  const inlineInput = view.kind === "other" && view.note === undefined && hasInput
   return (
     <>
       {view.command !== undefined && (
@@ -179,8 +179,9 @@ function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; n
           })}
         </ul>
       )}
-      {showInput && <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>}
-      {output.text !== "" && view.diff === undefined && (
+      {inlineInput && <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>}
+      {/* A diff stands in for an edit's success message, but never for the error saying why it failed. */}
+      {output.text !== "" && (view.diff === undefined || item.status === "error") && (
         <pre className={cn(PRE_CLASS, item.status === "error" && "text-destructive")}>{output.text}</pre>
       )}
       {output.images > 0 && (
@@ -190,7 +191,17 @@ function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; n
         </div>
       )}
       {nested}
-      <div className="font-mono text-[10px] break-all text-muted-foreground/60">{item.name}</div>
+      {hasInput && !inlineInput ? (
+        <details className="group/input min-w-0">
+          <summary className="w-fit cursor-pointer font-mono text-[10px] break-all text-muted-foreground/60 select-none hover:text-muted-foreground">
+            {item.name} · <span className="group-open/input:hidden">full input</span>
+            <span className="hidden group-open/input:inline">hide input</span>
+          </summary>
+          <pre className={cn(PRE_CLASS, "mt-1")}>{JSON.stringify(item.input, null, 2)}</pre>
+        </details>
+      ) : (
+        <div className="font-mono text-[10px] break-all text-muted-foreground/60">{item.name}</div>
+      )}
     </>
   )
 }
