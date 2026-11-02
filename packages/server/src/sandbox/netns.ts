@@ -22,9 +22,9 @@ import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
 
 const X11_DIR = "/tmp/.X11-unix"
 
-/** Tools a holder is started with; the util-linux ones come from one package. */
-interface HolderTools {
-  /** `unshare` (util-linux): gives the holder its own IPC and mount namespaces (and user namespace, unless pasta gives one). */
+/** Tools the pasta holder is started with; the util-linux ones come from one package. */
+interface PastaTools {
+  /** `unshare` (util-linux): gives the holder its own IPC and mount namespaces, inside pasta's user + network namespace. */
   readonly unsharePath: string
   /** util-linux `mount`: mounts the holder's private /tmp/.X11-unix. The PATH one may be NixOS's setuid wrapper, which a user namespace cannot run. */
   readonly mountPath: string
@@ -36,13 +36,21 @@ interface HolderTools {
 
 /** How the task's holder is started. */
 export type HolderStart =
-  | (HolderTools & {
+  | (PastaTools & {
       readonly kind: "pasta"
       readonly pastaPath: string
+      /** util-linux `umount`: unmounts the /proc pasta mounts in the holder (see `holderShell`). */
+      readonly umountPath: string
       /** Box HTTP port forwarded into the namespace (broker and MCP at 127.0.0.1:<port>). */
       readonly boxPort: number
     })
-  | (HolderTools & { readonly kind: "unshare" })
+  | {
+      readonly kind: "unshare"
+      /** bwrap: gives the holder its own user, IPC and mount namespaces, and mounts its private /tmp/.X11-unix. */
+      readonly bwrapPath: string
+      /** `sleep`: the holder's process. */
+      readonly sleepPath: string
+    }
 
 export interface TaskHolderOptions {
   readonly taskId: string
@@ -120,14 +128,21 @@ const kill = (h: TaskHolder) => {
   }
 }
 
-/** Runs in the holder: mounts its private X socket directory, then execs sleep so the holder's pid stays the namespace's pid. */
-const holderShell = (start: HolderTools): string[] => [
+/**
+ * Runs in a pasta holder: mounts its private X socket directory, then execs sleep so the holder's pid stays the
+ * namespace's pid. pasta runs its command in a PID namespace of its own and mounts that namespace's /proc over the
+ * host's. Processes that join the holder's mount namespace from outside cannot resolve `/proc/self` through it (NVENC
+ * fails on that), so the holder unmounts it and joined processes see the host's /proc. (The unshare holder is bwrap,
+ * which mounts without a root check and keeps the box user's own uid.)
+ */
+const holderShell = (start: Extract<HolderStart, { kind: "pasta" }>): string[] => [
   start.shPath,
   "-c",
   // The directory is a tmpfs owned by the holder's root (the box's uid, mapped), mode 1777 like /tmp, created if the host has none.
-  `"$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && exec "$1" infinity`,
+  `"$2" /proc && "$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && exec "$1" infinity`,
   start.mountPath,
   start.sleepPath,
+  start.umountPath,
 ]
 
 const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
@@ -157,16 +172,29 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
           ...holderShell(start),
         ]
       : [
-          start.unsharePath,
-          // The holder's own user namespace: root inside maps to the box's uid outside, which may mount the tmpfs.
-          // --kill-child ends the holder with this process, as bwrap's --die-with-parent did.
-          "--fork",
-          "--kill-child",
-          "--user",
-          "--map-root-user",
-          "--ipc",
-          "--mount",
-          ...holderShell(start),
+          start.bwrapPath,
+          // Its own user namespace, mapping the box user to itself, so the desktop's processes never see root: xterm
+          // chowns its pty to root and the tty group only when it runs as root, and that group is unmapped in a
+          // single-id namespace (chown fails with EINVAL, xterm exits). Root is not needed for the tmpfs: bwrap mounts
+          // it without the mount binary's root check. The holder is bwrap's child, which execs sleep (its pid stays the
+          // namespace's pid, as holderShell does for pasta).
+          "--die-with-parent",
+          "--unshare-user",
+          "--unshare-ipc",
+          "--bind",
+          "/",
+          "/",
+          // A fresh bind of /dev: the bind of `/` keeps the host's `nodev`, and then opening /dev/null fails with EACCES.
+          "--dev-bind",
+          "/dev",
+          "/dev",
+          "--perms",
+          "1777",
+          "--tmpfs",
+          X11_DIR,
+          "--",
+          start.sleepPath,
+          "infinity",
         ]
   // systemd-run --scope execs in place, so the spawned pid is the holder's starter.
   const [file, args] = opts.systemd

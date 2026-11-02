@@ -170,7 +170,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     "--unshare-pid",
     "--unshare-uts",
     "--unshare-cgroup-try",
-    // That namespace maps the box user to root; keep the agent on the box user's own ids (agent CLIs refuse root).
+    // Agent CLIs refuse root, so keep the box user's own ids; a holder's namespace may map them to root (pasta's does).
     "--uid",
     String(process.getuid?.() ?? 0),
     "--gid",
@@ -418,17 +418,16 @@ const taskHolder = (
       )
     }
     if (settings.level !== "strict") {
-      const unshare = findExecutable("unshare")
-      const sh = findExecutable("sh")
+      const bwrap = findExecutable("bwrap")
       const sleep = findExecutable("sleep")
-      if (unshare === null || sh === null || sleep === null) {
+      if (bwrap === null || sleep === null) {
         return yield* Effect.fail(
-          new InternalError({ message: "unshare (util-linux), sh and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+          new InternalError({ message: "bwrap and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
         )
       }
       const holder = yield* ensureTaskHolder({
         taskId,
-        start: { kind: "unshare", unsharePath: unshare, mountPath: join(dirname(unshare), "mount"), shPath: sh, sleepPath: sleep },
+        start: { kind: "unshare", bwrapPath: bwrap, sleepPath: sleep },
         systemd,
       })
       return { holder, nsenter }
@@ -456,6 +455,7 @@ const taskHolder = (
         unsharePath: unshare,
         // util-linux's own mount: the PATH one may be NixOS's setuid wrapper, which a user namespace cannot run.
         mountPath: join(dirname(unshare), "mount"),
+        umountPath: join(dirname(unshare), "umount"),
       },
       systemd,
     })
