@@ -8,7 +8,7 @@ if [[ $# != 2 ]]; then
 fi
 os_disk=$(realpath -e -- "$1")
 data_disk=$(realpath -e -- "$2")
-[[ -f "$os_disk" && -f "$data_disk" && "$os_disk" != "$data_disk" ]] || {
+[[ -f "$os_disk" && -f "$data_disk" && ! "$os_disk" -ef "$data_disk" ]] || {
   echo 'expected two different regular disk image files' >&2; exit 1;
 }
 command -v qemu-system-x86_64 >/dev/null || { echo 'qemu-system-x86_64 is required' >&2; exit 1; }
