@@ -203,10 +203,17 @@ export const AgentHarnessLive = Layer.effect(
     const waiting: Array<{ readonly runId: string; readonly grant: (granted: boolean) => void }> = []
     /** The queue item each waiting run shows, with its task for publishing. */
     const queuedItems = new Map<string, { readonly taskId: string; readonly item: AgentItem }>()
+    /**
+     * The queue item ("Started.") of a run that waited for its slot and is still being launched: the run shows it
+     * already, though it joins the run's items only when `startRun` makes the run active. Dropped then, or when the run
+     * gives up its slot instead.
+     */
+    const startingItems = new Map<string, AgentItem>()
     const suspended = new Map<string, { count: number; closing: boolean; done: Promise<void>; resolve: () => void }>()
 
     /** Frees a run's slot and hands it to the run that has waited longest. No-op for a run that holds no slot. */
     const releaseSlot = (runId: string) => {
+      startingItems.delete(runId)
       if (!holding.delete(runId)) return
       const next = waiting.shift()
       if (next === undefined) return
@@ -233,6 +240,8 @@ export const AgentHarnessLive = Layer.effect(
             queuedItems.delete(runId)
             const item = granted ? queueItem("ok", "Started.") : queueItem("error", "Cancelled before it started.")
             publish({ _tag: "agent.item", taskId, runId, item })
+            // A run getting its slot back (withSlotReleased) is active already and keeps its own items.
+            if (granted && !active.has(runId)) startingItems.set(runId, item)
             return granted ? { queued: item } : null
           }),
         )
@@ -523,6 +532,7 @@ export const AgentHarnessLive = Layer.effect(
               entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
             }
             active.set(run.id, entry)
+            startingItems.delete(run.id)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
             createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
             child.on("error", (err) => {
@@ -793,7 +803,8 @@ export const AgentHarnessLive = Layer.effect(
 
       items: readItems,
 
-      itemCount: (runId) => (queuedItems.has(runId) ? 1 : (active.get(runId)?.items.size ?? 0)),
+      // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
+      itemCount: (runId) => active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0),
 
       activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 
