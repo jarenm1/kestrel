@@ -1,14 +1,20 @@
-import React, { useState } from "react";
+import React, { type ReactNode, useState } from "react";
 import { Linking, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { Schema } from "effect";
+import { EllipsisVertical, GitPullRequest } from "lucide-react-native";
 import { GithubRepoSlug, type Checkout } from "@cloudagents/protocol";
 import { Button } from "@/components/ui/Button";
 import { colors, radius, spacing } from "@/theme";
 
 const isGithubRepo = Schema.is(GithubRepoSlug);
 
-const githubUrl = (repo: GithubRepoSlug) => `https://github.com/${repo}`;
+/** A pull request link as the thread view labels it ("PR #12", or "kestrel PR #12" with several repos). */
+export interface PullRequestLink {
+  readonly id: string;
+  readonly url: string;
+  readonly label: string;
+}
 
 /** GitHub's mark (Octicons `mark-github`); lucide has no brand icons. */
 function GitHubMark({ size, color }: { size: number; color: string }) {
@@ -19,44 +25,76 @@ function GitHubMark({ size, color }: { size: number; color: string }) {
   );
 }
 
+interface Link {
+  readonly key: string;
+  readonly url: string;
+  readonly label: string;
+  readonly icon: (color: string, size: number) => ReactNode;
+}
+
 /**
- * Opens the thread's GitHub repository: straight away with one repository, from a sheet of them with several. Renders
- * nothing when no checkout is a GitHub repository (other https clones have no GitHub page). The web app's
- * `ThreadRepoButton`.
+ * The thread's outside links in the top bar: its pull requests, then its repositories on GitHub (the web app's PR
+ * buttons and `ThreadRepoButton`). One link is one button; several share a single button that opens a sheet of them,
+ * so the bar never grows past the screen however many repos the thread checked out. Repos that are not on GitHub have
+ * no page and are left out.
  */
-export function ThreadRepoButton({ checkouts }: { checkouts: readonly Checkout[] }) {
+export function ThreadLinks({ pullRequests, checkouts }: { pullRequests: readonly PullRequestLink[]; checkouts: readonly Checkout[] }) {
   const [picking, setPicking] = useState(false);
-  const repos = checkouts.flatMap((checkout) => (isGithubRepo(checkout.repo) ? [checkout.repo] : []));
-  const [only] = repos;
+  const links: Link[] = [
+    ...pullRequests.map((pr) => ({
+      key: `pr:${pr.id}`,
+      url: pr.url,
+      label: pr.label,
+      icon: (color: string, size: number) => <GitPullRequest size={size} color={color} />,
+    })),
+    ...checkouts.flatMap((checkout) =>
+      isGithubRepo(checkout.repo)
+        ? [
+            {
+              key: `repo:${checkout.repo}`,
+              url: `https://github.com/${checkout.repo}`,
+              label: `${checkout.repo} on GitHub`,
+              icon: (color: string, size: number) => <GitHubMark size={size} color={color} />,
+            },
+          ]
+        : [],
+    ),
+  ];
+  const [only] = links;
   if (only === undefined) return null;
-  const open = (repo: GithubRepoSlug) => void Linking.openURL(githubUrl(repo));
+  if (links.length === 1) {
+    return (
+      <Button variant="ghost" size="icon" accessibilityLabel={`Open ${only.label}`} onPress={() => void Linking.openURL(only.url)}>
+        {only.icon(colors.mutedForeground, 16)}
+      </Button>
+    );
+  }
   return (
     <>
       <Button
         variant="ghost"
         size="icon"
-        accessibilityLabel={repos.length === 1 ? `Open ${only} on GitHub` : "Open a repository on GitHub"}
-        onPress={() => (repos.length === 1 ? open(only) : setPicking(true))}
-      >
-        <GitHubMark size={16} color={colors.mutedForeground} />
-      </Button>
+        icon={EllipsisVertical}
+        accessibilityLabel="Pull requests and repositories"
+        onPress={() => setPicking(true)}
+      />
       <Modal visible={picking} transparent animationType="fade" onRequestClose={() => setPicking(false)}>
         <Pressable style={styles.backdrop} onPress={() => setPicking(false)}>
           <View style={styles.sheet}>
-            <Text style={styles.heading}>Open on GitHub</Text>
-            {repos.map((repo) => (
+            <Text style={styles.heading}>Open</Text>
+            {links.map((link) => (
               <Pressable
-                key={repo}
+                key={link.key}
                 style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
                 accessibilityRole="link"
                 onPress={() => {
                   setPicking(false);
-                  open(repo);
+                  void Linking.openURL(link.url);
                 }}
               >
-                <GitHubMark size={18} color={colors.foreground} />
-                <Text style={styles.repo} numberOfLines={1}>
-                  {repo}
+                {link.icon(colors.foreground, 18)}
+                <Text style={styles.label} numberOfLines={1}>
+                  {link.label}
                 </Text>
               </Pressable>
             ))}
@@ -80,5 +118,5 @@ const styles = StyleSheet.create({
   heading: { color: colors.mutedForeground, fontSize: 12, fontWeight: "600", padding: spacing.md },
   row: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 44, paddingHorizontal: spacing.md, borderRadius: radius.md },
   rowPressed: { backgroundColor: colors.accent },
-  repo: { flex: 1, color: colors.foreground, fontSize: 15 },
+  label: { flex: 1, color: colors.foreground, fontSize: 15 },
 });

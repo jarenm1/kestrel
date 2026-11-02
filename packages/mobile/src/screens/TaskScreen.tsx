@@ -8,7 +8,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
 import { DiffView } from "@/components/DiffView";
 import { PreviewViewer } from "@/components/PreviewViewer";
-import { ThreadRepoButton } from "@/components/ThreadRepoButton";
+import { ThreadLinks } from "@/components/ThreadLinks";
 import { ContentPanel, TopBar } from "@/components/TopBar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -101,24 +101,15 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined;
 
-  // The web's collapsed panel rail: one button per tab, the pull request links, then the repositories on GitHub. The
-  // top bar stays above the open panel, so the GitHub button lives only here: the panel header has no room for it.
+  // The web's collapsed panel rail: one button per tab, then the thread's pull requests and GitHub repositories. Those
+  // share one button once there are several, so the bar fits a narrow phone whatever the thread checked out. The top
+  // bar stays above the open panel, so the links stay reachable while it is open.
   const rail = (
     <>
       {PANEL_TABS.map((t) => (
         <Button key={t.id} variant="ghost" size="icon" icon={t.icon} accessibilityLabel={t.label} onPress={() => openTab(t.id)} />
       ))}
-      {pullRequests.map((pr) => (
-        <Button
-          key={pr.id}
-          variant="ghost"
-          size="icon"
-          icon={GitPullRequest}
-          accessibilityLabel={pr.label}
-          onPress={() => void Linking.openURL(pr.url)}
-        />
-      ))}
-      <ThreadRepoButton checkouts={checkouts} />
+      <ThreadLinks pullRequests={pullRequests} checkouts={checkouts} />
     </>
   );
 
