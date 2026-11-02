@@ -2,8 +2,9 @@ import React, { type ReactNode, useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react-native";
-import { toolDisplayName, type AgentItem } from "@cloudagents/protocol";
+import { Paths, toolDisplayName, type AgentItem } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
+import { AttachmentImage } from "@/components/AttachmentImage";
 import { Markdown } from "@/components/Markdown";
 import { Alert } from "@/components/ui/Alert";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -75,7 +76,13 @@ function Pre({ text }: { text: string }) {
   );
 }
 
-function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
+/** The thread and run whose box serves the transcript's images. */
+interface RunSource {
+  readonly taskId: string;
+  readonly runId: string;
+}
+
+function ItemView({ item, tree, source }: { item: AgentItem; tree: Tree; source: RunSource }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />;
@@ -101,8 +108,16 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
               <Text style={[styles.summaryText, styles.mono]} selectable>{item.name}</Text>
               <Pre text={JSON.stringify(item.input, null, 2)} />
               {item.output !== null ? <Pre text={item.output} /> : null}
+              {(item.images ?? []).map((image) => (
+                <AttachmentImage
+                  key={image.id}
+                  path={Paths.taskRunImage(source.taskId, source.runId, image.id)}
+                  style={styles.image}
+                  accessibilityLabel="Tool screenshot"
+                />
+              ))}
               {(tree.children.get(item.id) ?? []).map((child) => (
-                <ItemView key={child.id} item={child} tree={tree} />
+                <ItemView key={child.id} item={child} tree={tree} source={source} />
               ))}
             </View>
           </Disclosure>
@@ -119,18 +134,19 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ runId }: { runId: string }) {
+export function RunTranscript({ taskId, runId }: { taskId: string; runId: string }) {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const { data } = useQuery(queries.runItems(runId));
   const tree = useMemo(() => buildTree(data ?? []), [data]);
+  const source = useMemo(() => ({ taskId, runId }), [taskId, runId]);
 
   if (data === undefined || data.length === 0) return null;
 
   return (
     <View style={styles.root}>
       {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} />
+        <ItemView key={item.id} item={item} tree={tree} source={source} />
       ))}
     </View>
   );
@@ -162,5 +178,6 @@ const styles = StyleSheet.create({
   toolBody: { marginTop: spacing.sm, gap: spacing.sm },
   pre: { maxHeight: 288, backgroundColor: colors.code, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 8 },
   preText: { color: colors.foreground, fontFamily: fonts.mono, fontSize: 11, lineHeight: 16 },
+  image: { width: "100%", height: 200, borderRadius: radius.sm },
   turn: { color: colors.mutedForeground, fontSize: 11 },
 });

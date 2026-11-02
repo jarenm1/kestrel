@@ -1,7 +1,7 @@
 import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
+import { Paths, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
 import { createQueries, keys, upsert } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -188,8 +188,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
                     {attachments.map((a) => (
                       <AttachmentImage
                         key={a.id}
-                        taskId={taskId}
-                        attachmentId={a.id}
+                        path={Paths.taskAttachment(taskId, a.id)}
                         style={styles.attachment}
                         accessibilityLabel="Attachment"
                       />
@@ -197,7 +196,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
                   </>
                 ) : undefined}
               </ThreadItem>
-              {transcriptRunId !== null ? <RunTranscript runId={transcriptRunId} /> : null}
+              {transcriptRunId !== null ? <RunTranscript taskId={taskId} runId={transcriptRunId} /> : null}
             </Fragment>
           );
         })}

@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, type ReactNode } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Paths, type Attachment } from "@cloudagents/protocol"
 import {
   Bot,
@@ -148,13 +148,41 @@ export interface RunSource {
   readonly runId: string
 }
 
-/** An image a tool call returned, at transcript size; a click opens it whole in a new tab. */
+/**
+ * An image a tool call returned, at transcript size; a click opens it whole in a new tab. On a user's own box the URL
+ * carries a box token that expires after an hour, while the row can stay mounted far longer: the click asks for a
+ * fresh URL first, and an image that fails to load (it scrolled into view after the token expired) asks once per URL.
+ */
 function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
-  const { data: url } = useQuery(queries.taskFileUrl(source.taskId, Paths.taskRunImage(source.taskId, source.runId, image.id)))
+  const queryClient = useQueryClient()
+  const options = queries.taskFileUrl(source.taskId, Paths.taskRunImage(source.taskId, source.runId, image.id))
+  const { data: url, refetch } = useQuery(options)
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
   if (url === undefined) return null
+  const openFresh = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+    // Opened before the await, while the click still allows a new tab; pointed at the image once the URL is fresh.
+    const tab = window.open("", "_blank")
+    if (tab === null) return
+    tab.opener = null
+    queryClient
+      .fetchQuery({ ...options, staleTime: 0 })
+      .then((fresh) => tab.location.replace(fresh))
+      .catch(() => tab.close())
+  }
   return (
-    <a href={url} target="_blank" rel="noreferrer" className="w-fit">
-      <img src={url} alt="Tool screenshot" loading="lazy" className="max-h-72 rounded-lg shadow-soft" />
+    <a href={url} target="_blank" rel="noreferrer" onClick={openFresh} className="w-fit">
+      <img
+        src={url}
+        alt="Tool screenshot"
+        loading="lazy"
+        onError={() => {
+          if (failedUrl === url) return
+          setFailedUrl(url)
+          void refetch()
+        }}
+        className="max-h-72 rounded-lg shadow-soft"
+      />
     </a>
   )
 }

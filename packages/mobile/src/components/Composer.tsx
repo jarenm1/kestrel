@@ -10,6 +10,7 @@ import {
   EFFORT_LABELS,
   connectedModelProviders,
   harnessCommandPrefix,
+  Paths,
   type ContextUsage,
   type HarnessCommand,
   type Message,
@@ -208,8 +209,7 @@ function AskPanel({
       {attachments.map((a) => (
         <AttachmentImage
           key={a.id}
-          taskId={ask.taskId}
-          attachmentId={a.id}
+          path={Paths.taskAttachment(ask.taskId, a.id)}
           style={styles.askImage}
           accessibilityLabel="Question attachment"
         />
