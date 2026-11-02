@@ -50,4 +50,12 @@ describe("channel fragments", () => {
   test("an empty fragment is rejected", () => {
     expect(() => new RtcReassembler().push(new Uint8Array(0))).toThrow("empty channel fragment")
   })
+
+  test("a flood of payload-free fragments is rejected once it exceeds the fragment limit", () => {
+    const reassembler = new RtcReassembler()
+    const flagsOnly = Uint8Array.of(0)
+    const limit = Math.ceil(RTC_MAX_MESSAGE_BYTES / RTC_FRAGMENT_BYTES)
+    for (let i = 0; i < limit; i++) expect(reassembler.push(flagsOnly)).toBeNull()
+    expect(() => reassembler.push(flagsOnly)).toThrow("channel message has too many fragments")
+  })
 })

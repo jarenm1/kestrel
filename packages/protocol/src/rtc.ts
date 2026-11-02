@@ -25,6 +25,12 @@ export const RTC_FRAGMENT_BYTES = 16 * 1024
 /** Largest reassembled message a receiver accepts; a larger message closes the channel. */
 export const RTC_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
+/**
+ * Most fragments a receiver accepts for one message. Every fragment, even one with no payload, is held until its
+ * message completes, so the count is bounded as well as the bytes.
+ */
+const RTC_MAX_MESSAGE_FRAGMENTS = Math.ceil(RTC_MAX_MESSAGE_BYTES / RTC_FRAGMENT_BYTES)
+
 /** Fragment flags: the last fragment of a message, and whether the message is text (JSON) or binary. */
 const FLAG_LAST = 0x01
 const FLAG_TEXT = 0x02
@@ -66,7 +72,8 @@ export const fragmentMessage = (message: RtcMessage): Uint8Array<ArrayBuffer>[] 
 
 /**
  * Rebuilds messages from fragments in arrival order. `push` returns the message once its last fragment arrives,
- * null while it is incomplete, and throws when a message would exceed `RTC_MAX_MESSAGE_BYTES` or a fragment is empty.
+ * null while it is incomplete, and throws when a message would exceed `RTC_MAX_MESSAGE_BYTES` or
+ * `RTC_MAX_MESSAGE_FRAGMENTS`, or when a fragment is empty.
  */
 export class RtcReassembler {
   private parts: Uint8Array[] = []
@@ -76,6 +83,7 @@ export class RtcReassembler {
     if (frame.byteLength < 1) throw new Error("empty channel fragment")
     this.size += frame.byteLength - 1
     if (this.size > RTC_MAX_MESSAGE_BYTES) throw new Error("channel message is too large")
+    if (this.parts.length >= RTC_MAX_MESSAGE_FRAGMENTS) throw new Error("channel message has too many fragments")
     this.parts.push(frame.subarray(1))
     const flags = frame[0] ?? 0
     if ((flags & FLAG_LAST) === 0) return null
