@@ -140,6 +140,8 @@ const LINGER_MS = 15_000
 const MAX_ENCODER_RESTARTS = 3
 /** Unexpected xdotool helper exits tolerated per desktop before it fails. */
 const MAX_INPUT_RESTARTS = 3
+/** Leave most of the desktop readiness budget for CPU fallback if NVENC never produces an init segment. */
+const NVENC_START_TIMEOUT_MS = 5_000
 /** NVENC is skipped for this long after it reports a busy GPU (session limit). */
 const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
@@ -156,6 +158,7 @@ interface Encoder {
   child: ChildProcess | null
   /** The init segment arrived: later exits are restarts, not boot failures. */
   initialized: boolean
+  startupTimer: ReturnType<typeof setTimeout> | null
   /** Tail of stderr, for classifying why NVENC would not start. */
   stderr: string
 }
@@ -358,9 +361,7 @@ const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
     "-hide_banner",
     "-loglevel",
     "error",
-    // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
-    "-fflags",
-    "nobuffer",
+    // Preserve the first frame even when the desktop stays still; timestamps come from the arrival clock.
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -549,6 +550,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     /** Forgets the encoder and everything cached from it. The caller stops the process. */
     const detachEncoder = (s: Session) => {
       cancelLinger(s)
+      if (s.encoder?.startupTimer) clearTimeout(s.encoder.startupTimer)
       s.encoder = null
       s.init = null
       s.gop = null
@@ -597,6 +599,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       for (const piece of pieces) {
         if (piece.kind === "init") {
           enc.initialized = true
+          if (enc.startupTimer) clearTimeout(enc.startupTimer)
+          enc.startupTimer = null
           s.restartsLeft = MAX_ENCODER_RESTARTS
           s.init = piece.bytes
           s.mime = `video/mp4; codecs="${piece.codec}"`
@@ -631,7 +635,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
       const { width, height, fps } = DESKTOP_QUALITIES[s.quality]
-      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, stderr: "" }
+      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, startupTimer: null, stderr: "" }
       s.init = null
       s.gop = null
       s.gopBytes = 0
@@ -647,6 +651,16 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit: (reason) => onEncoderExit(s, enc, reason),
       })
       s.encoder = enc
+      if (kind === "nvenc") {
+        enc.startupTimer = setTimeout(() => {
+          if (s.encoder !== enc || enc.initialized || (s.state !== "starting" && s.state !== "running")) return
+          // A timeout can be transient (slow startup or a quiet display), so retry hardware on a later start.
+          nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
+          console.warn(`desktop ${s.display}: nvenc did not initialize within ${NVENC_START_TIMEOUT_MS} ms; using libx264`)
+          stopEncoder(s)
+          launchEncoder(s, "x264")
+        }, NVENC_START_TIMEOUT_MS)
+      }
     }
 
     /** Starts an encoder from a process callback, where a spawn error must fail the desktop instead of throwing. */
