@@ -1,5 +1,6 @@
-import { useMemo } from "react"
+import { useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { Brain, ChevronRight } from "lucide-react"
 import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
@@ -9,6 +10,8 @@ import { Markdown } from "./Markdown"
 interface Props {
   taskId: string
   runId: string
+  /** The run is still going: its last item may still be streaming. */
+  running: boolean
 }
 
 interface Tree {
@@ -47,17 +50,62 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
 
 const PRE_CLASS = "m-0 max-h-72 overflow-auto rounded-lg bg-code px-3 py-2 font-mono text-[11px] break-all whitespace-pre-wrap shadow-well"
 
-function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
+const SHIMMER_CLASS =
+  "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent"
+
+/** How close to the bottom (px) still counts as following the stream. */
+const LIVE_EDGE_PX = 16
+
+/**
+ * Open while the model is thinking (the item is the run's newest and the run is going), then folds to a "Thought"
+ * line once anything follows it. A click takes over: after that the block stays the way the user left it.
+ */
+function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null)
+  const open = userOpen ?? live
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const atLiveEdgeRef = useRef(true)
+
+  // Follows the streaming text, unless the user scrolled up to read.
+  useLayoutEffect(() => {
+    const el = scrollerRef.current
+    if (live && atLiveEdgeRef.current && el) el.scrollTop = el.scrollHeight
+  }, [live, open, text])
+
+  return (
+    <div className="text-muted-foreground">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setUserOpen(!open)}
+        className="flex cursor-pointer items-center gap-1.5 rounded-md text-xs select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:outline-none"
+      >
+        <Brain className="size-3.5 shrink-0" />
+        <span className={cn(live && SHIMMER_CLASS)}>{live ? "Thinking" : "Thought"}</span>
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && (
+        <div
+          ref={scrollerRef}
+          onScroll={(event) => {
+            const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
+            atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= LIVE_EDGE_PX
+          }}
+          className="mt-1.5 max-h-60 overflow-auto border-l-2 border-border pl-3 text-sm break-words whitespace-pre-wrap italic"
+        >
+          {text}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ItemView({ item, tree, liveId }: { item: AgentItem; tree: Tree; liveId: string | null }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />
     case "thinking":
-      return (
-        <details className="text-muted-foreground">
-          <summary className="cursor-pointer text-xs select-none">Thinking</summary>
-          <div className="mt-1 text-sm break-words whitespace-pre-wrap italic">{item.text}</div>
-        </details>
-      )
+      return <ThinkingBlock text={item.text} live={item.id === liveId} />
     case "tool":
       return (
         <details className="rounded-xl border border-border bg-card/40 px-3.5 py-2 shadow-soft">
@@ -74,7 +122,7 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
             <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>
             {item.output !== null && <pre className={PRE_CLASS}>{item.output}</pre>}
             {(tree.children.get(item.id) ?? []).map((child) => (
-              <ItemView key={child.id} item={child} tree={tree} />
+              <ItemView key={child.id} item={child} tree={tree} liveId={liveId} />
             ))}
           </div>
         </details>
@@ -99,16 +147,18 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId }: Props) {
+export function RunTranscript({ taskId, runId, running }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
+  // Only the newest item of a running run can still be streaming; everything before it is finished.
+  const liveId = running ? (data?.at(-1)?.id ?? null) : null
 
   if (data === undefined || data.length === 0) return null
 
   return (
     <div className="flex flex-col gap-3">
       {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} />
+        <ItemView key={item.id} item={item} tree={tree} liveId={liveId} />
       ))}
     </div>
   )

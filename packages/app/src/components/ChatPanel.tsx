@@ -240,7 +240,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
                     />
                   ) : null}
                 </ThreadItem>
-                {transcriptRunId !== null && <RunTranscript taskId={taskId} runId={transcriptRunId} />}
+                {transcriptRunId !== null && (
+                  <RunTranscript
+                    taskId={taskId}
+                    runId={transcriptRunId}
+                    running={runs.some((run) => run.id === transcriptRunId && run.status === "running")}
+                  />
+                )}
               </Fragment>
             )
           })}
