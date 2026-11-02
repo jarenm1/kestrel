@@ -13,6 +13,7 @@ import {
   githubReferenceLabel,
   githubReferenceMarkdown,
   parseGithubReferenceDraft,
+  parseGithubReferenceMarkdown,
   type GithubReference,
   type GithubReferenceKind,
 } from "@/lib/githubReference"
@@ -238,17 +239,114 @@ function appendIcon(token: HTMLElement, kind: GithubReferenceKind): void {
   token.append(svg)
 }
 
+const CHIP_CLASS =
+  "mx-px inline-flex items-baseline gap-1 whitespace-nowrap font-semibold underline underline-offset-4 text-foreground"
+
 /** A reference chip: an atomic, non-editable inline token with the same bold, underlined look as sent Markdown. */
 function createReferenceToken(reference: GithubReference): HTMLSpanElement {
   const token = document.createElement("span")
   token.dataset.githubReference = githubReferenceMarkdown(reference)
   token.dataset.referenceLabel = githubReferenceLabel(reference.kind, reference.number)
   token.contentEditable = "false"
-  token.className =
-    "mx-px inline-flex items-baseline gap-1 whitespace-nowrap font-semibold underline underline-offset-4 text-foreground"
+  token.className = CHIP_CLASS
   appendIcon(token, reference.kind)
   token.append(document.createTextNode(githubReferenceLabel(reference.kind, reference.number)))
   return token
+}
+
+/** The `#number` a reference was typed as, minus whatever digits were deleted from its label. */
+function typedReferenceText(label: string): string {
+  return `#${/#(\d*)/.exec(label)?.[1] ?? ""}`
+}
+
+function isIntactChip(token: HTMLElement, label: string): boolean {
+  return (
+    token.contentEditable === "false" &&
+    token.className === CHIP_CLASS &&
+    token.childNodes.length === 2 &&
+    token.firstChild instanceof SVGElement &&
+    token.lastChild?.nodeType === Node.TEXT_NODE &&
+    token.lastChild.textContent === label
+  )
+}
+
+function isFlat(root: HTMLElement): boolean {
+  for (const child of root.childNodes) {
+    if (child.nodeType !== Node.ELEMENT_NODE) continue
+    const element = child as HTMLElement
+    if (element.tagName === "BR") continue
+    const markdown = element.dataset.githubReference
+    const parsed = markdown === undefined ? undefined : parseGithubReferenceMarkdown(markdown)
+    if (parsed === undefined) return false
+    if (!isIntactChip(element, githubReferenceLabel(parsed.reference.kind, parsed.reference.number))) return false
+  }
+  return true
+}
+
+/**
+ * The draft is flat: text, breaks and intact chips directly under the root. WebKit (Safari, iOS) breaks that while
+ * typing: it wraps text typed beside a chip in elements copying the chip's bold/underline, can type into the chip, and
+ * can delete characters out of its label. Wrappers are unwrapped, text typed into a chip moves beside it, and a chip
+ * whose label lost characters goes back to the `#number` text it was typed as. The caret stays on the same text.
+ */
+function flattenDraft(root: HTMLElement): void {
+  if (isFlat(root)) return
+  const selection = window.getSelection()
+  const anchor =
+    selection !== null && selection.rangeCount > 0 && selection.anchorNode !== null
+      ? { node: selection.anchorNode, offset: selection.anchorOffset }
+      : null
+  const fallback = caretOffset(root)
+  let caret: { node: Node; offset: number } | null = anchor?.node.nodeType === Node.TEXT_NODE ? anchor : null
+  const caretIn = (element: Element) => anchor !== null && element.contains(anchor.node)
+
+  const flatten = (parent: Node) => {
+    for (const child of Array.from(parent.childNodes)) {
+      if (child.nodeType !== Node.ELEMENT_NODE) continue
+      const element = child as HTMLElement
+      if (element.tagName === "BR") continue
+      const markdown = element.dataset.githubReference
+      const parsed = markdown === undefined ? undefined : parseGithubReferenceMarkdown(markdown)
+      if (parsed !== undefined) {
+        const label = githubReferenceLabel(parsed.reference.kind, parsed.reference.number)
+        if (isIntactChip(element, label)) continue
+        const text = element.textContent ?? ""
+        const at = text.indexOf(label)
+        const replacement: Node[] = []
+        if (at === -1) {
+          replacement.push(document.createTextNode(typedReferenceText(text)))
+        } else {
+          if (at > 0) replacement.push(document.createTextNode(text.slice(0, at)))
+          replacement.push(createReferenceToken(parsed.reference))
+          if (at + label.length < text.length) replacement.push(document.createTextNode(text.slice(at + label.length)))
+        }
+        const last = replacement[replacement.length - 1]!
+        element.replaceWith(...replacement)
+        // A caret that was in the chip continues after whatever replaced it.
+        if (caretIn(element)) {
+          caret = last.nodeType === Node.TEXT_NODE
+            ? { node: last, offset: last.textContent?.length ?? 0 }
+            : { node: last.parentNode ?? root, offset: childIndex(last) + 1 }
+        }
+        continue
+      }
+      // A block WebKit started for a new line keeps that line break.
+      if ((element.tagName === "DIV" || element.tagName === "P") && element.previousSibling !== null) {
+        element.before(document.createTextNode("\n"))
+      }
+      flatten(element)
+      element.replaceWith(...element.childNodes)
+    }
+  }
+  flatten(root)
+
+  if (selection === null) return
+  if (caret !== null && root.contains(caret.node)) {
+    setSelection(selection, caret.node, caret.offset)
+  } else {
+    const point = pointAt(root, fallback, true)
+    setSelection(selection, point.node, point.offset)
+  }
 }
 
 function renderDraft(root: HTMLElement, markdown: string): void {
@@ -311,6 +409,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   function readView(): ComposerEditorView {
     const element = root.current
     if (element === null) return composerViewOf(value)
+    flattenDraft(element)
     normalizeChipCaret(element)
     syncTrailingBreak(element)
     return {
@@ -386,13 +485,21 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       insertReference(reference, start, end) {
         const element = root.current
         if (element === null) return
+        // At the end of a line the chip gets a following space, so the caret sits in plain text: words typed next
+        // neither join the chip's label nor pick up its bold/underline (WebKit copies the style of the text before).
+        const next = readText(element, "plain").charAt(Math.max(start, end))
+        const spaced = next === "" || next === "\n"
         const range = rangeForVisible(element, start, end)
         const selection = window.getSelection()
         if (selection === null) return
         element.focus()
         selection.removeAllRanges()
         selection.addRange(range)
-        document.execCommand("insertHTML", false, createReferenceToken(reference).outerHTML)
+        const token = createReferenceToken(reference)
+        document.execCommand("insertHTML", false, token.outerHTML + (spaced ? "\u00A0" : ""))
+        flattenDraft(element)
+        const point = pointAt(element, Math.min(start, end) + labelOf(token).length + (spaced ? 1 : 0), true)
+        setSelection(selection, point.node, point.offset)
         notify()
       },
     }),
@@ -440,6 +547,37 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     }
     document.addEventListener("selectionchange", onSelectionChange)
     return () => document.removeEventListener("selectionchange", onSelectionChange)
+  }, [])
+
+  // Backspace into a chip turns it back into the `#number` it was typed as, minus its last digit: deleting the number
+  // edits the reference instead of removing it whole, and the menu reopens for what is left.
+  useEffect(() => {
+    const element = root.current
+    if (element === null) return
+    const onBeforeInput = (event: InputEvent) => {
+      if (event.inputType !== "deleteContentBackward" || event.isComposing || composing.current) return
+      const selection = window.getSelection()
+      if (selection === null || !selection.isCollapsed || !element.contains(selection.anchorNode)) return
+      normalizeChipCaret(element)
+      const caret = caretOffset(element)
+      const leaves: Leaf[] = []
+      collectLeaves(element, 0, leaves)
+      const chip = leaves.find((leaf) => leaf.token && leaf.start + leaf.length === caret)
+      if (chip === undefined) return
+      event.preventDefault()
+      const typed = typedReferenceText(labelOf(chip.node as HTMLElement))
+      const text = typed.length > 1 ? typed.slice(0, -1) : typed
+      selection.removeAllRanges()
+      selection.addRange(rangeForVisible(element, chip.start, caret))
+      // A native command keeps undo; the flattening in `notify` removes any style WebKit carries over from the chip.
+      document.execCommand("insertText", false, text)
+      flattenDraft(element)
+      const point = pointAt(element, chip.start + text.length, true)
+      setSelection(selection, point.node, point.offset)
+      notify()
+    }
+    element.addEventListener("beforeinput", onBeforeInput)
+    return () => element.removeEventListener("beforeinput", onBeforeInput)
   }, [])
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
