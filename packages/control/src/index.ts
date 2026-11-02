@@ -5,6 +5,7 @@ import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
 import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
+import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
@@ -71,11 +72,6 @@ const managedBoxAutomations = async (request: Request, env: Env, url: URL): Prom
 const isBoxAutomationPath = (pathname: string): boolean =>
   pathname === ControlPaths.boxAutomations || pathname.startsWith(`${ControlPaths.boxAutomations}/`)
 
-/**
- * The marketing hosts serve only the app's public pages. Sessions live on the app host, so sign-in and API calls
- * that land here (e.g. an old bookmark) move there with the same path.
- */
-const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "www.kestrel-agent.com": true }
 const APP_ORIGIN = "https://app.kestrel-agent.com"
 
 /**
@@ -132,33 +128,6 @@ const previewAssetRequest = (request: Request, url: URL): boolean => {
   }
 }
 
-/** Phones' browsers: `Mobi` is in every phone browser's user agent and in no tablet's or desktop's. */
-const PHONE_USER_AGENT = /Mobi/
-
-/**
- * App pages the mobile app has a screen for: home, threads, automations, archived and settings. They are also the
- * Worker-first page routes in wrangler.jsonc. Other pages (pairing approval, sign-in) stay on the desktop SPA.
- */
-const MOBILE_PAGE = /^\/(?:c\/[^/]+|automations|archived|settings(?:\/[^/]+)?)?\/?$/
-
-/**
- * The app host serves phones the mobile app's web build (`packages/mobile`, exported to `/m/`) in place of the desktop
- * SPA, on the same URLs: the mobile app opens the screen for the path itself. The site hosts' public pages stay.
- */
-const serveAppPage = async (request: Request, env: Env, url: URL): Promise<Response> => {
-  const page =
-    request.method === "GET" &&
-    !SITE_HOSTS[url.hostname] &&
-    MOBILE_PAGE.test(url.pathname) &&
-    (request.headers.get("accept") ?? "").includes("text/html")
-  if (!page) return env.ASSETS.fetch(request)
-  const phone = PHONE_USER_AGENT.test(request.headers.get("user-agent") ?? "")
-  const response = await env.ASSETS.fetch(phone ? new Request(new URL("/m/", url), request) : request)
-  const headers = new Headers(response.headers)
-  headers.append("Vary", "User-Agent")
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
-}
-
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
@@ -184,7 +153,7 @@ export default {
         const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null
         return origin ? withCors(response, origin) : response
       }
-      return await serveAppPage(request, env, url)
+      return await serveAppPage(request, env.ASSETS, url)
     } catch (err) {
       if (err instanceof UpstreamError) return errorResponse(502, "BadGateway", err.message)
       console.error(err)
