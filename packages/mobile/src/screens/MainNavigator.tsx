@@ -1,7 +1,7 @@
 import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, BackHandler, Pressable, StatusBar, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
-import Animated, { interpolate, useAnimatedStyle } from "react-native-reanimated";
+import Animated, { interpolate, interpolateColor, useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/auth/AuthContext";
@@ -102,7 +102,9 @@ export function MainNavigator() {
     transform: [{ translateX: swipe.progress.value * sidebarWidth }],
     // Pushed aside, the screen reads as a card: rounded, with a faint edge (as in the ChatGPT app).
     borderRadius: interpolate(swipe.progress.value, [0, 1], [0, radius.xxl + 16]),
-    borderColor: `rgba(255,255,255,${0.1 * swipe.progress.value})`,
+    // interpolateColor, not a formatted string: near the end of a close the alpha gets tiny enough to print as
+    // `9.2e-7`, which Reanimated rejects as an invalid color and Expo Go crashes on.
+    borderColor: interpolateColor(swipe.progress.value, [0, 1], ["rgba(255,255,255,0)", "rgba(255,255,255,0.1)"]),
   }));
   const sidebarStyle = useAnimatedStyle(() => ({
     opacity: swipe.progress.value,
