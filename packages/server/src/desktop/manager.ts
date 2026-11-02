@@ -56,11 +56,16 @@ export interface DesktopApp {
   readonly output: string
 }
 
-/** The IPC namespace the task's sandboxes share. */
+/**
+ * The IPC and mount namespaces the task's sandboxes share, which hold the task desktop's X socket directory (a
+ * private /tmp/.X11-unix, since WSLg mounts the host's read-only).
+ */
 export interface IpcNamespace {
   /** Pid of a process in it now (the task's namespace holder). */
   readonly holder: number
-  /** Argv prefix that runs a command in the IPC namespace of process `pid`. */
+  /** The X socket directory as this process sees it. */
+  readonly x11Dir: string
+  /** Argv prefix that runs a command in the IPC and mount namespaces of process `pid`. */
   readonly join: (pid: number) => ReadonlyArray<string>
 }
 
@@ -185,9 +190,9 @@ interface Session {
   /** Size and frame rate cap of the stream; the encoder is started with it. */
   quality: DesktopQuality
   /**
-   * Argv prefix for the box's MIT-SHM clients: joins the X server's IPC namespace. The server lives as long as the
-   * session, so the target cannot go stale the way a holder pid could. Set by boot once it is spawned; empty without
-   * a namespace.
+   * Argv prefix for the box's clients of the desktop: joins the X server's IPC and mount namespaces (the mount namespace
+   * holds its socket directory). The server lives as long as the session, so the target cannot go stale the way a
+   * holder pid could. Set by boot once it is spawned; empty without a namespace.
    */
   ipc: ReadonlyArray<string>
   /** weston's XDG_RUNTIME_DIR (its Wayland socket); removed when the desktop stops. Null until boot makes it. */
@@ -413,8 +418,8 @@ const terminate = async (procs: Iterable<ChildProcess>) => {
   for (const p of list) killProcessGroup(p.pid, "SIGKILL")
 }
 
-const waitForSocket = async (s: Session) => {
-  const socket = `/tmp/.X11-unix/X${s.num}`
+const waitForSocket = async (s: Session, x11Dir: string) => {
+  const socket = join(x11Dir, `X${s.num}`)
   const deadline = Date.now() + X_SOCKET_TIMEOUT_MS
   while (!existsSync(socket)) {
     if (s.state !== "starting") throw new Error(s.error ?? "the X server stopped before accepting connections")
@@ -752,6 +757,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const startInput = (s: Session) => {
       const child: ChildProcess = spawnTracked(s, "xdotool", ["-"], {
         critical: false,
+        prefix: s.ipc,
         stdin: true,
         onStderr: (d) => {
           Effect.runFork(Effect.logWarning(`desktop ${s.display} input: ${d.toString().trim()}`))
@@ -836,9 +842,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           },
           catch: toErr,
         })
-        // Xwayland is weston's child, so it is in the same IPC namespace.
+        // Xwayland is weston's child, so it is in the same IPC and mount namespaces.
         if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
-        yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
+        yield* Effect.tryPromise({ try: () => waitForSocket(s, ns === null ? "/tmp/.X11-unix" : ns.x11Dir), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         const shared = yield* Effect.try({
           try: () => {
@@ -864,7 +870,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         )
         yield* Effect.try({
           try: () => {
-            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false })
+            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false, prefix: s.ipc })
             startEncoder(s, preferredEncoder())
           },
           catch: toErr,
@@ -1006,7 +1012,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
           const r = yield* Effect.tryPromise({
-            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display),
+            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display, s.ipc),
             catch: toErr,
           })
           const x = /^X=(\d+)$/m.exec(r.stdout.toString())
@@ -1022,7 +1028,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const s = yield* requireLive(taskId)
           const args = xdotoolArgs(event)
           if (args.length === 0) return
-          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display), catch: toErr })
+          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display, s.ipc), catch: toErr })
           if (r.exitCode !== 0) {
             return yield* Effect.fail(new DesktopError({ message: `xdotool failed: ${r.stderr.trim()}` }))
           }
