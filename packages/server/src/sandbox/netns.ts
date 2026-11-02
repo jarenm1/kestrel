@@ -14,7 +14,7 @@ import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
  *
  * `strict` holders are `pasta`'s: a user + network namespace with outbound internet through user-space NAT, so a
  * browser on the task desktop reaches the agent's dev server on localhost (`joinTaskNet` joins it too). `basic` and
- * `off` holders are unshare's and have no network namespace: those levels share the host's network. Inside a strict
+ * `off` holders are bwrap's and have no network namespace: those levels share the host's network. Inside a strict
  * holder, loopback is the task's own: host services on 127.0.0.1 and other X servers' abstract sockets are out of reach.
  * The one way back to the host is the box port, forwarded with `-T` (broker and MCP). `--no-map-gw` keeps pasta from
  * mapping its gateway address to the host's loopback.
@@ -45,7 +45,7 @@ export type HolderStart =
       readonly boxPort: number
     })
   | {
-      readonly kind: "unshare"
+      readonly kind: "bwrap"
       /** bwrap: gives the holder its own user, IPC and mount namespaces, and mounts its private /tmp/.X11-unix. */
       readonly bwrapPath: string
       /** `sleep`: the holder's process. */
@@ -60,7 +60,7 @@ export interface TaskHolderOptions {
 }
 
 interface TaskHolder {
-  /** The process that starts the holder: pasta or unshare, which forks the holder as its child. */
+  /** The process that starts the holder: pasta or bwrap, which forks the holder as its child. */
   readonly proc: ChildProcess
   /** Host pid of the holder; `nsenter --target` joins its namespaces. */
   readonly holder: number
@@ -132,8 +132,8 @@ const kill = (h: TaskHolder) => {
  * Runs in a pasta holder: mounts its private X socket directory, then execs sleep so the holder's pid stays the
  * namespace's pid. pasta runs its command in a PID namespace of its own and mounts that namespace's /proc over the
  * host's. Processes that join the holder's mount namespace from outside cannot resolve `/proc/self` through it (NVENC
- * fails on that), so the holder unmounts it and joined processes see the host's /proc. (The unshare holder is bwrap,
- * which mounts without a root check and keeps the box user's own uid.)
+ * fails on that), so the holder unmounts it and joined processes see the host's /proc. The bwrap holder keeps the box
+ * user's own uid and mounts its tmpfs without a root check.
  */
 const holderShell = (start: Extract<HolderStart, { kind: "pasta" }>): string[] => [
   start.shPath,
@@ -209,7 +209,7 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
   let holder: number | null = null
   while (Date.now() < deadline && proc.exitCode === null) {
     holder = proc.pid === undefined ? null : holderPid(proc.pid)
-    if (holder !== null && mounted(holder) && (start.kind === "unshare" || configured(holder))) {
+    if (holder !== null && mounted(holder) && (start.kind === "bwrap" || configured(holder))) {
       const started: TaskHolder = { proc, holder }
       proc.on("exit", () => {
         if (holders.get(opts.taskId) === started) holders.delete(opts.taskId)
@@ -236,13 +236,24 @@ export const ensureTaskHolder = (opts: TaskHolderOptions): Effect.Effect<number,
       if (existing) stopTaskHolder(opts.taskId)
       let pending = starting.get(opts.taskId)
       if (!pending) {
-        pending = startHolder(opts)
-          .then((h) => {
+        const start: Promise<TaskHolder> = startHolder(opts).then(
+          (h) => {
+            // A stop that ran during the start dropped this start: the holder it made must not outlive the task.
+            if (starting.get(opts.taskId) !== start) {
+              kill(h)
+              throw new Error("the task was stopped while its namespace holder started")
+            }
+            starting.delete(opts.taskId)
             holders.set(opts.taskId, h)
             return h
-          })
-          .finally(() => starting.delete(opts.taskId))
-        starting.set(opts.taskId, pending)
+          },
+          (e: unknown) => {
+            if (starting.get(opts.taskId) === start) starting.delete(opts.taskId)
+            throw e
+          },
+        )
+        starting.set(opts.taskId, start)
+        pending = start
       }
       return (await pending).holder
     },
@@ -279,6 +290,7 @@ export const joinTaskDesktop = (nsenterPath: string, target: number): string[] =
 ]
 
 export const stopTaskHolder = (taskId: string): void => {
+  starting.delete(taskId)
   const h = holders.get(taskId)
   if (!h) return
   holders.delete(taskId)
@@ -286,7 +298,7 @@ export const stopTaskHolder = (taskId: string): void => {
 }
 
 export const stopAllTaskHolders = (): void => {
-  for (const taskId of [...holders.keys()]) stopTaskHolder(taskId)
+  for (const taskId of new Set([...holders.keys(), ...starting.keys()])) stopTaskHolder(taskId)
 }
 
 // Namespaces must not outlive the box, even when shutdown hooks never ran (systemd also stops the slice).

@@ -402,7 +402,7 @@ const requireSystemdRun = (settings: SandboxSettings): Effect.Effect<string | nu
 
 /**
  * The task's namespace holder (started on first use) and the nsenter that joins it. Strict's is pasta's, with the task's
- * network; basic's and off's are unshare's, without one (see netns.ts).
+ * network; basic's and off's are bwrap's, without one (see netns.ts).
  */
 const taskHolder = (
   settings: SandboxSettings,
@@ -427,7 +427,7 @@ const taskHolder = (
       }
       const holder = yield* ensureTaskHolder({
         taskId,
-        start: { kind: "unshare", bwrapPath: bwrap, sleepPath: sleep },
+        start: { kind: "bwrap", bwrapPath: bwrap, sleepPath: sleep },
         systemd,
       })
       return { holder, nsenter }
