@@ -4,6 +4,7 @@ import { Brain, ChevronRight } from "lucide-react"
 import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
+import { liveItemIds } from "@/lib/live-items"
 import { Alert } from "@/components/ui/alert"
 import { Markdown } from "./Markdown"
 
@@ -100,12 +101,12 @@ function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
   )
 }
 
-function ItemView({ item, tree, liveId }: { item: AgentItem; tree: Tree; liveId: string | null }) {
+function ItemView({ item, tree, liveIds }: { item: AgentItem; tree: Tree; liveIds: ReadonlySet<string> }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />
     case "thinking":
-      return <ThinkingBlock text={item.text} live={item.id === liveId} />
+      return <ThinkingBlock text={item.text} live={liveIds.has(item.id)} />
     case "tool":
       return (
         <details className="rounded-xl border border-border bg-card/40 px-3.5 py-2 shadow-soft">
@@ -122,7 +123,7 @@ function ItemView({ item, tree, liveId }: { item: AgentItem; tree: Tree; liveId:
             <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>
             {item.output !== null && <pre className={PRE_CLASS}>{item.output}</pre>}
             {(tree.children.get(item.id) ?? []).map((child) => (
-              <ItemView key={child.id} item={child} tree={tree} liveId={liveId} />
+              <ItemView key={child.id} item={child} tree={tree} liveIds={liveIds} />
             ))}
           </div>
         </details>
@@ -150,15 +151,14 @@ function ItemView({ item, tree, liveId }: { item: AgentItem; tree: Tree; liveId:
 export function RunTranscript({ taskId, runId, running }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
-  // Only the newest item of a running run can still be streaming; everything before it is finished.
-  const liveId = running ? (data?.at(-1)?.id ?? null) : null
+  const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running])
 
   if (data === undefined || data.length === 0) return null
 
   return (
     <div className="flex flex-col gap-3">
       {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} liveId={liveId} />
+        <ItemView key={item.id} item={item} tree={tree} liveIds={liveIds} />
       ))}
     </div>
   )
