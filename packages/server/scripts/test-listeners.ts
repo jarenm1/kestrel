@@ -1,8 +1,11 @@
 /**
  * Run the real box with a local control stub and a deterministic agent, using isolated data and ephemeral ports.
- * No model keys or real control plane are used. Requires Bun; basic also requires bwrap on PATH.
+ * No model keys or real control plane are used. Requires Bun; basic and strict also require bwrap on PATH.
+ * strict also needs pasta, nsenter and unshare on PATH, /dev/net/tun, and the sandbox toolchain
+ * (CLOUDAGENTS_SANDBOX_PATH, set by `nix develop`).
  *   bun packages/server/scripts/test-listeners.ts off
  *   bun packages/server/scripts/test-listeners.ts basic [--managed]
+ *   bun packages/server/scripts/test-listeners.ts strict [--managed]   (inside `nix develop`)
  */
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
@@ -12,7 +15,9 @@ import { join, resolve } from "node:path"
 import { BOX_ID_HEADER, BOX_TOKEN_QUERY, signBoxToken } from "@cloudagents/protocol"
 
 const sandbox = process.argv[2] ?? "off"
-assert(["off", "basic"].includes(sandbox), "sandbox must be off or basic")
+assert(["off", "basic", "strict"].includes(sandbox), "sandbox must be off, basic or strict")
+const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH
+assert(sandbox !== "strict" || sandboxPath, "strict needs CLOUDAGENTS_SANDBOX_PATH; run inside `nix develop`")
 const managed = process.argv.includes("--managed")
 const owner = "listener-test"
 const boxId = "listener-test-box"
@@ -61,6 +66,7 @@ const child = Bun.spawn([process.execPath, "packages/server/src/main.ts"], {
     CLOUDAGENTS_SANDBOX_PORT: String(privatePort),
     CLOUDAGENTS_DATA_DIR: dataDir,
     CLOUDAGENTS_SANDBOX: sandbox,
+    ...(sandbox === "strict" ? { CLOUDAGENTS_SANDBOX_PATH: sandboxPath, CLOUDAGENTS_SANDBOX_SSL: process.env.CLOUDAGENTS_SANDBOX_SSL } : {}),
     CLOUDAGENTS_SYSTEMD: "0",
     CLOUDAGENTS_FAKE_AGENT: "1",
     CLOUDAGENTS_CONTROL_URL: `http://127.0.0.1:${control.port}`,
@@ -115,7 +121,7 @@ try {
     socket!.onerror = () => { clearTimeout(timer); reject(new Error("event WebSocket failed")) }
   })
   const task = await api("/api/tasks", {}) as { id: string }
-  const sent = await api(`/api/tasks/${task.id}/messages`, { text: "listener-probe", model: "claude-sonnet-4-6" }) as { run: { id: string } }
+  const sent = await api(`/api/tasks/${task.id}/messages`, { text: `listener-probe ${publicPort} ${control.port} ${sandbox === "strict" ? "unreachable" : "unchecked"}`, model: "claude-sonnet-4-6" }) as { run: { id: string } }
   let run: { id: string; status: string } | undefined
   for (let attempt = 0; attempt < 150; attempt++) {
     const runs = await api(`/api/tasks/${task.id}/runs`) as Array<{ id: string; status: string }>
@@ -129,7 +135,7 @@ try {
   }
   assert.equal(run?.status, "succeeded", "authenticated agent run failed")
   assert.equal(lookups, 1, "one credentials lookup for this session")
-  console.log(`PASS: authenticated ${managed ? "managed" : "BYOB"} API/WebSocket, ${sandbox} agent MCP, broker and workspace exec`)
+  console.log(`PASS: authenticated ${managed ? "managed" : "BYOB"} API/WebSocket, ${sandbox} agent MCP, broker, workspace exec${sandbox === "strict" ? " and loopback isolation" : ""}`)
 
   const mcp = JSON.parse(await readFile(join(dataDir, "homes", task.id, ".cloudagents", "mcp.json"), "utf8"))
     .mcpServers.cloudagents as { url: string; headers: { Authorization: string } }
