@@ -37,7 +37,7 @@ A stretch longer than two sampling intervals is not bridged: the collector sends
 lists it as a gap. A resource whose process is missing (crashed, or not yet started) is likewise absent rather than
 zero. If any listed disk cannot be stat'ed, disk usage for that interval is absent too; the VM's other resources are still
 sampled. Usage that straddles a lifecycle transition is attributed to the state the VM held during it, using the sample
-at the transition tick.
+at the transition tick. A VM that moves to `deleted` is not sampled at that tick, so its CPU and memory for the interval before deletion are reported as a gap; its disk is still measured.
 
 ## Running it
 
