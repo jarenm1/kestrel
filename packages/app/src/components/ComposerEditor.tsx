@@ -12,6 +12,7 @@ import {
 import {
   githubReferenceLabel,
   githubReferenceMarkdown,
+  githubReferenceTypedText,
   parseGithubReferenceDraft,
   parseGithubReferenceMarkdown,
   type GithubReference,
@@ -254,11 +255,6 @@ function createReferenceToken(reference: GithubReference): HTMLSpanElement {
   return token
 }
 
-/** The `#number` a reference was typed as, minus whatever digits were deleted from its label. */
-function typedReferenceText(label: string): string {
-  return `#${/#(\d*)/.exec(label)?.[1] ?? ""}`
-}
-
 function isIntactChip(token: HTMLElement, label: string): boolean {
   return (
     token.contentEditable === "false" &&
@@ -314,7 +310,7 @@ function flattenDraft(root: HTMLElement): void {
         const at = text.indexOf(label)
         const replacement: Node[] = []
         if (at === -1) {
-          replacement.push(document.createTextNode(typedReferenceText(text)))
+          replacement.push(document.createTextNode(githubReferenceTypedText(text)))
         } else {
           if (at > 0) replacement.push(document.createTextNode(text.slice(0, at)))
           replacement.push(createReferenceToken(parsed.reference))
@@ -565,7 +561,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       const chip = leaves.find((leaf) => leaf.token && leaf.start + leaf.length === caret)
       if (chip === undefined) return
       event.preventDefault()
-      const typed = typedReferenceText(labelOf(chip.node as HTMLElement))
+      const typed = githubReferenceTypedText(labelOf(chip.node as HTMLElement))
       const text = typed.length > 1 ? typed.slice(0, -1) : typed
       selection.removeAllRanges()
       selection.addRange(rangeForVisible(element, chip.start, caret))

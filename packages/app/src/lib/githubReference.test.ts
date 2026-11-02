@@ -3,6 +3,7 @@ import {
   findGithubReferenceTrigger,
   githubReferenceFromLink,
   githubReferenceMarkdown,
+  githubReferenceTypedText,
   githubReferenceUrl,
   parseGithubReferenceDraft,
   parseGithubReferenceMarkdown,
@@ -36,6 +37,19 @@ describe("findGithubReferenceTrigger", () => {
     expect(findGithubReferenceTrigger("See #42, then send", 7)).toEqual({ start: 4, end: 7, number: 42 })
     // The caret before the last digit is inside the number, so the menu is closed there.
     expect(findGithubReferenceTrigger("See #42, then send", 6)).toBeUndefined()
+  })
+})
+
+describe("githubReferenceTypedText", () => {
+  test("an edited chip label goes back to # and the digits it still has", () => {
+    expect(githubReferenceTypedText("PR #181")).toBe("#181")
+    expect(githubReferenceTypedText("Issue #18")).toBe("#18")
+    // WebKit deleted the kind word, or the `#` itself: the digits stay.
+    expect(githubReferenceTypedText("#181")).toBe("#181")
+    expect(githubReferenceTypedText("PR 181")).toBe("#181")
+    // Every digit deleted: back to the `#` the reference was typed from.
+    expect(githubReferenceTypedText("PR #")).toBe("#")
+    expect(githubReferenceTypedText("PR")).toBe("#")
   })
 })
 

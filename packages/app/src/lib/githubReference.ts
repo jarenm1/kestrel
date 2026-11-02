@@ -44,6 +44,15 @@ export function githubReferenceLabel(kind: GithubReferenceKind, number: number):
   return `${kind === "pr" ? "PR" : "Issue"} #${number}`
 }
 
+/**
+ * The `#number` text a chip goes back to when its label is edited: `#` and the digits still in the label. A label that
+ * lost its `#` (`PR 181`) keeps its digits; one with no digits left is the `#` the reference was typed from.
+ */
+export function githubReferenceTypedText(label: string): string {
+  const digits = /#(\d*)/.exec(label)?.[1] ?? /\d+/.exec(label)?.[0] ?? ""
+  return `#${digits}`
+}
+
 /** `https://github.com/owner/repo/pull/123` or `.../issues/123`. */
 export function githubReferenceUrl(reference: GithubReference): string {
   return `https://github.com/${reference.repo}/${reference.kind === "pr" ? "pull" : "issues"}/${reference.number}`
