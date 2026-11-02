@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { AppState } from "react-native";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
-import { createQueries, keys, storeTask, upsert } from "@/api/queries";
+import { createQueries, keys, resnapshotTask, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 
 const MAX_LOG_LINES = 2000;
@@ -31,6 +32,20 @@ export function useTaskState(taskId: string) {
   const [generation, setGeneration] = useState(0);
   const [desktopOpens, setDesktopOpens] = useState(0);
 
+  // A socket can die silently in the background and nothing pings it, so it may never report a close. Coming back
+  // always opens a fresh one, which re-reads the thread.
+  useEffect(() => {
+    let backgrounded = false;
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "background") backgrounded = true;
+      if (state === "active" && backgrounded) {
+        backgrounded = false;
+        setGeneration((g) => g + 1);
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
   useEffect(() => {
     let active = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -49,10 +64,7 @@ export function useTaskState(taskId: string) {
       close = openTaskEvents(url, {
         onOpen: () => {
           setDisconnected(false);
-          for (const run of queryClient.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []) {
-            void queryClient.invalidateQueries({ queryKey: keys.runItems(run.id) });
-          }
-          void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
+          resnapshotTask(queryClient, taskId, generation > 0);
         },
         onEvent: (event) => {
           switch (event._tag) {

@@ -96,6 +96,19 @@ export function storeTask(client: QueryClient, task: Task): void {
 }
 
 /**
+ * Re-reads a thread after its event stream opens: events sent while no stream was open are gone. `keys.task` prefixes
+ * the thread's other entries, so messages, runs and the rest follow. Run items sit under their run instead, so they are
+ * invalidated by run. A finished run's items are final and were read when the thread mounted, so the first open of a
+ * mount refreshes only running ones. After a reconnect every run counts: its items may date from before the gap.
+ */
+export function resnapshotTask(client: QueryClient, taskId: string, reconnected: boolean): void {
+  for (const run of client.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []) {
+    if (reconnected || run.status === "running") void client.invalidateQueries({ queryKey: keys.runItems(run.id) })
+  }
+  void client.invalidateQueries({ queryKey: keys.task(taskId) })
+}
+
+/**
  * Stores a box list. When the active box changes, or Kestrel's managed box changes (its id or URL), the queries read
  * from the box that was replaced are cancelled and reset, so mounted views refetch from the new box and no usage
  * figure of the old box stays on screen; the old managed box's cached token is dropped. When the set of boxes changes

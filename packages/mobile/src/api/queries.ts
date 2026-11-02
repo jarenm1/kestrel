@@ -62,6 +62,19 @@ export function storeTask(client: QueryClient, task: Task): void {
   client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
 }
 
+/**
+ * Re-reads a thread after its event stream opens: events sent while no stream was open are gone. `keys.task` prefixes
+ * the thread's other entries, so messages, runs and the rest follow. Run items sit under their run instead, so they are
+ * invalidated by run. A finished run's items are final and were read when the thread mounted, so the first open of a
+ * mount refreshes only running ones. After a reconnect every run counts: its items may date from before the gap.
+ */
+export function resnapshotTask(client: QueryClient, taskId: string, reconnected: boolean): void {
+  for (const run of client.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []) {
+    if (reconnected || run.status === "running") void client.invalidateQueries({ queryKey: keys.runItems(run.id) });
+  }
+  void client.invalidateQueries({ queryKey: keys.task(taskId) });
+}
+
 /** Roots of the box-served cache entries. Switching the active box drops them: they describe the box that was active. */
 const BOX_SCOPED_ROOTS: readonly unknown[] = [keys.box[0], keys.usage[0], keys.tasks[0], keys.task("")[0], keys.runItems("")[0]];
 

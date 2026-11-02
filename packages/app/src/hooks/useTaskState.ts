@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
-import { keys, queries, storeTask, upsert } from "@/api/queries"
+import { keys, queries, resnapshotTask, storeTask, upsert } from "@/api/queries"
 import { errorText } from "@/util"
 
 const MAX_LOG_LINES = 2000
@@ -58,10 +58,7 @@ export function useTaskState(taskId: string) {
     const close = openTaskEvents(taskId, {
       onOpen: () => {
         setDisconnected(false)
-        for (const run of queryClient.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []) {
-          void queryClient.invalidateQueries({ queryKey: keys.runItems(run.id) })
-        }
-        void queryClient.invalidateQueries({ queryKey: keys.task(taskId) })
+        resnapshotTask(queryClient, taskId, generation > 0)
       },
       onEvent: (event) => {
         switch (event._tag) {
