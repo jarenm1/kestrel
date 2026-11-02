@@ -191,7 +191,19 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
       "/api/health",
       Effect.succeed(HttpServerResponse.unsafeJson(Schema.decodeSync(Health)({ ok: true, version: VERSION }))),
     ),
-    HttpRouter.get("/api/capabilities", Effect.succeed(HttpServerResponse.unsafeJson(capabilities))),
+    // Sandbox and desktop posture of this box: a signed-in user only, unlike health. 401 when no user is presented.
+    HttpRouter.get(
+      "/api/capabilities",
+      requestUser.pipe(
+        Effect.flatMap((user) =>
+          Effect.succeed(
+            user === null
+              ? HttpServerResponse.unsafeJson({ _tag: "Unauthorized", message: "no signed-in user" }, { status: 401 })
+              : HttpServerResponse.unsafeJson(capabilities),
+          ),
+        ),
+      ),
+    ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
     HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
     HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user)))),

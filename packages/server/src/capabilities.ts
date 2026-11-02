@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import type { BoxCapabilities } from "@cloudagents/protocol"
+import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
 
 interface CapabilityProbe {
   readonly platform: NodeJS.Platform
@@ -16,7 +17,11 @@ const hostProbe = (): CapabilityProbe => ({
   release: release(),
   exists: (path) => existsSync(path),
   executable: (name) => Bun.which(name) !== null,
-  westonVersion: () => execFileSync("weston", ["--version"], { encoding: "utf8", timeout: 2000 }),
+  // weston prints its version on stdout or stderr depending on build; an empty result means it did not answer.
+  westonVersion: () => {
+    const run = spawnSync("weston", ["--version"], { encoding: "utf8", timeout: 2000 })
+    return run.error ? "" : run.stdout + run.stderr
+  },
 })
 
 // Lima mounts its cloud-init seed ISO here on every guest it boots (checked on Lima 2.x, Ubuntu 24.04, qemu).
@@ -34,16 +39,11 @@ export const boxCapabilities = (
   probe: CapabilityProbe = hostProbe(),
 ): BoxCapabilities => {
   const platform = platformOf(probe)
-  // These run on the box. The terminal and wallpaper are optional conveniences, not desktop prerequisites.
-  const tools = ["weston", "Xwayland", "openbox", "xdotool", "ffmpeg", "xdamage-capture"]
+  // Only what a desktop start needs; optional tools (see requirements.ts) do not change the answer.
   let desktop = false
-  if (platform !== "other" && tools.every(probe.executable)) {
-    try {
-      const major = /weston (\d+)\./i.exec(probe.westonVersion())?.[1]
-      desktop = major !== undefined && Number(major) >= 14
-    } catch {
-      // A version probe that fails or times out has not confirmed the prerequisites.
-    }
+  if (platform !== "other" && [...DESKTOP_REQUIRED_TOOLS, DESKTOP_HELPER].every(probe.executable)) {
+    const version = parseWestonVersion(probe.westonVersion())
+    desktop = version !== null && version.major >= MIN_WESTON_MAJOR
   }
   return { version: 1, platform, sandbox, desktop: desktop ? "prerequisites-present" : "unavailable" }
 }

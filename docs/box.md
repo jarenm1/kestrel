@@ -264,12 +264,16 @@ Don't run a box against production with the production token from your machine: 
 
 `GET /api/capabilities` returns version 1 with `platform` (`linux`, `wsl`, `lima`, or `other`), the configured
 `sandbox` (`strict`, `basic`, or `off`), and `desktop`. `lima` is a Lima guest, detected by its cloud-init seed at
-`/mnt/lima-cidata`; Lima guests no longer report `linux`. `prerequisites-present` means Linux and the desktop
-executables, including weston 14 or newer, were found at box startup. It does not guarantee a desktop will start;
-permissions, graphics and runtime resources still matter. `unavailable` means that check did not pass. Older boxes
-return 404; clients should treat that as unknown capabilities and retain their existing behavior. Clients must also
-treat an unsupported contract version as unknown, rather than interpreting it as version 1. The `platform` and
-`sandbox` value sets are closed within version 1: a value outside them is a new contract version. Additive fields
-within version 1 may be ignored. The response is a startup snapshot; restart the box after installing desktop tools
-to refresh it. Like health, discovery requires no user identity and contains no user data. This endpoint does not
-change health or existing API behavior.
+`/mnt/lima-cidata`; Lima guests no longer report `linux`. `prerequisites-present` means Linux and the tools a desktop
+start needs (weston 14 or newer, Xwayland, xdotool, ffmpeg, and the xdamage-capture helper) were found at box startup.
+openbox, hsetroot and xterm are optional and do not change the answer. It does not guarantee a desktop will start;
+permissions, graphics and runtime resources still matter. `unavailable` means that check did not pass. The
+`platform` and `sandbox` value sets are closed within version 1: a value outside them is a new contract version.
+Additive fields within version 1 may be ignored. The response is a startup snapshot; restart the box after installing
+desktop tools to refresh it.
+
+Discovery needs a signed-in user, like the other box routes: send the same box token. Without one it answers 401
+`{"_tag":"Unauthorized"}`; a 401 says nothing about the box and means the token is missing or was rejected. A 404 means
+an older box without this endpoint. Clients treat a 404 as unknown capabilities and keep their existing behavior. They
+must also treat an unsupported contract version as unknown, rather than interpreting it as version 1. This endpoint
+does not change health or existing API behavior.

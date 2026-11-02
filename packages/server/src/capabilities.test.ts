@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
-import { BoxCapabilities, Health, Paths } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BoxCapabilities, Health, Paths } from "@cloudagents/protocol"
 import { boxCapabilities } from "./capabilities"
+import { DESKTOP_HELPER, DESKTOP_OPTIONAL_TOOLS, DESKTOP_REQUIRED_TOOLS } from "./desktop/requirements"
 import { makeWebHandler } from "./http/router"
 
 const linux = {
@@ -40,27 +41,28 @@ test("recognizes a Lima guest by its cloud-init seed, whatever the kernel releas
   expect(boxCapabilities("basic", { ...lima, platform: "darwin" }).platform).toBe("other")
 })
 
-test("missing capture or input tools prevent reporting desktop prerequisites", () => {
-  for (const missing of ["weston", "Xwayland", "openbox", "xdotool", "ffmpeg", "xdamage-capture"]) {
+test("a missing required desktop tool prevents reporting desktop prerequisites; optional tools do not", () => {
+  for (const missing of [...DESKTOP_REQUIRED_TOOLS, DESKTOP_HELPER]) {
     expect(boxCapabilities("basic", { ...linux, executable: (name) => name !== missing }).desktop).toBe("unavailable")
   }
+  for (const missing of DESKTOP_OPTIONAL_TOOLS) {
+    expect(boxCapabilities("basic", { ...linux, executable: (name) => name !== missing }).desktop).toBe("prerequisites-present")
+  }
 })
 
-test("old, unknown or failing Weston versions are unavailable", () => {
-  for (const version of ["weston 13.0.3", "unknown", "weston 1.4.0"]) {
+test("old or unknown Weston versions are unavailable", () => {
+  for (const version of ["weston 13.0.3", "unknown", "weston 1.4.0", ""]) {
     expect(boxCapabilities("basic", { ...linux, westonVersion: () => version }).desktop).toBe("unavailable")
   }
-  expect(boxCapabilities("basic", {
-    ...linux, westonVersion: () => { throw new Error("timed out") },
-  }).desktop).toBe("unavailable")
 })
 
-test("capability discovery preserves health and unknown-route behavior", async () => {
+test("capability discovery needs a signed-in user and preserves health and unknown-route behavior", async () => {
   const capabilities = boxCapabilities("off", linux)
   const handler = await Effect.runPromise(makeWebHandler({} as never, {} as never, capabilities))
-  const response = await handler(new Request(`http://box.test${Paths.capabilities}`))
-  expect(response.status).toBe(200)
-  expect(Schema.decodeUnknownSync(BoxCapabilities)(await response.json())).toEqual(capabilities)
+  expect((await handler(new Request(`http://box.test${Paths.capabilities}`))).status).toBe(401)
+  const signedIn = await handler(new Request(`http://box.test${Paths.capabilities}`, { headers: { [BOX_USER_HEADER]: "alice" } }))
+  expect(signedIn.status).toBe(200)
+  expect(Schema.decodeUnknownSync(BoxCapabilities)(await signedIn.json())).toEqual(capabilities)
   const health = await handler(new Request(`http://box.test${Paths.health}`))
   expect(health.status).toBe(200)
   expect(Schema.decodeUnknownSync(Health)(await health.json()).ok).toBe(true)
