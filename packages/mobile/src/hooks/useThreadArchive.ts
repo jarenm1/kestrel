@@ -12,11 +12,11 @@ export function useThreadArchive() {
   const queryClient = useQueryClient();
   const archive = useMutation({
     mutationFn: (taskId: string) => api.archiveTask(taskId),
-    onSuccess: (updated: Task) => storeTask(queryClient, updated),
+    onSuccess: (updated: Task) => storeTask(queryClient, updated, api.boxScope),
   });
   const unarchive = useMutation({
     mutationFn: (taskId: string) => api.unarchiveTask(taskId),
-    onSuccess: (updated: Task) => storeTask(queryClient, updated),
+    onSuccess: (updated: Task) => storeTask(queryClient, updated, api.boxScope),
   });
   return { archive, unarchive };
 }

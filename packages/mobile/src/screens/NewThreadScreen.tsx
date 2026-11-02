@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { GithubRepoSlug, type Message, type Run, type SendMessageBody, type Task } from "@cloudagents/protocol";
-import { keys, storeTask } from "@/api/queries";
+import { boxKeys, storeTask } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { useBoxOnline } from "@/components/BoxStatus";
 import { Composer } from "@/components/Composer";
@@ -21,6 +21,7 @@ import { colors, spacing } from "@/theme";
 export function NewThreadScreen() {
   const { api } = useApiClient();
   const { boxes, activeBoxId, setActiveBox } = useAuth();
+  const keys = boxKeys(api.boxScope);
   const nav = useNavigation();
   const queryClient = useQueryClient();
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug);
@@ -47,7 +48,7 @@ export function NewThreadScreen() {
       }
       created.current = { task, repo, branch, boxId: activeBoxId };
       // The thread exists from here on, even if sending the first message fails.
-      storeTask(queryClient, task);
+      storeTask(queryClient, task, api.boxScope);
       const sent = await api.sendMessage(task.id, body);
       return { task, sent };
     },

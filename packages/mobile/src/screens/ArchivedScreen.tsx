@@ -29,7 +29,7 @@ export function ArchivedScreen() {
 
   const unarchive = useMutation({
     mutationFn: (taskId: string) => api.unarchiveTask(taskId),
-    onSuccess: (task) => storeTask(queryClient, task),
+    onSuccess: (task) => storeTask(queryClient, task, api.boxScope),
   });
 
   const now = Date.now();

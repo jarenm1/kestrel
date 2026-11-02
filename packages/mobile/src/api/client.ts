@@ -75,6 +75,8 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
+  /** Stable identity for box-served cache entries; includes URL so a changed route cannot reuse old data. */
+  readonly boxScope: string;
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
@@ -224,6 +226,7 @@ export function createApiClient(
   }
 
   return {
+    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
       const token = await mintBoxToken(activeBox);
