@@ -78,24 +78,7 @@ export function SlashCommands({
         "animate-in duration-150 fade-in slide-in-from-bottom-1",
       )}
     >
-      {!chosenModel ? (
-        <StateLine>Choose a model to see its commands.</StateLine>
-      ) : pending ? (
-        <StateLine>
-          <Loader2 className="size-3.5 animate-spin" />
-          Loading commands…
-        </StateLine>
-      ) : error !== undefined && error !== null ? (
-        <StateLine>
-          <span className="line-clamp-2">Couldn’t load commands: {errorText(error)}</span>
-        </StateLine>
-      ) : matches.length === 0 ? (
-        <StateLine>
-          {query === ""
-            ? `No ${noun} available for this harness.`
-            : `No ${noun} match “${trigger}${query}”.`}
-        </StateLine>
-      ) : (
+      {matches.length > 0 && (
         <div
           id={listboxId}
           role="listbox"
@@ -136,6 +119,25 @@ export function SlashCommands({
           })}
         </div>
       )}
+      {/* Kestrel's own commands list straight away; the harness's join them, so its state shows beneath. */}
+      {!chosenModel ? (
+        <StateLine>Choose a model to see its commands.</StateLine>
+      ) : pending ? (
+        <StateLine>
+          <Loader2 className="size-3.5 animate-spin" />
+          Loading commands…
+        </StateLine>
+      ) : error !== undefined && error !== null ? (
+        <StateLine>
+          <span className="line-clamp-2">Couldn’t load commands: {errorText(error)}</span>
+        </StateLine>
+      ) : matches.length === 0 ? (
+        <StateLine>
+          {query === ""
+            ? `No ${noun} available for this harness.`
+            : `No ${noun} match “${trigger}${query}”.`}
+        </StateLine>
+      ) : null}
     </div>
   )
 }

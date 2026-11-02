@@ -191,6 +191,11 @@ export const AgentItem = Schema.Union(
     input: Schema.Unknown,
     status: Schema.Literal("running", "ok", "error"),
     output: Schema.NullOr(Schema.String),
+    /**
+     * Images the result returned (a desktop screenshot), served by `Paths.taskRunImage`; their `[image]` placeholder
+     * is not in `output`. Absent on items from before images were kept, and when the result had none.
+     */
+    images: Schema.optional(Schema.Array(Attachment)),
   }),
   /** End of one agent turn. Fields the harness does not report are null. */
   Schema.Struct({
@@ -519,6 +524,22 @@ export const Usage = Schema.Struct({
 })
 export type Usage = typeof Usage.Type
 
+/** One local calendar day with agent activity: the runs started that day, and those runs' active time. */
+export const ActivityDay = Schema.Struct({
+  /** `YYYY-MM-DD` in the requested time zone. */
+  date: Schema.String,
+  runs: Schema.Number,
+  agentSeconds: Schema.Number,
+})
+export type ActivityDay = typeof ActivityDay.Type
+
+/** The signed-in user's daily agent activity over the last year; days without a run are left out. */
+export const UsageActivity = Schema.Struct({
+  timeZone: Schema.String,
+  days: Schema.Array(ActivityDay),
+})
+export type UsageActivity = typeof UsageActivity.Type
+
 export type PlanId = "hobby" | "pro" | "team"
 
 export interface Plan {
@@ -605,6 +626,8 @@ export const Paths = {
   health: "/api/health",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
+  /** GET `?tz=<IANA zone>` -> UsageActivity of the signed-in user, days counted in that zone. */
+  usageActivity: "/api/usage/activity",
   /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
   tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,
@@ -645,6 +668,8 @@ export const Paths = {
   /** The bytes of `CheckoutIcon.blob`; the blob in the path makes the URL immutable. */
   taskCheckoutIcon: (taskId: string, checkoutId: string, blob: string) =>
     `/api/tasks/${taskId}/checkouts/${checkoutId}/icon/${blob}`,
+  /** An image a tool call returned (`images` on a tool item); the id names the bytes, so the URL is immutable. */
+  taskRunImage: (taskId: string, runId: string, imageId: string) => `/api/tasks/${taskId}/runs/${runId}/images/${imageId}`,
   /**
    * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the
    * optional `name` query parameter -> `Attachment`. The upload waits, unsent, until a `SendMessageBody.attachments`
@@ -676,4 +701,6 @@ export * from "./refs"
 export * from "./models"
 export * from "./boxtoken"
 export * from "./tool-names"
+export * from "./tool-display"
+export * from "./live-items"
 export * from "./thread-identity"

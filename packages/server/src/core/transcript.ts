@@ -1,4 +1,4 @@
-import type { AgentItem, ContextUsage } from "@cloudagents/protocol"
+import type { AgentItem, Attachment, ContextUsage } from "@cloudagents/protocol"
 
 /**
  * Turns one harness's stdout lines into the normalized `AgentItem`s the app renders.
@@ -43,10 +43,17 @@ const sumTokens = (values: ReadonlyArray<number | null>): number | null => {
   return present.length === 0 ? null : present.reduce((a, b) => a + b, 0)
 }
 
-/** A tool result's content as plain text; images have no text of their own. */
-const toolResultText = (content: unknown): string => {
-  if (typeof content === "string") return content
+/** Stores one base64 image a tool returned; null when it cannot be kept (unknown type, too large). */
+export type SaveImage = (base64: string, mimeType: string) => Attachment | null
+
+/**
+ * A tool result's content: its text, and the images `save` kept. An image that was not kept stays an `[image]` line,
+ * so the text still says one was there. Claude puts an image's bytes in `source`; MCP (Codex) puts them on the block.
+ */
+const toolResult = (content: unknown, save: SaveImage | null): { output: string; images: Attachment[] } => {
+  if (typeof content === "string") return { output: content, images: [] }
   const parts: string[] = []
+  const images: Attachment[] = []
   for (const part of asArray(content)) {
     if (typeof part === "string") {
       parts.push(part)
@@ -55,10 +62,16 @@ const toolResultText = (content: unknown): string => {
     if (!isRecord(part)) continue
     const kind = asString(part.type)
     if (kind === "text") parts.push(asString(part.text) ?? "")
-    else if (kind === "image") parts.push("[image]")
-    else parts.push(`[${kind ?? "unknown"}]`)
+    else if (kind === "image") {
+      const source = isRecord(part.source) ? part.source : part
+      const data = asString(source.data)
+      const mimeType = asString(source.media_type) ?? asString(source.mimeType)
+      const kept = save !== null && data !== null && mimeType !== null ? save(data, mimeType) : null
+      if (kept === null) parts.push("[image]")
+      else images.push(kept)
+    } else parts.push(`[${kind ?? "unknown"}]`)
   }
-  return parts.join("\n")
+  return { output: parts.join("\n"), images }
 }
 
 /** One Claude `tool_use` block, remembered until its `tool_result` arrives. */
@@ -82,9 +95,10 @@ const claudeWindow = (modelUsage: unknown, model: string | null): number | null 
 
 /**
  * `seed` is the context the thread's session last reported; a run that resumes the same session on the same model
- * reuses its window, so its context updates from the first model call rather than only at the result.
+ * reuses its window, so its context updates from the first model call rather than only at the result. `saveImage`
+ * keeps the images tool results return; without it they stay `[image]` lines in the output.
  */
-export const makeTranscript = (seed: ContextUsage | null = null): Transcript => {
+export const makeTranscript = (seed: ContextUsage | null = null, saveImage: SaveImage | null = null): Transcript => {
   /**
    * Ids for items the harness does not name. Unique per run: the same id later means
    * "replace that item", so counter ids are never reused.
@@ -213,6 +227,7 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
       const id = asString(block.tool_use_id)
       if (id === null) continue
       const call = tools.get(id)
+      const { output, images } = toolResult(block.content, saveImage)
       items.push({
         _tag: "tool",
         id,
@@ -221,7 +236,8 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
         name: call?.name ?? "tool",
         input: call?.input ?? null,
         status: block.is_error === true ? "error" : "ok",
-        output: toolResultText(block.content),
+        output,
+        ...(images.length > 0 ? { images } : {}),
       })
     }
     return items
@@ -386,7 +402,7 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
         if (server === null || tool === null) return null
         const error = isRecord(raw.error) ? asString(raw.error.message) : null
         const failed = error !== null || status === "failed"
-        const result = isRecord(raw.result) ? toolResultText(raw.result.content) : null
+        const result = isRecord(raw.result) && !failed ? toolResult(raw.result.content, saveImage) : null
         return {
           _tag: "tool",
           id,
@@ -394,7 +410,8 @@ export const makeTranscript = (seed: ContextUsage | null = null): Transcript => 
           name: `${server}.${tool}`,
           input: raw.arguments ?? null,
           status: running ? "running" : failed ? "error" : "ok",
-          output: failed ? error : result,
+          output: failed ? error : (result?.output ?? null),
+          ...(result !== null && result.images.length > 0 ? { images: result.images } : {}),
         }
       }
       case "webSearch":

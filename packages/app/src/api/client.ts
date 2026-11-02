@@ -32,6 +32,7 @@ import {
   Me,
   Message,
   Paths,
+  ProviderUsage,
   PendingPairing,
   PreviewSession,
   PutApiKeyBody,
@@ -47,6 +48,7 @@ import {
   UpdateFleetBoxBody,
   UserBox,
   Usage,
+  UsageActivity,
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
@@ -479,6 +481,7 @@ export const api = {
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
   cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
+  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
@@ -497,6 +500,13 @@ export const api = {
   },
 
   usage: () => onActive(Usage, "GET", Paths.usage),
+  /** Counted in the browser's time zone, so the days match the user's calendar. */
+  usageActivity: () =>
+    onActive(
+      UsageActivity,
+      "GET",
+      `${Paths.usageActivity}?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`,
+    ),
   /** Every box's threads, merged; a box that does not answer is left out unless none does. */
   listTasks: listAllTasks,
   /** Creates a thread on `boxId` (`null`: Kestrel's box), or on the active box when omitted. */

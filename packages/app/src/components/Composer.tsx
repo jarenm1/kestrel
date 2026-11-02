@@ -42,9 +42,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
+import { useOpenUsagePanel } from "@/components/UsagePanel"
 import { Textarea } from "@/components/ui/textarea"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
+import { useStoredDraft } from "@/hooks/useStoredDraft"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
@@ -308,6 +310,8 @@ interface Props {
   placeholder?: string
   autoFocus?: boolean
   className?: string
+  /** Names the unsent text kept in localStorage, so it survives leaving the thread and coming back. */
+  draftKey: string
   /** Preview elements to send as context; owned by the thread so the preview can add to them. */
   elements?: readonly ElementContext[]
   onElementsChange?: (elements: readonly ElementContext[]) => void
@@ -318,6 +322,19 @@ interface Props {
    * answer, followed by anything typed; with nothing picked, the typed text answers.
    */
   ask?: Message | undefined
+}
+
+/** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
+const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your usage limits and activity", prefix: "/" }
+
+/** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
+const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>
+  commands.filter((c) => !(c.name.toLowerCase() === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
+
+/** What stays in the draft once its leading `/usage` has run; undefined when the draft does not start with it. */
+const afterUsageCommand = (text: string): string | undefined => {
+  const match = /^\s*\/usage(?:\s+|$)/i.exec(text)
+  return match === null ? undefined : text.slice(match[0].length)
 }
 
 /** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
@@ -333,12 +350,13 @@ export function Composer({
   placeholder,
   autoFocus,
   className,
+  draftKey,
   elements = [],
   onElementsChange,
   context,
   ask,
 }: Props) {
-  const [text, setText] = useState("")
+  const [text, setText] = useStoredDraft(draftKey)
   const [caret, setCaret] = useState(0)
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
@@ -354,6 +372,7 @@ export function Composer({
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex]
   const slashMenuId = useId()
+  const openUsagePanel = useOpenUsagePanel()
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
   const connections = useQuery(queries.connections())
@@ -385,8 +404,9 @@ export function Composer({
     trigger === "/" ||
     (trigger === "$" &&
       (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)))
+  // A new thread has no harness to ask, so only Kestrel's own `/` commands list there.
   const slashQuery =
-    taskId !== undefined &&
+    (taskId !== undefined || trigger === "/") &&
     trigger !== undefined &&
     triggerAllowed &&
     caret > 0 &&
@@ -401,19 +421,24 @@ export function Composer({
   })
   // The response is authoritative (an active run may use another provider than the picker); `$` only belongs to Codex.
   const commandProvider = commandQuery.data?.provider ?? expectedProvider
-  const slashMenuOpen =
-    slashQuery !== undefined &&
-    (trigger !== "$" || commandProvider === "openai") &&
-    composerFocused &&
-    !slashDismissed
   const commandMatches =
     slashQuery === undefined
       ? []
-      : (commandQuery.data?.commands ?? []).filter(
+      : [
+          ...(trigger === "/" ? [USAGE_COMMAND] : []),
+          ...withoutShadowed(commandQuery.data?.commands ?? [], commandProvider),
+        ].filter(
           (c) =>
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
         )
+  // On a new thread nothing but those commands can match, and any other `/text` is an ordinary first message to send.
+  const slashMenuOpen =
+    slashQuery !== undefined &&
+    (trigger !== "$" || commandProvider === "openai") &&
+    (taskId !== undefined || commandMatches.length > 0) &&
+    composerFocused &&
+    !slashDismissed
   const selectedCommandIndex =
     commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
   const selectedCommand = selectedCommandIndex === -1 ? undefined : commandMatches[selectedCommandIndex]
@@ -423,11 +448,22 @@ export function Composer({
     setActiveCommandIndex(0)
   }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider])
 
+  function runUsageCommand(rest: string) {
+    setText(rest)
+    setCaret(0)
+    openUsagePanel()
+  }
+
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
+    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
+    // Kestrel's own command sends nothing, so picking it runs it and only its token leaves the draft.
+    if (command === USAGE_COMMAND) {
+      runUsageCommand(rest)
+      return
+    }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
-    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
     const nextText = `${prefix}${command.name} ` + rest
     const nextCaret = prefix.length + command.name.length + 1
     setText(nextText)
@@ -456,6 +492,13 @@ export function Composer({
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
+    // Overrides the harness's `/usage`, typed any way: it never reaches the agent, so it works during a turn too, and
+    // any text after it and any attachments stay for the next message.
+    const afterUsage = afterUsageCommand(text)
+    if (afterUsage !== undefined && chosenOption === undefined) {
+      runUsageCommand(afterUsage)
+      return
+    }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
@@ -630,8 +673,8 @@ export function Composer({
               trigger={trigger ?? "/"}
               provider={commandQuery.data?.provider ?? expectedProvider}
               matches={commandMatches}
-              chosenModel={model !== undefined}
-              pending={commandQuery.isPending}
+              chosenModel={taskId === undefined || model !== undefined}
+              pending={taskId !== undefined && commandQuery.isPending}
               error={commandQuery.error}
               activeIndex={selectedCommandIndex}
               onActiveIndexChange={setActiveCommandIndex}

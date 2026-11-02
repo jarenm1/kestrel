@@ -32,6 +32,8 @@ export const keys = {
   pairing: (code: string) => ["pairing", code] as const,
   connections: ["connections"] as const,
   usage: ["usage"] as const,
+  providerUsage: ["providerUsage"] as const,
+  usageActivity: ["usageActivity"] as const,
   automations: ["automations"] as const,
   githubRepos: ["github-repos"] as const,
   githubBranches: (repo: string) => ["github-branches", repo] as const,
@@ -67,6 +69,8 @@ export const keys = {
  */
 const ACTIVE_BOX_ROOTS: Record<string, true> = {
   usage: true,
+  providerUsage: true,
+  usageActivity: true,
   "cli-auth": true,
   box: true,
 }
@@ -128,6 +132,8 @@ export const queries = {
     queryOptions({ queryKey: keys.kestrelBox, queryFn: api.kestrelBoxStatus, refetchInterval: BOX_POLL_MS }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   usage: () => queryOptions({ queryKey: keys.usage, queryFn: api.usage }),
+  providerUsage: () => queryOptions({ queryKey: keys.providerUsage, queryFn: api.providerUsage }),
+  usageActivity: () => queryOptions({ queryKey: keys.usageActivity, queryFn: api.usageActivity }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
   githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
   githubBranches: (repo: string) =>

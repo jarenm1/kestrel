@@ -36,6 +36,10 @@ const KESTREL_TOOLS: Readonly<Record<string, string>> = {
   github_pr_create: "Open GitHub pull request",
   github_pr_status: "Check GitHub pull request",
   github_pr_review: "Review GitHub pull request",
+  github_pr_update: "Edit GitHub pull request",
+  github_pr_comment: "Comment on GitHub pull request",
+  github_pr_reviewers: "Request GitHub reviewers",
+  github_pr_labels: "Label GitHub pull request",
 }
 
 const BUILTIN_TOOLS: Readonly<Record<string, string>> = {

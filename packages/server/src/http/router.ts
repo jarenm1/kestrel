@@ -5,6 +5,7 @@ import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
+import { dayFormat } from "../core/activity"
 import { BOX_DEV_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
@@ -107,6 +108,15 @@ const chosenModel = Effect.gen(function* () {
 /** The query parameters of the request. */
 const searchParams = Effect.map(HttpServerRequest.HttpServerRequest, (req) => new URL(req.url, "http://localhost").searchParams)
 
+/** `?tz=`: the IANA time zone to count days in; an unknown zone is refused. */
+const timeZone = Effect.flatMap(searchParams, (params) => {
+  const zone = params.get("tz") ?? ""
+  return Effect.try({
+    try: () => dayFormat(zone).resolvedOptions().timeZone,
+    catch: () => new BadRequest({ message: `unknown time zone "${zone}"` }),
+  })
+})
+
 /** `?root=workspace|home`, or `?root=checkout&checkout=<id>` (`Paths.taskFileDownload`). */
 const fileRoot = (params: URLSearchParams): Effect.Effect<FileRoot, BadRequest> => {
   const root = params.get("root")
@@ -182,6 +192,7 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
     ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
     HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
+    HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user)))),
     HttpRouter.post(
       "/api/cli-auth/:provider/login",
       respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),
@@ -273,6 +284,10 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listRuns(user, id)))),
     ),
     HttpRouter.get("/api/usage", respond(signedIn((user) => core.usage(user, new Date())))),
+    HttpRouter.get(
+      "/api/usage/activity",
+      respond(signedIn((user) => Effect.flatMap(timeZone, (zone) => core.usageActivity(user, new Date(), zone)))),
+    ),
     HttpRouter.post(
       "/api/runs/:id/cancel",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
@@ -320,6 +335,26 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
           Effect.map((icon) =>
             HttpServerResponse.uint8Array(icon.bytes, {
               contentType: icon.mimeType,
+              headers: {
+                "cache-control": "private, max-age=31536000, immutable",
+                "content-security-policy": "sandbox",
+                "x-content-type-options": "nosniff",
+              },
+            }),
+          ),
+          Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
+        ),
+      ),
+    ),
+    // An image a tool call returned. The id is the bytes' hash, so the browser keeps it for good; like attachments,
+    // the response never runs as a page on the app's origin.
+    HttpRouter.get(
+      "/api/tasks/:id/runs/:runId/images/:imageId",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        signedIn((user) => core.runImage(user, p.id ?? "", p.runId ?? "", p.imageId ?? "")).pipe(
+          Effect.map((image) =>
+            HttpServerResponse.uint8Array(image.bytes, {
+              contentType: image.mimeType,
               headers: {
                 "cache-control": "private, max-age=31536000, immutable",
                 "content-security-policy": "sandbox",

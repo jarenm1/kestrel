@@ -24,6 +24,7 @@ import {
   type PullRequestLink,
   Run,
   type Usage,
+  type UsageActivity,
   SendMessageResponse,
   Task,
   type TaskStatus,
@@ -38,10 +39,11 @@ import {
   providerModels,
 } from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
+import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, type NewReview, type PostedReview, type PullRequest, type PullRequestStatus, type RepoSlug } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type CommentKind,type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
@@ -54,6 +56,7 @@ import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
+import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 
@@ -155,6 +158,32 @@ export interface OpenedPullRequest {
   readonly pullRequest: PullRequest
   /** False when an open pull request for the branch already existed and was returned instead. */
   readonly created: boolean
+}
+
+/** The pull request a tool acts on: `number` in the checkout's repository, or the checkout's own when omitted. */
+export interface PullRequestTarget {
+  /** Checkout whose repository holds the pull request; required when the thread has several. */
+  readonly checkoutId?: string
+  readonly number?: number
+}
+
+export type PullRequestCommentInput =
+  | {
+      readonly action: "create"
+      readonly body: string
+      /** Review comment to reply to, on its diff; omitted, the comment goes in the conversation. */
+      readonly replyTo?: number
+    }
+  | { readonly action: "edit"; readonly kind: CommentKind; readonly commentId: number; readonly body: string }
+  | { readonly action: "delete"; readonly kind: CommentKind; readonly commentId: number }
+
+export interface ReviewerChange extends ReviewerRequest {
+  readonly action: "add" | "remove"
+}
+
+export interface LabelChange {
+  readonly action: "add" | "remove"
+  readonly labels: readonly string[]
 }
 
 export interface AskInput {
@@ -300,6 +329,8 @@ export interface CoreShape {
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   /** Agent usage of `user` in the billing period (UTC calendar month) containing `now`. */
   readonly usage: (user: string, now: Date) => Effect.Effect<Usage>
+  /** Daily agent activity of `user` over the last year, days counted in `timeZone` (a valid IANA zone). */
+  readonly usageActivity: (user: string, now: Date, timeZone: string) => Effect.Effect<UsageActivity>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
   /** A run's display items; another user's run is NotFound, like every other owned route. */
   readonly runItems: (user: string, runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
@@ -349,6 +380,13 @@ export interface CoreShape {
     checkoutId: string,
     blob: string,
   ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
+  /** Bytes of an image a tool call of one of the user's runs returned (`images` on a tool item). */
+  readonly runImage: (
+    user: string,
+    taskId: string,
+    runId: string,
+    imageId: string,
+  ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
   /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
@@ -381,6 +419,26 @@ export interface CoreShape {
     taskId: string,
     input: ReviewPullRequestInput,
   ) => Effect.Effect<PostedReview, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: edits fields of a pull request of a checkout's GitHub repository. Returns it as GitHub now has it. */
+  readonly updatePullRequest: (
+    taskId: string,
+    input: PullRequestTarget & PullRequestChanges,
+  ) => Effect.Effect<PullRequest, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: creates, edits or deletes a comment on a pull request. Returns the comment; null after a delete. */
+  readonly commentOnPullRequest: (
+    taskId: string,
+    input: PullRequestTarget & PullRequestCommentInput,
+  ) => Effect.Effect<PostedComment | null, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: requests or removes reviewers (users and teams) on a pull request. */
+  readonly changeReviewers: (
+    taskId: string,
+    input: PullRequestTarget & ReviewerChange,
+  ) => Effect.Effect<void, NotFound | BadRequest | InternalError>
+  /** Used by the MCP handler: adds or removes labels on a pull request. */
+  readonly changeLabels: (
+    taskId: string,
+    input: PullRequestTarget & LabelChange,
+  ) => Effect.Effect<void, NotFound | BadRequest | InternalError>
   /** Used by the automations: the user a thread belongs to, whom its automations act for. */
   readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
   /** Bytes the thread's files took at the last storage check; null before its first check. */
@@ -590,6 +648,29 @@ export const CoreLive = Layer.effect(
           return yield* Effect.fail(new BadRequest({ message: `${ref.repo} is not a github.com repository; pull requests need one` }))
         }
         return { slug: ref.github, token: yield* requiredGithubToken(owner) }
+      })
+
+    /** The checkout's pull request number: the one recorded on it, else the open one for its branch (recorded for next time). */
+    const linkedPullRequestNumber = (taskId: string, checkout: Checkout, slug: RepoSlug, token: string) =>
+      Effect.gen(function* () {
+        if (checkout.pullRequest !== undefined) return checkout.pullRequest.number
+        const found = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
+        if (found === null) {
+          return yield* Effect.fail(new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }))
+        }
+        yield* recordPullRequest(taskId, checkout.id, { number: found.number, url: found.url }, false)
+        return found.number
+      })
+
+    /** The repository and token a pull request tool acts with, and the pull request it means. */
+    const pullRequestTarget = (taskId: string, input: PullRequestTarget) =>
+      Effect.gen(function* () {
+        const task = yield* requireTask(taskId)
+        const checkout = yield* pickCheckout(task, input.checkoutId)
+        const ref = yield* checkoutRepoRef(checkout)
+        const { slug, token } = yield* githubAccess(task.owner, ref)
+        const number = input.number ?? (yield* linkedPullRequestNumber(taskId, checkout, slug, token))
+        return { slug, token, number }
       })
 
     /** Pushes the checkout's branch from its shadow repo (never forced). The token is set for github.com remotes only. */
@@ -1528,6 +1609,22 @@ export const CoreLive = Layer.effect(
         return { mimeType, bytes }
       })
 
+    const runImage: CoreShape["runImage"] = (user, taskId, runId, imageId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        const run = (yield* store.read).runs.find((r) => r.id === runId && r.taskId === taskId)
+        const file = run === undefined ? null : runImageFile(join(config.runsDir, run.id), imageId)
+        if (file === null) return yield* Effect.fail(new NotFound({ message: `run ${runId} has no image ${imageId}` }))
+        const bytes = yield* Effect.tryPromise({
+          try: () => readFile(file.path),
+          catch: (e) =>
+            (e as NodeJS.ErrnoException).code === "ENOENT"
+              ? new NotFound({ message: `run ${runId} has no image ${imageId}` })
+              : new InternalError({ message: `read run image: ${String(e)}` }),
+        })
+        return { mimeType: file.mimeType, bytes }
+      })
+
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       Effect.gen(function* () {
@@ -1599,6 +1696,7 @@ export const CoreLive = Layer.effect(
       inbox,
       attachment,
       checkoutIcon,
+      runImage,
       upload,
       health: () => Effect.void,
 
@@ -1749,6 +1847,12 @@ export const CoreLive = Layer.effect(
             runs,
             threads: threads.size,
           }
+        }),
+
+      usageActivity: (user, now, timeZone) =>
+        Effect.map(store.read, (state) => {
+          const owned = new Set(state.tasks.filter((t) => t.owner === user).map((t) => t.id))
+          return dailyActivity(state.runs.filter((run) => owned.has(run.taskId)), now, timeZone)
         }),
 
       cancelRun: (user, runId) =>
@@ -2058,17 +2162,7 @@ export const CoreLive = Layer.effect(
           const checkout = yield* pickCheckout(task, checkoutId)
           const ref = yield* checkoutRepoRef(checkout)
           const { slug, token } = yield* githubAccess(task.owner, ref)
-          let number = checkout.pullRequest?.number
-          if (number === undefined) {
-            const found = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
-            if (found === null) {
-              return yield* Effect.fail(
-                new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }),
-              )
-            }
-            yield* recordPullRequest(taskId, checkout.id, { number: found.number, url: found.url }, false)
-            number = found.number
-          }
+          const number = yield* linkedPullRequestNumber(taskId, checkout, slug, token)
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
         }),
 
@@ -2081,6 +2175,55 @@ export const CoreLive = Layer.effect(
           return yield* github
             .createReview(token, slug, input.number, { body: input.body, event: input.event, comments: input.comments })
             .pipe(Effect.mapError(fromGitHub))
+        }),
+
+      updatePullRequest: (taskId, input) =>
+        Effect.gen(function* () {
+          const { slug, token, number } = yield* pullRequestTarget(taskId, input)
+          const { title, body, base, state, draft } = input
+          return yield* github.updatePullRequest(token, slug, number, { title, body, base, state, draft }).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      commentOnPullRequest: (taskId, input) =>
+        Effect.gen(function* () {
+          const { slug, token, number } = yield* pullRequestTarget(taskId, input)
+          if (input.action !== "create") {
+            const comment = yield* github.getComment(token, slug, input.kind, input.commentId).pipe(Effect.mapError(fromGitHub))
+            const viewer = yield* github.viewerLogin(token, slug).pipe(Effect.mapError(fromGitHub))
+            const problem = commentMismatch(comment, number, viewer)
+            if (problem !== null) return yield* Effect.fail(new BadRequest({ message: `cannot change comment ${input.commentId}: ${problem}` }))
+          }
+          switch (input.action) {
+            case "create":
+              return input.replyTo === undefined
+                ? yield* github.createComment(token, slug, number, input.body).pipe(Effect.mapError(fromGitHub))
+                : yield* github.replyToReviewComment(token, slug, number, input.replyTo, input.body).pipe(Effect.mapError(fromGitHub))
+            case "edit":
+              return yield* github.editComment(token, slug, input.kind, input.commentId, input.body).pipe(Effect.mapError(fromGitHub))
+            case "delete":
+              yield* github.deleteComment(token, slug, input.kind, input.commentId).pipe(Effect.mapError(fromGitHub))
+              return null
+          }
+        }),
+
+      changeReviewers: (taskId, input) =>
+        Effect.gen(function* () {
+          const { slug, token, number } = yield* pullRequestTarget(taskId, input)
+          const request: ReviewerRequest = { reviewers: input.reviewers, teamReviewers: input.teamReviewers }
+          const change = input.action === "add" ? github.requestReviewers : github.removeReviewers
+          yield* change(token, slug, number, request).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      changeLabels: (taskId, input) =>
+        Effect.gen(function* () {
+          const { slug, token, number } = yield* pullRequestTarget(taskId, input)
+          if (input.action === "add") {
+            yield* github.addLabels(token, slug, number, input.labels).pipe(Effect.mapError(fromGitHub))
+            return
+          }
+          for (const label of input.labels) {
+            yield* github.removeLabel(token, slug, number, label).pipe(Effect.mapError(fromGitHub))
+          }
         }),
 
       shutdown: () =>

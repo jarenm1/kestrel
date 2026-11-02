@@ -1,21 +1,18 @@
 import React, { useEffect, useState } from "react";
 import { Image, type ImageStyle, type StyleProp, View } from "react-native";
-import { Paths } from "@cloudagents/protocol";
 import type { FileSource } from "@/api/client";
 import { useApiClient } from "@/hooks/useApiClient";
 
 /**
- * A task attachment, contained in its frame. The source resolves asynchronously (the user's own box needs a minted token),
- * so the frame stays empty until it resolves.
+ * An image the thread's box serves (`Paths.taskAttachment`, `Paths.taskRunImage`), contained in its frame. The source
+ * resolves asynchronously (the user's own box needs a minted token), so the frame stays empty until it resolves.
  */
 export function AttachmentImage({
-  taskId,
-  attachmentId,
+  path,
   style,
   accessibilityLabel,
 }: {
-  taskId: string;
-  attachmentId: string;
+  path: string;
   style: StyleProp<ImageStyle>;
   accessibilityLabel: string;
 }) {
@@ -27,7 +24,7 @@ export function AttachmentImage({
     setSource(null);
     // A failed token mint leaves the frame empty; the box queries report the same failure.
     api
-      .fileSource(Paths.taskAttachment(taskId, attachmentId))
+      .fileSource(path)
       .then((resolved) => {
         if (active) setSource(resolved);
       })
@@ -35,7 +32,7 @@ export function AttachmentImage({
     return () => {
       active = false;
     };
-  }, [api, taskId, attachmentId]);
+  }, [api, path]);
 
   if (source === null) {
     return <View style={style} accessibilityLabel={accessibilityLabel} />;

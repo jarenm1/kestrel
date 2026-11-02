@@ -511,3 +511,38 @@ describe("claude context use", () => {
     expect(transcript.context()).toEqual({ model: "claude-sonnet-5-5", usedTokens: 50_110, windowTokens: 200_000 })
   })
 })
+
+describe("tool result images", () => {
+  /** Keeps PNGs only, like the run's store does for types it cannot serve. */
+  const saved: Array<{ base64: string; mimeType: string }> = []
+  const save = (base64: string, mimeType: string) => {
+    if (mimeType !== "image/png") return null
+    saved.push({ base64, mimeType })
+    return { id: `img${saved.length}.png`, mimeType }
+  }
+
+  test("Claude and Codex images are kept on the item instead of an [image] line; one that cannot be kept stays a line", () => {
+    const transcript = makeTranscript(null, save)
+    transcript.push(assistant([{ type: "tool_use", id: "toolu_s", name: "mcp__cloudagents__desktop_click", input: { x: 1, y: 2 } }]))
+    const claude = valid(
+      transcript.push(
+        toolResult("toolu_s", [
+          { type: "text", text: "clicked (1, 2)" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+          { type: "image", source: { type: "base64", media_type: "image/tiff", data: "QUJD" } },
+        ]),
+      ),
+    )
+    expect(claude[0]).toMatchObject({ output: "clicked (1, 2)\n[image]", images: [{ id: "img1.png", mimeType: "image/png" }] })
+
+    const call = { type: "mcpToolCall", id: "p1", server: "cloudagents", tool: "desktop_screenshot", arguments: {}, status: "completed", error: null }
+    const codex = valid(
+      transcript.push(item("completed", { ...call, result: { content: [{ type: "text", text: "1280x720" }, { type: "image", data: "REVG", mimeType: "image/png" }] } })),
+    )
+    expect(codex[0]).toMatchObject({ output: "1280x720", images: [{ id: "img2.png", mimeType: "image/png" }] })
+    expect(saved).toEqual([
+      { base64: "QUJD", mimeType: "image/png" },
+      { base64: "REVG", mimeType: "image/png" },
+    ])
+  })
+})

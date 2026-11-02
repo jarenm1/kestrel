@@ -1,19 +1,29 @@
 import { useMemo } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
+import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { Alert } from "@/components/ui/alert"
 import { Markdown } from "./Markdown"
+import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
 interface Props {
   taskId: string
   runId: string
+  /** The run is still going: its last item may still be streaming. */
+  running: boolean
 }
 
 interface Tree {
   roots: readonly AgentItem[]
   children: ReadonlyMap<string, readonly AgentItem[]>
+}
+
+interface Ctx {
+  readonly source: RunSource
+  readonly tree: Tree
+  readonly liveIds: ReadonlySet<string>
+  readonly running: boolean
 }
 
 /** Items in arrival order; a tool's subagent items (`parentToolId`) hang under it instead of the top level. */
@@ -45,40 +55,43 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
   return parts.join(" · ")
 }
 
-const PRE_CLASS = "m-0 max-h-72 overflow-auto rounded-lg bg-code px-3 py-2 font-mono text-[11px] break-all whitespace-pre-wrap shadow-well"
+/** A run of consecutive tool calls under one group, which shows a summary line once there are two or more. */
+function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
+  const views = items.map((item) => describeTool(item, ctx.source.taskId))
+  const rows = items.map((item, index) => {
+    const nested = ctx.tree.children.get(item.id)
+    return (
+      <ToolRow
+        key={item.id}
+        item={item}
+        view={views[index]!}
+        source={ctx.source}
+        running={ctx.running}
+        nested={nested !== undefined && <Items items={nested} ctx={ctx} />}
+      />
+    )
+  })
+  const last = items[items.length - 1]!
+  const live = ctx.running && (ctx.liveIds.has(last.id) || items.some((item) => item.status === "running"))
+  return (
+    <ToolGroup
+      single={items.length === 1}
+      summary={summarizeTools(views)}
+      kinds={new Set(views.map((view) => view.kind))}
+      live={live}
+      failed={items.some((item) => item.status === "error")}
+    >
+      {rows}
+    </ToolGroup>
+  )
+}
 
-function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
+function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />
     case "thinking":
-      return (
-        <details className="text-muted-foreground">
-          <summary className="cursor-pointer text-xs select-none">Thinking</summary>
-          <div className="mt-1 text-sm break-words whitespace-pre-wrap italic">{item.text}</div>
-        </details>
-      )
-    case "tool":
-      return (
-        <details className="rounded-xl border border-border bg-card/40 px-3.5 py-2 shadow-soft">
-          <summary
-            className={cn(
-              "cursor-pointer text-xs select-none",
-              item.status === "error" && "text-destructive",
-            )}
-          >
-            {toolDisplayName(item.name)} · {item.status}
-          </summary>
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="font-mono text-[11px] break-all text-muted-foreground">{item.name}</div>
-            <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>
-            {item.output !== null && <pre className={PRE_CLASS}>{item.output}</pre>}
-            {(tree.children.get(item.id) ?? []).map((child) => (
-              <ItemView key={child.id} item={child} tree={tree} />
-            ))}
-          </div>
-        </details>
-      )
+      return <ThinkingBlock text={item.text} live={ctx.liveIds.has(item.id)} />
     case "turn": {
       const summary = turnSummary(item)
       if (summary === "") return null
@@ -98,18 +111,36 @@ function ItemView({ item, tree }: { item: AgentItem; tree: Tree }) {
   }
 }
 
+/** Items in order, with each run of consecutive tool calls gathered into one `Tools` block. */
+function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
+  const blocks: Array<Exclude<AgentItem, ToolItem> | ToolItem[]> = []
+  for (const item of items) {
+    const last = blocks[blocks.length - 1]
+    if (item._tag !== "tool") blocks.push(item)
+    else if (Array.isArray(last)) last.push(item)
+    else blocks.push([item])
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      {blocks.map((block) =>
+        Array.isArray(block) ? (
+          <Tools key={block[0]!.id} items={block} ctx={ctx} />
+        ) : (
+          <ItemView key={block.id} item={block} ctx={ctx} />
+        ),
+      )}
+    </div>
+  )
+}
+
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId }: Props) {
+export function RunTranscript({ taskId, runId, running }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
+  const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running])
+  const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
 
   if (data === undefined || data.length === 0) return null
 
-  return (
-    <div className="flex flex-col gap-3">
-      {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} />
-      ))}
-    </div>
-  )
+  return <Items items={tree.roots} ctx={{ source, tree, liveIds, running }} />
 }
