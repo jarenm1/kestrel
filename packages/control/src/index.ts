@@ -3,6 +3,7 @@ import {
   BOX_USER_HEADER,
   ControlPaths,
   METER_HOST_ID_HEADER,
+  MAX_METER_BODY_BYTES,
   MeterBatch,
   PairingPollBody,
   PairingStartBody,
@@ -12,7 +13,7 @@ import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
-import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { cappedRequest, decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
@@ -76,7 +77,9 @@ const meterRecords = async (request: Request, env: Env): Promise<Response> => {
   const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
   const hostId = request.headers.get(METER_HOST_ID_HEADER) ?? ""
   if (secret === "" || hostId === "") return errorResponse(401, "Unauthorized", "invalid meter host credentials")
-  const batch = await decodeBody(request, MeterBatch, { onExcessProperty: "error" })
+  const capped = await cappedRequest(request, MAX_METER_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const batch = await decodeBody(capped, MeterBatch, { onExcessProperty: "error" })
   if (batch instanceof Response) return batch
   const outcome = await hub(env).ingestMeterRecords(hostId, secret, batch)
   return outcome.ok ? json(outcome.value) : errorResponse(outcome.status, outcome.tag, outcome.message)
