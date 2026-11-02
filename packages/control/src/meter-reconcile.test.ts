@@ -40,7 +40,7 @@ const usage = (
   measurements,
 })
 
-const reconcile = (records: MeterRecord[], through = at(3)) => reconcileMeter(records, { through })
+const reconcile = (records: MeterRecord[], through = at(3)) => reconcileMeter(records, { from: T0, through })
 
 const findings = (vm: { findings: { kind: string; resource?: string }[] }, kind: string, resource?: string) =>
   vm.findings.filter((f) => f.kind === kind && (resource === undefined || f.resource === resource))
@@ -116,23 +116,20 @@ describe("meter reconciliation", () => {
     expect(vm.findings.some((f) => f.kind === "lifecycle-conflict")).toBe(true)
   })
 
-  test("usage after `through` is counted in totals but does not enlarge the gap window", () => {
-    const report = reconcile(
-      [lifecycle("l1", 0, "running"), usage("u1", 0, 5, { cpuCoreSeconds: 300 })],
-      at(2),
-    )
-    expect(report.vms[0]?.totals.cpuCoreSeconds).toBe(300)
+  test("usage straddling `through` is prorated to the window", () => {
+    const report = reconcile([lifecycle("l1", 0, "running"), usage("u1", 0, 5, { cpuCoreSeconds: 300 })], at(2))
+    expect(report.vms[0]?.totals.cpuCoreSeconds).toBe(120)
     expect(report.records).toBe(2)
   })
 
   test("with rates, the report carries an estimated cost; without, none", () => {
     const rates = { cpuCoreSeconds: 0.5, memoryByteSeconds: 0, diskByteSeconds: 0, gpuDeviceSeconds: 0 }
     const records: MeterRecord[] = [lifecycle("l1", 0, "running"), usage("u1", 0, 1, { cpuCoreSeconds: 60 })]
-    const priced = reconcileMeter(records, { through: at(1), rates, currency: "USD" })
+    const priced = reconcileMeter(records, { from: T0, through: at(1), rates, currency: "USD" })
     expect(priced.currency).toBe("USD")
     expect(priced.estimatedCost).toBeCloseTo(30)
     expect(priced.users[0]?.estimatedCost).toBeCloseTo(30)
-    const unpriced = reconcileMeter(records, { through: at(1) })
+    const unpriced = reconcileMeter(records, { from: T0, through: at(1) })
     expect(unpriced.estimatedCost).toBeUndefined()
   })
 
@@ -160,5 +157,24 @@ describe("meter reconciliation", () => {
         detail: "gpuDeviceSeconds not reported while the lifecycle expects it",
       },
     ])
+  })
+
+  test("a VM running since before the window carries its state in and prorates usage straddling its start", () => {
+    const report = reconcileMeter(
+      [
+        lifecycle("l0", -5, "running"),
+        usage("u1", -1, 1, { cpuCoreSeconds: 120 }),
+        usage("u2", 1, 2, { cpuCoreSeconds: 60 }),
+      ],
+      { from: at(0), through: at(2) },
+    )
+    expect(report.vms[0]?.totals.cpuCoreSeconds).toBe(120)
+    expect(report.vms[0]?.findings.filter((f) => f.resource === "cpuCoreSeconds")).toEqual([])
+  })
+
+  test("a VM deleted before the window has nothing to report and is left out", () => {
+    const report = reconcileMeter([lifecycle("l0", -5, "deleted")], { from: at(0), through: at(2) })
+    expect(report.vms).toEqual([])
+    expect(report.users).toEqual([])
   })
 })

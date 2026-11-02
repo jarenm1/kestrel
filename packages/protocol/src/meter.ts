@@ -22,6 +22,12 @@ export const METER_HOST_ID_HEADER = "x-kestrel-meter-host"
 /** Records per POST to `ControlPaths.meterRecords`. */
 export const MAX_METER_BATCH = 500
 
+/** Largest body `ControlPaths.meterRecords` reads. A full batch of records is well under it. */
+export const MAX_METER_BODY_BYTES = 1024 * 1024
+
+/** The widest window a report covers. */
+export const MAX_METER_REPORT_WINDOW_MS = 31 * 24 * 60 * 60 * 1000
+
 const MeterId = Schema.String.pipe(Schema.trimmed(), Schema.minLength(1), Schema.maxLength(200))
 
 /** A UTC timestamp with milliseconds, as `Date.toISOString` writes it. */
@@ -125,14 +131,20 @@ export const MeterRates = Schema.Struct({
 export type MeterRates = typeof MeterRates.Type
 
 /**
- * `through` is the end of the window checked for gaps, default now: samples still in flight look like gaps near it.
- * `rates` and `currency` go together; with them the report includes an estimated cost in that currency label.
+ * The window `[from, through)` a report covers, at most 31 days; records outside it are not read. A VM's lifecycle
+ * state at `from` is its latest lifecycle record before `from`. `rates` and `currency` go together; with them the
+ * report includes an estimated cost in that currency label.
  */
 export const MeterReportBody = Schema.Struct({
-  through: Schema.optional(MeterTimestamp),
+  from: MeterTimestamp,
+  through: MeterTimestamp,
   rates: Schema.optional(MeterRates),
   currency: Schema.optional(MeterId),
 }).pipe(
+  Schema.filter((b) => Date.parse(b.from) < Date.parse(b.through) || "from must be before through"),
+  Schema.filter(
+    (b) => Date.parse(b.through) - Date.parse(b.from) <= MAX_METER_REPORT_WINDOW_MS || "the window may be at most 31 days",
+  ),
   Schema.filter((b) => (b.rates === undefined) === (b.currency === undefined) || "rates and currency go together"),
 )
 export type MeterReportBody = typeof MeterReportBody.Type
@@ -170,7 +182,7 @@ export const MeterVmReport = Schema.Struct({
   hostIds: Schema.Array(MeterId),
   /** `reconciled` when no findings; otherwise its totals cannot be trusted as complete. */
   status: Schema.Literal("reconciled", "findings"),
-  /** Sum of every reported measurement, including any that findings flag. */
+  /** Measured use inside the window: usage is prorated to the part of it that overlaps the window. */
   totals: MeterTotals,
   /** Expected-by-lifecycle seconds observed and missing, per resource. */
   coverage: Schema.Struct({
@@ -197,6 +209,7 @@ export type MeterUserReport = typeof MeterUserReport.Type
 export const MeterReport = Schema.Struct({
   billable: Schema.Literal(false),
   scope: Schema.Literal("recorded-intervals-only"),
+  from: MeterTimestamp,
   through: MeterTimestamp,
   records: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
   currency: Schema.optional(MeterId),

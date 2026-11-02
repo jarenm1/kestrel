@@ -85,20 +85,26 @@ const overlapsOf = (reported: readonly Span[]): Span[] => {
   return out
 }
 
-/** Each lifecycle event holds its state until the next event, or until `through`. */
+/** A stretch of time inside the window in which the lifecycle holds one state. */
 type Segment = Span & { state: MeterState; gpus: number }
 
+/**
+ * Each lifecycle event holds its state until the next event, or until `through`. Events before `from` only set the
+ * state at `from`; findings come from events inside the window alone.
+ */
 const lifecycleSegments = (
   events: readonly LifecycleRecord[],
+  from: number,
   through: number,
   findings: MeterFinding[],
 ): Segment[] => {
   const segments: Segment[] = []
   events.forEach((event, i) => {
     const at = Date.parse(event.observedAt)
+    const inside = at >= from
     const previous = events[i - 1]
     const next = events[i + 1]
-    if (previous?.state === "deleted" && event.state !== "deleted") {
+    if (inside && previous?.state === "deleted" && event.state !== "deleted") {
       findings.push({
         kind: "lifecycle-conflict",
         start: iso(at),
@@ -106,23 +112,24 @@ const lifecycleSegments = (
         detail: `${event.state} after deleted`,
       })
     }
-    if (next !== undefined && Date.parse(next.observedAt) === at && next.state !== event.state) {
+    if (inside && next !== undefined && Date.parse(next.observedAt) === at && next.state !== event.state) {
       const detail = `${event.state} and ${next.state} recorded at the same instant`
       findings.push({ kind: "lifecycle-conflict", start: iso(at), end: iso(at), detail })
     }
     const end = Math.min(next === undefined ? through : Date.parse(next.observedAt), through)
-    if (at < end) segments.push({ state: event.state, gpus: event.gpus ?? 0, start: at, end })
+    const start = Math.max(at, from)
+    if (start < end) segments.push({ state: event.state, gpus: event.gpus ?? 0, start, end })
   })
   return segments
 }
 
-const reconcileVm = (vmId: string, records: readonly MeterRecord[], through: number): MeterVmReport => {
+const reconcileVm = (vmId: string, records: readonly MeterRecord[], from: number, through: number): MeterVmReport => {
   const findings: MeterFinding[] = []
   const lifecycle = records
     .filter((r): r is LifecycleRecord => r.kind === "lifecycle")
     .sort((a, b) => Date.parse(a.observedAt) - Date.parse(b.observedAt) || (a.eventId < b.eventId ? -1 : 1))
   const usage = records.filter((r): r is UsageRecord => r.kind === "usage")
-  const segments = lifecycleSegments(lifecycle, through, findings)
+  const segments = lifecycleSegments(lifecycle, from, through, findings)
   const parked = union(segments.filter((s) => s.state === "parked"))
 
   const totals: Amounts = { cpuCoreSeconds: 0, memoryByteSeconds: 0, diskByteSeconds: 0, gpuDeviceSeconds: 0 }
@@ -130,15 +137,18 @@ const reconcileVm = (vmId: string, records: readonly MeterRecord[], through: num
   let parkedDiskByteSeconds = 0
   for (const res of METER_RESOURCES) reported[res] = []
   for (const record of usage) {
-    const span = { start: Date.parse(record.start), end: Date.parse(record.end) }
+    const duration = Date.parse(record.end) - Date.parse(record.start)
+    const span = { start: Math.max(Date.parse(record.start), from), end: Math.min(Date.parse(record.end), through) }
+    if (span.end <= span.start) continue
+    const share = (span.end - span.start) / duration
     for (const res of METER_RESOURCES) {
       const amount = record.measurements[res]
       if (amount === undefined) continue
-      totals[res] += amount
+      totals[res] += amount * share
       reported[res].push(span)
       if (res === "diskByteSeconds") {
         const inParked = measure(intersect([span], parked))
-        parkedDiskByteSeconds += (amount * inParked) / (span.end - span.start)
+        parkedDiskByteSeconds += (amount * inParked) / duration
       }
     }
   }
@@ -190,15 +200,22 @@ const reconcileVm = (vmId: string, records: readonly MeterRecord[], through: num
   }
 }
 
+/** Only a deleted state that ended before `from`: such a VM has nothing in the window to report. */
+const isDeletedBefore = (record: MeterRecord, from: number): boolean =>
+  record.kind === "lifecycle" && record.state === "deleted" && Date.parse(record.observedAt) < from
+
 /**
- * The estimate for stored records. `through` bounds the gap check; records after it still count toward totals.
- * `rates` (hypothetical, per raw unit) add an `estimatedCost` in `currency`; without them there is no cost.
+ * The estimate for `[from, through)`, from the records `meterRecordsInWindow` reads. Usage is prorated to the part
+ * inside the window, and lifecycle findings come only from events inside it. A VM whose only record is a deleted state
+ * from before `from` is left out. `rates` (hypothetical, per raw unit) add an `estimatedCost` in `currency`; without
+ * them there is no cost.
  */
 export const reconcileMeter = (
   records: readonly MeterRecord[],
-  options: { through: string; rates?: MeterRates; currency?: string },
+  options: { from: string; through: string; rates?: MeterRates; currency?: string },
 ): MeterReport => {
   const { rates } = options
+  const from = Date.parse(options.from)
   const through = Date.parse(options.through)
   const byVm = new Map<string, MeterRecord[]>()
   for (const record of records) {
@@ -206,7 +223,10 @@ export const reconcileMeter = (
     group.push(record)
     byVm.set(record.vmId, group)
   }
-  const vms = [...byVm.keys()].sort().map((vmId) => reconcileVm(vmId, byVm.get(vmId) ?? [], through))
+  const vms = [...byVm.keys()]
+    .sort()
+    .filter((vmId) => !(byVm.get(vmId) ?? []).every((r) => isDeletedBefore(r, from)))
+    .map((vmId) => reconcileVm(vmId, byVm.get(vmId) ?? [], from, through))
 
   const users = new Map<string, { vms: number; totals: Amounts; parkedDiskByteSeconds: number }>()
   for (const vm of vms) {
@@ -237,6 +257,7 @@ export const reconcileMeter = (
   return {
     billable: false,
     scope: "recorded-intervals-only",
+    from: options.from,
     through: options.through,
     records: records.length,
     ...(options.currency === undefined ? {} : { currency: options.currency }),

@@ -5,7 +5,14 @@
 import type { MeterHost, MeterIngestResult, MeterRecord } from "@cloudagents/protocol"
 import type { FleetSql } from "./fleet-table"
 
-/** Creates `meter_hosts` and `meter_records` when missing. */
+/** How long records are kept: a report may start no earlier than this many days before it runs. */
+export const METER_RETENTION_DAYS = 90
+const PURGE_BATCH = 500
+
+/**
+ * Creates `meter_hosts` and `meter_records` when missing. A record's `at` and `until` bound it in time: a lifecycle
+ * record has both at its `observedAt`, and a usage record runs from `start` to `end`.
+ */
 export const ensureMeterTables = (sql: FleetSql): void => {
   sql.exec(`CREATE TABLE IF NOT EXISTS meter_hosts (
     id TEXT PRIMARY KEY,
@@ -18,11 +25,16 @@ export const ensureMeterTables = (sql: FleetSql): void => {
     event_id TEXT NOT NULL,
     vm_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    at TEXT NOT NULL,
+    until TEXT NOT NULL,
     payload TEXT NOT NULL,
     received_at TEXT NOT NULL,
     PRIMARY KEY (host_id, event_id)
   )`)
-  sql.exec(`CREATE INDEX IF NOT EXISTS meter_records_vm ON meter_records (vm_id)`)
+  sql.exec(`CREATE INDEX IF NOT EXISTS meter_records_vm ON meter_records (vm_id, kind, at)`)
+  sql.exec(`CREATE INDEX IF NOT EXISTS meter_records_kind_at ON meter_records (kind, at)`)
+  sql.exec(`CREATE INDEX IF NOT EXISTS meter_records_kind_until ON meter_records (kind, until)`)
 }
 
 /** JSON with object keys sorted at every depth, so equal records serialize identically. */
@@ -66,12 +78,54 @@ export const listMeterHosts = (sql: FleetSql): MeterHost[] =>
     .toArray()
     .map((row) => ({ id: row.id, name: row.name, createdAt: row.created_at }))
 
-/** Every stored record. Payloads were validated and canonicalized when stored. */
-export const storedMeterRecords = (sql: FleetSql): MeterRecord[] =>
-  sql
-    .exec<{ payload: string }>(`SELECT payload FROM meter_records ORDER BY host_id, event_id`)
-    .toArray()
-    .map((row) => JSON.parse(row.payload) as MeterRecord)
+/** The earliest `at` a report may start with, for a retention window ending at `now`. */
+export const meterRetentionCutoff = (now: string): string =>
+  new Date(Date.parse(now) - METER_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString()
+
+/**
+ * The records a report over `[from, through)` reads: lifecycle records and usage overlapping the window, plus each VM's
+ * latest lifecycle record before `from`, which gives its state at `from`. Payloads were validated when stored.
+ */
+export const meterRecordsInWindow = (sql: FleetSql, from: string, through: string): MeterRecord[] => {
+  const payloads = (query: string, ...bindings: string[]): string[] =>
+    sql
+      .exec<{ payload: string }>(query, ...bindings)
+      .toArray()
+      .map((row) => row.payload)
+  const carried = payloads(
+    `SELECT payload FROM meter_records r WHERE r.kind = 'lifecycle' AND r.at = (
+       SELECT MAX(a.at) FROM meter_records a WHERE a.kind = 'lifecycle' AND a.vm_id = r.vm_id AND a.at < ?)`,
+    from,
+  )
+  const lifecycle = payloads(
+    `SELECT payload FROM meter_records WHERE kind = 'lifecycle' AND at >= ? AND at < ?`,
+    from,
+    through,
+  )
+  const usage = payloads(`SELECT payload FROM meter_records WHERE kind = 'usage' AND until > ? AND at < ?`, from, through)
+  return [...carried, ...lifecycle, ...usage].map((payload) => JSON.parse(payload) as MeterRecord)
+}
+
+/**
+ * Drops records that fell out of retention: usage that ended before the cutoff, and lifecycle records older than each
+ * VM's latest one before it. Each VM keeps that latest one, which is the state a report starting at the cutoff reads.
+ * At most `PURGE_BATCH` rows per call.
+ */
+export const purgeExpiredMeterRecords = (sql: FleetSql, now: string): void => {
+  const cutoff = meterRetentionCutoff(now)
+  sql.exec(
+    `DELETE FROM meter_records WHERE rowid IN (
+       SELECT r.rowid FROM meter_records r
+       WHERE (r.kind = 'usage' AND r.until < ?)
+          OR (r.kind = 'lifecycle' AND r.at < (
+               SELECT MAX(a.at) FROM meter_records a WHERE a.kind = 'lifecycle' AND a.vm_id = r.vm_id AND a.at < ?))
+       LIMIT ?
+     )`,
+    cutoff,
+    cutoff,
+    PURGE_BATCH,
+  )
+}
 
 export type MeterIngestOutcome =
   | { ok: true; value: MeterIngestResult }
@@ -133,12 +187,16 @@ export const storeMeterRecords = (
     fresh.push({ record, payload })
   }
   for (const { record, payload } of fresh) {
+    const [at, until] = record.kind === "lifecycle" ? [record.observedAt, record.observedAt] : [record.start, record.end]
     sql.exec(
-      `INSERT INTO meter_records (host_id, event_id, vm_id, user_id, payload, received_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO meter_records (host_id, event_id, vm_id, user_id, kind, at, until, payload, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       record.hostId,
       record.eventId,
       record.vmId,
       record.userId,
+      record.kind,
+      at,
+      until,
       payload,
       receivedAt,
     )

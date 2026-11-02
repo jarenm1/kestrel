@@ -1,11 +1,12 @@
 import { Database } from "bun:sqlite"
 import { beforeEach, describe, expect, test } from "bun:test"
-import type { MeterRecord, UsageRecord } from "@cloudagents/protocol"
+import type { LifecycleRecord, MeterRecord, UsageRecord } from "@cloudagents/protocol"
 import {
   ensureMeterTables,
   insertMeterHost,
   meterHostSecret,
-  storedMeterRecords,
+  meterRecordsInWindow,
+  purgeExpiredMeterRecords,
   storeMeterRecords,
 } from "./meter-table"
 import type { FleetSql } from "./fleet-table"
@@ -14,6 +15,21 @@ let db: Database
 let sql: FleetSql
 
 const RECEIVED = "2026-01-01T00:10:00.000Z"
+
+const lifecycle = (eventId: string, vmId: string, observedAt: string, state: LifecycleRecord["state"]): MeterRecord => ({
+  schemaVersion: 1,
+  kind: "lifecycle",
+  eventId,
+  hostId: "host-a",
+  vmId,
+  userId: "alice",
+  observedAt,
+  state,
+})
+
+/** Every stored record; the window covers all the timestamps these tests use. */
+const storedMeterRecords = (sql: FleetSql) =>
+  meterRecordsInWindow(sql, "2025-01-01T00:00:00.000Z", "2027-01-01T00:00:00.000Z")
 
 const usage = (eventId: string, overrides: Partial<UsageRecord> = {}): MeterRecord => ({
   schemaVersion: 1,
@@ -96,5 +112,24 @@ describe("meter hosts", () => {
     insertMeterHost(sql, { id: "host-a", name: "nest-a", secret: "s3cret", createdAt: RECEIVED })
     expect(meterHostSecret(sql, "host-a")).toBe("s3cret")
     expect(meterHostSecret(sql, "missing")).toBeUndefined()
+  })
+})
+
+describe("meter retention", () => {
+  test("purging keeps each VM's latest lifecycle before the cutoff and drops usage that ended before it", () => {
+    storeMeterRecords(
+      sql,
+      "host-a",
+      [
+        lifecycle("l-vm1-start", "vm-1", "2026-01-01T00:00:00.000Z", "running"),
+        lifecycle("l-vm1-park", "vm-1", "2026-01-10T00:00:00.000Z", "parked"),
+        lifecycle("l-vm2", "vm-2", "2026-01-05T00:00:00.000Z", "running"),
+        usage("u-old", { start: "2026-01-02T00:00:00.000Z", end: "2026-01-02T00:01:00.000Z" }),
+        usage("u-new", { start: "2026-05-01T00:00:00.000Z", end: "2026-05-01T00:01:00.000Z" }),
+      ],
+      RECEIVED,
+    )
+    purgeExpiredMeterRecords(sql, "2026-06-01T00:00:00.000Z")
+    expect(storedMeterRecords(sql).map((r) => r.eventId).sort()).toEqual(["l-vm1-park", "l-vm2", "u-new"])
   })
 })

@@ -74,7 +74,10 @@ import {
   insertMeterHost,
   listMeterHosts,
   meterHostSecret,
-  storedMeterRecords,
+  METER_RETENTION_DAYS,
+  meterRecordsInWindow,
+  meterRetentionCutoff,
+  purgeExpiredMeterRecords,
   storeMeterRecords,
 } from "./meter-table"
 import { reconcileMeter } from "./meter-reconcile"
@@ -741,13 +744,25 @@ export class Hub extends DurableObject<Env> {
     const stored = meterHostSecret(sql, hostId)
     if (stored === undefined || !(await safeEqual(secret, stored))) return INVALID_METER_HOST
     const received = new Date().toISOString()
-    return this.ctx.storage.transactionSync(() => storeMeterRecords(sql, hostId, batch.records, received))
+    return this.ctx.storage.transactionSync(() => {
+      const outcome = storeMeterRecords(sql, hostId, batch.records, received)
+      purgeExpiredMeterRecords(sql, received)
+      return outcome
+    })
   }
 
-  /** The reconciled, non-billable report over every stored record. `through` defaults to now. */
-  meterReport(body: MeterReportBody, now: string): MeterReport {
-    const records = storedMeterRecords(this.ctx.storage.sql)
-    return reconcileMeter(records, { through: body.through ?? now, rates: body.rates, currency: body.currency })
+  /**
+   * The reconciled, non-billable report for `[from, through)`. A window starting before the retention cutoff is
+   * refused: records it would need may already be purged.
+   */
+  meterReport(body: MeterReportBody, now: string): BoxOutcome<MeterReport> {
+    if (body.from < meterRetentionCutoff(now)) {
+      const message = `from is older than the ${METER_RETENTION_DAYS}-day retention window`
+      return { ok: false, status: 400, tag: "BadRequest", message }
+    }
+    const records = meterRecordsInWindow(this.ctx.storage.sql, body.from, body.through)
+    const { from, through, rates, currency } = body
+    return { ok: true, value: reconcileMeter(records, { from, through, rates, currency }) }
   }
 
   // -------------------------------------------------------------------------

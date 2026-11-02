@@ -360,7 +360,7 @@ const handleMeter = async (request: Request, env: Env, url: URL): Promise<Respon
   if (url.pathname === ControlPaths.meterReport && method === "POST") {
     const body = await decodeBody(request, MeterReportBody)
     if (body instanceof Response) return body
-    return json(await meter.meterReport(body, new Date().toISOString()))
+    return answerBox(await meter.meterReport(body, new Date().toISOString()))
   }
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
