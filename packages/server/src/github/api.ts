@@ -25,6 +25,8 @@ export const parseGitHubRepo = (url: string): RepoSlug | null => {
 
 export interface PullRequest {
   readonly number: number
+  /** GraphQL node id, needed to change draft state (REST cannot). */
+  readonly nodeId: string
   readonly url: string
   readonly title: string
   readonly state: "open" | "closed" | "merged"
@@ -88,18 +90,53 @@ export interface PostedReview {
   readonly state: string
 }
 
+/** Fields of a pull request an agent may change. Omitted fields are left alone. */
+export interface PullRequestChanges {
+  readonly title?: string
+  readonly body?: string
+  readonly base?: string
+  readonly state?: "open" | "closed"
+  readonly draft?: boolean
+}
+
+/** A comment on the pull request's conversation (`conversation`) or on its diff (`review`). */
+export type CommentKind = "conversation" | "review"
+
+export interface PostedComment {
+  readonly id: number
+  readonly url: string
+}
+
+/** Users and teams to ask for a review. Team slugs, not names. */
+export interface ReviewerRequest {
+  readonly reviewers: readonly string[]
+  readonly teamReviewers: readonly string[]
+}
+
 export interface GitHubShape {
   /** Open pull request whose head branch is `head` in `repo`, or null. */
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
   readonly createPullRequest: (token: string, repo: RepoSlug, input: NewPullRequest) => Effect.Effect<PullRequest, GitHubError>
   readonly getPullRequestStatus: (token: string, repo: RepoSlug, number: number) => Effect.Effect<PullRequestStatus, GitHubError>
   readonly createReview: (token: string, repo: RepoSlug, number: number, review: NewReview) => Effect.Effect<PostedReview, GitHubError>
+  /** Edits the given fields and returns the pull request as GitHub now has it. */
+  readonly updatePullRequest: (token: string, repo: RepoSlug, number: number, changes: PullRequestChanges) => Effect.Effect<PullRequest, GitHubError>
+  readonly createComment: (token: string, repo: RepoSlug, number: number, body: string) => Effect.Effect<PostedComment, GitHubError>
+  /** Replies in the thread of a review comment on the pull request's diff. */
+  readonly replyToReviewComment: (token: string, repo: RepoSlug, number: number, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
+  readonly editComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
+  readonly deleteComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number) => Effect.Effect<void, GitHubError>
+  readonly requestReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
+  readonly removeReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
+  readonly addLabels: (token: string, repo: RepoSlug, number: number, labels: readonly string[]) => Effect.Effect<void, GitHubError>
+  readonly removeLabel: (token: string, repo: RepoSlug, number: number, label: string) => Effect.Effect<void, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
 
 const PullRequestBody = Schema.Struct({
   number: Schema.Number,
+  node_id: Schema.String,
   html_url: Schema.String,
   title: Schema.String,
   state: Schema.String,
@@ -147,6 +184,16 @@ const ReviewCommentsBody = Schema.Array(
 const ReviewPostedBody = Schema.Struct({
   html_url: Schema.String,
   state: Schema.String,
+})
+
+const CommentPostedBody = Schema.Struct({
+  id: Schema.Number,
+  html_url: Schema.String,
+})
+
+/** GraphQL answers HTTP 200 even when a mutation fails; the failure is in `errors`. */
+const GraphQLBody = Schema.Struct({
+  errors: Schema.optional(Schema.Array(Schema.Struct({ message: Schema.String }))),
 })
 
 const PASSING_CONCLUSIONS = ["success", "neutral", "skipped"]
@@ -210,6 +257,7 @@ export const GitHubLive = Layer.effect(
 
     const toPullRequest = (pr: Schema.Schema.Type<typeof PullRequestBody>): PullRequest => ({
       number: pr.number,
+      nodeId: pr.node_id,
       url: pr.html_url,
       title: pr.title,
       state: pr.merged ? "merged" : pr.state === "open" ? "open" : "closed",
@@ -225,6 +273,40 @@ export const GitHubLive = Layer.effect(
       call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}`).pipe(
         Effect.flatMap(decode(PullRequestBody, "pull request")),
         Effect.map(toPullRequest),
+      )
+
+    const toComment = (comment: Schema.Schema.Type<typeof CommentPostedBody>): PostedComment => ({
+      id: comment.id,
+      url: comment.html_url,
+    })
+
+    const postComment = (token: string, repo: RepoSlug, path: string, body: string) =>
+      call(token, repo, "POST", path, { body }).pipe(
+        Effect.flatMap(decode(CommentPostedBody, "comment")),
+        Effect.map(toComment),
+      )
+
+    const commentPath = (repo: RepoSlug, kind: CommentKind, commentId: number) =>
+      kind === "review"
+        ? `${repoPath(repo)}/pulls/comments/${commentId}`
+        : `${repoPath(repo)}/issues/comments/${commentId}`
+
+    const reviewersBody = (request: ReviewerRequest) => ({
+      reviewers: request.reviewers,
+      team_reviewers: request.teamReviewers,
+    })
+
+    /** REST cannot change draft state; GraphQL can. The mutation is fixed, only the direction varies. */
+    const setDraft = (token: string, repo: RepoSlug, nodeId: string, draft: boolean): Effect.Effect<void, GitHubError> =>
+      call(token, repo, "POST", "/graphql", {
+        query: `mutation ($id: ID!) { ${draft ? "convertPullRequestToDraft" : "markPullRequestReadyForReview"}(input: { pullRequestId: $id }) { pullRequest { isDraft } } }`,
+        variables: { id: nodeId },
+      }).pipe(
+        Effect.flatMap(decode(GraphQLBody, "GraphQL")),
+        Effect.flatMap((body) => {
+          const [first] = body.errors ?? []
+          return first === undefined ? Effect.void : Effect.fail(new GitHubError({ message: first.message }))
+        }),
       )
 
     const service: GitHubShape = {
@@ -310,6 +392,39 @@ export const GitHubLive = Layer.effect(
           Effect.flatMap(decode(ReviewPostedBody, "review")),
           Effect.map((posted): PostedReview => ({ url: posted.html_url, state: posted.state })),
         ),
+      updatePullRequest: (token, repo, number, changes) => {
+        const { draft, ...rest } = changes
+        const fields = Object.fromEntries(Object.entries(rest).filter(([, value]) => value !== undefined))
+        const patch: Effect.Effect<void, GitHubError> =
+          Object.keys(fields).length === 0
+            ? Effect.void
+            : call(token, repo, "PATCH", `${repoPath(repo)}/pulls/${number}`, fields).pipe(Effect.asVoid)
+        const draftChange: Effect.Effect<void, GitHubError> =
+          draft === undefined
+            ? Effect.void
+            : getPullRequest(token, repo, number).pipe(
+                Effect.flatMap((current) => (current.draft === draft ? Effect.void : setDraft(token, repo, current.nodeId, draft))),
+              )
+        return patch.pipe(Effect.zipRight(draftChange), Effect.zipRight(getPullRequest(token, repo, number)))
+      },
+      createComment: (token, repo, number, body) => postComment(token, repo, `${repoPath(repo)}/issues/${number}/comments`, body),
+      replyToReviewComment: (token, repo, number, commentId, body) =>
+        postComment(token, repo, `${repoPath(repo)}/pulls/${number}/comments/${commentId}/replies`, body),
+      editComment: (token, repo, kind, commentId, body) =>
+        call(token, repo, "PATCH", commentPath(repo, kind, commentId), { body }).pipe(
+          Effect.flatMap(decode(CommentPostedBody, "comment")),
+          Effect.map(toComment),
+        ),
+      deleteComment: (token, repo, kind, commentId) =>
+        call(token, repo, "DELETE", commentPath(repo, kind, commentId)).pipe(Effect.asVoid),
+      requestReviewers: (token, repo, number, request) =>
+        call(token, repo, "POST", `${repoPath(repo)}/pulls/${number}/requested_reviewers`, reviewersBody(request)).pipe(Effect.asVoid),
+      removeReviewers: (token, repo, number, request) =>
+        call(token, repo, "DELETE", `${repoPath(repo)}/pulls/${number}/requested_reviewers`, reviewersBody(request)).pipe(Effect.asVoid),
+      addLabels: (token, repo, number, labels) =>
+        call(token, repo, "POST", `${repoPath(repo)}/issues/${number}/labels`, { labels: [...labels] }).pipe(Effect.asVoid),
+      removeLabel: (token, repo, number, label) =>
+        call(token, repo, "DELETE", `${repoPath(repo)}/issues/${number}/labels/${encodeURIComponent(label)}`).pipe(Effect.asVoid),
     }
     return service
   }),
