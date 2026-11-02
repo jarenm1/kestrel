@@ -21,6 +21,7 @@ const harnessLayer = (
   const config: ServerConfig = {
     port: 8897,
     host: "127.0.0.1",
+    sandboxPort: 8897,
     mcpBaseUrl: "http://127.0.0.1:8897",
     dataDir: root,
     stateFile: join(root, "state.json"),

@@ -196,22 +196,27 @@ const program = Effect.gen(function* () {
   const serve = direct === null ? webHandler : direct.handle
 
   const server = createServer((req, res) => {
-    // The broker only answers sandboxed runs holding a live token; it is routed first on purpose.
+    toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+      .catch((error: unknown) => failResponse(res, error))
+  })
+  const sandboxServer = createServer((req, res) => {
     const handled = req.url?.startsWith(BROKER_PREFIX)
       ? handleBroker(broker, req, res)
       : req.url?.startsWith(MCP_PREFIX)
         ? mcpHandler(req, res)
         : req.url?.startsWith(GH_PREFIX)
           ? ghHandler(req, res)
-          : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+          : Promise.resolve().then(() => { res.statusCode = 404; res.end() })
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
   // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
+  yield* listen(sandboxServer, "127.0.0.1", config.sandboxPort)
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
+  yield* Effect.logInfo(`sandbox listener on 127.0.0.1:${config.sandboxPort}`)
 
   // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
   const activity = yield* openActivitySocket(
@@ -234,6 +239,7 @@ const program = Effect.gen(function* () {
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   yield* closeServer(server)
+  yield* closeServer(sandboxServer)
 }).pipe(Effect.provide(AppLive))
 
 Effect.runPromise(program).then(

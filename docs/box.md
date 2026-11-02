@@ -63,7 +63,9 @@ Under the `strict` and `basic` levels, everything an agent controls runs in bubb
 
 ### Network and IPC
 
-Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the box port, which is forwarded in for the broker and MCP. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
+Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the sandbox listener, which is forwarded in for the broker and MCP. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
+
+The sandbox listener binds only `127.0.0.1` and serves only MCP and the broker. Its port defaults to the public box port plus 10,000, wrapping within 1–65535; set `CLOUDAGENTS_SANDBOX_PORT` to another free port if needed. It must differ from `CLOUDAGENTS_PORT`. Keep this listener local and point tunnels and proxies at the public box port, never the sandbox port. Both interfaces still require a live run token. Basic and off sandbox modes share the host network, so other local processes can reach this listener too.
 
 The holder of that namespace also owns the task's own SysV IPC namespace (`unshare --ipc`). The task's sandboxes, its X server and the box's capture and screenshot processes for it all join it, so GTK and Qt apps on the desktop can use X shared memory (MIT-SHM), and no task can attach another task's shared memory. Starting a desktop therefore starts the task's pasta and holder if nothing else has, and the desktop fails to start if pasta does. Processes keep the namespaces they started in: if the holder dies and is replaced while a desktop runs, apps launched afterwards no longer share memory with that desktop's X server until the desktop is restarted.
 
@@ -183,7 +185,7 @@ Nothing moves a box back to `pending`.
 ### Endpoint requirements
 
 - HTTPS, and WSS for the event streams, on a DNS-only hostname (not proxied by Cloudflare).
-- `/mcp` and `/broker` are never public. They are local sandbox interfaces, so the proxy answers them with 404.
+- `/mcp` and `/broker` are served only on the separate loopback sandbox listener, not on the public box port. Existing proxies may continue to block these paths as defense in depth.
 - The box's port (8787 by default) is reachable only from the proxy, never from the internet.
 
 ### Deploy modules

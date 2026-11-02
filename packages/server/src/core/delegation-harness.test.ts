@@ -25,7 +25,7 @@ createInterface({ input: process.stdin }).on("line", () => {
 })
 `)
   const config: ServerConfig = {
-    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "" },

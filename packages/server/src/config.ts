@@ -30,6 +30,8 @@ const DEFAULT_OPENAI_COMMAND =
 export interface ServerConfig {
   readonly port: number
   readonly host: string
+  /** Loopback-only listener for MCP and the credential broker. */
+  readonly sandboxPort: number
   /** Base URL the agent harness uses to reach this server's MCP endpoint. */
   readonly mcpBaseUrl: string
   readonly dataDir: string
@@ -115,7 +117,8 @@ export const loadConfig = (): ServerConfig => {
     throw new Error(`CLOUDAGENTS_PORT must be a valid port, got "${portRaw}"`)
   }
   const host = process.env.CLOUDAGENTS_HOST ?? "127.0.0.1"
-  const mcpHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host
+  const sandboxPort = intEnv("CLOUDAGENTS_SANDBOX_PORT", ((port + 9999) % 65535) + 1, 1, 65535)
+  if (sandboxPort === port) throw new Error("CLOUDAGENTS_SANDBOX_PORT must differ from CLOUDAGENTS_PORT")
   const dataDir = resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
@@ -158,9 +161,10 @@ export const loadConfig = (): ServerConfig => {
   return {
     port,
     host,
+    sandboxPort,
     relay: loadRelay(controlUrl, direct),
     direct,
-    mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
+    mcpBaseUrl: `http://127.0.0.1:${sandboxPort}`,
     dataDir,
     mirrorsDir: join(dataDir, "mirrors"),
     threadsDir: join(dataDir, "threads"),

@@ -360,14 +360,14 @@ export const sandboxSettingsOf = (config: {
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
   readonly systemd: SystemdSettings | null
-  readonly port: number
+  readonly sandboxPort: number
 }): SandboxSettings => ({
   level: config.sandbox,
   binPath: config.sandboxPath,
   // The CA bundle belongs to the Nix toolchain; `basic` uses the host's own /etc/ssl and `off` the host as is.
   sslCertFile: config.sandbox === "strict" ? config.sandboxSslCertFile : null,
   systemd: config.systemd,
-  boxPort: config.port,
+  boxPort: config.sandboxPort,
 })
 
 /**
