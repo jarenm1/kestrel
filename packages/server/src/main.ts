@@ -160,7 +160,6 @@ const program = Effect.gen(function* () {
       push: core.gitPush,
       openPullRequest: core.openPullRequest,
       pullRequestStatus: core.pullRequestStatus,
-      readReference: core.readReference,
       reviewPullRequest: core.reviewPullRequest,
       updatePullRequest: core.updatePullRequest,
       commentOnPullRequest: core.commentOnPullRequest,
