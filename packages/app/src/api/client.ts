@@ -54,7 +54,7 @@ import {
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
-import { type BoxChannel, channelFor } from "./rtc"
+import { type BoxChannel, channelFor, closeChannels } from "./rtc"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -154,6 +154,7 @@ const send = <A, I>(
       catch: (e) => new ApiError(res.status, String(e)),
     })
     if (session && res.status === 401) {
+      closeChannels()
       unauthorizedListeners.forEach((listener) => listener())
     }
     return yield* decodeExchange(schema, res.status, res.statusText, text)

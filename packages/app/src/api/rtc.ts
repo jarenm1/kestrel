@@ -77,7 +77,11 @@ export class BoxChannel {
       return promise
     }
     this.waiters.set(id, { resolve, reject })
-    for (const fragment of fragmentMessage({ text: true, data: encodeFrame(frame) })) this.dc.send(fragment)
+    try {
+      for (const fragment of fragmentMessage({ text: true, data: encodeFrame(frame) })) this.dc.send(fragment)
+    } catch (err) {
+      this.lose(err instanceof Error ? err.message : String(err))
+    }
     return promise
   }
 
@@ -173,6 +177,20 @@ async function connect(url: string, token: string, onLost: () => void): Promise<
 const channels = new Map<string, BoxChannel>()
 const connecting = new Set<string>()
 const retryAt = new Map<string, number>()
+/** Bumped by `closeChannels`, so a connect started under an earlier session never installs its channel. */
+let generation = 0
+
+/**
+ * Closes every channel and forgets pending retries. Called when the session ends: a channel opened with one user's
+ * token must not serve the next user who signs in on the same page.
+ */
+export function closeChannels(): void {
+  generation++
+  for (const channel of [...channels.values()]) channel.close()
+  channels.clear()
+  connecting.clear()
+  retryAt.clear()
+}
 
 /**
  * The open data channel to a box, or null while there is none, so the call goes over HTTP. A missing channel starts
@@ -182,19 +200,23 @@ export function channelFor(boxId: string, url: string, token: string): BoxChanne
   const open = channels.get(boxId)
   if (open !== undefined) return open
   if (connecting.has(boxId) || Date.now() < (retryAt.get(boxId) ?? 0)) return null
+  const session = generation
+  const current = (): boolean => session === generation
   connecting.add(boxId)
   connect(url, token, () => {
+    if (!current()) return
     channels.delete(boxId)
     retryAt.set(boxId, Date.now() + RETRY_AFTER_MS)
   })
     .then((channel) => {
+      if (!current()) return channel.close()
       channels.set(boxId, channel)
     })
     .catch(() => {
-      retryAt.set(boxId, Date.now() + RETRY_AFTER_MS)
+      if (current()) retryAt.set(boxId, Date.now() + RETRY_AFTER_MS)
     })
     .finally(() => {
-      connecting.delete(boxId)
+      if (current()) connecting.delete(boxId)
     })
   return null
 }
