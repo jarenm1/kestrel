@@ -643,6 +643,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 export const Paths = {
   health: "/api/health",
   capabilities: "/api/capabilities",
+  /** POST a browser's `WebRtcOffer` (box token) -> `WebRtcAnswer`: opens the direct data channel of a user box. */
+  webrtcOffer: "/api/webrtc/offer",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
   /** GET `?tz=<IANA zone>` -> UsageActivity of the signed-in user, days counted in that zone. */
@@ -715,6 +717,7 @@ export const Paths = {
 } as const
 
 export * from "./relay"
+export * from "./rtc"
 export * from "./control"
 export * from "./refs"
 export * from "./models"
