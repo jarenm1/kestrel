@@ -101,11 +101,11 @@ need screenshots in the PR:** push them to an orphan branch `<github-login>/<top
 | `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
-| `docs/architecture.md` | Diagram and who owns what | Read it before touching an area you don't own. |
+| `docs/architecture.md` | System architecture and boundaries | Read it before changing an unfamiliar area. |
 
 ## Conventions
 
 - TypeScript strict everywhere; validate data crossing a boundary with the Effect schemas in `packages/protocol`.
-- Keep changes scoped to the task; no drive-by refactors in someone else's area.
+- Keep changes scoped to the task; avoid unrelated refactors.
 - Delete code you replace; don't leave fallbacks or commented-out code.
 - Secrets never reach the agent sandbox; model keys go through the broker (`packages/server/src/broker`).

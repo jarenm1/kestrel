@@ -1,66 +1,45 @@
-# Kestrel architecture and ownership
+# Kestrel architecture
 
-This describes what runs today. For where it is heading, see [goal-state.md](goal-state.md).
+This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
+
+## System overview
+
+Kestrel has an interface for interacting with agents and viewing their desktops, and boxes that run the work. A box may be operated by Kestrel or supplied by a user. The control plane signs users in, coordinates access to boxes and handles shared services. Today Kestrel-operated managed boxes can serve multiple users; the goal is a separate Nest VM per user on a shared host.
 
 ```mermaid
 flowchart TB
-  subgraph Browser["Browser"]
-    APP["App SPA<br/>app.kestrel-agent.com: the app<br/>kestrel-agent.com: landing + pricing<br/>packages/app (React, TanStack Query)<br/>👤 caayd"]
-    VIEW["Desktop + Browser Preview<br/>DesktopViewer.tsx, PreviewViewer.tsx<br/>👤 Jaren"]
+  U["User"] --> WEB["Web app<br/>packages/app"]
+  U --> MOBILE["Mobile app<br/>packages/mobile"]
+  WEB --> CTRL["Control plane<br/>packages/control"]
+  MOBILE --> CTRL
+  CTRL <--> GH["GitHub"]
+  CTRL --> HUB[("Hub Durable Object<br/>sessions, registry, credentials,<br/>automations and watches")]
+  WEB -->|"box token; direct API, events and desktop"| BOX
+  MOBILE -->|"box token; direct to active box"| BOX
+  HUB <-->|"legacy relay when applicable"| BOX
+  subgraph BOX["Box · packages/server"]
+    API["REST API and WebSockets"]
+    HARNESS["Agent harness"]
+    SANDBOX["Per-thread sandbox"]
+    MCP["MCP tools"]
+    BROKER["Credential broker"]
+    DESKTOP["Desktop and capture"]
+    DATA[("Threads, workspaces and mirrors")]
+    API --> HARNESS --> SANDBOX
+    API --> DATA
+    SANDBOX --> MCP
+    SANDBOX --> BROKER
+    MCP --> DESKTOP
   end
-
-  subgraph CF["Cloudflare"]
-    subgraph CTRL["Worker kestrel: packages/control"]
-      AUTH["GitHub OAuth, sessions, allow-list<br/>auth.ts, providers.ts<br/>👤 Person 4"]
-      API["Control API<br/>/api and preview sessions<br/>api.ts, automations.ts<br/>👤 Person 4"]
-      HUB["Hub Durable Object<br/>users, sessions, secrets, preview tokens, fleet registry, legacy relay<br/>hub.ts<br/>👤 Person 4 + Jaren"]
-    end
-  end
-
-  GH["GitHub<br/>OAuth App kestrel-agent-app"]
-
-  subgraph PC["Jaren's PC: the box, packages/server"]
-    RELAY["Legacy relay client<br/>dials out over WSS<br/>relay/*<br/>👤 Jaren"]
-    REST["Box REST + WebSockets<br/>threads, checkouts, runs, diff, events<br/>http/*, core/service.ts<br/>👤 Jaren"]
-    HARN["Harness<br/>runs claude / other CLI agents<br/>core/harness.ts, config.ts<br/>👤 Person 3"]
-    MCP["MCP server /mcp/:taskId<br/>desktop_*, preview_open, workspace_exec, thread_*<br/>mcp/handler.ts<br/>👤 Person 3"]
-    BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
-    SB["bwrap sandbox (strict, basic or off) in a systemd scope<br/>per-task and box-wide limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
-    DESK["Desktop manager<br/>weston + Xwayland (host GPU) + xdamage-capture → ffmpeg (damage-driven VFR; NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
-    STATE[("state.json, thread workspaces,<br/>repo mirrors<br/>core/state.ts")]
-  end
-
-  LLM["Anthropic / OpenAI APIs"]
-
-  APP -->|HTTPS /api, WSS events| API
-  APP -->|sign in| AUTH
-  AUTH <-->|OAuth code to token| GH
-  API -->|list repos| GH
-  API --> HUB
-  HUB <-->|legacy relay frames over WSS| RELAY
-  VIEW -->|sandboxed preview + short-lived token| HUB
-  VIEW <-->|desktop stream WS| HUB
-  APP -->|direct, box token: managed or own box| REST
-  VIEW -.->|planned: WebRTC direct| DESK
-  RELAY --> REST
-  REST -->|loopback proxy in task netns| SB
-  REST --> HARN
-  REST --> STATE
-  HARN -->|spawn| SB
-  SB -->|tool calls| MCP
-  SB -->|model calls with run token| BROKER
-  BROKER --> LLM
-  MCP --> DESK
-  MCP --> REST
-  DESK --> SB
-
-  PROTO["packages/protocol<br/>shared schemas: relay frames, REST bodies, events<br/>👤 everyone reviews"]
-  PROTO -.- APP
-  PROTO -.- CTRL
-  PROTO -.- PC
+  BROKER --> MODEL["Model providers"]
+  PROTOCOL["packages/protocol<br/>shared schemas and types"] -.-> WEB
+  PROTOCOL -.-> CTRL
+  PROTOCOL -.-> BOX
 ```
 
-## How it fits together
+The diagram shows the major paths, not every endpoint. The legacy relay remains for users without a managed or directly connected box. Desktop and preview traffic can also use it. Protocol schemas are shared across packages; changes to them affect all consumers.
+
+## Implementation details
 
 - The browser only talks to Cloudflare. One Worker serves the API and one SPA build on two hosts: `app.kestrel-agent.com` is the app, and `kestrel-agent.com` (and `www.`) shows only its public landing and pricing pages, sending every other path, sign-in and the API to the app host. On the app host, phone browsers get the mobile app's web export (`packages/mobile`, built into `dist/m`) on the same URLs instead of the SPA ([details](../packages/mobile/README.md#on-the-web-phones)).
 - The Hub Durable Object relays app requests to a box over the WebSocket the box dials out to. That is the legacy relay, used by users with no managed box, so nothing on that box is exposed to the internet. Durable Object requests are the scarce resource (100k/day on the free plan; every RPC, every relayed request and every 20 incoming WebSocket messages count as one), so the relay is kept lean: a browser API call costs one Hub request (the Worker forwards the session id and the Hub resolves it, attaches credentials and relays in that request), and what changes often is pushed over WebSockets instead of polled, since the Hub's outgoing messages are free. The thread list comes over `/api/events` (`task.updated` for every thread of the user, `task.deleted`), the Desktop graphs over `/api/tasks/:id/stats/stream`, and the diff is refetched on agent activity rather than every few seconds. The desktop stream is opened only while the desktop is starting or running (the box refuses it otherwise, and retrying would cost a request every 2 s).
@@ -93,15 +72,53 @@ flowchart TB
 - Archiving a thread (`POST /api/tasks/:id/archive`; `DELETE` lifts it) tears down its runtime: running runs are cancelled, the desktop stops, and the sandbox network and systemd slice are removed. The workspace, checkouts, branches, messages and runs stay, and the thread leaves the active list. While archived, sending a message or starting the desktop fails with 409 Conflict. Unarchiving restores both and starts nothing on its own.
 - Dotted WebRTC line: planned direct video path from the box to the browser, replacing today's stream relayed through the Hub. Until then the box can bundle desktop fragments into fewer relay messages (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`, off by default; see [box.md](box.md#desktop-stream-bundling-cloudagents_desktop_bundle_ms)).
 
-## Owners
+## Components
 
-| Owner | Area | Starter items |
+| Component | Responsibility | Location |
 |---|---|---|
-| Jaren | Box runtime, relay, sandbox, broker, desktop/GPU streaming (NVENC, WebRTC) | Encoder switch, WebRTC sender, configurable dev ports |
-| caayd | `packages/app` (UI/UX) | Install-on-GitHub link, page titles, reconnect states |
-| Person 3 | Harness and MCP | `desktop_scroll`, `desktop_double_click`, fake-agent coverage, `docs/harness.md` |
-| Person 4 | OAuth / control plane | Friendlier "not allowed" page, repo pagination past 100, reconnect on 401, OG image, `/docs` page |
+| Web interface | Public pages, authenticated workspace, thread and desktop views | `packages/app` |
+| Mobile interface | Thread and desktop access for the active box | `packages/mobile` |
+| Control plane | GitHub OAuth, sessions, box registration and tokens, credentials, automations, PR watches and relay | `packages/control` |
+| Hub | Durable control-plane state and coordination, including fleet registry and scheduled events | `packages/control/src/hub.ts` |
+| Box | Thread API, agent runs, workspaces, sandbox, desktop and tools | `packages/server` |
+| Shared protocol | Schemas and types for APIs, events, relay and domain objects | `packages/protocol` |
 
-Changes to `packages/protocol` need a review from everyone, since every package depends on it.
+## Access and communication
 
-A thread can follow a PR with `github_pr_watch` and stop with `github_pr_unwatch`. The thread must have one checkout linked to the PR via the GitHub tools; its owner must be able to administer the repository webhook. The control plane extends the shared signed GitHub hook for review, review-comment, conversation-comment and completed check events. It remembers delivery IDs and coalesces nearby notifications per thread in a persistent queue. The existing Hub alarm delivers notifications to the thread's box and retries transient failures, without polling. A completed check without GitHub's PR association is matched against the watched PR's current head SHA. Archiving or deleting the thread removes its watch on the next delivery; closing the PR stops it. The event wakes the existing agent session to inspect current feedback, rather than treating the GitHub payload as an instruction or answering an outstanding question. These watches use the same managed or legacy boxes as automations; user-owned boxes are not supported.
+The Worker serves the web app and public site, handles sign-in, and issues box tokens. For a directly connected box, the client sends API and WebSocket requests to the box URL with a token scoped to that box. The box verifies the token offline. The web app combines threads from registered boxes and routes a thread's requests to its box; mobile currently uses the active box. See [byo-box.md](byo-box.md) for connection setup.
+
+The Hub also maintains a legacy WebSocket relay for users without a managed box. In that path the box dials out and the control plane forwards requests and streams. This is a current deployment path, not the goal for low-cost BYOB. The [goal state](goal-state.md#control-plane) describes the planned cutover and direct connectivity work.
+
+Managed boxes are registered in the Hub and can serve multiple users. Users are assigned to an active or draining box, and new assignments favor the active box with the fewest users. BYOB boxes have a single owner. On either path, the box enforces thread ownership using the identity supplied by the relay or a verified box token. The control plane and box have different responsibilities: signing in does not itself authorize access to another user's thread.
+
+## Agent execution and data
+
+A thread has a workspace, messages and runs. Repositories are checked out on demand, each on a thread branch. The box maintains per-user repository mirrors, fetching with the user's GitHub credentials on the host. Host-side Git operations use a separate shadow repository so agent-writable repository configuration cannot direct host commands. Thread data, workspaces and mirrors live on the box.
+
+The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Sessions resume with the same provider; when switching providers, the earlier conversation is passed into a new session. Model definitions and shared types live in `packages/protocol`.
+
+Agents normally run in a per-thread bubblewrap sandbox and systemd scope. The `strict`, `basic` and `off` modes provide different isolation; in particular, `basic` shares the host network. MCP provides the agent's box tools. Model requests go through the broker using a per-run token, so the sandbox does not receive the real model key. Host-side GitHub tools likewise use credentials outside the sandbox. See [box.md](box.md#agent-sandbox) for the actual sandbox guarantees and limitations.
+
+## Desktop, preview and evidence
+
+The box manages a desktop for a thread, captures its display and accepts input. The current stream uses H.264 in fMP4 over WebSocket, either directly or through the legacy relay. Capture is damage-driven and the encoder stops shortly after the last viewer leaves. A preview exposes an agent-started web service through a scoped preview session. Desktop and preview isolation depend on the box's sandbox mode.
+
+Screenshots produced by agent tools can be retained and shown in the transcript. Files in a workspace can be downloaded. Saved video clips, marked output files and evidence summaries are proposed in [goal-state.md](goal-state.md#saved-evidence); they are not yet the evidence system described there. Live streaming supports both observing work in progress and reviewing the desktop interactively.
+
+## Automations and PR watches
+
+The control plane stores scheduled and GitHub-triggered automations, verifies webhook deliveries and dispatches work to a box. An automation starts a thread and sends its prompt, optionally with a repository and PR context. PR watches use the shared GitHub webhook to wake a thread when relevant review, comment or completed-check activity arrives. The agent must inspect the current PR state; a webhook payload is not an instruction.
+
+Automations and watches currently use managed or legacy boxes, not user-owned boxes. The goal is parity across box types; see [goal-state.md](goal-state.md#the-box-contract).
+
+## Operational boundaries
+
+- **User and thread isolation:** the box checks ownership on thread data and operations. Current managed boxes are shared between users; a per-user Nest VM is a planned boundary, not a property of today's fleet.
+- **Agent isolation:** sandbox strength depends on mode. Run-scoped MCP and broker credentials expire when the run ends. A sandbox is not a substitute for the box's authorization checks.
+- **Credentials:** the control plane stores connection secrets; the box retrieves credentials through its authenticated path. Model keys and GitHub tokens are used outside the agent sandbox.
+- **Availability:** box-local threads, files and direct streams depend on the box being reachable. The control plane's registry and sign-in do not make an offline box available.
+- **Shared changes:** `packages/protocol` is used throughout the system. Coordinate changes to shared schemas and account for compatibility across deployed clients and boxes.
+
+## Direction and outstanding work
+
+The product direction is a common box contract and capabilities across BYOB and The Nest, direct low-cost BYOB connections, cross-platform support through Linux, WSL and Lima, saved visual evidence, and per-user Nest VMs with different resource shapes and usage-based billing. These are goals with implementation and validation work remaining, not present-day guarantees. The architecture, dependencies and open decisions are in [goal-state.md](goal-state.md).
