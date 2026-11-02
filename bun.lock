@@ -59,6 +59,16 @@
         "wrangler": "^4.153.0",
       },
     },
+    "packages/host": {
+      "name": "@cloudagents/host",
+      "version": "0.1.0",
+      "bin": {
+        "kestrel-host": "src/cli.ts",
+      },
+      "dependencies": {
+        "effect": "^3.22.4",
+      },
+    },
     "packages/mobile": {
       "name": "@cloudagents/mobile",
       "version": "0.0.1",
@@ -278,6 +288,8 @@
     "@cloudagents/app": ["@cloudagents/app@workspace:packages/app"],
 
     "@cloudagents/control": ["@cloudagents/control@workspace:packages/control"],
+
+    "@cloudagents/host": ["@cloudagents/host@workspace:packages/host"],
 
     "@cloudagents/mobile": ["@cloudagents/mobile@workspace:packages/mobile"],
 

@@ -1,0 +1,50 @@
+import { randomUUID } from "node:crypto"
+import { Schema } from "effect"
+import { HostError } from "./errors"
+import { appendLineDurable } from "./fs-atomic"
+import { eventsPath } from "./state-store"
+import { LifecycleRecord, STRICT } from "./schema"
+
+/**
+ * Lifecycle records for the PR #162 meter (schema v1). Only lifecycle records are written here; usage is
+ * not collected by this host. Mapping: start succeeds -> running; clean stop -> parked; destroy -> deleted;
+ * unexpected exit found by reconcile -> parked.
+ */
+
+export interface LifecycleInput {
+  readonly hostId: string
+  readonly vmId: string
+  readonly userId: string
+  readonly state: LifecycleRecord["state"]
+  readonly observedAt?: string
+  readonly eventId?: string
+}
+
+/** Builds and strictly validates a lifecycle record. Throws if any field is invalid. */
+export const buildLifecycleRecord = (input: LifecycleInput): LifecycleRecord => {
+  const candidate = {
+    schemaVersion: 1,
+    eventId: input.eventId ?? randomUUID(),
+    hostId: input.hostId,
+    vmId: input.vmId,
+    userId: input.userId,
+    observedAt: input.observedAt ?? new Date().toISOString(),
+    kind: "lifecycle",
+    state: input.state,
+  }
+  return Schema.decodeUnknownSync(LifecycleRecord, STRICT)(candidate)
+}
+
+/** Strict validation of an arbitrary value as a lifecycle record. Rejects unknown keys and bad timestamps. */
+export const validateLifecycleRecord = (value: unknown): LifecycleRecord =>
+  Schema.decodeUnknownSync(LifecycleRecord, STRICT)(value)
+
+/** Validates, then appends one fsynced line to events.jsonl. */
+export const appendLifecycleEvent = (stateDir: string, record: LifecycleRecord): void => {
+  const valid = validateLifecycleRecord(record)
+  try {
+    appendLineDurable(eventsPath(stateDir), JSON.stringify(valid))
+  } catch (error) {
+    throw new HostError(`cannot append lifecycle event: ${(error as Error).message}`)
+  }
+}
