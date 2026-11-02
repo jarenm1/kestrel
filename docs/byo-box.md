@@ -1,6 +1,7 @@
 # Bring your own box, with Kestrel cloud overflow (design)
 
-Status: step 1 (direct mode for a user's own box) is implemented; the rest is a proposal.
+Status: step 1 (direct mode for a user's own box) is implemented; the rest is a proposal. For Kestrel's compute (the
+Nest), hosts and billing, [goal-state.md](goal-state.md) is the current design.
 
 ## Goal
 
@@ -10,7 +11,7 @@ are the same box (`packages/server`) behind the same app, so moving to paid comp
 migration.
 
 - Free: their boxes, their tunnel. We serve only sign-in, the box registry and tokens.
-- Paid: Kestrel cloud compute (subscription with compute hours). Optionally later, our relay for boxes without a tunnel.
+- Paid: Nest compute, billed by what it uses. Optionally later, our relay for boxes without a tunnel.
 - Full local (Worker + box + Vite on one machine, `bun run dev`) stays a developer setup, not a product.
 
 ## Install your own box
@@ -139,34 +140,16 @@ flowchart LR
   `stats.ts`) over their control socket.
 - When a thread starts, the control plane picks a box:
   1. A user box with room.
-  2. If none (full or offline): a cloud box **automatically** when the user has a subscription with compute hours left.
+  2. If none (full or offline): a Nest box **automatically** when the user has billing set up and is under their spending cap.
   3. Otherwise: the app asks whether to upgrade. Declining queues nothing; the thread is not started.
 - The user can always pick a box by hand for a thread.
 - Existing threads never move automatically.
 
-### Cloud boxes
+### The Nest
 
-- Shared multi-tenant machines: one cloud box serves many users' threads, packed by capacity. The box is already
-  multi-user (threads, mirrors and CLI logins are per user), but its isolation was built for one trusted owner.
-- Billed by compute hours used by the user's threads on cloud boxes.
-- Model credentials: API keys are stored in the control plane's secret store and handed to the cloud box per run.
-  Claude and ChatGPT subscription logins are per box; the user signs in once for Kestrel cloud, and that login is
-  available on every cloud machine they are placed on (Settings › Connections shows which boxes are signed in).
-- Repo mirrors are per box and per user; the first checkout on a cloud machine fetches from scratch.
-
-### Multi-tenant sandboxing (separate workstream, required before cloud launch)
-
-Today's per-thread isolation (bubblewrap, a systemd slice with memory/CPU/pids caps, and under `strict` a pasta network namespace) shares
-the host kernel and assumes the users on a box trust the operator and not much else is at stake. Strangers on one
-machine need more:
-
-- A VM boundary per tenant or per thread (Firecracker, Cloud Hypervisor or gVisor), with bwrap kept inside it.
-- Host-side work that runs with user secrets (mirror fetches, `git_push`, the GitHub tools, the broker, `toolkit_install`
-  `nix build`s) isolated per tenant, so a compromised tenant cannot read another tenant's tokens, mirrors or CLI state.
-- Per-tenant storage quotas and encryption at rest; workspaces wiped on release.
-- Egress policy and abuse controls (rate limits, mining/spam detection) on the shared network.
-- GPU sharing: there is no per-thread VRAM limit today; cloud desktops need a share or a cap.
-- Noisy-neighbor limits on disk and network I/O, not just CPU and memory.
+Kestrel's paid compute gives each user their own VM on a shared host, instead of shared multi-tenant boxes. Its box is
+an ordinary single-owner box, so the VM is the boundary between users. See [goal-state.md](goal-state.md#the-nest) for
+shapes, the host layer and billing.
 
 ### Cross-box features
 
@@ -182,9 +165,8 @@ machine need more:
 3. Thread → box records; per-box event streams merged in the app.
 4. Box control sockets: presence, capacity reports, automations on user boxes, provisioning edited from the app.
 5. Placement, with auto-overflow for subscribers and the upgrade prompt for everyone else.
-6. Multi-tenant sandboxing (VM boundary, per-tenant host isolation), in parallel with 3–5.
-7. Cloud boxes: provisioning, credential handoff, metering and billing.
-8. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
+6. The Nest: host layer, VM shapes, metering and billing ([build order](goal-state.md#build-order)).
+7. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
 
 ## Protocol impact
 

@@ -1,5 +1,7 @@
 # Kestrel architecture and ownership
 
+This describes what runs today. For where it is heading, see [goal-state.md](goal-state.md).
+
 ```mermaid
 flowchart TB
   subgraph Browser["Browser"]
