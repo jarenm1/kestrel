@@ -77,8 +77,9 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - Sign in at `http://localhost:<app port>/auth/dev-login`. The public pages (landing, pricing) are at `http://site.localhost:<app port>/`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
 - **Windows:** `bun run dev` has no box desktop or sandbox. For those, use WSL2 Ubuntu with Nix (install as root via
   `wsl -u root`, enable flakes). Run `nix run` from a clone in WSL's home (a Windows worktree's `.git` is a Windows path).
-  WSLg mounts `/tmp/.X11-unix` read-only; the task desktop does not need it writable (`nix run` gives each task a private
-  `/tmp/.X11-unix` in its namespace). WSL uses CPU encoding for the desktop.
+  WSLg mounts `/tmp/.X11-unix` read-only; the task desktop does not need it writable: every launch that shows the desktop
+  joins the task's namespace holder, which mounts a private `/tmp/.X11-unix` (all sandbox levels, see
+  `packages/server/src/sandbox/netns.ts`). WSL uses CPU encoding for the desktop.
 
 ## Before opening a PR
 
