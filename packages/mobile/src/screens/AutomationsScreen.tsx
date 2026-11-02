@@ -240,7 +240,7 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
 /** One run: its status, reason, time and error; opens the run's thread when it started one. */
 function RunLine({ run }: { run: AutomationRun }) {
   const { push } = useNavigation();
-  const { activeBox } = useAuth();
+  const { managedBox } = useAuth();
   const failed = run.status === "failed";
   const body = (
     <>
@@ -266,7 +266,7 @@ function RunLine({ run }: { run: AutomationRun }) {
   return (
     <Pressable
       style={styles.run}
-      onPress={() => push({ name: "thread", taskId, box: activeBox })}
+      onPress={() => push({ name: "thread", taskId, box: managedBox === null ? null : { id: managedBox.id, url: managedBox.url } })}
       accessibilityRole="button"
       accessibilityLabel="Open thread"
     >
