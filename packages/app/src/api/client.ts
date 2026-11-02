@@ -529,6 +529,10 @@ export const api = {
   },
   archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
   unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
+  /** Deletes the thread for good: its history, checkouts and files. */
+  deleteTask: async (taskId: string): Promise<void> => {
+    await onTask(taskId, Schema.Unknown, "DELETE", Paths.task(taskId))
+  },
   listMessages: (taskId: string) => onTask(taskId, Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
   /** Slash commands of the harness for the composer's chosen model in this thread. */
   commands: (taskId: string, model: AgentModel) =>
