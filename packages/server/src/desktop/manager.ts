@@ -142,7 +142,7 @@ const MAX_ENCODER_RESTARTS = 3
 const MAX_INPUT_RESTARTS = 3
 /** Leave most of the desktop readiness budget for CPU fallback if NVENC never produces an init segment. */
 const NVENC_START_TIMEOUT_MS = 5_000
-/** NVENC is skipped for this long after it reports a busy GPU (session limit). */
+/** NVENC is skipped for this long after it reports a busy GPU (session limit) or misses its startup deadline. */
 const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
 let nvencDisabled = false
