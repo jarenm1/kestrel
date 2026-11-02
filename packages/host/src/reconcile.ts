@@ -4,7 +4,7 @@ import { isProcessAlive, processBelongsToVm } from "./proc"
 import { listVmIds, readVm, vmPaths } from "./state-store"
 import type { VmRecord, VmState } from "./schema"
 import { finishDestroy, GONE_AT_RECONCILE } from "./vm"
-import { commitState, vmProcessName, type HostContext } from "./vm-state"
+import { closingEvent, commitState, vmProcessName, type HostContext } from "./vm-state"
 
 const QMP_PROBE_TIMEOUT_MS = 500
 
@@ -26,7 +26,7 @@ const change = (vm: VmRecord, to: VmState, reason: string): ReconcileChange => (
  * Brings one VM's recorded state in line with the processes on the host. Caller must hold the VM lock.
  *  - starting: process alive and QMP answers -> running (emits running); process gone -> stopped (no event:
  *    the VM never reported running). A live but not-yet-answering launcher stays starting.
- *  - running/stopping: process not owned by this VM -> stopped with lastError (emits parked).
+ *  - running/stopping: process not owned by this VM -> stopped with lastError (emits parked if running was reported).
  *  - destroying: process gone -> finish removal (emits deleted).
  */
 export const reconcileLocked = async (ctx: HostContext, vmId: string): Promise<ReconcileChange | null> => {
@@ -49,7 +49,7 @@ export const reconcileLocked = async (ctx: HostContext, vmId: string): Promise<R
     case "running":
     case "stopping": {
       if (processBelongsToVm(vm.process, name)) return null
-      commitState(ctx, vm, "stopped", { process: null, lastError: GONE_AT_RECONCILE }, "parked")
+      commitState(ctx, vm, "stopped", { process: null, lastError: GONE_AT_RECONCILE }, closingEvent(vm))
       return change(vm, "stopped", GONE_AT_RECONCILE)
     }
     case "destroying": {

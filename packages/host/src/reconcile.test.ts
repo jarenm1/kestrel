@@ -38,7 +38,12 @@ const eventStates = (): string[] =>
 describe("reconcile", () => {
   test("a running VM whose process is dead becomes stopped and emits parked", async () => {
     const vm = writeStoppedVm(dir)
-    writeVm(dir, { ...vm, state: "running", process: { pid: exitedPid(), startTime: 1, name: vmProcessName(vm.vmId) } })
+    writeVm(dir, {
+      ...vm,
+      state: "running",
+      runningReported: true,
+      process: { pid: exitedPid(), startTime: 1, name: vmProcessName(vm.vmId) },
+    })
     const ctx = makeContext(dir, "/nonexistent", {}, warnings)
 
     const change = await withVmLock(vmPaths(dir, vm.vmId).dir, () => reconcileLocked(ctx, vm.vmId))

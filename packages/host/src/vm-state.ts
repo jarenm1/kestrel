@@ -32,7 +32,8 @@ export const commitState = (
   fields: VmFields,
   event: LifecycleRecord["state"] | null,
 ): VmRecord => {
-  const next = transitionVm(vm, to, fields, new Date().toISOString())
+  const runningReported = event === "running" || (event === null && vm.runningReported)
+  const next = { ...transitionVm(vm, to, fields, new Date().toISOString()), runningReported }
   if (event !== null) {
     appendLifecycleEvent(
       ctx.stateDir,
@@ -42,6 +43,9 @@ export const commitState = (
   writeVm(ctx.stateDir, next)
   return next
 }
+
+/** Event that closes the VM's lifecycle record: `parked` only when a `running` record was written. */
+export const closingEvent = (vm: VmRecord): "parked" | null => (vm.runningReported ? "parked" : null)
 
 /** Persists a field-only update (no state change). */
 export const commitFields = (ctx: HostContext, vm: VmRecord, fields: Partial<VmFields>): VmRecord => {

@@ -62,6 +62,8 @@ export const VmRecord = Schema.Struct({
   process: Schema.NullOr(ProcessRef),
   createdAt: IsoMillis,
   updatedAt: IsoMillis,
+  /** True while a `running` lifecycle record is open, i.e. no `parked` record has closed it yet. */
+  runningReported: Schema.Boolean,
   lastError: Schema.NullOr(Schema.String),
 })
 export type VmRecord = typeof VmRecord.Type

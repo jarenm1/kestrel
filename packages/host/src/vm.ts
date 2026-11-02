@@ -9,7 +9,7 @@ import { isProcessAlive, processBelongsToVm, readProcStat, sleep, type ProcIdent
 import { readHost, removeVmArtifacts, requireVm, vmPaths, writeVm } from "./state-store"
 import { requireTool } from "./tools"
 import type { ProcessRef, Shape, VmRecord, VolumeIdentity } from "./schema"
-import { commitFields, commitState, vmProcessName, type HostContext } from "./vm-state"
+import { closingEvent, commitFields, commitState, vmProcessName, type HostContext } from "./vm-state"
 
 const QMP_PROBE_TIMEOUT_MS = 500
 const QMP_COMMAND_TIMEOUT_MS = 5000
@@ -92,6 +92,7 @@ export const createVm = (ctx: HostContext, options: CreateOptions): string => {
       process: null,
       createdAt: now,
       updatedAt: now,
+      runningReported: false,
       lastError: null,
     })
   } catch (error) {
@@ -198,7 +199,7 @@ export const stopVm = (ctx: HostContext, vmId: string, options: StopOptions): Pr
     }
     const ref = vm.process
     if (ref === null || !isProcessAlive(ref)) {
-      commitState(ctx, vm, "stopped", { process: null, lastError: null }, "parked")
+      commitState(ctx, vm, "stopped", { process: null, lastError: null }, closingEvent(vm))
       return "stopped"
     }
     if (!processBelongsToVm(ref, vmProcessName(vmId))) {
@@ -214,7 +215,7 @@ export const stopVm = (ctx: HostContext, vmId: string, options: StopOptions): Pr
       }
     }
     if (requested && (await waitForExit(ref, options.timeoutMs))) {
-      commitState(ctx, vm, "stopped", { process: null, lastError: null }, "parked")
+      commitState(ctx, vm, "stopped", { process: null, lastError: null }, closingEvent(vm))
       return "stopped"
     }
     if (!options.force) {
@@ -234,7 +235,7 @@ export const stopVm = (ctx: HostContext, vmId: string, options: StopOptions): Pr
     if (!(await waitForExit(ref, FORCE_WAIT_MS))) {
       stopFailure(ctx, vm, `forced stop: qemu pid ${ref.pid} still running after QMP quit`)
     }
-    commitState(ctx, vm, "stopped", { process: null, lastError: FORCED_STOP_NOTE }, "parked")
+    commitState(ctx, vm, "stopped", { process: null, lastError: FORCED_STOP_NOTE }, closingEvent(vm))
     return "forced"
   })
 }

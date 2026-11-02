@@ -67,6 +67,7 @@ export const writeStoppedVm = (stateDir: string, overrides: Partial<VmRecord> = 
     process: null,
     createdAt: now,
     updatedAt: now,
+    runningReported: false,
     lastError: null,
     ...overrides,
   }

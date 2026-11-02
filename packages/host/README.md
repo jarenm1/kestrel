@@ -52,6 +52,7 @@ with `state` one of `running | parked | deleted`. Records are validated strictly
 | `--force` stop (QMP quit) | `parked` (vm.json `lastError` notes the forced stop) |
 | destroy completes | `deleted` |
 | reconcile finds a running/stopping VM whose process is gone | `parked` |
+| stop or reconcile of a VM that never reached running (e.g. stopped while `starting`) | no record |
 | create, failed start, reconcile of a dead `starting` VM | no record |
 
 No usage records are collected by this host.

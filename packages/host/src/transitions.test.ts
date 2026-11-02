@@ -18,6 +18,7 @@ const record = (state: VmState, sequence = 3): VmRecord => ({
   process: null,
   createdAt: "2026-11-02T06:00:00.000Z",
   updatedAt: "2026-11-02T06:00:00.000Z",
+  runningReported: false,
   lastError: null,
 })
 

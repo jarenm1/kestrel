@@ -7,8 +7,8 @@ import { LifecycleRecord, STRICT } from "./schema"
 
 /**
  * Lifecycle records for the PR #162 meter (schema v1). Only lifecycle records are written here; usage is
- * not collected by this host. Mapping: start succeeds -> running; clean stop -> parked; destroy -> deleted;
- * unexpected exit found by reconcile -> parked.
+ * not collected by this host. Mapping: start succeeds -> running; clean stop or unexpected exit found by
+ * reconcile -> parked, but only if a running record is open (vm.runningReported); destroy -> deleted;
  */
 
 export interface LifecycleInput {

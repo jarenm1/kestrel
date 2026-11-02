@@ -65,6 +65,19 @@ describe("destroy", () => {
   })
 })
 
+describe("stop", () => {
+  test("stopping a VM that never reached running writes no parked record", async () => {
+    const vm = writeStoppedVm(dir)
+    writeVm(dir, { ...vm, state: "starting" })
+    const ctx = makeContext(dir, launcher, process.env, warnings)
+
+    await expect(stopVm(ctx, vm.vmId, { timeoutMs: 1000, force: false })).resolves.toBe("stopped")
+
+    expect(readVm(dir, vm.vmId)?.state).toBe("stopped")
+    expect(existsSync(eventsPath(dir))).toBe(false)
+  })
+})
+
 describe("create and start refusals", () => {
   test("create refuses an OS image that is missing", () => {
     const ctx = makeContext(dir, launcher, process.env, warnings)
