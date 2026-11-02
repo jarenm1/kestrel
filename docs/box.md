@@ -83,7 +83,7 @@ The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpape
 
 #### Desktop dependencies on Linux
 
-Ubuntu 24.04's weston is too old for the box's desktop startup. With Nix and flakes enabled, build the desktop tools pinned by this checkout's `flake.lock`, including weston, Xwayland, ffmpeg and the capture helper:
+Ubuntu 24.04's weston is too old for the box's desktop startup. With Nix and flakes enabled (`experimental-features = nix-command flakes` in `/etc/nix/nix.conf` or `~/.config/nix/nix.conf`), build the desktop tools pinned by this checkout's `flake.lock`, including weston, Xwayland, ffmpeg and the capture helper:
 
 ```sh
 mkdir -p "$HOME/.local/share/kestrel"
