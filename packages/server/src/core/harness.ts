@@ -30,6 +30,7 @@ import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./stat
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
+import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
 
 export interface AgentHarnessShape {
@@ -476,7 +477,7 @@ export const AgentHarnessLive = Layer.effect(
               published: new Map(),
               held: new Map(),
               heldTimer: null,
-              transcript: makeTranscript(session.seed),
+              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType)),
               context: session.seed,
               sessionId: null,
               driver: null,

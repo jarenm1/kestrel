@@ -1,4 +1,6 @@
 import { useLayoutEffect, useRef, type ReactNode } from "react"
+import { useQuery } from "@tanstack/react-query"
+import { Paths, type Attachment } from "@cloudagents/protocol"
 import {
   Bot,
   Brain,
@@ -23,6 +25,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react"
+import { queries } from "@/api/queries"
 import { useAutoOpen } from "@/hooks/useAutoOpen"
 import { cn } from "@/lib/utils"
 import { outputText, type EditLine, type ToolIcon, type ToolItem, type ToolKind, type ToolView } from "@/lib/tool-display"
@@ -139,7 +142,24 @@ function EditDiff({ lines }: { lines: readonly EditLine[] }) {
 
 const CHANGE_CLASS: Record<string, string> = { add: "text-success", delete: "text-destructive" }
 
-function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; nested: ReactNode }) {
+/** Where a run's files are served from: the thread (its box) and the run. */
+export interface RunSource {
+  readonly taskId: string
+  readonly runId: string
+}
+
+/** An image a tool call returned, at transcript size; a click opens it whole in a new tab. */
+function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
+  const { data: url } = useQuery(queries.taskFileUrl(source.taskId, Paths.taskRunImage(source.taskId, source.runId, image.id)))
+  if (url === undefined) return null
+  return (
+    <a href={url} target="_blank" rel="noreferrer" className="w-fit">
+      <img src={url} alt="Tool screenshot" loading="lazy" className="max-h-72 rounded-lg shadow-soft" />
+    </a>
+  )
+}
+
+function ToolDetails({ item, view, source, nested }: { item: ToolItem; view: ToolView; source: RunSource; nested: ReactNode }) {
   const output = outputText(item.output, view.kind)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
   // An unrecognized call shows its input as is; a recognized one summarizes it, so the whole input sits one click away.
@@ -184,10 +204,12 @@ function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; n
       {output.text !== "" && (view.diff === undefined || item.status === "error") && (
         <pre className={cn(PRE_CLASS, item.status === "error" && "text-destructive")}>{output.text}</pre>
       )}
+      {item.images?.map((image) => <RunImage key={image.id} source={source} image={image} />)}
+      {/* Placeholders for images the box did not keep: runs from before it kept them, or a type it cannot serve. */}
       {output.images > 0 && (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Image className="size-3.5" />
-          {output.images === 1 ? "Returned a screenshot" : `Returned ${output.images} screenshots`} (shown to the agent, not kept here)
+          {output.images === 1 ? "Returned a screenshot" : `Returned ${output.images} screenshots`} (not kept)
         </div>
       )}
       {nested}
@@ -210,7 +232,13 @@ function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; n
  * One tool call as a single line (what it did, to what), with its input, diff and output behind a click. A subagent
  * stays open while it runs, so its own calls show as they happen.
  */
-export function ToolRow({ item, view, running, nested }: { item: ToolItem; view: ToolView; running: boolean; nested?: ReactNode }) {
+export function ToolRow({ item, view, source, running, nested }: {
+  item: ToolItem
+  view: ToolView
+  source: RunSource
+  running: boolean
+  nested?: ReactNode
+}) {
   const live = running && item.status === "running"
   const [open, toggle] = useAutoOpen(view.kind === "agent" && live)
   const Icon = view.icon !== undefined ? EXTRA_ICONS[view.icon] : KIND_ICONS[view.kind]
@@ -239,7 +267,7 @@ export function ToolRow({ item, view, running, nested }: { item: ToolItem; view:
       </button>
       {open && (
         <div className={DETAILS_CLASS}>
-          <ToolDetails item={item} view={view} nested={nested} />
+          <ToolDetails item={item} view={view} source={source} nested={nested} />
         </div>
       )}
     </div>

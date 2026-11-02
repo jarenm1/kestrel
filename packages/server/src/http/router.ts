@@ -346,6 +346,26 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         ),
       ),
     ),
+    // An image a tool call returned. The id is the bytes' hash, so the browser keeps it for good; like attachments,
+    // the response never runs as a page on the app's origin.
+    HttpRouter.get(
+      "/api/tasks/:id/runs/:runId/images/:imageId",
+      Effect.flatMap(HttpRouter.params, (p) =>
+        signedIn((user) => core.runImage(user, p.id ?? "", p.runId ?? "", p.imageId ?? "")).pipe(
+          Effect.map((image) =>
+            HttpServerResponse.uint8Array(image.bytes, {
+              contentType: image.mimeType,
+              headers: {
+                "cache-control": "private, max-age=31536000, immutable",
+                "content-security-policy": "sandbox",
+                "x-content-type-options": "nosniff",
+              },
+            }),
+          ),
+          Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
+        ),
+      ),
+    ),
   ).pipe(
     // pipe takes at most 20 functions: the preview and desktop routes are their own group.
     HttpRouter.post(

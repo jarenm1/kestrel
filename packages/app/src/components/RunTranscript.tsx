@@ -7,7 +7,7 @@ import { liveItemIds } from "@/lib/live-items"
 import { describeTool, summarizeTools, type ToolItem } from "@/lib/tool-display"
 import { Alert } from "@/components/ui/alert"
 import { Markdown } from "./Markdown"
-import { ThinkingBlock, ToolGroup, ToolRow } from "./WorkLog"
+import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
 interface Props {
   taskId: string
@@ -22,7 +22,7 @@ interface Tree {
 }
 
 interface Ctx {
-  readonly taskId: string
+  readonly source: RunSource
   readonly tree: Tree
   readonly liveIds: ReadonlySet<string>
   readonly running: boolean
@@ -59,7 +59,7 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
 
 /** A run of consecutive tool calls under one group, which shows a summary line once there are two or more. */
 function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
-  const views = items.map((item) => describeTool(item, ctx.taskId))
+  const views = items.map((item) => describeTool(item, ctx.source.taskId))
   const rows = items.map((item, index) => {
     const nested = ctx.tree.children.get(item.id)
     return (
@@ -67,6 +67,7 @@ function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
         key={item.id}
         item={item}
         view={views[index]!}
+        source={ctx.source}
         running={ctx.running}
         nested={nested !== undefined && <Items items={nested} ctx={ctx} />}
       />
@@ -139,8 +140,9 @@ export function RunTranscript({ taskId, runId, running }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
   const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running])
+  const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
 
   if (data === undefined || data.length === 0) return null
 
-  return <Items items={tree.roots} ctx={{ taskId, tree, liveIds, running }} />
+  return <Items items={tree.roots} ctx={{ source, tree, liveIds, running }} />
 }

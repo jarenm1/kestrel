@@ -191,6 +191,11 @@ export const AgentItem = Schema.Union(
     input: Schema.Unknown,
     status: Schema.Literal("running", "ok", "error"),
     output: Schema.NullOr(Schema.String),
+    /**
+     * Images the result returned (a desktop screenshot), served by `Paths.taskRunImage`; their `[image]` placeholder
+     * is not in `output`. Absent on items from before images were kept, and when the result had none.
+     */
+    images: Schema.optional(Schema.Array(Attachment)),
   }),
   /** End of one agent turn. Fields the harness does not report are null. */
   Schema.Struct({
@@ -663,6 +668,8 @@ export const Paths = {
   /** The bytes of `CheckoutIcon.blob`; the blob in the path makes the URL immutable. */
   taskCheckoutIcon: (taskId: string, checkoutId: string, blob: string) =>
     `/api/tasks/${taskId}/checkouts/${checkoutId}/icon/${blob}`,
+  /** An image a tool call returned (`images` on a tool item); the id names the bytes, so the URL is immutable. */
+  taskRunImage: (taskId: string, runId: string, imageId: string) => `/api/tasks/${taskId}/runs/${runId}/images/${imageId}`,
   /**
    * POST the raw file bytes as the body (not multipart), its type as `Content-Type`, and its file name as the
    * optional `name` query parameter -> `Attachment`. The upload waits, unsent, until a `SendMessageBody.attachments`

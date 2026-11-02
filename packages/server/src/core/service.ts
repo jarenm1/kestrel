@@ -56,6 +56,7 @@ import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
+import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 
@@ -378,6 +379,13 @@ export interface CoreShape {
     taskId: string,
     checkoutId: string,
     blob: string,
+  ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
+  /** Bytes of an image a tool call of one of the user's runs returned (`images` on a tool item). */
+  readonly runImage: (
+    user: string,
+    taskId: string,
+    runId: string,
+    imageId: string,
   ) => Effect.Effect<{ readonly mimeType: string; readonly bytes: Uint8Array }, NotFound | InternalError>
   /** Stores a file the user uploads for one of the task's messages; it waits there, unsent, until a message names it. */
   readonly upload: (user: string, taskId: string, input: UploadInput) => Effect.Effect<Attachment, NotFound | Conflict | BadRequest | InternalError>
@@ -1601,6 +1609,22 @@ export const CoreLive = Layer.effect(
         return { mimeType, bytes }
       })
 
+    const runImage: CoreShape["runImage"] = (user, taskId, runId, imageId) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        const run = (yield* store.read).runs.find((r) => r.id === runId && r.taskId === taskId)
+        const file = run === undefined ? null : runImageFile(join(config.runsDir, run.id), imageId)
+        if (file === null) return yield* Effect.fail(new NotFound({ message: `run ${runId} has no image ${imageId}` }))
+        const bytes = yield* Effect.tryPromise({
+          try: () => readFile(file.path),
+          catch: (e) =>
+            (e as NodeJS.ErrnoException).code === "ENOENT"
+              ? new NotFound({ message: `run ${runId} has no image ${imageId}` })
+              : new InternalError({ message: `read run image: ${String(e)}` }),
+        })
+        return { mimeType: file.mimeType, bytes }
+      })
+
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
       Effect.gen(function* () {
@@ -1672,6 +1696,7 @@ export const CoreLive = Layer.effect(
       inbox,
       attachment,
       checkoutIcon,
+      runImage,
       upload,
       health: () => Effect.void,
 
