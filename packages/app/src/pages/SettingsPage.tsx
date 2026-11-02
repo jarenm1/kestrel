@@ -1,3 +1,4 @@
+import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
 import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
+import { getTurnSound, playTurnSound, TURN_SOUND_KEY, turnSounds, type TurnSound } from "@/lib/turnSound"
 import { errorText } from "@/util"
 
 const sections = [
@@ -80,6 +82,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 export function ProfileSettings() {
   const me = useQuery(queries.me())
   const signOut = useSignOut()
+  const [sound, setSound] = useState(getTurnSound)
   if (!me.data) return null
   const { login, name, avatarUrl } = me.data
 
@@ -117,6 +120,24 @@ export function ProfileSettings() {
               <Link to="/settings/connections">Manage</Link>
             </Button>
           </Row>
+        </CardContent>
+      </Card>
+      <Card className="py-0">
+        <CardContent className="px-5 py-4">
+          <label htmlFor="turn-sound" className="font-medium">Turn sound</label>
+          <p className="mt-1 text-sm text-muted-foreground">Play a sound when a thread finishes or needs your input. Saved in this browser.</p>
+          <div className="mt-3 flex items-center gap-3">
+            <select id="turn-sound" value={sound} onChange={(event) => {
+              const next = event.target.value as TurnSound
+              setSound(next)
+              localStorage.setItem(TURN_SOUND_KEY, next)
+              playTurnSound(next)
+            }} className="rounded-md border border-white/10 bg-card px-3 py-2 capitalize">
+              {turnSounds.map((option) => <option key={option} value={option}>{option}</option>)}
+            </select>
+            <Button variant="soft" size="sm" disabled={sound === "off"} onClick={() => playTurnSound(sound)}>Preview</Button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">Keep Kestrel open; your browser may require interaction before playing audio.</p>
         </CardContent>
       </Card>
       <p className="text-xs text-muted-foreground">
