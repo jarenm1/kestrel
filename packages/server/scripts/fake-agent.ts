@@ -81,6 +81,24 @@ const runGhProbe = async (command: string): Promise<number> => {
   return 0
 }
 
+// No model key is configured by the listener smoke test: 424 proves that the run token reached the broker and
+// passed authentication, without making a provider request. Never log the URL: it contains the run token.
+const runListenerProbe = async (): Promise<number> => {
+  const base = process.env.ANTHROPIC_BASE_URL
+  if (base === undefined) throw new Error("listener probe requires ANTHROPIC_BASE_URL")
+  const response = await fetch(`${base}/v1/models`)
+  const body = await response.json() as { _tag?: string }
+  if (response.status !== 424 || body._tag !== "MissingCredential") {
+    throw new Error(`listener probe: broker answered ${response.status}`)
+  }
+  const exec = await call("workspace_exec", { command: "echo listener-probe-ok" })
+  if (exec.failed || !exec.text.startsWith("exit code: 0") || !exec.text.includes("listener-probe-ok")) {
+    throw new Error("listener probe: workspace_exec failed")
+  }
+  await call("task_report", { status: "done", message: "listener probe: MCP, broker and workspace exec passed" })
+  return 0
+}
+
 // Checks `repo` out into the thread, commits one file in the checkout and leaves another uncommitted, so the diff
 // must show both. Reports the checkout's directory.
 const runCheckoutProbe = async (repo: string): Promise<number> => {
@@ -279,6 +297,7 @@ const main = async (): Promise<number> => {
   // Probes match the user's text, not the user context the box puts before it (core/user-context.ts).
   const request = prompt.startsWith("The user is signed in to Kestrel as ") ? prompt.slice(prompt.indexOf("\n\n") + 2) : prompt
   if (request.trim() === "exec-probe") return runExecProbes()
+  if (request.trim() === "listener-probe") return runListenerProbe()
   const [probe, arg] = request.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
   if (probe === "thread-probe") return runThreadProbe(arg)

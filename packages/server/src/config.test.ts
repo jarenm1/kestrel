@@ -7,6 +7,9 @@ const BOX_VARS = [
   "CLOUDAGENTS_BOX_SECRET",
   "CLOUDAGENTS_BOX_MANAGED",
   "CLOUDAGENTS_BOX_TOKEN",
+  "CLOUDAGENTS_PORT",
+  "CLOUDAGENTS_HOST",
+  "CLOUDAGENTS_SANDBOX_PORT",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -32,6 +35,21 @@ const configWith = (env: Record<string, string>) => {
   Object.assign(process.env, env)
   return loadConfig()
 }
+
+describe("sandbox listener settings", () => {
+  test("wildcard public binding never changes the loopback sandbox URL", () => {
+    const config = configWith({ CLOUDAGENTS_HOST: "::", CLOUDAGENTS_PORT: "9000" })
+    expect(config.sandboxPort).toBe(19000)
+    expect(config.mcpBaseUrl).toBe("http://127.0.0.1:19000")
+  })
+
+  test("a separate port can be configured and invalid or shared ports are refused", () => {
+    expect(configWith({ CLOUDAGENTS_PORT: "9000", CLOUDAGENTS_SANDBOX_PORT: "20000" }).sandboxPort).toBe(20000)
+    for (const port of ["0", "65536", "1.5", "bad", "9000"]) {
+      expect(() => configWith({ CLOUDAGENTS_PORT: "9000", CLOUDAGENTS_SANDBOX_PORT: port })).toThrow()
+    }
+  })
+})
 
 describe("managed box settings", () => {
   test("CLOUDAGENTS_BOX_MANAGED=1 needs the box id, its secret and the control plane URL", () => {
