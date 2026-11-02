@@ -59,11 +59,12 @@ export interface AgentHarnessShape {
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /**
-   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input). False
-   * when the run cannot take it now (no turn going yet, or its last turn is over); the message then waits in the
-   * run's inbox for task_inbox.
+   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input).
+   * `accepted` is false when the run cannot take it now (no turn going yet, or its last turn is over); the message
+   * then waits in the run's inbox for task_inbox. `afterItems` is the run's item count (`itemCount`) in the same
+   * step the text was sent, so every item before it was emitted before the agent got the text.
    */
-  readonly steer: (runId: string, text: string) => Effect.Effect<boolean>
+  readonly steer: (runId: string, text: string) => Effect.Effect<{ readonly accepted: boolean; readonly afterItems: number }>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
@@ -547,6 +548,10 @@ export const AgentHarnessLive = Layer.effect(
         })
       })
 
+    // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
+    const itemCount = (runId: string): number =>
+      active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0)
+
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {
         const waitingItem = queuedItems.get(runId)
@@ -767,7 +772,12 @@ export const AgentHarnessLive = Layer.effect(
       cancel: (runId) => stopRun(runId, false),
 
       steer: (runId, text) =>
-        Effect.promise(() => active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)),
+        Effect.promise(() => {
+          // Counted and sent synchronously: no stdout line can add an item between the two.
+          const afterItems = itemCount(runId)
+          const sent = active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)
+          return sent.then((accepted) => ({ accepted, afterItems }))
+        }),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
@@ -803,8 +813,7 @@ export const AgentHarnessLive = Layer.effect(
 
       items: readItems,
 
-      // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
-      itemCount: (runId) => active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0),
+      itemCount,
 
       activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 

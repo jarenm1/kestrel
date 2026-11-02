@@ -123,7 +123,7 @@ createInterface({ input: process.stdin })
       })
       try {
         yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
-        expect(yield* harness.steer(run.id, "Queued message")).toBe(true)
+        expect((yield* harness.steer(run.id, "Queued message")).accepted).toBe(true)
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         const state = yield* store.read
         expect(state.runs[0]).toMatchObject({ status: "succeeded", exitCode: 0 })
@@ -138,23 +138,28 @@ createInterface({ input: process.stdin })
   }
 }, 12_000)
 
-test("a run's item count includes the queue item it shows while waiting for a slot and while it is launched", async () => {
+test("a run's item count includes its queue item while it waits and launches; a steer reports the count it was sent at", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-item-count-"))
   const cli = join(root, "cli.ts")
-  // Answers the prompt with one text item; an interrupt (Stop) ends the turn and the process.
+  // Answers the prompt with one text item and ends its turn on the next message (a steer); an interrupt (Stop)
+  // ends the turn too. The harness closes the input once the turn is over, which ends the process.
   await writeFile(cli, `
 import { createInterface } from "node:readline"
+let messages = 0
 const send = (message) => console.log(JSON.stringify(message))
-createInterface({ input: process.stdin }).on("line", (line) => {
-  const message = JSON.parse(line)
-  if (message.type === "user") {
-    send({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Working." }] }, parent_tool_use_id: null })
-  } else if (message.type === "control_request") {
-    send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
-    send({ type: "result", subtype: "error_during_execution", is_error: true })
-    process.exit(0)
-  }
-})
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.type === "user" && ++messages === 1) {
+      send({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Working." }] }, parent_tool_use_id: null })
+    } else if (message.type === "user") {
+      send({ type: "result", subtype: "success", is_error: false, result: "Done." })
+    } else if (message.type === "control_request") {
+      send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
+      send({ type: "result", subtype: "error_during_execution", is_error: true })
+    }
+  })
+  .on("close", () => process.exit(0))
 `)
   // The second launch (the run that waited) stops before it starts its agent until the test lets it go on.
   const launching = Promise.withResolvers<void>()
@@ -188,9 +193,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       }
       const waiting = Promise.withResolvers<void>()
       const answered = Promise.withResolvers<void>()
+      const finished = Promise.withResolvers<void>()
       const unsubscribe = hub.subscribe(second.task.id, (event) => {
         if (event._tag === "agent.item" && event.item._tag === "tool" && event.item.status === "running") waiting.resolve()
         if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
         yield* harness.spawn(first.task, first.run, first.run.prompt, null, "test", null, {})
@@ -207,8 +214,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
         expect(harness.itemCount(second.run.id)).toBe(2) // "Started." and the agent's text
         expect((yield* harness.items(second.run.id)).length).toBe(2)
-        // Stopped here like the first run, so its finish is stored before the state directory goes.
-        yield* harness.cancel(second.run.id)
+        expect(yield* harness.steer(second.run.id, "Wrap up")).toEqual({ accepted: true, afterItems: 2 })
+        // The run's finish is stored before the state directory goes.
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
       } finally {
         unsubscribe()
         proceed.resolve()
