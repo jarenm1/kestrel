@@ -401,7 +401,7 @@ export interface CoreShape {
   readonly checkout: (
     taskId: string,
     input: CheckoutRequest,
-  ) => Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError>
+  ) => Effect.Effect<CheckoutOutcome, NotFound | BadRequest | Conflict | InternalError>
   /** Used by the MCP handler: pushes a checkout's branch to its GitHub remote (never forced). Returns the branch. */
   readonly gitPush: (taskId: string, checkoutId?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: pushes the checkout's branch and opens its pull request, or returns the open one. */
@@ -483,6 +483,24 @@ const parseCheckoutRequest = (request: CheckoutRequest): Effect.Effect<RepoRef, 
     return Effect.fail(new BadRequest({ message: `${ref.repo} is not a github.com repository; pull requests need one` }))
   }
   return Effect.succeed(ref)
+}
+
+/** A checkout, and what the agent has to know about it that the checkout itself does not say. */
+export interface CheckoutOutcome {
+  readonly checkout: Checkout
+  readonly note: string | null
+}
+
+/**
+ * Why a checkout of this pull request cannot work on the pull request's own branch, or null when it can. Pushes use the
+ * checkout's repository, so a fork's branch is out of reach; a closed pull request's branch may be deleted, and pushing
+ * would bring it back; the default branch is never a thread's to push to.
+ */
+const pullRequestBranchBlocker = (pr: PullRequest, slug: RepoSlug, defaultBranch: string): string | null => {
+  if (pr.state !== "open") return `it is ${pr.state}`
+  if (pr.headRepo?.toLowerCase() !== `${slug.owner}/${slug.name}`.toLowerCase()) return "its branch is in another repository"
+  if (pr.headRef === defaultBranch) return "its branch is the repository's default branch"
+  return null
 }
 
 /** The repository a stored checkout names. Stored values were validated on the way in. */
@@ -930,13 +948,14 @@ export const CoreLive = Layer.effect(
       })
 
     /**
-     * Checks a repository out into a thread: refreshes the owner's mirror, clones it into the workspace on a new branch
-     * and pins the fork point in the checkout's shadow repo. A repo already checked out in the thread returns that checkout.
+     * Checks a repository out into a thread: refreshes the owner's mirror, clones it into the workspace and pins the fork
+     * point in the checkout's shadow repo. A repo already checked out in the thread returns that checkout; asking for its
+     * pull request again fetches the pull request's head, which the sandbox cannot do without the owner's token.
      */
     const addCheckout = (
       taskId: string,
       request: CheckoutRequest,
-    ): Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError> =>
+    ): Effect.Effect<CheckoutOutcome, NotFound | BadRequest | Conflict | InternalError> =>
       checkoutLock.withPermits(1)(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
@@ -946,8 +965,32 @@ export const CoreLive = Layer.effect(
           yield* refuseOverStorage(taskId)
           const ref = yield* parseCheckoutRequest(request)
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
-          if (existing) return existing
-          const checkout = yield* cloneCheckout(task, request, ref)
+          if (existing) {
+            if (request.pullRequest === undefined) return { checkout: existing, note: null }
+            if (existing.pullRequest?.number !== request.pullRequest) {
+              return yield* Effect.fail(
+                new BadRequest({
+                  message:
+                    `this thread already has ${ref.repo} checked out on ${existing.branch} and a thread has one checkout per ` +
+                    `repository; start a new thread for pull request #${request.pullRequest} (thread_spawn with repo and pullRequest)`,
+                }),
+              )
+            }
+            const access = yield* githubAccess(task.owner, ref)
+            const sha = yield* workspace
+              .fetchPullRequest({
+                mirrorPath: join(config.mirrorsDir, task.owner, ref.mirrorRel),
+                url: ref.url,
+                githubToken: access.token,
+                number: request.pullRequest,
+              })
+              .pipe(Effect.mapError(toInternal("fetch pull request")))
+            return {
+              checkout: existing,
+              note: `pull request #${request.pullRequest} is at ${sha}, available in this checkout: \`git merge ${sha}\` brings it in`,
+            }
+          }
+          const { checkout, note } = yield* cloneCheckout(task, request, ref)
           const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
@@ -957,7 +1000,7 @@ export const CoreLive = Layer.effect(
             return Either.right({ ...stored })
           })
           hub.publish({ _tag: "task.updated", task: updated })
-          return checkout
+          return { checkout, note }
         }),
       )
 
@@ -966,7 +1009,7 @@ export const CoreLive = Layer.effect(
       task: Task,
       request: CheckoutRequest,
       ref: RepoRef,
-    ): Effect.Effect<Checkout, BadRequest | InternalError> => {
+    ): Effect.Effect<CheckoutOutcome, BadRequest | InternalError> => {
       const id = newId()
       const threadDir = threadDirOf(task.id)
       const dir = freeDirName(
@@ -985,6 +1028,7 @@ export const CoreLive = Layer.effect(
         const token = ref.github === null ? undefined : yield* githubTokenOf(task.owner)
         const target = { mirrorPath, url: ref.url, githubToken: token }
         const pullRequest = request.pullRequest
+        const threadBranch = `cloudagents/${slugify(task.title)}-${task.id.replace(/-/g, "").slice(0, 6)}`
         const fork = yield* Effect.gen(function* () {
           if (pullRequest === undefined) {
             const defaultBranch = yield* workspace.syncMirror(target).pipe(Effect.mapError(toInternal("fetch repo")))
@@ -995,20 +1039,31 @@ export const CoreLive = Layer.effect(
             if (sha === null) {
               return yield* Effect.fail(new BadRequest({ message: `branch ${baseBranch} not found in ${ref.repo}` }))
             }
-            return { baseBranch, startSha: sha }
+            return { baseBranch, startSha: sha, branch: threadBranch, note: null }
           }
           // The checkout starts at the pull request's head; its base is the pull request's base unless named.
           const access = yield* githubAccess(task.owner, ref)
           const status = yield* github
             .getPullRequestStatus(access.token, access.slug, pullRequest)
             .pipe(Effect.mapError(fromGitHub))
-          yield* workspace.syncMirror(target).pipe(Effect.mapError(toInternal("fetch repo")))
+          const defaultBranch = yield* workspace.syncMirror(target).pipe(Effect.mapError(toInternal("fetch repo")))
           const sha = yield* workspace
             .fetchPullRequest({ ...target, githubToken: access.token, number: pullRequest })
             .pipe(Effect.mapError(toInternal("fetch pull request")))
-          return { baseBranch: request.baseBranch ?? status.baseRef, startSha: sha }
+          const baseBranch = request.baseBranch ?? status.baseRef
+          if (request.detached === true) return { baseBranch, startSha: sha, branch: threadBranch, note: null }
+          const link = { number: status.number, url: status.url }
+          const blocker = pullRequestBranchBlocker(status, access.slug, defaultBranch)
+          if (blocker === null) return { baseBranch, startSha: sha, branch: status.headRef, link, note: null }
+          return {
+            baseBranch,
+            startSha: sha,
+            branch: threadBranch,
+            link,
+            note: `pushes go to ${threadBranch} and do not update pull request #${pullRequest}: ${blocker}`,
+          }
         })
-        const branch = `cloudagents/${slugify(task.title)}-${task.id.replace(/-/g, "").slice(0, 6)}`
+        const branch = fork.branch
         yield* workspace
           .createCheckout({
             ...spec,
@@ -1025,15 +1080,17 @@ export const CoreLive = Layer.effect(
         const icon = yield* workspace.findIcon(mirrorPath, fork.startSha).pipe(
           Effect.catchAll((e) => Effect.as(Effect.logWarning(`icon for ${ref.repo}: ${e.message}`), null)),
         )
-        return {
+        const checkout: Checkout = {
           id,
           repo: ref.repo,
           dir,
           branch,
           baseBranch: fork.baseBranch,
           createdAt: nowIso(),
+          ...(fork.link === undefined ? {} : { pullRequest: fork.link }),
           ...(icon === null ? {} : { icon }),
         }
+        return { checkout, note: fork.note }
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 

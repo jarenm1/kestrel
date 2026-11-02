@@ -1197,11 +1197,12 @@ export class Hub extends DurableObject<Env> {
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
     const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
-    // A PR run checks the repository out at the PR head; the base branch stays the diff base.
+    // A PR run checks the repository out at the PR head; the base branch stays the diff base. It stays detached: a push
+    // to the PR's branch would fire the automation again.
     const checkout =
       row.repo === null
         ? {}
-        : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number }) } }
+        : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number, detached: true }) } }
     const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model)
     return this.recordRun(row.id, reason, now, outcome)
   }
