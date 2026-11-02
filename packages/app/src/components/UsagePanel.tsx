@@ -1,10 +1,18 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react"
-import { useQuery } from "@tanstack/react-query"
-import type { CliProvider, ProviderUsage, ProviderUsageWindow } from "@cloudagents/protocol"
+import { useMutation, useQuery } from "@tanstack/react-query"
+import type {
+  CliProvider,
+  ProviderBankedReset,
+  ProviderUsage,
+  ProviderUsageWindow,
+  UseBankedResetResult,
+} from "@cloudagents/protocol"
 import { Link } from "react-router-dom"
-import { queries } from "@/api/queries"
+import { api } from "@/api/client"
+import { keys, queries, queryClient } from "@/api/queries"
 import { boxName } from "@/components/BoxPicker"
 import { Alert } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { ActivityHeatmap } from "@/components/ActivityHeatmap"
 import { cn } from "@/lib/utils"
@@ -27,14 +35,76 @@ const ROW = "grid gap-x-6 gap-y-2 sm:grid-cols-[10rem_minmax(0,1fr)]"
 const WINDOW_ROW =
   "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-4 gap-y-1.5 sm:grid-cols-[8rem_minmax(0,1fr)_5rem_8rem] sm:gap-x-5"
 
-/** `4h56m`, `2d18h`: the two largest units left until the window resets. */
-function resetsText(resetsAt: string, now: number): string {
-  const minutes = Math.ceil((Date.parse(resetsAt) - now) / MINUTE_MS)
-  if (minutes <= 0) return "resets soon"
+/** `4h56m`, `2d18h`: the two largest units left until `at`; null once it has passed. */
+function timeLeft(at: string, now: number): string | null {
+  const minutes = Math.ceil((Date.parse(at) - now) / MINUTE_MS)
+  if (minutes <= 0) return null
   const days = Math.floor(minutes / 1440)
   const hours = Math.floor((minutes % 1440) / 60)
-  if (days > 0) return `resets in ${days}d${hours}h`
-  return `resets in ${hours > 0 ? `${hours}h` : ""}${minutes % 60}m`
+  if (days > 0) return `${days}d${hours}h`
+  return `${hours > 0 ? `${hours}h` : ""}${minutes % 60}m`
+}
+
+function resetsText(resetsAt: string, now: number): string {
+  const left = timeLeft(resetsAt, now)
+  return left === null ? "resets soon" : `resets in ${left}`
+}
+
+const expiryFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" })
+
+function expiresText(expiresAt: string | null, now: number): string {
+  if (expiresAt === null) return "Never expires"
+  const left = timeLeft(expiresAt, now)
+  return `${left === null ? "Expires soon" : `Expires in ${left}`} · ${expiryFormat.format(new Date(expiresAt))}`
+}
+
+const OUTCOME_TEXT: Record<UseBankedResetResult["outcome"], string> = {
+  reset: "Reset used: the limits it covers are full again.",
+  nothing_to_reset: "Nothing to reset yet: your limits aren’t used enough. The reset was kept.",
+  no_reset: "That reset is no longer available; it was used or expired.",
+}
+
+/** The banked resets of one provider; each can be spent on its own. */
+function BankedResetList({
+  provider,
+  available,
+  resets,
+  now,
+}: {
+  provider: CliProvider
+  available: number
+  resets: readonly ProviderBankedReset[]
+  now: number
+}) {
+  const use = useMutation({
+    mutationFn: (resetId: string) => api.useBankedReset(provider, { resetId }),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: keys.providerUsage }),
+  })
+  const unlisted = available - resets.length
+  return (
+    <div className="flex flex-col gap-2 sm:col-span-2">
+      <ul className="flex flex-col divide-y divide-border/60 rounded-lg border border-border/60">
+        {resets.map((reset) => (
+          <li key={reset.id} className="flex items-center justify-between gap-4 px-3 py-2">
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate">{reset.title ?? "Banked reset"}</span>
+              <span className="text-muted-foreground tabular-nums">{expiresText(reset.expiresAt, now)}</span>
+            </div>
+            <Button size="sm" variant="soft" disabled={use.isPending} onClick={() => use.mutate(reset.id)}>
+              {use.isPending && use.variables === reset.id ? "Using…" : "Use reset"}
+            </Button>
+          </li>
+        ))}
+        {unlisted > 0 && (
+          <li className="px-3 py-2 text-muted-foreground">
+            {unlisted} more {unlisted === 1 ? "reset" : "resets"} {PROVIDER_LABELS[provider]} didn’t list.
+          </li>
+        )}
+      </ul>
+      {use.error && <Alert>{errorText(use.error)}</Alert>}
+      {use.data && <span className="text-muted-foreground">{OUTCOME_TEXT[use.data.outcome]}</span>}
+    </div>
+  )
 }
 
 function WindowRow({ window, now }: { window: ProviderUsageWindow; now: number }) {
@@ -70,6 +140,8 @@ function WindowRow({ window, now }: { window: ProviderUsageWindow; now: number }
 }
 
 function ProviderRow({ usage, now }: { usage: ProviderUsage; now: number }) {
+  const [showResets, setShowResets] = useState(false)
+  const banked = usage.bankedResets?.available ?? 0
   return (
     <section className={cn(ROW, "border-t border-border/60 py-3 first:border-t-0")}>
       <div className="flex min-w-0 items-start gap-2.5">
@@ -77,6 +149,16 @@ function ProviderRow({ usage, now }: { usage: ProviderUsage; now: number }) {
         <div className="flex min-w-0 flex-col">
           <h3 className="truncate font-medium">{PROVIDER_LABELS[usage.provider]}</h3>
           {usage.plan !== null && <span className="text-muted-foreground capitalize">{usage.plan}</span>}
+          {banked > 0 && (
+            <button
+              type="button"
+              aria-expanded={showResets}
+              onClick={() => setShowResets((shown) => !shown)}
+              className="w-fit text-left text-success underline-offset-2 hover:underline"
+            >
+              {banked} banked {banked === 1 ? "reset" : "resets"}
+            </button>
+          )}
         </div>
       </div>
       <div className="flex flex-col gap-2">
@@ -86,6 +168,14 @@ function ProviderRow({ usage, now }: { usage: ProviderUsage; now: number }) {
           usage.windows.map((window) => <WindowRow key={window.id} window={window} now={now} />)
         )}
       </div>
+      {showResets && banked > 0 && usage.bankedResets && (
+        <BankedResetList
+          provider={usage.provider}
+          available={banked}
+          resets={usage.bankedResets.resets}
+          now={now}
+        />
+      )}
     </section>
   )
 }

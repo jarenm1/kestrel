@@ -83,6 +83,7 @@ createInterface({ input: process.stdin })
       logout: () => Effect.void,
       discoverCommands: () => Effect.succeed([]),
       providerUsage: () => Effect.succeed([]),
+      useBankedReset: () => Effect.die("unused"),
       shutdown: () => Effect.void,
     }),
   )

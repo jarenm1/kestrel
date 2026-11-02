@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, type FileRoot } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
@@ -203,6 +203,18 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         Effect.flatMap(cliProvider, (provider) =>
           signedIn((user) =>
             Effect.flatMap(jsonBody(CliLoginCodeBody), (body) => cliAuth.submitCode(user, provider, body.code)),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/banked-resets/use",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(UseBankedResetBody), (body) =>
+              cliAuth.useBankedReset(user, provider, body.resetId),
+            ),
           ),
         ),
       ),

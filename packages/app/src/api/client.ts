@@ -49,6 +49,8 @@ import {
   UserBox,
   Usage,
   UsageActivity,
+  type UseBankedResetBody,
+  UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
@@ -488,6 +490,8 @@ export const api = {
   cliLogout: async (provider: CliProvider): Promise<void> => {
     await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
   },
+  useBankedReset: (provider: CliProvider, body: UseBankedResetBody) =>
+    onActive(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
   taskFileUrl,
   /**
    * The sandboxed preview document of a thread. It is served from the thread's box: a user box's URL, or the app's own

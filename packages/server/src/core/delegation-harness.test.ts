@@ -40,7 +40,7 @@ createInterface({ input: process.stdin }).on("line", () => {
       issue: () => Effect.succeed({ token: "test-only", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
-    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), shutdown: () => Effect.void }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never),
   )

@@ -47,6 +47,11 @@ export const ControlPaths = {
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
+  /**
+   * POST UseBankedResetBody -> UseBankedResetResult: spends one of the user's banked resets (listed in `cliUsage`)
+   * through the provider's CLI on the box. Only providers that report `bankedResets` accept it. Relayed.
+   */
+  cliUseBankedReset: (provider: CliProvider) => `/api/cli-auth/${provider}/banked-resets/use`,
   /** GET -> Automation[] / POST CreateAutomationBody -> Automation: the signed-in user's automations. */
   automations: "/api/automations",
   /** GET -> Automation / PATCH UpdateAutomationBody -> Automation / DELETE -> 204. Other users' ids are 404. */
@@ -177,6 +182,17 @@ export const ProviderUsageWindow = Schema.Struct({
 })
 export type ProviderUsageWindow = typeof ProviderUsageWindow.Type
 
+/** A one-time reset of a provider's limits that the user holds and spends when they choose (Codex "banked reset"). */
+export const ProviderBankedReset = Schema.Struct({
+  /** The provider's opaque id, sent back in `UseBankedResetBody`. */
+  id: Schema.String,
+  /** The provider's name for it, e.g. the promotion that granted it; null when it gives none. */
+  title: Schema.NullOr(Schema.String),
+  /** When it lapses unused; null when it does not expire. */
+  expiresAt: Schema.NullOr(Schema.String),
+})
+export type ProviderBankedReset = typeof ProviderBankedReset.Type
+
 /**
  * What a provider's CLI reports about the user's subscription limits on the box. `signed_out` covers everything with
  * no subscription to report, including API keys, which providers meter by spend instead.
@@ -187,10 +203,30 @@ export const ProviderUsage = Schema.Struct({
   /** The subscription as the provider names it, e.g. `max` or `pro`. */
   plan: Schema.NullOr(Schema.String),
   windows: Schema.Array(ProviderUsageWindow),
+  /**
+   * Banked resets the user holds, soonest to expire first. Absent when the provider's CLI does not report them
+   * (Claude Code) or the box predates them. `available` can exceed `resets.length` when the provider lists only some.
+   */
+  bankedResets: Schema.optional(
+    Schema.Struct({ available: Schema.Number, resets: Schema.Array(ProviderBankedReset) }),
+  ),
   /** Why the box could not read the limits; set with `unavailable`. */
   error: Schema.optional(Schema.String),
 })
 export type ProviderUsage = typeof ProviderUsage.Type
+
+export const UseBankedResetBody = Schema.Struct({ resetId: Schema.String.pipe(Schema.minLength(1)) })
+export type UseBankedResetBody = typeof UseBankedResetBody.Type
+
+/**
+ * - `reset`: the reset was spent and the limits it covers are full again.
+ * - `nothing_to_reset`: no covered limit is used enough to reset; the reset was kept.
+ * - `no_reset`: the provider has no such reset available any more (used or expired).
+ */
+export const UseBankedResetResult = Schema.Struct({
+  outcome: Schema.Literal("reset", "nothing_to_reset", "no_reset"),
+})
+export type UseBankedResetResult = typeof UseBankedResetResult.Type
 
 /**
  * A sign-in the box started with the unmodified CLI. The user finishes it on the provider's own page:

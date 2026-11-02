@@ -10,6 +10,7 @@ import {
   type CliProvider,
   type HarnessCommand,
   type ProviderUsage,
+  type UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
 import {
@@ -20,7 +21,7 @@ import {
   killActiveDiscovery,
   limitDiscovery,
 } from "./harness-commands"
-import { probeClaudeUsage, probeCodexUsage } from "./provider-usage"
+import { probeClaudeUsage, probeCodexUsage, useCodexBankedReset } from "./provider-usage"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
@@ -105,6 +106,12 @@ export interface CliAuthShape {
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
   /** The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact. */
   readonly providerUsage: (user: string) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
+  /** Spends banked reset `resetId` of `user`'s `provider` (Codex only); the next usage read asks the CLI afresh. */
+  readonly useBankedReset: (
+    user: string,
+    provider: CliProvider,
+    resetId: string,
+  ) => Effect.Effect<UseBankedResetResult, BadRequest | InternalError>
   /** Kills sign-ins still waiting for the user; called on box shutdown. */
   readonly shutdown: () => Effect.Effect<void>
 }
@@ -402,6 +409,8 @@ export const CliAuthLive = Layer.effect(
 
     const usageCache = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>()
     const usageRuns = new Map<string, Promise<ProviderUsage>>()
+    /** Bumped when a banked reset is spent, so a read that started before it does not cache the old limits. */
+    const usageEpochs = new Map<string, number>()
     /** Providers throttle these reads, so a panel left open or several open tabs share one answer. */
     const USAGE_CACHE_MS = 60_000
     const USAGE_CACHE_MAX = 64
@@ -425,6 +434,7 @@ export const CliAuthLive = Layer.effect(
         const key = keyOf(user, provider)
         const cached = usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
+        const epoch = usageEpochs.get(key) ?? 0
         const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
         const inv = yield* invoke(user, spec.bin, args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
@@ -437,7 +447,8 @@ export const CliAuthLive = Layer.effect(
             )
               .then((usage) => {
                 usageCache.delete(key)
-                if (usage.status !== "signed_out") usageCache.set(key, { at: Date.now(), usage })
+                const current = (usageEpochs.get(key) ?? 0) === epoch
+                if (current && usage.status !== "signed_out") usageCache.set(key, { at: Date.now(), usage })
                 while (usageCache.size > USAGE_CACHE_MAX) {
                   const oldest = usageCache.keys().next().value
                   if (oldest === undefined) break
@@ -445,7 +456,9 @@ export const CliAuthLive = Layer.effect(
                 }
                 return usage
               })
-              .finally(() => usageRuns.delete(key))
+              .finally(() => {
+                if (usageRuns.get(key) === pending) usageRuns.delete(key)
+              })
             usageRuns.set(key, pending)
             return pending
           },
@@ -462,6 +475,34 @@ export const CliAuthLive = Layer.effect(
         PROVIDERS.map((provider) => readUsage(user, provider)),
         { concurrency: "unbounded" },
       )
+
+    const useBankedReset = (user: string, provider: CliProvider, resetId: string) =>
+      Effect.gen(function* () {
+        if (provider !== "codex-cli") {
+          return yield* Effect.fail(new BadRequest({ message: `${SPECS[provider].bin} has no banked resets` }))
+        }
+        const spec = SPECS[provider]
+        const env = yield* cliEnv(user)
+        if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
+          return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
+        }
+        const inv = yield* invoke(user, spec.bin, CODEX_DISCOVERY_ARGS)
+        const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
+        const key = keyOf(user, provider)
+        return yield* Effect.tryPromise({
+          try: () => limitDiscovery(() => useCodexBankedReset(launch, resetId)),
+          catch: (e) => new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} reset failed` }),
+        }).pipe(
+          // Whatever the outcome, the limits and the list of resets may have changed.
+          Effect.ensuring(
+            Effect.sync(() => {
+              usageEpochs.set(key, (usageEpochs.get(key) ?? 0) + 1)
+              usageCache.delete(key)
+              usageRuns.delete(key)
+            }),
+          ),
+        )
+      })
 
     /**
      * One CLI's login as the box sees it. A CLI the box cannot run (not installed where the sandbox looks, or failing)
@@ -647,6 +688,16 @@ export const CliAuthLive = Layer.effect(
         killActiveDiscovery()
       })
 
-    return { status, startLogin, submitCode, logout, loggedInDirs, discoverCommands, providerUsage, shutdown }
+    return {
+      status,
+      startLogin,
+      submitCode,
+      logout,
+      loggedInDirs,
+      discoverCommands,
+      providerUsage,
+      useBankedReset,
+      shutdown,
+    }
   }),
 )
