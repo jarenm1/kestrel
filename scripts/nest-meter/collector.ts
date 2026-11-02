@@ -285,29 +285,42 @@ const deliver = async (lines: string[], secret: string, hostId: string): Promise
   return first + (await deliver(lines.slice(half), secret, hostId))
 }
 
-/** Posts the outbox in batches, dropping what is settled. Stops at the first retryable failure. */
-const flush = async (secret: string, hostId: string) => {
-  let pending = readOutbox()
-  while (pending.length > 0) {
-    const batch = pending.slice(0, MAX_METER_BATCH)
-    const settled = await deliver(batch, secret, hostId)
-    pending = pending.slice(settled)
-    replaceDurable(outboxPath, pending.map((line) => `${line}\n`).join(""))
-    if (settled < batch.length) return
+/** Most records the outbox holds. Samples beyond it are dropped, and the report shows them as gaps. */
+const MAX_OUTBOX_RECORDS = 50_000
+
+/**
+ * Posts `pending` in batches and returns the lines still unsettled, stopping at the first retryable failure. The outbox
+ * is rewritten once, after the last batch. A crash before that resends settled lines, which the control plane
+ * acknowledges as duplicates.
+ */
+const flush = async (pending: string[], secret: string, hostId: string): Promise<string[]> => {
+  let settled = 0
+  while (settled < pending.length) {
+    const batch = pending.slice(settled, settled + MAX_METER_BATCH)
+    const done = await deliver(batch, secret, hostId)
+    settled += done
+    if (done < batch.length) break
   }
+  if (settled > 0) replaceDurable(outboxPath, pending.slice(settled).map((line) => `${line}\n`).join(""))
+  return pending.slice(settled)
 }
 
 const tick = async (secret: string) => {
   const now = new Date().toISOString()
   const inventory = decodeMeterInventory(JSON.parse(readFileSync(configPath, "utf8")))
   // Repairs a line torn by an earlier crash before anything is appended after it.
-  readOutbox()
+  const queued = readOutbox()
   const { records, next } = sampleAll(inventory, loadState(), now)
+  const kept = records.slice(0, Math.max(MAX_OUTBOX_RECORDS - queued.length, 0))
+  if (kept.length < records.length) {
+    console.error(`outbox holds ${MAX_OUTBOX_RECORDS} record(s); ${records.length - kept.length} sample(s) dropped`)
+  }
+  const lines = kept.map((record) => JSON.stringify(record))
   // The outbox is durable before the state moves on: a crash between the two resends records, never loses them.
-  if (records.length > 0) appendDurable(outboxPath, records.map((record) => `${JSON.stringify(record)}\n`).join(""))
+  if (lines.length > 0) appendDurable(outboxPath, lines.map((line) => `${line}\n`).join(""))
   replaceDurable(statePath, JSON.stringify(next))
-  await flush(secret, inventory.hostId)
-  console.log(`${now} sampled ${inventory.vms.length} VM(s), queued ${records.length}, outbox ${readOutbox().length}`)
+  const left = await flush([...queued, ...lines], secret, inventory.hostId)
+  console.log(`${now} sampled ${inventory.vms.length} VM(s), queued ${lines.length}, outbox ${left.length}`)
 }
 
 mkdirSync(stateDir, { recursive: true })

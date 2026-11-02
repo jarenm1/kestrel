@@ -10,8 +10,11 @@ zero total can mean "no data" as easily as "no use". Rates are supplied by the o
 - Control plane (`packages/control`, Hub Durable Object SQLite): stores records idempotently. A resent record with the
   same `eventId` is counted as a duplicate; a reused `eventId` with different content, a host mismatch, or a VM whose
   owner changed is refused.
-- `POST /api/meter/report` (operator only) reconciles stored records against each VM's lifecycle and returns gaps,
-  overlaps, unexpected usage, lifecycle conflicts, coverage, and parked-disk attribution to the owner.
+- `POST /api/meter/report` (operator only) takes a `from` and `through` window of at most 31 days and reconciles the
+  stored records inside it against each VM's lifecycle: gaps, overlaps, unexpected usage, lifecycle conflicts,
+  coverage, and parked-disk attribution to the owner. Usage straddling a window edge is prorated to the part inside it.
+  `from` may be at most 90 days old; records older than that are purged on ingest. Each VM keeps its latest lifecycle
+  record before the cutoff, so a window starting after it still knows the VM's state.
 
 ## Measurements
 
@@ -70,5 +73,9 @@ The state directory holds `vms.json` (per-VM sample baseline), `outbox.jsonl` (r
 sending), and `rejected.jsonl` (records the control plane refused with a 4xx, and outbox lines that do not decode; review
 them, they are not resent). A refused batch is split so that only the refused records land in `rejected.jsonl`. A 5xx,
 429, 401, or 403 keeps the outbox and retries the same records with the same `eventId`s.
+
+The outbox holds at most 50,000 records. When it is full, new samples are dropped with a log line and show as gaps. A
+flush posts batches and rewrites the outbox once, after the last batch. A crash mid-flush resends records the control
+plane already accepted; it counts them as duplicates.
 
 Egress is not measured. It is not implemented.
