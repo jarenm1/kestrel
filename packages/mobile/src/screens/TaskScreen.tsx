@@ -3,10 +3,12 @@ import { Linking, StyleSheet, Text, View, useWindowDimensions } from "react-nati
 import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { AppWindow, GitCompare, GitPullRequest, type LucideIcon, Monitor, PanelRightClose } from "lucide-react-native";
+import { ThreadBoxIndicator } from "@/components/BoxStatus";
 import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
 import { DiffView } from "@/components/DiffView";
 import { PreviewViewer } from "@/components/PreviewViewer";
+import { ThreadRepoButton } from "@/components/ThreadRepoButton";
 import { ContentPanel, TopBar } from "@/components/TopBar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -99,7 +101,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined;
 
-  // The web's collapsed panel rail: one button per tab, and the pull request links.
+  // The web's collapsed panel rail: one button per tab, the pull request links, then the repositories on GitHub.
   const rail = (
     <>
       {PANEL_TABS.map((t) => (
@@ -115,6 +117,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
           onPress={() => void Linking.openURL(pr.url)}
         />
       ))}
+      <ThreadRepoButton checkouts={checkouts} />
     </>
   );
 
@@ -124,6 +127,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
       <ContentPanel bottomInset={bottomInset}>
         <GestureDetector gesture={openPan}>
           <View style={styles.flex}>
+            <ThreadBoxIndicator />
             {state.error ? <Alert style={styles.error}>{state.error}</Alert> : null}
             <ChatPanel
               taskId={taskId}
@@ -161,6 +165,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
                     </Button>
                   ))}
                 </View>
+                <ThreadRepoButton checkouts={checkouts} />
                 <Button
                   variant="ghost"
                   size="icon"

@@ -1,7 +1,18 @@
 import React, { useMemo, useState } from "react";
 import { FlatList, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { Archive, ChevronsUpDown, LogOut, type LucideIcon, Plug, Settings, SquarePen, Workflow } from "lucide-react-native";
+import {
+  Archive,
+  ChevronsUpDown,
+  GitBranch,
+  GitPullRequest,
+  LogOut,
+  type LucideIcon,
+  Plug,
+  Settings,
+  SquarePen,
+  Workflow,
+} from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
@@ -10,11 +21,12 @@ import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
+import { LiveText } from "@/components/ui/LiveText";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { type Route, useNavigation } from "@/nav/navigation";
-import { colors, fonts, radius, shadows, spacing } from "@/theme";
+import { colors, radius, shadows, spacing } from "@/theme";
 
 const STATUS_LABEL: Record<Task["status"], string> = {
   idle: "Idle",
@@ -39,6 +51,11 @@ function NavRow({ icon: Icon, label, route, active }: { icon: LucideIcon; label:
   );
 }
 
+/**
+ * The web's expanded thread row: the first checkout's repository (and how many more) with the time, the title (fading
+ * while the agent works), and that checkout's branch or pull request with the status. Without a checkout the last
+ * line names the status instead.
+ */
 function ThreadRow({
   task,
   active,
@@ -53,41 +70,50 @@ function ThreadRow({
   now: number;
 }) {
   const nav = useNavigation();
-  const checkouts = task.checkouts ?? [];
+  const [checkout, ...otherCheckouts] = task.checkouts;
+  const checkoutsLabel = task.checkouts.map((c) => `${c.repo}, ${c.branch}`).join("; ");
   return (
     <Pressable
       onPress={() => nav.navigate({ name: "thread", taskId: task.id })}
       accessibilityRole="button"
-      accessibilityLabel={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
+      accessibilityLabel={[task.title || "Untitled thread", STATUS_LABEL[task.status], checkoutsLabel].filter(Boolean).join(" — ")}
       accessibilityState={{ selected: active }}
       style={({ pressed }) => [styles.threadRow, (pressed || active) && styles.rowActive]}
     >
       <View style={styles.threadInfo}>
-        <View style={styles.threadSummary}>
-          <ThreadAvatar task={task} />
-          <View style={styles.threadSummaryText}>
-            <Text style={[styles.threadTitle, active && styles.threadTitleActive]} numberOfLines={1}>
-              {task.title || "Untitled thread"}
-            </Text>
-            <View style={styles.threadMetaRow}>
-              <StatusIcon status={task.status} label={STATUS_LABEL[task.status]} size={12} />
-              <Text style={styles.threadMeta} numberOfLines={1}>· {formatAgo(task.updatedAt, now)}</Text>
-            </View>
-          </View>
+        <View style={styles.threadLine}>
+          <ThreadAvatar task={task} small />
+          <Text style={styles.threadMeta} numberOfLines={1}>
+            {checkout ? repoShortName(checkout.repo) : null}
+            {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
+          </Text>
+          {active ? null : <Text style={styles.threadTime}>{formatAgo(task.updatedAt, now)}</Text>}
         </View>
-        {checkouts.length > 0 ? (
-          <View style={styles.chipRow}>
-            {checkouts.map((checkout) => (
-              <View key={checkout.id} style={styles.repoChip}>
-                <Text style={styles.repoChipText} numberOfLines={1}>
-                  {repoShortName(checkout.repo)}
-                  {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
-                </Text>
-              </View>
-            ))}
-          </View>
-        ) : null}
+        <LiveText live={task.status === "running"} style={[styles.threadTitle, active && styles.threadTitleActive]}>
+          {task.title || "Untitled thread"}
+        </LiveText>
+        <View style={styles.threadLine}>
+          {checkout ? (
+            <>
+              {checkout.pullRequest ? (
+                <GitPullRequest size={14} color={colors.mutedForeground} />
+              ) : (
+                <GitBranch size={14} color={colors.mutedForeground} />
+              )}
+              <Text style={styles.threadMeta} numberOfLines={1}>
+                {checkout.branch}
+                {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+              </Text>
+            </>
+          ) : (
+            <Text style={styles.threadMeta} numberOfLines={1}>
+              {STATUS_LABEL[task.status]}
+            </Text>
+          )}
+          <StatusIcon status={task.status} size={14} />
+        </View>
       </View>
+      {/* The open thread's archive button takes the time's corner, as on the web. */}
       {active ? (
         <Button
           variant="ghost"
@@ -161,7 +187,7 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
-/** The user's threads, most recent first, under the workspace pages: the left drawer. */
+/** The user's threads under the workspace pages, the left drawer: most recent first, working threads last. */
 export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const { api } = useApiClient();
   const { user } = useAuth();
@@ -174,8 +200,11 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const openTaskId = current.name === "thread" ? current.taskId : undefined;
   const now = Date.now();
 
-  // Ordered by updatedAt, which also moves when a run finishes; Task has no `lastMessageAt` to sort by yet.
-  const byRecent = [...(tasks.data ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  // Working threads sit at the bottom, by the composer and the dock, each part newest first. Ordered by updatedAt,
+  // which also moves when a run finishes; Task has no `lastMessageAt` to sort by yet.
+  const byRecent = [...(tasks.data ?? [])].sort(
+    (a, b) => Number(a.status === "running") - Number(b.status === "running") || b.updatedAt.localeCompare(a.updatedAt)
+  );
   const threads = byRecent.filter((task) => task.archivedAt === undefined);
   const archivedCount = byRecent.length - threads.length;
 
@@ -287,52 +316,17 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
     gap: 10,
     paddingHorizontal: spacing.md,
-    paddingVertical: 10,
+    paddingVertical: spacing.sm,
     borderRadius: radius.md,
     marginVertical: 1,
   },
-  threadInfo: {
-    flex: 1,
-    gap: 2,
-    minWidth: 0,
-  },
-  threadSummary: { flexDirection: "row", alignItems: "center", gap: 10 },
-  threadSummaryText: { flex: 1, minWidth: 0, gap: 2 },
-  threadTitle: {
-    color: colors.mutedForeground,
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  threadTitleActive: {
-    color: colors.foreground,
-    fontWeight: "600",
-  },
-  threadMetaRow: { flexDirection: "row", alignItems: "center", gap: 4 },
-  threadMeta: {
-    color: colors.mutedForeground,
-    fontSize: 12,
-    flexShrink: 1,
-    opacity: 0.8,
-  },
-  chipRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 4,
-    marginTop: 4,
-    marginLeft: 38, // 28px avatar + 10px summary gap; chips stay under the text.
-  },
-  repoChip: {
-    backgroundColor: colors.white06,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: radius.full,
-  },
-  repoChipText: {
-    color: colors.mutedForeground,
-    fontSize: 10,
-    fontFamily: fonts.mono,
-  },
-  archive: { width: 28, height: 28, alignSelf: "center", marginRight: -spacing.xs },
+  threadInfo: { flex: 1, minWidth: 0, gap: spacing.xs },
+  threadLine: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
+  threadMeta: { flex: 1, color: colors.mutedForeground, fontSize: 12 },
+  threadTime: { color: colors.mutedForeground, fontSize: 12, fontVariant: ["tabular-nums"] },
+  threadTitle: { color: colors.mutedForeground, fontSize: 14, fontWeight: "500" },
+  threadTitleActive: { color: colors.foreground, fontWeight: "600" },
+  archive: { width: 28, height: 28, marginTop: -spacing.xs, marginRight: -spacing.xs },
   dock: {
     position: "absolute",
     left: spacing.md,

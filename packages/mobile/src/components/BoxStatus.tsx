@@ -1,10 +1,12 @@
 import React, { useMemo } from "react";
-import { StyleSheet, Text, type StyleProp, type ViewStyle } from "react-native";
+import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { useQuery } from "@tanstack/react-query";
+import { Server } from "lucide-react-native";
+import { useAuth } from "@/auth/AuthContext";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
-import { colors, fonts } from "@/theme";
+import { colors, fonts, radius, spacing } from "@/theme";
 
 /** Warning shown only once the box is known to be offline, the web app's `BoxOfflineBanner`. */
 export function BoxOfflineBanner({ style }: { style?: StyleProp<ViewStyle> }) {
@@ -20,10 +22,39 @@ export function BoxOfflineBanner({ style }: { style?: StyleProp<ViewStyle> }) {
 }
 
 export function useBoxOffline(): boolean {
+  return useBoxOnline() === false;
+}
+
+/** Whether the box the app talks to answers; undefined until it is known. */
+function useBoxOnline(): boolean | undefined {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
-  const box = useQuery(queries.box());
-  return box.data?.online === false;
+  return useQuery(queries.box()).data?.online;
+}
+
+/**
+ * The box a thread runs on, with its online dot: the web app's `ThreadBoxIndicator`, over the chat's top left. The app
+ * lists only the active box's threads, so that is the box every open thread runs on.
+ */
+export function ThreadBoxIndicator({ style }: { style?: StyleProp<ViewStyle> }) {
+  const { boxes, activeBoxId } = useAuth();
+  const online = useBoxOnline();
+  const name = activeBoxId === null ? "Kestrel's box" : (boxes.find((box) => box.id === activeBoxId)?.name ?? "Box");
+  const state = online === undefined ? "checking" : online ? "online" : "offline";
+  return (
+    <View style={[styles.indicator, style]} pointerEvents="none" accessibilityLabel={`Running on ${name}, ${state}`}>
+      <Server size={12} color={colors.mutedForeground} />
+      <Text style={styles.indicatorText} numberOfLines={1}>
+        {name}
+      </Text>
+      <View
+        style={[
+          styles.dot,
+          { backgroundColor: online === undefined ? colors.mutedForeground + "66" : online ? colors.success : colors.destructive },
+        ]}
+      />
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -36,4 +67,20 @@ const styles = StyleSheet.create({
     color: colors.foreground,
     fontFamily: fonts.mono,
   },
+  indicator: {
+    position: "absolute",
+    top: spacing.md,
+    left: spacing.md,
+    zIndex: 1,
+    maxWidth: 192,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: radius.full,
+    backgroundColor: colors.card + "cc",
+  },
+  indicatorText: { flexShrink: 1, color: colors.mutedForeground, fontSize: 11 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
 });

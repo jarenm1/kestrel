@@ -6,15 +6,17 @@ import type { FileSource } from "@/api/client";
 import { useApiClient } from "@/hooks/useApiClient";
 import { fonts } from "@/theme";
 
-const SIZE = 28;
-const RADIUS = 8;
+/** Tile size and corner radius: the regular tile, and `small` beside text (the web's `size-4.5`). */
+const TILE = { regular: { size: 28, radius: 8, font: 11 }, small: { size: 18, radius: 5, font: 7.5 } } as const;
 
 /**
  * Same identity and glass as the web tile: the first checkout's repository icon once it has loaded, else the
  * monogram on glass. Glass is the tint, a hard sheen across the top half, and a border lit from above. A loaded
  * icon is the tile itself: it covers the frame and is clipped to the tile's corner radius, with no glass behind it.
+ * `small` is the inline size used beside text, ahead of the repository name in the thread list.
  */
-export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "checkouts"> }) {
+export function ThreadAvatar({ task, small = false }: { task: Pick<Task, "id" | "title" | "checkouts">; small?: boolean }) {
+  const { size: SIZE, radius: RADIUS, font } = small ? TILE.small : TILE.regular;
   const { monogram, tone, icon } = threadIdentity(task);
   const { api } = useApiClient();
   const path = icon === null ? null : Paths.taskCheckoutIcon(task.id, icon.checkoutId, icon.blob);
@@ -41,7 +43,7 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
   const [from, to] = THREAD_TINTS[tone];
   const id = `thread-avatar-${tone}`;
   return (
-    <View style={styles.tile}>
+    <View style={[styles.tile, { width: SIZE, height: SIZE }]}>
       {!loaded && (
         <Svg width={SIZE} height={SIZE} style={StyleSheet.absoluteFill}>
           <Defs>
@@ -74,12 +76,16 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
           />
         </Svg>
       )}
-      {!loaded && <Text style={styles.monogram} accessible={false}>{monogram}</Text>}
+      {!loaded && (
+        <Text style={[styles.monogram, { fontSize: font, lineHeight: Math.round(font * 1.2) }]} accessible={false}>
+          {monogram}
+        </Text>
+      )}
       {source !== null && (
         <Image
           source={source}
           resizeMode="cover"
-          style={loaded ? styles.icon : styles.pending}
+          style={loaded ? { width: SIZE, height: SIZE, borderRadius: RADIUS } : styles.pending}
           onLoad={() => setLoaded(true)}
           onError={() => setLoaded(false)}
         />
@@ -89,15 +95,12 @@ export function ThreadAvatar({ task }: { task: Pick<Task, "id" | "title" | "chec
 }
 
 const styles = StyleSheet.create({
-  tile: { width: SIZE, height: SIZE, flexShrink: 0, alignItems: "center", justifyContent: "center" },
-  icon: { width: SIZE, height: SIZE, borderRadius: RADIUS },
+  tile: { flexShrink: 0, alignItems: "center", justifyContent: "center" },
   // Loads invisibly; a failure (not decodable, e.g. some .ico) keeps the monogram.
   pending: { position: "absolute", width: 18, height: 18, opacity: 0 },
   monogram: {
     color: "rgba(255,255,255,0.95)",
     fontFamily: fonts.sans,
-    fontSize: 11,
-    lineHeight: 13,
     fontWeight: "600",
     includeFontPadding: false,
     textAlignVertical: "center",

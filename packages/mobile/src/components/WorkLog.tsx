@@ -1,6 +1,5 @@
-import React, { type ComponentRef, type ReactNode, useEffect, useRef } from "react";
-import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from "react-native";
-import { useReducedMotion } from "react-native-reanimated";
+import React, { type ComponentRef, type ReactNode, useRef } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from "react-native";
 import {
   Bot,
   Brain,
@@ -35,6 +34,7 @@ import {
   type ToolView,
 } from "@cloudagents/protocol";
 import { AttachmentImage } from "@/components/AttachmentImage";
+import { LiveText } from "@/components/ui/LiveText";
 import { useAutoOpen } from "@/hooks/useAutoOpen";
 import { colors, fonts, radius, spacing } from "@/theme";
 
@@ -68,31 +68,6 @@ const EXTRA_ICONS: Record<ToolIcon, LucideIcon> = {
   git: GitBranch,
   message: MessageSquare,
 };
-
-/** The web's shimmer, as a slow fade: the label of what the agent is doing right now. */
-function LiveText({ live, style, children }: { live: boolean; style: StyleProp<TextStyle>; children: ReactNode }) {
-  const reduceMotion = useReducedMotion();
-  const fade = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    if (!live || reduceMotion) {
-      fade.setValue(1);
-      return;
-    }
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(fade, { toValue: 0.4, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        Animated.timing(fade, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-      ]),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [live, reduceMotion, fade]);
-  return (
-    <Animated.Text style={[style, { opacity: fade }]} numberOfLines={1}>
-      {children}
-    </Animated.Text>
-  );
-}
 
 /** A tappable one-line header: icon, label, trailing marks and a chevron that turns while open. */
 function RowHeader({
