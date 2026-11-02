@@ -143,12 +143,29 @@ const sampleProcess = (pidFile: string | undefined): Live | null => {
   }
 }
 
+/** Allocated bytes across `paths`, or null if any is unreadable: a partial sum would read as a measured undercount. */
+const allocatedDiskBytes = (paths: readonly string[]): number | null => {
+  let total = 0
+  for (const path of paths) {
+    try {
+      total += statSync(path).blocks * 512
+    } catch {
+      return null
+    }
+  }
+  return total
+}
+
 /** Measurements for the interval a VM spent in `prev.state`. A resource that cannot be read is absent, not zero. */
 const measure = (vm: VmEntry, prev: Saved, live: Live | null, dtSec: number): MeterMeasurements => {
   const measurements: { -readonly [K in keyof MeterMeasurements]?: number } = {}
   if (vm.disks.length > 0) {
-    const allocatedBytes = vm.disks.reduce((sum, path) => sum + statSync(path).blocks * 512, 0)
-    measurements.diskByteSeconds = allocatedBytes * dtSec
+    const allocatedBytes = allocatedDiskBytes(vm.disks)
+    if (allocatedBytes === null) {
+      console.error(`${vm.vmId}: a disk is unreadable; disk usage not recorded this interval`)
+    } else {
+      measurements.diskByteSeconds = allocatedBytes * dtSec
+    }
   }
   if (prev.state === "running" && live !== null && live.identity === prev.identity && prev.cpuTicks !== null) {
     measurements.cpuCoreSeconds = (live.cpuTicks - prev.cpuTicks) / clockTicks
@@ -210,45 +227,81 @@ const sampleAll = (inventory: MeterInventory, saved: Record<string, Saved>, now:
   return { records, next }
 }
 
-const readOutbox = (): string[] => readText(outboxPath).split("\n").filter((line) => line !== "")
+/** Outbox lines that decode as records. A line torn by a crash mid-append goes to rejected.jsonl, so it cannot block the lines after it. */
+const readOutbox = (): string[] => {
+  const valid: string[] = []
+  const invalid: string[] = []
+  for (const line of readText(outboxPath).split("\n")) {
+    if (line === "") continue
+    try {
+      decodeMeterRecord(JSON.parse(line))
+      valid.push(line)
+    } catch {
+      invalid.push(line)
+    }
+  }
+  if (invalid.length > 0) {
+    appendDurable(rejectedPath, invalid.map((line) => `${line}\n`).join(""))
+    replaceDurable(outboxPath, valid.map((line) => `${line}\n`).join(""))
+    console.error(`${invalid.length} unreadable outbox line(s) moved to rejected.jsonl`)
+  }
+  return valid
+}
 
-/** Posts the outbox in batches, dropping what the control plane accepted. Stops at the first retryable failure. */
+/**
+ * Posts `lines` and returns how many leading lines are settled: accepted, or refused and kept in rejected.jsonl. A
+ * refused batch is split until each refused record stands alone, so one bad record cannot take its neighbours with it.
+ */
+const deliver = async (lines: string[], secret: string, hostId: string): Promise<number> => {
+  let response: Response
+  try {
+    response = await fetch(new URL(ControlPaths.meterRecords, controlUrl), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${secret}`,
+        [METER_HOST_ID_HEADER]: hostId,
+      },
+      body: JSON.stringify({ records: lines.map((line) => JSON.parse(line)) }),
+    })
+  } catch (error) {
+    console.error(`post failed, ${lines.length} record(s) kept for retry: ${String(error)}`)
+    return 0
+  }
+  // Server errors, rate limits, and rejected credentials are not about the records: keep them for retry.
+  if (response.status >= 500 || response.status === 429 || response.status === 401 || response.status === 403) {
+    console.error(`control answered ${response.status}, ${lines.length} record(s) kept for retry`)
+    return 0
+  }
+  if (response.ok) return lines.length
+  if (lines.length === 1) {
+    appendDurable(rejectedPath, `${lines[0]}\n`)
+    console.error(`control refused a record with ${response.status}; kept in rejected.jsonl`)
+    return 1
+  }
+  const half = Math.ceil(lines.length / 2)
+  const first = await deliver(lines.slice(0, half), secret, hostId)
+  if (first < half) return first
+  return first + (await deliver(lines.slice(half), secret, hostId))
+}
+
+/** Posts the outbox in batches, dropping what is settled. Stops at the first retryable failure. */
 const flush = async (secret: string, hostId: string) => {
   let pending = readOutbox()
   while (pending.length > 0) {
     const batch = pending.slice(0, MAX_METER_BATCH)
-    let response: Response
-    try {
-      response = await fetch(new URL(ControlPaths.meterRecords, controlUrl), {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${secret}`,
-          [METER_HOST_ID_HEADER]: hostId,
-        },
-        body: JSON.stringify({ records: batch.map((line) => JSON.parse(line)) }),
-      })
-    } catch (error) {
-      console.error(`post failed, ${pending.length} record(s) kept for retry: ${String(error)}`)
-      return
-    }
-    // Server errors, rate limits, and rejected credentials are not about the records: keep them for retry.
-    if (response.status >= 500 || response.status === 429 || response.status === 401 || response.status === 403) {
-      console.error(`control answered ${response.status}, ${pending.length} record(s) kept for retry`)
-      return
-    }
-    if (!response.ok) {
-      appendDurable(rejectedPath, batch.map((line) => `${line}\n`).join(""))
-      console.error(`control refused ${batch.length} record(s) with ${response.status}; kept in rejected.jsonl`)
-    }
-    pending = pending.slice(batch.length)
+    const settled = await deliver(batch, secret, hostId)
+    pending = pending.slice(settled)
     replaceDurable(outboxPath, pending.map((line) => `${line}\n`).join(""))
+    if (settled < batch.length) return
   }
 }
 
 const tick = async (secret: string) => {
   const now = new Date().toISOString()
   const inventory = decodeMeterInventory(JSON.parse(readFileSync(configPath, "utf8")))
+  // Repairs a line torn by an earlier crash before anything is appended after it.
+  readOutbox()
   const { records, next } = sampleAll(inventory, loadState(), now)
   // The outbox is durable before the state moves on: a crash between the two resends records, never loses them.
   if (records.length > 0) appendDurable(outboxPath, records.map((record) => `${JSON.stringify(record)}\n`).join(""))
