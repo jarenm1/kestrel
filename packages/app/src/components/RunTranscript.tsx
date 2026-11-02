@@ -1,12 +1,13 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useMemo } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { Brain, ChevronRight } from "lucide-react"
-import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
+import type { AgentItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { liveItemIds } from "@/lib/live-items"
+import { describeTool, summarizeTools, type ToolItem } from "@/lib/tool-display"
 import { Alert } from "@/components/ui/alert"
 import { Markdown } from "./Markdown"
+import { ThinkingBlock, ToolGroup, ToolRow } from "./WorkLog"
 
 interface Props {
   taskId: string
@@ -18,6 +19,13 @@ interface Props {
 interface Tree {
   roots: readonly AgentItem[]
   children: ReadonlyMap<string, readonly AgentItem[]>
+}
+
+interface Ctx {
+  readonly taskId: string
+  readonly tree: Tree
+  readonly liveIds: ReadonlySet<string>
+  readonly running: boolean
 }
 
 /** Items in arrival order; a tool's subagent items (`parentToolId`) hang under it instead of the top level. */
@@ -49,85 +57,42 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
   return parts.join(" · ")
 }
 
-const PRE_CLASS = "m-0 max-h-72 overflow-auto rounded-lg bg-code px-3 py-2 font-mono text-[11px] break-all whitespace-pre-wrap shadow-well"
-
-const SHIMMER_CLASS =
-  "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent"
-
-/** How close to the bottom (px) still counts as following the stream. */
-const LIVE_EDGE_PX = 16
-
-/**
- * Open while the model is thinking (the item is the run's newest and the run is going), then folds to a "Thought"
- * line once anything follows it. A click takes over: after that the block stays the way the user left it.
- */
-function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
-  const [userOpen, setUserOpen] = useState<boolean | null>(null)
-  const open = userOpen ?? live
-  const scrollerRef = useRef<HTMLDivElement>(null)
-  const atLiveEdgeRef = useRef(true)
-
-  // Follows the streaming text, unless the user scrolled up to read.
-  useLayoutEffect(() => {
-    const el = scrollerRef.current
-    if (live && atLiveEdgeRef.current && el) el.scrollTop = el.scrollHeight
-  }, [live, open, text])
-
+/** A run of consecutive tool calls: one row alone, or a group under a summary line. */
+function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
+  const views = items.map((item) => describeTool(item, ctx.taskId))
+  const rows = items.map((item, index) => {
+    const nested = ctx.tree.children.get(item.id)
+    return (
+      <ToolRow
+        key={item.id}
+        item={item}
+        view={views[index]!}
+        running={ctx.running}
+        nested={nested !== undefined && <Items items={nested} ctx={ctx} />}
+      />
+    )
+  })
+  if (items.length === 1) return rows[0]
+  const last = items[items.length - 1]!
+  const live = ctx.running && (ctx.liveIds.has(last.id) || items.some((item) => item.status === "running"))
   return (
-    <div className="text-muted-foreground">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setUserOpen(!open)}
-        className="flex cursor-pointer items-center gap-1.5 rounded-md text-xs select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:outline-none"
-      >
-        <Brain className="size-3.5 shrink-0" />
-        <span className={cn(live && SHIMMER_CLASS)}>{live ? "Thinking" : "Thought"}</span>
-        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
-      </button>
-      {open && (
-        <div
-          ref={scrollerRef}
-          onScroll={(event) => {
-            const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
-            atLiveEdgeRef.current = scrollHeight - scrollTop - clientHeight <= LIVE_EDGE_PX
-          }}
-          className="mt-1.5 max-h-60 overflow-auto border-l-2 border-border pl-3 text-sm break-words whitespace-pre-wrap italic"
-        >
-          {text}
-        </div>
-      )}
-    </div>
+    <ToolGroup
+      summary={summarizeTools(views)}
+      kinds={new Set(views.map((view) => view.kind))}
+      live={live}
+      failed={items.some((item) => item.status === "error")}
+    >
+      {rows}
+    </ToolGroup>
   )
 }
 
-function ItemView({ item, tree, liveIds }: { item: AgentItem; tree: Tree; liveIds: ReadonlySet<string> }) {
+function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />
     case "thinking":
-      return <ThinkingBlock text={item.text} live={liveIds.has(item.id)} />
-    case "tool":
-      return (
-        <details className="rounded-xl border border-border bg-card/40 px-3.5 py-2 shadow-soft">
-          <summary
-            className={cn(
-              "cursor-pointer text-xs select-none",
-              item.status === "error" && "text-destructive",
-            )}
-          >
-            {toolDisplayName(item.name)} · {item.status}
-          </summary>
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="font-mono text-[11px] break-all text-muted-foreground">{item.name}</div>
-            <pre className={PRE_CLASS}>{JSON.stringify(item.input, null, 2)}</pre>
-            {item.output !== null && <pre className={PRE_CLASS}>{item.output}</pre>}
-            {(tree.children.get(item.id) ?? []).map((child) => (
-              <ItemView key={child.id} item={child} tree={tree} liveIds={liveIds} />
-            ))}
-          </div>
-        </details>
-      )
+      return <ThinkingBlock text={item.text} live={ctx.liveIds.has(item.id)} />
     case "turn": {
       const summary = turnSummary(item)
       if (summary === "") return null
@@ -147,6 +112,28 @@ function ItemView({ item, tree, liveIds }: { item: AgentItem; tree: Tree; liveId
   }
 }
 
+/** Items in order, with each run of consecutive tool calls gathered into one `Tools` block. */
+function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
+  const blocks: Array<Exclude<AgentItem, ToolItem> | ToolItem[]> = []
+  for (const item of items) {
+    const last = blocks[blocks.length - 1]
+    if (item._tag !== "tool") blocks.push(item)
+    else if (Array.isArray(last)) last.push(item)
+    else blocks.push([item])
+  }
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      {blocks.map((block) =>
+        Array.isArray(block) ? (
+          <Tools key={block[0]!.id} items={block} ctx={ctx} />
+        ) : (
+          <ItemView key={block.id} item={block} ctx={ctx} />
+        ),
+      )}
+    </div>
+  )
+}
+
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
 export function RunTranscript({ taskId, runId, running }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
@@ -155,11 +142,5 @@ export function RunTranscript({ taskId, runId, running }: Props) {
 
   if (data === undefined || data.length === 0) return null
 
-  return (
-    <div className="flex flex-col gap-3">
-      {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} liveIds={liveIds} />
-      ))}
-    </div>
-  )
+  return <Items items={tree.roots} ctx={{ taskId, tree, liveIds, running }} />
 }
