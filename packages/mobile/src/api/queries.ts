@@ -23,6 +23,7 @@ export const keys = {
   connections: ["connections"] as const,
   usage: ["usage"] as const,
   githubRepos: ["github-repos"] as const,
+  githubBranches: (repo: string) => ["github-repos", repo, "branches"] as const,
   automations: ["automations"] as const,
   automationRuns: (automationId: string) => ["automations", automationId, "runs"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
@@ -83,6 +84,8 @@ export function createQueries(api: ApiClient) {
     box: () => queryOptions({ queryKey: keys.box, queryFn: () => api.box(), refetchInterval: BOX_POLL_MS }),
     connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => api.connections() }),
     githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: () => api.githubRepos() }),
+    githubBranches: (repo: string) =>
+      queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
     automations: () => queryOptions({ queryKey: keys.automations, queryFn: () => api.listAutomations() }),
     automationRuns: (automationId: string) =>
       queryOptions({

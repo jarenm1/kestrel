@@ -26,7 +26,7 @@ export function useBoxOffline(): boolean {
 }
 
 /** Whether the box the app talks to answers; undefined until it is known. */
-function useBoxOnline(): boolean | undefined {
+export function useBoxOnline(): boolean | undefined {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   return useQuery(queries.box()).data?.online;

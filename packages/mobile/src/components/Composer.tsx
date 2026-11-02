@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { type ReactNode, useMemo, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Check, ChevronDown, Settings2, Square } from "lucide-react-native";
@@ -187,6 +187,8 @@ interface ComposerProps {
   readonly context?: ContextUsage | null | undefined;
   readonly activeRunId?: string;
   readonly activeRunProvider?: ModelProvider;
+  /** Hangs right under the message box, e.g. the new thread's repository, branch and box bar. */
+  readonly below?: ReactNode;
 }
 
 /**
@@ -260,6 +262,7 @@ export function Composer({
   context,
   activeRunId,
   activeRunProvider,
+  below,
 }: ComposerProps) {
   const { api } = useApiClient();
   const navigation = useNavigation();
@@ -410,12 +413,15 @@ export function Composer({
           )}
         </View>
       </View>
+      {below !== undefined ? <View style={styles.below}>{below}</View> : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  // Cancels the wrap's gap, so what hangs under the box touches it.
+  below: { marginTop: -spacing.sm },
   wrap: { gap: spacing.sm, paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.md },
   box: {
     gap: spacing.xs,

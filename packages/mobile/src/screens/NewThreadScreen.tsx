@@ -1,29 +1,51 @@
-import React, { useRef } from "react";
+import React, { useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
+import { GithubRepoSlug, type Message, type Run, type SendMessageBody, type Task } from "@cloudagents/protocol";
 import { keys, storeTask } from "@/api/queries";
+import { useAuth } from "@/auth/AuthContext";
+import { useBoxOnline } from "@/components/BoxStatus";
 import { Composer } from "@/components/Composer";
+import { NewThreadBar } from "@/components/NewThreadBar";
 import { useApiClient } from "@/hooks/useApiClient";
-import { threadTitle } from "@/lib/format";
+import { useStoredChoice } from "@/hooks/useStoredChoice";
+import { repoShortName, threadTitle } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, spacing } from "@/theme";
 
 /**
- * Chat home: the first message creates a thread (task), sends the message to it and opens it. The thread starts with
- * no repository; the agent checks out the ones it needs. The composer sits at the bottom, above the keyboard.
+ * Chat home: the first message creates a thread (task), sends the message to it and opens it. The bar under the
+ * composer picks the repository and branch the thread starts in (none: the agent checks out what it needs) and,
+ * for someone with a box of their own, the box it runs on, as on the web.
  */
 export function NewThreadScreen() {
   const { api } = useApiClient();
+  const { boxes, activeBoxId, setActiveBox } = useAuth();
   const nav = useNavigation();
   const queryClient = useQueryClient();
-  // The thread created by an earlier attempt; a retry after a failed send reuses it instead of creating another.
-  const created = useRef<Task | null>(null);
+  const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug);
+  // Branch to start from; `undefined` is the repository's default branch. A different repository starts on its default.
+  const [branch, setBranch] = useState<string | undefined>();
+  const boxOnline = useBoxOnline();
+  // The thread created by an earlier attempt, and what it was created with; a retry after a failed send reuses it
+  // only while the repository, branch and box are unchanged.
+  const created = useRef<{ task: Task; repo: string | undefined; branch: string | undefined; boxId: string | null } | null>(null);
+
+  const switchBox = useMutation({ mutationFn: (boxId: string | null) => setActiveBox(boxId) });
 
   const start = useMutation({
     mutationFn: async (body: SendMessageBody) => {
-      const task = created.current ?? (await api.createTask({ title: threadTitle(body.text) }));
-      created.current = task;
+      const previous = created.current;
+      let task: Task;
+      if (previous !== null && previous.repo === repo && previous.branch === branch && previous.boxId === activeBoxId) {
+        task = previous.task;
+      } else if (boxOnline === false) {
+        throw new Error("That box is offline. Pick another box or start it first.");
+      } else {
+        const checkout = repo === undefined ? {} : { checkout: { repo, ...(branch === undefined ? {} : { baseBranch: branch }) } };
+        task = await api.createTask({ title: threadTitle(body.text), ...checkout });
+      }
+      created.current = { task, repo, branch, boxId: activeBoxId };
       // The thread exists from here on, even if sending the first message fails.
       storeTask(queryClient, task);
       const sent = await api.sendMessage(task.id, body);
@@ -36,6 +58,7 @@ export function NewThreadScreen() {
     },
   });
 
+  const busy = start.isPending || switchBox.isPending;
   return (
     <View style={styles.flex}>
       <View style={styles.body}>
@@ -43,9 +66,26 @@ export function NewThreadScreen() {
       </View>
       <Composer
         onSend={(body) => start.mutateAsync(body)}
-        pending={start.isPending}
-        error={start.error}
-        placeholder="Ask for anything — the agent checks out the repos it needs"
+        pending={busy}
+        error={start.error ?? switchBox.error}
+        placeholder={
+          repo === undefined ? "Ask for anything — the agent checks out the repos it needs" : `Ask for anything in ${repoShortName(repo)}`
+        }
+        below={
+          <NewThreadBar
+            repo={repo}
+            onRepoChange={(next) => {
+              if (next !== repo) setBranch(undefined);
+              setRepo(next);
+            }}
+            branch={branch}
+            onBranchChange={setBranch}
+            boxes={{ boxes, activeBoxId }}
+            boxOnline={boxOnline}
+            onBoxChange={(boxId) => switchBox.mutate(boxId)}
+            disabled={busy}
+          />
+        }
       />
     </View>
   );

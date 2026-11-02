@@ -87,6 +87,8 @@ export interface ApiClient {
   putApiKey(provider: string, body: PutApiKeyBody): Promise<Connection>;
   deleteConnection(provider: string): Promise<void>;
   githubRepos(): Promise<readonly GithubRepo[]>;
+  /** Branch names of a GitHub repository, its default branch first; 404 without a GitHub connection or access. */
+  githubBranches(repo: string): Promise<readonly string[]>;
   boxes(): Promise<BoxList>;
   setActiveBox(boxId: string | null): Promise<BoxList>;
   box(): Promise<BoxStatus>;
@@ -241,6 +243,7 @@ export function createApiClient(
     deleteConnection: (provider) =>
       request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)).then(() => undefined),
     githubRepos: () => request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos),
+    githubBranches: (repo) => request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo)),
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
