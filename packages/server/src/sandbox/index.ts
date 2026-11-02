@@ -151,6 +151,8 @@ export interface BwrapOptions {
   readonly caBundle?: string | null
   /** `basic` only: bwrap args exposing the agent CLIs installed in the box user's home (`homeToolArgs`). */
   readonly homeToolArgs?: ReadonlyArray<string>
+  /** `strict` only: the toolchain dir (CLOUDAGENTS_SANDBOX_PATH), whose `env` becomes /usr/bin/env. */
+  readonly binPath?: string | null
 }
 
 /**
@@ -200,6 +202,8 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.level === "basic") argv.push(...(opts.homeToolArgs ?? []))
   // Basic binds all of /etc, which holds these files.
   if (opts.level === "strict") {
+    // Strict has no /usr, and scripts (the run's `gh`, whatever an agent writes) start with #!/usr/bin/env.
+    if (opts.binPath) argv.push("--symlink", join(opts.binPath, "env"), "/usr/bin/env")
     for (const file of SYSTEM_RO_FILES) {
       if (file === "/etc/ssl" && opts.caBundle) continue
       if (existsSync(file)) argv.push("--ro-bind", file, file)
@@ -734,6 +738,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         binds: req.binds,
         caBundle: settings.sslCertFile,
         homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
+        binPath: settings.binPath,
       }).slice(1)
 
     const inner: { file: string; args: string[] } =
