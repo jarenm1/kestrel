@@ -31,6 +31,11 @@ interface Waiter {
   readonly reject: (error: Error) => void
 }
 
+/** A request the channel could not send. The box never received the whole message, so it did not run it. */
+export class ChannelUnsent extends Error {
+  readonly unsent = true
+}
+
 /**
  * One box's data channel. Requests go over it as the box's HTTP handler would receive them: the box already knows the
  * caller's identity from the signed offer, so requests carry no token. The channel is alive from the moment it opens
@@ -80,7 +85,11 @@ export class BoxChannel {
     try {
       for (const fragment of fragmentMessage({ text: true, data: encodeFrame(frame) })) this.dc.send(fragment)
     } catch (err) {
-      this.lose(err instanceof Error ? err.message : String(err))
+      // Some fragments may have left, but the box cannot complete a message without the last one: the request never ran.
+      const reason = err instanceof Error ? err.message : String(err)
+      this.waiters.delete(id)
+      reject(new ChannelUnsent(reason))
+      this.lose(reason)
     }
     return promise
   }

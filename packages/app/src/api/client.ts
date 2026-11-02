@@ -54,7 +54,7 @@ import {
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
-import { type BoxChannel, channelFor, closeChannels } from "./rtc"
+import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -114,11 +114,11 @@ const viaChannel = <A, I>(
   method: Method,
   path: string,
   body: unknown,
-): Effect.Effect<A, ApiError> =>
+): Effect.Effect<A, ApiError | ChannelUnsent> =>
   Effect.flatMap(
     Effect.tryPromise({
       try: () => channel.request(method, path, body),
-      catch: (e) => new ApiError(0, e instanceof Error ? e.message : String(e)),
+      catch: (e) => (e instanceof ChannelUnsent ? e : new ApiError(0, e instanceof Error ? e.message : String(e))),
     }),
     (reply) => decodeExchange(schema, reply.status, "", reply.body),
   )
@@ -280,10 +280,14 @@ const boxCall = <A, I>(
     (token) => {
       // A body that is a Blob (a file upload) always goes over HTTP; everything else prefers the open channel.
       const channel = body instanceof Blob ? null : channelFor(target.boxId, target.url, token)
+      const overHttp = () => send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` })
       const call =
         channel === null
-          ? send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` })
-          : viaChannel(channel, schema, method, path, body)
+          ? overHttp()
+          : viaChannel(channel, schema, method, path, body).pipe(
+              // The channel never delivered the request to the box, so this call goes over HTTP instead.
+              Effect.catchAll((e) => (e instanceof ChannelUnsent ? overHttp() : Effect.fail(e))),
+            )
       return call.pipe(
         Effect.catchAll((e) => {
           if (e.status !== 401 || retried) return Effect.fail(e)
