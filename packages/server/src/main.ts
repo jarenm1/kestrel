@@ -22,7 +22,8 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { BOX_DEV_HEADER, runRelay } from "./relay/client"
+import { runRelay } from "./relay/client"
+import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
@@ -238,6 +239,7 @@ const program = Effect.gen(function* () {
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
+  if (direct !== null) direct.close()
   yield* closeServer(server)
   yield* closeServer(sandboxServer)
 }).pipe(Effect.provide(AppLive))

@@ -1,14 +1,10 @@
 import { Context, Duration, Either, Effect, Runtime, Schema } from "effect"
 import {
-  BOX_USER_HEADER,
   CREDENTIALS_HEADER,
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
   decodeFrame,
   encodeFrame,
-  MAX_RELAY_RESPONSE_BYTES,
-  fromBase64,
-  toBase64,
   type RelayCredentials,
   type RelayFrame,
 } from "@cloudagents/protocol"
@@ -16,6 +12,7 @@ import { WebSocket } from "ws"
 import { VERSION } from "../config"
 import { CredentialStore } from "../credentials"
 import { CLOSE_NOT_FOUND, CLOSE_UNAUTHORIZED, serveStream, streamRoute, type WsServices } from "../http/streams"
+import { serveTunnelHttp, TUNNEL_ORIGIN } from "../tunnel"
 import { RelayStream } from "./stream"
 
 export interface RelayOptions {
@@ -33,23 +30,6 @@ const RECONNECT_MAX_MS = 30_000
 const PING_INTERVAL_MS = 20_000
 /** Silence longer than this means the relay connection is dead even if TCP has not noticed. */
 const SILENCE_TIMEOUT_MS = 60_000
-/** Placeholder origin for building Request URLs from tunnelled paths. */
-const BOX_ORIGIN = "http://box.local"
-/** Headers that describe the tunnel hop rather than the browser request, so they are not forwarded. */
-const HOP_HEADERS: Record<string, true> = {
-  host: true,
-  "content-length": true,
-  connection: true,
-  "transfer-encoding": true,
-  upgrade: true,
-  [CREDENTIALS_HEADER]: true,
-}
-
-/**
- * Set to "1" on a relayed request from a `/auth/dev-login` session (dev-only flows such as fixture replay).
- * Like BOX_USER_HEADER, only the relay sets it: the browser's copy is dropped here and main.ts strips it locally.
- */
-export const BOX_DEV_HEADER = "x-kestrel-box-dev"
 
 const Credentials = Schema.parseJson(
   Schema.Struct({
@@ -124,11 +104,14 @@ const connectOnce = (
 
     const dispatch = (frame: RelayFrame) => {
       switch (frame.t) {
-        case "http":
-          void serveHttp(frame, options.handle, store, send)
+        case "http": {
+          const creds = absorbCredentials(frame.headers, store)
+          const identity = creds === null ? null : { user: creds.user, dev: creds.dev === true }
+          void serveTunnelHttp(frame, options.handle, identity, (reply) => send(encodeFrame(reply)))
           return
+        }
         case "ws-open": {
-          const url = new URL(frame.path, BOX_ORIGIN)
+          const url = new URL(frame.path, TUNNEL_ORIGIN)
           const protocol = frame.headers["x-kestrel-preview-protocol"]?.split(",")[0]?.trim()
           const route = streamRoute(url.pathname, frame.path, protocol)
           if (route === null) {
@@ -200,59 +183,4 @@ const absorbCredentials = (headers: Readonly<Record<string, string>>, store: Sto
   }
   Effect.runSync(store.set(decoded.right))
   return decoded.right
-}
-
-const serveHttp = async (
-  frame: Extract<RelayFrame, { t: "http" }>,
-  handle: (req: Request) => Promise<Response>,
-  store: Store,
-  send: (data: string | Uint8Array) => void,
-) => {
-  const creds = absorbCredentials(frame.headers, store)
-  let res: Response
-  try {
-    const headers = new Headers()
-    for (const [name, value] of Object.entries(frame.headers)) {
-      if (HOP_HEADERS[name.toLowerCase()] !== true) headers.set(name, value)
-    }
-    headers.delete(BOX_USER_HEADER)
-    headers.delete(BOX_DEV_HEADER)
-    if (creds !== null) headers.set(BOX_USER_HEADER, creds.user)
-    if (creds?.dev === true) headers.set(BOX_DEV_HEADER, "1")
-    const body = frame.body === undefined ? undefined : new Uint8Array(fromBase64(frame.body))
-    const req = new Request(new URL(frame.path, BOX_ORIGIN), { method: frame.method, headers, body })
-    res = await handle(req)
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    res = Response.json({ error: "InternalError", message }, { status: 500 })
-  }
-  // One frame carries the whole body, and Cloudflare refuses messages over 32 MiB: a larger response would never
-  // arrive. Say so instead; a declared length spares reading a large file just to refuse it.
-  const tooLarge = () =>
-    Response.json(
-      { _tag: "PayloadTooLarge", message: `responses over ${MAX_RELAY_RESPONSE_BYTES} bytes cannot go through the relay` },
-      { status: 413 },
-    )
-  if (Number(res.headers.get("content-length") ?? 0) > MAX_RELAY_RESPONSE_BYTES) {
-    await res.body?.cancel()
-    res = tooLarge()
-  }
-  let bytes = new Uint8Array(await res.arrayBuffer())
-  if (bytes.byteLength > MAX_RELAY_RESPONSE_BYTES) {
-    res = tooLarge()
-    bytes = new Uint8Array(await res.arrayBuffer())
-  }
-  const headers: Record<string, string> = {}
-  res.headers.forEach((value, name) => {
-    headers[name] = value
-  })
-  send(
-    encodeFrame({
-      t: "http-res",
-      id: frame.id,
-      status: res.status,
-      headers,
-      body: bytes.byteLength > 0 ? toBase64(bytes) : undefined,
-    }),
-  )
 }

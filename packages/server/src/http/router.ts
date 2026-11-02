@@ -7,7 +7,7 @@ import type { BoxCapabilities } from "@cloudagents/protocol"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
 import { dayFormat } from "../core/activity"
-import { BOX_DEV_HEADER } from "../relay/client"
+import { BOX_DEV_HEADER } from "../tunnel"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
