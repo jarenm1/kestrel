@@ -32,7 +32,8 @@ zero total can mean "no data" as easily as "no use". Rates are supplied by the o
 
 A stretch longer than two sampling intervals is not bridged: the collector sends no usage for it, and the report
 lists it as a gap. A resource whose process is missing (crashed, or not yet started) is likewise absent rather than
-zero. Usage that straddles a lifecycle transition is attributed to the state the VM held during it, using the sample
+zero. If any listed disk cannot be stat'ed, disk usage for that interval is absent too; the VM's other resources are still
+sampled. Usage that straddles a lifecycle transition is attributed to the state the VM held during it, using the sample
 at the transition tick.
 
 ## Running it
@@ -65,8 +66,9 @@ bun scripts/nest-meter/collector.ts --config inventory.json --state-dir ./meter 
   --control http://127.0.0.1:8828 --interval 60
 ```
 
-The state directory holds `vms.json` (per-VM sample baseline), `outbox.jsonl` (records not yet accepted, fsynced before
-sending), and `rejected.jsonl` (batches the control plane refused with a 4xx; review them, they are not resent).
-A 5xx or 429 keeps the outbox and retries the same records with the same `eventId`s.
+The state directory holds `vms.json` (per-VM sample baseline), `outbox.jsonl` (records not yet settled, fsynced before
+sending), and `rejected.jsonl` (records the control plane refused with a 4xx, and outbox lines that do not decode; review
+them, they are not resent). A refused batch is split so that only the refused records land in `rejected.jsonl`. A 5xx,
+429, 401, or 403 keeps the outbox and retries the same records with the same `eventId`s.
 
 Egress is not measured. It is not implemented.
