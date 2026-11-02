@@ -55,15 +55,10 @@ export const parseClaudeUsage = (value: unknown): ProviderUsage => {
   const response = fields(value)
   const limits = fields(response?.rate_limits)
   if (response?.rate_limits_available !== true || limits === null) return signedOut("claude-cli")
-  const scoped = Array.isArray(limits.model_scoped) ? limits.model_scoped : []
   const extra = fields(limits.extra_usage)
   const windows = [
     claudeWindow("five_hour", "5-hour", limits.five_hour),
     claudeWindow("seven_day", "Weekly", limits.seven_day),
-    ...scoped.map((entry, index) => {
-      const name = text(fields(entry)?.display_name)
-      return name === null ? null : claudeWindow(`model_${index}`, `Weekly · ${name}`, entry)
-    }),
     extra?.is_enabled === true ? claudeWindow("extra_usage", "Extra usage", extra) : null,
   ].filter((window) => window !== null)
   return { provider: "claude-cli", status: "ok", plan: text(response.subscription_type), windows }

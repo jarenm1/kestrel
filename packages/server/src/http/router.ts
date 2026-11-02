@@ -5,6 +5,7 @@ import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
+import { dayFormat } from "../core/activity"
 import { BOX_DEV_HEADER } from "../relay/client"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
@@ -106,6 +107,15 @@ const chosenModel = Effect.gen(function* () {
 
 /** The query parameters of the request. */
 const searchParams = Effect.map(HttpServerRequest.HttpServerRequest, (req) => new URL(req.url, "http://localhost").searchParams)
+
+/** `?tz=`: the IANA time zone to count days in; an unknown zone is refused. */
+const timeZone = Effect.flatMap(searchParams, (params) => {
+  const zone = params.get("tz") ?? ""
+  return Effect.try({
+    try: () => dayFormat(zone).resolvedOptions().timeZone,
+    catch: () => new BadRequest({ message: `unknown time zone "${zone}"` }),
+  })
+})
 
 /** `?root=workspace|home`, or `?root=checkout&checkout=<id>` (`Paths.taskFileDownload`). */
 const fileRoot = (params: URLSearchParams): Effect.Effect<FileRoot, BadRequest> => {
@@ -274,6 +284,10 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.listRuns(user, id)))),
     ),
     HttpRouter.get("/api/usage", respond(signedIn((user) => core.usage(user, new Date())))),
+    HttpRouter.get(
+      "/api/usage/activity",
+      respond(signedIn((user) => Effect.flatMap(timeZone, (zone) => core.usageActivity(user, new Date(), zone)))),
+    ),
     HttpRouter.post(
       "/api/runs/:id/cancel",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),

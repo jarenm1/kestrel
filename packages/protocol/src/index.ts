@@ -519,6 +519,22 @@ export const Usage = Schema.Struct({
 })
 export type Usage = typeof Usage.Type
 
+/** One local calendar day with agent activity: the runs started that day, and those runs' active time. */
+export const ActivityDay = Schema.Struct({
+  /** `YYYY-MM-DD` in the requested time zone. */
+  date: Schema.String,
+  runs: Schema.Number,
+  agentSeconds: Schema.Number,
+})
+export type ActivityDay = typeof ActivityDay.Type
+
+/** The signed-in user's daily agent activity over the last year; days without a run are left out. */
+export const UsageActivity = Schema.Struct({
+  timeZone: Schema.String,
+  days: Schema.Array(ActivityDay),
+})
+export type UsageActivity = typeof UsageActivity.Type
+
 export type PlanId = "hobby" | "pro" | "team"
 
 export interface Plan {
@@ -605,6 +621,8 @@ export const Paths = {
   health: "/api/health",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
+  /** GET `?tz=<IANA zone>` -> UsageActivity of the signed-in user, days counted in that zone. */
+  usageActivity: "/api/usage/activity",
   /** GET -> Task[]: every thread of the signed-in user, archived ones included. POST CreateTaskBody -> Task. */
   tasks: "/api/tasks",
   task: (id: string) => `/api/tasks/${id}`,

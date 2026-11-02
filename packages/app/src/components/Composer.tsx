@@ -325,7 +325,7 @@ interface Props {
 }
 
 /** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
-const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your Claude and Codex usage limits", prefix: "/" }
+const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your usage limits and activity", prefix: "/" }
 
 /** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
 const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>

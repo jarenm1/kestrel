@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { parseClaudeUsage, parseCodexUsage } from "./provider-usage"
 
 describe("parseClaudeUsage", () => {
-  test("reads the session, weekly, per-model and extra usage windows", () => {
+  test("reads the session, weekly and extra usage windows, not per-model ones", () => {
     const usage = parseClaudeUsage({
       subscription_type: "max",
       rate_limits_available: true,
@@ -20,7 +20,6 @@ describe("parseClaudeUsage", () => {
       windows: [
         { id: "five_hour", label: "5-hour", usedPercent: 42, resetsAt: "2026-11-01T15:00:00.000Z" },
         { id: "seven_day", label: "Weekly", usedPercent: 100, resetsAt: null },
-        { id: "model_0", label: "Weekly · Opus", usedPercent: 7, resetsAt: "2026-11-05T00:00:00.000Z" },
         { id: "extra_usage", label: "Extra usage", usedPercent: 3, resetsAt: null },
       ],
     })

@@ -1,12 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, Gauge, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
+import { Archive, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
 import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { StatusIcon } from "@/components/StatusIcon"
-import { useOpenUsagePanel } from "@/components/UsagePanel"
 import { Alert } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
@@ -110,7 +109,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
   const { archive } = useThreadArchive()
-  const openUsagePanel = useOpenUsagePanel()
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
@@ -161,15 +159,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
           >
             <Archive className="size-4" />
           </NavLink>
-          <button
-            type="button"
-            aria-label="Usage"
-            title="Usage"
-            className={cn(tabClass({ isActive: false }), "justify-center py-2")}
-            onClick={openUsagePanel}
-          >
-            <Gauge className="size-4" />
-          </button>
           {sorted.map((task) => (
             <NavLink
               key={task.id}
@@ -221,14 +210,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
           <Archive className="size-4 shrink-0" />
           Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
         </NavLink>
-        <button
-          type="button"
-          className={cn(tabClass({ isActive: false }), "items-center py-2 pr-3 pl-2.5")}
-          onClick={openUsagePanel}
-        >
-          <Gauge className="size-4 shrink-0" />
-          Usage
-        </button>
         {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
         {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
         {sorted.length > 0 && (

@@ -24,6 +24,7 @@ import {
   type PullRequestLink,
   Run,
   type Usage,
+  type UsageActivity,
   SendMessageResponse,
   Task,
   type TaskStatus,
@@ -38,6 +39,7 @@ import {
   providerModels,
 } from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
+import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
@@ -300,6 +302,8 @@ export interface CoreShape {
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   /** Agent usage of `user` in the billing period (UTC calendar month) containing `now`. */
   readonly usage: (user: string, now: Date) => Effect.Effect<Usage>
+  /** Daily agent activity of `user` over the last year, days counted in `timeZone` (a valid IANA zone). */
+  readonly usageActivity: (user: string, now: Date, timeZone: string) => Effect.Effect<UsageActivity>
   readonly cancelRun: (user: string, runId: string) => Effect.Effect<Run, NotFound | Conflict | InternalError>
   /** A run's display items; another user's run is NotFound, like every other owned route. */
   readonly runItems: (user: string, runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, NotFound | InternalError>
@@ -1749,6 +1753,12 @@ export const CoreLive = Layer.effect(
             runs,
             threads: threads.size,
           }
+        }),
+
+      usageActivity: (user, now, timeZone) =>
+        Effect.map(store.read, (state) => {
+          const owned = new Set(state.tasks.filter((t) => t.owner === user).map((t) => t.id))
+          return dailyActivity(state.runs.filter((run) => owned.has(run.taskId)), now, timeZone)
         }),
 
       cancelRun: (user, runId) =>
