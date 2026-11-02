@@ -18,6 +18,27 @@ In an existing thread, type `/` at the start of the composer to discover that th
 
 Discovery uses `GET /api/tasks/:id/commands?model=<model-id>`, checks thread ownership, and runs the CLI in that thread's workspace with the signed-in user's own CLI home. The discovery sandbox has no network, so repo-controlled config cannot reach the box's loopback services; Claude Code runs with `disableAllHooks` so the workspace's `.claude/settings.json` hooks do not execute. At most four discovery runs execute box-wide; further requests queue, and a full queue answers "command discovery is busy". While a turn is running, its provider takes precedence over the next-turn model picker. Results are briefly cached per user, provider and workspace; discovery starts no model turn and exposes no credential or skill-file paths. The new-thread composer does not query a harness.
 
+### GitHub references
+
+In the web composer, type `#` followed by a positive issue/PR number at the start of a word, for example `Review #156`.
+The same autocomplete menu as slash commands offers **PR #156** and **Issue #156**. Use ↑/↓ and Enter or Tab, or click
+an option; Escape dismisses it. Selection inserts an inline bold, underlined label with a PR or issue icon. References
+survive draft restoration and remain clickable links in sent messages.
+
+A new thread uses its selected repository. An existing thread uses its sole GitHub checkout; with no checkout or
+several, choose the repository in the reference menu. Each inserted reference keeps its repository even if a later
+reference uses another. Drafts and messages store ordinary Markdown links such as
+`[PR #156](https://github.com/jarenm1/kestrel/pull/156)`, so the agent receives the explicit repository, number and kind.
+Choosing an option does not claim that the item exists.
+
+The agent can read a reference with the read-only `github_reference_read` MCP tool:
+`{ "repo": "jarenm1/kestrel", "number": 156, "kind": "pr" }` (`kind` is `pr` or `issue`).
+No checkout is required. The box uses the thread owner's connected GitHub account on the host; its token never reaches
+the sandbox. The result includes the current title, body, author, state, URL and conversation. PRs also include branches,
+changed files, reviews, review comments and check status when available. Lists are bounded to GitHub's first page of
+100 items and tool output is size-limited. Missing or inaccessible numbers return an error; an issue/PR kind mismatch
+returns an explicit error instead of silently treating the number as the other kind.
+
 ### Automation tools
 
 Agents manage their owner's automations with `automation_list`, `automation_create`, `automation_update` and `automation_delete`. Creation and trigger updates accept either a schedule object (`_tag: "schedule"`, five-field `cron`, IANA `timezone`) or a GitHub object (`_tag: "github"`, non-empty `events`, optional reviewer/branch/draft filters).

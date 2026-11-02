@@ -6,7 +6,11 @@ import { Config } from "../config"
  * error messages carry only GitHub's status and message text.
  */
 
-export class GitHubError extends Data.TaggedError("GitHubError")<{ readonly message: string }> {}
+export class GitHubError extends Data.TaggedError("GitHubError")<{
+  readonly message: string
+  /** HTTP status when GitHub answered; absent for transport and decoding failures. */
+  readonly status?: number
+}> {}
 
 export interface RepoSlug {
   readonly owner: string
@@ -61,6 +65,91 @@ export interface PullRequestStatus extends PullRequest {
   readonly reviewComments: readonly ReviewComment[]
   readonly conversation: readonly { readonly author: string; readonly body: string; readonly url: string }[]
 }
+
+/** Which GitHub reference a number names. The issues endpoint returns pull requests too, so callers must state it. */
+export type ReferenceKind = "pr" | "issue"
+
+export interface ReferenceComment {
+  readonly author: string
+  readonly body: string
+  readonly url: string
+  /** ISO timestamp GitHub reports for the comment. */
+  readonly createdAt: string
+}
+
+export interface ReferenceReview {
+  readonly author: string
+  readonly state: string
+  readonly body: string
+  readonly url: string
+}
+
+export interface ReferenceReviewComment {
+  readonly author: string
+  readonly body: string
+  readonly url: string
+  readonly path: string
+  readonly line: number | null
+}
+
+/** A file a pull request changes. Patches are deliberately omitted: status and line counts are the useful summary. */
+export interface ReferenceFile {
+  readonly path: string
+  readonly status: string
+  readonly additions: number
+  readonly deletions: number
+}
+
+export interface IssueReference {
+  readonly kind: "issue"
+  readonly number: number
+  readonly title: string
+  readonly body: string
+  readonly state: string
+  /** `completed`, `not_planned`, `reopened`, or null when GitHub reports none. */
+  readonly stateReason: string | null
+  readonly author: string
+  readonly url: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly labels: readonly string[]
+  /** Issue comments, in GitHub's chronological order (first page, up to 100). */
+  readonly conversation: readonly ReferenceComment[]
+}
+
+export interface PullRequestReference {
+  readonly kind: "pr"
+  readonly number: number
+  readonly title: string
+  readonly body: string
+  readonly state: "open" | "closed" | "merged"
+  readonly draft: boolean
+  readonly author: string
+  readonly url: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly labels: readonly string[]
+  readonly baseRef: string
+  readonly headRef: string
+  readonly headSha: string
+  /** null while GitHub is still computing mergeability. */
+  readonly mergeable: boolean | null
+  readonly mergeableState: string
+  readonly reviewDecision: PullRequestStatus["reviewDecision"]
+  /** null when GitHub will not report check runs for this head commit (for example a token without checks access). */
+  readonly checks: PullRequestStatus["checks"] | null
+  /** Reviews in the order GitHub returns them; bodies are often empty. */
+  readonly reviews: readonly ReferenceReview[]
+  /** Most recent review comments, newest first. */
+  readonly reviewComments: readonly ReferenceReviewComment[]
+  /** Conversation comments, in GitHub's chronological order (first page, up to 100). */
+  readonly conversation: readonly ReferenceComment[]
+  /** Files the pull request changes, up to GitHub's first page of 100. */
+  readonly files: readonly ReferenceFile[]
+}
+
+/** An issue or pull request read without a checkout. `kind` must match what the number actually is. */
+export type GitHubReference = IssueReference | PullRequestReference
 
 export interface NewPullRequest {
   readonly title: string
@@ -132,6 +221,17 @@ export interface GitHubShape {
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
   readonly createPullRequest: (token: string, repo: RepoSlug, input: NewPullRequest) => Effect.Effect<PullRequest, GitHubError>
   readonly getPullRequestStatus: (token: string, repo: RepoSlug, number: number) => Effect.Effect<PullRequestStatus, GitHubError>
+  /**
+   * Reads an issue or pull request by number, whichever the caller says it is. Fails with an explicit kind-mismatch
+   * error when the number is the other kind, and with a not-found error when GitHub has no such reference the token
+   * can see. The token is only ever sent to GitHub.
+   */
+  readonly readReference: (
+    token: string,
+    repo: RepoSlug,
+    number: number,
+    kind: ReferenceKind,
+  ) => Effect.Effect<GitHubReference, GitHubError>
   readonly createReview: (token: string, repo: RepoSlug, number: number, review: NewReview) => Effect.Effect<PostedReview, GitHubError>
   /** Edits the given fields and returns the pull request as GitHub now has it. */
   readonly updatePullRequest: (token: string, repo: RepoSlug, number: number, changes: PullRequestChanges) => Effect.Effect<PullRequest, GitHubError>
@@ -198,6 +298,39 @@ const ReviewCommentsBody = Schema.Array(
   }),
 )
 
+/** GitHub's issue endpoint answers for pull requests too, with `pull_request` set; that is how kind is checked. */
+const IssueBody = Schema.Struct({
+  number: Schema.Number,
+  html_url: Schema.String,
+  title: Schema.String,
+  body: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.String,
+  state_reason: Schema.optional(Schema.NullOr(Schema.String)),
+  created_at: Schema.String,
+  updated_at: Schema.String,
+  user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+  labels: Schema.Array(Schema.Struct({ name: Schema.String })),
+  pull_request: Schema.optional(Schema.Unknown),
+})
+
+const ReferenceCommentsBody = Schema.Array(
+  Schema.Struct({
+    body: Schema.String,
+    html_url: Schema.String,
+    created_at: Schema.String,
+    user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+  }),
+)
+
+const PullFilesBody = Schema.Array(
+  Schema.Struct({
+    filename: Schema.String,
+    status: Schema.String,
+    additions: Schema.Number,
+    deletions: Schema.Number,
+  }),
+)
+
 const ReviewPostedBody = Schema.Struct({
   html_url: Schema.String,
   state: Schema.String,
@@ -223,6 +356,18 @@ const GraphQLBody = Schema.Struct({
 })
 
 const PASSING_CONCLUSIONS = ["success", "neutral", "skipped"]
+
+const summarizeChecks = (checks: Schema.Schema.Type<typeof CheckRunsBody>): PullRequestStatus["checks"] => {
+  const failing: string[] = []
+  const pending: string[] = []
+  let passed = 0
+  for (const run of checks.check_runs) {
+    if (run.status !== "completed") pending.push(run.name)
+    else if (PASSING_CONCLUSIONS.includes(run.conclusion ?? "")) passed++
+    else failing.push(run.name)
+  }
+  return { total: checks.check_runs.length, passed, failing, pending }
+}
 
 /** Latest review state per reviewer, then the strongest signal wins. Dismissed reviews drop out. */
 const reviewDecisionOf = (reviews: readonly { state: string; login: string }[]): PullRequestStatus["reviewDecision"] => {
@@ -270,7 +415,7 @@ export const GitHubLive = Layer.effect(
               catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
             })
           }
-          return Effect.fail(new GitHubError({ message: describeFailure(status, text, repo) }))
+          return Effect.fail(new GitHubError({ message: describeFailure(status, text, repo), status }))
         }),
       )
 
@@ -300,6 +445,144 @@ export const GitHubLive = Layer.effect(
         Effect.flatMap(decode(PullRequestBody, "pull request")),
         Effect.map(toPullRequest),
       )
+
+    const referenceComments = (token: string, repo: RepoSlug, number: number) =>
+      call(token, repo, "GET", `${repoPath(repo)}/issues/${number}/comments?per_page=100`).pipe(
+        Effect.flatMap(decode(ReferenceCommentsBody, "issue comment list")),
+        Effect.map((comments): ReadonlyArray<ReferenceComment> =>
+          comments.map((comment) => ({
+            author: comment.user?.login ?? "ghost",
+            body: comment.body,
+            url: comment.html_url,
+            createdAt: comment.created_at,
+          })),
+        ),
+      )
+
+    const referenceNotFound = (repo: RepoSlug, number: number): GitHubError =>
+      new GitHubError({
+        message: `GitHub has no issue or pull request #${number} in ${repo.owner}/${repo.name} (it does not exist or the connected account cannot see it)`,
+        status: 404,
+      })
+
+    /**
+     * Reads the issue endpoint first: it is the one place that says whether a number is an issue or a pull request,
+     * and it carries the body and author for both. A kind mismatch never falls through to the other endpoint.
+     */
+    const readReference = (token: string, repo: RepoSlug, number: number, kind: ReferenceKind) =>
+      Effect.gen(function* () {
+        const slug = `${repo.owner}/${repo.name}`
+        const issue = yield* call(token, repo, "GET", `${repoPath(repo)}/issues/${number}`).pipe(
+          Effect.flatMap(decode(IssueBody, "issue")),
+          Effect.catchIf(
+            (e) => e.status === 404,
+            () => Effect.fail(referenceNotFound(repo, number)),
+          ),
+        )
+        const isPullRequest = issue.pull_request !== undefined && issue.pull_request !== null
+        const labels = issue.labels.map((label) => label.name)
+        if (kind === "issue") {
+          if (isPullRequest) {
+            return yield* Effect.fail(
+              new GitHubError({
+                message: `#${number} in ${slug} is a pull request, not an issue; read it with kind "pr"`,
+              }),
+            )
+          }
+          const conversation = yield* referenceComments(token, repo, number)
+          return {
+            kind: "issue",
+            number: issue.number,
+            title: issue.title,
+            body: issue.body ?? "",
+            state: issue.state,
+            stateReason: issue.state_reason ?? null,
+            author: issue.user?.login ?? "ghost",
+            url: issue.html_url,
+            createdAt: issue.created_at,
+            updatedAt: issue.updated_at,
+            labels,
+            conversation,
+          } satisfies IssueReference
+        }
+        if (!isPullRequest) {
+          return yield* Effect.fail(
+            new GitHubError({
+              message: `#${number} in ${slug} is an issue, not a pull request; read it with kind "issue"`,
+            }),
+          )
+        }
+        const [pr, reviews, reviewComments, conversation, files] = yield* Effect.all(
+          [
+            getPullRequest(token, repo, number),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/reviews?per_page=100`).pipe(
+              Effect.flatMap(decode(ReviewsBody, "review list")),
+            ),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/comments?sort=created&direction=desc&per_page=100`).pipe(
+              Effect.flatMap(decode(ReviewCommentsBody, "review comment list")),
+            ),
+            referenceComments(token, repo, number),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/files?per_page=100`).pipe(
+              Effect.flatMap(decode(PullFilesBody, "pull request file list")),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        )
+        const checks = yield* call(token, repo, "GET", `${repoPath(repo)}/commits/${pr.headSha}/check-runs?per_page=100`).pipe(
+          Effect.flatMap(decode(CheckRunsBody, "check run list")),
+          Effect.map(summarizeChecks),
+          // The body and conversation must stay readable even when this optional enrichment is not.
+          Effect.catchAll(() => Effect.succeed(null)),
+        )
+        return {
+          kind: "pr",
+          number: pr.number,
+          title: pr.title,
+          body: issue.body ?? "",
+          state: pr.state,
+          draft: pr.draft,
+          author: issue.user?.login ?? "ghost",
+          url: pr.url,
+          createdAt: issue.created_at,
+          updatedAt: issue.updated_at,
+          labels,
+          baseRef: pr.baseRef,
+          headRef: pr.headRef,
+          headSha: pr.headSha,
+          mergeable: pr.mergeable,
+          mergeableState: pr.mergeableState,
+          reviewDecision: reviewDecisionOf(
+            reviews.map((review) => ({ state: review.state, login: review.user?.login ?? "ghost" })),
+          ),
+          checks,
+          reviews: reviews.map(
+            (review): ReferenceReview => ({
+              author: review.user?.login ?? "ghost",
+              state: review.state,
+              body: review.body ?? "",
+              url: review.html_url ?? "",
+            }),
+          ),
+          reviewComments: reviewComments.map(
+            (comment): ReferenceReviewComment => ({
+              path: comment.path,
+              line: comment.line ?? null,
+              author: comment.user?.login ?? "ghost",
+              body: comment.body,
+              url: comment.html_url,
+            }),
+          ),
+          conversation,
+          files: files.map(
+            (file): ReferenceFile => ({
+              path: file.filename,
+              status: file.status,
+              additions: file.additions,
+              deletions: file.deletions,
+            }),
+          ),
+        } satisfies PullRequestReference
+      })
 
     const toComment = (comment: Schema.Schema.Type<typeof CommentPostedBody>): PostedComment => ({
       id: comment.id,
@@ -378,21 +661,12 @@ export const GitHubLive = Layer.effect(
           Effect.flatMap(([pr, reviews, comments, conversation]) =>
             call(token, repo, "GET", `${repoPath(repo)}/commits/${pr.headSha}/check-runs?per_page=100`).pipe(
               Effect.flatMap(decode(CheckRunsBody, "check run list")),
-              Effect.map((checks): PullRequestStatus => {
-                const failing: string[] = []
-                const pending: string[] = []
-                let passed = 0
-                for (const run of checks.check_runs) {
-                  if (run.status !== "completed") pending.push(run.name)
-                  else if (PASSING_CONCLUSIONS.includes(run.conclusion ?? "")) passed++
-                  else failing.push(run.name)
-                }
-                return {
+              Effect.map((checks): PullRequestStatus => ({
                   ...pr,
                   reviewDecision: reviewDecisionOf(
                     reviews.map((review) => ({ state: review.state, login: review.user?.login ?? "ghost" })),
                   ),
-                  checks: { total: checks.check_runs.length, passed, failing, pending },
+                  checks: summarizeChecks(checks),
                   conversation: [
                     ...reviews.filter((review) => review.body && review.html_url).slice(-20).map((review) => ({ author: review.user?.login ?? "ghost", body: review.body ?? "", url: review.html_url ?? "" })),
                     ...conversation.map((comment) => ({ author: comment.user?.login ?? "ghost", body: comment.body, url: comment.html_url })),
@@ -404,11 +678,11 @@ export const GitHubLive = Layer.effect(
                     body: comment.body,
                     url: comment.html_url,
                   })),
-                }
-              }),
+                })),
             ),
           ),
         ),
+      readReference,
       createReview: (token, repo, number, review) =>
         call(token, repo, "POST", `${repoPath(repo)}/pulls/${number}/reviews`, {
           body: review.body,

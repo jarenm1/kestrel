@@ -2,8 +2,10 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
+import { CircleDot, GitPullRequest } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
+import { githubReferenceLabel, githubReferenceUrl, parseGithubReferenceDraft } from "@/lib/githubReference"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatClock, formatElapsed } from "@/util"
@@ -67,6 +69,36 @@ function MessageTime({ iso }: { iso: string }) {
   return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
 }
 
+/** A sent message keeps its text as written; only exact reference Markdown becomes the same inline chip the editor showed. */
+function UserMessageText({ text }: { text: string }) {
+  const segments = parseGithubReferenceDraft(text)
+  if (!segments.some((segment) => segment.type === "reference")) return <>{text}</>
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === "text" ? (
+          <Fragment key={index}>{segment.text}</Fragment>
+        ) : (
+          <a
+            key={index}
+            href={githubReferenceUrl(segment.reference)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-baseline gap-1 whitespace-nowrap font-semibold underline underline-offset-4"
+          >
+            {segment.reference.kind === "pr" ? (
+              <GitPullRequest aria-hidden="true" className="relative top-0.5 size-3.5 shrink-0 self-center" />
+            ) : (
+              <CircleDot aria-hidden="true" className="relative top-0.5 size-3.5 shrink-0 self-center" />
+            )}
+            {githubReferenceLabel(segment.reference.kind, segment.reference.number)}
+          </a>
+        ),
+      )}
+    </>
+  )
+}
+
 /** Delegated threads are independent conversations; their original run stays linked even after follow-ups. */
 function DelegatedTasks({ taskId }: { taskId: string }) {
   const tasks = useQuery(queries.tasks()).data ?? []
@@ -125,7 +157,7 @@ function ThreadItem({
           {/* A message of only attachments has no text bubble. */}
           {message.text !== "" && (
             <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">
-              {message.text}
+              <UserMessageText text={message.text} />
             </div>
           )}
           {children}
@@ -154,6 +186,9 @@ function ThreadItem({
 
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
+  // The thread query is already the page's baseline; reading it here gives `#` references the checked-out repositories.
+  const task = useQuery(queries.task(taskId))
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo)
   const threadRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const atEnd = useRef(true)
@@ -273,6 +308,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <Composer
             taskId={taskId}
             draftKey={taskId}
+            repos={checkoutRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}

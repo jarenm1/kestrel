@@ -4,11 +4,28 @@ import rehypeRaw from "rehype-raw"
 import rehypeSanitize from "rehype-sanitize"
 import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
+import { CircleDot, GitPullRequest } from "lucide-react"
 import { AGENT_HTML_SCHEMA, rehypeAgentSvg } from "@/lib/agentHtml"
+import { githubReferenceFromLink } from "@/lib/githubReference"
 import { cn } from "@/lib/utils"
 
 const COMPONENTS: Components = {
-  a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  a: ({ node: _node, children, ...props }) => {
+    const reference = typeof children === "string" ? githubReferenceFromLink(props.href ?? "", children) : undefined
+    const isReference = reference !== undefined
+    const Icon = reference?.kind === "pr" ? GitPullRequest : CircleDot
+    return (
+      <a
+        {...props}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={isReference ? "inline-flex items-baseline gap-1 font-semibold underline underline-offset-4" : undefined}
+      >
+        {isReference && <Icon aria-hidden="true" className="relative top-0.5 size-3.5 shrink-0 self-center" />}
+        {children}
+      </a>
+    )
+  },
 }
 
 // Single newlines stay line breaks: run output that falls back to raw stdout/stderr is line-oriented.

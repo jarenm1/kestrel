@@ -23,9 +23,16 @@ function StateLine({ children }: { children: ReactNode }) {
   )
 }
 
+/** Usable by every composer autocomplete, so slash commands and `#` references share one menu look. */
+export const AUTOCOMPLETE_MENU_CLASS = cn(
+  "absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-2xl bg-popover p-1.5 text-sm text-popover-foreground ring-1 ring-white/[0.06]",
+  "shadow-[0_16px_40px_-12px_rgb(0_0_0/0.85),inset_0_1px_0_0_rgb(255_255_255/0.05)]",
+  "animate-in duration-150 fade-in slide-in-from-bottom-1",
+)
+
 /**
  * The slash-command menu above the composer. The page behind it owns the filtered `matches`, the active index and
- * the selection; this only renders the states and forwards pointer picks. Keeping focus on the textarea is the
+ * the selection; this only renders the states and forwards pointer picks. Keeping focus on the composer editor is the
  * caller's job; options never take a click that would blur it away.
  */
 export function SlashCommands({
@@ -71,13 +78,7 @@ export function SlashCommands({
   }, [selectedIndex])
 
   return (
-    <div
-      className={cn(
-        "absolute bottom-full left-0 z-20 mb-2 w-full overflow-hidden rounded-2xl bg-popover p-1.5 text-sm text-popover-foreground ring-1 ring-white/[0.06]",
-        "shadow-[0_16px_40px_-12px_rgb(0_0_0/0.85),inset_0_1px_0_0_rgb(255_255_255/0.05)]",
-        "animate-in duration-150 fade-in slide-in-from-bottom-1",
-      )}
-    >
+    <div className={AUTOCOMPLETE_MENU_CLASS}>
       {matches.length > 0 && (
         <div
           id={listboxId}

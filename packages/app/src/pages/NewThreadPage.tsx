@@ -9,6 +9,7 @@ import { BoxPicker, KESTREL_BOX, useBoxOnline } from "@/components/BoxPicker"
 import { Composer } from "@/components/Composer"
 import { BranchPicker, RepoPicker } from "@/components/RepoPicker"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
+import { githubReferenceLabel, parseGithubReferenceDraft } from "@/lib/githubReference"
 import { threadPath } from "@/routes"
 import { repoShortName, threadTitle } from "@/util"
 
@@ -50,7 +51,10 @@ export function NewThreadPage() {
   const start = useMutation({
     mutationFn: async ({ body, files }: { body: SendMessageBody; files: readonly File[] }) => {
       // A message of only files is titled after the first one.
-      const title = threadTitle(body.text) || threadTitle(files[0]?.name ?? "")
+      const titleText = parseGithubReferenceDraft(body.text)
+        .map((segment) => segment.type === "text" ? segment.text : githubReferenceLabel(segment.reference.kind, segment.reference.number))
+        .join("")
+      const title = threadTitle(titleText) || threadTitle(files[0]?.name ?? "")
       const previous = created.current
       let task: Task
       if (previous !== null && previous.repo === repo && previous.branch === branch && previous.boxId === boxId) {
@@ -82,6 +86,11 @@ export function NewThreadPage() {
           pending={start.isPending}
           error={start.error}
           draftKey="new"
+          repo={repo}
+          onRepoChange={(next) => {
+            if (next !== repo) setBranch(undefined)
+            setRepo(next)
+          }}
           placeholder={
             repo === undefined
               ? "Ask for anything — the agent checks out the repos it needs"

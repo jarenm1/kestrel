@@ -43,7 +43,7 @@ import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, commentMismatch, type CommentKind,type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
@@ -165,6 +165,15 @@ export interface PullRequestTarget {
   /** Checkout whose repository holds the pull request; required when the thread has several. */
   readonly checkoutId?: string
   readonly number?: number
+}
+
+/** An issue or pull request read from an explicit repository, with no checkout involved. */
+export interface GitHubReferenceInput {
+  /** `owner/name` on github.com (or its https clone URL). */
+  readonly repo: string
+  readonly number: number
+  /** What the number is. GitHub's issues endpoint returns pull requests too, so a mismatch is refused. */
+  readonly kind: ReferenceKind
 }
 
 export type PullRequestCommentInput =
@@ -414,6 +423,14 @@ export interface CoreShape {
     taskId: string,
     checkoutId?: string,
   ) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
+  /**
+   * Used by the MCP handler (`github_reference_read`): reads an issue or pull request in an explicit repository with
+   * the thread owner's GitHub token. No checkout is needed, and the token stays host-side.
+   */
+  readonly readReference: (
+    taskId: string,
+    input: GitHubReferenceInput,
+  ) => Effect.Effect<GitHubReference, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: posts a review on a pull request of a checkout's GitHub repository. APPROVE is never sent. */
   readonly reviewPullRequest: (
     taskId: string,
@@ -2164,6 +2181,20 @@ export const CoreLive = Layer.effect(
           const { slug, token } = yield* githubAccess(task.owner, ref)
           const number = yield* linkedPullRequestNumber(taskId, checkout, slug, token)
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      readReference: (taskId, input) =>
+        Effect.gen(function* () {
+          if (!Number.isSafeInteger(input.number) || input.number <= 0) {
+            return yield* Effect.fail(new BadRequest({ message: "issue or pull request number must be a positive integer" }))
+          }
+          const task = yield* requireTask(taskId)
+          const ref = parseRepoRef(input.repo)
+          if (ref === null || ref.github === null) {
+            return yield* Effect.fail(new BadRequest({ message: "repo must be owner/name on github.com (or its https clone URL)" }))
+          }
+          const token = yield* requiredGithubToken(task.owner)
+          return yield* github.readReference(token, ref.github, input.number, input.kind).pipe(Effect.mapError(fromGitHub))
         }),
 
       reviewPullRequest: (taskId, input) =>
