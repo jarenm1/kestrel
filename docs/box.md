@@ -81,6 +81,20 @@ GPU access is not a tenant isolation boundary: desktop apps reach the host GPU d
 
 The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpaper.png` (the logo on black) on the root window, openbox runs with the theme, fonts and bindings from `desktop/theme.ts`, and the flake's `xterm` wrapper uses the app's colors. Openbox gets an explicit set of bindings and an empty menu file, so nothing on the desktop runs a program outside the sandbox: its stock root menu launches programs as the box user. Right-clicking the desktop lists the open windows instead, which is also the way back to an iconified window.
 
+#### Desktop dependencies on Linux
+
+Ubuntu 24.04's weston is too old for the box's desktop startup. With Nix and flakes enabled, build the desktop tools pinned by this checkout's `flake.lock`, including weston, Xwayland, ffmpeg and the capture helper:
+
+```sh
+mkdir -p "$HOME/.local/share/kestrel"
+nix build .#desktop-deps --out-link "$HOME/.local/share/kestrel/desktop-deps"
+export PATH="$(readlink -f "$HOME/.local/share/kestrel/desktop-deps")/bin:$PATH"
+```
+
+Run the box from that environment, or run `kestrel-box install` from it so the user service records the store path on its `PATH`. Keep the output link: it prevents garbage collection of the tools used by the service. Rebuild and reinstall the service to pick up a newer checkout's dependencies. The box and agent sandbox still need their own prerequisites; this bundle supplies desktop commands only. Nix is optional if equivalent host packages and the compiled capture helper are already installed.
+
+From a checkout with Bun dependencies installed, `bun packages/server/scripts/desktop-smoke.ts` exercises a real desktop's stream, screenshot and pointer input using the tools on `PATH`. A successful smoke test proves only that environment; it does not establish WSL, Lima or GPU behavior. WSLg's read-only `/tmp/.X11-unix` remains a separate setup issue.
+
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
 On the legacy relay, the desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
