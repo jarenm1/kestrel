@@ -1,4 +1,4 @@
-import type { AgentItem } from "@cloudagents/protocol"
+import type { AgentItem } from "./index"
 
 /**
  * Items that may still be streaming. The main agent and each subagent (items under one `parentToolId`) stream

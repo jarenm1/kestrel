@@ -1,18 +1,24 @@
-import React, { type ReactNode, useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useMemo } from "react";
+import { StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight } from "lucide-react-native";
-import { Paths, toolDisplayName, type AgentItem } from "@cloudagents/protocol";
+import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
-import { AttachmentImage } from "@/components/AttachmentImage";
 import { Markdown } from "@/components/Markdown";
 import { Alert } from "@/components/ui/Alert";
+import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "@/components/WorkLog";
 import { useApiClient } from "@/hooks/useApiClient";
-import { colors, fonts, radius, shadows, spacing } from "@/theme";
+import { colors, spacing } from "@/theme";
 
 interface Tree {
   roots: readonly AgentItem[];
   children: ReadonlyMap<string, readonly AgentItem[]>;
+}
+
+interface Ctx {
+  readonly source: RunSource;
+  readonly tree: Tree;
+  readonly liveIds: ReadonlySet<string>;
+  readonly running: boolean;
 }
 
 /** Items in arrival order; a tool's subagent items (`parentToolId`) hang under it instead of the top level. */
@@ -44,85 +50,43 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
   return parts.join(" · ");
 }
 
-/** The web app's `<details>`: a tappable summary line that shows its body while open. */
-function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
+/** A run of consecutive tool calls under one group, which shows a summary line once there are two or more. */
+function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
+  const views = items.map((item) => describeTool(item, ctx.source.taskId));
+  const rows = items.map((item, index) => {
+    const nested = ctx.tree.children.get(item.id);
+    return (
+      <ToolRow
+        key={item.id}
+        item={item}
+        view={views[index]!}
+        source={ctx.source}
+        running={ctx.running}
+        nested={nested !== undefined ? <Items items={nested} ctx={ctx} /> : undefined}
+      />
+    );
+  });
+  const last = items[items.length - 1]!;
+  const live = ctx.running && (ctx.liveIds.has(last.id) || items.some((item) => item.status === "running"));
   return (
-    <View>
-      <Pressable
-        style={styles.summary}
-        onPress={() => setOpen((o) => !o)}
-        hitSlop={6}
-        accessibilityRole="button"
-        accessibilityState={{ expanded: open }}
-      >
-        <View style={open ? styles.chevronOpen : undefined}>
-          <ChevronRight size={14} color={colors.mutedForeground} />
-        </View>
-        {summary}
-      </Pressable>
-      {open ? children : null}
-    </View>
+    <ToolGroup
+      single={items.length === 1}
+      summary={summarizeTools(views)}
+      kinds={new Set(views.map((view) => view.kind))}
+      live={live}
+      failed={items.some((item) => item.status === "error")}
+    >
+      {rows}
+    </ToolGroup>
   );
 }
 
-function Pre({ text }: { text: string }) {
-  return (
-    <ScrollView style={styles.pre} nestedScrollEnabled>
-      <Text style={styles.preText} selectable>
-        {text}
-      </Text>
-    </ScrollView>
-  );
-}
-
-/** The thread and run whose box serves the transcript's images. */
-interface RunSource {
-  readonly taskId: string;
-  readonly runId: string;
-}
-
-function ItemView({ item, tree, source }: { item: AgentItem; tree: Tree; source: RunSource }) {
+function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx }) {
   switch (item._tag) {
     case "text":
       return <Markdown text={item.text} />;
     case "thinking":
-      return (
-        <Disclosure summary={<Text style={styles.summaryText}>Thinking</Text>}>
-          <Text style={styles.thinking}>{item.text}</Text>
-        </Disclosure>
-      );
-    case "tool":
-      return (
-        <View style={styles.tool}>
-          <Disclosure
-            summary={
-              <Text
-                style={[styles.summaryText, item.status === "error" && styles.error]}
-              >
-                {toolDisplayName(item.name)} · {item.status}
-              </Text>
-            }
-          >
-            <View style={styles.toolBody}>
-              <Text style={[styles.summaryText, styles.mono]} selectable>{item.name}</Text>
-              <Pre text={JSON.stringify(item.input, null, 2)} />
-              {item.output !== null ? <Pre text={item.output} /> : null}
-              {(item.images ?? []).map((image) => (
-                <AttachmentImage
-                  key={image.id}
-                  path={Paths.taskRunImage(source.taskId, source.runId, image.id)}
-                  style={styles.image}
-                  accessibilityLabel="Tool screenshot"
-                />
-              ))}
-              {(tree.children.get(item.id) ?? []).map((child) => (
-                <ItemView key={child.id} item={child} tree={tree} source={source} />
-              ))}
-            </View>
-          </Disclosure>
-        </View>
-      );
+      return <ThinkingBlock text={item.text} live={ctx.liveIds.has(item.id)} />;
     case "turn": {
       const summary = turnSummary(item);
       if (summary === "") return null;
@@ -133,51 +97,44 @@ function ItemView({ item, tree, source }: { item: AgentItem; tree: Tree; source:
   }
 }
 
-/** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId }: { taskId: string; runId: string }) {
-  const { api } = useApiClient();
-  const queries = useMemo(() => createQueries(api), [api]);
-  const { data } = useQuery(queries.runItems(runId));
-  const tree = useMemo(() => buildTree(data ?? []), [data]);
-  const source = useMemo(() => ({ taskId, runId }), [taskId, runId]);
-
-  if (data === undefined || data.length === 0) return null;
-
+/** Items in order, with each run of consecutive tool calls gathered into one `Tools` block. */
+function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
+  const blocks: Array<Exclude<AgentItem, ToolItem> | ToolItem[]> = [];
+  for (const item of items) {
+    const last = blocks[blocks.length - 1];
+    if (item._tag !== "tool") blocks.push(item);
+    else if (Array.isArray(last)) last.push(item);
+    else blocks.push([item]);
+  }
   return (
-    <View style={styles.root}>
-      {tree.roots.map((item) => (
-        <ItemView key={item.id} item={item} tree={tree} source={source} />
-      ))}
+    <View style={styles.items}>
+      {blocks.map((block) =>
+        Array.isArray(block) ? (
+          <Tools key={block[0]!.id} items={block} ctx={ctx} />
+        ) : (
+          <ItemView key={block.id} item={block} ctx={ctx} />
+        ),
+      )}
     </View>
   );
 }
 
+/** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
+export function RunTranscript({ taskId, runId, running }: { taskId: string; runId: string; running: boolean }) {
+  const { api } = useApiClient();
+  const queries = useMemo(() => createQueries(api), [api]);
+  const { data } = useQuery(queries.runItems(runId));
+  const tree = useMemo(() => buildTree(data ?? []), [data]);
+  const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running]);
+  const source = useMemo(() => ({ taskId, runId }), [taskId, runId]);
+
+  if (data === undefined || data.length === 0) return null;
+
+  return <Items items={tree.roots} ctx={{ source, tree, liveIds, running }} />;
+}
+
 const styles = StyleSheet.create({
-  root: { gap: spacing.md },
-  summary: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 24 },
-  chevronOpen: { transform: [{ rotate: "90deg" }] },
-  summaryText: { color: colors.mutedForeground, fontSize: 12, flexShrink: 1 },
-  mono: { fontFamily: fonts.mono },
+  items: { gap: spacing.sm },
   error: { color: colors.destructive },
-  thinking: {
-    color: colors.mutedForeground,
-    fontSize: 14,
-    lineHeight: 20,
-    fontStyle: "italic",
-    marginTop: spacing.xs,
-  },
-  tool: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.card + "66",
-    borderRadius: radius.xl,
-    paddingHorizontal: 14,
-    paddingVertical: spacing.sm,
-    ...shadows.soft,
-  },
-  toolBody: { marginTop: spacing.sm, gap: spacing.sm },
-  pre: { maxHeight: 288, backgroundColor: colors.code, borderRadius: radius.sm, paddingHorizontal: 12, paddingVertical: 8 },
-  preText: { color: colors.foreground, fontFamily: fonts.mono, fontSize: 11, lineHeight: 16 },
-  image: { width: "100%", height: 200, borderRadius: radius.sm },
   turn: { color: colors.mutedForeground, fontSize: 11 },
 });

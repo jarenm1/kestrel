@@ -1,6 +1,15 @@
 import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Paths, type Attachment } from "@cloudagents/protocol"
+import {
+  outputText,
+  Paths,
+  type Attachment,
+  type EditLine,
+  type ToolIcon,
+  type ToolItem,
+  type ToolKind,
+  type ToolView,
+} from "@cloudagents/protocol"
 import {
   Bot,
   Brain,
@@ -28,7 +37,6 @@ import {
 import { queries } from "@/api/queries"
 import { useAutoOpen } from "@/hooks/useAutoOpen"
 import { cn } from "@/lib/utils"
-import { outputText, type EditLine, type ToolIcon, type ToolItem, type ToolKind, type ToolView } from "@/lib/tool-display"
 
 const SHIMMER_CLASS =
   "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent"

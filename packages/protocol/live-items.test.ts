@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import type { AgentItem } from "@cloudagents/protocol"
-import { liveItemIds } from "./live-items"
+import type { AgentItem } from "./src/index"
+import { liveItemIds } from "./src/live-items"
 
 const thinking = (id: string, parentToolId: string | null = null): AgentItem => ({ _tag: "thinking", id, parentToolId, text: id })
 const text = (id: string, parentToolId: string | null = null): AgentItem => ({ _tag: "text", id, parentToolId, text: id })

@@ -1,5 +1,5 @@
-import { toolDisplayName, type AgentItem } from "@cloudagents/protocol"
-import type { DiffLineKind } from "./diff"
+import type { AgentItem } from "./index"
+import { toolDisplayName } from "./tool-names"
 
 export type ToolItem = Extract<AgentItem, { _tag: "tool" }>
 
@@ -10,7 +10,7 @@ export type ToolKind = "command" | "read" | "edit" | "search" | "web" | "desktop
 export type ToolIcon = "camera" | "pointer" | "keyboard" | "git" | "message"
 
 export interface EditLine {
-  readonly kind: DiffLineKind
+  readonly kind: "context" | "add" | "del"
   readonly text: string
 }
 
@@ -119,7 +119,7 @@ const SANDBOX_HOME = "/home/agent"
  * A path as the user knows it: relative to the thread's workspace (`<data>/threads/<taskId>`), or `~` for the agent's
  * home. Backslashes count as separators too (a dev box on Windows).
  */
-export function displayPath(path: string, taskId: string): string {
+export function displayToolPath(path: string, taskId: string): string {
   const normalized = path.replaceAll("\\", "/")
   const workspace = `/threads/${taskId}`
   const at = normalized.indexOf(workspace)
@@ -280,7 +280,7 @@ export function describeTool(item: ToolItem, taskId: string): ToolView {
   const { server, tool } = splitName(item.name)
   const path = (key: string) => {
     const value = str(input[key])
-    return value === undefined ? undefined : displayPath(value, taskId)
+    return value === undefined ? undefined : displayToolPath(value, taskId)
   }
 
   if (server === "cloudagents") {
@@ -316,7 +316,7 @@ export function describeTool(item: ToolItem, taskId: string): ToolView {
       }
       case "file_change": {
         const changes = (Array.isArray(input.changes) ? input.changes : []).map(record).map((change) => ({
-          path: displayPath(str(change.path) ?? "?", taskId),
+          path: displayToolPath(str(change.path) ?? "?", taskId),
           kind: str(change.kind) ?? "update",
         }))
         const verb = (kind: string) => (kind === "add" ? "Created" : kind === "delete" ? "Deleted" : "Edited")

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { describeTool, displayCommand, displayPath, editDiff, outputText, summarizeTools, type ToolItem } from "./tool-display"
+import { describeTool, displayCommand, displayToolPath, editDiff, outputText, summarizeTools, type ToolItem } from "./src/tool-display"
 
 const TASK = "t_123"
 const tool = (name: string, input: unknown, status: ToolItem["status"] = "ok"): ToolItem => ({
@@ -38,15 +38,15 @@ describe("displayCommand", () => {
   })
 })
 
-describe("displayPath", () => {
+describe("displayToolPath", () => {
   test("workspace paths become relative, the agent's home becomes ~", () => {
-    expect(displayPath(`/var/lib/kestrel/threads/${TASK}/repo/src/a.ts`, TASK)).toBe("repo/src/a.ts")
-    expect(displayPath(`/var/lib/kestrel/threads/${TASK}`, TASK)).toBe(".")
-    expect(displayPath("/home/agent/.config/x.json", TASK)).toBe("~/.config/x.json")
+    expect(displayToolPath(`/var/lib/kestrel/threads/${TASK}/repo/src/a.ts`, TASK)).toBe("repo/src/a.ts")
+    expect(displayToolPath(`/var/lib/kestrel/threads/${TASK}`, TASK)).toBe(".")
+    expect(displayToolPath("/home/agent/.config/x.json", TASK)).toBe("~/.config/x.json")
     // Another thread's directory is not this workspace.
-    expect(displayPath(`/var/lib/kestrel/threads/${TASK}0/a.ts`, TASK)).toBe(`/var/lib/kestrel/threads/${TASK}0/a.ts`)
-    expect(displayPath("/tmp/out.png", TASK)).toBe("/tmp/out.png")
-    expect(displayPath(`C:\\data\\threads\\${TASK}\\repo\\a.ts`, TASK)).toBe("repo/a.ts")
+    expect(displayToolPath(`/var/lib/kestrel/threads/${TASK}0/a.ts`, TASK)).toBe(`/var/lib/kestrel/threads/${TASK}0/a.ts`)
+    expect(displayToolPath("/tmp/out.png", TASK)).toBe("/tmp/out.png")
+    expect(displayToolPath(`C:\\data\\threads\\${TASK}\\repo\\a.ts`, TASK)).toBe("repo/a.ts")
   })
 })
 
