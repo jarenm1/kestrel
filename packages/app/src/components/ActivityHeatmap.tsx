@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react"
 import type { ActivityDay } from "@cloudagents/protocol"
 import { cn } from "@/lib/utils"
 
@@ -29,6 +30,12 @@ interface Cell {
  */
 export function ActivityHeatmap({ days, today }: { days: readonly ActivityDay[] | undefined; today: Date }) {
   const byDate = new Map(days?.map((d) => [d.date, d]))
+  const scroller = useRef<HTMLDivElement>(null)
+  // Narrow screens scroll the year sideways; start at today's end, where the recent weeks are.
+  useLayoutEffect(() => {
+    const el = scroller.current
+    if (el) el.scrollLeft = el.scrollWidth
+  }, [])
   const end = new Date(today.getFullYear(), today.getMonth(), today.getDate())
   const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (end.getDay() + 6) % 7 - (WEEKS - 1) * 7)
 
@@ -68,37 +75,39 @@ export function ActivityHeatmap({ days, today }: { days: readonly ActivityDay[] 
           {dayFormat.format(start)} – {dayFormat.format(end)}
         </span>
       </div>
-      <div
-        className="grid gap-[3px] text-xs text-muted-foreground"
-        style={{ gridTemplateColumns: `1.25rem repeat(${WEEKS}, minmax(0, 1fr))` }}
-      >
-        {monthLabels.map(
-          (label, week) =>
-            label !== null && (
-              <span key={`m${week}`} className="whitespace-nowrap" style={{ gridRow: 1, gridColumn: week + 2 }}>
-                {label}
-              </span>
-            ),
-        )}
-        {Object.entries(DAY_LABELS).map(([row, label]) => (
-          <span key={`d${row}`} className="leading-none" style={{ gridRow: Number(row) + 2, gridColumn: 1 }}>
-            {label}
-          </span>
-        ))}
-        {weeks.map((week, w) =>
-          week.map(({ date, day }, row) => {
-            const runs = day?.runs ?? 0
-            const level = runs === 0 ? 0 : Math.min(4, Math.ceil((runs / busiest) * 4))
-            return (
-              <span
-                key={dateKey(date)}
-                title={`${runs === 0 ? "No runs" : `${runs} ${runs === 1 ? "run" : "runs"} · ${duration(day?.agentSeconds ?? 0)}`} · ${dayFormat.format(date)}`}
-                className={cn("aspect-square rounded-[3px]", LEVELS[level])}
-                style={{ gridRow: row + 2, gridColumn: w + 2 }}
-              />
-            )
-          }),
-        )}
+      <div ref={scroller} className="overflow-x-auto sm:overflow-x-visible">
+        <div
+          className="grid min-w-[40rem] gap-[3px] text-xs text-muted-foreground"
+          style={{ gridTemplateColumns: `1.25rem repeat(${WEEKS}, minmax(0, 1fr))` }}
+        >
+          {monthLabels.map(
+            (label, week) =>
+              label !== null && (
+                <span key={`m${week}`} className="whitespace-nowrap" style={{ gridRow: 1, gridColumn: week + 2 }}>
+                  {label}
+                </span>
+              ),
+          )}
+          {Object.entries(DAY_LABELS).map(([row, label]) => (
+            <span key={`d${row}`} className="leading-none" style={{ gridRow: Number(row) + 2, gridColumn: 1 }}>
+              {label}
+            </span>
+          ))}
+          {weeks.map((week, w) =>
+            week.map(({ date, day }, row) => {
+              const runs = day?.runs ?? 0
+              const level = runs === 0 ? 0 : Math.min(4, Math.ceil((runs / busiest) * 4))
+              return (
+                <span
+                  key={dateKey(date)}
+                  title={`${runs === 0 ? "No runs" : `${runs} ${runs === 1 ? "run" : "runs"} · ${duration(day?.agentSeconds ?? 0)}`} · ${dayFormat.format(date)}`}
+                  className={cn("aspect-square rounded-[3px]", LEVELS[level])}
+                  style={{ gridRow: row + 2, gridColumn: w + 2 }}
+                />
+              )
+            }),
+          )}
+        </div>
       </div>
       <div className="flex items-center justify-between gap-4 text-muted-foreground">
         <span>

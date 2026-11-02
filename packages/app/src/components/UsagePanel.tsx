@@ -19,9 +19,13 @@ const PROVIDER_LABELS: Record<CliProvider, string> = {
   "codex-cli": "Codex",
 }
 
-/** Column widths shared by every provider's rows, so the bars line up down the table. */
-const ROW = "grid grid-cols-[10rem_minmax(0,1fr)] gap-x-6"
-const WINDOW_ROW = "grid grid-cols-[8rem_minmax(0,1fr)_5rem_8rem] items-center gap-x-5"
+/**
+ * Column widths shared by every provider's rows, so the bars line up down the table. Below `sm` the provider sits above
+ * its limits, and each limit puts its bar on a full-width second line.
+ */
+const ROW = "grid gap-x-6 gap-y-2 sm:grid-cols-[10rem_minmax(0,1fr)]"
+const WINDOW_ROW =
+  "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-4 gap-y-1.5 sm:grid-cols-[8rem_minmax(0,1fr)_5rem_8rem] sm:gap-x-5"
 
 /** `4h56m`, `2d18h`: the two largest units left until the window resets. */
 function resetsText(resetsAt: string, now: number): string {
@@ -44,7 +48,7 @@ function WindowRow({ window, now }: { window: ProviderUsageWindow; now: number }
         aria-valuenow={used}
         aria-valuemin={0}
         aria-valuemax={100}
-        className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]"
+        className="col-span-3 row-start-2 h-1.5 overflow-hidden rounded-full bg-white/[0.06] sm:col-span-1 sm:row-start-auto"
       >
         <div
           className={cn(
