@@ -3,7 +3,7 @@ import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from 
 import { WebView } from "react-native-webview";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
-import { createQueries, keys } from "@/api/queries";
+import { createQueries, boxKeys } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -21,6 +21,7 @@ const SafeWebView = WebView as unknown as React.ComponentType<any>;
  */
 export function DesktopViewer({ taskId }: { taskId: string }) {
   const { api } = useApiClient();
+  const keys = boxKeys(api.boxScope);
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const desktop = useQuery(queries.desktop(taskId));

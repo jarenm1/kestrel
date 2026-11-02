@@ -2,7 +2,7 @@ import React, { useRef } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Message, Run, SendMessageBody, Task } from "@cloudagents/protocol";
-import { keys, storeTask } from "@/api/queries";
+import { boxKeys, storeTask } from "@/api/queries";
 import { Composer } from "@/components/Composer";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadTitle } from "@/lib/format";
@@ -15,6 +15,7 @@ import { colors, spacing } from "@/theme";
  */
 export function NewThreadScreen() {
   const { api } = useApiClient();
+  const keys = boxKeys(api.boxScope);
   const nav = useNavigation();
   const queryClient = useQueryClient();
   // The thread created by an earlier attempt; a retry after a failed send reuses it instead of creating another.
@@ -25,7 +26,7 @@ export function NewThreadScreen() {
       const task = created.current ?? (await api.createTask({ title: threadTitle(body.text) }));
       created.current = task;
       // The thread exists from here on, even if sending the first message fails.
-      storeTask(queryClient, task);
+      storeTask(queryClient, task, api.boxScope);
       const sent = await api.sendMessage(task.id, body);
       return { task, sent };
     },

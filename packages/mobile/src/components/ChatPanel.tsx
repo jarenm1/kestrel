@@ -2,7 +2,7 @@ import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo,
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
-import { createQueries, keys, upsert } from "@/api/queries";
+import { createQueries, boxKeys, upsert } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -115,6 +115,7 @@ function ArchivedNotice({ task }: { task: Task }) {
 
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, context }: Props) {
   const { api } = useApiClient();
+  const keys = boxKeys(api.boxScope);
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);

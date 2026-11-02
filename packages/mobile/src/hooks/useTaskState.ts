@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
-import { createQueries, keys, storeTask, upsert } from "@/api/queries";
+import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 
 const MAX_LOG_LINES = 2000;
@@ -14,6 +14,7 @@ const RECONNECT_MS = 2000;
  */
 export function useTaskState(taskId: string) {
   const { api } = useApiClient();
+  const keys = boxKeys(api.boxScope);
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
 
@@ -54,7 +55,7 @@ export function useTaskState(taskId: string) {
         onEvent: (event) => {
           switch (event._tag) {
             case "task.updated":
-              storeTask(queryClient, event.task);
+              storeTask(queryClient, event.task, api.boxScope);
               break;
             case "message.created":
               queryClient.setQueryData(keys.messages(taskId), (list: Message[] | undefined) =>
