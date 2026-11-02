@@ -1,7 +1,7 @@
 import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import { Paths, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
+import { Paths, transcriptSegments, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
 import { createQueries, keys, upsert } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -122,12 +122,9 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
   const atEnd = useRef(true);
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  // A run's transcript follows the last user message it took: the prompt, or a later message that steered it or
-  // waited in its inbox. The user's messages read first, then everything the agent did with them.
-  const transcriptAfter = new Map<string, string>();
-  for (const m of sortedMessages) {
-    if (m.role === "user" && m.runId !== null) transcriptAfter.set(m.runId, m.id);
-  }
+  // After each user message a run took comes what the run showed until its next one, so a message that steered the run
+  // (or waited in its inbox) reads at the point of the transcript where it was sent.
+  const segments = transcriptSegments(sortedMessages);
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) });
@@ -174,8 +171,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
           <Text style={styles.empty}>No messages yet. Describe what to do.</Text>
         ) : null}
         {sortedMessages.map((m) => {
-          const transcriptRunId =
-            m.role === "user" && m.runId !== null && transcriptAfter.get(m.runId) === m.id ? m.runId : null;
+          const segment = segments.get(m.id);
           const pending = m.id === pendingAsk?.id;
           const duplicate =
             m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0;
@@ -196,11 +192,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
                   </>
                 ) : undefined}
               </ThreadItem>
-              {transcriptRunId !== null ? (
+              {segment !== undefined ? (
                 <RunTranscript
                   taskId={taskId}
-                  runId={transcriptRunId}
-                  running={runs.some((run) => run.id === transcriptRunId && run.status === "running")}
+                  runId={segment.runId}
+                  running={runs.some((run) => run.id === segment.runId && run.status === "running")}
+                  from={segment.from}
+                  to={segment.to}
                 />
               ) : null}
             </Fragment>

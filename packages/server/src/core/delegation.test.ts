@@ -41,7 +41,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }
         return Either.right(undefined)
-      }), stopAll: () => Effect.void, items: () => Effect.succeed([]),
+      }), stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
     } as never),
   )
   try {

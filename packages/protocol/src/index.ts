@@ -147,6 +147,12 @@ export const Message = Schema.Struct({
    * came from, with that thread's title when it was sent. Absent on messages the user typed.
    */
   fromThread: Schema.optional(Schema.Struct({ id: Schema.String, title: Schema.String })),
+  /**
+   * Set on a user message that reached a run already going (a steer, an answer, or mail for its inbox): how many of
+   * the run's display items it had shown by then, so the message reads at that point of the transcript. Absent on a
+   * run's prompt and on messages persisted before it was recorded.
+   */
+  afterItems: Schema.optional(Schema.Number),
 })
 export type Message = typeof Message.Type
 
@@ -703,4 +709,5 @@ export * from "./boxtoken"
 export * from "./tool-names"
 export * from "./tool-display"
 export * from "./live-items"
+export * from "./transcript-segments"
 export * from "./thread-identity"

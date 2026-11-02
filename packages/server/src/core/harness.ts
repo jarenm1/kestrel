@@ -68,6 +68,8 @@ export interface AgentHarnessShape {
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
   readonly items: (runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, InternalError>
+  /** How many display items a live run has shown so far (a run waiting for a slot shows its queue item); 0 once it is over. */
+  readonly itemCount: (runId: string) => number
   /**
    * Plays a recorded fixture through the normal run pipeline (stdout -> items -> finish) instead
    * of launching an agent. Dev-only `/replay` flow; the fixture path is trusted repo state.
@@ -790,6 +792,8 @@ export const AgentHarnessLive = Layer.effect(
         }),
 
       items: readItems,
+
+      itemCount: (runId) => (queuedItems.has(runId) ? 1 : (active.get(runId)?.items.size ?? 0)),
 
       activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 

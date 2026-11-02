@@ -12,6 +12,9 @@ interface Props {
   runId: string
   /** The run is still going: its last item may still be streaming. */
   running: boolean
+  /** The part of the run's items to show: positions `from` up to `to` (null: the end). A tool keeps its subagent items. */
+  from: number
+  to: number | null
 }
 
 interface Tree {
@@ -134,13 +137,20 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId, running }: Props) {
+export function RunTranscript({ taskId, runId, running, from, to }: Props) {
   const { data } = useQuery(queries.runItems(taskId, runId))
   const tree = useMemo(() => buildTree(data ?? []), [data])
   const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running])
   const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
+  const roots = useMemo(() => {
+    const position = new Map((data ?? []).map((item, index) => [item.id, index]))
+    return tree.roots.filter((item) => {
+      const at = position.get(item.id)!
+      return at >= from && (to === null || at < to)
+    })
+  }, [data, tree, from, to])
 
-  if (data === undefined || data.length === 0) return null
+  if (roots.length === 0) return null
 
-  return <Items items={tree.roots} ctx={{ source, tree, liveIds, running }} />
+  return <Items items={roots} ctx={{ source, tree, liveIds, running }} />
 }
