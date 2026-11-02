@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
+import { Check, ChevronDown, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
 import { Link, Navigate, NavLink, Outlet } from "react-router-dom"
 import { queries } from "@/api/queries"
 import { Boxes } from "@/components/Boxes"
@@ -11,9 +11,17 @@ import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Slider } from "@/components/ui/slider"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
-import { getTurnSound, playTurnSound, TURN_SOUND_KEY, turnSounds, type TurnSound } from "@/lib/turnSound"
+import { getTurnSound, getTurnVolume, playTurnSound, TURN_SOUND_KEY, TURN_VOLUME_KEY, turnSounds } from "@/lib/turnSound"
 import { errorText } from "@/util"
 
 const sections = [
@@ -79,10 +87,76 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
+function TurnSoundCard() {
+  const [sound, setSound] = useState(getTurnSound)
+  const [volume, setVolume] = useState(getTurnVolume)
+  const silent = sound === "off"
+
+  return (
+    <Card className="py-0">
+      <CardContent className="divide-y divide-white/[0.04] px-0">
+        <div className="px-5 py-4">
+          <div className="font-medium">Turn sound</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Play a sound when a thread finishes or needs your input. Saved in this browser; your browser may require a
+            click on the page before it plays audio.
+          </p>
+        </div>
+        <Row label="Sound">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="soft" size="sm" aria-label="Turn sound" className="capitalize data-[state=open]:bg-white/[0.06]">
+                {sound}
+                <ChevronDown className="opacity-60" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuRadioGroup
+                value={sound}
+                onValueChange={(value) => {
+                  const next = turnSounds.find((option) => option === value) ?? "off"
+                  setSound(next)
+                  localStorage.setItem(TURN_SOUND_KEY, next)
+                  playTurnSound(next, volume)
+                }}
+              >
+                {turnSounds.map((option) => (
+                  <DropdownMenuRadioItem key={option} value={option} className="capitalize">
+                    {option}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button variant="soft" size="sm" disabled={silent || volume === 0} onClick={() => playTurnSound(sound, volume)}>
+            Preview
+          </Button>
+        </Row>
+        <Row label="Volume">
+          <Slider
+            thumbLabel="Turn sound volume"
+            className="max-w-64 flex-1"
+            disabled={silent}
+            min={0}
+            max={100}
+            step={5}
+            value={[volume]}
+            onValueChange={([next = volume]) => {
+              setVolume(next)
+              localStorage.setItem(TURN_VOLUME_KEY, String(next))
+            }}
+            onValueCommit={([next = volume]) => playTurnSound(sound, next)}
+          />
+          <span className="w-10 text-right text-sm text-muted-foreground tabular-nums">{volume}%</span>
+        </Row>
+      </CardContent>
+    </Card>
+  )
+}
+
 export function ProfileSettings() {
   const me = useQuery(queries.me())
   const signOut = useSignOut()
-  const [sound, setSound] = useState(getTurnSound)
   if (!me.data) return null
   const { login, name, avatarUrl } = me.data
 
@@ -122,24 +196,7 @@ export function ProfileSettings() {
           </Row>
         </CardContent>
       </Card>
-      <Card className="py-0">
-        <CardContent className="px-5 py-4">
-          <label htmlFor="turn-sound" className="font-medium">Turn sound</label>
-          <p className="mt-1 text-sm text-muted-foreground">Play a sound when a thread finishes or needs your input. Saved in this browser.</p>
-          <div className="mt-3 flex items-center gap-3">
-            <select id="turn-sound" value={sound} onChange={(event) => {
-              const next = event.target.value as TurnSound
-              setSound(next)
-              localStorage.setItem(TURN_SOUND_KEY, next)
-              playTurnSound(next)
-            }} className="rounded-md border border-white/10 bg-card px-3 py-2 capitalize">
-              {turnSounds.map((option) => <option key={option} value={option}>{option}</option>)}
-            </select>
-            <Button variant="soft" size="sm" disabled={sound === "off"} onClick={() => playTurnSound(sound)}>Preview</Button>
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">Keep Kestrel open; your browser may require interaction before playing audio.</p>
-        </CardContent>
-      </Card>
+      <TurnSoundCard />
       <p className="text-xs text-muted-foreground">
         Name and avatar update from GitHub each time you sign in.
       </p>

@@ -4,7 +4,7 @@ import type { Task } from "@cloudagents/protocol"
 import type { Target } from "@/api/client"
 import { openUserEvents } from "@/api/events"
 import { keys, queries, storeTask } from "@/api/queries"
-import { getTurnSound, observeTask, playTurnSound, type SeenTasks } from "@/lib/turnSound"
+import { observeTask, playTurnSound, type SeenTasks } from "@/lib/turnSound"
 
 const RECONNECT_MS = 2000
 
@@ -21,7 +21,7 @@ export function useThreadListEvents(): void {
   useEffect(() => {
     // One clip however many threads a reconnect's refetch finds finished.
     const turns = (tasks ?? []).filter((task) => observeTask(seen.current, task))
-    if (turns.length > 0) playTurnSound(getTurnSound())
+    if (turns.length > 0) playTurnSound()
   }, [tasks])
   const list = useQuery(queries.boxes()).data
   const managed = list?.managedBox ?? null
@@ -50,7 +50,7 @@ function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): (
       onEvent: (event) => {
         switch (event._tag) {
           case "task.updated":
-            if (observeTask(seen, event.task)) playTurnSound(getTurnSound())
+            if (observeTask(seen, event.task)) playTurnSound()
             storeTask(queryClient, event.task)
             break
           case "task.deleted":
