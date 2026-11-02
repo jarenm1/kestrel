@@ -2,6 +2,15 @@ import { QueryClient, queryOptions } from "@tanstack/react-query";
 import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 
+/**
+ * A request about one thread. It names the box client that sent it, so the response is cached under that box even if
+ * the active box has changed while the request was in flight.
+ */
+export interface ThreadCall {
+  readonly api: ApiClient;
+  readonly taskId: string;
+}
+
 /** Agent box status poll; it feeds the top bar pill. */
 const BOX_POLL_MS = 10_000;
 /** Task statuses change from agent runs with no list-level event stream, so the thread list is polled. */

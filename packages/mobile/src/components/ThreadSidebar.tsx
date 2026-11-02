@@ -209,7 +209,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const archivedCount = byRecent.length - threads.length;
 
   function archiveThread(task: Task) {
-    archive.mutate(task.id, {
+    archive.mutate({ api, taskId: task.id }, {
       // The open thread leaves the list; go back to the empty chat.
       onSuccess: () => {
         if (task.id === openTaskId) nav.navigate({ name: "new-thread" });
@@ -249,7 +249,7 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
           <ThreadRow
             task={item}
             active={item.id === openTaskId}
-            archiving={archive.isPending && archive.variables === item.id}
+            archiving={archive.isPending && archive.variables?.taskId === item.id}
             onArchive={() => archiveThread(item)}
             now={now}
           />

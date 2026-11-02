@@ -2,7 +2,7 @@ import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo,
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, transcriptSegments, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
-import { createQueries, boxKeys, upsert } from "@/api/queries";
+import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -102,10 +102,11 @@ function ThreadItem({
 /** Stands in for the composer on an archived thread: its history stays readable until it is unarchived. */
 function ArchivedNotice({ task }: { task: Task }) {
   const { unarchive } = useThreadArchive();
+  const { api } = useApiClient();
   return (
     <View style={styles.archived}>
       <Text style={styles.archivedText}>This thread is archived. Unarchive it to send messages again.</Text>
-      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate(task.id)}>
+      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate({ api, taskId: task.id })}>
         Unarchive
       </Button>
       {unarchive.error ? <Alert>{errorText(unarchive.error)}</Alert> : null}
@@ -115,7 +116,6 @@ function ArchivedNotice({ task }: { task: Task }) {
 
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, context }: Props) {
   const { api } = useApiClient();
-  const keys = boxKeys(api.boxScope);
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
@@ -136,16 +136,18 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined;
 
   const send = useMutation({
-    mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
-    onSuccess: (res) => {
+    mutationFn: ({ api, taskId, body }: ThreadCall & { body: SendMessageBody }) => api.sendMessage(taskId, body),
+    onSuccess: (res, { api, taskId }) => {
       atEnd.current = true;
+      const keys = boxKeys(api.boxScope);
       queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, res.message));
       queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
     },
   });
   const cancel = useMutation({
-    mutationFn: (runId: string) => api.cancelRun(runId),
-    onSuccess: (run) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
+    mutationFn: ({ api, runId }: ThreadCall & { runId: string }) => api.cancelRun(runId),
+    onSuccess: (run, { api, taskId }) =>
+      queryClient.setQueryData<Run[]>(boxKeys(api.boxScope).runs(taskId), (list) => upsert(list, run)),
   });
   const latestRun = sortedRuns.at(-1);
   const activeRun = latestRun?.status === "running" ? latestRun : undefined;
@@ -216,10 +218,10 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
-          onSend={(body) => send.mutateAsync(body)}
+          onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}
-          onStop={activeRun ? () => cancel.mutate(activeRun.id) : undefined}
+          onStop={activeRun ? () => cancel.mutate({ api, taskId, runId: activeRun.id }) : undefined}
           stopping={cancel.isPending}
         />
       )}

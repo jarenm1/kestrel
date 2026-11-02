@@ -1,13 +1,14 @@
 import React, { useMemo } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
-import { createQueries, storeTask } from "@/api/queries";
+import { createQueries } from "@/api/queries";
 import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { useApiClient } from "@/hooks/useApiClient";
+import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, spacing } from "@/theme";
@@ -16,7 +17,6 @@ import { colors, spacing } from "@/theme";
 export function ArchivedScreen() {
   const { api } = useApiClient();
   const nav = useNavigation();
-  const queryClient = useQueryClient();
   const tasks = useQuery(createQueries(api).tasks());
 
   const archived = useMemo(
@@ -27,10 +27,7 @@ export function ArchivedScreen() {
     [tasks.data]
   );
 
-  const unarchive = useMutation({
-    mutationFn: (taskId: string) => api.unarchiveTask(taskId),
-    onSuccess: (task) => storeTask(queryClient, task, api.boxScope),
-  });
+  const { unarchive } = useThreadArchive();
 
   const now = Date.now();
 
@@ -56,9 +53,9 @@ export function ArchivedScreen() {
         <ArchivedRow
           task={item}
           now={now}
-          unarchiving={unarchive.isPending && unarchive.variables === item.id}
+          unarchiving={unarchive.isPending && unarchive.variables?.taskId === item.id}
           onOpen={() => nav.push({ name: "thread", taskId: item.id })}
-          onUnarchive={() => unarchive.mutate(item.id)}
+          onUnarchive={() => unarchive.mutate({ api, taskId: item.id })}
         />
       )}
       ListEmptyComponent={

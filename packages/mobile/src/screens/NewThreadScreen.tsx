@@ -2,6 +2,7 @@ import React, { useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { GithubRepoSlug, type Message, type Run, type SendMessageBody, type Task } from "@cloudagents/protocol";
+import type { ApiClient } from "@/api/client";
 import { boxKeys, storeTask } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { useBoxOnline } from "@/components/BoxStatus";
@@ -21,7 +22,6 @@ import { colors, spacing } from "@/theme";
 export function NewThreadScreen() {
   const { api } = useApiClient();
   const { boxes, activeBoxId, setActiveBox } = useAuth();
-  const keys = boxKeys(api.boxScope);
   const nav = useNavigation();
   const queryClient = useQueryClient();
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug);
@@ -30,15 +30,16 @@ export function NewThreadScreen() {
   const boxOnline = useBoxOnline();
   // The thread created by an earlier attempt, and what it was created with; a retry after a failed send reuses it
   // only while the repository, branch and box are unchanged.
-  const created = useRef<{ task: Task; repo: string | undefined; branch: string | undefined; boxId: string | null } | null>(null);
+  const created = useRef<{ task: Task; repo: string | undefined; branch: string | undefined; scope: string } | null>(null);
 
   const switchBox = useMutation({ mutationFn: (boxId: string | null) => setActiveBox(boxId) });
 
+  // The box the send goes to travels with the call, so a response that lands after a box switch writes into the box it was sent to.
   const start = useMutation({
-    mutationFn: async (body: SendMessageBody) => {
+    mutationFn: async ({ api, body }: { api: ApiClient; body: SendMessageBody }) => {
       const previous = created.current;
       let task: Task;
-      if (previous !== null && previous.repo === repo && previous.branch === branch && previous.boxId === activeBoxId) {
+      if (previous !== null && previous.repo === repo && previous.branch === branch && previous.scope === api.boxScope) {
         task = previous.task;
       } else if (boxOnline === false) {
         throw new Error("That box is offline. Pick another box or start it first.");
@@ -46,13 +47,14 @@ export function NewThreadScreen() {
         const checkout = repo === undefined ? {} : { checkout: { repo, ...(branch === undefined ? {} : { baseBranch: branch }) } };
         task = await api.createTask({ title: threadTitle(body.text), ...checkout });
       }
-      created.current = { task, repo, branch, boxId: activeBoxId };
+      created.current = { task, repo, branch, scope: api.boxScope };
       // The thread exists from here on, even if sending the first message fails.
       storeTask(queryClient, task, api.boxScope);
       const sent = await api.sendMessage(task.id, body);
       return { task, sent };
     },
-    onSuccess: ({ task, sent }) => {
+    onSuccess: ({ task, sent }, { api }) => {
+      const keys = boxKeys(api.boxScope);
       queryClient.setQueryData<Message[]>(keys.messages(task.id), [sent.message]);
       queryClient.setQueryData<Run[]>(keys.runs(task.id), [sent.run]);
       nav.replace({ name: "thread", taskId: task.id });
@@ -66,7 +68,7 @@ export function NewThreadScreen() {
         <Text style={styles.heading}>What should we work on?</Text>
       </View>
       <Composer
-        onSend={(body) => start.mutateAsync(body)}
+        onSend={(body) => start.mutateAsync({ api, body })}
         pending={busy}
         error={start.error ?? switchBox.error}
         placeholder={
