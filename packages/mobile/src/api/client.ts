@@ -64,6 +64,12 @@ function errorMessage(text: string, fallback: string): string {
 /** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
+/** Whether two active boxes are the same route; `null` (Kestrel's relayed box) only matches `null`. */
+export function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.id === b.id && a.url === b.url;
+}
+
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
 export interface FileSource {
   uri: string;

@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { GithubRepoSlug, type Message, type Run, type SendMessageBody, type Task } from "@cloudagents/protocol";
-import type { ApiClient } from "@/api/client";
+import type { ActiveBox, ApiClient } from "@/api/client";
 import { boxKeys, storeTask } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { useBoxOnline } from "@/components/BoxStatus";
@@ -14,6 +14,8 @@ import { repoShortName, threadTitle } from "@/lib/format";
 import { useNavigation } from "@/nav/navigation";
 import { colors, spacing } from "@/theme";
 
+type StartVariables = { api: ApiClient; box: ActiveBox | null; body: SendMessageBody };
+
 /**
  * Chat home: the first message creates a thread (task), sends the message to it and opens it. The bar under the
  * composer picks the repository and branch the thread starts in (none: the agent checks out what it needs) and,
@@ -21,7 +23,7 @@ import { colors, spacing } from "@/theme";
  */
 export function NewThreadScreen() {
   const { api } = useApiClient();
-  const { boxes, activeBoxId, setActiveBox } = useAuth();
+  const { boxes, activeBox, activeBoxId, setActiveBox } = useAuth();
   const nav = useNavigation();
   const queryClient = useQueryClient();
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug);
@@ -36,7 +38,7 @@ export function NewThreadScreen() {
 
   // The box the send goes to travels with the call, so a response that lands after a box switch writes into the box it was sent to.
   const start = useMutation({
-    mutationFn: async ({ api, body }: { api: ApiClient; body: SendMessageBody }) => {
+    mutationFn: async ({ api, body }: StartVariables) => {
       const previous = created.current;
       let task: Task;
       if (previous !== null && previous.repo === repo && previous.branch === branch && previous.scope === api.boxScope) {
@@ -53,11 +55,11 @@ export function NewThreadScreen() {
       const sent = await api.sendMessage(task.id, body);
       return { task, sent };
     },
-    onSuccess: ({ task, sent }, { api }) => {
+    onSuccess: ({ task, sent }, { api, box }) => {
       const keys = boxKeys(api.boxScope);
       queryClient.setQueryData<Message[]>(keys.messages(task.id), [sent.message]);
       queryClient.setQueryData<Run[]>(keys.runs(task.id), [sent.run]);
-      nav.replace({ name: "thread", taskId: task.id });
+      nav.replace({ name: "thread", taskId: task.id, box });
     },
   });
 
@@ -68,7 +70,7 @@ export function NewThreadScreen() {
         <Text style={styles.heading}>What should we work on?</Text>
       </View>
       <Composer
-        onSend={(body) => start.mutateAsync({ api, body })}
+        onSend={(body) => start.mutateAsync({ api, box: activeBox, body })}
         pending={busy}
         error={start.error ?? switchBox.error}
         placeholder={

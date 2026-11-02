@@ -175,7 +175,16 @@ export function MainNavigator() {
 
 /** The thread screen draws its own top bar (title and panel buttons); every other screen gets the plain one. */
 function screenFor(route: Route, bottomInset: number): ReactNode {
-  if (route.name === "thread") return <TaskScreen key={route.taskId} taskId={route.taskId} bottomInset={bottomInset} />;
+  if (route.name === "thread") {
+    return (
+      <TaskScreen
+        key={`${route.box?.id ?? "relay"}:${route.taskId}`}
+        taskId={route.taskId}
+        box={route.box}
+        bottomInset={bottomInset}
+      />
+    );
+  }
   return (
     <>
       <TopBar />

@@ -1,9 +1,10 @@
 import { createContext, useContext } from "react";
+import type { ActiveBox } from "@/api/client";
 
 /** Every screen the signed-in app can show. The stack lives in MainNavigator. */
 export type Route =
   | { name: "new-thread" }
-  | { name: "thread"; taskId: string }
+  | { name: "thread"; taskId: string; box: ActiveBox | null }
   | { name: "archived" }
   | { name: "automations" }
   | { name: "connections" }

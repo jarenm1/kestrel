@@ -2,7 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useState, useCall
 import { useQueryClient } from "@tanstack/react-query";
 import { storage } from "@/lib/storage";
 import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
-import { createApiClient, type ActiveBox } from "@/api/client";
+import { createApiClient, sameBox, type ActiveBox } from "@/api/client";
 import { clearBoxScopedQueries } from "@/api/queries";
 import { fetchCredentials, hostOrigin } from "@/auth/session";
 
@@ -244,9 +244,4 @@ function resolveActiveBox(
   if (activeBoxId === null) return managedBox === null ? null : { id: managedBox.id, url: managedBox.url };
   const box = boxes.find((b) => b.id === activeBoxId);
   return box === undefined ? null : { id: box.id, url: box.url };
-}
-
-function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
-  if (a === null || b === null) return a === b;
-  return a.id === b.id && a.url === b.url;
 }

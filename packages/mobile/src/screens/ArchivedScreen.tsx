@@ -7,6 +7,7 @@ import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { useAuth } from "@/auth/AuthContext";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
@@ -16,6 +17,7 @@ import { colors, spacing } from "@/theme";
 /** The user's archived threads, most recently archived first. Opening one shows it; Unarchive brings it back. */
 export function ArchivedScreen() {
   const { api } = useApiClient();
+  const { activeBox } = useAuth();
   const nav = useNavigation();
   const tasks = useQuery(createQueries(api).tasks());
 
@@ -54,7 +56,7 @@ export function ArchivedScreen() {
           task={item}
           now={now}
           unarchiving={unarchive.isPending && unarchive.variables?.taskId === item.id}
-          onOpen={() => nav.push({ name: "thread", taskId: item.id })}
+          onOpen={() => nav.push({ name: "thread", taskId: item.id, box: activeBox })}
           onUnarchive={() => unarchive.mutate({ api, taskId: item.id })}
         />
       )}
