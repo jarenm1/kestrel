@@ -57,8 +57,8 @@ export interface DesktopApp {
 }
 
 /**
- * The IPC and mount namespaces the task's sandboxes share, which hold the task desktop's X socket directory (a
- * private /tmp/.X11-unix, since WSLg mounts the host's read-only).
+ * The task holder's IPC and mount namespaces, which the task desktop and the box's clients of it join. The mount
+ * namespace holds the desktop's X socket directory: a private /tmp/.X11-unix, since WSLg mounts the host's read-only.
  */
 export interface IpcNamespace {
   /** Pid of a process in it now (the task's namespace holder). */
@@ -74,9 +74,9 @@ export interface DesktopStartOptions {
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
   /**
    * The X server and the box's MIT-SHM clients (capture, screenshots) run in this namespace, so sandboxed apps can use
-   * MIT-SHM too. Null: everything shares the box's own.
+   * MIT-SHM too.
    */
-  readonly ipcNamespace: Effect.Effect<IpcNamespace | null, DesktopError>
+  readonly ipcNamespace: Effect.Effect<IpcNamespace, DesktopError>
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -837,14 +837,14 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 "-nolisten",
                 "local",
               ],
-              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder), env },
+              { critical: true, prefix: ns.join(ns.holder), env },
             )
           },
           catch: toErr,
         })
         // Xwayland is weston's child, so it is in the same IPC and mount namespaces.
-        if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
-        yield* Effect.tryPromise({ try: () => waitForSocket(s, ns === null ? "/tmp/.X11-unix" : ns.x11Dir), catch: toErr })
+        if (server.pid !== undefined) s.ipc = ns.join(server.pid)
+        yield* Effect.tryPromise({ try: () => waitForSocket(s, ns.x11Dir), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         const shared = yield* Effect.try({
           try: () => {

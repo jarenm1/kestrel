@@ -44,7 +44,7 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
-import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
@@ -853,7 +853,7 @@ export const CoreLive = Layer.effect(
           }
         }
         yield* desktop.stop(taskId)
-        stopTaskNet(taskId)
+        stopTaskHolder(taskId)
         if (sandboxSettings.systemd) {
           yield* removeTask(sandboxSettings.systemd, taskId).pipe(
             Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: ${e.message}`)),
@@ -2358,7 +2358,7 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           yield* harness.stopAll()
           yield* desktop.stopAll()
-          stopAllTaskNets()
+          stopAllTaskHolders()
         }),
     }
     return shape

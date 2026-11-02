@@ -45,8 +45,8 @@ export interface SystemdSettings {
   readonly box: BoxLimits
 }
 
-/** `net` is the task's network namespace holder (pasta); the rest are sandboxed processes. */
-export type LaunchKind = "run" | "exec" | "desktop" | "net"
+/** `holder` is the task's namespace holder (pasta or bwrap); the rest are sandboxed processes. */
+export type LaunchKind = "run" | "exec" | "desktop" | "holder"
 
 /** Variables systemd-run/systemctl need to reach the user manager; never passed into bwrap. */
 export const busEnv = (): Record<string, string> => {
@@ -140,9 +140,9 @@ export const scopeArgs = (settings: SystemdSettings, taskId: string, kind: Launc
   "--collect",
   `--unit=${settings.boxSlice}-${kind}-${randomUUID()}`,
   `--slice=${taskSlice(settings, taskId)}`,
-  // The namespace holder is PID 1 of pasta's PID namespace, which ignores SIGTERM sent from outside it, so a stop
-  // would wait out the 90 s stop timeout before SIGKILL. pasta and the holder keep no state, so they are killed outright.
-  ...(kind === "net" ? ["--property=KillSignal=SIGKILL"] : []),
+  // The holders keep no state. pasta's is PID 1 of its PID namespace and ignores SIGTERM from outside it, so a stop
+  // would wait out the 90 s stop timeout before SIGKILL: they are killed outright.
+  ...(kind === "holder" ? ["--property=KillSignal=SIGKILL"] : []),
   "--",
 ]
 
