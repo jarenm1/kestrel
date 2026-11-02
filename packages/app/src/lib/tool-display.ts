@@ -382,9 +382,13 @@ export function summarizeTools(views: readonly ToolView[]): string {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-/** Tool output without the `[image]` placeholders screenshots leave (the image itself is not in the transcript). */
-export function outputText(output: string | null): { text: string; images: number } {
+/**
+ * A tool's output as the details show it. Only Kestrel's desktop tools return images, which the transcript keeps as
+ * an `[image]` line each; for them those lines become a count. Every other output is returned byte for byte.
+ */
+export function outputText(output: string | null, kind: ToolKind): { text: string; images: number } {
   if (output === null) return { text: "", images: 0 }
+  if (kind !== "desktop") return { text: output, images: 0 }
   const kept = output.split("\n").filter((line) => line !== "[image]")
-  return { text: kept.join("\n").trim(), images: output.split("\n").length - kept.length }
+  return { text: kept.join("\n"), images: output.split("\n").length - kept.length }
 }

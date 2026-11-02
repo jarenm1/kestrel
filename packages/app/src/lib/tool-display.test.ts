@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { describeTool, displayCommand, displayPath, editDiff, summarizeTools, type ToolItem } from "./tool-display"
+import { describeTool, displayCommand, displayPath, editDiff, outputText, summarizeTools, type ToolItem } from "./tool-display"
 
 const TASK = "t_123"
 const tool = (name: string, input: unknown, status: ToolItem["status"] = "ok"): ToolItem => ({
@@ -105,5 +105,15 @@ describe("summarizeTools", () => {
     expect(summarizeTools(more)).toBe("Ran 2 commands, read 1 file, edited 1 file, ran 1 search")
     const most = [...more, describeTool(tool("WebSearch", { query: "x" }), TASK)]
     expect(summarizeTools(most)).toBe("Ran 2 commands, read 1 file, edited 1 file, +2 more")
+  })
+})
+
+describe("outputText", () => {
+  test("a command that prints [image] keeps its output exactly, whitespace included", () => {
+    expect(outputText("  [image]\n[image]\n\n", "command")).toEqual({ text: "  [image]\n[image]\n\n", images: 0 })
+  })
+
+  test("a desktop tool's image placeholders become a count and its text stays as returned", () => {
+    expect(outputText("clicked (412, 88)\n[image]", "desktop")).toEqual({ text: "clicked (412, 88)", images: 1 })
   })
 })

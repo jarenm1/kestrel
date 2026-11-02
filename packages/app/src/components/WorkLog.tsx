@@ -140,7 +140,7 @@ function EditDiff({ lines }: { lines: readonly EditLine[] }) {
 const CHANGE_CLASS: Record<string, string> = { add: "text-success", delete: "text-destructive" }
 
 function ToolDetails({ item, view, nested }: { item: ToolItem; view: ToolView; nested: ReactNode }) {
-  const output = outputText(item.output)
+  const output = outputText(item.output, view.kind)
   const hasInput = typeof item.input === "object" && item.input !== null && Object.keys(item.input).length > 0
   // An unrecognized call shows its input as is; a recognized one summarizes it, so the whole input sits one click away.
   const inlineInput = view.kind === "other" && view.note === undefined && hasInput
@@ -248,9 +248,11 @@ export function ToolRow({ item, view, running, nested }: { item: ToolItem; view:
 
 /**
  * Consecutive tool calls under one summary line ("Ran 3 commands, read 2 files"). Open while the calls are still
- * coming in, folded once the agent moves on, like a thought.
+ * coming in, folded once the agent moves on, like a thought. A lone call renders without the summary but through the
+ * same elements, so its row (and whatever the user opened in it) survives the next call turning it into a group.
  */
-export function ToolGroup({ summary, kinds, live, failed, children }: {
+export function ToolGroup({ single, summary, kinds, live, failed, children }: {
+  single: boolean
   summary: string
   kinds: ReadonlySet<ToolKind>
   live: boolean
@@ -262,13 +264,15 @@ export function ToolGroup({ summary, kinds, live, failed, children }: {
   const Icon = kinds.size === 1 && only !== undefined ? KIND_ICONS[only] : Wrench
   return (
     <div className="min-w-0">
-      <button type="button" aria-expanded={open} onClick={toggle} className={ROW_CLASS}>
-        <Icon className="size-4 shrink-0" />
-        <span className={cn("min-w-0 truncate", live && SHIMMER_CLASS)}>{summary}</span>
-        {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="a call failed" />}
-        <Chevron open={open} />
-      </button>
-      {open && <div className={cn(DETAILS_CLASS, "gap-0")}>{children}</div>}
+      {single ? null : (
+        <button type="button" aria-expanded={open} onClick={toggle} className={ROW_CLASS}>
+          <Icon className="size-4 shrink-0" />
+          <span className={cn("min-w-0 truncate", live && SHIMMER_CLASS)}>{summary}</span>
+          {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="a call failed" />}
+          <Chevron open={open} />
+        </button>
+      )}
+      {(single || open) && <div className={single ? "min-w-0" : cn(DETAILS_CLASS, "gap-0")}>{children}</div>}
     </div>
   )
 }

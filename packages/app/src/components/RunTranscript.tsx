@@ -57,7 +57,7 @@ function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
   return parts.join(" · ")
 }
 
-/** A run of consecutive tool calls: one row alone, or a group under a summary line. */
+/** A run of consecutive tool calls under one group, which shows a summary line once there are two or more. */
 function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
   const views = items.map((item) => describeTool(item, ctx.taskId))
   const rows = items.map((item, index) => {
@@ -72,11 +72,11 @@ function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
       />
     )
   })
-  if (items.length === 1) return rows[0]
   const last = items[items.length - 1]!
   const live = ctx.running && (ctx.liveIds.has(last.id) || items.some((item) => item.status === "running"))
   return (
     <ToolGroup
+      single={items.length === 1}
       summary={summarizeTools(views)}
       kinds={new Set(views.map((view) => view.kind))}
       live={live}
