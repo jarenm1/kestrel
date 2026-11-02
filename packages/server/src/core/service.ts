@@ -41,7 +41,7 @@ import { CliAuth } from "../cliauth"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, type CommentKind, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type CommentKind,type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
@@ -2152,6 +2152,12 @@ export const CoreLive = Layer.effect(
       commentOnPullRequest: (taskId, input) =>
         Effect.gen(function* () {
           const { slug, token, number } = yield* pullRequestTarget(taskId, input)
+          if (input.action !== "create") {
+            const comment = yield* github.getComment(token, slug, input.kind, input.commentId).pipe(Effect.mapError(fromGitHub))
+            const viewer = yield* github.viewerLogin(token, slug).pipe(Effect.mapError(fromGitHub))
+            const problem = commentMismatch(comment, number, viewer)
+            if (problem !== null) return yield* Effect.fail(new BadRequest({ message: `cannot change comment ${input.commentId}: ${problem}` }))
+          }
           switch (input.action) {
             case "create":
               return input.replyTo === undefined

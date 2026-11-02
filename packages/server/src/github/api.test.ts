@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Config, type ServerConfig } from "../config"
-import { GitHub, GitHubLive, type RepoSlug } from "./api"
+import { GitHub, GitHubLive, type RepoSlug, commentMismatch } from "./api"
 
 const repo: RepoSlug = { owner: "jarenm1", name: "kestrel" }
 const prPath = "/repos/jarenm1/kestrel/pulls/7"
@@ -231,4 +231,53 @@ test("labels are added in one call and removed one at a time, with the name URL-
   } finally {
     gh.stop()
   }
+})
+
+test("getComment reports the pull request a review or conversation comment is on, and its author", async () => {
+  const gh = fakeGitHub(({ path }) => {
+    if (path === "/repos/jarenm1/kestrel/pulls/comments/55") {
+      return { json: { pull_request_url: "https://api.github.com/repos/jarenm1/kestrel/pulls/7", issue_url: "https://api.github.com/repos/jarenm1/kestrel/issues/7", user: { login: "jarenm1" } } }
+    }
+    if (path === "/repos/jarenm1/kestrel/issues/comments/9") {
+      return { json: { issue_url: "https://api.github.com/repos/jarenm1/kestrel/issues/12", user: null } }
+    }
+    return { status: 500 }
+  })
+  try {
+    const result = await runAgainst(
+      gh.url,
+      Effect.gen(function* () {
+        const github = yield* GitHub
+        return {
+          review: yield* github.getComment("token", repo, "review", 55),
+          conversation: yield* github.getComment("token", repo, "conversation", 9),
+        }
+      }),
+    )
+    expect(result).toEqual({
+      review: { pullRequest: 7, author: "jarenm1" },
+      conversation: { pullRequest: 12, author: "ghost" },
+    })
+  } finally {
+    gh.stop()
+  }
+})
+
+test("viewerLogin reads the login of the account the token belongs to", async () => {
+  const gh = fakeGitHub(({ path }) => (path === "/user" ? { json: { login: "jarenm1" } } : { status: 500 }))
+  try {
+    expect(await runAgainst(gh.url, Effect.flatMap(GitHub, (github) => github.viewerLogin("token", repo)))).toBe("jarenm1")
+  } finally {
+    gh.stop()
+  }
+})
+
+test("commentMismatch refuses comments on another pull request or written by someone else", () => {
+  const own = { pullRequest: 7, author: "jarenm1" }
+  expect(commentMismatch(own, 7, "jarenm1")).toBeNull()
+  expect(commentMismatch({ ...own, pullRequest: 8 }, 7, "jarenm1")).toBe("it is not on pull request #7")
+  expect(commentMismatch({ ...own, pullRequest: null }, 7, "jarenm1")).toBe("it is not on pull request #7")
+  expect(commentMismatch({ ...own, author: "octocat" }, 7, "jarenm1")).toBe(
+    "it was written by octocat, not by the connected account jarenm1",
+  )
 })

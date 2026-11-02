@@ -107,6 +107,20 @@ export interface PostedComment {
   readonly url: string
 }
 
+/** Where a comment sits and who wrote it. GitHub comment ids are repository-wide, so the pull request must be checked. */
+export interface CommentDetails {
+  /** Number of the pull request the comment belongs to, or null when it is not on a pull request. */
+  readonly pullRequest: number | null
+  readonly author: string
+}
+
+/** Why `comment` may not be edited or deleted as `viewer` on pull request `number`, or null when it may. */
+export const commentMismatch = (comment: CommentDetails, number: number, viewer: string): string | null => {
+  if (comment.pullRequest !== number) return `it is not on pull request #${number}`
+  if (comment.author !== viewer) return `it was written by ${comment.author}, not by the connected account ${viewer}`
+  return null
+}
+
 /** Users and teams to ask for a review. Team slugs, not names. */
 export interface ReviewerRequest {
   readonly reviewers: readonly string[]
@@ -126,6 +140,9 @@ export interface GitHubShape {
   readonly replyToReviewComment: (token: string, repo: RepoSlug, number: number, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
   readonly editComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
   readonly deleteComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number) => Effect.Effect<void, GitHubError>
+  readonly getComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number) => Effect.Effect<CommentDetails, GitHubError>
+  /** Login of the account the token belongs to. */
+  readonly viewerLogin: (token: string, repo: RepoSlug) => Effect.Effect<string, GitHubError>
   readonly requestReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly removeReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly addLabels: (token: string, repo: RepoSlug, number: number, labels: readonly string[]) => Effect.Effect<void, GitHubError>
@@ -190,6 +207,15 @@ const CommentPostedBody = Schema.Struct({
   id: Schema.Number,
   html_url: Schema.String,
 })
+
+/** Review comments carry `pull_request_url`; conversation comments carry `issue_url`. */
+const CommentDetailsBody = Schema.Struct({
+  issue_url: Schema.optional(Schema.String),
+  pull_request_url: Schema.optional(Schema.String),
+  user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+})
+
+const ViewerBody = Schema.Struct({ login: Schema.String })
 
 /** GraphQL answers HTTP 200 even when a mutation fails; the failure is in `errors`. */
 const GraphQLBody = Schema.Struct({
@@ -417,6 +443,20 @@ export const GitHubLive = Layer.effect(
         ),
       deleteComment: (token, repo, kind, commentId) =>
         call(token, repo, "DELETE", commentPath(repo, kind, commentId)).pipe(Effect.asVoid),
+      getComment: (token, repo, kind, commentId) =>
+        call(token, repo, "GET", commentPath(repo, kind, commentId)).pipe(
+          Effect.flatMap(decode(CommentDetailsBody, "comment")),
+          Effect.map((comment): CommentDetails => {
+            const url = comment.pull_request_url ?? comment.issue_url ?? ""
+            const number = /\/(\d+)$/.exec(url)?.[1]
+            return { pullRequest: number === undefined ? null : Number(number), author: comment.user?.login ?? "ghost" }
+          }),
+        ),
+      viewerLogin: (token, repo) =>
+        call(token, repo, "GET", "/user").pipe(
+          Effect.flatMap(decode(ViewerBody, "user")),
+          Effect.map((viewer) => viewer.login),
+        ),
       requestReviewers: (token, repo, number, request) =>
         call(token, repo, "POST", `${repoPath(repo)}/pulls/${number}/requested_reviewers`, reviewersBody(request)).pipe(Effect.asVoid),
       removeReviewers: (token, repo, number, request) =>
