@@ -63,9 +63,9 @@ Under the `strict` and `basic` levels, everything an agent controls runs in bubb
 
 ### Network and IPC
 
-Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the sandbox listener, which is forwarded in for the broker and MCP. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
+Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the sandbox listener, which is forwarded in for the broker, MCP and GitHub. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
 
-The sandbox listener binds only `127.0.0.1` and serves only MCP and the broker. Its port defaults to the public box port plus 10,000, wrapping within 1–65535; set `CLOUDAGENTS_SANDBOX_PORT` to another free port if needed. It must differ from `CLOUDAGENTS_PORT`. Keep this listener local and point tunnels and proxies at the public box port, never the sandbox port. Both interfaces still require a live run token. Basic and off sandbox modes share the host network, so other local processes can reach this listener too.
+The sandbox listener binds only `127.0.0.1` and serves only MCP, the broker and GitHub (`/gh/`). Its port defaults to the public box port plus 10,000, wrapping within 1–65535; set `CLOUDAGENTS_SANDBOX_PORT` to another free port if needed. It must differ from `CLOUDAGENTS_PORT`. Keep this listener local and point tunnels and proxies at the public box port, never the sandbox port. Both interfaces still require a live run token. Basic and off sandbox modes share the host network, so other local processes can reach this listener too.
 
 `bun packages/server/scripts/test-listeners.ts <off|basic|strict>` checks the listener split with a real box process, a local control stub and a fake agent. It exercises authenticated API and event connections, MCP, the broker, workspace execution and token revocation without model keys. Add `--managed` to check the managed credential path. `basic` needs bubblewrap on `PATH`. `strict` needs bubblewrap, pasta, `/dev/net/tun` and the Nix toolchain (`CLOUDAGENTS_SANDBOX_PATH`, which `nix develop` sets). Under `strict` the agent's own loopback must also be unable to reach the box's public port or the control stub, so the script checks that as well.
 
@@ -187,7 +187,7 @@ Nothing moves a box back to `pending`.
 ### Endpoint requirements
 
 - HTTPS, and WSS for the event streams, on a DNS-only hostname (not proxied by Cloudflare).
-- `/mcp` and `/broker` are served only on the separate loopback sandbox listener, not on the public box port. Existing proxies may continue to block these paths as defense in depth.
+- `/mcp`, `/broker` and `/gh/` are served only on the separate loopback sandbox listener, not on the public box port. Existing proxies may continue to block these paths as defense in depth.
 - The box's port (8787 by default) is reachable only from the proxy, never from the internet.
 
 ### Deploy modules
