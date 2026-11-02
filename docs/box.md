@@ -83,7 +83,7 @@ The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpape
 
 #### Desktop dependencies on Linux
 
-Ubuntu 24.04's weston is too old for the box's desktop startup. With Nix and flakes enabled (`experimental-features = nix-command flakes` in `/etc/nix/nix.conf` or `~/.config/nix/nix.conf`), build the desktop tools pinned by this checkout's `flake.lock`, including weston, Xwayland, ffmpeg and the capture helper:
+Ubuntu 24.04 packages weston 13.0.0, and the desktop needs weston 14 or newer (see the [README](../README.md)). With Nix and flakes enabled (`experimental-features = nix-command flakes` in `/etc/nix/nix.conf` or `~/.config/nix/nix.conf`), build the desktop tools pinned by this checkout's `flake.lock`, including weston 16, Xwayland, ffmpeg, openbox, hsetroot, xterm, xdotool and the `xdamage-capture` helper:
 
 ```sh
 mkdir -p "$HOME/.local/share/kestrel"
@@ -91,7 +91,7 @@ nix build .#desktop-deps --out-link "$HOME/.local/share/kestrel/desktop-deps"
 export PATH="$(readlink -f "$HOME/.local/share/kestrel/desktop-deps")/bin:$PATH"
 ```
 
-Run the box from that environment, or run `kestrel-box install` from it so the user service records the store path on its `PATH`. Keep the output link: it prevents garbage collection of the tools used by the service. Rebuild and reinstall the service to pick up a newer checkout's dependencies. The box and agent sandbox still need their own prerequisites; this bundle supplies desktop commands only. Nix is optional if equivalent host packages and the compiled capture helper are already installed.
+Run the box from that environment, or run `kestrel-box install` from it so the user service records the store path on its `PATH`. `install` also compiles its own `xdamage-capture` into `~/.local/share/kestrel/bin`, which that `PATH` searches first, so the bundle's helper is used only if that build fails. The build needs `gcc` and the X11, Xext, Xdamage and Xfixes headers; without them `install` warns and continues. Keep the output link: it prevents garbage collection of the tools used by the service. Rebuild and reinstall the service to pick up a newer checkout's dependencies. The box and agent sandbox still need their own prerequisites; this bundle supplies desktop commands only. Nix is optional if equivalent host packages and the compiled capture helper are already installed.
 
 From a checkout with Bun dependencies installed, `bun packages/server/scripts/desktop-smoke.ts` exercises a real desktop's stream, screenshot and pointer input using the tools on `PATH`. A successful smoke test proves only that environment; it does not establish WSL, Lima or GPU behavior. WSLg's read-only `/tmp/.X11-unix` remains a separate setup issue.
 
