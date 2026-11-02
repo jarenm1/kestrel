@@ -84,14 +84,6 @@ export function storeTask(client: QueryClient, task: Task, scope: string): void 
   client.setQueryData(scoped.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
 }
 
-/** Roots of the box-served cache entries. Switching the active box drops them: they describe the box that was active. */
-const BOX_SCOPED_ROOT = "box-data";
-
-/** Drops every cached box-served entry; control-plane entries (me, connections, automations, repos) stay. */
-export function clearBoxScopedQueries(client: QueryClient): void {
-  client.removeQueries({ predicate: (query) => query.queryKey[0] === BOX_SCOPED_ROOT });
-}
-
 export function createQueries(api: ApiClient) {
   const scoped = boxKeys(api.boxScope);
   return {

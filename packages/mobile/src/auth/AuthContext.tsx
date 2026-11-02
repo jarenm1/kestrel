@@ -1,9 +1,7 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
 import { storage } from "@/lib/storage";
 import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
-import { createApiClient, sameBox, type ActiveBox } from "@/api/client";
-import { clearBoxScopedQueries } from "@/api/queries";
+import { createApiClient, type ActiveBox } from "@/api/client";
 import { fetchCredentials, hostOrigin } from "@/auth/session";
 
 const SERVER_URL_KEY = "kestrel_server_url";
@@ -59,27 +57,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     activeBoxId: null,
     managedBox: null,
   });
-  const queryClient = useQueryClient();
   const activeBox = useMemo(
     () => resolveActiveBox(state.boxes, state.activeBoxId, state.managedBox),
     [state.boxes, state.activeBoxId, state.managedBox]
   );
-  // The box the cached box-served data was read from.
-  const cachedBoxRef = useRef<ActiveBox | null>(null);
-
-  /**
-   * Every box-list read goes through here. The box-served cache describes the box it was read from, so when the box the
-   * apps reach changes (id or url), that cache is dropped before the new list takes effect.
-   */
-  const applyBoxList = useCallback(
-    (list: BoxList) => {
-      const next = resolveActiveBox(list.boxes, list.activeBoxId, list.managedBox);
-      if (!sameBox(cachedBoxRef.current, next)) clearBoxScopedQueries(queryClient);
-      cachedBoxRef.current = next;
-      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
-    },
-    [queryClient]
-  );
+  const applyBoxList = useCallback((list: BoxList) => {
+    setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
+  }, []);
 
   // Load saved server URL and session on mount
   useEffect(() => {
@@ -141,7 +125,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     }
     await storage.deleteItem(SESSION_COOKIE_KEY);
-    cachedBoxRef.current = null;
     setState((s) => ({
       ...s,
       sessionCookie: null,

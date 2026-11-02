@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
-import { boxKeys, clearBoxScopedQueries, createQueries, keys, queryClient, storeTask } from "./queries";
+import { boxKeys, createQueries, queryClient, storeTask } from "./queries";
 
 const task = (title: string): Task => ({
   id: "same-id", owner: "owner", title, status: "idle", createdAt: "2026-01-01T00:00:00Z",
@@ -39,17 +39,6 @@ test("relay and changed direct routes do not share a box scope", () => {
   const moved = client({ id: "box", url: "https://two.example" });
   expect(new Set([relay.boxScope, first.boxScope, moved.boxScope]).size).toBe(3);
   expect([...createQueries(first).tasks().queryKey]).toEqual([...boxKeys(first.boxScope).tasks]);
-});
-
-test("clearing box data preserves control-plane cache", () => {
-  const cache = new QueryClient();
-  cache.setQueryData(keys.connections, ["control"]);
-  cache.setQueryData(boxKeys("first").messages("thread"), ["first"]);
-  cache.setQueryData(boxKeys("second").desktop("thread"), { state: "running" });
-  clearBoxScopedQueries(cache);
-  expect(cache.getQueryData(keys.connections)).toEqual(["control"]);
-  expect(cache.getQueryData(boxKeys("first").messages("thread"))).toBeUndefined();
-  expect(cache.getQueryData(boxKeys("second").desktop("thread"))).toBeUndefined();
 });
 
 test("independent HTTP snapshots from two boxes stay in their own query entries", async () => {
