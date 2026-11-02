@@ -7,6 +7,7 @@ import { makeWebHandler } from "./http/router"
 const linux = {
   platform: "linux" as const,
   release: "6.12.0",
+  exists: () => false,
   executable: () => true,
   westonVersion: () => "weston 14.0.1\n",
 }
@@ -28,6 +29,15 @@ test("recognizes WSL and does not promise a desktop on native Windows or macOS",
       executable: () => { throw new Error("must not probe Linux tools") },
     })).toEqual({ version: 1, platform: "other", sandbox: "off", desktop: "unavailable" })
   }
+})
+
+test("recognizes a Lima guest by its cloud-init seed, whatever the kernel release", () => {
+  const lima = { ...linux, exists: (path: string) => path === "/mnt/lima-cidata" }
+  expect(boxCapabilities("basic", lima)).toEqual({
+    version: 1, platform: "lima", sandbox: "basic", desktop: "prerequisites-present",
+  })
+  expect(boxCapabilities("basic", { ...lima, exists: () => false }).platform).toBe("linux")
+  expect(boxCapabilities("basic", { ...lima, platform: "darwin" }).platform).toBe("other")
 })
 
 test("missing capture or input tools prevent reporting desktop prerequisites", () => {

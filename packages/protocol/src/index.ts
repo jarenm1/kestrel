@@ -508,10 +508,13 @@ export const HarnessCommands = Schema.Struct({
 })
 export type HarnessCommands = typeof HarnessCommands.Type
 
-/** Version 1 describes configuration and desktop prerequisites, not a guarantee of a successful start. */
+/**
+ * Version 1 describes configuration and desktop prerequisites, not a guarantee of a successful start. The `platform`
+ * and `sandbox` value sets are closed within version 1: a new value is a new contract version.
+ */
 export const BoxCapabilities = Schema.Struct({
   version: Schema.Literal(1),
-  platform: Schema.Literal("linux", "wsl", "other"),
+  platform: Schema.Literal("linux", "wsl", "lima", "other"),
   sandbox: Schema.Literal("strict", "basic", "off"),
   desktop: Schema.Literal("prerequisites-present", "unavailable"),
 })
