@@ -10,7 +10,7 @@ The Expo app. Start Metro with `bun run dev:mobile` (from the repo root) and ope
 
 ## On the web (phones)
 
-The same app is also the app host's UI for phone browsers. `bun run build:app` builds the desktop SPA, then this app's web export (react-native-web, `build:web`) into `packages/app/dist/m`. The Worker serves `m/index.html` in place of the SPA when a phone (`Mobi` in the user agent) opens one of the pages the app has screens for (`/`, `/c/:id`, `/automations`, `/archived`, `/settings/...`; `MOBILE_PAGE` in `packages/control/src/index.ts`), on the same URL. Other pages (`/pair`, `/login`) and the public site stay on the SPA.
+The same app is also the app host's UI for phone browsers. `bun run build:app` builds the desktop SPA, then this app's web export (react-native-web, `build:web`) into `packages/app/dist/m`. The Worker serves `m/index.html` in place of the SPA when a phone (`Mobi` in the user agent) opens one of the pages the app has screens for (`/`, `/c/:id`, `/automations`, `/archived`, `/settings/...`; `MOBILE_PAGE` in `packages/control/src/pages.ts`), on the same URL. Other pages (`/pair`, `/login`) and the public site stay on the SPA.
 
 - Platform files (`*.web.ts(x)`, picked by Metro for the web export) hold everything native-only: `auth/session` (the browser's HttpOnly session cookie and same-origin requests instead of SecureStore and an explicit `Cookie` header), `lib/storage` (localStorage), `lib/confirm` (`window.confirm`, since react-native-web's `Alert.alert` does nothing), `components/ui/HtmlView` (a `srcdoc` iframe instead of a WebView, for the desktop stream and the preview frame) and `nav/history`.
 - Sign-in is a redirect to GitHub that returns to the page it started on; there is no server URL or token field.
