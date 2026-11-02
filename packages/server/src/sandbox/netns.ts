@@ -14,7 +14,7 @@ import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
  *
  * `strict` holders are `pasta`'s: a user + network namespace with outbound internet through user-space NAT, so a
  * browser on the task desktop reaches the agent's dev server on localhost (`joinTaskNet` joins it too). `basic` and
- * `off` holders are bubblewrap's and have no network namespace: those levels share the host's network. Inside a strict
+ * `off` holders are unshare's and have no network namespace: those levels share the host's network. Inside a strict
  * holder, loopback is the task's own: host services on 127.0.0.1 and other X servers' abstract sockets are out of reach.
  * The one way back to the host is the box port, forwarded with `-T` (broker and MCP). `--no-map-gw` keeps pasta from
  * mapping its gateway address to the host's loopback.
@@ -22,27 +22,27 @@ import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
 
 const X11_DIR = "/tmp/.X11-unix"
 
+/** Tools a holder is started with; the util-linux ones come from one package. */
+interface HolderTools {
+  /** `unshare` (util-linux): gives the holder its own IPC and mount namespaces (and user namespace, unless pasta gives one). */
+  readonly unsharePath: string
+  /** util-linux `mount`: mounts the holder's private /tmp/.X11-unix. The PATH one may be NixOS's setuid wrapper, which a user namespace cannot run. */
+  readonly mountPath: string
+  /** `sh`, to run the mount before the holder execs sleep. */
+  readonly shPath: string
+  /** `sleep`: the holder's process once the mount is done. */
+  readonly sleepPath: string
+}
+
 /** How the task's holder is started. */
 export type HolderStart =
-  | {
+  | (HolderTools & {
       readonly kind: "pasta"
       readonly pastaPath: string
       /** Box HTTP port forwarded into the namespace (broker and MCP at 127.0.0.1:<port>). */
       readonly boxPort: number
-      /** `sleep` from the sandbox toolchain. */
-      readonly sleepPath: string
-      /** `unshare` (util-linux): gives the holder its own IPC and mount namespaces. */
-      readonly unsharePath: string
-      /** util-linux `mount`: mounts the holder's private /tmp/.X11-unix. */
-      readonly mountPath: string
-      /** `sh` from the sandbox toolchain, to run the mount before the holder execs sleep. */
-      readonly shPath: string
-    }
-  | {
-      readonly kind: "bwrap"
-      readonly bwrapPath: string
-      readonly sleepPath: string
-    }
+    })
+  | (HolderTools & { readonly kind: "unshare" })
 
 export interface TaskHolderOptions {
   readonly taskId: string
@@ -52,7 +52,7 @@ export interface TaskHolderOptions {
 }
 
 interface TaskHolder {
-  /** The process that starts the holder: pasta or bwrap, which forks the holder as its child. */
+  /** The process that starts the holder: pasta or unshare, which forks the holder as its child. */
   readonly proc: ChildProcess
   /** Host pid of the holder; `nsenter --target` joins its namespaces. */
   readonly holder: number
@@ -120,6 +120,16 @@ const kill = (h: TaskHolder) => {
   }
 }
 
+/** Runs in the holder: mounts its private X socket directory, then execs sleep so the holder's pid stays the namespace's pid. */
+const holderShell = (start: HolderTools): string[] => [
+  start.shPath,
+  "-c",
+  // The directory is a tmpfs owned by the holder's root (the box's uid, mapped), mode 1777 like /tmp, created if the host has none.
+  `"$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && exec "$1" infinity`,
+  start.mountPath,
+  start.sleepPath,
+]
+
 const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
   const { start } = opts
   const argv =
@@ -144,30 +154,19 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
           start.unsharePath,
           "--ipc",
           "--mount",
-          start.shPath,
-          "-c",
-          // The holder execs sleep, so its pid stays the namespace's pid. The X socket directory is a tmpfs owned by
-          // the task's root (the box's uid, mapped), mode 1777 like /tmp, created if the host has none.
-          `"$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && exec "$1" infinity`,
-          start.mountPath,
-          start.sleepPath,
+          ...holderShell(start),
         ]
-      : // bwrap's own IPC and mount namespaces over the host's root, which stays writable: the processes that join it
-        // (the desktop, and basic and off launches) run there as they do on the host. The tmpfs replaces the host's X
-        // directory. bwrap forks sleep, so the holder is bwrap's child.
-        [
-          start.bwrapPath,
-          "--die-with-parent",
-          "--unshare-user",
-          "--unshare-ipc",
-          "--bind",
-          "/",
-          "/",
-          "--tmpfs",
-          X11_DIR,
-          "--",
-          start.sleepPath,
-          "infinity",
+      : [
+          start.unsharePath,
+          // The holder's own user namespace: root inside maps to the box's uid outside, which may mount the tmpfs.
+          // --kill-child ends the holder with this process, as bwrap's --die-with-parent did.
+          "--fork",
+          "--kill-child",
+          "--user",
+          "--map-root-user",
+          "--ipc",
+          "--mount",
+          ...holderShell(start),
         ]
   // systemd-run --scope execs in place, so the spawned pid is the holder's starter.
   const [file, args] = opts.systemd
@@ -182,7 +181,7 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
   let holder: number | null = null
   while (Date.now() < deadline && proc.exitCode === null) {
     holder = proc.pid === undefined ? null : holderPid(proc.pid)
-    if (holder !== null && mounted(holder) && (start.kind === "bwrap" || configured(holder))) {
+    if (holder !== null && mounted(holder) && (start.kind === "unshare" || configured(holder))) {
       const started: TaskHolder = { proc, holder }
       proc.on("exit", () => {
         if (holders.get(opts.taskId) === started) holders.delete(opts.taskId)

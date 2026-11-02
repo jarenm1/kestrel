@@ -402,7 +402,7 @@ const requireSystemdRun = (settings: SandboxSettings): Effect.Effect<string | nu
 
 /**
  * The task's namespace holder (started on first use) and the nsenter that joins it. Strict's is pasta's, with the task's
- * network; basic's and off's are bubblewrap's, without one (see netns.ts).
+ * network; basic's and off's are unshare's, without one (see netns.ts).
  */
 const taskHolder = (
   settings: SandboxSettings,
@@ -418,16 +418,17 @@ const taskHolder = (
       )
     }
     if (settings.level !== "strict") {
-      const bwrap = findExecutable("bwrap")
+      const unshare = findExecutable("unshare")
+      const sh = findExecutable("sh")
       const sleep = findExecutable("sleep")
-      if (bwrap === null || sleep === null) {
+      if (unshare === null || sh === null || sleep === null) {
         return yield* Effect.fail(
-          new InternalError({ message: "bwrap (bubblewrap) and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+          new InternalError({ message: "unshare (util-linux), sh and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
         )
       }
       const holder = yield* ensureTaskHolder({
         taskId,
-        start: { kind: "bwrap", bwrapPath: bwrap, sleepPath: sleep },
+        start: { kind: "unshare", unsharePath: unshare, mountPath: join(dirname(unshare), "mount"), shPath: sh, sleepPath: sleep },
         systemd,
       })
       return { holder, nsenter }
