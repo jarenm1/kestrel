@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Schema, SchemaAST } from "effect"
 
 /** Error body shape shared with the rest of the API: `{ _tag, message }`. */
 export const errorResponse = (status: number, tag: string, message: string): Response =>
@@ -11,15 +11,22 @@ export const json = (body: unknown, status = 200, headers?: HeadersInit): Respon
   return new Response(JSON.stringify(body), { status, headers: h })
 }
 
-/** The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. */
-export const decodeBody = async <A, I>(request: Request, schema: Schema.Schema<A, I>): Promise<A | Response> => {
+/**
+ * The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. Pass
+ * `options` to make unknown fields an error.
+ */
+export const decodeBody = async <A, I>(
+  request: Request,
+  schema: Schema.Schema<A, I>,
+  options?: SchemaAST.ParseOptions,
+): Promise<A | Response> => {
   let body: unknown
   try {
     body = await request.json()
   } catch {
     return errorResponse(400, "BadRequest", "body must be JSON")
   }
-  const decoded = Schema.decodeUnknownEither(schema)(body)
+  const decoded = Schema.decodeUnknownEither(schema, options)(body)
   return decoded._tag === "Left" ? errorResponse(400, "BadRequest", "invalid request body") : decoded.right
 }
 

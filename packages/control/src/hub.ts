@@ -42,6 +42,13 @@ import {
   type UpdateBoxBody,
   type UpdateFleetBoxBody,
   type UserBox,
+  type CreateMeterHostBody,
+  type CreatedMeterHost,
+  type MeterBatch,
+  type MeterHostList,
+  type MeterIngestResult,
+  type MeterReport,
+  type MeterReportBody,
 } from "@cloudagents/protocol"
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
 import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
@@ -62,6 +69,15 @@ import {
   updateFleetBox,
   type ManagedBoxRow,
 } from "./fleet-table"
+import {
+  ensureMeterTables,
+  insertMeterHost,
+  listMeterHosts,
+  meterHostSecret,
+  storedMeterRecords,
+  storeMeterRecords,
+} from "./meter-table"
+import { reconcileMeter } from "./meter-reconcile"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -72,6 +88,12 @@ const NO_SUCH_BOX: BoxFailure = { ok: false, status: 404, tag: "NotFound", messa
 const NO_SUCH_PAIRING: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "no such pairing or it expired" }
 const INVALID_BOX_CREDENTIALS: BoxFailure = { ok: false, status: 401, tag: "Unauthorized", message: "invalid box credentials" }
 const NOT_ASSIGNED: BoxFailure = { ok: false, status: 403, tag: "Forbidden", message: "user is not assigned to this box" }
+const INVALID_METER_HOST: BoxFailure = {
+  ok: false,
+  status: 401,
+  tag: "Unauthorized",
+  message: "invalid meter host credentials",
+}
 
 /** 32 random bytes, base64url: a box secret, or the id a pairing is polled with. */
 const newSecret = (): string =>
@@ -243,6 +265,7 @@ export class Hub extends DurableObject<Env> {
         sql.exec("ALTER TABLE users ADD COLUMN active_box_id TEXT")
       }
       ensureFleetTable(sql)
+      ensureMeterTables(sql)
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -694,6 +717,37 @@ export class Hub extends DurableObject<Env> {
     if (!rotateFleetBoxSecret(sql, id, secret)) return null
     const box = fleetBox(sql, id)
     return box === null ? null : { box, secret }
+  }
+
+  // -------------------------------------------------------------------------
+  // Nest usage metering: hosts post records; reconciliation runs when a report is read.
+  // -------------------------------------------------------------------------
+
+  meterHosts(): MeterHostList {
+    return { hosts: listMeterHosts(this.ctx.storage.sql) }
+  }
+
+  /** A new Nest host, with its secret returned once. */
+  createMeterHost(body: CreateMeterHostBody): CreatedMeterHost {
+    const host = { id: crypto.randomUUID(), name: body.name, createdAt: new Date().toISOString() }
+    const secret = newSecret()
+    insertMeterHost(this.ctx.storage.sql, { ...host, secret })
+    return { host, secret }
+  }
+
+  /** Stores a host's batch after checking its secret; a refused batch stores nothing. */
+  async ingestMeterRecords(hostId: string, secret: string, batch: MeterBatch): Promise<BoxOutcome<MeterIngestResult>> {
+    const sql = this.ctx.storage.sql
+    const stored = meterHostSecret(sql, hostId)
+    if (stored === undefined || !(await safeEqual(secret, stored))) return INVALID_METER_HOST
+    const received = new Date().toISOString()
+    return this.ctx.storage.transactionSync(() => storeMeterRecords(sql, hostId, batch.records, received))
+  }
+
+  /** The reconciled, non-billable report over every stored record. `through` defaults to now. */
+  meterReport(body: MeterReportBody, now: string): MeterReport {
+    const records = storedMeterRecords(this.ctx.storage.sql)
+    return reconcileMeter(records, { through: body.through ?? now, rates: body.rates, currency: body.currency })
   }
 
   // -------------------------------------------------------------------------
