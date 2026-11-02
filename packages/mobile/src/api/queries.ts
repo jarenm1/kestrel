@@ -74,6 +74,18 @@ export function storeTask(client: QueryClient, task: Task, scope: string): void 
   client.setQueryData(scoped.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
 }
 
+/**
+ * Options for a mutation that returns the updated task. The scope is captured when the mutation starts, because a
+ * re-render after a box switch replaces a pending mutation's callbacks with ones closed over the new box.
+ */
+export function storeTaskMutation(client: QueryClient, api: ApiClient, request: (taskId: string) => Promise<Task>) {
+  return {
+    mutationFn: request,
+    onMutate: () => ({ scope: api.boxScope }),
+    onSuccess: (task: Task, _taskId: string, { scope }: { scope: string }) => storeTask(client, task, scope),
+  };
+}
+
 /** Roots of the box-served cache entries. Switching the active box drops them: they describe the box that was active. */
 const BOX_SCOPED_ROOT = "box-data";
 

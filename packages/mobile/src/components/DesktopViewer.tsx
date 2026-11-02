@@ -37,7 +37,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       await api.stopDesktop(taskId);
       return api.getDesktop(taskId);
     },
-    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+    onMutate: () => ({ keys }),
+    onSuccess: (next, _vars, { keys }) => queryClient.setQueryData(keys.desktop(taskId), next),
   });
 
   // Streaming pauses while the app is backgrounded: the page closes its socket and resumes on foreground.

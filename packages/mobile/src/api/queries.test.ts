@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { MutationObserver, QueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
-import { boxKeys, clearBoxScopedQueries, createQueries, keys, queryClient, storeTask } from "./queries";
+import { boxKeys, clearBoxScopedQueries, createQueries, keys, queryClient, storeTask, storeTaskMutation } from "./queries";
 
 const task = (title: string): Task => ({
   id: "same-id", owner: "owner", title, status: "idle", createdAt: "2026-01-01T00:00:00Z",
@@ -88,4 +88,23 @@ test("independent HTTP snapshots from two boxes stay in their own query entries"
     first.stop(true);
     second.stop(true);
   }
+});
+
+test("a pending mutation stores its result under the box it started on after a box switch", async () => {
+  const first = createApiClient("https://control.example", "session", { id: "first", url: "https://first.example" });
+  const second = createApiClient("https://control.example", "session", { id: "second", url: "https://second.example" });
+  const cache = new QueryClient();
+  let respond: (task: Task) => void = () => {};
+  const request = () => new Promise<Task>((resolve) => { respond = resolve; });
+  const observer = new MutationObserver(cache, storeTaskMutation(cache, first, request));
+
+  const pending = observer.mutate("same-id");
+  await Promise.resolve();
+  observer.setOptions(storeTaskMutation(cache, second, request));
+  await Promise.resolve();
+  respond(task("archived on first"));
+  await pending;
+
+  expect(cache.getQueryData<Task>(boxKeys(first.boxScope).task("same-id"))?.title).toBe("archived on first");
+  expect(cache.getQueryData(boxKeys(second.boxScope).task("same-id"))).toBeUndefined();
 });

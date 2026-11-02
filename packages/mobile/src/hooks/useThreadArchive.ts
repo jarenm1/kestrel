@@ -1,6 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Task } from "@cloudagents/protocol";
-import { storeTask } from "@/api/queries";
+import { storeTaskMutation } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 
 /**
@@ -10,13 +9,7 @@ import { useApiClient } from "@/hooks/useApiClient";
 export function useThreadArchive() {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
-  const archive = useMutation({
-    mutationFn: (taskId: string) => api.archiveTask(taskId),
-    onSuccess: (updated: Task) => storeTask(queryClient, updated, api.boxScope),
-  });
-  const unarchive = useMutation({
-    mutationFn: (taskId: string) => api.unarchiveTask(taskId),
-    onSuccess: (updated: Task) => storeTask(queryClient, updated, api.boxScope),
-  });
+  const archive = useMutation(storeTaskMutation(queryClient, api, (taskId) => api.archiveTask(taskId)));
+  const unarchive = useMutation(storeTaskMutation(queryClient, api, (taskId) => api.unarchiveTask(taskId)));
   return { archive, unarchive };
 }

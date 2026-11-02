@@ -140,7 +140,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
 
   const send = useMutation({
     mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
-    onSuccess: (res) => {
+    onMutate: () => ({ keys }),
+    onSuccess: (res, _body, { keys }) => {
       atEnd.current = true;
       queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, res.message));
       queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
@@ -148,7 +149,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
   });
   const cancel = useMutation({
     mutationFn: (runId: string) => api.cancelRun(runId),
-    onSuccess: (run) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
+    onMutate: () => ({ keys }),
+    onSuccess: (run, _runId, { keys }) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
   });
   const latestRun = sortedRuns.at(-1);
   const activeRun = latestRun?.status === "running" ? latestRun : undefined;

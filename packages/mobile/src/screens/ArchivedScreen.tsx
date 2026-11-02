@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
-import { createQueries, storeTask } from "@/api/queries";
+import { createQueries, storeTaskMutation } from "@/api/queries";
 import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -27,10 +27,7 @@ export function ArchivedScreen() {
     [tasks.data]
   );
 
-  const unarchive = useMutation({
-    mutationFn: (taskId: string) => api.unarchiveTask(taskId),
-    onSuccess: (task) => storeTask(queryClient, task, api.boxScope),
-  });
+  const unarchive = useMutation(storeTaskMutation(queryClient, api, (taskId) => api.unarchiveTask(taskId)));
 
   const now = Date.now();
 

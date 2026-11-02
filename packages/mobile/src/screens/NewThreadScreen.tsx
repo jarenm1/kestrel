@@ -15,7 +15,6 @@ import { colors, spacing } from "@/theme";
  */
 export function NewThreadScreen() {
   const { api } = useApiClient();
-  const keys = boxKeys(api.boxScope);
   const nav = useNavigation();
   const queryClient = useQueryClient();
   // The thread created by an earlier attempt; a retry after a failed send reuses it instead of creating another.
@@ -30,7 +29,8 @@ export function NewThreadScreen() {
       const sent = await api.sendMessage(task.id, body);
       return { task, sent };
     },
-    onSuccess: ({ task, sent }) => {
+    onMutate: () => ({ keys: boxKeys(api.boxScope) }),
+    onSuccess: ({ task, sent }, _body, { keys }) => {
       queryClient.setQueryData<Message[]>(keys.messages(task.id), [sent.message]);
       queryClient.setQueryData<Run[]>(keys.runs(task.id), [sent.run]);
       nav.replace({ name: "thread", taskId: task.id });
