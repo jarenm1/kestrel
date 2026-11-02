@@ -100,6 +100,16 @@ export const ControlPaths = {
   /** POST -> CreatedFleetBox: replaces the managed box's secret; the box must be restarted with the new one. */
   fleetBoxSecret: (id: string) => `/api/fleet/boxes/${id}/secret`,
   /**
+   * Nest host only: POST MeterBatch -> MeterIngestResult, with `Authorization: Bearer <host secret>` and
+   * METER_HOST_ID_HEADER. Stores each record once per host and eventId; a retry of identical records is acknowledged
+   * as duplicates. Any other caller gets 401; a record naming another host, or a conflicting replay, gets 403 or 409.
+   */
+  meterRecords: "/api/meter/records",
+  /** Operator-only: GET -> MeterHostList / POST CreateMeterHostBody -> CreatedMeterHost. Everyone else gets 404. */
+  meterHosts: "/api/meter/hosts",
+  /** Operator-only: POST MeterReportBody -> MeterReport, reconciled non-billable estimates. Everyone else gets 404. */
+  meterReport: "/api/meter/report",
+  /**
    * Pairing a box from the `kestrel-box` CLI, no auth. POST PairingStartBody -> PairingStart: the CLI shows `code` and
    * `approveUrl`, then polls `boxPairingPoll` with the secret `pairingId` until the signed-in user approves the code.
    */
