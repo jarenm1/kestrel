@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { Alert, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
+import { confirmDestructive } from "@/lib/confirm";
 import { keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
@@ -99,10 +100,9 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   }
 
   function confirmDisconnect() {
-    Alert.alert("Disconnect this subscription?", "Agent runs will stop using it.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Disconnect", style: "destructive", onPress: () => logout.mutate() },
-    ]);
+    confirmDestructive("Disconnect this subscription?", "Agent runs will stop using it.", "Disconnect", () =>
+      logout.mutate()
+    );
   }
 
   function stepContent() {

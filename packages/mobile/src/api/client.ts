@@ -35,6 +35,7 @@ import {
   Usage,
   type UserBox,
 } from "@cloudagents/protocol";
+import { fetchCredentials } from "@/auth/session";
 
 export class ApiError extends Error {
   constructor(
@@ -137,8 +138,8 @@ async function send<A, I>(
     res = await fetch(url, {
       method,
       headers: requestHeaders,
-      // RN's cookie jar would append a second session to our explicit Cookie header.
-      credentials: "omit",
+      // Native: RN's cookie jar would append a second session to our explicit Cookie header. Web: the browser's cookie.
+      credentials: fetchCredentials,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {

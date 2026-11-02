@@ -1,5 +1,6 @@
 import React, { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, BackHandler, Pressable, StatusBar, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { ActivityIndicator, Pressable, StatusBar, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { onBackPress, showRoute, takeLaunchRoute } from "@/nav/history";
 import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
 import Animated, { interpolate, interpolateColor, useAnimatedStyle } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -25,7 +26,7 @@ const SIDEBAR_MAX_WIDTH = 360;
 /**
  * The signed-in workspace: the thread sidebar on the page background, revealed by swiping right (or the top bar
  * button), and the current screen in a raised panel that slides aside for it. Navigation is a small stack
- * without a router; Android back closes the sidebar first, then pops.
+ * without a router; back (Android's button, the browser's on the web) closes the sidebar first, then pops.
  */
 export function MainNavigator() {
   const { user, loading } = useAuth();
@@ -76,27 +77,36 @@ export function MainNavigator() {
   const scrimClosePan = usePanGesture(swipe.closeGesture);
 
   const canGoBack = stack.length > 1;
-  useEffect(() => {
-    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (sidebarOpen) {
-        setSidebarOpen(false);
+  useEffect(
+    () =>
+      onBackPress(() => {
+        if (sidebarOpen) {
+          setSidebarOpen(false);
+          return true;
+        }
+        if (backInterceptor.current?.()) return true;
+        if (!canGoBack) return false;
+        nav.back();
         return true;
-      }
-      if (backInterceptor.current?.()) return true;
-      if (!canGoBack) return false;
-      nav.back();
-      return true;
-    });
-    return () => sub.remove();
-  }, [sidebarOpen, canGoBack, nav]);
+      }),
+    [sidebarOpen, canGoBack, nav]
+  );
 
-  // Signing out drops the cached account data and returns to the empty chat.
+  // Signing out drops the cached account data and returns to the empty chat; signing in opens the launch link's thread.
   useEffect(() => {
-    if (user) return;
+    if (user) {
+      const launch = takeLaunchRoute();
+      if (launch) setStack([HOME, launch]);
+      return;
+    }
     queryClient.clear();
     setStack([HOME]);
     setSidebarOpen(false);
   }, [user, queryClient]);
+
+  useEffect(() => {
+    if (user) showRoute(current);
+  }, [user, current]);
 
   const contentStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: swipe.progress.value * sidebarWidth }],

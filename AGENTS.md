@@ -85,7 +85,7 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 
 ```sh
 bun run typecheck      # all packages, must pass
-bun run build:app      # if packages/app changed
+bun run build:app      # if packages/app or packages/mobile changed (it also builds the mobile web export)
 ```
 
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and

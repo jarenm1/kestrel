@@ -1,9 +1,10 @@
 import React, { useState } from "react";
-import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Modal } from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, Modal, Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { WebView, type WebViewProps } from "react-native-webview";
 import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
 import { useAuth } from "@/auth/AuthContext";
+import { hostOrigin } from "@/auth/session";
 import { KestrelMark } from "@/components/KestrelMark";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -36,6 +37,12 @@ export function LoginScreen() {
 
   const currentServerUrl = serverUrl || url.trim() || "https://app.kestrel-agent.com";
   const loginUrl = `${currentServerUrl}/auth/github/login?return=/auth/mobile-callback`;
+
+  /** Web: the page is on the app host, so GitHub sign-in is a plain redirect that comes back to this page with the cookie. */
+  const signInHere = () => {
+    const back = window.location.pathname + window.location.search;
+    window.location.assign(`/auth/github/login?return=${encodeURIComponent(back)}`);
+  };
 
   /**
    * Catches the callback redirect inside the WebView: the session id comes from the URL, since the session cookie is
@@ -72,19 +79,22 @@ export function LoginScreen() {
         </View>
 
         <View style={styles.form}>
-          <Text style={styles.label}>Server URL</Text>
-          <Input
-            value={url}
-            onChangeText={setUrl}
-            placeholder="https://app.kestrel-agent.com"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-            returnKeyType="done"
-            onSubmitEditing={handleSetUrl}
-            onBlur={handleSetUrl}
-          />
-
+          {hostOrigin === null ? (
+            <>
+              <Text style={styles.label}>Server URL</Text>
+              <Input
+                value={url}
+                onChangeText={setUrl}
+                placeholder="https://app.kestrel-agent.com"
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                returnKeyType="done"
+                onSubmitEditing={handleSetUrl}
+                onBlur={handleSetUrl}
+              />
+            </>
+          ) : null}
           {error ? <Alert>{error}</Alert> : null}
 
           <Button
@@ -92,6 +102,7 @@ export function LoginScreen() {
             style={styles.centered}
             disabled={loading}
             onPress={() => {
+              if (hostOrigin !== null) return signInHere();
               void handleSetUrl();
               setShowWebView(true);
             }}
@@ -99,14 +110,16 @@ export function LoginScreen() {
             {loading ? <ActivityIndicator color={colors.primaryForeground} /> : "Sign in with GitHub"}
           </Button>
 
-          <Button
-            variant="ghost"
-            size="sm"
-            style={styles.centered}
-            onPress={() => setShowTokenInput(!showTokenInput)}
-          >
-            {showTokenInput ? "Hide token sign-in" : "Sign in with session token directly"}
-          </Button>
+          {hostOrigin === null ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              style={styles.centered}
+              onPress={() => setShowTokenInput(!showTokenInput)}
+            >
+              {showTokenInput ? "Hide token sign-in" : "Sign in with session token directly"}
+            </Button>
+          ) : null}
 
           {showTokenInput ? (
             <View style={styles.tokenBox}>
@@ -185,13 +198,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
   },
-  /** `drop-shadow-[0_0_24px_rgb(255_255_255/0.25)]`: a white glow behind the mark. */
-  glow: {
-    shadowColor: "#ffffff",
-    shadowOpacity: 0.25,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 0 },
-  },
+  /**
+   * `drop-shadow-[0_0_24px_rgb(255_255_255/0.25)]`: a white glow behind the mark. iOS shadows follow the mark's shape;
+   * on the web a shadow would outline the wrapper's box, so the web build uses the CSS drop-shadow filter itself.
+   */
+  glow: Platform.select({
+    web: { filter: "drop-shadow(0 0 12px rgba(255,255,255,0.25))" },
+    default: {
+      shadowColor: "#ffffff",
+      shadowOpacity: 0.25,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 0 },
+    },
+  }),
   tagline: {
     maxWidth: 340,
     color: colors.mutedForeground,

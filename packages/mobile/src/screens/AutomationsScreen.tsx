@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Alert as NativeAlert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react-native";
 import type { Automation, AutomationRun, TriggerAutomationBody } from "@cloudagents/protocol";
@@ -10,6 +10,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
+import { confirmDestructive } from "@/lib/confirm";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useNavigation } from "@/nav/navigation";
@@ -178,10 +179,9 @@ function AutomationRow({
             size="sm"
             disabled={remove.isPending}
             onPress={() =>
-              NativeAlert.alert("Remove automation?", `“${automation.name}” will stop running.`, [
-                { text: "Cancel", style: "cancel" },
-                { text: "Remove", style: "destructive", onPress: () => remove.mutate() },
-              ])
+              confirmDestructive("Remove automation?", `“${automation.name}” will stop running.`, "Remove", () =>
+                remove.mutate()
+              )
             }
             hitSlop={6}
           >

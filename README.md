@@ -66,7 +66,7 @@ Open the printed URL (`http://localhost:5173/auth/dev-login`) to sign in as `dev
 - **Windows:** agent commands run through POSIX `sh` (from `PATH` or Git for Windows).
 - **Several stacks on one machine:** ports shift by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10`, so give each running stack its own `KESTREL_DEV_SLOT` (0-9). The ports are printed at startup; forward the app port with `ssh -L` to use a remote dev machine.
 
-Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` changed). Contributing workflow: [AGENTS.md](AGENTS.md).
+Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `packages/mobile` changed). Contributing workflow: [AGENTS.md](AGENTS.md).
 
 ## Repository
 
@@ -77,7 +77,7 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 | [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
-| [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
+| [`packages/mobile`](packages/mobile) | Expo app; its web export is the app host's UI on phones ([README](packages/mobile/README.md)). |
 
 Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](docs/goal-state.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
 
