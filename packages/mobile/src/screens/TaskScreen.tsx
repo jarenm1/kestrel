@@ -101,7 +101,8 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined;
 
-  // The web's collapsed panel rail: one button per tab, the pull request links, then the repositories on GitHub.
+  // The web's collapsed panel rail: one button per tab, the pull request links, then the repositories on GitHub. The
+  // top bar stays above the open panel, so the GitHub button lives only here: the panel header has no room for it.
   const rail = (
     <>
       {PANEL_TABS.map((t) => (
@@ -165,7 +166,6 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
                     </Button>
                   ))}
                 </View>
-                <ThreadRepoButton checkouts={checkouts} />
                 <Button
                   variant="ghost"
                   size="icon"

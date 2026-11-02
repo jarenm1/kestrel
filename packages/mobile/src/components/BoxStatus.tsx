@@ -33,8 +33,9 @@ function useBoxOnline(): boolean | undefined {
 }
 
 /**
- * The box a thread runs on, with its online dot: the web app's `ThreadBoxIndicator`, over the chat's top left. The app
- * lists only the active box's threads, so that is the box every open thread runs on.
+ * The box a thread runs on, with its online dot: the web app's `ThreadBoxIndicator`. The web floats it over the chat;
+ * here it takes its own line above the chat, so it never covers the first message. The app lists only the active
+ * box's threads, so that is the box every open thread runs on.
  */
 export function ThreadBoxIndicator({ style }: { style?: StyleProp<ViewStyle> }) {
   const { boxes, activeBoxId } = useAuth();
@@ -68,10 +69,9 @@ const styles = StyleSheet.create({
     fontFamily: fonts.mono,
   },
   indicator: {
-    position: "absolute",
-    top: spacing.md,
-    left: spacing.md,
-    zIndex: 1,
+    alignSelf: "flex-start",
+    marginTop: spacing.md,
+    marginLeft: spacing.md,
     maxWidth: 192,
     flexDirection: "row",
     alignItems: "center",
@@ -79,7 +79,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderRadius: radius.full,
-    backgroundColor: colors.card + "cc",
+    backgroundColor: colors.white06,
   },
   indicatorText: { flexShrink: 1, color: colors.mutedForeground, fontSize: 11 },
   dot: { width: 6, height: 6, borderRadius: 3 },
