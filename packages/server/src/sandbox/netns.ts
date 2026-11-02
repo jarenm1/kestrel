@@ -9,13 +9,15 @@ import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
  * desktop apps), so a browser on the task desktop reaches the agent's dev server on localhost.
  *
  * `pasta` creates a user + network namespace around a `sleep infinity` holder and gives it outbound
- * internet through user-space NAT. The holder runs under `unshare --ipc`, so the task also has its own
- * SysV IPC namespace: the task's X server and capture join it too (`joinTaskIpc`), which lets X clients
- * share MIT-SHM images with the server without seeing another task's segments. Sandboxes join with
- * `nsenter --user --net --ipc`. Inside, loopback is the task's own: host services on 127.0.0.1 and other
- * X servers' abstract sockets are out of reach. The one way back to the host is the box port, forwarded
- * with `-T` (broker and MCP). `--no-map-gw` keeps pasta from mapping its gateway address to the host's
- * loopback.
+ * internet through user-space NAT. The holder runs under `unshare --ipc --mount`, so the task also has its
+ * own SysV IPC namespace and mount namespace. The mount namespace gives the task a private, empty
+ * `/tmp/.X11-unix` (a tmpfs): the X server's socket directory is then never the host's, so it works even
+ * where the host's is read-only (WSLg mounts it so). The task's X server and capture join the IPC and
+ * mount namespaces too (`joinTaskDesktop`), which lets X clients share MIT-SHM images with the server
+ * without seeing another task's segments. Sandboxes join with `nsenter --user --net --ipc --mount`.
+ * Inside, loopback is the task's own: host services on 127.0.0.1 and other X servers' abstract sockets
+ * are out of reach. The one way back to the host is the box port, forwarded with `-T` (broker and MCP).
+ * `--no-map-gw` keeps pasta from mapping its gateway address to the host's loopback.
  */
 interface TaskNet {
   readonly pasta: ChildProcess
@@ -77,8 +79,12 @@ export interface TaskNetOptions {
   readonly pastaPath: string
   /** `sleep` from the sandbox toolchain. */
   readonly sleepPath: string
-  /** `unshare` (util-linux): gives the holder its own IPC namespace. */
+  /** `unshare` (util-linux): gives the holder its own IPC and mount namespaces. */
   readonly unsharePath: string
+  /** util-linux `mount`: mounts the holder's private /tmp/.X11-unix. */
+  readonly mountPath: string
+  /** `sh` from the sandbox toolchain, to run the mount before the holder execs sleep. */
+  readonly shPath: string
   /** With systemd, pasta and the holder live in the task slice, so task removal and box restarts kill them. */
   readonly systemd: { readonly settings: SystemdSettings; readonly systemdRun: string } | null
 }
@@ -102,8 +108,14 @@ const startNet = async (opts: TaskNetOptions): Promise<TaskNet> => {
     "--",
     opts.unsharePath,
     "--ipc",
+    "--mount",
+    opts.shPath,
+    "-c",
+    // The holder execs sleep, so its pid stays the namespace's pid. The X socket directory is a tmpfs owned by
+    // the task's root (the box's uid, mapped), mode 1777 like /tmp, created if the host has none.
+    '"$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs /tmp/.X11-unix && exec "$1" infinity',
+    opts.mountPath,
     opts.sleepPath,
-    "infinity",
   ]
   // systemd-run --scope execs in place, so the spawned pid is pasta's.
   const [file, args] = opts.systemd
@@ -166,21 +178,23 @@ export const joinTaskNet = (nsenterPath: string, holder: number): string[] => [
   "--user",
   "--net",
   "--ipc",
+  "--mount",
   "--preserve-credentials",
   "--",
 ]
 
 /**
- * Argv prefix for the task's X server and its box-side clients that use MIT-SHM (capture, screenshots): the IPC
- * namespace of `target`, a process already in the task's (joining it needs its user namespace), but the host network,
- * so the box still reaches them.
+ * Argv prefix for the task's X server and its box-side clients (capture, screenshots, input): the IPC and mount
+ * namespaces of `target`, a process already in the task's (joining needs its user namespace). The mount namespace
+ * holds the X socket directory; the host network is kept, so the box still reaches them.
  */
-export const joinTaskIpc = (nsenterPath: string, target: number): string[] => [
+export const joinTaskDesktop = (nsenterPath: string, target: number): string[] => [
   nsenterPath,
   "--target",
   String(target),
   "--user",
   "--ipc",
+  "--mount",
   "--preserve-credentials",
   "--",
 ]

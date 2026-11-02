@@ -7,7 +7,7 @@ import { dirname, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 import { desktopScaleEnv } from "../desktop/scale"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
-import { ensureTaskNet, joinTaskIpc, joinTaskNet } from "./netns"
+import { ensureTaskNet, joinTaskDesktop, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
 
 export { stopAllTaskNets, stopTaskNet } from "./netns"
@@ -299,12 +299,19 @@ const gpuArgs = (): string[] => {
   return argv
 }
 
-/** Parses ":101" into 101 when the desktop socket exists on the host. */
-export const displayNumber = (display: string | null): number | undefined => {
+/**
+ * The X socket directory the server sees for a task's namespace holder: its private /tmp/.X11-unix, which holds the
+ * task desktop's sockets. Without a holder (basic, off) the host's.
+ */
+export const x11Dir = (holder: number | null): string =>
+  holder === null ? "/tmp/.X11-unix" : `/proc/${holder}/root/tmp/.X11-unix`
+
+/** Parses ":101" into 101 when the desktop socket exists in `dir` (see x11Dir). */
+export const displayNumber = (display: string | null, dir: string): number | undefined => {
   const match = display === null ? null : /^:(\d+)$/.exec(display)
   if (!match) return undefined
   const n = Number(match[1])
-  return existsSync(x11Socket(n)) ? n : undefined
+  return existsSync(join(dir, `X${n}`)) ? n : undefined
 }
 
 export interface SandboxSettings {
@@ -423,7 +430,10 @@ const taskNamespaces = (
       boxPort: settings.boxPort,
       pastaPath: pasta,
       sleepPath: join(settings.binPath, "sleep"),
+      shPath: join(settings.binPath, "sh"),
       unsharePath: unshare,
+      // util-linux's own mount: the PATH one may be NixOS's setuid wrapper, which a user namespace cannot run.
+      mountPath: join(dirname(unshare), "mount"),
       systemd: settings.systemd && systemdRun ? { settings: settings.systemd, systemdRun } : null,
     })
     return { holder, nsenter }
@@ -652,20 +662,24 @@ export const openTaskPreviewSocket = (
   })
 
 /**
- * The task's IPC namespace, for the task desktop's X server and the box's MIT-SHM clients of it (capture,
- * screenshots): a process in it now, and the argv prefix that joins a process's IPC namespace. Starts the task's
- * namespaces if needed. Null unless strict: the other levels share the host's IPC.
+ * The task's IPC and mount namespaces, for the task desktop: its X server and the box's clients of it (capture,
+ * screenshots, input), which see the desktop's socket directory through the mount namespace. The holder pid, the
+ * directory the server reads the desktop's sockets from, and the argv prefix that joins a process's namespaces. Starts the
+ * task's namespaces if needed. Null unless strict: the other levels share the host's /tmp and IPC.
  */
 export const desktopNamespace = (
   settings: SandboxSettings,
   taskId: string,
-): Effect.Effect<{ readonly holder: number; readonly join: (pid: number) => string[] } | null, InternalError> =>
+): Effect.Effect<
+  { readonly holder: number; readonly x11Dir: string; readonly join: (pid: number) => string[] } | null,
+  InternalError
+> =>
   Effect.gen(function* () {
     if (settings.level !== "strict") return null
     const systemdRun = yield* requireSystemdRun(settings)
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
     const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
-    return { holder, join: (pid: number) => joinTaskIpc(nsenter, pid) }
+    return { holder, x11Dir: x11Dir(holder), join: (pid: number) => joinTaskDesktop(nsenter, pid) }
   })
 
 /**
@@ -725,13 +739,13 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       ...req.env,
     }
 
-    const bwrapArgs = (level: "strict" | "basic"): string[] =>
+    const bwrapArgs = (level: "strict" | "basic", x11SocketDir: string): string[] =>
       buildBwrapArgv({
         level,
         workspacePath: req.workspacePath,
         mirrorDir: req.mirrorDir,
         homeDir: req.homeDir,
-        display: displayNumber(req.display),
+        display: displayNumber(req.display, x11SocketDir),
         env,
         command: req.command,
         roBinds: req.roBinds,
@@ -745,12 +759,12 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       settings.level === "off"
         ? { file: shell(), args: ["-c", req.command] }
         : settings.level === "basic"
-          ? { file: bwrap as string, args: bwrapArgs("basic") }
+          ? { file: bwrap as string, args: bwrapArgs("basic", x11Dir(null)) }
           : yield* Effect.map(
               taskNamespaces(settings, req.taskId, systemdRun),
               ({ holder, nsenter }) => {
                 const [file, ...args] = joinTaskNet(nsenter, holder)
-                return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs("strict")] }
+                return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs("strict", x11Dir(holder))] }
               },
             )
 
