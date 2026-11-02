@@ -36,7 +36,7 @@ export const VmState = Schema.Literal("stopped", "starting", "running", "stoppin
 export type VmState = typeof VmState.Type
 
 export const Shape = Schema.Struct({
-  cpus: Schema.Int.pipe(Schema.between(1, 64)),
+  cpus: Schema.Int.pipe(Schema.between(1, 8)),
   memoryMb: Schema.Int.pipe(Schema.between(128, 4096)),
 })
 export type Shape = typeof Shape.Type

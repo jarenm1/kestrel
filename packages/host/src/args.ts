@@ -21,7 +21,7 @@ export type Command =
 
 export const USAGE = `usage:
   kestrel-host init
-  kestrel-host vm create --user <userId> --os-image <raw path> [--cpus N=2] [--memory-mb N=2048 (max 4096)] [--volume-gb N=20]
+  kestrel-host vm create --user <userId> --os-image <raw path> [--cpus N=2 (1-8)] [--memory-mb N=2048 (max 4096)] [--volume-gb N=20]
   kestrel-host vm start <vmId>
   kestrel-host vm stop <vmId> [--timeout SECONDS=120] [--force]
   kestrel-host vm destroy <vmId> --yes
@@ -89,7 +89,7 @@ const parseVmCommand = (sub: string | undefined, rest: readonly string[]): Comma
         userId,
         osImage,
         shape: {
-          cpus: intFlag(flags.values.cpus, 2, "cpus", 1, 64),
+          cpus: intFlag(flags.values.cpus, 2, "cpus", 1, 8),
           memoryMb: intFlag(flags.values["memory-mb"], 2048, "memory-mb", 128, 4096),
         },
         volumeGb: intFlag(flags.values["volume-gb"], 20, "volume-gb", 1, 4096),

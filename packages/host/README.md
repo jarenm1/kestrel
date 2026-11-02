@@ -60,7 +60,7 @@ No usage records are collected by this host.
 
 ```
 kestrel-host init
-kestrel-host vm create --user <userId> --os-image <raw path> [--cpus N=2] [--memory-mb N=2048 (max 4096)] [--volume-gb N=20]
+kestrel-host vm create --user <userId> --os-image <raw path> [--cpus N=2 (1-8)] [--memory-mb N=2048 (max 4096)] [--volume-gb N=20]
 kestrel-host vm start <vmId>
 kestrel-host vm stop <vmId> [--timeout SECONDS=120] [--force]
 kestrel-host vm destroy <vmId> --yes

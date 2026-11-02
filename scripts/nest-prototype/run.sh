@@ -42,13 +42,19 @@ esac
 
 console_args=(-display none -serial mon:stdio)
 if [[ -n "${KESTREL_VM_CONSOLE_SOCKET:-}" ]]; then
-  chardev="socket,id=console,path=$KESTREL_VM_CONSOLE_SOCKET,server=on,wait=off"
-  if [[ -n "${KESTREL_VM_CONSOLE_LOG:-}" ]]; then chardev+=",logfile=$KESTREL_VM_CONSOLE_LOG"; fi
+  # QEMU option strings split on commas; a literal comma in a path is written as ",,".
+  console_socket=${KESTREL_VM_CONSOLE_SOCKET//,/,,}
+  chardev="socket,id=console,path=$console_socket,server=on,wait=off"
+  if [[ -n "${KESTREL_VM_CONSOLE_LOG:-}" ]]; then
+    console_log=${KESTREL_VM_CONSOLE_LOG//,/,,}
+    chardev+=",logfile=$console_log"
+  fi
   console_args=(-display none -chardev "$chardev" -serial chardev:console)
 fi
 qmp_args=()
 if [[ -n "${KESTREL_VM_QMP_SOCKET:-}" ]]; then
-  qmp_args=(-qmp "unix:$KESTREL_VM_QMP_SOCKET,server=on,wait=off")
+  qmp_socket=${KESTREL_VM_QMP_SOCKET//,/,,}
+  qmp_args=(-qmp "unix:$qmp_socket,server=on,wait=off")
 fi
 
 # Lock the actual files, not a name derived from their paths. QEMU receives these same open files.
