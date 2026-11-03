@@ -18,7 +18,7 @@ import { WorkspaceService } from "./workspace"
 test("a message sent mid-run is placed where the run was when the agent got it, also after a reload", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-steer-"))
   const config: ServerConfig = {
-    port: 8898, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8898", dataDir: root,
+    port: 8898, host: "127.0.0.1", sandboxPort: 8898, mcpBaseUrl: "http://127.0.0.1:8898", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
