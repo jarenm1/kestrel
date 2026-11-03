@@ -56,6 +56,8 @@ export const Checkout = Schema.Struct({
   createdAt: Schema.String,
   /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
+  pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
   icon: Schema.optional(CheckoutIcon),
 })

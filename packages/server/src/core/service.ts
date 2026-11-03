@@ -757,6 +757,13 @@ export const CoreLive = Layer.effect(
       Effect.gen(function* () {
         const ref = yield* checkoutRepoRef(checkout)
         const token = ref.github === null ? undefined : yield* requiredGithubToken(task.owner)
+        if (checkout.pullRequestTakeover && checkout.pullRequest !== undefined) {
+          const access = yield* githubAccess(task.owner, ref)
+          const pr = yield* github.getPullRequestStatus(access.token, access.slug, checkout.pullRequest.number).pipe(Effect.mapError(fromGitHub))
+          if (pr.state !== "open" || pr.headRef !== checkout.branch || pr.headRepo?.toLowerCase() !== ref.repo.toLowerCase()) {
+            return yield* Effect.fail(new BadRequest({ message: `cannot push ${checkout.branch}: pull request #${checkout.pullRequest.number} is no longer open on this repository's branch` }))
+          }
+        }
         const spec = checkoutSpec(task.id, checkout)
         const head = yield* workspace.headSha(spec).pipe(Effect.mapError(toInternal("read checkout head")))
         yield* workspace
@@ -1119,7 +1126,7 @@ export const CoreLive = Layer.effect(
           if (request.detached === true) return { baseBranch, startSha: sha, branch: threadBranch, note: null }
           const link = { number: status.number, url: status.url }
           const blocker = pullRequestBranchBlocker(status, access.slug, defaultBranch)
-          if (blocker === null) return { baseBranch, startSha: sha, branch: status.headRef, link, note: null }
+          if (blocker === null) return { baseBranch, startSha: sha, branch: status.headRef, link, takeover: true, note: null }
           return {
             baseBranch,
             startSha: sha,
@@ -1156,6 +1163,7 @@ export const CoreLive = Layer.effect(
           baseBranch: fork.baseBranch,
           createdAt: nowIso(),
           ...(fork.link === undefined ? {} : { pullRequest: fork.link }),
+          ...(fork.takeover ? { pullRequestTakeover: true } : {}),
           ...(icon === null ? {} : { icon }),
         }
         return { checkout, note: fork.note, instructionFiles }

@@ -186,6 +186,26 @@ describe("repo_checkout with a pull request", () => {
     )
   })
 
+  test("refuses to recreate a taken-over branch after its pull request closes", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    const status = prStatus({})
+    await withCore(status, origin, root, (core) =>
+      Effect.gen(function* () {
+        yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        Object.assign(status, { state: "closed" })
+        git(origin, ["update-ref", "-d", "refs/heads/topic"])
+        const pushed = yield* Effect.either(core.gitPush("t1"))
+        expect(Either.isLeft(pushed)).toBe(true)
+        if (Either.isLeft(pushed)) expect(String(pushed.left.message)).toContain("no longer open")
+        expect(git(origin, ["branch", "--list", "topic"])).toBe("")
+        const opened = yield* Effect.either(core.openPullRequest("t1", { title: "New PR", body: "", draft: false }))
+        expect(Either.isLeft(opened)).toBe(true)
+        expect(git(origin, ["branch", "--list", "topic"])).toBe("")
+      }),
+    )
+  })
+
   test("a thread with the repository on another branch refuses instead of ignoring the pull request", async () => {
     const root = await newRoot()
     const { origin } = await makeOrigin(root, "topic")
