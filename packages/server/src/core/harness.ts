@@ -469,8 +469,8 @@ export const AgentHarnessLive = Layer.effect(
             putItem(runId, entry, item)
             if (!endsCodexTurn(parsed) && !declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
           }
-          const context = entry.transcript.context()
-          if (context !== null && context !== entry.context) {
+          const context = entry.transcript.takeContext()
+          if (context !== undefined && context !== entry.context) {
             entry.context = context
             runFork(setContext(entry.taskId, context))
           }

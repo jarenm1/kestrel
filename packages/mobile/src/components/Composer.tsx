@@ -9,6 +9,7 @@ import {
   type ComposerEditorView,
   type GithubReferenceKind,
 } from "@cloudagents/composer/reference";
+import Svg, { Circle } from "react-native-svg";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import {
@@ -41,11 +42,17 @@ import { Markdown } from "./Markdown";
 import { SlashCommands } from "./SlashCommands";
 import ComposerEditor, { type DOMRef } from "./ComposerEditor";
 import { GithubReferenceMenu } from "./GithubReferenceMenu";
+import { ThinkingSlider } from "./ThinkingSlider";
 
-interface PickerOption<T extends string> {
-  readonly value: T | undefined;
-  readonly label: string;
-}
+// Match the desktop ring regardless of the model's number of supported levels.
+const EFFORT_RING_FILL: Record<AgentEffort, number> = {
+  none: 0,
+  low: 25,
+  medium: 50,
+  high: 75,
+  xhigh: 87.5,
+  max: 100,
+};
 
 /** A connected provider and the models the user keeps in the picker for it. */
 interface ModelSection {
@@ -53,55 +60,79 @@ interface ModelSection {
   readonly models: readonly ModelInfo[];
 }
 
-/**
- * A pill that opens a single-choice menu; shows its label until something other than Default is picked.
- * The web dropdown becomes a bottom sheet.
- */
-function PillPicker<T extends string>({
-  label,
+/** The desktop thinking slider in a touch-sized sheet, shared by Expo and mobile web. */
+function ThinkingPicker({
   value,
   options,
   onChange,
 }: {
-  label: string;
-  value: T | undefined;
-  options: readonly PickerOption<T>[];
-  onChange: (value: T | undefined) => void;
+  value: AgentEffort | undefined;
+  options: readonly { value: AgentEffort | undefined; label: string }[];
+  onChange: (value: AgentEffort | undefined) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const shown = value === undefined ? label : (options.find((o) => o.value === value)?.label ?? label);
+  const [width, setWidth] = useState(0);
+  const index = Math.max(0, options.findIndex((option) => option.value === value));
+  const selected = options[index]!;
+  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value];
+  // Both input implementations reserve 16px at each end for the thumb.
+  const offset = (stop: number) => 16 + Math.max(0, width - 32) * stop / (options.length - 1);
   return (
     <>
-      <Button variant="ghost" size="sm" active={open} onPress={() => setOpen(true)} accessibilityLabel={label}>
-        <Text style={styles.pillText}>{shown}</Text>
-        <ChevronDown size={16} color={colors.mutedForeground + "99"} />
+      <Button
+        variant="ghost"
+        size="sm"
+        active={open}
+        onPress={() => setOpen(true)}
+        accessibilityLabel={`Thinking level: ${selected.label}`}
+      >
+        <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" strokeWidth={3} accessibilityElementsHidden aria-hidden>
+          <Circle cx={12} cy={12} r={9} stroke={colors.mutedForeground + "4d"} />
+          {ringFill > 0 ? (
+            <Circle
+              cx={12} cy={12} r={9}
+              stroke={colors.mutedForeground}
+              strokeDasharray={`${2 * Math.PI * 9 * ringFill / 100} ${2 * Math.PI * 9}`}
+              strokeLinecap="round"
+              rotation={-90}
+              origin="12, 12"
+            />
+          ) : null}
+        </Svg>
+        <Text style={styles.pillText}>{value === undefined ? "Thinking" : selected.label}</Text>
       </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
-          <View style={styles.sheet}>
-            <Text style={styles.sheetLabel}>{label}</Text>
-            {options.map((o) => {
-              const selected = o.value === value;
-              return (
-                <Pressable
-                  key={o.label}
-                  style={({ pressed }) => [styles.option, pressed && styles.optionPressed]}
-                  accessibilityRole="radio"
-                  accessibilityState={{ checked: selected }}
-                  onPress={() => {
-                    onChange(o.value);
-                    setOpen(false);
-                  }}
-                >
-                  <View style={styles.optionCheck}>
-                    {selected ? <Check size={16} color={colors.foreground} /> : null}
-                  </View>
-                  <Text style={styles.optionText}>{o.label}</Text>
-                </Pressable>
-              );
-            })}
+        <View style={styles.modalRoot}>
+          <Pressable style={styles.backdropFill} onPress={() => setOpen(false)} accessibilityLabel="Close thinking" accessibilityRole="button" />
+          <View style={[styles.sheet, styles.thinkingSheet]}>
+            <View style={styles.thinkingHeader}>
+              <Text style={styles.thinkingLabel}>Thinking</Text>
+              <Text style={styles.thinkingValue}>{selected.label}</Text>
+            </View>
+            <View style={styles.sliderHitArea} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
+              <View pointerEvents="none" style={styles.sliderTrack}>
+                <View style={[styles.sliderFill, { width: offset(index) + 8 }]} />
+                {options.map((option, stop) => (
+                  <View key={option.label} style={[
+                    styles.sliderStop,
+                    { left: offset(stop) - 2, backgroundColor: stop <= index ? colors.primary + "99" : colors.mutedForeground + "66" },
+                  ]} />
+                ))}
+                <View style={[styles.sliderThumb, { left: offset(index) - 12 }]} />
+              </View>
+              <ThinkingSlider
+                value={index}
+                max={options.length - 1}
+                label={selected.label}
+                onChange={(stop) => onChange(options[stop]!.value)}
+              />
+            </View>
+            <View style={styles.thinkingEndpoints} aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+              <Text style={styles.thinkingLabel}>{options[0]!.label}</Text>
+              <Text style={styles.thinkingLabel}>{options[options.length - 1]!.label}</Text>
+            </View>
           </View>
-        </Pressable>
+        </View>
       </Modal>
     </>
   );
@@ -318,7 +349,7 @@ export function Composer({
   const offered = sections?.flatMap((section) => section.models) ?? [];
   const model = offered.find((m) => m.id === storedModel) ?? offered[0];
   const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined;
-  const effortOptions: readonly PickerOption<AgentEffort>[] = [
+  const effortOptions = [
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
   ];
@@ -495,7 +526,7 @@ export function Composer({
             onManage={() => navigation.push({ name: "connections" })}
           />
           {model !== undefined && model.efforts.length > 0 ? (
-            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
           ) : null}
           <View style={styles.flex} />
           {onStop && empty ? (
@@ -596,7 +627,6 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: spacing.xs },
   modelPill: { flexShrink: 1, minWidth: 0 },
   pillText: { color: colors.mutedForeground, fontSize: 12, fontWeight: "500", flexShrink: 1 },
-  backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
   sheet: {
     backgroundColor: colors.secondary,
     borderTopLeftRadius: radius.xxl,
@@ -613,6 +643,16 @@ const styles = StyleSheet.create({
   divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginVertical: spacing.xs },
   manageText: { color: colors.mutedForeground, fontSize: 14 },
   sheetLabel: { color: colors.mutedForeground, fontSize: 12, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+  thinkingSheet: { paddingHorizontal: spacing.xl },
+  thinkingHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: spacing.sm },
+  thinkingLabel: { color: colors.mutedForeground, fontSize: 12 },
+  thinkingValue: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
+  sliderHitArea: { height: 44, justifyContent: "center" },
+  sliderTrack: { height: 32, borderRadius: radius.full, backgroundColor: colors.input },
+  sliderFill: { position: "absolute", left: 4, top: 4, height: 24, borderRadius: radius.full, backgroundColor: colors.primary + "33" },
+  sliderStop: { position: "absolute", top: 14, width: 4, height: 4, borderRadius: radius.full },
+  sliderThumb: { position: "absolute", top: 4, width: 24, height: 24, borderRadius: radius.full, backgroundColor: colors.primary, ...shadows.soft },
+  thinkingEndpoints: { flexDirection: "row", justifyContent: "space-between" },
   option: {
     flexDirection: "row",
     alignItems: "center",

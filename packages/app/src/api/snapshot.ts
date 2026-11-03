@@ -1,4 +1,5 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query"
+import type { Task } from "@cloudagents/protocol"
 
 /**
  * Fetches a list snapshot, keeping entries live events wrote while it was in flight: those are newer than the snapshot.
@@ -19,4 +20,21 @@ export async function fetchSnapshot<T extends { readonly id: string }>(
     if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item)
   }
   return [...byId.values()]
+}
+
+/**
+ * Fetches one task, keeping the task live events wrote while the fetch was in flight: it is newer than the snapshot.
+ * The identity check matters more than for lists: every event writes a whole task object, and a thread opened while a
+ * run is reporting context (or a socket reconnecting after the tab was hidden) would otherwise take the snapshot read
+ * before that report and show it until the run's next one.
+ */
+export async function fetchTaskSnapshot(
+  client: QueryClient,
+  key: QueryKey,
+  fetch: () => Promise<Task>,
+): Promise<Task> {
+  const before = client.getQueryData<Task>(key)
+  const task = await fetch()
+  const current = client.getQueryData<Task>(key)
+  return current !== undefined && current !== before ? current : task
 }
