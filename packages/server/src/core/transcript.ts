@@ -16,6 +16,11 @@ export interface Transcript {
    * results; Codex in `thread/tokenUsage/updated`. Each change is a new object.
    */
   readonly context: () => ContextUsage | null
+  /**
+   * The context change since the previous call: the new use, null after a compaction dropped the old one, or
+   * undefined when nothing changed. Consumers that store the context (the harness) read this, so a drop is seen too.
+   */
+  readonly takeContext: () => ContextUsage | null | undefined
 }
 
 /** Claude `stream-json` line types. */
@@ -129,6 +134,8 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
   let windowTokens: number | null = null
   let usedTokens: number | null = null
   let contextValue: ContextUsage | null = null
+  /** Set when `contextValue` changed since `takeContext` last read it, including a drop to null. */
+  let contextChanged = false
   /**
    * Claude text and thinking blocks streaming in (`--include-partial-messages`), by API message id, in block order,
    * with the item id each one shows under. The finished block's `assistant` line takes over that id.
@@ -145,6 +152,7 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
       return
     }
     contextValue = { model, usedTokens, windowTokens }
+    contextChanged = true
   }
 
   const claudeSystem = (line: Record<string, unknown>) => {
@@ -156,6 +164,8 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
       case "compact_boundary":
         // The pre-compaction size no longer holds; the next model call reports the compacted one.
         usedTokens = null
+        contextValue = null
+        contextChanged = true
         return
     }
   }
@@ -607,5 +617,10 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
     },
     finalText: () => finalTextValue,
     context: () => contextValue,
+    takeContext: () => {
+      if (!contextChanged) return undefined
+      contextChanged = false
+      return contextValue
+    },
   }
 }

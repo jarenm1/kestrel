@@ -502,8 +502,24 @@ describe("claude context use", () => {
     transcript.push(call(10, 920_000, 100))
     expect(transcript.context()).toEqual({ model: "claude-opus-5-5", usedTokens: 920_110, windowTokens: 1_000_000 })
     transcript.push({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 920_110 } })
+    // The size the bar showed before the compaction is not the session's size any more.
+    expect(transcript.context()).toBeNull()
     transcript.push(call(10, 30_000, 100))
     expect(transcript.context()).toEqual({ model: "claude-opus-5-5", usedTokens: 30_110, windowTokens: 1_000_000 })
+  })
+
+  test("takeContext reports each change once, including a compaction dropping the size", () => {
+    const transcript = makeTranscript({ model: "claude-opus-5-5", usedTokens: 900_000, windowTokens: 1_000_000 })
+    expect(transcript.takeContext()).toBeUndefined()
+    transcript.push(init("claude-opus-5-5"))
+    transcript.push(call(10, 920_000, 100))
+    expect(transcript.takeContext()).toEqual({ model: "claude-opus-5-5", usedTokens: 920_110, windowTokens: 1_000_000 })
+    // Nothing new on the next line, so the harness does not publish the task again.
+    transcript.push(call(10, 920_000, 100))
+    expect(transcript.takeContext()).toBeUndefined()
+    transcript.push({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 920_110 } })
+    expect(transcript.takeContext()).toBeNull()
+    expect(transcript.takeContext()).toBeUndefined()
   })
 
   test("a compaction with no call after it reports no size rather than the stale one", () => {

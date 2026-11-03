@@ -361,3 +361,79 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     await rm(root, { recursive: true, force: true })
   }
 }, 20_000)
+
+test("a compaction drops the context stored on the task, not just the transcript's copy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-context-drop-"))
+  const cli = join(root, "cli.ts")
+  // The test lets the CLI report the compaction only after the harness has published the pre-compaction context,
+  // so the run's later drop cannot be confused with having never reported one.
+  const compacted = join(root, "compacted")
+  await writeFile(cli, `
+import { existsSync } from "node:fs"
+import { createInterface } from "node:readline"
+const send = (message) => console.log(JSON.stringify(message))
+createInterface({ input: process.stdin }).on("line", (line) => {
+  if (JSON.parse(line).type !== "user") return
+  send({ type: "system", subtype: "init", session_id: "s1", model: "claude-opus-5-5" })
+  send({
+    type: "assistant",
+    message: {
+      id: "m1",
+      content: [{ type: "text", text: "Working." }],
+      usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 180_000, output_tokens: 100 },
+    },
+    parent_tool_use_id: null,
+  })
+  send({ type: "result", subtype: "success", is_error: false, usage: {}, modelUsage: { "claude-opus-5-5": { contextWindow: 200_000 } }, result: "Done." })
+  const timer = setInterval(() => {
+    if (!existsSync(${JSON.stringify(compacted)})) return
+    clearInterval(timer)
+    send({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 180_110 } })
+    setTimeout(() => process.exit(0), 100)
+  }, 20)
+})
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const { task, run } = runningTask("compact")
+      yield* store.update((state) => {
+        state.tasks.push(task)
+        state.runs.push(run)
+        return Either.right(null)
+      })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const reported = Promise.withResolvers<void>()
+      const dropped = Promise.withResolvers<void>()
+      const finished = Promise.withResolvers<void>()
+      let sawContext = false
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "task.updated") {
+          if (event.task.context?.usedTokens === 180_110) {
+            sawContext = true
+            reported.resolve()
+          } else if (sawContext && event.task.context === undefined) {
+            dropped.resolve()
+          }
+        }
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* Effect.promise(() => reported.promise).pipe(Effect.timeout("8 seconds"))
+        yield* Effect.promise(() => writeFile(compacted, ""))
+        yield* Effect.promise(() => dropped.promise).pipe(Effect.timeout("8 seconds"))
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        expect((yield* store.read).tasks[0]?.context).toBeUndefined()
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)

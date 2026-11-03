@@ -444,8 +444,8 @@ export const AgentHarnessLive = Layer.effect(
           entry.driver?.receive(parsed)
           // Every parsed line goes through the run's transcript, whether or not it yields items.
           for (const item of entry.transcript.push(parsed)) putItem(runId, entry, item)
-          const context = entry.transcript.context()
-          if (context !== null && context !== entry.context) {
+          const context = entry.transcript.takeContext()
+          if (context !== undefined && context !== entry.context) {
             entry.context = context
             runFork(setContext(entry.taskId, context))
           }
