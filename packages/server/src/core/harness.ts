@@ -34,7 +34,7 @@ import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
-import { agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 export interface AgentHarnessShape {
   /**
@@ -112,6 +112,7 @@ interface ActiveRun {
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
   readonly agentKind: "claude" | "codex" | null
+  diagnostic: string | null
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
   readonly failedTools: Set<string>
   /** Set once the run is stopped; what its process reports while it shuts down is not a tool failure. */
@@ -327,7 +328,7 @@ export const AgentHarnessLive = Layer.effect(
       entry.heldTimer ??= setTimeout(() => flushHeld(runId, entry), ITEM_PUBLISH_MS)
     }
 
-    const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
+    const finish = (runId: string, exitCode: number | null, spawnError: string | null, signal: string | null = null) =>
       Effect.gen(function* () {
         releaseSlot(runId)
         // The run's broker token dies with the run, whatever the outcome.
@@ -386,7 +387,7 @@ export const AgentHarnessLive = Layer.effect(
         })
         if (outcome === null) return
         if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
-          toolFailures?.record(agentFailure(entry.agentKind, turn.error))
+          toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
         }
         publish({ _tag: "message.created", message: outcome.message })
         publish({ _tag: "run.updated", run: outcome.run })
@@ -456,6 +457,7 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
+        entry.diagnostic = agentDiagnostic(line) ?? entry.diagnostic
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
       }
@@ -464,8 +466,17 @@ export const AgentHarnessLive = Layer.effect(
         try {
           const parsed: unknown = JSON.parse(trimmed)
           entry.driver?.receive(parsed)
+          if (entry.agentKind === "claude" && typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "result" && "is_error" in parsed && parsed.is_error === true) {
+            const result = "result" in parsed && typeof parsed.result === "string" ? parsed.result : null
+            const errors = "errors" in parsed && Array.isArray(parsed.errors) ? parsed.errors.find((e: unknown) => typeof e === "string") : null
+            const detail = result || errors || ("subtype" in parsed && typeof parsed.subtype === "string" ? parsed.subtype : null)
+            if (detail !== null) entry.diagnostic = agentDiagnostic(`error: ${detail}`) ?? entry.diagnostic
+          }
           // Every parsed line goes through the run's transcript, whether or not it yields items.
           for (const item of entry.transcript.push(parsed)) {
+            if (item._tag === "error" && !(entry.agentKind === "claude" && item.text.startsWith("claude result:"))) {
+              entry.diagnostic = agentDiagnostic(`error: ${item.text}`) ?? entry.diagnostic
+            }
             putItem(runId, entry, item)
             if (!endsCodexTurn(parsed) && !declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
           }
@@ -525,6 +536,7 @@ export const AgentHarnessLive = Layer.effect(
               sessionId: null,
               driver: null,
               agentKind: session.conversation?.kind ?? null,
+              diagnostic: null,
               failedTools: new Set(),
               stopped: false,
             }
@@ -571,8 +583,8 @@ export const AgentHarnessLive = Layer.effect(
             child.on("error", (err) => {
               runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
             })
-            child.on("close", (code) => {
-              runFork(finish(run.id, code, null))
+            child.on("close", (code, signal) => {
+              runFork(finish(run.id, code, null, signal))
             })
             entry.driver?.start()
           },

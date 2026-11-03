@@ -56,11 +56,10 @@ describe("failureSignature", () => {
 })
 
 describe("agentFailure", () => {
-  test("classifies early exits for both agents without sending error text", () => {
-    expect(agentFailure("claude", "Claude Code exited before its turn finished.")).toEqual({ tool: "agent:claude", signature: "exited before turn finished" })
-    expect(agentFailure("codex", "Codex exited before its turn finished.")).toEqual({ tool: "agent:codex", signature: "exited before turn finished" })
-    expect(agentFailure("codex", "private provider error")).toEqual({ tool: "agent:codex", signature: "turn failed" })
-    expect(agentFailure("claude", null).signature).toBe("turn failed")
+  test("reports diagnostics and exit details for failed turns", () => {
+    expect(agentFailure("claude", "Claude Code exited before its turn finished.", null, 1, null)).toEqual({ tool: "agent:claude", signature: "exited before turn finished: exit code 1" })
+    expect(agentFailure("codex", "Codex exited before its turn finished.", "error: rate limit exceeded", null, "SIGKILL")).toEqual({ tool: "agent:codex", signature: "exited before turn finished: error: rate limit exceeded: signal SIGKILL" })
+    expect(agentFailure("claude", null, null, null, null).signature).toBe("turn failed")
   })
 })
 

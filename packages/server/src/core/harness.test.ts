@@ -87,7 +87,7 @@ const runningTask = (id: string): { task: Task; run: Run } => {
 test("an agent exiting early reports its failed turn to the control plane", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-exit-telemetry-"))
   const cli = join(root, "cli.ts")
-  await writeFile(cli, 'process.stdin.once("data", () => process.exit(1))')
+  await writeFile(cli, 'process.stdin.once("data", () => { console.error("Error: rate limit exceeded for /home/alice/private"); process.exit(1) })')
   const reports: unknown[] = []
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (request) => {
     reports.push(await request.json())
@@ -110,7 +110,45 @@ test("an agent exiting early reports its failed turn to the control plane", asyn
         yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         yield* harness.stopAll()
-        expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "exited before turn finished", count: 1 }] }])
+        expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "exited before turn finished: Error: rate limit exceeded for <path>: exit code 1", count: 1 }] }])
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    server.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
+
+test("Claude error results report the specific error rather than the result subtype", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-result-telemetry-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, 'process.stdin.once("data", () => console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Rate limit exceeded"] })))')
+  const reports: unknown[] = []
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (request) => {
+    reports.push(await request.json())
+    return new Response(null, { status: 204 })
+  } })
+  const { config, layer } = harnessLayer(root, cli, { controlUrl: server.url.toString() })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const { task, run } = runningTask("error-result")
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.stopAll()
+        expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "turn failed: error: Rate limit exceeded: exit code 0", count: 1 }] }])
       } finally {
         unsubscribe()
         yield* harness.stopAll()

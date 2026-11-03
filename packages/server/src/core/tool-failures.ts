@@ -95,12 +95,17 @@ export const declinedCodexItem = (message: unknown, itemId: string): boolean => 
   return typeof item === "object" && item !== null && "id" in item && item.id === itemId && "status" in item && item.status === "declined"
 }
 
-/** Turn errors can contain provider or user data, so only report fixed categories. */
-export const agentFailure = (agent: "claude" | "codex", error: string | null): Omit<ToolFailureCount, "count"> => ({
+/** Only retain a scrubbed error line from CLI diagnostics, never arbitrary output. */
+export const agentDiagnostic = (text: string): string | null => {
+  const signature = failureSignature("Bash", text)
+  return signature === "(no error line)" || signature === "(no output)" || signature === "(output too large)" ? null : signature
+}
+
+export const agentFailure = (agent: "claude" | "codex", error: string | null, diagnostic: string | null, exitCode: number | null, signal: string | null): Omit<ToolFailureCount, "count"> => ({
   tool: `agent:${agent}`,
-  signature: error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
+  signature: [error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
     ? "exited before turn finished"
-    : "turn failed",
+    : "turn failed", diagnostic ?? (error === null ? null : agentDiagnostic(error)), exitCode === null ? null : `exit code ${exitCode}`, signal === null ? null : `signal ${signal}`].filter((part) => part !== null).join(": ").slice(0, MAX_SIGNATURE),
 })
 
 export interface ToolFailureReporter {
