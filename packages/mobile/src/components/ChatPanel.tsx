@@ -225,6 +225,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
+          lastRun={sortedRuns.filter((run) => run.model !== undefined).at(-1)}
           onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}

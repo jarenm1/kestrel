@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react"
+import { useCallback, useState } from "react"
 import { Schema } from "effect"
 
-/** One pick, remembered in localStorage so it survives switching threads and reloads. */
+/**
+ * One pick, remembered in localStorage so it survives switching threads and reloads. Writes go to storage directly
+ * rather than from an effect: a send can resolve after its composer has unmounted, and that clear must still land.
+ */
 export function useStoredChoice<A extends string>(key: string, schema: Schema.Schema<A>) {
   const [value, setValue] = useState<A | undefined>(() => {
     const stored = localStorage.getItem(key)
     return stored !== null && Schema.is(schema)(stored) ? stored : undefined
   })
-  useEffect(() => {
-    if (value === undefined) localStorage.removeItem(key)
-    else localStorage.setItem(key, value)
-  }, [key, value])
-  return [value, setValue] as const
+  const choose = useCallback(
+    (next: A | undefined) => {
+      setValue(next)
+      if (next === undefined) localStorage.removeItem(key)
+      else localStorage.setItem(key, next)
+    },
+    [key],
+  )
+  return [value, choose] as const
 }

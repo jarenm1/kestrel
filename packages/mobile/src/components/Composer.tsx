@@ -12,19 +12,22 @@ import {
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import {
-  AgentEffort,
   AgentModel,
   GithubRepoSlug,
   EFFORT_LABELS,
+  EffortPick,
   connectedModelProviders,
   harnessCommandPrefix,
   Paths,
+  resolveAgentChoice,
+  type AgentEffort,
   type ContextUsage,
   type HarnessCommand,
   type Message,
   type ModelInfo,
   type ModelProvider,
   type ModelProviderInfo,
+  type Run,
   type SendMessageBody,
 } from "@cloudagents/protocol";
 import { AttachmentImage } from "@/components/AttachmentImage";
@@ -197,6 +200,8 @@ interface ComposerProps {
   readonly ask?: Message | undefined;
   readonly context?: ContextUsage | null | undefined;
   readonly activeRunId?: string;
+  /** The thread's latest run that recorded a model: the pickers show its choice until a different one is picked. */
+  readonly lastRun?: Pick<Run, "model" | "effort"> | undefined;
   readonly activeRunProvider?: ModelProvider;
   readonly repo?: string;
   readonly onRepoChange?: (repo: string) => void;
@@ -276,6 +281,7 @@ export function Composer({
   context,
   activeRunId,
   activeRunProvider,
+  lastRun,
   below,
   repo,
   onRepoChange,
@@ -301,23 +307,26 @@ export function Composer({
   const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate));
   const referenceRepo = pickedRepo ?? repo ?? (checkoutRepos.length === 1 ? checkoutRepos[0] : undefined);
   useEffect(() => setPickedRepo(undefined), [repo]);
-  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
-  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
+  // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
+  const pickSuffix = taskId === undefined ? "" : `.${taskId}`;
+  const [pickedModel, setPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel);
+  const [pickedEffort, setPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick);
+  const [defaultModel] = useStoredChoice("kestrel.model", AgentModel);
+  const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick);
   const [choice, setChoice] = useState<{ askId: string; index: number } | undefined>();
 
   const askOptions = ask?.options ?? [];
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined;
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex];
 
+  const connected = connections.data ? connectedModelProviders(connections.data) : [];
   const sections: readonly ModelSection[] | null = connections.data
-    ? connectedModelProviders(connections.data)
+    ? connected
         .map((provider) => ({ provider, models: shown[provider.id] }))
         .filter((section) => section.models.length > 0)
     : null;
-  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((section) => section.models) ?? [];
-  const model = offered.find((m) => m.id === storedModel) ?? offered[0];
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined;
+  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort });
   const effortOptions: readonly PickerOption<AgentEffort>[] = [
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
@@ -427,6 +436,11 @@ export function Composer({
         editor.current?.clear();
         setText("");
         setChoice(undefined);
+        // The new run now records these picks. A message joining a running turn keeps them for the next turn.
+        if (taskId !== undefined && activeRunId === undefined) {
+          setPickedModel(undefined);
+          setPickedEffort(undefined);
+        }
       },
       () => undefined
     );
@@ -491,11 +505,11 @@ export function Composer({
           <ModelPicker
             sections={sections}
             value={model}
-            onChange={setModel}
+            onChange={setPickedModel}
             onManage={() => navigation.push({ name: "connections" })}
           />
           {model !== undefined && model.efforts.length > 0 ? (
-            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={(e) => setPickedEffort(e ?? "default")} />
           ) : null}
           <View style={styles.flex} />
           {onStop && empty ? (

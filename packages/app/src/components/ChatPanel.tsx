@@ -306,11 +306,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <ArchivedNotice task={archivedTask} />
         ) : (
           <Composer
+            key={taskId}
             taskId={taskId}
             draftKey={taskId}
             repos={checkoutRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
+            lastRun={sortedRuns.filter((run) => run.model !== undefined).at(-1)}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             ask={pendingAsk}
