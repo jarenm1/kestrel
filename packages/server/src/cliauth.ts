@@ -95,8 +95,9 @@ export interface CliAuthShape {
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
   /**
-   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace): Claude Code
-   * slash commands or Codex skills. Runs the CLI in the user's isolated login home with the workspace read-only,
+   * The real commands the provider's CLI offers for `user` in `workspacePath` (where the thread's agent starts: its
+   * first checkout or the workspace root): Claude Code slash commands or Codex skills. Runs the CLI in the user's
+   * isolated login home with that directory read-only,
    * bounded and killed on answer, error or timeout; never tokens, paths or file contents.
    */
   readonly discoverCommands: (
@@ -344,8 +345,8 @@ export const CliAuthLive = Layer.effect(
       })
 
     /**
-     * A thread's workspace, and only a thread's workspace: discovery reads project commands/skills from it and must
-     * never be handed an arbitrary host path.
+     * A directory inside the threads directory (a workspace or one of its checkouts), and nothing else: discovery
+     * reads project commands/skills from it and must never be handed an arbitrary host path.
      */
     const threadWorkspace = (workspacePath: string): Effect.Effect<string, BadRequest> => {
       const root = resolve(config.threadsDir)

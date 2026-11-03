@@ -16,7 +16,15 @@ const harness = (overrides: Partial<CodexRunInput> = {}) => {
   const threads: string[] = []
   const outcomes: RunOutcome[] = []
   const driver = makeCodexDriver(
-    { text: "fix the test", prompt: "user context\n\nfix the test", resumeThread: null, clientVersion: "1.2.3", ...overrides },
+    {
+      text: "fix the test",
+      prompt: "user context\n\nfix the test",
+      cwd: "/threads/t1/kestrel",
+      workspacePath: "/threads/t1",
+      resumeThread: null,
+      clientVersion: "1.2.3",
+      ...overrides,
+    },
     { send: (m) => sent.push(m as Sent), onThread: (id) => threads.push(id), onDone: (o) => outcomes.push(o) },
   )
   const last = () => sent.at(-1) as Sent
@@ -39,7 +47,7 @@ describe("codex app-server driver", () => {
     expect(h.sent.at(-2)).toEqual({ method: "initialized", params: {} })
     expect(h.last()).toMatchObject({
       method: "thread/start",
-      params: { approvalPolicy: "never", sandbox: "danger-full-access", model: "gpt-6-luna" },
+      params: { approvalPolicy: "never", sandbox: "danger-full-access", cwd: "/threads/t1/kestrel", model: "gpt-6-luna" },
     })
     h.reply({ thread: { id: "th1" }, model: "gpt-6-luna" })
     expect(h.threads).toEqual([])
@@ -62,7 +70,11 @@ describe("codex app-server driver", () => {
     h.reply({})
     expect(h.last()).toMatchObject({ method: "account/login/start", params: { type: "apiKey", apiKey: "run-token" } })
     h.reply({ type: "apiKey" })
-    expect(h.last()).toMatchObject({ method: "thread/resume", params: { threadId: "th-old", excludeTurns: true, approvalPolicy: "never" } })
+    // A thread opened before its checkout existed moves there: the cwd is sent on resume, not only on start.
+    expect(h.last()).toMatchObject({
+      method: "thread/resume",
+      params: { threadId: "th-old", excludeTurns: true, approvalPolicy: "never", cwd: "/threads/t1/kestrel" },
+    })
     h.driver.receive({ id: h.last().id, error: { code: -32600, message: "no rollout found for thread th-old" } })
     expect(h.outcomes).toEqual([{ status: "failed", error: "thread/resume: no rollout found for thread th-old" }])
     expect(h.methods()).not.toContain("turn/start")
@@ -100,7 +112,11 @@ describe("codex app-server driver", () => {
     h.driver.start()
     h.reply({})
     h.reply({ thread: { id: "th1" } })
-    expect(h.last()).toMatchObject({ method: "review/start" })
+    // Without instructions it reviews every checkout in the workspace, not only the one it runs in.
+    expect(h.last()).toMatchObject({
+      method: "review/start",
+      params: { target: { type: "custom", instructions: "Review the uncommitted changes in every git repository under /threads/t1." } },
+    })
     h.reply({ turn: { id: "tu-review" }, reviewThreadId: "th1" })
     // The review turn exists but nothing runs until the reviewer's own turn starts.
     expect(h.driver.interrupt()).toBe(false)

@@ -37,7 +37,7 @@ export interface ServerConfig {
   readonly dataDir: string
   /** Bare mirrors of repositories, one per user per repository; host-only writes, read-only in sandboxes. */
   readonly mirrorsDir: string
-  /** Per-thread workspaces: the agent's working directory, with one checkout directory per repository. */
+  /** Per-thread workspaces, with one checkout directory per repository; the agent starts in the first checkout. */
   readonly threadsDir: string
   /** Host-only shadow git dirs, one per checkout; all host-side git on a checkout runs against these. */
   readonly shadowsDir: string
@@ -46,7 +46,8 @@ export interface ServerConfig {
   readonly stateFile: string
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
-   * cwd = task worktree (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
+   * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
+   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /

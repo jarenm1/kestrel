@@ -1,8 +1,8 @@
 /**
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
- * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would. Like the
- * real CLIs it takes its prompt on stdin: Claude Code's stream-json input for Anthropic models, Codex app-server's
- * JSON-RPC for OpenAI ones, and plays one turn.
+ * Runs where a real agent would (the thread's first checkout, else its workspace) and talks to the task's MCP
+ * endpoint like a real agent would. Like the real CLIs it takes its prompt on stdin: Claude Code's stream-json input
+ * for Anthropic models, Codex app-server's JSON-RPC for OpenAI ones, and plays one turn.
  */
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
@@ -110,7 +110,7 @@ const runListenerProbe = async (publicPort?: string, hostPort?: string, expect?:
 }
 
 // Checks `repo` out into the thread, commits one file in the checkout and leaves another uncommitted, so the diff
-// must show both. Reports the checkout's directory.
+// must show both. Reports the checkout's directory, the directory the run started in and what repo_checkout said.
 const runCheckoutProbe = async (repo: string): Promise<number> => {
   const checkout = await call("repo_checkout", { repo })
   const dir = /\bat (\S+) \(/.exec(checkout.text)?.[1]
@@ -126,7 +126,10 @@ const runCheckoutProbe = async (repo: string): Promise<number> => {
     await call("task_report", { status: "failed", message: `fake agent could not change files in ${dir}` })
     return 1
   }
-  await call("task_report", { status: "done", message: `checkout probe finished in ${dir}` })
+  await call("task_report", {
+    status: "done",
+    message: `checkout probe finished in ${dir}; run started in ${process.cwd()}; repo_checkout said: ${checkout.text}`,
+  })
   return 0
 }
 

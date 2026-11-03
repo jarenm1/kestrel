@@ -6,7 +6,7 @@ import { dirname, join } from "node:path"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { SANDBOX_HOME, buildBwrapArgv } from "."
 
-const base = { workspacePath: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
+const base = { workspacePath: "/w", cwd: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
 
 /** The real thing needs a toolchain inside the nix store, the only part of the host strict shows. */
 const envPath = Bun.which("env")
@@ -39,6 +39,7 @@ describe("buildBwrapArgv", () => {
         level: "strict",
         binPath,
         workspacePath,
+        cwd: workspacePath,
         mirrorDir,
         homeDir,
         env: { PATH: `${SANDBOX_HOME}/.kestrel/gh:${binPath}` },

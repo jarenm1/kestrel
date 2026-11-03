@@ -47,7 +47,7 @@ export const Checkout = Schema.Struct({
   id: Schema.String,
   /** GitHub "owner/name" for github.com repositories, otherwise the https clone URL. */
   repo: Schema.String,
-  /** Directory of the checkout, relative to the thread workspace (the agent's working directory), e.g. `kestrel`. */
+  /** Directory of the checkout, relative to the thread workspace, e.g. `kestrel`. The agent starts in the first one. */
   dir: Schema.String,
   /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`. */
   branch: Schema.String,
@@ -467,7 +467,7 @@ const noFolderFiles = (): FolderFiles => ({ files: [], truncated: false })
 
 /**
  * `GET Paths.taskFiles(id)` (`?hidden=1` adds hidden files to the folders). `checkouts` has one entry per checkout, in
- * `Task.checkouts` order. `workspace` is the thread's working directory without its checkouts; `home` is the agent's
+ * `Task.checkouts` order. `workspace` is the thread workspace without its checkouts; `home` is the agent's
  * home, where desktop apps save.
  */
 export const FilesResponse = Schema.Struct({

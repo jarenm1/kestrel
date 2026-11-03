@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createWriteStream, type WriteStream } from "node:fs"
+import { createWriteStream, existsSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
@@ -150,6 +150,18 @@ interface ProcessSpec {
   readonly args: ReadonlyArray<string>
   readonly cwd: string
   readonly env: NodeJS.ProcessEnv
+}
+
+/**
+ * Where a thread's agent starts: its first checkout, so the harness finds that repository's root and loads its
+ * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout (or the agent deleted it). The
+ * whole workspace stays bound either way; only the starting directory changes.
+ */
+export const agentCwd = (workspacePath: string, task: Pick<Task, "checkouts">): string => {
+  const first = task.checkouts[0]
+  if (first === undefined) return workspacePath
+  const dir = join(workspacePath, first.dir)
+  return existsSync(dir) ? dir : workspacePath
 }
 
 const KILL_GRACE_MS = 3000
@@ -649,11 +661,14 @@ export const AgentHarnessLive = Layer.effect(
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
+            const workspacePath = join(config.threadsDir, task.id)
+            const cwd = agentCwd(workspacePath, task)
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
               kind: "run",
-              workspacePath: join(config.threadsDir, task.id),
+              workspacePath,
+              cwd,
               mirrorDir: join(config.mirrorsDir, task.owner),
               homeDir,
               display,
@@ -706,6 +721,8 @@ export const AgentHarnessLive = Layer.effect(
                         input: {
                           text: run.prompt,
                           prompt,
+                          cwd,
+                          workspacePath,
                           resumeThread: resumeSession,
                           model: choice.model,
                           effort: choice.effort,

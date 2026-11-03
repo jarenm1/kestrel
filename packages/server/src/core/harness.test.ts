@@ -3,7 +3,7 @@ import { Effect, Either, Layer } from "effect"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Run, Task } from "@cloudagents/protocol"
+import type { Checkout, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker } from "../broker"
 import { CliAuth } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
@@ -228,3 +228,68 @@ createInterface({ input: process.stdin })
     await rm(root, { recursive: true, force: true })
   }
 }, 20_000)
+
+test("a run starts in the thread's first checkout, and in the workspace root once that checkout is gone", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-run-cwd-"))
+  const cli = join(root, "cli.ts")
+  // Answers the prompt with its working directory, then ends when the harness closes its input.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    if (JSON.parse(line).type === "user") {
+      console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: process.cwd() }))
+    }
+  })
+  .on("close", () => process.exit(0))
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  const checkout = (dir: string): Checkout => ({ id: dir, repo: `owner/${dir}`, dir, branch: "b", baseBranch: "main", createdAt: "" })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const workspace = join(config.threadsDir, "task")
+      yield* Effect.promise(() => mkdir(join(workspace, "app"), { recursive: true }))
+      yield* Effect.promise(() => mkdir(join(workspace, "lib"), { recursive: true }))
+
+      /** The directory a fresh run of a thread with `checkouts` reports. */
+      const runIn = (runId: string, checkouts: ReadonlyArray<Checkout>) =>
+        Effect.gen(function* () {
+          const base = runningTask("task")
+          const task = { ...base.task, checkouts: [...checkouts] }
+          const run = { ...base.run, id: runId }
+          yield* store.update((state) => {
+            state.tasks = [task]
+            state.runs.push(run)
+            return Either.right(null)
+          })
+          const finished = Promise.withResolvers<void>()
+          const unsubscribe = hub.subscribe(task.id, (event) => {
+            if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") finished.resolve()
+          })
+          try {
+            yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+            yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+          } finally {
+            unsubscribe()
+          }
+          return (yield* store.read).messages.at(-1)?.text
+        })
+
+      try {
+        expect(yield* runIn("no-checkout", [])).toBe(workspace)
+        // The first checkout, not the latest: a second repository does not move the thread.
+        expect(yield* runIn("two-checkouts", [checkout("app"), checkout("lib")])).toBe(join(workspace, "app"))
+        // An agent can delete its checkout; the thread's next run must still start.
+        yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
+        expect(yield* runIn("deleted-checkout", [checkout("app"), checkout("lib")])).toBe(workspace)
+      } finally {
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)

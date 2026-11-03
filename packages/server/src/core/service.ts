@@ -48,7 +48,7 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
-import { AgentHarness, type AgentChoice } from "./harness"
+import { AgentHarness, agentCwd, type AgentChoice } from "./harness"
 import { formatHandoff } from "./handoff"
 import { withUserContext } from "./user-context"
 import { peerMessageText, type FromThread } from "./peer"
@@ -417,11 +417,19 @@ export interface CoreShape {
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
   readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
-  /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
+  /**
+   * Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking
+   * again returns it. `path` is the checkout's absolute directory, the same inside the sandbox. `instructionFiles`
+   * are the absolute paths of the agent instruction files at the root of a checkout this call made: the calling run
+   * started before it existed, so its harness has not loaded them. Empty for an existing checkout.
+   */
   readonly checkout: (
     taskId: string,
     input: CheckoutRequest,
-  ) => Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError>
+  ) => Effect.Effect<
+    { readonly checkout: Checkout; readonly path: string; readonly instructionFiles: ReadonlyArray<string> },
+    NotFound | BadRequest | Conflict | InternalError
+  >
   /** Used by the MCP handler: pushes a checkout's branch to its GitHub remote (never forced). Returns the branch. */
   readonly gitPush: (taskId: string, checkoutId?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: pushes the checkout's branch and opens its pull request, or returns the open one. */
@@ -533,6 +541,9 @@ const parseCheckoutRequest = (request: CheckoutRequest): Effect.Effect<RepoRef, 
   }
   return Effect.succeed(ref)
 }
+
+/** Files at a repository's root that Codex (AGENTS.md) and Claude Code (CLAUDE.md) load from their working directory. */
+const AGENT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const
 
 /** The repository a stored checkout names. Stored values were validated on the way in. */
 const checkoutRepoRef = (checkout: Checkout): Effect.Effect<RepoRef, InternalError> => {
@@ -985,7 +996,7 @@ export const CoreLive = Layer.effect(
     const addCheckout = (
       taskId: string,
       request: CheckoutRequest,
-    ): Effect.Effect<Checkout, NotFound | BadRequest | Conflict | InternalError> =>
+    ): Effect.Effect<{ readonly checkout: Checkout; readonly created: boolean }, NotFound | BadRequest | Conflict | InternalError> =>
       checkoutLock.withPermits(1)(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
@@ -995,7 +1006,7 @@ export const CoreLive = Layer.effect(
           yield* refuseOverStorage(taskId)
           const ref = yield* parseCheckoutRequest(request)
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
-          if (existing) return existing
+          if (existing) return { checkout: existing, created: false }
           const checkout = yield* cloneCheckout(task, request, ref)
           const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
             const found = findTask(s, taskId)
@@ -1006,7 +1017,7 @@ export const CoreLive = Layer.effect(
             return Either.right({ ...stored })
           })
           hub.publish({ _tag: "task.updated", task: updated })
-          return checkout
+          return { checkout, created: true }
         }),
       )
 
@@ -1805,7 +1816,8 @@ export const CoreLive = Layer.effect(
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
           const cliProvider: CliProvider = provider === "anthropic" ? "claude-cli" : "codex-cli"
-          const commands = yield* cliAuth.discoverCommands(user, cliProvider, threadDirOf(task.id))
+          // Where the agent starts, so the list holds the project commands and skills of the checkout it runs in.
+          const commands = yield* cliAuth.discoverCommands(user, cliProvider, agentCwd(threadDirOf(task.id), task))
           return { provider, commands }
         }),
 
@@ -2196,7 +2208,19 @@ export const CoreLive = Layer.effect(
           return yield* installToolkit(flake, join(config.homesDir, taskId), name)
         }),
 
-      checkout: (taskId, input) => addCheckout(taskId, input),
+      checkout: (taskId, input) =>
+        Effect.gen(function* () {
+          const { checkout, created } = yield* addCheckout(taskId, input)
+          const path = join(threadDirOf(taskId), checkout.dir)
+          if (!created) return { checkout, path, instructionFiles: [] }
+          // Names only: the checkout is agent-writable, so nothing in it is followed or read here.
+          const names = yield* Effect.tryPromise({
+            try: () => readdir(path),
+            catch: (e) => new InternalError({ message: `list checkout: ${String(e)}` }),
+          })
+          const found = AGENT_INSTRUCTION_FILES.filter((name) => names.includes(name))
+          return { checkout, path, instructionFiles: found.map((name) => join(path, name)) }
+        }),
 
       taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),
       storageUsed: (taskId) => storageUsed.get(taskId) ?? null,
