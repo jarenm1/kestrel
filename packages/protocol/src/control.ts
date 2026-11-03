@@ -99,6 +99,13 @@ export const ControlPaths = {
   fleetBox: (id: string) => `/api/fleet/boxes/${id}`,
   /** POST -> CreatedFleetBox: replaces the managed box's secret; the box must be restarted with the new one. */
   fleetBoxSecret: (id: string) => `/api/fleet/boxes/${id}/secret`,
+  /** Operator-only: GET `?days=` (1-90, default 30) -> ToolFailureList, most common first. Everyone else gets 404. */
+  fleetToolFailures: "/api/fleet/tool-failures",
+  /**
+   * Box-only, Kestrel's own boxes: POST ToolFailureReport -> 204. Authenticated like the automation routes below, but
+   * names no user: the counts belong to no one. A user's own box never reports. Never reached from a browser.
+   */
+  boxToolFailures: "/box/telemetry/tool-failures",
   /**
    * Pairing a box from the `kestrel-box` CLI, no auth. POST PairingStartBody -> PairingStart: the CLI shows `code` and
    * `approveUrl`, then polls `boxPairingPoll` with the secret `pairingId` until the signed-in user approves the code.
@@ -392,6 +399,34 @@ export type UpdateFleetBoxBody = typeof UpdateFleetBoxBody.Type
  */
 export const CreatedFleetBox = Schema.Struct({ box: FleetBox, secret: Schema.String })
 export type CreatedFleetBox = typeof CreatedFleetBox.Type
+
+/** How often one failure happened: the tool, and its error with everything specific to the run scrubbed out. */
+export const ToolFailureCount = Schema.Struct({
+  tool: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100)),
+  signature: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(200)),
+  count: Schema.Int.pipe(Schema.positive()),
+})
+export type ToolFailureCount = typeof ToolFailureCount.Type
+
+export const MAX_TOOL_FAILURES_PER_REPORT = 200
+
+export const ToolFailureReport = Schema.Struct({
+  failures: Schema.Array(ToolFailureCount).pipe(Schema.maxItems(MAX_TOOL_FAILURES_PER_REPORT)),
+})
+export type ToolFailureReport = typeof ToolFailureReport.Type
+
+/** One failure across all of Kestrel's boxes; `firstSeen` and `lastSeen` are UTC days (`YYYY-MM-DD`) within the window. */
+export const ToolFailureSummary = Schema.Struct({
+  tool: Schema.String,
+  signature: Schema.String,
+  count: Schema.Number,
+  firstSeen: Schema.String,
+  lastSeen: Schema.String,
+})
+export type ToolFailureSummary = typeof ToolFailureSummary.Type
+
+export const ToolFailureList = Schema.Struct({ days: Schema.Number, failures: Schema.Array(ToolFailureSummary) })
+export type ToolFailureList = typeof ToolFailureList.Type
 
 /** How long a pairing code stays valid. */
 export const PAIRING_TTL_SECONDS = 10 * 60

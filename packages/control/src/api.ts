@@ -32,6 +32,7 @@ import { SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
+import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -336,6 +337,19 @@ const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<R
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 
+/** The most common tool failures, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes. */
+const handleToolFailures = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const days = Number(url.searchParams.get("days") ?? DEFAULT_TOOL_FAILURE_DAYS)
+  if (!Number.isInteger(days) || days < 1 || days > TOOL_FAILURE_RETENTION_DAYS) {
+    return errorResponse(400, "BadRequest", `days must be a whole number from 1 to ${TOOL_FAILURE_RETENTION_DAYS}`)
+  }
+  return json(await hub(env).commonToolFailures(days))
+}
+
 /**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
@@ -347,6 +361,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)
   }
+  if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)

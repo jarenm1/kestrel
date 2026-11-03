@@ -129,6 +129,12 @@ export const managedBoxFor = (sql: FleetSql, login: string): ManagedBoxRow | nul
   return next
 }
 
+/** Whether `secret` is the managed box's own; unknown ids never match. */
+export const managedBoxSecretValid = async (sql: FleetSql, boxId: string, secret: string): Promise<boolean> => {
+  const stored = sql.exec<{ secret: string }>("SELECT secret FROM managed_boxes WHERE id = ?", boxId).toArray()[0]
+  return stored !== undefined && (await safeEqual(secret, stored.secret))
+}
+
 /**
  * Authorizes a managed box's call on behalf of `login`: the secret must be the box's (unknown ids are unauthenticated),
  * and the user must be assigned to that box.
@@ -139,8 +145,7 @@ export const managedBoxAccess = async (
   secret: string,
   login: string,
 ): Promise<ManagedBoxAccess> => {
-  const stored = sql.exec<{ secret: string }>("SELECT secret FROM managed_boxes WHERE id = ?", boxId).toArray()[0]
-  if (stored === undefined || !(await safeEqual(secret, stored.secret))) return "unauthenticated"
+  if (!(await managedBoxSecretValid(sql, boxId, secret))) return "unauthenticated"
   const assigned = sql
     .exec<{ found: number }>("SELECT 1 AS found FROM users WHERE login = ? AND managed_box_id = ?", login, boxId)
     .toArray()
