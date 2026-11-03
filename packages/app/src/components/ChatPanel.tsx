@@ -157,7 +157,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             repos={checkoutRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
-            lastRun={sortedRuns.filter((run) => run.model !== undefined).at(-1)}
+            lastRun={latestRun}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             ask={pendingAsk}

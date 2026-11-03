@@ -35,6 +35,12 @@ describe("resolveAgentChoice", () => {
     expect(effort).toBe(level)
   })
 
+  test("a last run on the box default falls to the device's model and keeps its own level", () => {
+    const run = resolveAgentChoice({ ...base, lastRun: { effort: null }, defaultModel: second, defaultEffort: level })
+    expect(run.model?.id).toBe(second)
+    expect(run.effort).toBeUndefined()
+  })
+
   test("the last run's model stays while hidden from the picker, and falls away once its provider is disconnected", () => {
     expect(resolveAgentChoice({ ...base, lastRun: { model: hidden } }).model?.id).toBe(hidden)
     expect(resolveAgentChoice({ ...base, connected: [], lastRun: { model: hidden } }).model?.id).toBe(first)
