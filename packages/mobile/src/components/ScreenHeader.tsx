@@ -12,7 +12,7 @@ interface Props {
   right?: ReactNode;
 }
 
-/** Monochrome page bar: a ghost back control, the title centred, trailing actions. Sits on the page background, no card. */
+/** Monochrome page bar: a ghost back control, the title centred, trailing actions. Transparent over the content panel. */
 export function ScreenHeader({ title, onBack, right }: Props) {
   return (
     <View style={styles.bar}>
@@ -37,7 +37,6 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.border,
-    backgroundColor: colors.background,
   },
   side: {
     minWidth: 72,
