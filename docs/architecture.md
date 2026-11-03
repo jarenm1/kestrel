@@ -45,11 +45,17 @@ The diagram shows the major paths, not every endpoint. The legacy relay remains 
 |---|---|---|
 | Web interface | Public pages, authenticated workspace, thread and desktop views | `packages/app` |
 | Mobile interface | Multi-box thread lists and box-scoped thread and desktop access | `packages/mobile` |
+| Shared composer | GitHub reference format, draft parsing and the DOM editor used by desktop, phone web and Expo native WebViews | `packages/composer` |
 | Control plane | GitHub OAuth, sessions, box registration and tokens, credentials, automations, PR watches and relay | `packages/control` |
 | Hub | Durable control-plane state and coordination, including fleet registry and scheduled events | `packages/control/src/hub.ts` |
 | Box | Thread API, agent runs, workspaces, sandbox, desktop and tools | `packages/server` |
 | Host experiment | Local per-user CPU VM lifecycle CLI; not yet the Nest host agent | `packages/host` |
 | Shared protocol | Schemas and types for APIs, events, relay and domain objects | `packages/protocol` |
+
+Phone browsers use the mobile app's web export. Its reference composer and the desktop composer share one DOM
+implementation; Expo bundles that surface locally for native iOS/Android through `use dom`. References serialize
+as ordinary GitHub Markdown links with explicit repository, kind and number, so drafts and messages cross UI
+surfaces without a protocol change. See [mobile references](../packages/mobile/README.md#github-references).
 
 ## Access and communication
 

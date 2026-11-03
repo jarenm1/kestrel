@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudagents/composer": "workspace:*",
     "@cloudagents/protocol": "workspace:*",
     "@expo/metro-runtime": "~58.0.16",
     "@expo/vector-icons": "^15.0.2",

@@ -1,0 +1,25 @@
+{
+  "name": "@cloudagents/composer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./reference": "./src/reference/index.ts",
+    "./view": "./src/view.ts",
+    "./editor": "./src/editor/ComposerEditor.tsx"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.7.0"
+  },
+  "peerDependencies": {
+    "react": ">=19"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "typescript": "^5.9.3"
+  }
+}

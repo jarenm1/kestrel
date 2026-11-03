@@ -73,6 +73,11 @@ export function NewThreadScreen() {
         onSend={(body) => start.mutateAsync({ api, box: activeBox, body })}
         pending={busy}
         error={start.error ?? switchBox.error}
+        repo={repo}
+        onRepoChange={(next) => {
+          if (next !== repo) setBranch(undefined);
+          setRepo(next);
+        }}
         placeholder={
           repo === undefined ? "Ask for anything — the agent checks out the repos it needs" : `Ask for anything in ${repoShortName(repo)}`
         }

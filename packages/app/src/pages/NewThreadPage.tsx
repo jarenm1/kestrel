@@ -9,7 +9,7 @@ import { BoxPicker, KESTREL_BOX, useBoxOnline } from "@/components/BoxPicker"
 import { Composer } from "@/components/Composer"
 import { BranchPicker, RepoPicker } from "@/components/RepoPicker"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
-import { githubReferenceLabel, parseGithubReferenceDraft } from "@/lib/githubReference"
+import { githubReferenceLabel, parseGithubReferenceDraft } from "@cloudagents/composer/reference"
 import { threadPath } from "@/routes"
 import { repoShortName, threadTitle } from "@/util"
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react"
 import { CircleDot, GitPullRequest, type LucideIcon } from "lucide-react"
-import type { GithubReferenceKind } from "@/lib/githubReference"
+import type { GithubReferenceKind } from "@cloudagents/composer/reference"
 import { cn } from "@/lib/utils"
 import { RepoPicker } from "@/components/RepoPicker"
 import { AUTOCOMPLETE_MENU_CLASS, slashListboxId, slashOptionId } from "@/components/SlashCommands"

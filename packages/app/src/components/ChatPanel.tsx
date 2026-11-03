@@ -5,7 +5,7 @@ import { transcriptSegments, type ContextUsage, type Message, type Run, type Sen
 import { CircleDot, GitPullRequest } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
-import { githubReferenceLabel, githubReferenceUrl, parseGithubReferenceDraft } from "@/lib/githubReference"
+import { githubReferenceLabel, githubReferenceUrl, parseGithubReferenceDraft } from "@cloudagents/composer/reference"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatClock, formatElapsed } from "@/util"

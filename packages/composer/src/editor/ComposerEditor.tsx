@@ -17,21 +17,11 @@ import {
   parseGithubReferenceMarkdown,
   type GithubReference,
   type GithubReferenceKind,
-} from "@/lib/githubReference"
-import { cn } from "@/lib/utils"
+} from "../reference/githubReference"
+import { COMPOSER_CHIP_PLACEHOLDER, composerViewOf, type ComposerEditorView } from "../view"
+import { cn } from "../lib/cn"
 
-/** What the parent needs from the editor after every edit: serialized Markdown, what is visible, and the caret. */
-export interface ComposerEditorView {
-  /** The draft to store and send; reference chips serialize as Markdown links. */
-  readonly markdown: string
-  /** What the user sees, including reference labels, in reading order. */
-  readonly plain: string
-  /** Like `plain`, but reference labels are replaced by one placeholder per character, so `#123` inside a chip is
-   * never mistaken for a reference being typed. */
-  readonly referenceText: string
-  /** Caret position in `plain`/`referenceText` characters. */
-  readonly caret: number
-}
+export { composerViewOf, type ComposerEditorView } from "../view"
 
 export interface ComposerEditorHandle {
   focus(): void
@@ -41,6 +31,10 @@ export interface ComposerEditorHandle {
   replaceRange(start: number, end: number, replacement: string): void
   /** Replaces visible characters `[start, end)` with a reference chip. */
   insertReference(reference: GithubReference, start: number, end: number): void
+  /** Reads the editor as it is now, including edits the parent has not received yet. */
+  readView(): ComposerEditorView
+  /** Empties the draft after a successful send without moving focus (tap-to-send can blur the surface). */
+  clear(): void
 }
 
 interface Props {
@@ -52,6 +46,8 @@ interface Props {
   onChange: (view: ComposerEditorView) => void
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void
   onPaste?: (event: ClipboardEvent<HTMLDivElement>) => void
+  /** Phone composers insert a newline on Enter; the desktop composer leaves Enter to the parent's send/menu handling. */
+  enterInsertsNewline?: boolean
   onFocus?: () => void
   onBlur?: (event: FocusEvent<HTMLDivElement>) => void
   ariaExpanded: boolean
@@ -62,7 +58,7 @@ interface Props {
 type Mode = "markdown" | "plain" | "reference"
 
 const SVG_NS = "http://www.w3.org/2000/svg"
-const PLACEHOLDER = "\uFFFC"
+const PLACEHOLDER = COMPOSER_CHIP_PLACEHOLDER
 
 const labelOf = (token: HTMLElement): string => token.dataset.referenceLabel ?? token.textContent ?? ""
 
@@ -353,23 +349,6 @@ function renderDraft(root: HTMLElement, markdown: string): void {
   }
 }
 
-/** The draft as the editor shows it, for the parent's first render before the editor reports. */
-export function composerViewOf(markdown: string): ComposerEditorView {
-  let plain = ""
-  let referenceText = ""
-  for (const segment of parseGithubReferenceDraft(markdown)) {
-    if (segment.type === "text") {
-      plain += segment.text
-      referenceText += segment.text
-    } else {
-      const label = githubReferenceLabel(segment.reference.kind, segment.reference.number)
-      plain += label
-      referenceText += PLACEHOLDER.repeat(label.length)
-    }
-  }
-  return { markdown, plain, referenceText, caret: 0 }
-}
-
 /**
  * The message box's editor. It is a small contentEditable surface rather than a new editor dependency: text stays
  * native (so IME, selection and undo keep working), while chosen `#` references are atomic chips that serialize
@@ -384,6 +363,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     onChange,
     onKeyDown,
     onPaste,
+    enterInsertsNewline = false,
     onFocus,
     onBlur,
     ariaExpanded,
@@ -395,7 +375,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   const root = useRef<HTMLDivElement>(null)
   const composing = useRef(false)
   const initialized = useRef(false)
-  // The last Markdown this editor produced. A `value` change from anywhere else is a draft/send write to render.
+  // The last Markdown this editor produced. Any other `value` is an external write (a loaded draft or send-clear).
   const lastSerialized = useRef<string | null>(null)
   const [empty, setEmpty] = useState(() => composerViewOf(value).plain === "")
   const [composingText, setComposingText] = useState(false)
@@ -498,6 +478,19 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         setSelection(selection, point.node, point.offset)
         notify()
       },
+      readView() {
+        return readView()
+      },
+      clear() {
+        const element = root.current
+        if (element === null) return
+        renderDraft(element, "")
+        if (document.activeElement === element) {
+          const selection = window.getSelection()
+          if (selection !== null) setSelection(selection, element, 0)
+        }
+        notify()
+      },
     }),
     [],
   )
@@ -505,7 +498,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   useLayoutEffect(() => {
     const element = root.current
     if (element === null) return
-    // Drafts and programmatic writes replace the children; edits from the user already match and keep their caret.
+    // Drafts and external writes replace the children; edits from the user already match and keep their caret.
     if (!initialized.current || value !== lastSerialized.current) {
       renderDraft(element, value)
       if (autoFocus || document.activeElement === element) {
@@ -580,8 +573,9 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     if (!event.nativeEvent.isComposing && root.current !== null) normalizeChipCaret(root.current)
     callbacks.current.onKeyDown?.(event)
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return
-    // Enter sends or picks from a menu (the composer handles those). Shift+Enter is the one newline key.
-    if (event.key === "Enter" && event.shiftKey) {
+    // Desktop: Enter sends or picks from a menu (the composer handles those) and Shift+Enter is the newline key.
+    // Phone: Enter is a newline; the native wrapper still forwards menu keys before this runs.
+    if (event.key === "Enter" && (event.shiftKey || enterInsertsNewline)) {
       event.preventDefault()
       insertPlainText("\n")
     }
@@ -597,9 +591,10 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   }
 
   return (
-    <div className="relative w-full">
+    <div className="relative w-full" data-composer-root="">
       <div
         ref={root}
+        data-composer-editor=""
         role="combobox"
         aria-label="Message"
         aria-autocomplete="list"
@@ -636,6 +631,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       {empty && !composingText && (
         <div
           aria-hidden="true"
+          data-composer-placeholder-layer=""
           className="pointer-events-none absolute inset-0 px-3.5 py-2.5 text-sm text-muted-foreground/70"
         >
           {placeholder}

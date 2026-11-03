@@ -44,13 +44,18 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
-import { ComposerEditor, composerViewOf, type ComposerEditorHandle, type ComposerEditorView } from "@/components/ComposerEditor"
+import {
+  ComposerEditor,
+  composerViewOf,
+  type ComposerEditorHandle,
+  type ComposerEditorView,
+} from "@cloudagents/composer/editor"
 import { GithubReferenceMenu } from "@/components/GithubReferenceMenu"
 import { useOpenUsagePanel } from "@/components/UsagePanel"
 import {
   findGithubReferenceTrigger,
   type GithubReferenceKind,
-} from "@/lib/githubReference"
+} from "@cloudagents/composer/reference"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
