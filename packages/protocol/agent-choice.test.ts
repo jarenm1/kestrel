@@ -26,8 +26,13 @@ describe("resolveAgentChoice", () => {
   })
 
   test("a run on the default level does not inherit the device's level", () => {
-    const { effort } = resolveAgentChoice({ ...base, lastRun: { model: second }, defaultEffort: level })
+    const { effort } = resolveAgentChoice({ ...base, lastRun: { model: second, effort: null }, defaultEffort: level })
     expect(effort).toBeUndefined()
+  })
+
+  test("older runs without a recorded level retain the device default", () => {
+    const { effort } = resolveAgentChoice({ ...base, lastRun: { model: second }, defaultEffort: level })
+    expect(effort).toBe(level)
   })
 
   test("the last run's model stays while hidden from the picker, and falls away once its provider is disconnected", () => {
