@@ -10,6 +10,9 @@ export type Route =
   | { name: "connections" }
   | { name: "settings" };
 
+/** A screen a link opens. A thread link carries only its id, so the thread opens on the box the app is using. */
+export type LaunchRoute = { name: "thread"; taskId: string } | Exclude<Route, { name: "thread" }>;
+
 export interface Navigation {
   /** The route on screen. */
   current: Route;

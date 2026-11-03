@@ -29,7 +29,7 @@ const SIDEBAR_MAX_WIDTH = 360;
  * without a router; back (Android's button, the browser's on the web) closes the sidebar first, then pops.
  */
 export function MainNavigator() {
-  const { user, loading } = useAuth();
+  const { user, loading, activeBox } = useAuth();
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
@@ -96,7 +96,8 @@ export function MainNavigator() {
   useEffect(() => {
     if (user) {
       const launch = takeLaunchRoute();
-      if (launch) setStack([HOME, launch]);
+      // The box is applied together with the user, so `activeBox` is the box the link's thread lives on.
+      if (launch) setStack([HOME, launch.name === "thread" ? { ...launch, box: activeBox } : launch]);
       return;
     }
     queryClient.clear();
