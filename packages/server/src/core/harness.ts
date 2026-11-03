@@ -586,10 +586,16 @@ export const AgentHarnessLive = Layer.effect(
 
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {
-        const waitingItem = queuedItems.get(runId)
-        if (waitingItem) return [waitingItem.item]
+        // An active run keeps its transcript, including while it waits to get its slot back (withSlotReleased): the
+        // queue item it shows meanwhile goes to live clients on top of these items, it does not replace them.
         const entry = active.get(runId)
         if (entry) return [...entry.items.values()]
+        // A run that got its slot and is still launching already shows its "Started." item.
+        const startingItem = startingItems.get(runId)
+        if (startingItem !== undefined) return [startingItem]
+        // A run that is still waiting for a slot shows its queue item.
+        const waitingItem = queuedItems.get(runId)
+        if (waitingItem) return [waitingItem.item]
         const file = join(config.runsDir, runId, "items.json")
         const text = yield* Effect.tryPromise({
           try: async () => {

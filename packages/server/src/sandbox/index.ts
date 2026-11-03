@@ -83,6 +83,9 @@ const basicRoArgs = (): string[] => {
 /** The agent CLIs and the runtime npm-installed ones need; `basic` makes these visible when installed in $HOME. */
 const HOME_TOOLS = ["claude", "codex", "node"]
 
+/** Shell interpreter paths for repository scripts; targets stay in the read-only toolchain. */
+const SANDBOX_SHELLS = ["sh", "bash"]
+
 /**
  * bwrap args that let `basic` run agent CLIs installed in the box user's home, which the sandbox otherwise hides:
  * Claude Code's native installer (`~/.local/bin/claude` -> `~/.local/share/claude/versions/<v>`), npm prefixes and nvm.
@@ -203,8 +206,14 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.level === "basic") argv.push(...(opts.homeToolArgs ?? []))
   // Basic binds all of /etc, which holds these files.
   if (opts.level === "strict") {
-    // Strict has no /usr, and scripts (the run's `gh`, whatever an agent writes) start with #!/usr/bin/env.
-    if (opts.binPath) argv.push("--symlink", join(opts.binPath, "env"), "/usr/bin/env")
+    if (opts.binPath) {
+      argv.push("--symlink", join(opts.binPath, "env"), "/usr/bin/env")
+      for (const shell of SANDBOX_SHELLS) {
+        const target = join(opts.binPath, shell)
+        if (!existsSync(target)) continue
+        argv.push("--symlink", target, `/bin/${shell}`, "--symlink", target, `/usr/bin/${shell}`)
+      }
+    }
     for (const file of SYSTEM_RO_FILES) {
       if (file === "/etc/ssl" && opts.caBundle) continue
       if (existsSync(file)) argv.push("--ro-bind", file, file)

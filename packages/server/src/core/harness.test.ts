@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Effect, Either, Layer } from "effect"
+import { Effect, Either, Fiber, Layer } from "effect"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -244,10 +244,17 @@ createInterface({ input: process.stdin })
         // The run waits for its slot in the background; its queue item says it got as far as waiting.
         yield* Effect.promise(() => waiting.promise).pipe(Effect.timeout("8 seconds"))
         expect(harness.itemCount(second.run.id)).toBe(1) // "Waiting for a free run slot"
+        expect(yield* harness.items(second.run.id)).toMatchObject([
+          { _tag: "tool", id: "queue", status: "running" },
+        ])
 
         yield* harness.cancel(first.run.id)
         yield* Effect.promise(() => launching.promise).pipe(Effect.timeout("8 seconds"))
         expect(harness.itemCount(second.run.id)).toBe(1) // "Started.", before the agent is up
+        // A run that waited and is still launching shows the same "Started." item the app already has.
+        expect(yield* harness.items(second.run.id)).toMatchObject([
+          { _tag: "tool", id: "queue", status: "ok" },
+        ])
 
         proceed.resolve()
         yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
@@ -259,6 +266,96 @@ createInterface({ input: process.stdin })
       } finally {
         unsubscribe()
         proceed.resolve()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a run waiting for its slot back keeps its transcript instead of showing only its queue item", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-slot-lending-"))
+  const cli = join(root, "cli.ts")
+  // Keeps both turns open until steered, then exits through the harness's normal completion path.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+const send = (message) => console.log(JSON.stringify(message))
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.type === "user") {
+      const text = typeof message.message.content === "string" ? message.message.content : "prompt"
+      if (text === "Wrap up") send({ type: "result", subtype: "success", is_error: false, result: "Done." })
+      else send({ type: "assistant", message: { id: "m-" + text, role: "assistant", content: [{ type: "text", text: "Working on " + text }] }, parent_tool_use_id: null })
+    } else if (message.type === "control_request") {
+      send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: {} } })
+      send({ type: "result", subtype: "error_during_execution", is_error: true })
+    }
+  })
+  .on("close", () => process.exit(0))
+`)
+  const { config, layer } = harnessLayer(root, cli, { maxConcurrentRuns: 1 })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const parent = runningTask("parent")
+      const child = runningTask("child")
+      yield* store.update((state) => {
+        state.tasks.push(parent.task, child.task)
+        state.runs.push(parent.run, child.run)
+        return Either.right(null)
+      })
+      for (const { task } of [parent, child]) {
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      }
+      const answered = Promise.withResolvers<void>()
+      const childAnswered = Promise.withResolvers<void>()
+      const waitingAgain = Promise.withResolvers<void>()
+      const childFinished = Promise.withResolvers<void>()
+      const parentFinished = Promise.withResolvers<void>()
+      const unsubscribeParent = hub.subscribe(parent.task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") parentFinished.resolve()
+        if (event._tag !== "agent.item") return
+        if (event.item._tag === "text") answered.resolve()
+        // The parent gave its slot away and now waits for it back (withSlotReleased).
+        if (event.item._tag === "tool" && event.item.id === "queue" && event.item.status === "running") waitingAgain.resolve()
+      })
+      const unsubscribeChild = hub.subscribe(child.task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") childAnswered.resolve()
+        if (event._tag === "run.updated" && event.run.status !== "running") childFinished.resolve()
+      })
+      const release = Promise.withResolvers<void>()
+      try {
+        yield* harness.spawn(parent.task, parent.run, parent.run.prompt, null, parent.task.owner, null, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        // The child needs the slot the parent holds, as a delegated run does while its parent waits for it.
+        yield* harness.spawn(child.task, child.run, child.run.prompt, null, child.task.owner, null, {})
+        const released = yield* Effect.fork(
+          harness.withSlotReleased(parent.task.id, parent.run.id, Effect.promise(() => release.promise)),
+        )
+        yield* Effect.promise(() => childAnswered.promise).pipe(Effect.timeout("8 seconds"))
+        release.resolve()
+        // The parent gets the slot back only once the child is done; meanwhile it is queued again.
+        yield* Effect.promise(() => waitingAgain.promise).pipe(Effect.timeout("8 seconds"))
+        const items = yield* harness.items(parent.run.id)
+        const liveCount = harness.itemCount(parent.run.id)
+        yield* harness.steer(child.run.id, "Wrap up")
+        yield* Effect.promise(() => childFinished.promise).pipe(Effect.timeout("8 seconds"))
+        yield* Fiber.join(released).pipe(Effect.timeout("8 seconds"))
+        const resumedItems = yield* harness.items(parent.run.id)
+        yield* harness.steer(parent.run.id, "Wrap up")
+        yield* Effect.promise(() => parentFinished.promise).pipe(Effect.timeout("8 seconds"))
+        // Assert after both subprocesses have exited so a before-fix failure cannot race directory cleanup.
+        expect(items.filter((item) => item._tag === "text")).toMatchObject([{ text: "Working on First message" }])
+        expect(liveCount).toBe(items.length)
+        expect(resumedItems).toMatchObject([{ _tag: "text", text: "Working on First message" }])
+      } finally {
+        unsubscribeParent()
+        unsubscribeChild()
+        release.resolve()
         yield* harness.stopAll()
       }
     }).pipe(Effect.provide(layer)))

@@ -1,28 +1,24 @@
 import { describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { SANDBOX_HOME, buildBwrapArgv, cliBwrapArgs } from "."
 
-const base = { workspacePath: "/w", cwd: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
-
 /** The real thing needs a toolchain inside the nix store, the only part of the host strict shows. */
 const envPath = Bun.which("env")
-const runnable = Bun.which("bwrap") !== null && envPath !== null && envPath.startsWith("/nix/store/")
+const bashPath = Bun.which("bash")
+const shellDir = bashPath !== null && bashPath.startsWith("/nix/store/") ? dirname(bashPath) : null
+const shPath = shellDir === null ? null : existsSync(join(shellDir, "sh")) ? join(shellDir, "sh") : null
+const runnable =
+  Bun.which("bwrap") !== null &&
+  envPath !== null &&
+  envPath.startsWith("/nix/store/") &&
+  shellDir !== null &&
+  shPath !== null
 
 describe("buildBwrapArgv", () => {
-  test("strict links /usr/bin/env to the toolchain's env", () => {
-    const argv = buildBwrapArgv({ ...base, level: "strict", binPath: "/nix/store/x-env/bin" })
-    const at = argv.indexOf("--symlink")
-    expect(argv.slice(at, at + 3)).toEqual(["--symlink", "/nix/store/x-env/bin/env", "/usr/bin/env"])
-  })
-
-  test("basic keeps the host's own /usr/bin/env", () => {
-    expect(buildBwrapArgv({ ...base, level: "basic", binPath: "/nix/store/x-env/bin" })).not.toContain("/usr/bin/env")
-  })
-
   test.skipIf(!runnable)("a strict sandbox runs the gh shim by its shebang", () => {
     const root = mkdtempSync(join(tmpdir(), "kestrel-sandbox-"))
     try {
@@ -42,7 +38,8 @@ describe("buildBwrapArgv", () => {
         cwd: workspacePath,
         mirrorDir,
         homeDir,
-        env: { PATH: `${SANDBOX_HOME}/.kestrel/gh:${binPath}` },
+        // bwrap runs `sh -c <command>`; the sandbox starts with the toolchain's PATH, which needs a shell too.
+        env: { PATH: `${SANDBOX_HOME}/.kestrel/gh:${binPath}:${shellDir}` },
         command: "gh --version",
       })
       const result = spawnSync(argv[0] as string, argv.slice(1), { encoding: "utf8" })
@@ -50,6 +47,45 @@ describe("buildBwrapArgv", () => {
       // No KESTREL_GH_URL here: reaching this message means the script ran, instead of exit 126 from its shebang.
       expect(result.stderr).toContain("gh: only available inside a Kestrel agent run")
       expect(result.status).toBe(1)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(!runnable)("a strict sandbox runs scripts whose shebang names /bin/sh or /bin/bash", () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-shebang-"))
+    try {
+      const homeDir = join(root, "home")
+      const workspacePath = join(root, "workspace")
+      const mirrorDir = join(root, "mirror")
+      const binPath = join(root, "toolchain-bin")
+      for (const dir of [homeDir, workspacePath, mirrorDir, binPath]) mkdirSync(dir, { recursive: true })
+      // The toolchain dir is bound read-only so the symlinks' targets exist inside the sandbox too.
+      for (const name of ["env", "sh", "bash"]) {
+        const target = name === "sh" ? (shPath as string) : (Bun.which(name) as string)
+        symlinkSync(target, join(binPath, name))
+      }
+      writeFileSync(join(workspacePath, "s-sh"), "#!/bin/sh\necho SH-OK\n")
+      writeFileSync(join(workspacePath, "s-bash"), "#!/bin/bash\necho BASH-OK\n")
+      writeFileSync(join(workspacePath, "s-env"), "#!/usr/bin/env bash\necho ENVBASH-OK\n")
+      for (const name of ["s-sh", "s-bash", "s-env"]) chmodSync(join(workspacePath, name), 0o755)
+      const argv = buildBwrapArgv({
+        level: "strict",
+        binPath,
+        workspacePath,
+        cwd: workspacePath,
+        mirrorDir,
+        homeDir,
+        roBinds: [binPath],
+        env: { PATH: binPath },
+        command: "set -e\n./s-sh\n./s-bash\n./s-env",
+      })
+      const result = spawnSync(argv[0] as string, argv.slice(1), { encoding: "utf8" })
+      expect(result.stdout).toContain("SH-OK")
+      expect(result.stdout).toContain("BASH-OK")
+      expect(result.stdout).toContain("ENVBASH-OK")
+      expect(result.stderr).toBe("")
+      expect(result.status).toBe(0)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
