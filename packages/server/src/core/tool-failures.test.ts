@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { ToolFailureReport } from "@cloudagents/protocol"
-import { failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentFailure, failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 describe("failureSignature", () => {
   test("failures that differ only in their details share a signature", () => {
@@ -49,6 +49,15 @@ describe("failureSignature", () => {
 
   test("no output at all", () => {
     expect(failureSignature("file_change", null)).toBe("(no output)")
+  })
+})
+
+describe("agentFailure", () => {
+  test("classifies early exits for both agents without sending error text", () => {
+    expect(agentFailure("claude", "Claude Code exited before its turn finished.")).toEqual({ tool: "agent:claude", signature: "exited before turn finished" })
+    expect(agentFailure("codex", "Codex exited before its turn finished.")).toEqual({ tool: "agent:codex", signature: "exited before turn finished" })
+    expect(agentFailure("codex", "private provider error")).toEqual({ tool: "agent:codex", signature: "turn failed" })
+    expect(agentFailure("claude", null).signature).toBe("turn failed")
   })
 })
 

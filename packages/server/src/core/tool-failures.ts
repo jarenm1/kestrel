@@ -75,6 +75,14 @@ export const toolFailure = (name: string, output: string | null): Omit<ToolFailu
   return { tool, signature: failureSignature(tool, output) }
 }
 
+/** Turn errors can contain provider or user data, so only report fixed categories. */
+export const agentFailure = (agent: "claude" | "codex", error: string | null): Omit<ToolFailureCount, "count"> => ({
+  tool: `agent:${agent}`,
+  signature: error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
+    ? "exited before turn finished"
+    : "turn failed",
+})
+
 export interface ToolFailureReporter {
   readonly record: (failure: Omit<ToolFailureCount, "count">) => void
   /** Sends what is pending and waits for it, briefly; for shutdown. */

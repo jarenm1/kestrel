@@ -34,7 +34,7 @@ import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
-import { makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentFailure, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 export interface AgentHarnessShape {
   /**
@@ -113,6 +113,7 @@ interface ActiveRun {
   sessionId: string | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
+  readonly agentKind: "claude" | "codex" | null
   /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
   readonly stderrIsLog: boolean
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
@@ -373,6 +374,9 @@ export const AgentHarnessLive = Layer.effect(
           return Either.right({ run: { ...run }, task: { ...task }, message })
         })
         if (outcome === null) return
+        if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
+          toolFailures?.record(agentFailure(entry.agentKind, turn.error))
+        }
         publish({ _tag: "message.created", message: outcome.message })
         publish({ _tag: "run.updated", run: outcome.run })
         publish({ _tag: "task.updated", task: outcome.task })
@@ -512,6 +516,7 @@ export const AgentHarnessLive = Layer.effect(
               context: session.seed,
               sessionId: null,
               driver: null,
+              agentKind: session.conversation?.kind ?? null,
               stderrIsLog: session.conversation?.kind === "codex",
               failedTools: new Set(),
             }
