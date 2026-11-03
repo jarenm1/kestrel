@@ -114,6 +114,8 @@ interface ActiveRun {
   readonly agentKind: "claude" | "codex" | null
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
   readonly failedTools: Set<string>
+  /** Set once the run is stopped; what its process reports while it shuts down is not a tool failure. */
+  stopped: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
@@ -414,6 +416,7 @@ export const AgentHarnessLive = Layer.effect(
         if (waitIndex >= 0) waiting.splice(waitIndex, 1)[0]?.grant(false)
         const entry = active.get(runId)
         if (entry) {
+          entry.stopped = true
           // An interrupted turn ends on its own and closes the process; anything else is signalled now.
           const interrupted = entry.driver?.interrupt() ?? false
           if (!interrupted) killProcessGroup(entry.child.pid, "SIGTERM")
@@ -441,7 +444,7 @@ export const AgentHarnessLive = Layer.effect(
 
     /** Counts a tool call's failure for the control plane. Replays have no driver; they only repeat old runs. */
     const noteToolFailure = (entry: ActiveRun, item: AgentItem) => {
-      if (toolFailures === null || entry.driver === null || item._tag !== "tool" || item.status !== "error") return
+      if (toolFailures === null || entry.driver === null || entry.stopped || item._tag !== "tool" || item.status !== "error") return
       if (entry.failedTools.has(item.id)) return
       entry.failedTools.add(item.id)
       const failure = toolFailure(item.name, item.output)
@@ -523,6 +526,7 @@ export const AgentHarnessLive = Layer.effect(
               driver: null,
               agentKind: session.conversation?.kind ?? null,
               failedTools: new Set(),
+              stopped: false,
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
