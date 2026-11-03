@@ -2,14 +2,19 @@
 // Starts a real isolated display, without connecting to a box, control plane or agent harness.
 import assert from "node:assert/strict"
 import { Effect } from "effect"
-import { DesktopManager, DesktopManagerLive } from "../src/desktop"
+import { DesktopError, DesktopManager, DesktopManagerLive } from "../src/desktop"
+import { desktopNamespace, sandboxSettingsOf, stopTaskHolder } from "../src/sandbox"
+
+const holderSettings = sandboxSettingsOf({ sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
 
 const probe = Effect.gen(function* () {
   const desktop = yield* DesktopManager
   const taskId = `desktop-smoke-${process.pid}`
   yield* Effect.gen(function* () {
     const status = yield* desktop.start(taskId, {
-      ipcNamespace: Effect.succeed(null),
+      ipcNamespace: desktopNamespace(holderSettings, taskId).pipe(
+        Effect.mapError((e) => new DesktopError({ message: e.message })),
+      ),
       terminal: (display) => Effect.succeed({
         file: "xterm",
         args: ["-geometry", "60x15+20+20"],
@@ -34,7 +39,7 @@ const probe = Effect.gen(function* () {
       assert.ok(kinds.has("key"), "viewer should receive a keyframe")
       console.log(`PASS ${status.display}: H.264 stream, PNG screenshot and pointer input`)
     }).pipe(Effect.ensuring(unsubscribe))
-  }).pipe(Effect.ensuring(desktop.stopAll()))
+  }).pipe(Effect.ensuring(desktop.stopAll()), Effect.ensuring(Effect.sync(() => stopTaskHolder(taskId))))
   assert.equal(yield* desktop.activeCount(), 0)
 })
 

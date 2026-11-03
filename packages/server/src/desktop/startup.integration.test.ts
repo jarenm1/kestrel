@@ -3,7 +3,11 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
-import { DesktopManager, DesktopManagerLive } from "./manager"
+import { DesktopError, DesktopManager, DesktopManagerLive } from "./manager"
+import { desktopNamespace, sandboxSettingsOf, stopTaskHolder } from "../sandbox"
+
+/** The sandbox settings of the task namespace holder (level off: a bwrap holder). */
+const holderSettings = sandboxSettingsOf({ sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null, sandboxPort: 0 })
 
 // Opt in on a Linux machine with the desktop tools installed and a writable /tmp/.X11-unix.
 test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("an initialized hardware attempt survives the startup deadline", async () => {
@@ -24,7 +28,9 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("an initialized har
       const desktop = yield* DesktopManager
       yield* Effect.gen(function* () {
         const status = yield* desktop.start("encoder-ready-test", {
-          ipcNamespace: Effect.succeed(null),
+          ipcNamespace: desktopNamespace(holderSettings, "encoder-ready-test").pipe(
+            Effect.mapError((e) => new DesktopError({ message: e.message })),
+          ),
           terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
         })
         expect(status.state).toBe("running")
@@ -32,7 +38,7 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("an initialized har
         yield* Effect.sleep("6 seconds")
         expect((yield* desktop.status("encoder-ready-test")).state).toBe("running")
         expect(() => process.kill(pid, 0)).not.toThrow()
-      }).pipe(Effect.ensuring(desktop.stopAll()))
+      }).pipe(Effect.ensuring(desktop.stopAll()), Effect.ensuring(Effect.sync(() => stopTaskHolder("encoder-ready-test"))))
     })
     await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
   } finally {
@@ -60,7 +66,9 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a stalled NVENC pr
       const desktop = yield* DesktopManager
       yield* Effect.gen(function* () {
         const status = yield* desktop.start("encoder-timeout-test", {
-          ipcNamespace: Effect.succeed(null),
+          ipcNamespace: desktopNamespace(holderSettings, "encoder-timeout-test").pipe(
+            Effect.mapError((e) => new DesktopError({ message: e.message })),
+          ),
           terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
         })
         expect(status.state).toBe("running")
@@ -68,7 +76,7 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a stalled NVENC pr
         expect(Date.now() - started).toBeLessThan(18_000)
         const png = yield* desktop.screenshot("encoder-timeout-test", undefined, 0.25)
         expect(Buffer.from(png.subarray(0, 8)).toString("hex")).toBe("89504e470d0a1a0a")
-      }).pipe(Effect.ensuring(desktop.stopAll()))
+      }).pipe(Effect.ensuring(desktop.stopAll()), Effect.ensuring(Effect.sync(() => stopTaskHolder("encoder-timeout-test"))))
     })
     await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
     const pid = Number(readFileSync(pidFile, "utf8"))
