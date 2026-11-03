@@ -18,5 +18,8 @@ export function useStoredChoice<A extends string>(key: string, schema: Schema.Sc
     },
     [key],
   )
-  return [value, choose] as const
+  const clearIfUnchanged = useCallback((expected: A | undefined) => {
+    if (localStorage.getItem(key) === (expected ?? null)) choose(undefined)
+  }, [key, choose])
+  return [value, choose, clearIfUnchanged] as const
 }

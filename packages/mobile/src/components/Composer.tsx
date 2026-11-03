@@ -309,8 +309,8 @@ export function Composer({
   useEffect(() => setPickedRepo(undefined), [repo]);
   // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
   const pickSuffix = taskId === undefined ? "" : `.${taskId}`;
-  const [pickedModel, setPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel);
-  const [pickedEffort, setPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick);
+  const [pickedModel, setPickedModel, clearPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel);
+  const [pickedEffort, setPickedEffort, clearPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick);
   const [defaultModel] = useStoredChoice("kestrel.model", AgentModel);
   const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick);
   const [choice, setChoice] = useState<{ askId: string; index: number } | undefined>();
@@ -438,8 +438,8 @@ export function Composer({
         setChoice(undefined);
         // The new run now records these picks. A message joining a running turn keeps them for the next turn.
         if (taskId !== undefined && activeRunId === undefined) {
-          setPickedModel(undefined);
-          setPickedEffort(undefined);
+          void clearPickedModel(pickedModel);
+          void clearPickedEffort(pickedEffort);
         }
       },
       () => undefined
