@@ -7,6 +7,7 @@ The Expo app. Start Metro with `bun run dev:mobile` (from the repo root) and ope
 - Native API requests authenticate with the session saved in SecureStore and use `credentials: "omit"`: React Native must not merge the WebView cookie jar into the explicit `Cookie` header (which produces a comma-joined, invalid session value).
 - In a thread, swipe left over chat or from its right edge to open Desktop/Diff; swipe right over the panel header or left edge to close it. Swipe right over chat for Threads, or use the header buttons. Mostly horizontal swipes tolerate small vertical drift; vertical swipes keep scrolling the content.
 - The composer groups modern models by connected Anthropic/OpenAI provider. **Manage models** opens Connections, where each provider's visible models can be toggled or reset. Choices are saved on the device. Thinking opens a stepped slider sheet matching the desktop's monochrome track and effort ring. It offers Default plus only levels supported by the selected model, falls back to Default for unsupported saved levels, and disappears for models without thinking controls. Tap or drag to select; Expo also exposes screen-reader increment/decrement actions, and mobile web uses a native range input with arrow keys, Home and End.
+- The composer's editable area stays transparent and shadow-free, including while focused, so it sits flush inside the outer box. The outer box retains its depth and focus border.
 
 ## GitHub references
 

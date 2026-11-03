@@ -22,6 +22,7 @@ export const composerEditorStyles = `
     border: 0;
     border-radius: 14px;
     background: transparent;
+    box-shadow: none;
     color: #ededef;
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     font-size: 16px;
