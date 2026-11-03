@@ -112,8 +112,6 @@ interface ActiveRun {
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
   readonly agentKind: "claude" | "codex" | null
-  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
-  readonly stderrIsLog: boolean
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
   readonly failedTools: Set<string>
 }
@@ -524,7 +522,6 @@ export const AgentHarnessLive = Layer.effect(
               sessionId: null,
               driver: null,
               agentKind: session.conversation?.kind ?? null,
-              stderrIsLog: session.conversation?.kind === "codex",
               failedTools: new Set(),
             }
             const stdin = child.stdin

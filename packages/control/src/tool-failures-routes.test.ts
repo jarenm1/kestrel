@@ -29,6 +29,8 @@ describe("tool failure routes", () => {
     expect((await send({ authorization: "Bearer wrong", [BOX_ID_HEADER]: "managed" })).status).toBe(401)
     expect((await send({ authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "user-box" })).status).toBe(401)
     expect((await send({ authorization: "Bearer relay-secret" }, "{}" )).status).toBe(400)
+    const oversized = JSON.stringify({ failures: Array.from({ length: 201 }, () => ({ tool: "Read", signature: "failed", count: 1 })) })
+    expect((await send({ authorization: "Bearer relay-secret" }, oversized)).status).toBe(400)
     expect((await request(ControlPaths.boxToolFailures)).status).toBe(405)
     expect(received).toHaveLength(2)
   })
