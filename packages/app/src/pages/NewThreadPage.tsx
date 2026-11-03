@@ -82,7 +82,7 @@ export function NewThreadPage() {
       <h1 className="text-center text-xl font-semibold tracking-tight">What should we work on?</h1>
       <div className="flex w-full max-w-3xl flex-col">
         <Composer
-          onSend={(body, files) => start.mutateAsync({ body, files })}
+          onSend={async (body, files) => { await start.mutateAsync({ body, files }) }}
           pending={start.isPending}
           error={start.error}
           draftKey="new"

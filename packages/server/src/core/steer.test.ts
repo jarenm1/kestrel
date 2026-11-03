@@ -15,7 +15,7 @@ import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore } from "./state"
 import { WorkspaceService } from "./workspace"
 
-test("a message sent mid-run is placed where the run was when the agent got it, also after a reload", async () => {
+test.each([4, 0])("a message sent mid-run retains its position (initial items: %i), also after a reload", async (initialItems) => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-steer-"))
   const config: ServerConfig = {
     port: 8898, host: "127.0.0.1", sandboxPort: 8898, mcpBaseUrl: "http://127.0.0.1:8898", dataDir: root,
@@ -37,8 +37,8 @@ test("a message sent mid-run is placed where the run was when the agent got it, 
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
     Layer.succeed(AgentHarness, {
-      // The run has shown four items when a message is stored.
-      itemCount: (runId: string) => (runId === "run" ? 4 : 0),
+      // Zero still identifies a message joining an existing run, not a new run's prompt.
+      itemCount: (runId: string) => (runId === "run" ? initialItems : 0),
       steer: (runId: string, text: string) =>
         Effect.sync(() => {
           steered.push({ runId, text })
@@ -76,16 +76,16 @@ test("a message sent mid-run is placed where the run was when the agent got it, 
     ])
     // The position is the one at delivery; a run that ended meanwhile keeps the one taken when the message was stored.
     expect(first.message).toMatchObject({ runId: "run", afterItems: 6 })
-    expect(second.message).toMatchObject({ runId: "run", afterItems: 4 })
+    expect(second.message).toMatchObject({ runId: "run", afterItems: initialItems })
     // Each message is published once, with its final position.
-    expect(published.map((m) => [m.id, m.afterItems])).toEqual([[first.message.id, 6], [second.message.id, 4]])
+    expect(published.map((m) => [m.id, m.afterItems])).toEqual([[first.message.id, 6], [second.message.id, initialItems]])
 
     // A fresh store reads the box's state file, as after a restart.
     const reloaded = await Effect.runPromise(
       Effect.flatMap(StateStore, (store) => store.read).pipe(Effect.provide(stateLayer)),
     )
     expect(reloaded.messages.find((m) => m.id === first.message.id)).toMatchObject({ runId: "run", afterItems: 6 })
-    expect(reloaded.messages.find((m) => m.id === second.message.id)).toMatchObject({ runId: "run", afterItems: 4 })
+    expect(reloaded.messages.find((m) => m.id === second.message.id)).toMatchObject({ runId: "run", afterItems: initialItems })
     expect(reloaded.messages.find((m) => m.id === "prompt")?.afterItems).toBeUndefined()
   } finally {
     await rm(root, { recursive: true, force: true })

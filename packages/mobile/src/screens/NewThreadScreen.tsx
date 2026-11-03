@@ -70,7 +70,7 @@ export function NewThreadScreen() {
         <Text style={styles.heading}>What should we work on?</Text>
       </View>
       <Composer
-        onSend={(body) => start.mutateAsync({ api, box: activeBox, body })}
+        onSend={async (body) => { await start.mutateAsync({ api, box: activeBox, body }); }}
         pending={busy}
         error={start.error ?? switchBox.error}
         repo={repo}

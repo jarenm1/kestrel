@@ -30,6 +30,7 @@ import {
   type ModelProviderInfo,
   type Run,
   type SendMessageBody,
+  type SendMessageResponse,
 } from "@cloudagents/protocol";
 import { AttachmentImage } from "@/components/AttachmentImage";
 import { createQueries } from "@/api/queries";
@@ -220,7 +221,7 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
 }
 
 interface ComposerProps {
-  readonly onSend: (body: SendMessageBody) => Promise<unknown>;
+  readonly onSend: (body: SendMessageBody) => Promise<SendMessageResponse | void>;
   readonly pending: boolean;
   readonly error: unknown;
   /** Shown as a stop button while the composer is empty and a run is active. */
@@ -463,12 +464,12 @@ export function Composer({
     const body = [chosenOption ?? "", next.markdown.trim()].filter(Boolean).join("\n\n");
     if (body === "" || pending) return;
     void onSend({ text: body, model: model?.id, effort }).then(
-      () => {
+      (sent) => {
         editor.current?.clear();
         setText("");
         setChoice(undefined);
         // The new run now records these picks. A message joining a running turn keeps them for the next turn.
-        if (taskId !== undefined && activeRunId === undefined) {
+        if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
           void clearPickedModel(pickedModel);
           void clearPickedEffort(pickedEffort);
         }

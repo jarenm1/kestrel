@@ -32,6 +32,7 @@ import {
   type ModelProviderInfo,
   type Run,
   type SendMessageBody,
+  type SendMessageResponse,
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -379,7 +380,7 @@ function AskPanel({
 
 interface Props {
   /** Resolves once the message is accepted; the text and files are cleared only then. */
-  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
+  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<SendMessageResponse | void>
   pending: boolean
   error: unknown
   /**
@@ -639,14 +640,14 @@ export function Composer({
     if (empty || pending) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, effort }, files).then(
-      () => {
+      (sent) => {
         setText("")
         onElementsChange?.([])
         setFiles([])
         setFileError(undefined)
         setChoice(undefined)
         // The new run now records these picks. A message joining a running turn keeps them for the next turn.
-        if (taskId !== undefined && activeRunId === undefined) {
+        if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
           clearPickedModel(pickedModel)
           clearPickedEffort(pickedEffort)
         }
