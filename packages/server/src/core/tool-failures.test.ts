@@ -61,6 +61,13 @@ describe("agentFailure", () => {
     expect(agentFailure("codex", "Codex exited before its turn finished.", "error: rate limit exceeded", null, "SIGKILL")).toEqual({ tool: "agent:codex", signature: "exited before turn finished: error: rate limit exceeded: signal SIGKILL" })
     expect(agentFailure("claude", null, null, null, null).signature).toBe("turn failed")
   })
+
+  test("reserves space for termination details after a long diagnostic", () => {
+    const signature = agentFailure("codex", null, `error: ${"word ".repeat(50)}`, 137, "SIGKILL").signature
+    expect(signature.length).toBeLessThanOrEqual(200)
+    expect(signature).toStartWith("turn failed: error:")
+    expect(signature).toEndWith(": exit code 137: signal SIGKILL")
+  })
 })
 
 describe("toolFailure", () => {
