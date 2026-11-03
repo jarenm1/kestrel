@@ -29,26 +29,78 @@ export const MODIFIERS: readonly Modifier[] = ["ctrl", "alt", "shift", "super"]
 
 const MODIFIER_KEYS: Record<string, true> = { Shift: true, Control: true, Alt: true, Meta: true }
 
-/**
- * A key press for DOM key name `name`. Down carries the held modifiers as a chord ("ctrl+c"); up is the bare key, as
- * the box releases the chord's last key. Modifiers pressed on their own are sent bare.
- */
-export function keyPress(name: string, mods: readonly Modifier[], down: boolean): DesktopInput {
+/** The chord for DOM key name `name` ("ctrl+c"). Modifiers pressed on their own are bare. */
+function chord(name: string, mods: readonly Modifier[]): string {
   const base = KEYSYMS[name] ?? name
-  if (!down || MODIFIER_KEYS[name]) return { _tag: "key", key: base, down }
+  if (MODIFIER_KEYS[name]) return base
   // Shift on a single character is already in the character (the box types the shifted glyph).
   const held = mods.filter((m) => m !== "shift" || base.length > 1)
-  return { _tag: "key", key: [...held, base].join("+"), down }
+  return [...held, base].join("+")
 }
 
-/** Key down/up input for a hardware key event; held Ctrl/Alt/Meta (and Shift for named keys) make the chord. */
-export function keyInput(e: KeyboardEvent, down: boolean): DesktopInput {
+/**
+ * A key press for a key the user is holding. Down carries the held modifiers as a chord; up is the bare key, since the
+ * box releases every key named in the message and the modifiers are still down.
+ */
+export function keyPress(name: string, mods: readonly Modifier[], down: boolean): DesktopInput {
+  return { _tag: "key", key: down ? chord(name, mods) : (KEYSYMS[name] ?? name), down }
+}
+
+/** A key pressed and released with `mods` held only across it, so the release names the whole chord. */
+export function keyTap(name: string, mods: readonly Modifier[]): DesktopInput[] {
+  const key = chord(name, mods)
+  return [
+    { _tag: "key", key, down: true },
+    { _tag: "key", key, down: false },
+  ]
+}
+
+/** The parts of a hardware key event that HeldKeys reads. */
+type HeldKeyEvent = Pick<KeyboardEvent, "code" | "key" | "ctrlKey" | "altKey" | "metaKey" | "shiftKey">
+
+/** The key name for a hardware key event; held Ctrl/Alt/Meta (and Shift for named keys) make the chord. */
+function eventChord(e: HeldKeyEvent): string {
   const mods: Modifier[] = []
   if (e.ctrlKey) mods.push("ctrl")
   if (e.altKey) mods.push("alt")
   if (e.metaKey) mods.push("super")
   if (e.shiftKey) mods.push("shift")
-  return keyPress(e.key, mods, down)
+  return chord(e.key, mods)
+}
+
+/**
+ * What the box has down from hardware keys. A key's keyup goes to whatever has focus by then, so when focus leaves the
+ * input (Alt+Tab, a click elsewhere) `releaseAll` lets go of everything instead of leaving Ctrl stuck on the desktop.
+ */
+export class HeldKeys {
+  /** Physical key -> the DOM key name it went down as: Shift can change the name before the keyup. */
+  private readonly names = new Map<string, string>()
+  /** Every chord sent down. A modifier held since before the input had focus only shows up in these. */
+  private readonly chords = new Set<string>()
+
+  press(e: HeldKeyEvent): DesktopInput {
+    const key = eventChord(e)
+    this.names.set(e.code || e.key, e.key)
+    this.chords.add(key)
+    return { _tag: "key", key, down: true }
+  }
+
+  /** The release for this keyup, or null when the key was never sent down. */
+  release(e: HeldKeyEvent): DesktopInput | null {
+    const id = e.code || e.key
+    const name = this.names.get(id)
+    if (name === undefined) return null
+    this.names.delete(id)
+    if (this.names.size === 0 && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) this.chords.clear()
+    return keyPress(name, [], false)
+  }
+
+  releaseAll(): DesktopInput[] {
+    const out: DesktopInput[] = [...this.chords].map((key) => ({ _tag: "key", key, down: false }))
+    this.names.clear()
+    this.chords.clear()
+    return out
+  }
 }
 
 /** Text for the box to type with xdotool; the protocol caps one `text` message at 1000 UTF-16 units. */
@@ -77,7 +129,7 @@ export function typedInputs(text: string, mods: readonly Modifier[]): DesktopInp
   if (mods.length === 0) return textInputs(text)
   const out: DesktopInput[] = []
   for (const ch of text) {
-    out.push(keyPress(ch, mods, true), keyPress(ch, [], false))
+    out.push(...keyTap(ch, mods))
   }
   return out
 }

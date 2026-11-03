@@ -14,8 +14,8 @@ import type { DesktopSource } from "@/api/events"
 import { Button } from "@cloudagents/ui/button"
 import {
   contentRect,
-  keyInput,
-  keyPress,
+  HeldKeys,
+  keyTap,
   mouseButton,
   MODIFIERS,
   type Modifier,
@@ -144,6 +144,7 @@ export function DesktopScreen({
   const [cursorPos, setCursorPos] = useState<Point>({ x: 0.5, y: 0.5 })
   const [generation, setGeneration] = useState(0)
   const [scroll] = useState(() => new NotchAccumulator())
+  const [heldKeys] = useState(() => new HeldKeys())
   // Latest pointer move, sent at the next animation frame. Any other input flushes it first.
   const pendingMove = useRef<DesktopInput | null>(null)
   const moveFrame = useRef(0)
@@ -246,6 +247,23 @@ export function DesktopScreen({
     dot.style.top = `${r.top - f.top + cursorPos.y * r.height}px`
   }, [view, cursorPos, mode, rtc, status])
 
+  // Leaving the page may not blur the input (a backgrounded WebView), and its keyups then go nowhere.
+  useEffect(() => {
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") releaseKeys()
+    }
+    window.addEventListener("blur", releaseKeys)
+    document.addEventListener("visibilitychange", onHidden)
+    return () => {
+      window.removeEventListener("blur", releaseKeys)
+      document.removeEventListener("visibilitychange", onHidden)
+    }
+  }, [])
+
+  function releaseKeys() {
+    for (const message of heldKeys.releaseAll()) send(message)
+  }
+
   function flushMove() {
     if (moveFrame.current) cancelAnimationFrame(moveFrame.current)
     moveFrame.current = 0
@@ -298,9 +316,7 @@ export function DesktopScreen({
 
   /** A named key pressed and released, with the latched modifiers held across it. */
   function tapKey(name: string) {
-    const held = [...mods]
-    send(keyPress(name, held, true))
-    send(keyPress(name, held, false))
+    for (const message of keyTap(name, [...mods])) send(message)
     clearMods()
   }
 
@@ -394,11 +410,12 @@ export function DesktopScreen({
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (!takesKey(e)) return
     e.preventDefault()
-    send(keyInput(e.nativeEvent, true))
+    send(heldKeys.press(e.nativeEvent))
   }
 
   function onKeyUp(e: KeyboardEvent<HTMLInputElement>) {
-    if (takesKey(e)) send(keyInput(e.nativeEvent, false))
+    const release = heldKeys.release(e.nativeEvent)
+    if (release) send(release)
   }
 
   const size = desktopSize(status)
@@ -466,7 +483,10 @@ export function DesktopScreen({
           onKeyDown={onKeyDown}
           onKeyUp={onKeyUp}
           onFocus={() => setKeyboard(true)}
-          onBlur={() => setKeyboard(false)}
+          onBlur={() => {
+            setKeyboard(false)
+            releaseKeys()
+          }}
           className="absolute top-0 left-0 size-px text-base opacity-0"
         />
         {(booting || text) && (

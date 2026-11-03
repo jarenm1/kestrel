@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import {
+  HeldKeys,
   NotchAccumulator,
   TEXT_LIMIT,
   keyPress,
+  keyTap,
   normalizePoint,
   textInputs,
   typedInputs,
@@ -46,11 +48,88 @@ describe("typedInputs", () => {
     expect(out.map((m) => (m._tag === "text" ? m.text : "")).join("")).toBe(text)
   })
 
-  test("latched modifiers make each character a chord with a bare release", () => {
+  test("latched modifiers make each character a chord released whole, so ctrl does not stay down", () => {
     expect(typedInputs("c", ["ctrl"])).toEqual([
       { _tag: "key", key: "ctrl+c", down: true },
-      { _tag: "key", key: "c", down: false },
+      { _tag: "key", key: "ctrl+c", down: false },
     ])
+  })
+})
+
+describe("keyTap", () => {
+  test("releases the whole chord", () => {
+    expect(keyTap("ArrowLeft", ["alt"])).toEqual([
+      { _tag: "key", key: "alt+Left", down: true },
+      { _tag: "key", key: "alt+Left", down: false },
+    ])
+  })
+})
+
+describe("HeldKeys", () => {
+  const event = (code: string, key: string, mods: { ctrl?: boolean; shift?: boolean } = {}) => ({
+    code,
+    key,
+    ctrlKey: mods.ctrl ?? false,
+    altKey: false,
+    metaKey: false,
+    shiftKey: mods.shift ?? false,
+  })
+
+  test("Ctrl held when focus leaves is released, with the key pressed under it", () => {
+    const held = new HeldKeys()
+    expect(held.press(event("ControlLeft", "Control", { ctrl: true }))).toEqual({
+      _tag: "key",
+      key: "Control_L",
+      down: true,
+    })
+    expect(held.press(event("Tab", "Tab", { ctrl: true }))).toEqual({ _tag: "key", key: "ctrl+Tab", down: true })
+    expect(held.releaseAll()).toEqual([
+      { _tag: "key", key: "Control_L", down: false },
+      { _tag: "key", key: "ctrl+Tab", down: false },
+    ])
+  })
+
+  test("a modifier held since before focus is released even after its chord's key came up", () => {
+    const held = new HeldKeys()
+    held.press(event("KeyC", "c", { ctrl: true }))
+    expect(held.release(event("KeyC", "c", { ctrl: true }))).toEqual({ _tag: "key", key: "c", down: false })
+    expect(held.releaseAll()).toEqual([{ _tag: "key", key: "ctrl+c", down: false }])
+  })
+
+  test("nothing is left to release once every key and modifier came up", () => {
+    const held = new HeldKeys()
+    held.press(event("ControlLeft", "Control", { ctrl: true }))
+    held.press(event("KeyC", "c", { ctrl: true }))
+    held.release(event("KeyC", "c", { ctrl: true }))
+    held.release(event("ControlLeft", "Control"))
+    expect(held.releaseAll()).toEqual([])
+  })
+
+  test("a key whose modifier came up first still releases", () => {
+    const held = new HeldKeys()
+    held.press(event("KeyC", "c", { ctrl: true }))
+    expect(held.release(event("KeyC", "c"))).toEqual({ _tag: "key", key: "c", down: false })
+  })
+
+  test("the release names the key as it went down, whatever Shift did since", () => {
+    const held = new HeldKeys()
+    held.press(event("KeyA", "A", { ctrl: true, shift: true }))
+    expect(held.release(event("KeyA", "a", { ctrl: true }))).toEqual({ _tag: "key", key: "A", down: false })
+  })
+
+  test("a keyup for a key never sent down releases nothing, and releaseAll is idempotent", () => {
+    const held = new HeldKeys()
+    expect(held.release(event("KeyC", "c"))).toBeNull()
+    held.press(event("Tab", "Tab"))
+    expect(held.releaseAll().length).toBe(1)
+    expect(held.releaseAll()).toEqual([])
+    expect(held.release(event("Tab", "Tab"))).toBeNull()
+  })
+
+  test("a soft keyboard's empty code falls back to the key name", () => {
+    const held = new HeldKeys()
+    held.press(event("", "Enter"))
+    expect(held.release(event("", "Enter"))).toEqual({ _tag: "key", key: "Return", down: false })
   })
 })
 
