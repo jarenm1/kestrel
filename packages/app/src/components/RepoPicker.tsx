@@ -115,8 +115,8 @@ export function RepoPicker({
 }
 
 /**
- * Menu of `repo`'s branches to start from, with a filter box; `undefined` is the repository's default branch, which
- * the box resolves. Branch names a checkout cannot take (see `BranchName`) are left out.
+ * Menu of `repo`'s branches to start from, with a filter box; `undefined` leaves the choice to the agent. Branch names
+ * a checkout cannot take (see `BranchName`) are left out.
  */
 export function BranchPicker({
   repo,
@@ -130,11 +130,10 @@ export function BranchPicker({
   disabled?: boolean
 }) {
   const branches = useQuery(queries.githubBranches(repo))
-  const listed = useQuery(queries.githubRepos()).data?.find((r) => r.fullName === repo)?.defaultBranch
   const names = (branches.data ?? []).filter(Schema.is(BranchName))
-  // The listing puts the default branch first; before it loads, the repository list knows it.
-  const defaultBranch = branches.data?.[0] ?? listed ?? "main"
-  const menu = useFilterMenu(names, (name) => name, (name) => onChange(name === defaultBranch ? undefined : name))
+  // The listing puts the default branch first.
+  const defaultBranch = branches.data?.[0]
+  const menu = useFilterMenu(names, (name) => name, onChange)
 
   return (
     <DropdownMenu open={menu.open} onOpenChange={menu.setOpen}>
@@ -144,21 +143,29 @@ export function BranchPicker({
           variant="ghost"
           size="sm"
           disabled={disabled}
-          title="Branch the thread starts from"
+          title={value === undefined ? "The agent picks the branch or pull request to check out" : "Branch the thread starts from"}
           className={BAR_TRIGGER_CLASS}
         >
           <GitBranch className="opacity-70" />
-          <span className="truncate">{value ?? defaultBranch}</span>
+          <span className="truncate">{value ?? "Agent picks"}</span>
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className={FILTER_MENU_CLASS}>
         <Input {...menu.inputProps} placeholder="Filter branches" aria-label="Filter branches" className="mb-1 h-8 shrink-0" />
         <div ref={menu.listRef} className={FILTER_LIST_CLASS}>
-          <DropdownMenuRadioGroup
-            value={value ?? defaultBranch}
-            onValueChange={(v) => onChange(v === defaultBranch ? undefined : v)}
-          >
+          <DropdownMenuRadioGroup value={value ?? ""} onValueChange={(v) => onChange(v === "" ? undefined : v)}>
+            {menu.query === "" && (
+              <>
+                <DropdownMenuRadioItem value="" {...filterItemProps}>
+                  <span className="flex flex-col">
+                    Agent picks
+                    <span className="text-xs text-muted-foreground">The agent picks a branch or pull request</span>
+                  </span>
+                </DropdownMenuRadioItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
             {menu.matches.map((name) => (
               <DropdownMenuRadioItem key={name} value={name} {...filterItemProps}>
                 <span className="min-w-0 flex-1 truncate">{name}</span>
@@ -168,7 +175,7 @@ export function BranchPicker({
           </DropdownMenuRadioGroup>
           {branches.isPending && <DropdownMenuLabel>Loading branches…</DropdownMenuLabel>}
           {branches.isError && <DropdownMenuLabel>{errorText(branches.error)}</DropdownMenuLabel>}
-          {branches.isSuccess && menu.matches.length === 0 && (
+          {branches.isSuccess && menu.query !== "" && menu.matches.length === 0 && (
             <DropdownMenuLabel>No branch matches “{menu.query}”.</DropdownMenuLabel>
           )}
         </div>

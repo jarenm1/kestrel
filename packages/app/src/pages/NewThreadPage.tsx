@@ -25,14 +25,15 @@ function chosenBox(stored: string | undefined, list: BoxList | undefined): strin
 
 /**
  * Chat home: the first message creates a thread (task), sends the message to it and opens it. The bar under the box
- * picks the repository the thread starts with checked out (otherwise the agent checks out the ones it needs) and,
- * for users with boxes of their own, the box it runs on; that pick leaves the active box as it is.
+ * picks the repository the thread is about (the agent then picks what to check out), the branch if the user wants to
+ * decide that (the thread starts with it checked out) and, for users with boxes of their own, the box it runs on;
+ * that pick leaves the active box as it is.
  */
 export function NewThreadPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug)
-  // Branch to start from; `undefined` is the repository's default branch. A different repository starts on its default.
+  // Branch to start from; `undefined` leaves it to the agent. A different repository goes back to that.
   const [branch, setBranch] = useState<string | undefined>()
   const [storedBox, setStoredBox] = useStoredChoice("kestrel.newThreadBox", Schema.String)
   const boxes = useQuery(queries.boxes())
@@ -62,8 +63,8 @@ export function NewThreadPage() {
       } else if (boxOnline === false) {
         throw new Error("That box is offline. Pick another box or start it first.")
       } else {
-        const checkout = repo === undefined ? {} : { checkout: { repo, ...(branch === undefined ? {} : { baseBranch: branch }) } }
-        task = await api.createTask({ title, ...checkout }, boxId)
+        const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } }
+        task = await api.createTask({ title, ...target }, boxId)
       }
       created.current = { task, repo, branch, boxId }
       // The thread exists from here on, even if the message below fails.

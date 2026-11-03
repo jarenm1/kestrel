@@ -1,3 +1,7 @@
+/** Preamble note for a thread whose user picked a repository and left what to check out to the agent. */
+export const pickedRepoNote = (repo: string): string =>
+  `The user picked the repository ${repo} for this thread. It is not checked out yet. If the work needs it, check it out with repo_checkout, choosing what fits the request: \`pullRequest\` to continue an open pull request, \`baseBranch\` to start from a branch, neither to start from the default branch. A thread has one checkout per repository, so this choice is final.`
+
 /**
  * Prefixes a run's prompt with who the agent works for. Agents have no way to learn the user's GitHub login from their
  * tools, so without this "my repo" reads as a project name to look up on the web. `notes` are further lines from the

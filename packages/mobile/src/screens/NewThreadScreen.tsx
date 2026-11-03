@@ -18,8 +18,9 @@ type StartVariables = { api: ApiClient; box: ActiveBox | null; body: SendMessage
 
 /**
  * Chat home: the first message creates a thread (task), sends the message to it and opens it. The bar under the
- * composer picks the repository and branch the thread starts in (none: the agent checks out what it needs) and,
- * for someone with a box of their own, the box it runs on, as on the web.
+ * composer picks the repository the thread is about (the agent then picks what to check out), the branch if the user
+ * wants to decide that (the thread starts with it checked out) and, for someone with a box of their own, the box it
+ * runs on, as on the web.
  */
 export function NewThreadScreen() {
   const { api } = useApiClient();
@@ -27,7 +28,7 @@ export function NewThreadScreen() {
   const nav = useNavigation();
   const queryClient = useQueryClient();
   const [repo, setRepo] = useStoredChoice("kestrel.newThreadRepo", GithubRepoSlug);
-  // Branch to start from; `undefined` is the repository's default branch. A different repository starts on its default.
+  // Branch to start from; `undefined` leaves it to the agent. A different repository goes back to that.
   const [branch, setBranch] = useState<string | undefined>();
   const boxOnline = useBoxOnline();
   // The thread created by an earlier attempt, and what it was created with; a retry after a failed send reuses it
@@ -46,8 +47,8 @@ export function NewThreadScreen() {
       } else if (boxOnline === false) {
         throw new Error("That box is offline. Pick another box or start it first.");
       } else {
-        const checkout = repo === undefined ? {} : { checkout: { repo, ...(branch === undefined ? {} : { baseBranch: branch }) } };
-        task = await api.createTask({ title: threadTitle(body.text), ...checkout });
+        const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } };
+        task = await api.createTask({ title: threadTitle(body.text), ...target });
       }
       created.current = { task, repo, branch, scope: api.boxScope };
       // The thread exists from here on, even if sending the first message fails.

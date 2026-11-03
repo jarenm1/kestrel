@@ -103,6 +103,8 @@ export const Task = Schema.Struct({
   updatedAt: Schema.String,
   /** Oldest first. Empty until the agent checks a repository out. */
   checkouts: Schema.Array(Checkout),
+  /** Repository the user started the thread on without naming a branch; its agent picks what to check out. */
+  pickedRepo: Schema.optional(RepoRef),
   /** Port of the task's dev server, registered by its agent for the browser preview. */
   previewPort: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 65535))),
   /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
@@ -388,6 +390,8 @@ export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
   /** Check this repository out before the first message, e.g. for an automation on a pull request. */
   checkout: Schema.optional(CheckoutRequest),
+  /** Point the agent at this repository and let it pick the branch or pull request to check out (`Task.pickedRepo`). */
+  pickedRepo: Schema.optional(RepoRef),
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
