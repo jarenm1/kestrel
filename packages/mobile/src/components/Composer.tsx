@@ -231,7 +231,7 @@ interface ComposerProps {
   readonly ask?: Message | undefined;
   readonly context?: ContextUsage | null | undefined;
   readonly activeRunId?: string;
-  /** The thread's latest run that recorded a model: the pickers show its choice until a different one is picked. */
+  /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
   readonly lastRun?: Pick<Run, "model" | "effort"> | undefined;
   readonly activeRunProvider?: ModelProvider;
   readonly repo?: string;

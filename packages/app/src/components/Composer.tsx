@@ -394,7 +394,7 @@ interface Props {
   activeRunId?: string | undefined
   /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
   activeRunProvider?: ModelProvider | undefined
-  /** The thread's latest run that recorded a model: the pickers show its choice until a different one is picked. */
+  /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
   lastRun?: Pick<Run, "model" | "effort"> | undefined
   placeholder?: string
   autoFocus?: boolean

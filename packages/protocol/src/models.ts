@@ -126,6 +126,33 @@ export const EffortPick = Schema.Union(AgentEffort, Schema.Literal("default"))
 export type EffortPick = typeof EffortPick.Type
 
 /**
+ * The run whose choice a thread's pickers restore, from its runs oldest first: the latest that recorded a model,
+ * skipping runs another thread or GitHub woke, which use the provider's default rather than the thread's choice. The
+ * first run counts whoever started it, since a delegated thread's assignment names its model. Only a run's first user
+ * message says who started it; a later one with `fromThread` is mail reaching a run already going.
+ */
+export const threadChoiceRun = <R extends { readonly id: string; readonly model?: AgentModel | undefined }>(
+  runs: readonly R[],
+  messages: ReadonlyArray<{
+    readonly role: string
+    readonly runId: string | null
+    readonly createdAt: string
+    readonly fromThread?: unknown
+  }>,
+): R | undefined => {
+  const prompts = new Map<string, (typeof messages)[number]>()
+  for (const message of [...messages].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+    if (message.role === "user" && message.runId !== null) prompts.set(message.runId, message)
+  }
+  return runs
+    .filter((run, index) => {
+      const prompt = prompts.get(run.id)
+      return run.model !== undefined && (index === 0 || (prompt !== undefined && prompt.fromThread === undefined))
+    })
+    .at(-1)
+}
+
+/**
  * What a composer's pickers show and its next message sends. An unsent pick wins while it is on offer; a thread then
  * stays on what its last run used, even a model since hidden from the picker, as long as its provider is connected.
  * The device's default covers the rest (the new-thread picks, or a thread whose runs recorded no model), and the

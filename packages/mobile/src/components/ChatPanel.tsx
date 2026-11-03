@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Linking, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentItem, ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
 import type { ActiveBox } from "@/api/client";
 import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
@@ -147,7 +147,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
-          lastRun={sortedRuns.filter((run) => run.model !== undefined).at(-1)}
+          lastRun={threadChoiceRun(sortedRuns, messages)}
           onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}
