@@ -17,7 +17,7 @@ import { Schema } from "effect"
 export const RTC_CHANNEL_LABEL = "kestrel-api"
 
 /** STUN servers the box and the browser use to learn their server-reflexive candidates. */
-export const RTC_ICE_SERVERS: readonly string[] = ["stun:stun.l.google.com:19302"]
+export const RTC_ICE_SERVERS: readonly string[] = ["stun:stun.cloudflare.com:3478"]
 
 /** Payload bytes per fragment, excluding the one-byte flags header. */
 export const RTC_FRAGMENT_BYTES = 16 * 1024

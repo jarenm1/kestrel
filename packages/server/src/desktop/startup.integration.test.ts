@@ -72,7 +72,6 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a stalled NVENC pr
           terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
         })
         expect(status.state).toBe("running")
-        expect(status.mime).toContain("avc1")
         expect(Date.now() - started).toBeLessThan(18_000)
         const png = yield* desktop.screenshot("encoder-timeout-test", undefined, 0.25)
         expect(Buffer.from(png.subarray(0, 8)).toString("hex")).toBe("89504e470d0a1a0a")

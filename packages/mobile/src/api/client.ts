@@ -41,6 +41,7 @@ import {
   type UserBox,
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
+import { sessionCookieScript } from "./embedCookie";
 
 export class ApiError extends Error {
   constructor(
@@ -94,6 +95,9 @@ export interface FileAccess {
 /** A minted box token is replaced this long before the box says it expires. */
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
+/** The desktop viewer page on the app host. Its ws URL and task id travel in the fragment, which the server never sees. */
+const DESKTOP_EMBED_PATH = "/embed/desktop";
+
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
   /** Stable identity for box-served cache entries; includes URL so a changed route cannot reuse old data. */
@@ -102,8 +106,18 @@ export interface ApiClient {
   fileSource(path: string): Promise<FileSource>;
   /** Source of any box file for a WebView or DOM `<img>`: `${base}${path}${query}`, valid until `expiresAt` (epoch ms). */
   fileAccess(): Promise<FileAccess>;
-  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
-  socketUrl(path: string): Promise<string>;
+  /**
+   * A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly.
+   * `fresh` mints a new box token instead of reusing the cached one (after the box rejected the socket).
+   */
+  socketUrl(path: string, options?: { fresh?: boolean }): Promise<string>;
+  /** The desktop embed page URL for a task, given the stream's ws URL from `socketUrl`. */
+  desktopEmbedUrl(taskId: string, ws: string): string;
+  /**
+   * The script that gives the native desktop WebView the session cookie, run before the embed page loads. `null` when
+   * the embed needs none: a user box is reached directly, and the web build's iframe already shares the app's cookies.
+   */
+  embedCookieScript(): string | null;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
 
@@ -203,7 +217,8 @@ export function createApiClient(
 
   // The user's box token, single-flight: concurrent callers share one mint, and a failed mint is not kept.
   let boxToken: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } | null = null;
-  function mintBoxToken(box: ActiveBox): Promise<{ token: string; expiresAt: number }> {
+  function mintBoxToken(box: ActiveBox, fresh = false): Promise<{ token: string; expiresAt: number }> {
+    if (fresh) boxToken = null;
     if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.minted;
     const entry: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } = {
       refreshAt: Number.POSITIVE_INFINITY,
@@ -300,11 +315,15 @@ export function createApiClient(
         expiresAt: Date.parse(minted.expiresAt),
       };
     },
-    socketUrl: async (path) => {
+    socketUrl: async (path, options) => {
       if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const { token } = await mintBoxToken(activeBox);
+      const { token } = await mintBoxToken(activeBox, options?.fresh);
       return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
+    desktopEmbedUrl: (taskId, ws) =>
+      `${serverUrl}${DESKTOP_EMBED_PATH}#ws=${encodeURIComponent(ws)}&task=${encodeURIComponent(taskId)}`,
+    embedCookieScript: () =>
+      activeBox === null && sessionCookie !== null ? sessionCookieScript(serverUrl, sessionCookie) : null,
     previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
 
     // Control plane (served by the Worker).

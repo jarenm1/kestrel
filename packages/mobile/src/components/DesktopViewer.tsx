@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -11,11 +11,25 @@ import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Paths, type DesktopStatus } from "@cloudagents/protocol";
 
+/** A second `auth-expired` inside this window means the fresh URL was rejected too: stop retrying. */
+const AUTH_REFRESH_WINDOW_MS = 5_000;
+
+/** Messages the desktop embed page (`<app host>/embed/desktop`) posts to the host. */
+type EmbedEvent = { event: "status"; state: string } | { event: "auth-expired" };
+
+function embedEvent(data: unknown): EmbedEvent | null {
+  if (typeof data !== "object" || data === null) return null;
+  const message = data as { type?: unknown; event?: unknown; state?: unknown };
+  if (message.type !== "kestrel-desktop") return null;
+  if (message.event === "auth-expired") return { event: "auth-expired" };
+  if (message.event === "status" && typeof message.state === "string") return { event: "status", state: message.state };
+  return null;
+}
+
 /**
- * Desktop viewer for mobile — renders the desktop stream in an HtmlView.
- * The desktop stream uses fMP4 over WebSocket + MediaSource Extensions,
- * which isn't natively supported in React Native, so we use a minimal
- * HTML page (a WebView, or an iframe on the web) to handle video playback.
+ * Desktop viewer. The stream plays in the desktop embed page, loaded in an HtmlView: a WebView on native, an iframe on
+ * the web. The embed negotiates WebRTC and handles touch input; this component starts and stops the desktop, relays
+ * the embed's status, and answers `auth-expired` with a fresh stream URL.
  */
 export function DesktopViewer({ taskId }: { taskId: string }) {
   const { api } = useApiClient();
@@ -23,8 +37,13 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queries = useMemo(() => createQueries(api), [api]);
   const desktop = useQuery(queries.desktop(taskId));
   const status = desktop.data ?? null;
-  const [stream, setStream] = useState<{ taskId: string; url: string } | null>(null);
+  const [embed, setEmbed] = useState<{ taskId: string; url: string } | null>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
+  const [viewerState, setViewerState] = useState<string | null>(null);
+  // The embed is unmounted while the app is backgrounded, which closes its connections; it remounts on foreground.
+  const [inForeground, setInForeground] = useState(true);
+  const webView = useRef<HtmlViewHandle | null>(null);
+  const lastAuthRefresh = useRef(0);
 
   const active = status?.state === "running" || status?.state === "starting";
 
@@ -37,210 +56,55 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     onSuccess: (next, { api, taskId }) => queryClient.setQueryData(boxKeys(api.boxScope).desktop(taskId), next),
   });
 
-  // Streaming pauses while the app is backgrounded: the page closes its socket and resumes on foreground.
-  const webView = useRef<HtmlViewHandle | null>(null);
   useEffect(() => {
-    const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active" || state === "background") {
-        webView.current?.injectJavaScript(`window.setDesktopActive && window.setDesktopActive(${state === "active"}); true;`);
-      }
-    });
+    const sub = AppState.addEventListener("change", (state) => setInForeground(state !== "background"));
     return () => sub.remove();
   }, []);
 
-  // The stream URL carries the box token. It is resolved outside render and kept while unchanged, so the WebView does not
-  // reload. It is re-resolved on each desktop state change, so a restarted stream gets a token that has not expired.
+  // The embed URL carries the stream's ws URL, and that carries the box token. It is resolved outside render and kept
+  // while unchanged, so the WebView does not reload. It is re-resolved on each desktop state change and on foreground,
+  // so a restarted stream or a resumed app gets a token that has not expired.
   useEffect(() => {
-    let active = true;
+    if (!inForeground) return;
+    let current = true;
     api.socketUrl(Paths.taskDesktopWs(taskId)).then(
-      (url) => {
-        if (!active) return;
+      (ws) => {
+        if (!current) return;
+        const url = api.desktopEmbedUrl(taskId, ws);
         setStreamError(null);
-        setStream((prev) => (prev?.taskId === taskId && prev.url === url ? prev : { taskId, url }));
+        setEmbed((prev) => (prev?.taskId === taskId && prev.url === url ? prev : { taskId, url }));
       },
       (error: unknown) => {
-        if (active) setStreamError(error);
+        if (current) setStreamError(error);
       }
     );
     return () => {
-      active = false;
+      current = false;
     };
-  }, [api, taskId, status?.state]);
+  }, [api, taskId, status?.state, inForeground]);
 
-  // Minimal MSE page for the desktop fMP4 stream. Every binary frame (init or fragment) goes into one
-  // FIFO that is drained only while the SourceBuffer is idle: dropping a fragment corrupts H.264 decoding.
-  const desktopHtml = useMemo(() => {
-    if (!stream || stream.taskId !== taskId || !status || status.state !== "running") return null;
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #000; display: flex; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
-    video { width: 100%; height: 100%; object-fit: contain; }
-    .status { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: #8a93a6; font-family: system-ui; }
-  </style>
-</head>
-<body>
-  <video id="v" muted autoplay playsinline></video>
-  <div id="s" class="status"></div>
-  <script>
-    const KEEP_BEHIND_S = 10;
-    const LIVE_EDGE_S = 0.5;
-    const CATCH_UP_S = 0.08;
-    let ws = null;
-    const video = document.getElementById("v");
-    const statusEl = document.getElementById("s");
-    let ms = null, sb = null, mime = null;
-    const queue = [];
-    let received = 0, acked = 0, ackedAt = performance.now(), ackTimer = null;
-
-    // Acks let the server bound how many frames are in flight to this viewer (see stream.ack in protocol).
-    function sendAck() {
-      clearTimeout(ackTimer);
-      ackTimer = null;
-      acked = received;
-      ackedAt = performance.now();
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ _tag: "stream.ack", frames: received }));
-    }
-
-    function countFrame() {
-      received++;
-      if (received - acked >= 6 || performance.now() - ackedAt >= 100) sendAck();
-      else if (!ackTimer) ackTimer = setTimeout(sendAck, 100);
-    }
-
-    function pump() {
-      if (!sb || sb.updating) return;
-      const ranges = sb.buffered;
-      if (ranges.length > 0 && video.currentTime - KEEP_BEHIND_S > ranges.start(0)) {
-        sb.remove(0, video.currentTime - KEEP_BEHIND_S);
-        return;
-      }
-      const chunk = queue.shift();
-      if (!chunk) return;
-      try {
-        sb.appendBuffer(chunk);
-      } catch (e) {
-        queue.unshift(chunk);
-        const from = ranges.length > 0 ? ranges.start(0) : 0;
-        if (video.currentTime - 1 > from) sb.remove(from, video.currentTime - 1);
-        else statusEl.textContent = String(e);
-      }
-    }
-
-    // Chase the live edge and recover from timestamp gaps. Underrun at the end of the last range is
-    // left alone: the playhead then waits for more data. A small lag is caught up by playing slightly
-    // fast (no visible jump); only a large lag seeks.
-    function follow() {
-      if (!sb || sb.buffered.length === 0) return;
-      const b = sb.buffered;
-      const last = b.length - 1;
-      const t = video.currentTime;
-      let inside = false;
-      for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t < b.end(i)) inside = true;
-      if (!inside) {
-        for (let i = 0; i < b.length; i++) {
-          if (b.start(i) > t) { video.currentTime = b.start(i); return; }
+  // The embed's socket was rejected (its box token expired): mint a new one and hand the embed its new ws URL. The
+  // embed keeps its page, so its WebRTC session is re-established without a reload.
+  const onEmbedMessage = useCallback(
+    (data: unknown) => {
+      const message = embedEvent(data);
+      if (message?.event === "status") {
+        setViewerState(message.state);
+      } else if (message?.event === "auth-expired") {
+        const now = Date.now();
+        if (now - lastAuthRefresh.current < AUTH_REFRESH_WINDOW_MS) {
+          setStreamError(new Error("The desktop stream rejected a fresh sign-in. Stop and start the desktop to retry."));
+          return;
         }
+        lastAuthRefresh.current = now;
+        api.socketUrl(Paths.taskDesktopWs(taskId), { fresh: true }).then(
+          (ws) => webView.current?.postMessage({ type: "kestrel-desktop", ws }),
+          (error: unknown) => setStreamError(error)
+        );
       }
-      const lag = b.end(last) - t;
-      if (lag > LIVE_EDGE_S) video.currentTime = b.end(last) - 0.05;
-      else video.playbackRate = lag > CATCH_UP_S ? 1.25 : 1;
-    }
-
-    function start() {
-      if (ms || !mime) return;
-      if (!MediaSource.isTypeSupported(mime)) {
-        statusEl.textContent = "cannot play " + mime;
-        return;
-      }
-      const src = new MediaSource();
-      ms = src;
-      video.src = URL.createObjectURL(src);
-      src.addEventListener("sourceopen", function() {
-        if (ms !== src) return;
-        sb = src.addSourceBuffer(mime);
-        sb.addEventListener("updateend", function() { follow(); pump(); });
-        pump();
-      });
-    }
-
-    function onMessage(e) {
-      if (typeof e.data === "string") {
-        try {
-          const st = JSON.parse(e.data);
-          if (st.state === "running" && st.mime) {
-            mime = st.mime;
-            statusEl.textContent = "";
-            start();
-          } else {
-            statusEl.textContent = st.state || "";
-          }
-        } catch (err) {}
-        return;
-      }
-      countFrame();
-      queue.push(new Uint8Array(e.data));
-      start();
-      pump();
-    }
-
-    function connect() {
-      ws = new WebSocket("${stream.url}");
-      ws.binaryType = "arraybuffer";
-      ws.onmessage = onMessage;
-      ws.onclose = function() {
-        ws = null;
-        statusEl.textContent = "disconnected";
-      };
-    }
-
-    // Closes the socket and drops the MSE state built on it; the next connect starts from a fresh init segment.
-    function disconnect() {
-      if (ws) {
-        ws.onmessage = null;
-        ws.onclose = null;
-        ws.close();
-        ws = null;
-      }
-      clearTimeout(ackTimer);
-      ackTimer = null;
-      queue.length = 0;
-      received = 0;
-      acked = 0;
-      if (ms) {
-        URL.revokeObjectURL(video.src);
-        video.removeAttribute("src");
-        video.load();
-      }
-      ms = null;
-      sb = null;
-    }
-
-    // Streams only while the page is visible and the app is foregrounded (React Native calls this too).
-    function setActive(on) {
-      if (!on) {
-        disconnect();
-        statusEl.textContent = "paused";
-      } else if (!ws) {
-        statusEl.textContent = "";
-        connect();
-      }
-    }
-
-    video.addEventListener("waiting", follow);
-    setInterval(follow, 100);
-    window.setDesktopActive = setActive;
-    document.addEventListener("visibilitychange", function() { setActive(!document.hidden); });
-    setActive(!document.hidden);
-  </script>
-</body>
-</html>`;
-  }, [stream, taskId, status?.state]);
+    },
+    [api, taskId]
+  );
 
   const actionError = toggle.error ?? desktop.error ?? streamError;
   const error = actionError
@@ -250,6 +114,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     : status?.error ?? null;
 
   const aspect = status?.width && status?.height ? status.width / status.height : 16 / 9;
+  const showViewer = status?.state === "running" && inForeground && embed?.taskId === taskId;
 
   return (
     <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
@@ -265,14 +130,20 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         {status ? <StatusIcon status={status.state} /> : null}
         {status?.state === "running" ? (
           <Text style={styles.info}>
-            {status.width}×{status.height} · {status.fps} fps
+            {status.width}×{status.height} · {status.fps} fps{viewerState ? ` · ${viewerState}` : ""}
           </Text>
         ) : null}
       </View>
       {error ? <Alert style={styles.alert}>{error}</Alert> : null}
       <View style={[styles.well, { aspectRatio: aspect }]}>
-        {status?.state === "running" && desktopHtml ? (
-          <HtmlView ref={webView} html={desktopHtml} style={styles.webview} />
+        {showViewer && embed ? (
+          <HtmlView
+            ref={webView}
+            uri={embed.url}
+            onMessage={onEmbedMessage}
+            beforeLoadScript={api.embedCookieScript() ?? undefined}
+            style={styles.webview}
+          />
         ) : (
           <View style={styles.placeholder}>
             {toggle.isPending ? (
@@ -299,4 +170,3 @@ const styles = StyleSheet.create({
   placeholder: { flex: 1, alignItems: "center", justifyContent: "center" },
   placeholderText: { color: colors.mutedForeground, fontSize: 14, textAlign: "center" },
 });
-

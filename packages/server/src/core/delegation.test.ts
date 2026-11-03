@@ -24,7 +24,8 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
     sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null,
-    taskDiskMax: 1024 ** 3, desktopBundleMs: 0, githubApiUrl: "https://api.github.com",
+    taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
+    webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const choices: AgentChoice[] = []
   let testStore: StoreShape | undefined

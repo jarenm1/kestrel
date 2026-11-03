@@ -23,6 +23,14 @@ describe("buildBwrapArgv", () => {
     expect(buildBwrapArgv({ ...base, level: "basic", binPath: "/nix/store/x-env/bin" })).not.toContain("/usr/bin/env")
   })
 
+  test("a desktop's audio socket is bound beside its X socket only when audio is on", () => {
+    const withAudio = buildBwrapArgv({ ...base, level: "basic", display: 101, audio: true })
+    const at = withAudio.indexOf("/tmp/.X11-unix/pulse-101")
+    expect(withAudio.slice(at - 1, at + 2)).toEqual(["--bind", "/tmp/.X11-unix/pulse-101", "/tmp/.X11-unix/pulse-101"])
+    expect(buildBwrapArgv({ ...base, level: "basic", display: 101 })).not.toContain("/tmp/.X11-unix/pulse-101")
+    expect(buildBwrapArgv({ ...base, level: "basic", audio: true })).not.toContain("/tmp/.X11-unix/pulse-101")
+  })
+
   test.skipIf(!runnable)("a strict sandbox runs the gh shim by its shebang", () => {
     const root = mkdtempSync(join(tmpdir(), "kestrel-sandbox-"))
     try {

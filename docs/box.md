@@ -109,24 +109,39 @@ Run the box from that environment, or run `kestrel-box install` from it so the u
 
 From a checkout with Bun dependencies installed, `bun packages/server/scripts/desktop-smoke.ts` exercises a real desktop's stream, screenshot and pointer input using the tools on `PATH`. A successful smoke test proves only that environment; it does not establish WSL, Lima or GPU behavior. WSLg's read-only `/tmp/.X11-unix` remains a separate setup issue.
 
-#### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
+#### WebRTC desktop
 
-On the legacy relay, the desktop stream goes through the Hub Durable Object, and every message the box sends it is a billed request (20 messages count as one). The encoder writes one fragment per frame, so continuous motion (scrolling, video) at 30 fps is about 30 messages a second per viewer; a still desktop sends nothing. `CLOUDAGENTS_DESKTOP_BUNDLE_MS` (default `0`, off; whole ms up to 1000) sends at most one message per window per viewer:
+Desktop video, audio and input travel over WebRTC only; there is no WebSocket media fallback, and WebRTC is always on. The desktop WebSocket (`/api/tasks/:id/desktop/stream`) carries the status and signaling.
 
-- The first frame after a quiet window goes out at once, so a keystroke or a click on an otherwise still desktop has no added latency.
-- Frames that come while one is held are concatenated into one message, sent when the window is up. A keyframe starts a new message; init segments are never bundled; a message is cut at 1 MiB.
-- Pending frames go out before any status message, so the viewer sees them in order. Acks and flow control count messages, not frames.
+- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate` and `rtc.close`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate` and `rtc.unavailable`. Signaling also works over the legacy relay, where a session costs a handful of Hub requests.
+- **Media** is H.264 video and Opus audio (48 kHz stereo, 10 ms frames) on recvonly transceivers. A desktop without audio dependencies still streams video; its audio m-line is answered inactive. Silent Opus packets (2 bytes or less) are gated to one per 400 ms, so a quiet desktop sends almost no audio; audible packets always pass.
+- **Input** runs over data channels. `input` (ordered, reliable) carries key, button, wheel and text input, and `ping`; `pointer` (unordered, no retransmits) carries mouse moves only. Wheel notches are clamped to ±10 per event, and `text` (at most 1000 characters) is typed with `xdotool type`.
+- **Video** comes from one encoder per desktop, shared by every viewer, with a paced RTP sender per viewer (`desktop/rtp.ts`). A keyframe request (PLI or FIR) or a joining viewer gets the current GOP replayed, unless it is over 4 MiB, in which case the viewer waits for the next keyframe. Replays take at most a quarter of the pacing rate. A viewer more than a second behind has its queue dropped and resumes at the next keyframe. Where the browser offers the playout-delay header extension, it is set to zero.
+- **Codec** is H.264 with packetization-mode 1, one encoder per desktop. The default is High 4:2:0 (`-profile:v high -bf 0`, level 4.0 in the SPS), answered with `640c` or `6400` (`f400` is also accepted, untested). If any connected viewer offers only Constrained Baseline (`42e0`, `42c0`, `4200`), the encoder switches to Constrained Baseline for all viewers while that viewer is connected, and that viewer is answered with a Baseline payload. Level is ignored in negotiation, as libwebrtc ignores it. A browser that offers none of these gets `rtc.unavailable` with `retryable: false`. Scaling is bicubic (`scale_cuda interp_algo=3`; `flags=area` on the CPU encoder).
+- **Load**: the stream is encoded once whatever the viewer count. Each viewer costs box CPU for encryption and pacing. The box carries 16 viewers; past that, new ones get `rtc.unavailable` and retry later.
 
-What it costs, during continuous motion only: added latency per frame, and smoothness, because the browser paints only the newest frame of a message and so shows fewer frames. Simulated with frames at a steady rate:
+Kestrel provides no media relay. The default STUN server, `stun:stun.cloudflare.com:3478`, is sent to the box and every viewer in `rtc.config`, so both sides learn their public addresses. No TURN server is used unless you configure one. Without TURN, only direct paths work: to the box's LAN or public addresses, or to a tailnet with `CLOUDAGENTS_WEBRTC_HOST_ADDRESSES`. What to set:
 
-| Frame rate | Window | Messages/s (was) | Added latency, average / worst |
-|---|---|---|---|
-| 30 fps | 33 ms | 30 (30) | 0 / 0: saves nothing |
-| 30 fps | 50 ms | 20 (30) | 33 / 50 ms |
-| 60 fps | 33 ms | 30 (60) | 17 / 33 ms |
-| 60 fps | 50 ms | 20 (60) | 33 / 50 ms |
+| Your network | Settings |
+|---|---|
+| Box and viewers on a LAN, or the box has a public address | Nothing more; open UDP to the box, narrowed with `CLOUDAGENTS_WEBRTC_PORT_RANGE` if you like |
+| Tailscale or WireGuard | `CLOUDAGENTS_WEBRTC_HOST_ADDRESSES` = the box's address on it (tunnel interfaces are not found on their own) |
+| Box behind ordinary NAT | Nothing more: the default STUN server sees both ends' public addresses. Set `CLOUDAGENTS_WEBRTC_ICE_SERVERS` to a STUN server of your choice, or to `[]` to use none |
+| Symmetric NAT or UDP blocked | A TURN server you run, which carries the video and whose bandwidth you pay for: `CLOUDAGENTS_WEBRTC_TURN_URLS` and `CLOUDAGENTS_WEBRTC_TURN_SECRET` |
 
-Try `33` at 60 fps or `50` on the real box and watch typing, scrolling and video before keeping it.
+`CLOUDAGENTS_WEBRTC_TURN_SECRET` is coturn's `static-auth-secret` (`use-auth-secret`). It stays on the box: each session gets a credential minted from it (username `<expiry>:<thread id>`, HMAC-SHA1, valid one hour), for the thread's owner only. It is held like `CLOUDAGENTS_BOX_SECRET`, out of the sandbox's environment. A managed box refuses static TURN passwords in `CLOUDAGENTS_WEBRTC_ICE_SERVERS`, which every viewer could read. `CLOUDAGENTS_WEBRTC_ICE_POLICY=relay` makes viewers send only through TURN; the box still offers its own candidates for the relay to reach. The box itself does not probe a viewer's candidates on loopback, link-local or metadata addresses.
+
+Managed boxes also refuse viewer candidates in private IPv4, carrier-grade NAT, and IPv6 unique-local ranges, including addresses advertised by the box. Viewers on those networks need a reachable public candidate or a TURN relay to see the desktop. Self-hosted boxes keep private LAN and tailnet connectivity.
+
+Limits today:
+
+- Tested on Chromium 155 and on Firefox 158 with Mozilla's OpenH264 plugin. Firefox without that plugin offers no usable H.264 and is refused. Safari is untested. Phones and the web embed use the same viewer; WebRTC on a phone is untested.
+- The SPS says level 4.0, the level for 1080p30 and 720p60, whatever level the browser offered, since negotiation ignores level. A browser that offers only a lower level may fail to decode large desktops. Hardware-only decoders may refuse a stream; the viewer then shows a decoder stuck asking for keyframes.
+- Constrained Baseline is used only while a Baseline-only viewer is connected. It has no B-frames and uses CAVLC, so it costs about 50% more bytes per frame than High at the same quality setting (measured on a synthetic scroll).
+- Pacing follows receiver loss reports, but nothing adapts the encoder's bitrate to the path, so a narrow path loses frames rather than quality.
+- A box that can only send through its own TURN allocation is untested: with `relay`, the relay must be able to reach the box directly.
+- TURN credentials expire after an hour. If the path then fails, the viewer reconnects and its next attempt gets a new one.
+- The peer lives with its WebSocket, so a dropped WebSocket interrupts video until it reconnects.
 
 ### Toolkits
 
@@ -155,7 +170,11 @@ Defaults below are the server's, which keep Kestrel's shared box on hard per-thr
 | `CLOUDAGENTS_BOX_CPU_QUOTA` | all cores | `CPUQuota` of the whole box slice, in every mode |
 | `CLOUDAGENTS_MAX_CONCURRENT_RUNS` | `0` (unlimited) | Agent runs that execute at once; the rest wait in a queue, shown in the chat |
 | `CLOUDAGENTS_TASK_DISK_MAX` | `50G` | Storage per task (workspace, home, git shadow repos and its attachment files, pending uploads included), enforced by the box; applies with or without systemd |
-| `CLOUDAGENTS_DESKTOP_BUNDLE_MS` | `0` (off) | Desktop stream bundling window, see [Desktop stream bundling](#desktop-stream-bundling-cloudagents_desktop_bundle_ms) |
+| `CLOUDAGENTS_WEBRTC_ICE_SERVERS` | `[{"urls":["stun:stun.cloudflare.com:3478"]}]` | JSON array of `{"urls":["stun:host:3478"],"username"?,"credential"?}`, given to the box and every viewer; `[]` uses no STUN server |
+| `CLOUDAGENTS_WEBRTC_TURN_URLS`, `CLOUDAGENTS_WEBRTC_TURN_SECRET` | none | Comma-separated `turn:`/`turns:` URLs and the secret to mint per-session credentials with; set together |
+| `CLOUDAGENTS_WEBRTC_ICE_POLICY` | `all` | `relay` makes viewers send only through TURN |
+| `CLOUDAGENTS_WEBRTC_PORT_RANGE` | any | UDP ports for ICE, e.g. `50000-50100` |
+| `CLOUDAGENTS_WEBRTC_HOST_ADDRESSES` | none | Comma-separated addresses to offer that the box does not find by itself, such as its tailnet address |
 | `CLOUDAGENTS_SYSTEMD` | on | `0` runs without limits (machines without a user systemd manager) |
 
 The box needs the user's systemd manager (`systemd-run --user`) with the memory, cpu and pids controllers delegated (the default on systemd distros). It checks this at startup and refuses to start otherwise; a box that outlives your login session (the production box) needs `loginctl enable-linger <user>`. At startup the box also stops its own slice, killing sandboxes a previous instance left behind; deleting or archiving a task stops its slice and drops its limits. Inspect live sandboxes with `systemd-cgls --user-unit kestrel.slice`.

@@ -142,6 +142,8 @@ export interface BwrapOptions {
   readonly homeDir: string
   /** X display number of the task desktop; its socket is bound when given. */
   readonly display?: number
+  /** `display` only: the task desktop's PulseAudio socket (see `pulseSocket`) is bound too. */
+  readonly audio?: boolean
   /** Exact environment of the sandboxed process. Nothing else from the host is passed. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -213,6 +215,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.caBundle) for (const path of CA_BUNDLE_PATHS) argv.push("--ro-bind", opts.caBundle, path)
   if (opts.display !== undefined) {
     const socket = x11Socket(opts.display)
+    if (opts.audio) argv.push("--bind", pulseSocket(opts.display), pulseSocket(opts.display))
     argv.push("--bind", socket, socket)
     argv.push(...gpuArgs())
   }
@@ -278,6 +281,9 @@ export const cliBwrapArgs = (
 }
 
 export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display}`
+
+/** The task desktop's PulseAudio socket, in the holder's private X dir beside the X socket (see desktop/audio.ts). */
+export const pulseSocket = (display: number): string => `/tmp/.X11-unix/pulse-${display}`
 
 /**
  * The host GPU, for processes that can draw on the task desktop: DRM render nodes (never the card nodes, which can
@@ -746,6 +752,13 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
     const home = agentHome(settings, req.homeDir)
     const cwd = req.cwd ?? req.workspacePath
     const hostPath = process.env.PATH ?? "/usr/bin:/bin"
+    // Strict always joins the task's holder (for its network); the other levels only when the launch shows the desktop.
+    const ns = settings.level === "strict" || req.display !== null ? yield* taskHolder(settings, req.taskId, systemdRun) : null
+    const holderX11 = ns === null ? null : x11Dir(ns.holder)
+    const x11Display = holderX11 === null ? undefined : displayNumber(req.display, holderX11)
+    // The desktop's audio server makes this socket (desktop/audio.ts); apps get it only once it exists.
+    const pulse = x11Display !== undefined && existsSync(join(holderX11 as string, `pulse-${x11Display}`)) ? pulseSocket(x11Display) : undefined
+
     const env: Record<string, string> = {
       ...(settings.level === "off" ? platformEnv() : {}),
       PATH: [
@@ -762,11 +775,10 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         ? { SSL_CERT_FILE: settings.sslCertFile, NIX_SSL_CERT_FILE: settings.sslCertFile }
         : {}),
       ...(req.display ? { DISPLAY: req.display, ...desktopScaleEnv } : {}),
+      ...(pulse ? { PULSE_SERVER: `unix:${pulse}` } : {}),
       ...req.env,
     }
 
-    // Strict always joins the task's holder (for its network); the other levels only when the launch shows the desktop.
-    const ns = settings.level === "strict" || req.display !== null ? yield* taskHolder(settings, req.taskId, systemdRun) : null
     const bwrapArgs = (level: "strict" | "basic"): string[] =>
       buildBwrapArgv({
         level,
@@ -774,7 +786,8 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         cwd,
         mirrorDir: req.mirrorDir,
         homeDir: req.homeDir,
-        display: ns === null ? undefined : displayNumber(req.display, x11Dir(ns.holder)),
+        display: x11Display,
+        audio: pulse !== undefined,
         env,
         command: req.command,
         roBinds: req.roBinds,

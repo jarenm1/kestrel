@@ -13,3 +13,4 @@ result
 .box.env
 .astro/
 .expo/
+packages/server/scripts/desktop-bench/results/

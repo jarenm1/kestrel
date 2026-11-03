@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { DesktopRtcIceServer } from "@cloudagents/protocol"
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { availableParallelism, homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -28,6 +29,16 @@ export const BoxConfig = Schema.Struct({
   dataDir: Schema.String,
   sandbox: Schema.Literal("basic", "off"),
   provisioning: Provisioning,
+  /** WebRTC desktop media's network. Absent: the server's default (one public STUN server). See docs/box.md. */
+  webrtc: Schema.optional(
+    Schema.Struct({
+      iceServers: Schema.optional(Schema.Array(DesktopRtcIceServer)),
+      turn: Schema.optional(Schema.Struct({ urls: Schema.Array(Schema.String), secret: Schema.String })),
+      icePolicy: Schema.optional(Schema.Literal("all", "relay")),
+      portRange: Schema.optional(Schema.String),
+      hostAddresses: Schema.optional(Schema.Array(Schema.String)),
+    }),
+  ),
 })
 export type BoxConfig = typeof BoxConfig.Type
 
@@ -114,5 +125,15 @@ export const serverEnv = (config: BoxConfig): Record<string, string | undefined>
     CLOUDAGENTS_CONTROL_URL: config.controlUrl,
     CLOUDAGENTS_BOX_ID: config.boxId,
     CLOUDAGENTS_BOX_SECRET: config.boxSecret,
+    ...(config.webrtc === undefined
+      ? {}
+      : {
+          CLOUDAGENTS_WEBRTC_ICE_SERVERS: config.webrtc.iceServers === undefined ? undefined : JSON.stringify(config.webrtc.iceServers),
+          CLOUDAGENTS_WEBRTC_TURN_URLS: config.webrtc.turn?.urls.join(","),
+          CLOUDAGENTS_WEBRTC_TURN_SECRET: config.webrtc.turn?.secret,
+          CLOUDAGENTS_WEBRTC_ICE_POLICY: config.webrtc.icePolicy,
+          CLOUDAGENTS_WEBRTC_PORT_RANGE: config.webrtc.portRange,
+          CLOUDAGENTS_WEBRTC_HOST_ADDRESSES: config.webrtc.hostAddresses?.join(","),
+        }),
   }
 }

@@ -8,6 +8,7 @@ import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { PublicShell } from "@/components/PublicShell"
 import { Alert } from "@cloudagents/ui/alert"
+import { DesktopEmbedPage } from "@/pages/DesktopEmbedPage"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
@@ -43,6 +44,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Host-embedded desktop viewer: the fragment carries the stream URL, so it sits outside the session guard. */}
+      <Route path="/embed/desktop" element={<DesktopEmbedPage />} />
 
       {/* Protected routes. The guard is the only place that checks the session. */}
       <Route element={<RequireAuth />}>

@@ -36,6 +36,7 @@
           hsetroot
           xterm
           xdotool
+          pulseaudio
           ffmpeg-full.bin
           xdamageCapture
         ];

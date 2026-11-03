@@ -38,8 +38,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "" },
     fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
-    maxConcurrentRuns: 1, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3, desktopBundleMs: 0,
+    maxConcurrentRuns: 1, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3,
     githubApiUrl: "https://api.github.com",
+    webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const configLayer = Layer.succeed(Config, config)
   const deps = Layer.mergeAll(

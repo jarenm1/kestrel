@@ -53,6 +53,20 @@ Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (w
 - Rendering: the live desktop uses the GPU only on native Linux with render nodes. WSL2 exposes the GPU as `/dev/dxg`,
   not a render node, and Linux VMs on macOS get no 3D GPU, so there the desktop renders and encodes (x264) on the CPU.
 
+Desktop video, audio and input always use WebRTC, with no opt-in. The optional `webrtc` object in `config.json` sets its network; restart the box after editing it. Every field is optional. Without `iceServers`, the box and viewers use one STUN server, `stun:stun.cloudflare.com:3478`; set `iceServers` to replace it, or to `[]` to use none. An example:
+
+```json
+"webrtc": {
+  "iceServers": [{ "urls": ["stun:stun.example.org:3478"] }],
+  "turn": { "urls": ["turn:turn.example.org:3478"], "secret": "coturn static-auth-secret" },
+  "icePolicy": "all",
+  "portRange": "50000-50100",
+  "hostAddresses": ["100.64.0.5"]
+}
+```
+
+Which of these you need depends on your network, see [WebRTC desktop](box.md#webrtc-desktop). Kestrel relays no media. Your own TURN server, set with `turn`, is the only relay the box will use. If no path connects, the desktop does not stream: there is no WebSocket fallback.
+
 ### Releasing
 
 `bun run build:box` builds `dist/box/kestrel-box-{linux,darwin}-{x64,arm64}` (version from
@@ -84,8 +98,7 @@ from the config.
 - One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
   still holds for Kestrel's own box.
 - One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic, including the desktop stream, goes browser → Worker → Hub → relay → box. Every relayed request is a
-  Durable Object request, which we pay for.
+- All app traffic goes browser → Worker → Hub → relay → box, including the desktop's status and WebRTC signaling. Desktop media does not: it goes between the box and each viewer over WebRTC, never through the Hub. Every relayed request is a Durable Object request, which we pay for.
 - The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
 - Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
 - The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
@@ -177,7 +190,7 @@ on `packages/protocol`; the PR for each step calls this out.
 
 ## Open questions
 
-- Paid relay for boxes without a tunnel: offer it, and how to meter the desktop stream.
+- Paid relay for boxes without a tunnel: offer one, and how to meter its media. Desktop video is WebRTC now, so such a relay would carry WebRTC media; Kestrel provides no media relay today ([box.md](box.md#webrtc-desktop)).
 - Orgs/teams owning boxes (out of scope here; boxes are single-owner).
 - Moving a thread between boxes: conversation handoff like `core/handoff.ts`, workspace via its thread branch or a
   snapshot.

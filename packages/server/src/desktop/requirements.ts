@@ -9,8 +9,8 @@ export const DESKTOP_HELPER = "xdamage-capture"
  */
 export const DESKTOP_REQUIRED_TOOLS = ["weston", "Xwayland", "xdotool", "ffmpeg"] as const
 
-/** Started when found; a desktop without them still runs (no wallpaper, no window manager, no terminal). */
-export const DESKTOP_OPTIONAL_TOOLS = ["openbox", "hsetroot", "xterm"] as const
+/** Started when found; a desktop without them still runs (no wallpaper, no window manager, no terminal, no audio). */
+export const DESKTOP_OPTIONAL_TOOLS = ["openbox", "hsetroot", "xterm", "pulseaudio"] as const
 
 /** The desktop starts Xwayland as weston's client (`weston … -- Xwayland …`), which weston supports from 14.0. */
 export const MIN_WESTON_MAJOR = 14

@@ -23,11 +23,12 @@ const probe = Effect.gen(function* () {
       }),
     })
     assert.equal(status.state, "running")
-    assert.ok(status.mime?.includes("avc1"), "desktop should publish H.264")
     const kinds = new Set<string>()
     const unsubscribe = yield* desktop.subscribe(taskId, {
+      baselineOnly: false,
       onStatus: () => {},
-      onMedia: (_bytes, kind) => kinds.add(kind),
+      onMedia: (unit) => kinds.add(unit.kind),
+      onAudio: () => {},
     })
     yield* Effect.gen(function* () {
       const screenshot = yield* desktop.screenshot(taskId, undefined, 0.25)
@@ -35,7 +36,7 @@ const probe = Effect.gen(function* () {
       yield* desktop.input(taskId, { _tag: "mouse.move", x: 123 / 2560, y: 234 / 1440 })
       const cursor = yield* desktop.cursor(taskId)
       assert.deepEqual(cursor, { x: 123, y: 234 })
-      assert.ok(kinds.has("init"), "viewer should receive the initialization segment")
+      assert.ok(kinds.has("config"), "viewer should receive the parameter sets")
       assert.ok(kinds.has("key"), "viewer should receive a keyframe")
       console.log(`PASS ${status.display}: H.264 stream, PNG screenshot and pointer input`)
     }).pipe(Effect.ensuring(unsubscribe))

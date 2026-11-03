@@ -257,16 +257,11 @@ export const DesktopStatus = Schema.Struct({
   /** The stream's frame rate cap, from `quality`. */
   fps: Schema.Number,
   quality: DesktopQuality,
-  /**
-   * MIME + codec string for MediaSource, e.g. `video/mp4; codecs="avc1.42E01F"`.
-   * Null until the stream is running. Clients MUST use this verbatim.
-   */
-  mime: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
 })
 export type DesktopStatus = typeof DesktopStatus.Type
 
-/** PUT `Paths.taskDesktopQuality` -> DesktopStatus. The encoder restarts at the new quality; viewers get a new init segment. */
+/** PUT `Paths.taskDesktopQuality` -> DesktopStatus. The encoder restarts at the new quality; viewers renegotiate. */
 export const SetDesktopQualityBody = Schema.Struct({ quality: DesktopQuality })
 export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
 
@@ -305,9 +300,9 @@ export type TaskStats = typeof TaskStats.Type
 export const TASK_STATS_WINDOW_MS = 60_000
 
 /**
- * Client -> server input over the desktop WebSocket (JSON text frames).
- * Coordinates are normalized to [0, 1] relative to the stream frame so the
- * client never needs to know the X resolution.
+ * Client -> server input (JSON text) over the WebRTC data channels: `input` carries clicks, wheel, keys and text, and
+ * `pointer` carries `mouse.move` only. Coordinates are normalized to [0, 1] relative to the stream frame so the client
+ * never needs to know the X resolution.
  */
 export const DesktopInput = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("mouse.move"), x: Schema.Number, y: Schema.Number }),
@@ -319,6 +314,7 @@ export const DesktopInput = Schema.Union(
     button: Schema.Literal(1, 2, 3),
     down: Schema.Boolean,
   }),
+  /** Notch counts (integers); the server clamps each event to ±10. Positive dy scrolls down, positive dx right. */
   Schema.Struct({ _tag: Schema.Literal("mouse.wheel"), dx: Schema.Number, dy: Schema.Number }),
   Schema.Struct({
     _tag: Schema.Literal("key"),
@@ -326,18 +322,52 @@ export const DesktopInput = Schema.Union(
     key: Schema.String,
     down: Schema.Boolean,
   }),
-  Schema.Struct({ _tag: Schema.Literal("text"), text: Schema.String }),
+  /** Typed with xdotool `type`; soft keyboards send their text this way. */
+  Schema.Struct({ _tag: Schema.Literal("text"), text: Schema.String.pipe(Schema.maxLength(1000)) }),
 )
 export type DesktopInput = typeof DesktopInput.Type
 
+/** A STUN or TURN server for one WebRTC session, as `RTCPeerConnection` takes it. */
+export const DesktopRtcIceServer = Schema.Struct({
+  urls: Schema.Array(Schema.String),
+  username: Schema.optional(Schema.String),
+  credential: Schema.optional(Schema.String),
+})
+export type DesktopRtcIceServer = typeof DesktopRtcIceServer.Type
+
+/** An ICE candidate in either direction; a null `candidate` ends the viewer's gathering. */
+const DesktopRtcCandidate = Schema.Struct({
+  _tag: Schema.Literal("rtc.candidate"),
+  candidate: Schema.NullOr(Schema.String),
+  sdpMid: Schema.NullOr(Schema.String),
+  sdpMLineIndex: Schema.NullOr(Schema.Number),
+})
+
 /**
- * Client -> server flow-control ack over the desktop WebSocket (JSON text frames, sent alongside `DesktopInput`).
- * `frames` is the cumulative count of binary frames (init segment and fragments) the client has received on this
- * connection. The client sends one every ~100 ms or every 6 frames, whichever comes first. The server throttles a
- * connection only after its first ack, so clients that never ack keep the unthrottled stream.
+ * Client -> box WebRTC signaling over the desktop WebSocket, which already proved who the viewer is. `rtc.offer` carries
+ * the viewer's SDP offer (recvonly video and audio, and the `input` and `pointer` data channels); `rtc.candidate`
+ * trickles its ICE candidates; `rtc.close` ends the session.
  */
-export const DesktopAck = Schema.Struct({ _tag: Schema.Literal("stream.ack"), frames: Schema.Number })
-export type DesktopAck = typeof DesktopAck.Type
+export const DesktopRtcClientMessage = Schema.Union(
+  Schema.Struct({ _tag: Schema.Literal("rtc.offer"), sdp: Schema.String }),
+  DesktopRtcCandidate,
+  Schema.Struct({ _tag: Schema.Literal("rtc.close") }),
+)
+export type DesktopRtcClientMessage = typeof DesktopRtcClientMessage.Type
+
+/** Box -> client WebRTC signaling over the desktop WebSocket, next to `DesktopStatus`. */
+export const DesktopRtcServerMessage = Schema.Union(
+  Schema.Struct({
+    _tag: Schema.Literal("rtc.config"),
+    iceServers: Schema.Array(DesktopRtcIceServer),
+    iceTransportPolicy: Schema.Literal("all", "relay"),
+  }),
+  /** `retryable`: the box is at its viewer limit or negotiation failed, so a later try may work; false: no usable H.264. */
+  Schema.Struct({ _tag: Schema.Literal("rtc.unavailable"), reason: Schema.String, retryable: Schema.Boolean }),
+  Schema.Struct({ _tag: Schema.Literal("rtc.answer"), sdp: Schema.String }),
+  DesktopRtcCandidate,
+)
+export type DesktopRtcServerMessage = typeof DesktopRtcServerMessage.Type
 
 /** Server -> client events over the task event WebSocket (JSON text frames). */
 export const ServerEvent = Schema.Union(
@@ -713,8 +743,8 @@ export const Paths = {
    */
   eventsWs: "/api/events",
   /**
-   * WebSocket: server sends `DesktopStatus` JSON text frames + fMP4 binary frames; client sends `DesktopInput` JSON
-   * and `DesktopAck` JSON.
+   * WebSocket: server sends `DesktopStatus` JSON text frames and WebRTC signaling (`DesktopRtcServerMessage`); the client
+   * sends WebRTC signaling (`DesktopRtcClientMessage`). Video and audio travel over WebRTC; input over its data channels.
    */
   taskDesktopWs: (id: string) => `/api/tasks/${id}/desktop/stream`,
   /** MCP (streamable HTTP) endpoint for the agent harness. */

@@ -142,8 +142,8 @@ Today a BYOB user needs their own HTTPS tunnel and a local proxy that blocks `/m
    Move them to a listener only sandboxes can reach, so a tunnel can point straight at the public listener.
 2. **WebRTC for the API, spiked.** The app posts its offer to `POST /api/webrtc/offer` on the box's own port, so signaling
    needs the same direct route as the API and does not use the dial-out socket yet. Once open, the data channel carries API
-   calls and HTTP stays the fallback ([byo-box.md](byo-box.md#direct-data-path)). The desktop stream still uses the
-   existing path. The tunnel stays optional only once the reach question below is answered.
+   calls and HTTP stays the fallback ([byo-box.md](byo-box.md#direct-data-path)). The desktop stream is on WebRTC as well,
+   signaled over the desktop WebSocket ([Streaming](#streaming)). The tunnel stays optional only once the reach question below is answered.
 3. **Keep tunnels as the fallback.** Tailscale, Cloudflare Tunnel or the user's own domain still work, and the installer
    should automate as much of this as it can.
 
@@ -329,14 +329,12 @@ usage. Model usage stays on the user's own key or subscription.
 
 ## Streaming
 
-Today's stream is fMP4 over WebSocket, either through the Hub or direct to the box. The damage-driven capture sends almost
-nothing while the desktop is still, and the encoder stops shortly after the last viewer leaves.
+Desktop video, audio and input are on WebRTC: H.264 video and Opus audio sent directly from the box to each viewer, input over data channels, and signaling on the desktop WebSocket. The damage-driven capture sends almost nothing while the desktop is still, and the encoder stops shortly after the last viewer leaves. The current design is in [box.md](box.md#webrtc-desktop).
 
-- **Goal:** WebRTC directly from box to viewer, for lower latency and better behaviour on poor networks. WebSocket stays as
-  the fallback, so a tunnel-only box still streams.
-- **Relay:** the legacy Hub path goes away with the relay.
-- **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the
-  apps should set from the encoder capability.
+- **Done:** WebRTC from box to viewer. The fMP4 WebSocket path is deleted; WebSocket media is not kept as a fallback.
+- **No fallback, by decision:** keeping the WebSocket stream for a tunnel-only box would have sent video through the Hub or another relay Kestrel pays for, which breaks requirement 1. The tradeoff: a box reachable only over an HTTPS tunnel, with no LAN, tailnet or public UDP path and no operator-configured TURN, cannot stream. It needs a direct UDP path or its operator's TURN server.
+- **Relay:** the Hub carries only desktop signaling and status for boxes on the legacy relay, a handful of requests per session. No media passes through it, so it adds no media cost.
+- **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the apps should set from the encoder capability.
 
 ## Saved evidence
 
@@ -429,7 +427,7 @@ records, and usage records. `PLANS` changes when billing arrives.
 - **Resume times:** what suspend and resume cost in practice decides how aggressive the idle timeout can be.
 - **Memory billing:** whether ballooning returns enough memory to bill close to real use.
 - **Fractional GPUs:** which option works with our apps, and whether it is worth its licensing and setup.
-- **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback); the stream is not on WebRTC yet.
+- **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback). The desktop stream has no fallback, so its failure rate on real networks is the open question.
 - **Evidence in PRs:** what GitHub actually renders, and how long Nest evidence is retained.
 - **Free tier:** whether the Nest has one, given that a free VM has a real cost even when suspended.
 - **Teams:** whether a team shares boxes or each seat gets its own. Boxes are single-owner in this design.

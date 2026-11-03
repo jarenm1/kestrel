@@ -2055,7 +2055,6 @@
     "web-namespaces": ["web-namespaces@2.0.1", "", {}, "sha512-bKr1DkiNa2krS7qxNtdrtHAmzuYGFQLiQ13TsorsdT6ULTkPLKuu5+GsFpDlg6JFjUTwX2DyhMPG2be8uPrqsQ=="],
 
     "webidl-conversions": ["webidl-conversions@3.0.1", "", {}, "sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ=="],
-
     "werift": ["werift@0.26.0", "", { "dependencies": { "buffer": "^6.0.3", "mediabunny": "^1.62.1", "multicast-dns": "^7.2.5" } }, "sha512-pH8l4jmp+oNnyGG9FrqkBf8r+Tz+1oDE6rshqtMlpfUzf90rJCn/XS81yalXl58T3tnsXnNQnhwkW/nE0wbFRA=="],
 
     "whatwg-fetch": ["whatwg-fetch@3.6.20", "", {}, "sha512-EqhiFU6daOA8kpjOWTL0olhVOF3i7OrFzSYiGsEMB8GcXS+RrzauAERX65xMeNWVqxA6HXH2m69Z9LaKKdisfg=="],

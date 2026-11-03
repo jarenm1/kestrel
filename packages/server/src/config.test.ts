@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { DEFAULT_ANTHROPIC_COMMAND, loadConfig } from "./config"
+import { DEFAULT_CONFIG, serverEnv } from "./cli/config"
+import { DEFAULT_ANTHROPIC_COMMAND, loadConfig, webRtcEnv } from "./config"
 
 const BOX_VARS = [
   "CLOUDAGENTS_CONTROL_URL",
@@ -126,5 +127,97 @@ describe("managed box settings", () => {
     expect(() => configWith({ CLOUDAGENTS_BOX_ID: "box_own", CLOUDAGENTS_BOX_SECRET: "secret" })).toThrow(
       "CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set",
     )
+  })
+})
+
+describe("webRtcEnv", () => {
+  test("is always on, with one public STUN server assumed", () => {
+    expect(webRtcEnv(false, {})).toEqual({
+      iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
+      turn: null,
+      policy: "all",
+      portRange: null,
+      hostAddresses: [],
+      denyPrivate: false,
+    })
+  })
+
+  test("an empty ICE server list leaves no STUN or TURN server", () => {
+    expect(webRtcEnv(false, { CLOUDAGENTS_WEBRTC_ICE_SERVERS: "[]" }).iceServers).toEqual([])
+  })
+
+  test("managed viewers cannot cause probes of private networks", () => {
+    expect(webRtcEnv(true, {}).denyPrivate).toBe(true)
+  })
+
+  test("reads the box's network", () => {
+    const settings = webRtcEnv(false, {
+      CLOUDAGENTS_WEBRTC_ICE_SERVERS: '[{"urls":["stun:stun.example:3478"]}]',
+      CLOUDAGENTS_WEBRTC_TURN_URLS: "turn:t.example:3478, turns:t.example:5349",
+      CLOUDAGENTS_WEBRTC_TURN_SECRET: "s",
+      CLOUDAGENTS_WEBRTC_ICE_POLICY: "relay",
+      CLOUDAGENTS_WEBRTC_PORT_RANGE: "50000-50100",
+      CLOUDAGENTS_WEBRTC_HOST_ADDRESSES: "100.64.0.5, 10.0.0.2",
+    })
+    expect(settings).toEqual({
+      iceServers: [{ urls: ["stun:stun.example:3478"] }],
+      turn: { urls: ["turn:t.example:3478", "turns:t.example:5349"], secret: "s" },
+      policy: "relay",
+      portRange: [50000, 50100],
+      hostAddresses: ["100.64.0.5", "10.0.0.2"],
+      denyPrivate: false,
+    })
+  })
+
+  test("rejects a bad network", () => {
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_ICE_SERVERS: "stun:x" })).toThrow("JSON array")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_ICE_SERVERS: '[{"urls":["http://x"]}]' })).toThrow("must start with")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_TURN_SECRET: "s" })).toThrow("together")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_ICE_POLICY: "relay" })).toThrow("needs a TURN server")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_PORT_RANGE: "50000" })).toThrow("PORT_RANGE")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_PORT_RANGE: "50100-50000" })).toThrow("PORT_RANGE")
+  })
+
+  test("a managed box refuses to share a static TURN password", () => {
+    const static_ = '[{"urls":["turn:t.example"],"username":"u","credential":"p"}]'
+    expect(() => webRtcEnv(true, { CLOUDAGENTS_WEBRTC_ICE_SERVERS: static_ })).toThrow("managed box")
+    expect(() => webRtcEnv(false, { CLOUDAGENTS_WEBRTC_ICE_SERVERS: static_ })).not.toThrow()
+  })
+})
+
+describe("a user's box config", () => {
+  test("uses the default STUN server unless the config names one", () => {
+    expect(webRtcEnv(false, serverEnv(DEFAULT_CONFIG)).iceServers).toEqual([{ urls: ["stun:stun.cloudflare.com:3478"] }])
+  })
+
+  test("turns its webrtc object into settings the server accepts", () => {
+    const settings = webRtcEnv(
+      false,
+      serverEnv({
+        ...DEFAULT_CONFIG,
+        webrtc: {
+          iceServers: [{ urls: ["stun:stun.example:3478"] }],
+          turn: { urls: ["turn:t.example:3478"], secret: "s" },
+          icePolicy: "relay",
+          portRange: "50000-50100",
+          hostAddresses: ["100.64.0.5"],
+        },
+      }),
+    )
+    expect(settings).toEqual({
+      iceServers: [{ urls: ["stun:stun.example:3478"] }],
+      turn: { urls: ["turn:t.example:3478"], secret: "s" },
+      policy: "relay",
+      portRange: [50000, 50100],
+      hostAddresses: ["100.64.0.5"],
+      denyPrivate: false,
+    })
+  })
+
+  test("an empty webrtc object keeps the default STUN server", () => {
+    expect(webRtcEnv(false, serverEnv({ ...DEFAULT_CONFIG, webrtc: {} }))).toMatchObject({
+      iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
+      turn: null,
+    })
   })
 })

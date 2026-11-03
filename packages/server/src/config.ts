@@ -1,8 +1,9 @@
-import { Context, Layer } from "effect"
+import { Context, Layer, Schema } from "effect"
 import { join, resolve } from "node:path"
 import { availableParallelism } from "node:os"
-import type { ModelProvider } from "@cloudagents/protocol"
+import { DesktopRtcIceServer, type ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
+import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
 import type { Provisioning, SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
@@ -104,13 +105,8 @@ export interface ServerConfig {
    * shadow repos. The box enforces it itself (see `core/storage.ts`); it applies with or without systemd.
    */
   readonly taskDiskMax: number
-  /**
-   * Desktop frame bundling window in ms (CLOUDAGENTS_DESKTOP_BUNDLE_MS, default 0 = off). When set, the box sends at
-   * most one relay message per window per viewer: the first fragment after a quiet window goes out at once, later ones
-   * are held and sent together. Fewer billed relay messages, at up to the window of added latency during continuous
-   * motion. See docs/box.md.
-   */
-  readonly desktopBundleMs: number
+  /** WebRTC desktop media and its connectivity. Always on. See docs/box.md. */
+  readonly webrtc: WebRtcSettings
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
   readonly githubApiUrl: string
 }
@@ -192,7 +188,7 @@ export const loadConfig = (): ServerConfig => {
     systemd,
     maxConcurrentRuns: intEnv("CLOUDAGENTS_MAX_CONCURRENT_RUNS", 0, 0),
     taskDiskMax: diskMaxEnv(),
-    desktopBundleMs: bundleMsEnv(),
+    webrtc: webRtcEnv(direct?.managed === true),
     githubApiUrl: loadGitHubApiUrl(),
   }
 }
@@ -236,13 +232,56 @@ const diskMaxEnv = (): number => {
   return bytes
 }
 
-const bundleMsEnv = (): number => {
-  const raw = process.env.CLOUDAGENTS_DESKTOP_BUNDLE_MS?.trim() || "0"
-  const ms = Number(raw)
-  if (!/^\d+$/.test(raw) || ms > 1000) {
-    throw new Error(`CLOUDAGENTS_DESKTOP_BUNDLE_MS must be a whole number of milliseconds from 0 to 1000, got "${raw}"`)
+/**
+ * WebRTC connectivity for desktop media. Always on. ICE servers default to one public STUN server;
+ * CLOUDAGENTS_WEBRTC_ICE_SERVERS replaces it (`[]` for none). TURN is used only when the operator configures it.
+ * A managed box takes the TURN REST secret instead of static credentials.
+ */
+export const webRtcEnv = (managed: boolean, env: NodeJS.ProcessEnv = process.env): WebRtcSettings => {
+  const servers = env.CLOUDAGENTS_WEBRTC_ICE_SERVERS?.trim() || '[{"urls":["stun:stun.cloudflare.com:3478"]}]'
+  let iceServers: ReadonlyArray<DesktopRtcIceServer>
+  try {
+    iceServers = Schema.decodeUnknownSync(Schema.parseJson(Schema.Array(DesktopRtcIceServer)))(servers)
+  } catch {
+    throw new Error(`CLOUDAGENTS_WEBRTC_ICE_SERVERS must be a JSON array of {"urls":["stun:host:port"],"username"?,"credential"?}`)
   }
-  return ms
+  if (iceServers.some((s) => s.urls.length === 0 || s.urls.some((u) => !/^(stun|stuns|turn|turns):/.test(u)))) {
+    throw new Error("CLOUDAGENTS_WEBRTC_ICE_SERVERS urls must start with stun:, stuns:, turn: or turns:")
+  }
+  if (managed && iceServers.some((s) => s.credential !== undefined)) {
+    throw new Error("a managed box must not share static TURN credentials: use CLOUDAGENTS_WEBRTC_TURN_SECRET")
+  }
+  const turnUrls = (env.CLOUDAGENTS_WEBRTC_TURN_URLS ?? "").split(",").map((u) => u.trim()).filter((u) => u !== "")
+  const turnSecret = env.CLOUDAGENTS_WEBRTC_TURN_SECRET?.trim() ?? ""
+  if ((turnUrls.length === 0) !== (turnSecret === "")) {
+    throw new Error("CLOUDAGENTS_WEBRTC_TURN_URLS and CLOUDAGENTS_WEBRTC_TURN_SECRET must be set together")
+  }
+  if (turnUrls.some((u) => !/^turns?:/.test(u))) throw new Error("CLOUDAGENTS_WEBRTC_TURN_URLS must start with turn: or turns:")
+  const policy = env.CLOUDAGENTS_WEBRTC_ICE_POLICY?.trim() || "all"
+  if (policy !== "all" && policy !== "relay") throw new Error(`CLOUDAGENTS_WEBRTC_ICE_POLICY must be all or relay, got "${policy}"`)
+  if (policy === "relay" && turnUrls.length === 0 && !iceServers.some((s) => s.urls.some((u) => u.startsWith("turn")))) {
+    throw new Error("CLOUDAGENTS_WEBRTC_ICE_POLICY=relay needs a TURN server")
+  }
+  return {
+    iceServers,
+    turn: turnUrls.length === 0 ? null : { urls: turnUrls, secret: turnSecret },
+    policy,
+    portRange: webRtcPortRange(env.CLOUDAGENTS_WEBRTC_PORT_RANGE?.trim() ?? ""),
+    hostAddresses: (env.CLOUDAGENTS_WEBRTC_HOST_ADDRESSES ?? "").split(",").map((a) => a.trim()).filter((a) => a !== ""),
+    denyPrivate: managed,
+  }
+}
+
+const webRtcPortRange = (raw: string): readonly [number, number] | null => {
+  if (raw === "") return null
+  const match = /^(\d+)-(\d+)$/.exec(raw)
+  const low = Number(match?.[1])
+  const high = Number(match?.[2])
+  // werift's own limit: a range of one port does not work.
+  if (match === null || low < 1024 || high > 65535 || low >= high) {
+    throw new Error(`CLOUDAGENTS_WEBRTC_PORT_RANGE must look like 50000-50100, got "${raw}"`)
+  }
+  return [low, high]
 }
 
 const loadGitHubApiUrl = (): string => {

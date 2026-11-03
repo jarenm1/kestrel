@@ -46,7 +46,7 @@ const harnessLayer = (
     direct: null,
     toolkitsFlake: null,
     taskDiskMax: 1024 ** 3,
-    desktopBundleMs: 0,
+    webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
     githubApiUrl: "https://api.github.com",
   }
   const configLayer = Layer.succeed(Config, config)
