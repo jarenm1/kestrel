@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
-import { RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
+import { createSocket } from "node:dgram"
+import { classes, Message, methods, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
 import type { DesktopRtcServerMessage } from "@cloudagents/protocol"
 import { MediaTap } from "./rtp"
 import {
@@ -332,6 +333,51 @@ describe("DesktopRtcSession", () => {
       expect(filter?.({ remoteCandidate: { host: "fe80::1" } })).toBe(false)
     }
   })
+
+  test("inbound STUN is authenticated and address-filtered before werift responds or probes", async () => {
+    const browser = await remoteOffer()
+    closing.push(() => browser.close())
+    const socket = createSocket("udp4")
+    closing.push(() => socket.close())
+    await new Promise<void>((resolve) => socket.bind(0, "127.0.0.1", resolve))
+    const packets: Buffer[] = []
+    socket.on("message", (packet) => packets.push(packet))
+    const sourcePort = socket.address().port
+
+    for (const denyPrivate of [false, true]) {
+      const { s } = session({ denyPrivate })
+      await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+      const peer = (s as unknown as { peer: { pc: RTCPeerConnection } }).peer
+      const connection = peer.pc.iceTransports[0]!.connection
+      const candidate = connection.localCandidates.find((c) => c.host === "127.0.0.1" && c.transport === "udp")
+      if (!candidate) throw new Error("no loopback candidate")
+      const send = async (username: string, password?: string) => {
+        const request = new Message(methods.BINDING, classes.REQUEST)
+        request.setAttribute("USERNAME", username)
+        request.setAttribute("PRIORITY", 1234)
+        // A role conflict used to elicit an error before iceFilterStunResponse ran.
+        request.setAttribute("ICE-CONTROLLED", 0xffffffffffffffffn)
+        if (password !== undefined) request.addMessageIntegrity(Buffer.from(password))
+        socket.send(request.bytes, candidate.port, "127.0.0.1")
+        await Bun.sleep(120)
+      }
+      const username = `${connection.localUsername}:${connection.remoteUsername}`
+      await send(username)
+      await send(username, "wrong-password")
+      await send(`wrong:${connection.remoteUsername}`, connection.localPassword)
+      expect(packets).toHaveLength(0)
+      expect(connection.candidatePairs.some((p) => p.remoteCandidate.port === sourcePort)).toBe(false)
+      await send(username, connection.localPassword)
+      if (denyPrivate) {
+        expect(packets).toHaveLength(0)
+        expect(connection.candidatePairs.some((p) => p.remoteCandidate.port === sourcePort)).toBe(false)
+      } else {
+        expect(packets.length).toBeGreaterThan(0)
+      }
+      packets.length = 0
+      s.close()
+    }
+  }, 10_000)
 
   test("negotiates, connects, carries input, and gathers no reflexive candidates unasked", async () => {
     const { s, sent, inputs } = session()

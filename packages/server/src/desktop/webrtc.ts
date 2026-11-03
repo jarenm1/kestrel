@@ -11,6 +11,8 @@ import {
   RTCRtpHeaderExtensionParameters,
   RtpHeader,
   RtpPacket,
+  parseMessage,
+  type Protocol,
   useFIR,
   useNACK,
   usePLI,
@@ -177,6 +179,31 @@ const isPrivateV4 = ([a, b]: number[]): boolean =>
 export const withoutDefaultStun = (pc: RTCPeerConnection, servers: ReadonlyArray<DesktopRtcIceServer>): void => {
   if (servers.some((s) => s.urls.some((u) => u.startsWith("stun")))) return
   for (const transport of pc.iceTransports) transport.connection.stunServer = undefined
+}
+
+/** Guard werift 0.26.0's request dispatch before it can respond, change roles, or create peer-reflexive pairs.
+ * Its public iceFilterStunResponse hook runs after role conflict handling and does not authenticate requests.
+ * The private hook is pinned by the live STUN tests; fail closed if a future werift changes it.
+ */
+export const guardIceRequests = (pc: RTCPeerConnection, settings: WebRtcSettings): void => {
+  if (pc.iceTransports.length === 0) throw new Error("werift created no ICE transports")
+  for (const transport of pc.iceTransports) {
+    const connection = transport.connection
+    const internal = connection as unknown as { ensureProtocol?: (protocol: Protocol) => void }
+    const ensure = internal.ensureProtocol
+    if (typeof ensure !== "function") throw new Error("werift ICE request guard unavailable")
+    internal.ensureProtocol = function (protocol) {
+      const event = protocol.onRequestReceived
+      const dispatch = event.execute.bind(event)
+      event.execute = (message, addr, data) => {
+        if (!isPeerAddressAllowed(addr[0], settings.hostAddresses, settings.denyPrivate)) return
+        const verified = parseMessage(data, Buffer.from(connection.localPassword, "utf8"))
+        if (!verified || verified.getAttributeValue("USERNAME") !== `${connection.localUsername}:${connection.remoteUsername}`) return
+        dispatch(verified, addr, data)
+      }
+      ensure.call(connection, protocol)
+    }
+  }
 }
 
 export interface DesktopRtcHandlers {
@@ -379,6 +406,7 @@ export class DesktopRtcSession {
       pc.addTransceiver(audioTrack, { direction: "sendonly" })
       await pc.setRemoteDescription({ type: "offer", sdp: offer })
       withoutDefaultStun(pc, servers)
+      guardIceRequests(pc, this.settings)
       const videoTransceiver = pc.getTransceivers().find((t) => t.kind === "video")
       if (videoTransceiver === undefined) throw new Error("offer has no video section")
       await videoTransceiver.sender.replaceTrack(track)
