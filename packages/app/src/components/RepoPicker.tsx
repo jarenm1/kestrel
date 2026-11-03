@@ -5,7 +5,7 @@ import { BranchName } from "@cloudagents/protocol"
 import { ChevronDown, FolderGit2, GitBranch, Lock, Plug } from "lucide-react"
 import { ApiError } from "@/api/client"
 import { queries } from "@/api/queries"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,

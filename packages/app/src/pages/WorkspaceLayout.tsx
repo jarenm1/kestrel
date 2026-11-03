@@ -7,7 +7,7 @@ import { BoxOfflineBanner } from "@/components/BoxStatus"
 import { ReconnectBanner } from "@/components/ReconnectBanner"
 import { ThreadSidebar } from "@/components/ThreadSidebar"
 import { UsagePanelProvider } from "@/components/UsagePanel"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { useThreadListEvents } from "@/hooks/useThreadListEvents"
 
 const COLLAPSED_KEY = "kestrel.threadsCollapsed"

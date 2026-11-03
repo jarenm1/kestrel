@@ -16,9 +16,9 @@ import { Schema } from "effect"
 import { ChevronDown } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   DropdownMenu,

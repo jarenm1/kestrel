@@ -19,7 +19,7 @@ import {
 import { KestrelMark } from "@/components/KestrelMark"
 import { APP_URL, GITHUB_URL } from "@/components/PublicShell"
 import { StatusIcon } from "@/components/StatusIcon"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { cn } from "@/lib/utils"
 
 /** What a box keeps from working locally. */

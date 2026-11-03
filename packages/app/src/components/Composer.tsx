@@ -31,8 +31,8 @@ import {
   type SendMessageBody,
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
-import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
+import { Alert } from "@cloudagents/ui/alert"
+import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,

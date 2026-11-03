@@ -46,6 +46,7 @@ The diagram shows the major paths, not every endpoint. The legacy relay remains 
 | Web interface | Public pages, authenticated workspace, thread and desktop views | `packages/app` |
 | Mobile interface | Multi-box thread lists and box-scoped thread and desktop access | `packages/mobile` |
 | Shared composer | GitHub reference format, draft parsing and the DOM editor used by desktop, phone web and Expo native WebViews | `packages/composer` |
+| Shared UI | Theme tokens, primitives and panels (quotas) rendered by desktop, phone web and Expo native WebViews | `packages/ui` |
 | Control plane | GitHub OAuth, sessions, box registration and tokens, credentials, automations, PR watches and relay | `packages/control` |
 | Hub | Durable control-plane state and coordination, including fleet registry and scheduled events | `packages/control/src/hub.ts` |
 | Box | Thread API, agent runs, workspaces, sandbox, desktop and tools | `packages/server` |
@@ -56,6 +57,11 @@ Phone browsers use the mobile app's web export. Its reference composer and the d
 implementation; Expo bundles that surface locally for native iOS/Android through `use dom`. References serialize
 as ordinary GitHub Markdown links with explicit repository, kind and number, so drafts and messages cross UI
 surfaces without a protocol change. See [mobile references](../packages/mobile/README.md#github-references).
+
+Shared panels follow the same pattern: `packages/ui` holds the DOM component with plain JSON props, each app
+fetches the data with its own client, and the phone app renders the component through a `use dom` wrapper whose
+Tailwind comes from `@cloudagents/ui/dom.css` (Metro runs `@tailwindcss/postcss`). See
+[shared desktop components](../packages/mobile/README.md#shared-desktop-components).
 
 ## Access and communication
 

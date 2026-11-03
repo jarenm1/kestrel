@@ -24,6 +24,7 @@ function launchRoute(): LaunchRoute | null {
   if (path === "/automations") return { name: "automations" };
   if (path === "/archived") return { name: "archived" };
   if (path === "/settings/connections") return { name: "connections" };
+  if (path === "/settings/usage") return { name: "usage" };
   if (path === "/settings" || path.startsWith("/settings/")) return { name: "settings" };
   return null;
 }
@@ -40,6 +41,8 @@ function pathFor(route: Route): string {
       return "/settings/connections";
     case "settings":
       return "/settings";
+    case "usage":
+      return "/settings/usage";
     case "new-thread":
       return "/";
   }

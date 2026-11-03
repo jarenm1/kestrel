@@ -1,0 +1,46 @@
+/* Tailwind for shared components inside an Expo DOM component (`"use dom"`): rendered in place on phone web, and in a
+   WebView on iOS/Android. Import it from the DOM component and wrap the content in `[data-kestrel-dom]`.
+
+   There is no preflight: on phone web this sheet shares the page with react-native-web, so the element resets below
+   apply only inside `[data-kestrel-dom]`. Utilities are generated from this package's sources only (`theme.css`). */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "./theme.css";
+
+@layer base {
+  [data-kestrel-dom] {
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.4285;
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+  [data-kestrel-dom] *,
+  [data-kestrel-dom] ::before,
+  [data-kestrel-dom] ::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    border: 0 solid var(--border);
+  }
+  [data-kestrel-dom] :is(h1, h2, h3, h4) {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  [data-kestrel-dom] :is(ul, ol) {
+    list-style: none;
+  }
+  [data-kestrel-dom] a {
+    color: inherit;
+    text-decoration: inherit;
+  }
+  [data-kestrel-dom] button {
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+}

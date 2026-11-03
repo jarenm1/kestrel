@@ -1,7 +1,7 @@
 import { useSearchParams } from "react-router-dom"
 import { ControlPaths } from "@cloudagents/protocol"
 import { KestrelMark } from "@/components/KestrelMark"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { SERVER_URL } from "@/config"
 import { APP_HOME } from "@/routes"
 

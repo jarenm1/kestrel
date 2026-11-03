@@ -28,6 +28,23 @@ Native typing stays inside the DOM: only the initial draft seeds the view, and S
 rather than a potentially delayed bridge update. No GitHub credentials enter the editor; the existing
 `github_reference_read` tool resolves the explicit repository/kind/number when the agent follows a reference.
 
+## Shared desktop components
+
+Some screens render the desktop's own components from `packages/ui` instead of a React Native copy, so a change to
+them lands on desktop, phone web and native at once. **Settings › Quotas** (`/settings/usage`) is the first: the
+desktop's quotas panel (limits, banked resets, activity).
+
+- `screens/UsageScreen` owns the data (TanStack Query, the box client) and passes plain JSON props and async
+  callbacks to `components/UsageQuotasDom`, a `"use dom"` wrapper around `@cloudagents/ui/usage`.
+- On phone web the wrapper renders in place; on iOS/Android Expo bundles it into a WebView sized with
+  `matchContents`, and the native `ScrollView` scrolls the page.
+- Styles: the wrapper imports `@cloudagents/ui/dom.css`, which Metro compiles with Tailwind v4
+  (`postcss.config.mjs`). It has no preflight, so it cannot restyle react-native-web; element resets apply only inside
+  `[data-kestrel-dom]`. Utilities are generated from `packages/ui` sources only, so put Tailwind classes there, not in
+  the wrapper. `components/domHostReset` shrink-wraps the WebView document (native only).
+- To add another: move the component into `packages/ui` with JSON-only props, render it from the desktop as before,
+  and add a `*Dom.tsx` wrapper plus a screen that supplies the data.
+
 ## On the web (phones)
 
 The same app is also the app host's UI for phone browsers. `bun run build:app` builds the desktop SPA, then this app's web export (react-native-web, `build:web`) into `packages/app/dist/m`. The Worker serves `m/index.html` in place of the SPA when a phone (`Mobi` in the user agent) opens one of the pages the app has screens for (`/`, `/c/:id`, `/automations`, `/archived`, `/settings/...`; `MOBILE_PAGE` in `packages/control/src/pages.ts`), on the same URL. Other pages (`/pair`, `/login`) and the public site stay on the SPA.

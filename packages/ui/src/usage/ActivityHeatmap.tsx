@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react"
 import type { ActivityDay } from "@cloudagents/protocol"
-import { cn } from "@/lib/utils"
+import { cn } from "../cn"
 
 const WEEKS = 53
 const DAY_LABELS: Record<number, string> = { 0: "M", 2: "W", 4: "F" }

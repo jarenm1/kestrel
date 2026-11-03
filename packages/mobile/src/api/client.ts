@@ -24,6 +24,7 @@ import {
   Message,
   Paths,
   PreviewSession,
+  ProviderUsage,
   PutApiKeyBody,
   Run,
   RunItems,
@@ -33,6 +34,9 @@ import {
   TriggerAutomationBody,
   UpdateAutomationBody,
   Usage,
+  UsageActivity,
+  type UseBankedResetBody,
+  UseBankedResetResult,
   type UserBox,
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
@@ -126,6 +130,11 @@ export interface ApiClient {
   startDesktop(taskId: string): Promise<DesktopStatus>;
   stopDesktop(taskId: string): Promise<void>;
   usage(): Promise<Usage>;
+  /** The CLI providers' plan limits on the active box. */
+  providerUsage(): Promise<readonly ProviderUsage[]>;
+  useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
+  /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
+  usageActivity(): Promise<UsageActivity>;
   commands(taskId: string, model: AgentModel): Promise<HarnessCommands>;
   previewSession(taskId: string): Promise<PreviewSession>;
 }
@@ -294,6 +303,15 @@ export function createApiClient(
     startDesktop: (taskId) => boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId)),
     stopDesktop: (taskId) => boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),
     usage: () => boxRequest(Usage, "GET", Paths.usage),
+    providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+    useBankedReset: (provider, body) =>
+      boxRequest(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
+    usageActivity: () =>
+      boxRequest(
+        UsageActivity,
+        "GET",
+        `${Paths.usageActivity}?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`
+      ),
     commands: (taskId: string, model: AgentModel) =>
       boxRequest(HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`),
     previewSession: (taskId: string) => boxRequest(PreviewSession, "POST", Paths.taskPreviewSession(taskId)),

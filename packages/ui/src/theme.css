@@ -1,0 +1,68 @@
+/* Kestrel's design tokens, shared by the desktop app (styles.css) and DOM components on phones (dom.css). Both
+   compile Tailwind over this package's sources, so a shared component's utilities exist wherever it renders. */
+@source "./";
+
+/* Dark-only, monochrome theme: white is the accent; blue (`info`) is reserved for states white can't carry.
+   Token names follow shadcn/ui so `bunx shadcn add <component>` works unchanged. */
+:root {
+  color-scheme: dark;
+  --radius: 0.875rem;
+  --background: #0a0a0b;
+  --foreground: #ededef;
+  --card: #141416;
+  --card-foreground: #ededef;
+  --popover: #141416;
+  --popover-foreground: #ededef;
+  --primary: #f5f5f6;
+  --primary-foreground: #0a0a0b;
+  --secondary: #1c1c1f;
+  --secondary-foreground: #ededef;
+  --muted: #1c1c1f;
+  --muted-foreground: #8b8b93;
+  --accent: #242428;
+  --accent-foreground: #ededef;
+  --destructive: #f2555a;
+  --border: rgb(255 255 255 / 0.07);
+  --input: rgb(255 255 255 / 0.05);
+  --ring: #ffffff;
+  --success: #4ade80;
+  --warning: #e3b341;
+  --info: #6b9bff;
+  --code: #070708;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  /* Depth instead of outlines: a faint top highlight plus a soft drop shadow. */
+  --shadow-soft: inset 0 1px 0 0 rgb(255 255 255 / 0.04), 0 8px 24px -12px rgb(0 0 0 / 0.7);
+  --shadow-glow: 0 0 0 1px rgb(255 255 255 / 0.14), 0 0 22px -4px rgb(255 255 255 / 0.22);
+  --shadow-well: inset 0 1px 3px 0 rgb(0 0 0 / 0.6);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-code: var(--code);
+}

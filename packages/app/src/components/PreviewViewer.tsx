@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { MousePointer2, RefreshCw } from "lucide-react"
-import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
+import { Alert } from "@cloudagents/ui/alert"
+import { Button } from "@cloudagents/ui/button"
 import { api } from "@/api/client"
 
 import type { ElementContext } from "@/components/Composer"

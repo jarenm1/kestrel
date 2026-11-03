@@ -39,6 +39,8 @@ export const keys = {
 export const boxKeys = (scope: string) => ({
   box: ["box-data", scope, "status"] as const,
   usage: ["box-data", scope, "usage"] as const,
+  providerUsage: ["box-data", scope, "provider-usage"] as const,
+  usageActivity: ["box-data", scope, "usage-activity"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["box-data", scope, "task-list"] as const,
   task: (taskId: string) => ["box-data", scope, "tasks", taskId] as const,
@@ -144,6 +146,8 @@ export function createQueries(api: ApiClient) {
     desktop: (taskId: string) =>
       queryOptions({ queryKey: scoped.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
     usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
+    providerUsage: () => queryOptions({ queryKey: scoped.providerUsage, queryFn: () => api.providerUsage() }),
+    usageActivity: () => queryOptions({ queryKey: scoped.usageActivity, queryFn: () => api.usageActivity() }),
     commands: (
       taskId: string | undefined,
       model: AgentModel | undefined,

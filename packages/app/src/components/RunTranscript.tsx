@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { cn } from "@/lib/utils"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
 import { Markdown } from "./Markdown"
 import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
