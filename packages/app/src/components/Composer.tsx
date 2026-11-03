@@ -12,7 +12,7 @@ import {
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, Brain, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
+import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
 import { Popover } from "radix-ui"
 import {
   AgentEffort,
@@ -66,6 +66,16 @@ interface ModelSection {
   readonly models: readonly ModelInfo[]
 }
 
+// Keep each level's visual weight consistent across models with different supported levels.
+const EFFORT_RING_FILL: Record<AgentEffort, number> = {
+  none: 0,
+  low: 25,
+  medium: 50,
+  high: 75,
+  xhigh: 87.5,
+  max: 100,
+}
+
 /** A stepped thinking slider; Default leaves the provider's effort setting untouched. */
 function ThinkingPicker({
   value,
@@ -78,6 +88,7 @@ function ThinkingPicker({
 }) {
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
   const selected = options[selectedIndex]!
+  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value]
   // Keep the stops aligned with the native range's 2rem thumb, including at both ends.
   const offset = (index: number) => `calc(1rem + (100% - 2rem) * ${index / (options.length - 1)})`
   return (
@@ -90,7 +101,21 @@ function ThinkingPicker({
           aria-label={`Thinking level: ${selected.label}`}
           className="data-[state=open]:bg-white/[0.06]"
         >
-          <Brain className="opacity-60" />
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" strokeWidth="3">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" className="text-muted-foreground/30" />
+            {ringFill > 0 && (
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+                pathLength="100"
+                stroke="currentColor"
+                strokeDasharray={`${ringFill} 100`}
+                strokeLinecap="round"
+                transform="rotate(-90 12 12)"
+              />
+            )}
+          </svg>
           {value === undefined ? "Thinking" : selected.label}
         </Button>
       </Popover.Trigger>
@@ -107,7 +132,7 @@ function ThinkingPicker({
             <span className="text-xs font-medium text-muted-foreground">Thinking</span>
             <span className="text-sm font-semibold">{selected.label}</span>
           </div>
-          <div className="relative flex h-8 items-center rounded-full bg-input shadow-well transition-shadow has-focus-visible:shadow-glow">
+          <div className="relative flex h-8 items-center rounded-full bg-input transition-shadow has-focus-visible:shadow-glow">
             <div
               className="pointer-events-none absolute left-1 h-6 rounded-full bg-primary/20"
               style={{ width: `calc(${offset(selectedIndex)} + 0.5rem)` }}
