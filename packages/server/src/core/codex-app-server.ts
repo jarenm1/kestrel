@@ -120,6 +120,10 @@ const APPROVALS: Readonly<Record<string, unknown>> = {
   applyPatchApproval: { decision: "approved" },
 }
 
+/** Keeps edits out of throwaway scripts, as `CLAUDE_INSTRUCTIONS` in `config.ts` does for Claude Code. */
+const DEVELOPER_INSTRUCTIONS =
+  "Change and create files with the apply_patch tool, also when a change repeats across many places or files: patch them rather than batching the change in a script. Do not change files through python, bun -e, node -e, sed -i, perl -i or a shell heredoc. Python may not be installed here."
+
 const textInput = (text: string) => [{ type: "text", text, text_elements: [] }]
 
 const errorText = (error: unknown): string =>
@@ -220,6 +224,7 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       cwd: input.cwd,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
       ...(input.model === undefined ? {} : { model: input.model }),
     }
     const onThread = (method: string, persisted: boolean) =>

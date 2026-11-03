@@ -47,7 +47,13 @@ describe("codex app-server driver", () => {
     expect(h.sent.at(-2)).toEqual({ method: "initialized", params: {} })
     expect(h.last()).toMatchObject({
       method: "thread/start",
-      params: { approvalPolicy: "never", sandbox: "danger-full-access", cwd: "/threads/t1/kestrel", model: "gpt-6-luna" },
+      params: {
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+        cwd: "/threads/t1/kestrel",
+        developerInstructions: expect.stringContaining("apply_patch"),
+        model: "gpt-6-luna",
+      },
     })
     h.reply({ thread: { id: "th1" }, model: "gpt-6-luna" })
     expect(h.threads).toEqual([])
@@ -73,7 +79,13 @@ describe("codex app-server driver", () => {
     // A thread opened before its checkout existed moves there: the cwd is sent on resume, not only on start.
     expect(h.last()).toMatchObject({
       method: "thread/resume",
-      params: { threadId: "th-old", excludeTurns: true, approvalPolicy: "never", cwd: "/threads/t1/kestrel" },
+      params: {
+        threadId: "th-old",
+        excludeTurns: true,
+        approvalPolicy: "never",
+        cwd: "/threads/t1/kestrel",
+        developerInstructions: expect.stringContaining("apply_patch"),
+      },
     })
     h.driver.receive({ id: h.last().id, error: { code: -32600, message: "no rollout found for thread th-old" } })
     expect(h.outcomes).toEqual([{ status: "failed", error: "thread/resume: no rollout found for thread th-old" }])

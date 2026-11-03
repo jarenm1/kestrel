@@ -9,13 +9,21 @@ import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
 
+const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
+
+/**
+ * Left to themselves, agents batch a multi-file change into a throwaway script, usually Python, which the strict
+ * sandbox doesn't have, so the run fails once and redoes it in Bun. The Codex counterpart is in `core/codex-app-server.ts`.
+ */
+const CLAUDE_INSTRUCTIONS =
+  "Change existing files with the Edit tool and create files with the Write tool, also when a change repeats across many places or files: send several Edit calls in one response rather than batching them in a script. Do not change files through python, bun -e, node -e, sed -i, perl -i or a shell heredoc. Python may not be installed here."
+
 /**
  * The prompt goes in on stdin (`--input-format stream-json`), so the harness can add messages to a running turn and
  * interrupt it (`core/claude-stream.ts`). `--include-partial-messages` streams text and thinking as `stream_event`
  * deltas next to the finished blocks.
  */
-const DEFAULT_ANTHROPIC_COMMAND =
-  'claude -p --input-format stream-json ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
+export const DEFAULT_ANTHROPIC_COMMAND = `claude -p --input-format stream-json \${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --append-system-prompt ${shellQuote(CLAUDE_INSTRUCTIONS)} --output-format stream-json --verbose --include-partial-messages \${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} \${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}`
 
 /**
  * Codex runs as app-server on stdio; the harness opens the thread and its turn over JSON-RPC
@@ -300,5 +308,3 @@ const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): S
 }
 
 export const ConfigLive = Layer.sync(Config, loadConfig)
-
-const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`

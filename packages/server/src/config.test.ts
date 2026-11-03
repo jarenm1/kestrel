@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { loadConfig } from "./config"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { DEFAULT_ANTHROPIC_COMMAND, loadConfig } from "./config"
 
 const BOX_VARS = [
   "CLOUDAGENTS_CONTROL_URL",
@@ -47,6 +50,26 @@ describe("sandbox listener settings", () => {
     expect(configWith({ CLOUDAGENTS_PORT: "9000", CLOUDAGENTS_SANDBOX_PORT: "20000" }).sandboxPort).toBe(20000)
     for (const port of ["0", "65536", "1.5", "bad", "9000"]) {
       expect(() => configWith({ CLOUDAGENTS_PORT: "9000", CLOUDAGENTS_SANDBOX_PORT: port })).toThrow()
+    }
+  })
+})
+
+describe("default Claude command", () => {
+  test("the shell hands Claude Code the edit instructions as one argument", () => {
+    const bin = mkdtempSync(join(tmpdir(), "claude-stub-"))
+    try {
+      writeFileSync(join(bin, "claude"), `#!/usr/bin/env sh\nfor arg in "$@"; do printf '%s\\n' "$arg"; done\n`)
+      chmodSync(join(bin, "claude"), 0o755)
+      const run = Bun.spawnSync(["sh", "-c", DEFAULT_ANTHROPIC_COMMAND], {
+        env: { PATH: `${bin}:${process.env.PATH}`, CLOUDAGENTS_MCP_CONFIG: "/mcp.json" },
+      })
+      const args = run.stdout.toString().trim().split("\n")
+      const instructions = args[args.indexOf("--append-system-prompt") + 1]
+      expect(instructions).toStartWith("Change existing files with the Edit tool")
+      expect(instructions).toEndWith("Python may not be installed here.")
+      expect(args[args.indexOf("--mcp-config") + 1]).toBe("/mcp.json")
+    } finally {
+      rmSync(bin, { recursive: true, force: true })
     }
   })
 })
