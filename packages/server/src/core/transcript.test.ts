@@ -115,6 +115,19 @@ describe("claude stream-json", () => {
     expect(transcript.finalText()).toBe("all done")
   })
 
+  test("a result without text uses the completed main-agent message, not a subagent or tool result", () => {
+    const transcript = makeTranscript()
+    transcript.push(assistant([{ type: "text", text: "First part" }]))
+    transcript.push(assistant([{ type: "text", text: "Second part" }]))
+    transcript.push(assistant([{ type: "text", text: "Child's private response" }], "child-tool"))
+    transcript.push(toolResult("shell", "prompt echo and diagnostic noise"))
+    transcript.push({ type: "result", subtype: "success", is_error: false })
+    expect(transcript.finalText()).toBe("First part\n\nSecond part")
+    transcript.push({ ...assistant([{ type: "text", text: "Next queued turn" }]), message: { id: "msg_2", content: [{ type: "text", text: "Next queued turn" }] } })
+    transcript.push({ type: "result", subtype: "success", is_error: false })
+    expect(transcript.finalText()).toBe("Next queued turn")
+  })
+
   test("an error result without text becomes an error item", () => {
     const transcript = makeTranscript()
     const items = valid(

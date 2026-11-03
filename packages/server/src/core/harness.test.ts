@@ -306,3 +306,58 @@ createInterface({ input: process.stdin })
     await rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+test("prompts reach stdin but not descendant environments, and diagnostics never become conversation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-prompt-boundary-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+import { spawnSync } from "node:child_process"
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  if (message.type !== "user") return
+  const child = spawnSync(process.execPath, ["-e", 'console.log(JSON.stringify(process.env.CLOUDAGENTS_PROMPT ?? null))'], { encoding: "utf8" })
+  const text = JSON.stringify({ received: message.message.content, inheritedPrompt: JSON.parse(child.stdout) })
+  console.log("diagnostic stdout: " + message.message.content)
+  console.error("diagnostic stderr: " + message.message.content)
+  if (message.message.content !== "no answer") {
+    console.log(JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { id: "answer", content: [{ type: "text", text }] } }))
+  }
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false }))
+})
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      for (const [id, prompt] of [["answer", "private user message"], ["empty", "no answer"]] as const) {
+        const { task, run: base } = runningTask(id)
+        const run = { ...base, prompt }
+        yield* store.update((state) => {
+          state.tasks.push(task)
+          state.runs.push(run)
+          return Either.right(undefined)
+        })
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+        const finished = Promise.withResolvers<void>()
+        const unsubscribe = hub.subscribe(task.id, (event) => {
+          if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+        })
+        try {
+          yield* harness.spawn(task, run, prompt, null, task.owner, null, {})
+          yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+          const message = (yield* store.read).messages.find((m) => m.runId === run.id)!
+          if (id === "answer") expect(JSON.parse(message.text)).toEqual({ received: prompt, inheritedPrompt: null })
+          else expect(message.text).toBe("Run finished with no output.")
+        } finally {
+          unsubscribe()
+          yield* harness.stopAll()
+        }
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)

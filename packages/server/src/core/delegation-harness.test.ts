@@ -20,8 +20,16 @@ test("a waiting parent releases the only run slot so a real child can finish", a
   const cli = join(root, "agent.ts")
   await writeFile(cli, `
 import { createInterface } from "node:readline"
-createInterface({ input: process.stdin }).on("line", () => {
-  if (!process.env.CLOUDAGENTS_PROMPT?.includes("hold parent")) console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
+let hold
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  if (message.type === "control_request") {
+    console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true }))
+    return
+  }
+  if (message.type !== "user") return
+  hold ??= message.message.content.includes("hold parent")
+  if (!hold) console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
 })
 `)
   const config: ServerConfig = {
@@ -90,7 +98,12 @@ createInterface({ input: process.stdin }).on("line", () => {
           yield* Effect.sleep("50 millis")
         }
         expect(thirdQueued).toBe(true)
-      } finally { yield* agent.stopAll() }
+      } finally {
+        yield* agent.stopAll()
+        // Stop records cancellation before the CLI has exited. Wait for it before deleting its cwd on Windows.
+        for (let i = 0; i < 100 && (yield* agent.activeRunCount()) > 0; i++) yield* Effect.sleep("50 millis")
+        expect(yield* agent.activeRunCount()).toBe(0)
+      }
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness)))))
   } finally { await rm(root, { recursive: true, force: true }) }
 }, 12_000)

@@ -96,8 +96,6 @@ interface ActiveRun {
   readonly child: ChildProcess
   readonly log: WriteStream
   readonly taskId: string
-  readonly stdoutLines: string[]
-  readonly stderrLines: string[]
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
@@ -111,8 +109,6 @@ interface ActiveRun {
   sessionId: string | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
-  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
-  readonly stderrIsLog: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
@@ -331,7 +327,6 @@ export const AgentHarnessLive = Layer.effect(
         if (!entry) return
         active.delete(runId)
         entry.log.end()
-        if (spawnError) entry.stderrLines.push(spawnError)
         // A run is over when its turn is, whatever the CLI's exit code; a refused request or an early exit shows as
         // the run's error, unless the run was stopped on purpose.
         entry.driver?.close()
@@ -362,13 +357,13 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
-          const failure = turn?.status === "failed" ? turn.error : null
-          const stdout = entry.stdoutLines.join("\n").trim()
-          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
+          const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
+          // Diagnostics stay in output.log and agent.output, never in portable conversation history:
+          // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
           const text =
             entry.transcript.finalText() ??
-            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
-              (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
+            failure ??
+            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -439,7 +434,6 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
-        entry.stderrLines.push(line)
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
       }
@@ -468,7 +462,6 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
-      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
@@ -498,8 +491,6 @@ export const AgentHarnessLive = Layer.effect(
               child,
               log,
               taskId: task.id,
-              stdoutLines: [],
-              stderrLines: [],
               items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
@@ -508,7 +499,6 @@ export const AgentHarnessLive = Layer.effect(
               context: session.seed,
               sessionId: null,
               driver: null,
-              stderrIsLog: session.conversation?.kind === "codex",
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
@@ -675,7 +665,6 @@ export const AgentHarnessLive = Layer.effect(
               homeDir,
               display,
               env: {
-                CLOUDAGENTS_PROMPT: prompt,
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,

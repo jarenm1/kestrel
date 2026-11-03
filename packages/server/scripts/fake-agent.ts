@@ -13,7 +13,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 const mcpUrl = process.env.CLOUDAGENTS_MCP_URL
 const mcpToken = process.env.CLOUDAGENTS_MCP_TOKEN
-let prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
+let prompt = ""
 const model = process.env.CLOUDAGENTS_MODEL
 const effort = process.env.CLOUDAGENTS_EFFORT
 const choice = [model === undefined ? null : `model: ${model}`, effort === undefined ? null : `effort: ${effort}`]
