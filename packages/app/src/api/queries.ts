@@ -1,7 +1,7 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
-import { fetchSnapshot } from "./snapshot"
+import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
 /** Agent box status poll; it feeds the offline banner. */
 const BOX_POLL_MS = 10_000
@@ -146,7 +146,11 @@ export const queries = {
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
-  task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
+  task: (taskId: string) =>
+    queryOptions({
+      queryKey: keys.task(taskId),
+      queryFn: () => fetchTaskSnapshot(queryClient, keys.task(taskId), () => api.getTask(taskId)),
+    }),
   // A thread never moves to another box.
   taskBox: (taskId: string) =>
     queryOptions({ queryKey: keys.taskBox(taskId), queryFn: () => api.taskBox(taskId), staleTime: Infinity }),

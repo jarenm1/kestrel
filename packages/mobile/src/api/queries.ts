@@ -1,4 +1,4 @@
-import { QueryClient, queryOptions } from "@tanstack/react-query";
+import { QueryClient, queryOptions, type QueryKey } from "@tanstack/react-query";
 import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 
@@ -75,6 +75,18 @@ function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonl
 }
 
 /**
+ * Fetches one task, keeping the task live events wrote while the fetch was in flight: it is newer than the snapshot.
+ * A task always has a cache entry from an earlier visit, so identity, not presence, is what says an event landed
+ * during the fetch: a thread opened while its run reports context would otherwise show the snapshot read before it.
+ */
+export async function fetchTaskSnapshot(key: QueryKey, fetch: () => Promise<Task>): Promise<Task> {
+  const before = queryClient.getQueryData<Task>(key);
+  const task = await fetch();
+  const current = queryClient.getQueryData<Task>(key);
+  return current !== undefined && current !== before ? current : task;
+}
+
+/**
  * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
  * stays unloaded; its query fetches it, so no partial list is ever cached.
  */
@@ -100,7 +112,11 @@ export function createQueries(api: ApiClient) {
         queryFn: () => api.listAutomationRuns(automationId),
       }),
     tasks: () => queryOptions({ queryKey: scoped.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
-    task: (taskId: string) => queryOptions({ queryKey: scoped.task(taskId), queryFn: () => api.getTask(taskId) }),
+    task: (taskId: string) =>
+      queryOptions({
+        queryKey: scoped.task(taskId),
+        queryFn: () => fetchTaskSnapshot(scoped.task(taskId), () => api.getTask(taskId)),
+      }),
     messages: (taskId: string) =>
       queryOptions({
         queryKey: scoped.messages(taskId),
