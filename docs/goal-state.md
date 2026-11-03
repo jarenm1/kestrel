@@ -108,7 +108,7 @@ the natural place to begin.
 Gaps to close today:
 
 - Automations and PR watches run only on Kestrel's boxes.
-- The mobile app talks only to the active box, while web merges them all.
+- Web and mobile list threads across boxes. Mobile web links without a box identifier still open on the active box.
 - `toolkit_install` requires a box started from the Nix flake.
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
   remove it: every box uses `/box/self`.
