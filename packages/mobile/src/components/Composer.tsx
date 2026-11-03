@@ -67,14 +67,14 @@ function ThinkingPicker({
   onChange,
 }: {
   value: AgentEffort | undefined;
-  options: readonly { value: AgentEffort | undefined; label: string }[];
-  onChange: (value: AgentEffort | undefined) => void;
+  options: readonly { value: AgentEffort; label: string }[];
+  onChange: (value: AgentEffort) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(0);
   const index = Math.max(0, options.findIndex((option) => option.value === value));
   const selected = options[index]!;
-  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value];
+  const ringFill = EFFORT_RING_FILL[selected.value];
   // Both input implementations reserve 16px at each end for the thumb.
   const offset = (stop: number) => 16 + Math.max(0, width - 32) * stop / (options.length - 1);
   return (
@@ -99,7 +99,7 @@ function ThinkingPicker({
             />
           ) : null}
         </Svg>
-        <Text style={styles.pillText}>{value === undefined ? "Thinking" : selected.label}</Text>
+        <Text style={styles.pillText}>{selected.label}</Text>
       </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <View style={styles.modalRoot}>
@@ -348,11 +348,11 @@ export function Composer({
   // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((section) => section.models) ?? [];
   const model = offered.find((m) => m.id === storedModel) ?? offered[0];
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined;
-  const effortOptions = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ];
+  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : model?.efforts[0];
+  const effortOptions = (model?.efforts ?? []).map((e) => ({
+    value: e,
+    label: e === "none" ? "Off" : EFFORT_LABELS[e],
+  }));
 
   // Slash commands
   const visible = view.plain;
