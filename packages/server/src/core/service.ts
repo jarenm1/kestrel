@@ -27,6 +27,9 @@ import {
   type UsageActivity,
   SendMessageResponse,
   Task,
+  Unavailable,
+  WebhookRunRequest,
+  WebhookRunResult,
   type TaskStatus,
   type Checkout,
   type CheckoutRequest,
@@ -53,7 +56,7 @@ import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
-import { newId, nowIso, StateStore, type StoreState } from "./state"
+import { newId, nowIso, StateStore, type StoreState, type WebhookRunRecord } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
@@ -346,6 +349,11 @@ export interface CoreShape {
 
   readonly githubActivity: (user: string, taskId: string, repo: string, number: number, kind: string, deliveryId: string) => Effect.Effect<void, NotFound | Conflict | BadRequest | InternalError>
 
+  /** Starts a webhook delivery's run in a new thread of `user`; see `WebhookRunRequest`. `created` is false for a repeat of an accepted delivery. */
+  readonly startWebhookRun: (user: string, body: WebhookRunRequest) => Effect.Effect<{ readonly result: WebhookRunResult; readonly created: boolean }, BadRequest | Conflict | Unavailable>
+  /** The status of a webhook delivery's run, for its owner only; an unknown delivery is NotFound. */
+  readonly webhookRun: (user: string, deliveryId: string) => Effect.Effect<WebhookRunResult, NotFound>
+
   readonly listRuns: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Run>, NotFound>
   /** Agent usage of `user` in the billing period (UTC calendar month) containing `now`. */
   readonly usage: (user: string, now: Date) => Effect.Effect<Usage>
@@ -526,6 +534,29 @@ const freeDirName = (taken: ReadonlyArray<string>, name: string): string => {
   let candidate = name
   for (let n = 2; taken.includes(candidate); n++) candidate = `${name}-${n}`
   return candidate
+}
+
+/** How long a webhook delivery stays recorded: the gateway retries within 24 hours, so this outlives every retry. */
+const WEBHOOK_RUN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+/** JSON with object keys sorted at every level, so equal bodies serialize alike whatever their key order. */
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  )
+
+/** Where a delivery's run stands now; `deleted` once its thread or run is gone. */
+const webhookStatus = (state: Readonly<StoreState>, record: WebhookRunRecord): WebhookRunResult => {
+  const run = state.runs.find((r) => r.id === record.runId)
+  const task = state.tasks.find((t) => t.id === record.taskId)
+  return {
+    deliveryId: record.deliveryId,
+    taskId: record.taskId,
+    runId: record.runId,
+    status: run === undefined || task === undefined ? "deleted" : run.status,
+  }
 }
 
 /** Validates a checkout request before anything is created for it. */
@@ -1160,6 +1191,14 @@ export const CoreLive = Layer.effect(
       ]
     }
 
+    /** Starts a reserved run: a desktop the user already has running is passed on to the run's sandbox. */
+    const startRun = (user: string, task: Task, run: Run, prompt: string, resumeSession: string | null, choice: AgentChoice) =>
+      Effect.gen(function* () {
+        const desktopNow = yield* desktop.status(task.id)
+        const display = desktopNow.state === "running" ? desktopNow.display : null
+        yield* harness.spawn(task, run, prompt, display, user, resumeSession, choice)
+      })
+
     /** A message to a thread: from its user (`from` null), or from the agent of another of the owner's threads. */
     const deliverMessage = (
       user: string,
@@ -1397,14 +1436,138 @@ export const CoreLive = Layer.effect(
 
         // The desktop is not started with the run: the agent opens it with desktop_open when it needs one. A desktop the
         // user already has running is passed on, so the run's sandbox can reach it.
-        const desktopNow = yield* desktop.status(taskId)
-        const display = desktopNow.state === "running" ? desktopNow.display : null
-        yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
+        yield* startRun(user, taskNow, reserved.run, reserved.start.prompt, reserved.start.resumeSession, choice)
         return { message: reserved.message, run: reserved.run }
       })
 
     const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
       deliverMessage(user, taskId, text, choice, attachmentIds, dev, null)
+
+    /** Takes back a webhook reservation whose write failed, so the store holds nothing the caller was not told about. If this write also fails, the reservation stays in memory until the next write. */
+    const unreserveWebhookRun = (taskId: string): Effect.Effect<void> =>
+      store
+        .update((s): Either.Either<void, never> => {
+          s.tasks = s.tasks.filter((t) => t.id !== taskId)
+          s.messages = s.messages.filter((m) => m.taskId !== taskId)
+          s.runs = s.runs.filter((r) => r.taskId !== taskId)
+          s.webhookRuns = s.webhookRuns.filter((r) => r.taskId !== taskId)
+          return Either.right(undefined)
+        })
+        .pipe(Effect.ignore)
+
+    /** Ends a recorded webhook run as failed because its thread could not be started. The delivery stays recorded, so it is not retried. */
+    const failWebhookRun = (taskId: string, runId: string): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const failed = yield* store
+          .update((s): Either.Either<{ readonly task: Task; readonly run: Run } | null, never> => {
+            const run = s.runs.find((r) => r.id === runId)
+            const task = s.tasks.find((t) => t.id === taskId)
+            if (run === undefined || task === undefined) return Either.right(null)
+            const now = nowIso()
+            if (run.status === "running") {
+              run.status = "failed"
+              run.endedAt = now
+            }
+            task.status = "failed"
+            task.updatedAt = now
+            return Either.right({ task: { ...task }, run: { ...run } })
+          })
+          .pipe(Effect.orElseSucceed(() => null))
+        if (failed === null) return
+        hub.publish({ _tag: "task.updated", task: failed.task })
+        hub.publish({ _tag: "run.updated", run: failed.run })
+      })
+
+    /**
+     * Starts the run of a webhook delivery in a new thread of `user`. The delivery, its thread, message and run are one
+     * durable write, so a repeat with the same body answers the first run's status and starts nothing, and a repeat with
+     * another body is a Conflict. Once recorded, a failed checkout or spawn fails the run instead of leaving the delivery to be retried.
+     */
+    const startWebhookRun: CoreShape["startWebhookRun"] = (user, body) =>
+      Effect.gen(function* () {
+        if (body.checkout !== undefined) yield* parseCheckoutRequest(body.checkout)
+        // A repeat of a delivery with another fingerprint is a Conflict.
+        const fingerprint = createHash("sha256").update(canonicalJson(body)).digest("hex")
+        const choice: AgentChoice = body.model === undefined ? {} : { model: body.model }
+        const provider = body.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(body.model).provider
+        const id = newId()
+        const runId = newId()
+        const now = nowIso()
+        const task: Task = {
+          id,
+          owner: user,
+          title: body.title.trim() || "Untitled task",
+          status: "running",
+          createdAt: now,
+          updatedAt: now,
+          checkouts: [],
+        }
+        const message: Message = { id: newId(), taskId: id, role: "user", text: body.prompt, runId, createdAt: now }
+        const run: Run = {
+          id: runId,
+          taskId: id,
+          prompt: body.prompt,
+          status: "running",
+          startedAt: now,
+          endedAt: null,
+          exitCode: null,
+          provider,
+          ...(body.model === undefined ? {} : { model: body.model }),
+        }
+        const record: WebhookRunRecord = { owner: user, deliveryId: body.deliveryId, fingerprint, taskId: id, runId, createdAt: now }
+        const known = yield* store
+          .update(
+            (s): Either.Either<WebhookRunResult | null, Conflict> => {
+              const previous = s.webhookRuns.find((r) => r.owner === user && r.deliveryId === body.deliveryId)
+              if (previous !== undefined) {
+                return previous.fingerprint === fingerprint
+                  ? Either.right(webhookStatus(s, previous))
+                  : Either.left(new Conflict({ message: `delivery ${body.deliveryId} was accepted with a different body` }))
+              }
+              const cutoff = Date.parse(now) - WEBHOOK_RUN_RETENTION_MS
+              s.webhookRuns = s.webhookRuns.filter((r) => Date.parse(r.createdAt) >= cutoff)
+              s.tasks.push(task)
+              s.messages.push(message)
+              s.runs.push(run)
+              s.webhookRuns.push(record)
+              return Either.right(null)
+            },
+          )
+          .pipe(
+            // A failed write leaves the reservation in memory, where the next successful write would persist it: take it back.
+            Effect.tapError((e) => (e instanceof InternalError ? unreserveWebhookRun(id) : Effect.void)),
+            Effect.catchTag("InternalError", () =>
+              Effect.fail(new Unavailable({ message: "the box could not store the webhook run; retry later" })),
+            ),
+          )
+        if (known !== null) return { result: known, created: false }
+        hub.publish({ _tag: "task.updated", task })
+        publishMessage(message)
+        hub.publish({ _tag: "run.updated", run })
+        seenFor(runId).add(message.id)
+        yield* Effect.gen(function* () {
+          yield* Effect.tryPromise({
+            try: () => mkdir(threadDirOf(id), { recursive: true }),
+            catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),
+          })
+          if (body.checkout !== undefined) yield* addCheckout(id, body.checkout)
+          const taskNow = yield* requireTask(id)
+          const runNow = (yield* store.read).runs.find((r) => r.id === runId)
+          if (runNow?.status !== "running") return
+          const prompt = withUserContext(user, deliveredText(id, { id: message.id, text: body.prompt, attachments: [] }), runNotes(id))
+          yield* startRun(user, taskNow, runNow, prompt, null, choice)
+        }).pipe(Effect.catchAll(() => failWebhookRun(id, runId)))
+        return { result: webhookStatus(yield* store.read, record), created: true }
+      })
+
+    /** The status of a webhook delivery's run, for its owner only; an unknown delivery is NotFound. */
+    const webhookRun: CoreShape["webhookRun"] = (user, deliveryId) =>
+      Effect.flatMap(store.read, (state) => {
+        const record = state.webhookRuns.find((r) => r.owner === user && r.deliveryId === deliveryId)
+        return record === undefined
+          ? Effect.fail(new NotFound({ message: `no webhook run for delivery ${deliveryId}` }))
+          : Effect.succeed(webhookStatus(state, record))
+      })
 
     /**
      * The choice a run started by another agent's message runs with: the provider of the thread's latest session,
@@ -1951,6 +2114,8 @@ export const CoreLive = Layer.effect(
 
       sendMessage,
       githubActivity,
+      startWebhookRun,
+      webhookRun,
       sendToThread,
 
       listRuns: (user, taskId) =>

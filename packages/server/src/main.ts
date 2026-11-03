@@ -2,7 +2,7 @@ import { boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
+import { BOX_CONTROL_PATH, BOX_ID_HEADER, BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
 import { ConfigLive, Config, type ServerConfig } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -228,15 +228,36 @@ const program = Effect.gen(function* () {
   let relayFiber: Fiber.RuntimeFiber<void> | null = null
   if (config.relay) {
     relayFiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
+      runRelay({
+        controlUrl: config.relay.controlUrl,
+        path: RELAY_CONNECT_PATH,
+        headers: { Authorization: `Bearer ${config.relay.boxToken}` },
+        handle: webHandler,
+      }),
     )
     yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
+  }
+
+  // A BYOB box (direct, not managed) holds its own outbound control socket; the control plane routes its requests over it.
+  let controlFiber: Fiber.RuntimeFiber<void> | null = null
+  const control = config.direct
+  if (control !== null && !control.managed) {
+    controlFiber = yield* Effect.forkDaemon(
+      runRelay({
+        controlUrl: control.controlUrl,
+        path: BOX_CONTROL_PATH,
+        headers: { Authorization: `Bearer ${control.boxSecret}`, [BOX_ID_HEADER]: control.boxId },
+        handle: webHandler,
+      }),
+    )
+    yield* Effect.logInfo(`box control socket connecting to control plane at ${control.controlUrl}`)
   }
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   if (activity !== null) yield* activity.close
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
+  if (controlFiber !== null) yield* Fiber.interrupt(controlFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   if (direct !== null) direct.close()

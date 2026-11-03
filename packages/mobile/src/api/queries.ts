@@ -17,6 +17,8 @@ const BOX_POLL_MS = 10_000;
 const TASK_POLL_MS = 2000;
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000;
+/** Webhook deliveries poll while the automation editor is open, so accepted deliveries reach a final status. */
+const DELIVERY_POLL_MS = 5000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +35,8 @@ export const keys = {
   githubBranches: (repo: string) => ["github-repos", repo, "branches"] as const,
   automations: ["automations"] as const,
   automationRuns: (automationId: string) => ["automations", automationId, "runs"] as const,
+  /** Webhook deliveries of one automation. Under `automations`, so invalidating that refreshes them too. */
+  automationDeliveries: (automationId: string) => ["automations", automationId, "deliveries"] as const,
 };
 
 /** Box-served data is isolated by box identity even when task or run IDs coincide. */
@@ -110,6 +114,12 @@ export function createQueries(api: ApiClient) {
       queryOptions({
         queryKey: keys.automationRuns(automationId),
         queryFn: () => api.listAutomationRuns(automationId),
+      }),
+    automationDeliveries: (automationId: string) =>
+      queryOptions({
+        queryKey: keys.automationDeliveries(automationId),
+        queryFn: () => api.listAutomationDeliveries(automationId),
+        refetchInterval: DELIVERY_POLL_MS,
       }),
     tasks: () => queryOptions({ queryKey: scoped.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
     task: (taskId: string) =>

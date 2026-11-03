@@ -17,8 +17,8 @@ const legacyAutomation = {
 const decodeList = Schema.decodeUnknownSync(Schema.Array(Automation))
 
 describe("automation model response compatibility", () => {
-  test("legacy automation lists decode to the box default without changing other fields", () => {
-    expect(decodeList([legacyAutomation])).toEqual([{ ...legacyAutomation, model: null }])
+  test("legacy automation lists decode to the box default and no webhook without changing other fields", () => {
+    expect(decodeList([legacyAutomation])).toEqual([{ ...legacyAutomation, model: null, webhook: null }])
   })
 
   test("explicit selections and the explicit box default survive decoding", () => {

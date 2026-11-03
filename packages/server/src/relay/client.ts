@@ -1,7 +1,6 @@
 import { Context, Duration, Either, Effect, Runtime, Schema } from "effect"
 import {
   CREDENTIALS_HEADER,
-  RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
   decodeFrame,
   encodeFrame,
@@ -16,9 +15,12 @@ import { serveTunnelHttp, TUNNEL_ORIGIN } from "../tunnel"
 import { RelayStream } from "./stream"
 
 export interface RelayOptions {
-  /** Control plane base URL (http(s) or ws(s)); the box dials `RELAY_CONNECT_PATH` under it. */
+  /** Control plane base URL (http(s) or ws(s)); the box dials `path` under it. */
   readonly controlUrl: string
-  readonly boxToken: string
+  /** Path dialled under `controlUrl`: `RELAY_CONNECT_PATH` for the relay, `BOX_CONTROL_PATH` for a direct box's control socket. */
+  readonly path: string
+  /** Credentials sent with the upgrade request, e.g. `Authorization: Bearer <box token>`. */
+  readonly headers: Readonly<Record<string, string>>
   /** Serves a tunnelled HTTP request with the box's local `/api/*` handler. */
   readonly handle: (req: Request) => Promise<Response>
 }
@@ -30,6 +32,14 @@ const RECONNECT_MAX_MS = 30_000
 const PING_INTERVAL_MS = 20_000
 /** Silence longer than this means the relay connection is dead even if TCP has not noticed. */
 const SILENCE_TIMEOUT_MS = 60_000
+/** Close code the control plane sends when a newer connection from the same box replaces this one. */
+const CLOSE_REPLACED = 4000
+
+/** How one connection attempt ended. `refused`: the control plane turned the box away, so an immediate retry is pointless. */
+interface Attempt {
+  readonly opened: boolean
+  readonly refused: boolean
+}
 
 const Credentials = Schema.parseJson(
   Schema.Struct({
@@ -41,10 +51,10 @@ const Credentials = Schema.parseJson(
   }),
 )
 
-const relayUrl = (controlUrl: string): string => {
+const relayUrl = (controlUrl: string, path: string): string => {
   const url = new URL(controlUrl)
   url.protocol = url.protocol === "https:" || url.protocol === "wss:" ? "wss:" : "ws:"
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}${RELAY_CONNECT_PATH}`
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}${path}`
   url.search = ""
   url.hash = ""
   return url.toString()
@@ -58,29 +68,33 @@ export const runRelay = (options: RelayOptions): Effect.Effect<void, never, Cred
   Effect.gen(function* () {
     const runtime = yield* Effect.runtime<CredentialStore | WsServices>()
     const store = yield* CredentialStore
-    const url = relayUrl(options.controlUrl)
+    const url = relayUrl(options.controlUrl, options.path)
     let delay = RECONNECT_MIN_MS
     for (;;) {
-      const opened = yield* connectOnce(url, options, store, runtime)
-      if (opened) delay = RECONNECT_MIN_MS
+      const attempt = yield* connectOnce(url, options, store, runtime)
+      if (attempt.opened) delay = RECONNECT_MIN_MS
+      // A refused box waits longest: the same credentials are refused again, and a replaced box must not fight its successor.
+      if (attempt.refused) delay = RECONNECT_MAX_MS
       yield* Effect.logWarning(`relay connection closed; retrying in ${delay}ms`)
       yield* Effect.sleep(Duration.millis(delay))
       delay = Math.min(delay * 2, RECONNECT_MAX_MS)
     }
   })
 
-/** Resolves with whether the connection opened, once it closes. Interruption tears the socket down. */
+/** Resolves with how the connection ended, once it closes. Interruption tears the socket down. */
 const connectOnce = (
   url: string,
   options: RelayOptions,
   store: Store,
   runtime: Runtime.Runtime<CredentialStore | WsServices>,
-): Effect.Effect<boolean> =>
-  Effect.async<boolean>((resume) => {
+): Effect.Effect<Attempt> =>
+  Effect.async<Attempt>((resume) => {
     const runFork = Runtime.runFork(runtime)
-    const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${options.boxToken}` } })
+    const ws = new WebSocket(url, { headers: options.headers })
     const streams = new Map<number, RelayStream>()
     let opened = false
+    let refused = false
+    let settled = false
     let lastSeen = Date.now()
 
     const send = (data: string | Uint8Array) => {
@@ -95,11 +109,13 @@ const connectOnce = (
       send(encodeFrame({ t: "ping" }))
     }, PING_INTERVAL_MS)
 
-    const finish = () => {
+    const finish = (code: number) => {
+      if (settled) return
+      settled = true
       clearInterval(keepalive)
       for (const stream of streams.values()) stream.receiveClose()
       streams.clear()
-      resume(Effect.succeed(opened))
+      resume(Effect.succeed({ opened, refused: refused || code === CLOSE_REPLACED }))
     }
 
     const dispatch = (frame: RelayFrame) => {
@@ -164,7 +180,14 @@ const connectOnce = (
     ws.on("error", (err) => {
       Effect.runSync(Effect.logWarning(`relay socket error: ${err.message}`))
     })
-    ws.on("close", finish)
+    // The control plane answered the upgrade with a plain HTTP response: a refusal (401) or a route that is not there.
+    ws.on("unexpected-response", (_req, res) => {
+      refused = res.statusCode === 401
+      res.resume()
+      finish(0)
+      ws.terminate()
+    })
+    ws.on("close", (code) => finish(code))
 
     return Effect.sync(() => {
       clearInterval(keepalive)

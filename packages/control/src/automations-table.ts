@@ -22,7 +22,10 @@ const COLUMNS = `
   trigger_json TEXT NOT NULL,
   next_run_at INTEGER,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL`
+  updated_at TEXT NOT NULL,
+  webhook_secret TEXT,
+  webhook_box_id TEXT,
+  webhook_on_unavailable TEXT`
 
 const COPIED_COLUMNS =
   "id, login, name, repo, prompt, enabled, trigger_json, next_run_at, created_at, updated_at"
@@ -47,4 +50,10 @@ export const ensureAutomationsTable = (sql: AutomationsSql): void => {
     .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'model'")
     .toArray()
   if (modelColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN model TEXT")
+  for (const column of ["webhook_secret", "webhook_box_id", "webhook_on_unavailable"]) {
+    const present = sql
+      .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = ?", column)
+      .toArray()
+    if (present.length === 0) sql.exec(`ALTER TABLE automations ADD COLUMN ${column} TEXT`)
+  }
 }

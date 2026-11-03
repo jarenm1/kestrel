@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import {
+  Alert as NativeAlert,
   FlatList,
   Modal,
   Pressable,
@@ -20,25 +21,29 @@ import {
   type Automation,
   type AutomationTrigger,
   type CreateAutomationBody,
+  type CreatedAutomation,
   type GithubRepo,
+  type WebhookEndpoint,
 } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
+import { useAuth } from "@/auth/AuthContext";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
 import { Input, Textarea } from "@/components/ui/Input";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { errorText } from "@/lib/format";
-import { EVENT_LABELS, splitList } from "@/lib/automations";
+import { DELIVERY_LABELS, EVENT_LABELS, ON_UNAVAILABLE_LABELS, formatWhen, splitList } from "@/lib/automations";
 import { colors, fonts, radius, spacing } from "@/theme";
 
 export type AutomationEditorTarget =
   | { readonly kind: "create" }
   | { readonly kind: "edit"; readonly automation: Automation };
 
-type TriggerKind = "schedule" | "github";
+type TriggerKind = "schedule" | "github" | "webhook";
 
 const switchTrack = { false: colors.secondary, true: colors.primary };
 
@@ -76,7 +81,9 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const providers = connectedModelProviders(connections.data ?? []);
   const models = providers.flatMap((provider) => shown[provider.id]);
   const selectedModel = model === null ? null : modelInfo(model);
-  const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule");
+  const { activeBoxId, boxes } = useAuth();
+  const unavailable = activeBoxId !== null;
+  const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? (unavailable ? "webhook" : "schedule"));
   const [cron, setCron] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.cron : "");
   const [timezone, setTimezone] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.timezone : "");
   const [events, setEvents] = useState<readonly GithubAutomationEvent[]>(
@@ -92,10 +99,20 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const [repo, setRepo] = useState<string | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [pickingRepo, setPickingRepo] = useState(false);
+  const [webhookBoxId, setWebhookBoxId] = useState<string | null>(seed?.webhook?.preferredBoxId ?? null);
+  const [onUnavailable, setOnUnavailable] = useState<WebhookEndpoint["onUnavailable"]>(
+    seed?.webhook?.onUnavailable ?? "retry",
+  );
+  const [pickingBox, setPickingBox] = useState(false);
+  const [createdWebhook, setCreatedWebhook] = useState<{ url: string; secret: string } | null>(null);
+  const webhookBody = kind === "webhook" ? { webhook: { preferredBoxId: webhookBoxId, onUnavailable } } : {};
+  const boxLabel =
+    webhookBoxId === null ? "Kestrel's box" : (boxes.find((box) => box.id === webhookBoxId)?.name ?? "Unavailable box");
 
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
     if (kind === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() };
+    if (kind === "webhook") return { _tag: "webhook" };
     const [first, ...rest] = events;
     if (first === undefined) throw new Error("Pick at least one pull request event.");
     return {
@@ -108,13 +125,14 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   }
 
   const save = useMutation({
-    mutationFn: (): Promise<Automation> => {
+    mutationFn: (): Promise<Automation | CreatedAutomation> => {
       if (target.kind === "edit") {
         return api.updateAutomation(target.automation.id, {
           name: name.trim(),
           prompt: prompt.trim(),
           model,
           trigger: buildTrigger(),
+          ...webhookBody,
         });
       }
       const body: CreateAutomationBody = {
@@ -123,12 +141,17 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         model,
         trigger: buildTrigger(),
         enabled,
-        ...(repo === null ? {} : { repo }),
+        ...(repo === null || kind === "webhook" ? {} : { repo }),
+        ...webhookBody,
       };
       return api.createAutomation(body);
     },
-    onSuccess: () => {
+    onSuccess: (saved) => {
       void queryClient.invalidateQueries({ queryKey: keys.automations });
+      if ("webhookSecret" in saved && saved.webhookSecret !== null && saved.webhook !== null) {
+        setCreatedWebhook({ url: saved.webhook.url, secret: saved.webhookSecret });
+        return;
+      }
       onClose();
     },
   });
@@ -139,15 +162,53 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   }
 
   const repoRequired = target.kind === "create" && kind === "github";
-  const triggerReady = kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0;
+  const triggerReady =
+    kind === "schedule"
+      ? cron.trim() !== "" && timezone.trim() !== ""
+      : kind === "github"
+        ? events.length > 0
+        : true;
   const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null);
+
+  if (createdWebhook !== null) {
+    return (
+      <SafeAreaView style={styles.container}>
+        <ScreenHeader title="Webhook ready" onBack={onClose} />
+        <ScrollView contentContainerStyle={styles.content}>
+          <Text style={styles.description}>
+            Copy the secret now. It is shown once; rotate it later from the automation to get a new one.
+          </Text>
+          <Card style={styles.section}>
+            <Field label="Webhook URL">
+              <Text selectable style={styles.monoText}>
+                {createdWebhook.url}
+              </Text>
+            </Field>
+            <Field label="Secret (shown once)">
+              <Text selectable style={styles.monoText}>
+                {createdWebhook.secret}
+              </Text>
+              <Text style={styles.hint}>
+                Send it as Authorization: Bearer, or sign the body with HMAC-SHA256 and send X-Kestrel-Signature: sha256=…
+              </Text>
+            </Field>
+          </Card>
+          <Button onPress={onClose}>Done</Button>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container}>
       <ScreenHeader title={target.kind === "edit" ? "Edit automation" : "New automation"} onBack={onClose} />
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <Text style={styles.description}>
-          {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+          {kind === "schedule"
+            ? "Runs on a schedule."
+            : kind === "github"
+              ? "Runs on pull request events."
+              : "Runs when a request arrives at its webhook URL."}
         </Text>
 
         <Field label="Name">
@@ -167,24 +228,37 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         {target.kind === "create" ? (
           <Field label="Trigger">
             <View style={styles.segmented}>
-              <Segment label="Schedule" selected={kind === "schedule"} onPress={() => setKind("schedule")} />
-              <Segment label="Pull requests" selected={kind === "github"} onPress={() => setKind("github")} />
+              <Segment
+                label="Schedule"
+                selected={kind === "schedule"}
+                disabled={unavailable}
+                onPress={() => setKind("schedule")}
+              />
+              <Segment
+                label="Pull requests"
+                selected={kind === "github"}
+                disabled={unavailable}
+                onPress={() => setKind("github")}
+              />
+              <Segment label="Webhook" selected={kind === "webhook"} onPress={() => setKind("webhook")} />
             </View>
           </Field>
         ) : null}
 
-        <Field label="Repository">
-          {target.kind === "edit" ? (
-            <Text style={styles.readonly}>{target.automation.repo ?? "No repository"}</Text>
-          ) : (
-            <Pressable style={styles.select} onPress={() => setPickingRepo(true)} accessibilityRole="button">
-              <Text style={[styles.selectText, repo === null && styles.placeholder]}>
-                {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
-              </Text>
-              <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
-            </Pressable>
-          )}
-        </Field>
+        {kind !== "webhook" ? (
+          <Field label="Repository">
+            {target.kind === "edit" ? (
+              <Text style={styles.readonly}>{target.automation.repo ?? "No repository"}</Text>
+            ) : (
+              <Pressable style={styles.select} onPress={() => setPickingRepo(true)} accessibilityRole="button">
+                <Text style={[styles.selectText, repo === null && styles.placeholder]}>
+                  {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
+                </Text>
+                <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
+              </Pressable>
+            )}
+          </Field>
+        ) : null}
 
         {kind === "schedule" ? (
           <>
@@ -208,7 +282,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </Field>
           </>
-        ) : (
+        ) : kind === "github" ? (
           <>
             <Field label="Pull request events">
               {GithubAutomationEvent.literals.map((event) => {
@@ -258,6 +332,36 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               />
             </View>
           </>
+        ) : (
+          <>
+            <Field label="Box">
+              <Pressable style={styles.select} onPress={() => setPickingBox(true)} accessibilityRole="button">
+                <Text style={styles.selectText}>{boxLabel}</Text>
+                <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
+              </Pressable>
+            </Field>
+            <Field label="If that box is unavailable">
+              {(["retry", "fail"] as const).map((policy) => (
+                <Pressable
+                  key={policy}
+                  style={styles.checkRow}
+                  onPress={() => setOnUnavailable(policy)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: onUnavailable === policy }}
+                >
+                  <View style={[styles.checkbox, onUnavailable === policy && styles.checkboxOn]}>
+                    {onUnavailable === policy ? (
+                      <Check size={12} color={colors.primaryForeground} strokeWidth={3} />
+                    ) : null}
+                  </View>
+                  <Text style={styles.checkLabel}>{ON_UNAVAILABLE_LABELS[policy]}</Text>
+                </Pressable>
+              ))}
+              <Text style={styles.hint}>
+                Deliveries stay on the box you pick. Sending to another box as a fallback is not available yet.
+              </Text>
+            </Field>
+          </>
         )}
 
         {target.kind === "create" ? (
@@ -271,6 +375,10 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               ios_backgroundColor={colors.secondary}
             />
           </View>
+        ) : null}
+
+        {target.kind === "edit" && target.automation.webhook ? (
+          <WebhookDetails automationId={target.automation.id} url={target.automation.webhook.url} />
         ) : null}
 
         {save.error ? <Alert>{errorText(save.error)}</Alert> : null}
@@ -325,6 +433,26 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             {connections.isSuccess && providers.length === 0 ? (
               <Text style={styles.emptyText}>Connect Anthropic or OpenAI to choose a model.</Text>
             ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+      <Modal visible={pickingBox} animationType="slide" onRequestClose={() => setPickingBox(false)}>
+        <SafeAreaView style={styles.container}>
+          <ScreenHeader title="Box" onBack={() => setPickingBox(false)} />
+          <ScrollView contentContainerStyle={styles.list}>
+            <RepoOption
+              label="Kestrel's box"
+              selected={webhookBoxId === null}
+              onPress={() => { setWebhookBoxId(null); setPickingBox(false); }}
+            />
+            {boxes.map((box) => (
+              <RepoOption
+                key={box.id}
+                label={box.name}
+                selected={box.id === webhookBoxId}
+                onPress={() => { setWebhookBoxId(box.id); setPickingBox(false); }}
+              />
+            ))}
           </ScrollView>
         </SafeAreaView>
       </Modal>
@@ -416,11 +544,22 @@ function RepoOption({
   );
 }
 
-function Segment({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+function Segment({
+  label,
+  selected,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  selected: boolean;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
   return (
     <Button
       variant={selected ? "secondary" : "ghost"}
       active={selected}
+      disabled={disabled}
       style={styles.segment}
       onPress={onPress}
       accessibilityLabel={label}
@@ -436,6 +575,68 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <Text style={styles.label}>{label}</Text>
       {children}
     </View>
+  );
+}
+
+/** Endpoint URL, one-time secret rotation and recent deliveries for an existing webhook automation. */
+function WebhookDetails({ automationId, url }: { automationId: string; url: string }) {
+  const { api } = useApiClient();
+  const queries = useMemo(() => createQueries(api), [api]);
+  const deliveries = useQuery(queries.automationDeliveries(automationId));
+  const [secret, setSecret] = useState<string | null>(null);
+  const rotate = useMutation({
+    mutationFn: () => api.rotateAutomationWebhook(automationId),
+    onSuccess: (rotated) => setSecret(rotated.secret),
+  });
+
+  function confirmRotate() {
+    NativeAlert.alert("Rotate webhook secret?", "The current secret stops working immediately.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Rotate", style: "destructive", onPress: () => rotate.mutate() },
+    ]);
+  }
+
+  return (
+    <Card style={styles.section}>
+      <Field label="Webhook URL">
+        <Text selectable style={styles.monoText}>
+          {url}
+        </Text>
+      </Field>
+      {secret === null ? (
+        <Button variant="secondary" disabled={rotate.isPending} onPress={confirmRotate}>
+          {rotate.isPending ? "Rotating…" : "Rotate secret"}
+        </Button>
+      ) : (
+        <Field label="New secret (shown once)">
+          <Text selectable style={styles.monoText}>
+            {secret}
+          </Text>
+          <Text style={styles.hint}>
+            Send it as Authorization: Bearer, or sign the body with HMAC-SHA256 and send X-Kestrel-Signature: sha256=…
+            The old secret no longer works.
+          </Text>
+          <Button variant="ghost" onPress={() => setSecret(null)}>
+            Done
+          </Button>
+        </Field>
+      )}
+      {rotate.error ? <Alert>{errorText(rotate.error)}</Alert> : null}
+      <Field label="Recent deliveries">
+        {deliveries.error ? <Alert>{errorText(deliveries.error)}</Alert> : null}
+        {deliveries.isPending ? <Text style={styles.hint}>Loading…</Text> : null}
+        {deliveries.data?.length === 0 ? <Text style={styles.hint}>No deliveries yet.</Text> : null}
+        {deliveries.data?.map((delivery) => (
+          <View key={delivery.id} style={styles.deliveryRow}>
+            <Text style={styles.deliveryStatus}>
+              {DELIVERY_LABELS[delivery.status]} · {formatWhen(delivery.receivedAt)}
+            </Text>
+            <Text style={styles.hint}>{delivery.reason}</Text>
+            {delivery.error ? <Text style={styles.deliveryError}>{delivery.error}</Text> : null}
+          </View>
+        ))}
+      </Field>
+    </Card>
   );
 }
 
@@ -497,6 +698,31 @@ const styles = StyleSheet.create({
   },
   segment: {
     flex: 1,
+  },
+  hint: {
+    color: colors.mutedForeground,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  monoText: {
+    color: colors.foreground,
+    fontFamily: fonts.mono,
+    fontSize: 13,
+  },
+  section: {
+    gap: spacing.md,
+  },
+  deliveryRow: {
+    gap: 2,
+    paddingVertical: spacing.xs,
+  },
+  deliveryStatus: {
+    color: colors.foreground,
+    fontSize: 14,
+  },
+  deliveryError: {
+    color: colors.destructive,
+    fontSize: 12,
   },
   checkRow: {
     flexDirection: "row",

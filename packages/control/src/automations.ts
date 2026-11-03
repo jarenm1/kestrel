@@ -6,6 +6,7 @@ import {
   TriggerAutomationBody,
   UpdateAutomationBody,
   type AutomationTrigger,
+  type WebhookSettings,
 } from "@cloudagents/protocol"
 import { triggerProblem } from "./automation-rules"
 import { hub, type Env } from "./env"
@@ -49,6 +50,12 @@ const githubToken = async (env: Env, login: string, message: string): Promise<st
 const webhookUrl = (url: URL): string => new URL(ControlPaths.githubWebhook, url.origin).toString()
 
 /**
+ * The origin senders reach the gateway on, used to build each automation's webhook URL. A local stack names it in
+ * APP_ORIGIN, since `wrangler dev` rewrites request URLs to the production route.
+ */
+const publicOrigin = (env: Env, url: URL): string => env.APP_ORIGIN ?? url.origin
+
+/**
  * Makes sure the repository has a `pull_request` webhook pointing here. One hook per repository serves every
  * automation on it; the secret stays in the Hub and is only used to verify deliveries.
  */
@@ -88,12 +95,28 @@ export const releaseHook = async (env: Env, login: string, slug: string): Promis
   }
 }
 
+/** Why a webhook's settings cannot apply: they name a non-webhook trigger, or a box the owner does not own. */
+const webhookProblem = async (
+  env: Env,
+  login: string,
+  trigger: Pick<AutomationTrigger, "_tag">,
+  settings: Partial<WebhookSettings> | undefined,
+): Promise<string | null> => {
+  if (settings === undefined) return null
+  if (trigger._tag !== "webhook") return "webhook settings only apply to webhook automations"
+  const boxId = settings.preferredBoxId
+  if (typeof boxId === "string" && !(await hub(env).ownsBox(login, boxId))) return "preferredBoxId is not a box you own"
+  return null
+}
+
 const createAutomation = async (request: Request, env: Env, login: string, url: URL): Promise<Response> => {
   const body = await readBody(request, CreateAutomationBody)
   if (body instanceof Response) return body
   const problem = triggerProblem(body.trigger, body.repo ?? null, Date.now())
   if (problem !== null) return badRequest(problem)
-  if (body.repo === undefined) return json(await hub(env).createAutomation(login, { ...body, repo: null }), 201)
+  const settingsProblem = await webhookProblem(env, login, body.trigger, body.webhook)
+  if (settingsProblem !== null) return badRequest(settingsProblem)
+  if (body.repo === undefined) return json(await hub(env).createAutomation(login, publicOrigin(env, url), { ...body, repo: null }), 201)
   const token = await githubToken(env, login, "connect GitHub to use repositories")
   if (token instanceof Response) return token
   // The owner's GitHub token must be able to read the repository; the stored name is GitHub's canonical casing.
@@ -102,11 +125,11 @@ const createAutomation = async (request: Request, env: Env, login: string, url: 
   if ((body.enabled ?? true) && body.trigger._tag === "github") {
     await ensureHook(env, token, repo, webhookUrl(url))
   }
-  return json(await hub(env).createAutomation(login, { ...body, repo }), 201)
+  return json(await hub(env).createAutomation(login, publicOrigin(env, url), { ...body, repo }), 201)
 }
 
 const updateAutomation = async (request: Request, env: Env, login: string, url: URL, id: string): Promise<Response> => {
-  const current = await hub(env).automation(login, id)
+  const current = await hub(env).automation(login, id, publicOrigin(env, url))
   if (current === null) return notFound()
   const body = await readBody(request, UpdateAutomationBody)
   if (body instanceof Response) return body
@@ -116,6 +139,8 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
     const problem = triggerProblem(body.trigger, current.repo, Date.now())
     if (problem !== null) return badRequest(problem)
   }
+  const settingsProblem = await webhookProblem(env, login, trigger, body.webhook)
+  if (settingsProblem !== null) return badRequest(settingsProblem)
   const slug = current.repo
   const wasHooked = current.enabled && current.trigger._tag === "github" && slug !== null
   const needsHook = enabled && trigger._tag === "github" && slug !== null
@@ -125,14 +150,14 @@ const updateAutomation = async (request: Request, env: Env, login: string, url: 
     if (token instanceof Response) return token
     await ensureHook(env, token, slug, webhookUrl(url))
   }
-  const updated = await hub(env).updateAutomation(login, id, body)
+  const updated = await hub(env).updateAutomation(login, publicOrigin(env, url), id, body)
   if (updated === null) return notFound()
   if (slug !== null && wasHooked && !needsHook) await releaseHook(env, login, slug)
   return json(updated)
 }
 
-const deleteAutomation = async (env: Env, login: string, id: string): Promise<Response> => {
-  const current = await hub(env).automation(login, id)
+const deleteAutomation = async (env: Env, login: string, id: string, url: URL): Promise<Response> => {
+  const current = await hub(env).automation(login, id, publicOrigin(env, url))
   if (current === null) return notFound()
   await hub(env).deleteAutomation(login, id)
   if (current.enabled && current.trigger._tag === "github" && current.repo !== null) {
@@ -145,9 +170,10 @@ const deleteAutomation = async (env: Env, login: string, id: string): Promise<Re
  * "Run now". A GitHub automation needs the pull request to review (fetched with the owner's token so the
  * reason and PR details match what a webhook delivery would produce); a schedule runs as a plain manual run.
  */
-const triggerAutomation = async (request: Request, env: Env, login: string, id: string): Promise<Response> => {
-  const current = await hub(env).automation(login, id)
+const triggerAutomation = async (request: Request, env: Env, login: string, id: string, url: URL): Promise<Response> => {
+  const current = await hub(env).automation(login, id, publicOrigin(env, url))
   if (current === null) return notFound()
+  if (current.trigger._tag === "webhook") return badRequest("webhook automations run when their webhook is called")
   const body = await readBody(request, TriggerAutomationBody, true)
   if (body instanceof Response) return body
   let reason = "manual"
@@ -181,24 +207,32 @@ export const handleAutomations = async (
 ): Promise<Response> => {
   const method = request.method
   if (url.pathname === base) {
-    if (method === "GET") return json(await hub(env).automations(login))
+    if (method === "GET") return json(await hub(env).automations(login, publicOrigin(env, url)))
     if (method === "POST") return createAutomation(request, env, login, url)
     return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
   }
-  const match = new RegExp(`^${base}/([^/]+)(/runs|/trigger)?$`).exec(url.pathname)
-   if (match === null) return errorResponse(404, "NotFound", "no such route")
+  const match = new RegExp(`^${base}/([^/]+)(/runs|/trigger|/deliveries|/webhook/rotate)?$`).exec(url.pathname)
+  if (match === null) return errorResponse(404, "NotFound", "no such route")
   const [, id = "", suffix] = match
   if (suffix === "/runs" && method === "GET") {
     const runs = await hub(env).automationRuns(login, id)
     return runs === null ? notFound() : json(runs)
   }
-  if (suffix === "/trigger" && method === "POST") return triggerAutomation(request, env, login, id)
+  if (suffix === "/deliveries" && method === "GET") {
+    const deliveries = await hub(env).webhookDeliveries(login, id)
+    return deliveries === null ? notFound() : json(deliveries)
+  }
+  if (suffix === "/webhook/rotate" && method === "POST") {
+    const rotated = await hub(env).rotateWebhook(login, publicOrigin(env, url), id)
+    return rotated === null ? notFound() : json(rotated)
+  }
+  if (suffix === "/trigger" && method === "POST") return triggerAutomation(request, env, login, id, url)
   if (suffix === undefined && method === "GET") {
-    const automation = await hub(env).automation(login, id)
+    const automation = await hub(env).automation(login, id, publicOrigin(env, url))
     return automation === null ? notFound() : json(automation)
   }
   if (suffix === undefined && method === "PATCH") return updateAutomation(request, env, login, url, id)
-  if (suffix === undefined && method === "DELETE") return deleteAutomation(env, login, id)
+  if (suffix === undefined && method === "DELETE") return deleteAutomation(env, login, id, url)
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 

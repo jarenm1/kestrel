@@ -23,6 +23,8 @@ export default defineConfig({
       "/auth": { target: CONTROL_PLANE },
       "/box": { target: CONTROL_PLANE, ws: true },
       "/_preview": { target: CONTROL_PLANE, ws: true },
+      // Senders reach webhook automations at the app origin, as in production.
+      "/webhooks": { target: CONTROL_PLANE },
     },
   },
 })

@@ -14,6 +14,7 @@ import {
   Connection,
   ControlPaths,
   CreateAutomationBody,
+  CreatedAutomation,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
@@ -34,6 +35,8 @@ import {
   UpdateAutomationBody,
   Usage,
   type UserBox,
+  WebhookDelivery,
+  WebhookRotated,
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
 
@@ -105,11 +108,13 @@ export interface ApiClient {
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
   cliLogout(provider: CliProvider): Promise<void>;
   listAutomations(): Promise<readonly Automation[]>;
-  createAutomation(body: CreateAutomationBody): Promise<Automation>;
+  createAutomation(body: CreateAutomationBody): Promise<CreatedAutomation>;
   updateAutomation(id: string, body: UpdateAutomationBody): Promise<Automation>;
   deleteAutomation(id: string): Promise<void>;
   listAutomationRuns(id: string): Promise<readonly AutomationRun[]>;
   triggerAutomation(id: string, body: TriggerAutomationBody): Promise<AutomationRun>;
+  rotateAutomationWebhook(id: string): Promise<WebhookRotated>;
+  listAutomationDeliveries(id: string): Promise<readonly WebhookDelivery[]>;
 
   listTasks(): Promise<readonly Task[]>;
   createTask(body: CreateTaskBody): Promise<Task>;
@@ -272,11 +277,13 @@ export function createApiClient(
     cliLogout: (provider) =>
       boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)).then(() => undefined),
     listAutomations: () => request(Schema.Array(Automation), "GET", ControlPaths.automations),
-    createAutomation: (body) => request(Automation, "POST", ControlPaths.automations, body),
+    createAutomation: (body) => request(CreatedAutomation, "POST", ControlPaths.automations, body),
     updateAutomation: (id, body) => request(Automation, "PATCH", ControlPaths.automation(id), body),
     deleteAutomation: (id) => request(Schema.Unknown, "DELETE", ControlPaths.automation(id)).then(() => undefined),
     listAutomationRuns: (id) => request(Schema.Array(AutomationRun), "GET", ControlPaths.automationRuns(id)),
     triggerAutomation: (id, body) => request(AutomationRun, "POST", ControlPaths.automationTrigger(id), body),
+    rotateAutomationWebhook: (id) => request(WebhookRotated, "POST", ControlPaths.automationWebhookRotate(id)),
+    listAutomationDeliveries: (id) => request(Schema.Array(WebhookDelivery), "GET", ControlPaths.automationDeliveries(id)),
 
     // Agent box (relayed by the Worker, or served directly by the user's own box).
     listTasks: () => boxRequest(Schema.Array(Task), "GET", Paths.tasks),

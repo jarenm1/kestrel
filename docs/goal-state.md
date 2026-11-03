@@ -107,7 +107,7 @@ the natural place to begin.
 
 Gaps to close today:
 
-- Automations and PR watches run only on Kestrel's boxes.
+- Scheduled and GitHub-triggered automations and PR watches run only on Kestrel's boxes; webhook automations already reach user boxes.
 - Web and mobile list threads across boxes. Mobile web links without a box identifier still open on the active box.
 - `toolkit_install` requires a box started from the Nix flake.
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
@@ -115,9 +115,9 @@ Gaps to close today:
 
 ### Webhook automations
 
-**Status: design, not implemented.** Replace the managed-box-only proposal in PR #124 with a gateway that can start
-work on a user's own box or, when explicitly enabled, fall back to the Nest. Existing scheduled and GitHub-triggered
-automations remain as described in [architecture.md](architecture.md#automations-and-pr-watches).
+**Status: implemented except Nest fallback** (see [architecture.md](architecture.md#webhook-automations)). The gateway
+routes deliveries to the user's Kestrel box or one of their own boxes, with retry-or-fail when the box is unavailable.
+Nest fallback below still needs the host agent and wake-up path.
 
 The sender posts to a stable Kestrel gateway URL for an automation. The gateway authenticates the delivery, applies the
 owner's limits and routes it to the automation's preferred box. The box starts a **new** thread and run using the
@@ -463,7 +463,7 @@ Each step is useful by itself, and the Nest work comes after the BYOB and eviden
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.
 5. **Evidence:** explicit recording, clips and run summaries first, then the rolling buffer and desktop idle stop.
 6. **Parity:** a common box automation and PR-watch contract, BYOB control connectivity and multi-box support on
-   mobile. Add the rate-limited webhook gateway with preferred-box delivery and explicit failure or retry when unavailable.
+   mobile. The rate-limited webhook gateway with preferred-box delivery and retry or fail when unavailable is done.
 7. **Host layer:** one host and one CPU shape, with suspend and resume, running the meter without charging. Add
    opt-in Nest webhook fallback once wake-up, spending permission and safe delivery reconciliation are available.
 8. **Shapes:** low-RAM and GPU shapes, volumes in object storage, and parking.

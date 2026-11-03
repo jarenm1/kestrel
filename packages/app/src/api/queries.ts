@@ -5,6 +5,8 @@ import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
 /** Agent box status poll; it feeds the offline banner. */
 const BOX_POLL_MS = 10_000
+/** Webhook deliveries poll while the automation editor is open, so accepted deliveries reach a final status. */
+const DELIVERY_POLL_MS = 5_000
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,6 +37,8 @@ export const keys = {
   providerUsage: ["providerUsage"] as const,
   usageActivity: ["usageActivity"] as const,
   automations: ["automations"] as const,
+  /** Webhook deliveries of one automation. Under `automations`, so invalidating that refreshes them too. */
+  automationDeliveries: (id: string) => ["automations", id, "deliveries"] as const,
   githubRepos: ["github-repos"] as const,
   githubBranches: (repo: string) => ["github-branches", repo] as const,
   /** CLI sign-ins on the box the apps talk to. */
@@ -141,6 +145,12 @@ export const queries = {
   providerUsage: () => queryOptions({ queryKey: keys.providerUsage, queryFn: api.providerUsage }),
   usageActivity: () => queryOptions({ queryKey: keys.usageActivity, queryFn: api.usageActivity }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
+  automationDeliveries: (id: string) =>
+    queryOptions({
+      queryKey: keys.automationDeliveries(id),
+      queryFn: () => api.listAutomationDeliveries(id),
+      refetchInterval: DELIVERY_POLL_MS,
+    }),
   githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
   githubBranches: (repo: string) =>
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),

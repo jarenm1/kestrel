@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, Unavailable, WebhookRunRequest, type FileRoot } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -9,7 +9,7 @@ import type { CoreShape } from "../core/service"
 import { dayFormat } from "../core/activity"
 import { BOX_DEV_HEADER } from "../tunnel"
 
-type ApiError = NotFound | BadRequest | Conflict | InternalError
+type ApiError = NotFound | BadRequest | Conflict | InternalError | Unavailable
 
 const statusOf = (e: ApiError): number => {
   switch (e._tag) {
@@ -21,11 +21,16 @@ const statusOf = (e: ApiError): number => {
       return 409
     case "InternalError":
       return 500
+    case "Unavailable":
+      return 503
   }
 }
 
-const errorResponse = (e: ApiError) =>
-  HttpServerResponse.unsafeJson({ _tag: e._tag, message: e.message }, { status: statusOf(e) })
+const errorResponse = (e: ApiError) => {
+  const response = HttpServerResponse.unsafeJson({ _tag: e._tag, message: e.message }, { status: statusOf(e) })
+  // A 503 means the box did not store the request, so the gateway may send it again after this hint.
+  return e._tag === "Unavailable" ? response.pipe(HttpServerResponse.setHeader("retry-after", "5")) : response
+}
 
 /** Turns a service result into a JSON response; failures become the tagged error body with its status. */
 const respond = <A, R>(effect: Effect.Effect<A, ApiError, R>): Effect.Effect<HttpServerResponse.HttpServerResponse, never, R> =>
@@ -55,6 +60,21 @@ const jsonBody = <A, I>(schema: Schema.Schema<A, I, never>): Effect.Effect<A, Ba
       Effect.mapError((e) => new BadRequest({ message: `invalid request body: ${e.message}` })),
     )
   })
+
+/** Largest webhook run request body the box reads; the prompt alone is capped at 256 KiB. */
+const WEBHOOK_RUN_BODY_MAX_BYTES = 1024 * 1024
+
+/** The JSON body of a webhook run request, refused past `WEBHOOK_RUN_BODY_MAX_BYTES` before it is parsed. */
+const webhookRunBody = Effect.gen(function* () {
+  const req = yield* HttpServerRequest.HttpServerRequest
+  const tooLarge = new BadRequest({ message: `request body is larger than ${WEBHOOK_RUN_BODY_MAX_BYTES} bytes` })
+  if (Number(req.headers["content-length"] ?? 0) > WEBHOOK_RUN_BODY_MAX_BYTES) return yield* Effect.fail(tooLarge)
+  const text = yield* req.text.pipe(Effect.mapError(() => new BadRequest({ message: "cannot read request body" })))
+  if (Buffer.byteLength(text) > WEBHOOK_RUN_BODY_MAX_BYTES) return yield* Effect.fail(tooLarge)
+  return yield* Schema.decodeUnknown(Schema.parseJson(WebhookRunRequest))(text).pipe(
+    Effect.mapError((e) => new BadRequest({ message: `invalid request body: ${e.message}` })),
+  )
+})
 
 /**
  * The raw bytes of an uploaded file: the body, its `Content-Type` (required; parameters such as `charset` are
@@ -319,6 +339,19 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.cancelRun(user, id)))),
     ),
   ).pipe(
+    // A webhook delivery's run: 201 when the box records it now, 200 for a repeat of an accepted delivery. The gateway
+    // reads a 503 as "not stored, send again" and any other failure of this route as ambiguous (see docs/byo-box.md).
+    HttpRouter.post(
+      "/api/webhook-runs",
+      signedIn((user) => Effect.flatMap(webhookRunBody, (body) => core.startWebhookRun(user, body))).pipe(
+        Effect.map(({ result, created }) => HttpServerResponse.unsafeJson(result, { status: created ? 201 : 200 })),
+        Effect.catchAll((e) => Effect.succeed(errorResponse(e))),
+      ),
+    ),
+    HttpRouter.get(
+      "/api/webhook-runs/:deliveryId",
+      Effect.flatMap(HttpRouter.params, (p) => respond(signedIn((user) => core.webhookRun(user, p.deliveryId ?? "")))),
+    ),
     HttpRouter.get(
       "/api/runs/:id/items",
       Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.runItems(user, id)))),

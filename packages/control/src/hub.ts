@@ -6,6 +6,13 @@ import {
   Paths,
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
+  BOX_CONTROL_PATH,
+  BOX_ID_HEADER,
+  WebhookRunResult,
+  type CreatedAutomation,
+  type WebhookDelivery,
+  type WebhookRotated,
+  type WebhookSettings,
   AutomationTrigger,
   BOX_TOKEN_TTL_SECONDS,
   MAX_USER_BOXES,
@@ -53,6 +60,21 @@ import {
 import { errorResponse, headersToRecord, isHopByHop, safeEqual } from "./http"
 import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullRequestInfo } from "./github"
 import { localDate, nextFireTime } from "./cron"
+import {
+  acceptWebhook,
+  claimDueDeliveries,
+  deleteAutomationDeliveries,
+  ensureWebhookTables,
+  listWebhookDeliveries,
+  newWebhookSecret,
+  nextDeliveryAt,
+  pruneWebhookRecords,
+  settleDelivery,
+  type ClaimedDelivery,
+  type Settlement,
+  type WebhookOutcome,
+  type WebhookRequest,
+} from "./webhook-gateway"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
@@ -132,6 +154,10 @@ const BOX_GONE_CLOSE_CODE = 4001
 const RUNS_KEPT = 50
 /** How long webhook delivery ids are remembered for deduplication. */
 const DELIVERY_RETENTION_MS = 24 * 60 * 60 * 1000
+/** Defaults for a webhook whose creator named no box and no failure policy. */
+const DEFAULT_WEBHOOK_SETTINGS: WebhookSettings = { preferredBoxId: null, onUnavailable: "retry" }
+/** Socket tag of one BYOB box's control connection. Accepting the socket and finding it both use this, so they cannot drift. */
+const controlTag = (boxId: string): string => `control:${boxId}`
 
 /** Response of `POST /api/repos/:id/tasks`. */
 const CreatedTask = Schema.Struct({ id: Schema.String })
@@ -154,12 +180,15 @@ type AutomationRow = {
   enabled: number
   triggerJson: string
   nextRunAt: number | null
+  webhookSecret: string | null
+  webhookBoxId: string | null
+  webhookOnUnavailable: string | null
   createdAt: string
   updatedAt: string
 }
 
 const AUTOMATION_COLUMNS =
-  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, created_at AS createdAt, updated_at AS updatedAt"
+  "id, login, name, repo, prompt, model, enabled, trigger_json AS triggerJson, next_run_at AS nextRunAt, webhook_secret AS webhookSecret, webhook_box_id AS webhookBoxId, webhook_on_unavailable AS webhookOnUnavailable, created_at AS createdAt, updated_at AS updatedAt"
 
 type PairingRow = {
   id: string
@@ -181,18 +210,29 @@ const decodeTrigger = (json: string): AutomationTrigger => Schema.decodeUnknownS
 const nextRunMs = (trigger: AutomationTrigger, enabled: boolean, now: number): number | null =>
   enabled && trigger._tag === "schedule" ? nextFireTime(trigger.cron, trigger.timezone, now) : null
 
-const automationView = (row: AutomationRow): Automation => ({
-  id: row.id,
-  name: row.name,
-  repo: row.repo,
-  prompt: row.prompt,
-  model: row.model,
-  enabled: row.enabled === 1,
-  trigger: decodeTrigger(row.triggerJson),
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
-  nextRunAt: row.nextRunAt === null ? null : new Date(row.nextRunAt).toISOString(),
-})
+const automationView = (row: AutomationRow, origin: string): Automation => {
+  const trigger = decodeTrigger(row.triggerJson)
+  return {
+    id: row.id,
+    name: row.name,
+    repo: row.repo,
+    prompt: row.prompt,
+    model: row.model,
+    enabled: row.enabled === 1,
+    trigger,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    nextRunAt: row.nextRunAt === null ? null : new Date(row.nextRunAt).toISOString(),
+    webhook:
+      trigger._tag === "webhook"
+        ? {
+            url: origin + ControlPaths.webhookAutomation(row.id),
+            preferredBoxId: row.webhookBoxId,
+            onUnavailable: row.webhookOnUnavailable === "fail" ? "fail" : "retry",
+          }
+        : null,
+  }
+}
 
 const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A | null => {
   let value: unknown
@@ -206,6 +246,13 @@ const decodeJson = <A, I>(schema: Schema.Schema<A, I>, text: string): A | null =
 
 const boxError = (res: BoxResult): string =>
   decodeJson(BoxErrorBody, res.body)?.message ?? `agent box responded ${res.status}`
+
+/** A box's answer to a webhook run request or lookup, as a delivery settlement. A body that does not parse is ambiguous. */
+const runSettlement = (body: string): Settlement => {
+  const run = decodeJson(WebhookRunResult, body)
+  if (run === null) return { kind: "retry", error: "agent box returned an unreadable run", ambiguous: true }
+  return { kind: "delivered", taskId: run.taskId, runId: run.runId }
+}
 
 /** Headers the box must never see from the browser. Hop-by-hop headers are dropped by `headersToRecord`. */
 const DROP_FOR_BOX: Record<string, true> = {
@@ -230,7 +277,7 @@ export type SessionRecord = { login: string; dev: boolean }
 
 export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string }
 
-type PendingHttp = { resolve: (res: Response) => void; timer: number }
+type PendingHttp = { resolve: (res: Response) => void; timer: number; box: WebSocket }
 
 type BoxAttachment = { connectedAt: string; boxVersion: string | null }
 
@@ -255,6 +302,10 @@ export class Hub extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
+    // Box keep-alives are answered by the runtime, so an idle box socket (relay or BYOB control) never wakes the Hub.
+    ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(encodeFrame({ t: "ping" }), encodeFrame({ t: "pong" })),
+    )
     void ctx.blockConcurrencyWhile(async () => {
       const sql = ctx.storage.sql
       sql.exec(`CREATE TABLE IF NOT EXISTS users (
@@ -312,6 +363,7 @@ export class Hub extends DurableObject<Env> {
         expires_at INTEGER NOT NULL
       )`)
       ctx.storage.transactionSync(() => ensureAutomationsTable(sql))
+      ctx.storage.transactionSync(() => ensureWebhookTables(sql))
       sql.exec(`CREATE TABLE IF NOT EXISTS automation_runs (
         id TEXT PRIMARY KEY,
         automation_id TEXT NOT NULL,
@@ -926,18 +978,7 @@ export class Hub extends DurableObject<Env> {
     if (!box) {
       return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
     }
-    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(this.credentials(login)) }
-    const body = payload === undefined ? undefined : new TextEncoder().encode(JSON.stringify(payload))
-    if (body !== undefined) headers["content-type"] = "application/json"
-    const frame: HttpFrame = {
-      t: "http",
-      id: this.allocId(),
-      method,
-      path,
-      headers,
-      ...(body ? { body: toBase64(body) } : {}),
-    }
-    return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
+    return this.socketCall(login, box, method, path, payload)
   }
 
   /**
@@ -979,25 +1020,116 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
+  /**
+   * One call to a webhook delivery's target. A BYOB box is reached only over its own control socket; no socket is a
+   * definitive 503 (nothing reached the box). A null target is the user's Kestrel box, as for every other box call.
+   */
+  private targetCall(
+    login: string,
+    boxId: string | null,
+    method: "GET" | "POST",
+    path: string,
+    payload?: unknown,
+  ): Promise<BoxResult> {
+    if (boxId === null) return this.boxCall(login, method, path, payload)
+    const control = this.ctx.getWebSockets(controlTag(boxId))[0]
+    if (!control) {
+      return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
+    }
+    return this.socketCall(login, control, method, path, payload)
+  }
+
+  /** Sends one HTTP request over a box's socket and waits for its answer. */
+  private socketCall(
+    login: string,
+    box: WebSocket,
+    method: "GET" | "POST",
+    path: string,
+    payload?: unknown,
+  ): Promise<BoxResult> {
+    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(this.credentials(login)) }
+    const body = payload === undefined ? undefined : new TextEncoder().encode(JSON.stringify(payload))
+    if (body !== undefined) headers["content-type"] = "application/json"
+    const frame: HttpFrame = {
+      t: "http",
+      id: this.allocId(),
+      method,
+      path,
+      headers,
+      ...(body ? { body: toBase64(body) } : {}),
+    }
+    return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
+  }
+
+  /** One attempt at a claimed webhook. A possibly-landed earlier attempt is reconciled before any resend. */
+  private async attemptWebhook(delivery: ClaimedDelivery): Promise<Settlement> {
+    const { id, login, boxId, request, previousStatus, onUnavailable } = delivery
+    if (previousStatus === "delivering" || previousStatus === "ambiguous") {
+      const seen = await this.targetCall(login, boxId, "GET", Paths.webhookRun(id))
+      if (seen.ok) return runSettlement(seen.body)
+      if (seen.status !== 404) {
+        return { kind: "retry", error: `could not confirm the earlier attempt (${seen.status})`, ambiguous: true }
+      }
+    }
+    const sent = await this.targetCall(login, boxId, "POST", Paths.webhookRuns, request)
+    if (sent.ok) return runSettlement(sent.body)
+    // 503: the box definitively did not persist the run, so a retry is safe and not ambiguous.
+    if (sent.status === 503) {
+      return onUnavailable === "fail"
+        ? { kind: "failed", error: boxError(sent) }
+        : { kind: "retry", error: boxError(sent), ambiguous: false }
+    }
+    if (sent.status === 404) return { kind: "failed", error: "agent box has no webhook run route" }
+    if (sent.status === 400 || sent.status === 409) return { kind: "failed", error: boxError(sent) }
+    return { kind: "retry", error: boxError(sent), ambiguous: true }
+  }
+
+  /** Attempts every due webhook delivery, one at a time, each against the target snapshotted at acceptance. */
+  private async dispatchWebhooks(now: number): Promise<void> {
+    const sql = this.ctx.storage.sql
+    for (const delivery of claimDueDeliveries(sql, now)) {
+      const settlement = await this.deliverWebhook(delivery)
+      settleDelivery(sql, Date.now(), delivery, settlement)
+    }
+  }
+
+  private async deliverWebhook(delivery: ClaimedDelivery): Promise<Settlement> {
+    if (Date.now() >= delivery.expiresAt) return { kind: "expired" }
+    if (delivery.boxId !== null && this.ownedBox(delivery.login, delivery.boxId) === null) {
+      return { kind: "failed", error: "target box was removed" }
+    }
+    return this.attemptWebhook(delivery)
+  }
+
   // -------------------------------------------------------------------------
   // Automations: stored per user; schedules fire from the alarm, GitHub triggers from webhook deliveries
   // -------------------------------------------------------------------------
 
-  automations(login: string): Automation[] {
+  automations(login: string, origin: string): Automation[] {
     return this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE login = ? ORDER BY created_at`, login)
       .toArray()
-      .map(automationView)
+      .map((row) => automationView(row, origin))
   }
 
-  automation(login: string, id: string): Automation | null {
+  automation(login: string, id: string, origin: string): Automation | null {
     const row = this.automationRow(login, id)
-    return row === null ? null : automationView(row)
+    return row === null ? null : automationView(row, origin)
   }
 
-  async createAutomation(login: string, input: Omit<CreateAutomationBody, "repo"> & { repo: string | null }): Promise<Automation> {
+  /** Whether `login` owns this box. A webhook may only name a box its owner owns. */
+  ownsBox(login: string, boxId: string): boolean {
+    return this.ownedBox(login, boxId) !== null
+  }
+
+  async createAutomation(
+    login: string,
+    origin: string,
+    input: Omit<CreateAutomationBody, "repo"> & { repo: string | null },
+  ): Promise<CreatedAutomation> {
     const now = Date.now()
     const enabled = input.enabled ?? true
+    const hook = input.trigger._tag === "webhook" ? (input.webhook ?? DEFAULT_WEBHOOK_SETTINGS) : null
     const row: AutomationRow = {
       id: crypto.randomUUID(),
       login,
@@ -1008,12 +1140,16 @@ export class Hub extends DurableObject<Env> {
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(input.trigger),
       nextRunAt: nextRunMs(input.trigger, enabled, now),
+      webhookSecret: hook === null ? null : newWebhookSecret(),
+      webhookBoxId: hook?.preferredBoxId ?? null,
+      webhookOnUnavailable: hook?.onUnavailable ?? null,
       createdAt: new Date(now).toISOString(),
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at,
+         webhook_secret, webhook_box_id, webhook_on_unavailable, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.login,
       row.name,
@@ -1023,19 +1159,36 @@ export class Hub extends DurableObject<Env> {
       row.enabled,
       row.triggerJson,
       row.nextRunAt,
+      row.webhookSecret,
+      row.webhookBoxId,
+      row.webhookOnUnavailable,
       row.createdAt,
       row.updatedAt,
     )
     await this.rearm()
-    return automationView(row)
+    return { ...automationView(row, origin), webhookSecret: row.webhookSecret }
   }
 
-  async updateAutomation(login: string, id: string, changes: UpdateAutomationBody): Promise<Automation | null> {
+  async updateAutomation(
+    login: string,
+    origin: string,
+    id: string,
+    changes: UpdateAutomationBody,
+  ): Promise<Automation | null> {
     const current = this.automationRow(login, id)
     if (current === null) return null
     const now = Date.now()
     const trigger = changes.trigger ?? decodeTrigger(current.triggerJson)
     const enabled = changes.enabled ?? current.enabled === 1
+    // Webhook settings only exist while the trigger is a webhook; the secret is kept, or minted on first use.
+    const hook: WebhookSettings | null =
+      trigger._tag !== "webhook"
+        ? null
+        : {
+            preferredBoxId:
+              changes.webhook?.preferredBoxId !== undefined ? changes.webhook.preferredBoxId : current.webhookBoxId,
+            onUnavailable: changes.webhook?.onUnavailable ?? (current.webhookOnUnavailable === "fail" ? "fail" : "retry"),
+          }
     const next: AutomationRow = {
       ...current,
       name: changes.name ?? current.name,
@@ -1044,31 +1197,62 @@ export class Hub extends DurableObject<Env> {
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(trigger),
       nextRunAt: nextRunMs(trigger, enabled, now),
+      webhookSecret: hook === null ? null : (current.webhookSecret ?? newWebhookSecret()),
+      webhookBoxId: hook?.preferredBoxId ?? null,
+      webhookOnUnavailable: hook?.onUnavailable ?? null,
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
-      "UPDATE automations SET name = ?, prompt = ?, model = ?, enabled = ?, trigger_json = ?, next_run_at = ?, updated_at = ? WHERE id = ? AND login = ?",
+      `UPDATE automations SET name = ?, prompt = ?, model = ?, enabled = ?, trigger_json = ?, next_run_at = ?,
+         webhook_secret = ?, webhook_box_id = ?, webhook_on_unavailable = ?, updated_at = ?
+       WHERE id = ? AND login = ?`,
       next.name,
       next.prompt,
       next.model,
       next.enabled,
       next.triggerJson,
       next.nextRunAt,
+      next.webhookSecret,
+      next.webhookBoxId,
+      next.webhookOnUnavailable,
       next.updatedAt,
       id,
       login,
     )
     await this.rearm()
-    return automationView(next)
+    return automationView(next, origin)
   }
 
   async deleteAutomation(login: string, id: string): Promise<boolean> {
     if (this.automationRow(login, id) === null) return false
     const sql = this.ctx.storage.sql
     sql.exec("DELETE FROM automation_runs WHERE automation_id = ?", id)
+    deleteAutomationDeliveries(sql, id)
     sql.exec("DELETE FROM automations WHERE id = ? AND login = ?", id, login)
     await this.rearm()
     return true
+  }
+
+  /** A new webhook credential. The old one stops working immediately. Null when `login` has no such webhook. */
+  rotateWebhook(login: string, origin: string, id: string): WebhookRotated | null {
+    const row = this.automationRow(login, id)
+    if (row === null || decodeTrigger(row.triggerJson)._tag !== "webhook") return null
+    const secret = newWebhookSecret()
+    this.ctx.storage.sql.exec("UPDATE automations SET webhook_secret = ? WHERE id = ? AND login = ?", secret, id, login)
+    return { url: origin + ControlPaths.webhookAutomation(id), secret }
+  }
+
+  /** The deliveries an owner sees for one automation, newest first; null when it is not `login`'s. */
+  webhookDeliveries(login: string, id: string): WebhookDelivery[] | null {
+    if (this.automationRow(login, id) === null) return null
+    return listWebhookDeliveries(this.ctx.storage.sql, id)
+  }
+
+  /** A sender's request to a webhook automation: durably stored, or refused. Routing runs from the alarm. */
+  async receiveWebhook(input: WebhookRequest): Promise<WebhookOutcome> {
+    const outcome = await acceptWebhook(this.ctx.storage.sql, Date.now(), input)
+    if (outcome.ok && outcome.created) await this.rearm()
+    return outcome
   }
 
   /** Recent runs, newest first; null when the automation is not `login`'s. */
@@ -1237,6 +1421,8 @@ export class Hub extends DurableObject<Env> {
       }
       else this.ctx.storage.sql.exec("UPDATE pr_activity_queue SET due_at = ? WHERE login = ? AND task_id = ? AND delivery_id = ?", Date.now() + 60000, row.login, row.taskId, row.deliveryId)
     }
+    await this.dispatchWebhooks(now)
+    pruneWebhookRecords(this.ctx.storage.sql, now)
     await this.rearm()
   }
 
@@ -1255,7 +1441,11 @@ export class Hub extends DurableObject<Env> {
       .toArray()[0]
     const activityAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
     const scheduleAt = row?.at ?? null
-    const at = scheduleAt === null ? activityAt : activityAt === null ? scheduleAt : Math.min(scheduleAt, activityAt)
+    const deliveryAt = nextDeliveryAt(this.ctx.storage.sql)
+    let at: number | null = null
+    for (const candidate of [scheduleAt, activityAt, deliveryAt]) {
+      if (candidate !== null) at = at === null ? candidate : Math.min(at, candidate)
+    }
     if (at === null) await this.ctx.storage.deleteAlarm()
     else await this.ctx.storage.setAlarm(at)
   }
@@ -1326,6 +1516,7 @@ export class Hub extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname === RELAY_CONNECT_PATH) return this.acceptBox(request)
+    if (url.pathname === BOX_CONTROL_PATH) return this.acceptControl(request)
     if (url.pathname.startsWith("/_preview/") || this.previewReferer(request) !== null) {
       return this.previewRelay(request, url)
     }
@@ -1407,6 +1598,29 @@ export class Hub extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client })
   }
 
+  /** A BYOB box's outbound control socket. The Worker has already verified the box secret; one socket per box. */
+  private acceptControl(request: Request): Response {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return errorResponse(426, "UpgradeRequired", "expected a WebSocket upgrade")
+    }
+    const boxId = request.headers.get(BOX_ID_HEADER)
+    if (boxId === null) return errorResponse(400, "BadRequest", "missing box id")
+    const tag = controlTag(boxId)
+    // Newest connection wins, as for the main box: calls on the old socket fail now.
+    for (const old of this.ctx.getWebSockets(tag)) {
+      this.failPending(old)
+      closeQuietly(old, 4000, "replaced")
+    }
+
+    const pair = new WebSocketPair()
+    const client = pair[0]
+    const server = pair[1]
+    const attachment: BoxAttachment = { connectedAt: new Date().toISOString(), boxVersion: null }
+    this.ctx.acceptWebSocket(server, [tag])
+    server.serializeAttachment(attachment)
+    return new Response(null, { status: 101, webSocket: client })
+  }
+
   private async relay(request: Request, url: URL): Promise<Response> {
     const box = this.ctx.getWebSockets(BOX_TAG)[0]
     if (!box) return errorResponse(503, "BoxOffline", "agent box is not connected")
@@ -1437,7 +1651,7 @@ export class Hub extends DurableObject<Env> {
       this.pending.delete(frame.id)
       resolve(errorResponse(504, "GatewayTimeout", "agent box did not respond in time"))
     }, HTTP_TIMEOUT_MS)
-    this.pending.set(frame.id, { resolve, timer })
+    this.pending.set(frame.id, { resolve, timer, box })
     try {
       box.send(encodeFrame(frame))
     } catch {
@@ -1510,13 +1724,19 @@ export class Hub extends DurableObject<Env> {
   }
 
   override webSocketClose(ws: WebSocket, code: number): void {
-    this.boxLost(ws)
+    this.socketLost(ws)
     closeQuietly(ws, closeCode(code), "")
   }
 
   override webSocketError(ws: WebSocket): void {
-    this.boxLost(ws)
+    this.socketLost(ws)
     closeQuietly(ws, 1000, "")
+  }
+
+  /** Fails the calls in flight on this socket. Only a main box's loss also tears down its streams. */
+  private socketLost(ws: WebSocket): void {
+    this.failPending(ws)
+    if (this.ctx.getTags(ws).includes(BOX_TAG)) this.boxLost(ws)
   }
 
   private onFrame(ws: WebSocket, frame: RelayFrame): void {
@@ -1571,14 +1791,21 @@ export class Hub extends DurableObject<Env> {
     this.failAll()
   }
 
+  /** Fails every call in flight on the main box's sockets and closes its streams. */
   private failAll(): void {
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer)
-      p.resolve(errorResponse(502, "BadGateway", "agent box disconnected"))
-    }
-    this.pending.clear()
+    for (const box of this.ctx.getWebSockets(BOX_TAG)) this.failPending(box)
     for (const s of this.streams.values()) closeQuietly(s, BOX_GONE_CLOSE_CODE, "agent box disconnected")
     this.streams.clear()
+  }
+
+  /** Fails the calls in flight on one box socket (main or BYOB control); the others keep running. */
+  private failPending(box: WebSocket): void {
+    for (const [id, p] of this.pending) {
+      if (p.box !== box) continue
+      clearTimeout(p.timer)
+      this.pending.delete(id)
+      p.resolve(errorResponse(502, "BadGateway", "agent box disconnected"))
+    }
   }
 
   private attachment(ws: WebSocket): BoxAttachment {

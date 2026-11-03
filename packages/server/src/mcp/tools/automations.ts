@@ -43,6 +43,8 @@ const triggerSchema = z.union([
 
 const describeTrigger = (trigger: AutomationTrigger): string => {
   if (trigger._tag === "schedule") return `schedule "${trigger.cron}" ${trigger.timezone}`
+  // Webhook automations are created in the app: their secret is shown once and must not land in a transcript.
+  if (trigger._tag === "webhook") return "webhook (set up in the app)"
   const parts = [`on ${trigger.events.join(", ")}`]
   if (trigger.reviewers !== undefined) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
   if (trigger.baseBranches !== undefined) parts.push(`base ${trigger.baseBranches.join(", ")}`)
