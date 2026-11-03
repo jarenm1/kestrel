@@ -9,6 +9,15 @@ The Expo app. Start Metro with `bun run dev:mobile` (from the repo root) and ope
 - The composer groups modern models by connected Anthropic/OpenAI provider. **Manage models** opens Connections, where each provider's visible models can be toggled or reset. Choices are saved on the device. Thinking opens a stepped slider sheet matching the desktop's monochrome track and effort ring. It offers Default plus only levels supported by the selected model, falls back to Default for unsupported saved levels, and disappears for models without thinking controls. Tap or drag to select; Expo also exposes screen-reader increment/decrement actions, and mobile web uses a native range input with arrow keys, Home and End.
 - The composer's editable area stays transparent and shadow-free, including while focused, so it sits flush inside the outer box. The outer box retains its depth and focus border.
 
+## Commands
+
+In a thread, type `/` to browse the selected harness's commands and skills (`$` shows only Codex skills).
+Tap a suggestion, or tap **Select** to complete the highlighted command. The menu stays available when touching
+it takes focus from the editor, on both phone web and native. Selection fills the draft without sending it:
+add any arguments, then tap **Send** to run it. Text with no matching command keeps the ordinary Send action.
+Hardware keyboards can use arrows and Enter/Tab to select, or Escape to dismiss; outside the menu, Return inserts
+a newline.
+
 ## GitHub references
 
 Type `#` followed by a positive issue/PR number at a word boundary to choose **PR #N** or **Issue #N** above the

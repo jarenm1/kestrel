@@ -375,11 +375,12 @@ export function Composer({
   });
 
   const commandProvider = commandQuery.data?.provider ?? expectedProvider;
+  // Touching the native/web menu blurs the DOM editor before a Pressable's onPress can select a command.
+  // Like references, keep the active token available across that focus change.
   const slashMenuOpen =
     slashQuery !== undefined &&
     (trigger !== "$" || commandProvider === "openai") &&
-    !dismissed &&
-    focused;
+    !dismissed;
 
   // Codex lists its commands and skills on `/`, and only its skills on their native `$`.
   const commandMatches =
@@ -390,7 +391,7 @@ export function Composer({
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
         );
-
+  const selectedCommand = commandMatches[activeCommandIndex % commandMatches.length];
   const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret);
   // A repository sheet or a touch choice takes focus from the editor; keep the active token available until chosen.
   const referenceMenuOpen = referenceTrigger !== undefined && !dismissed;
@@ -441,8 +442,7 @@ export function Composer({
       if (key === "ArrowDown" || key === "ArrowUp") {
         setActiveCommandIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + commandMatches.length) % commandMatches.length);
       } else if (key === "Enter" || key === "Tab") {
-        const command = commandMatches[activeCommandIndex % commandMatches.length];
-        if (command !== undefined) chooseCommand(command);
+        if (selectedCommand !== undefined) chooseCommand(selectedCommand);
       }
     }
   }
@@ -529,7 +529,15 @@ export function Composer({
             <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
           ) : null}
           <View style={styles.flex} />
-          {onStop && empty ? (
+          {slashMenuOpen && selectedCommand !== undefined ? (
+            <Button
+              icon={Check}
+              accessibilityLabel="Select command"
+              onPress={() => chooseCommand(selectedCommand)}
+            >
+              Select
+            </Button>
+          ) : onStop && empty ? (
             <Button size="icon" accessibilityLabel="Stop" disabled={stopping} onPress={onStop}>
               <Square size={14} color={colors.primaryForeground} fill={colors.primaryForeground} />
             </Button>
