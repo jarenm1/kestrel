@@ -88,9 +88,12 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
 
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
-  // The thread query is already the page's baseline; reading it here gives `#` references the checked-out repositories.
+  // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
   const task = useQuery(queries.task(taskId))
   const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo)
+  const referenceRepos = checkoutRepos.length === 0 && task.data?.pickedRepo
+    ? [task.data.pickedRepo]
+    : checkoutRepos
 
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   // Items of every run in the thread; live events keep these cache entries current.
@@ -153,7 +156,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <Composer
             taskId={taskId}
             draftKey={taskId}
-            repos={checkoutRepos}
+            repos={referenceRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}

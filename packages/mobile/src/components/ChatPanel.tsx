@@ -81,6 +81,11 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const task = useQuery(queries.task(taskId));
+  // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo);
+  const referenceRepos = checkoutRepos.length === 0 && task.data?.pickedRepo
+    ? [task.data.pickedRepo]
+    : checkoutRepos;
   const files = useQuery({
     queryKey: [...boxKeys(api.boxScope).box, "file-access"],
     queryFn: () => api.fileAccess(),
@@ -141,7 +146,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
       ) : (
         <Composer
           key={taskId}
-          repos={(task.data?.checkouts ?? []).map((checkout) => checkout.repo)}
+          repos={referenceRepos}
           taskId={taskId}
           ask={pendingAsk}
           context={context}
