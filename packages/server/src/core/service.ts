@@ -556,6 +556,7 @@ export interface CheckoutOutcome {
  */
 const pullRequestBranchBlocker = (pr: PullRequest, slug: RepoSlug, defaultBranch: string): string | null => {
   if (pr.state !== "open") return `it is ${pr.state}`
+  if (pr.headRepo === null) return "its head repository is no longer available"
   if (pr.headRepo?.toLowerCase() !== `${slug.owner}/${slug.name}`.toLowerCase()) return "its branch is in another repository"
   if (pr.headRef === defaultBranch) return "its branch is the repository's default branch"
   return null

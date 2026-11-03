@@ -222,7 +222,7 @@ describe("repo_checkout with a pull request", () => {
 
   const threadBranchCases: ReadonlyArray<readonly [string, Partial<PullRequestStatus>, string]> = [
     ["a fork's pull request", { headRepo: "someone/widget" }, "another repository"],
-    ["a pull request whose fork is gone", { headRepo: null }, "another repository"],
+    ["a pull request whose fork is gone", { headRepo: null }, "head repository is no longer available"],
     ["a closed pull request", { state: "closed" }, "closed"],
     ["a merged pull request", { state: "merged" }, "merged"],
     ["a pull request from the default branch", { headRef: "main", baseRef: "release" }, "default branch"],
