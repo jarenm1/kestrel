@@ -351,6 +351,7 @@ export class DesktopRtcSession {
       if (!released) peers -= 1
       released = true
     }
+    let connectTimer: NodeJS.Timeout | undefined
     try {
       const track = new MediaStreamTrack({ kind: "video", codec: encoded })
       const audioTrack = new MediaStreamTrack({ kind: "audio", codec: opusCodec })
@@ -416,14 +417,15 @@ export class DesktopRtcSession {
         if (packet.type !== 201 || !("reports" in packet)) return
         for (const report of packet.reports) sender.reportLoss(report.fractionLost / 256)
       })
-      const connectTimer = setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.peer?.pc === pc) this.lose()
       }, CONNECT_TIMEOUT_MS)
-      const peer: Peer = { pc, sender, audio, live: false, connectTimer, release, baselineOnly }
+      connectTimer = timer
+      const peer: Peer = { pc, sender, audio, live: false, connectTimer: timer, release, baselineOnly }
       pc.connectionStateChange.subscribe((state) => {
         if (this.peer !== peer) return
         if (state === "connected") {
-          clearTimeout(connectTimer)
+          clearTimeout(timer)
           peer.live = true
           sender.start()
         } else if (state === "failed" || state === "closed") this.lose()
@@ -443,6 +445,7 @@ export class DesktopRtcSession {
         sender.start()
       }
     } catch (e) {
+      clearTimeout(connectTimer)
       release()
       await pc.close().catch(() => {})
       throw e

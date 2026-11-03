@@ -1601,6 +1601,8 @@ export class Hub extends DurableObject<Env> {
       if (frame) this.onFrame(ws, frame)
       return
     }
+    // Current boxes send no binary frames. Boxes from before WebRTC-only desktops still send fMP4 here, and installed
+    // native apps from then play it; this merge does not update either, so this stays until they are gone.
     const bin = decodeBinary(new Uint8Array(message))
     if (bin) this.streams.get(bin.id)?.send(bin.payload)
   }
