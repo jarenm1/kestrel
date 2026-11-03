@@ -6,11 +6,10 @@ export interface ThinkingSliderProps {
   readonly max: number;
   readonly label: string;
   readonly onChange: (value: number) => void;
-  readonly onFocusChange: (focused: boolean) => void;
 }
 
 /** Transparent input over the shared track; native touch and VoiceOver/TalkBack adjustments. */
-export function ThinkingSlider({ value, max, label, onChange, onFocusChange }: ThinkingSliderProps) {
+export function ThinkingSlider({ value, max, label, onChange }: ThinkingSliderProps) {
   const width = useRef(0);
   function select(event: GestureResponderEvent) {
     if (width.current <= 32) return;
@@ -32,13 +31,8 @@ export function ThinkingSlider({ value, max, label, onChange, onFocusChange }: T
         if (action === "decrement") onChange(Math.max(0, value - 1));
       }}
       onStartShouldSetResponder={() => true}
-      onResponderGrant={(event) => {
-        onFocusChange(true);
-        select(event);
-      }}
+      onResponderGrant={select}
       onResponderMove={select}
-      onResponderRelease={() => onFocusChange(false)}
-      onResponderTerminate={() => onFocusChange(false)}
       onResponderTerminationRequest={() => false}
     />
   );

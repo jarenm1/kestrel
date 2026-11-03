@@ -72,7 +72,6 @@ function ThinkingPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(0);
-  const [focused, setFocused] = useState(false);
   const index = Math.max(0, options.findIndex((option) => option.value === value));
   const selected = options[index]!;
   const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value];
@@ -111,7 +110,7 @@ function ThinkingPicker({
               <Text style={styles.thinkingValue}>{selected.label}</Text>
             </View>
             <View style={styles.sliderHitArea} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
-              <View pointerEvents="none" style={[styles.sliderTrack, focused && styles.sliderFocused]}>
+              <View pointerEvents="none" style={styles.sliderTrack}>
                 <View style={[styles.sliderFill, { width: offset(index) + 8 }]} />
                 {options.map((option, stop) => (
                   <View key={option.label} style={[
@@ -126,7 +125,6 @@ function ThinkingPicker({
                 max={options.length - 1}
                 label={selected.label}
                 onChange={(stop) => onChange(options[stop]!.value)}
-                onFocusChange={setFocused}
               />
             </View>
             <View style={styles.thinkingEndpoints} aria-hidden accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
@@ -651,8 +649,6 @@ const styles = StyleSheet.create({
   thinkingValue: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
   sliderHitArea: { height: 44, justifyContent: "center" },
   sliderTrack: { height: 32, borderRadius: radius.full, backgroundColor: colors.input },
-  // `outlineStyle` is required on the web: CSS outlines default to `none`, so width and colour alone never paint.
-  sliderFocused: { outlineStyle: "solid", outlineColor: colors.ring, outlineWidth: 2, outlineOffset: 2 },
   sliderFill: { position: "absolute", left: 4, top: 4, height: 24, borderRadius: radius.full, backgroundColor: colors.primary + "33" },
   sliderStop: { position: "absolute", top: 14, width: 4, height: 4, borderRadius: radius.full },
   sliderThumb: { position: "absolute", top: 4, width: 24, height: 24, borderRadius: radius.full, backgroundColor: colors.primary, ...shadows.soft },
