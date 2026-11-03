@@ -123,6 +123,10 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
         )}
       </svg>
       <span className="absolute top-1.5 left-2.5 text-[11px] font-medium text-muted-foreground">{label}</span>
+      {/* Touch screens cannot hover, so they keep the latest reading in view; a mouse reads any sample by hovering. */}
+      <span className="absolute top-1.5 right-2.5 hidden text-[11px] font-medium text-foreground tabular-nums pointer-coarse:block">
+        {points.length > 0 ? percentText(points[points.length - 1]!.value) : "–"}
+      </span>
       {hovered && (
         <>
           {/* Drawn in HTML, not the stretched SVG, so the dot stays round. */}
