@@ -67,10 +67,21 @@ export interface WorkspaceShape {
   readonly findIcon: (mirrorPath: string, commit: string) => Effect.Effect<CheckoutIcon | null, WorkspaceError>
   /** Bytes of a blob in the mirror, at most `ICON_MAX_BYTES`. */
   readonly readIcon: (mirrorPath: string, blob: string) => Effect.Effect<Uint8Array, WorkspaceError>
+  /** Which of `paths` are regular files at `commit`, read from the mirror (never the agent-writable checkout). */
+  readonly filesAt: (
+    mirrorPath: string,
+    commit: string,
+    paths: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<string>, WorkspaceError>
   /** The commit the checkout's HEAD points at, read from its files. */
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
   readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
+  /**
+   * Commits on the checkout's HEAD and not on `baseRef` (a ref in the shadow), newest first, as `git log --cherry`
+   * prints them with `%H%x00%s%x00%b%x00`. Empty when there are none.
+   */
+  readonly commitLog: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
   /**
    * Paths of the checkout's files on disk, sorted: everything its `.gitignore` files do not ignore, plus files committed
    * at HEAD even when ignored. At most `limit`; `truncated` says there were more.
@@ -521,6 +532,9 @@ const make: WorkspaceShape = {
       yield* git(shadowPath, ["--git-dir", shadowPath, "update-ref", pinRef, baseSha])
     }),
 
+  filesAt: (mirrorPath, commit, paths) =>
+    Effect.map(listBlobs(mirrorPath, commit, paths), (found) => paths.filter((path) => found.has(path))),
+
   findIcon: (mirrorPath, commit) =>
     Effect.gen(function* () {
       const wellKnown = yield* firstIcon(mirrorPath, commit, ICON_CANDIDATES)
@@ -571,6 +585,20 @@ const make: WorkspaceShape = {
       } finally {
         yield* Effect.promise(() => rm(index, { force: true }))
       }
+    }),
+
+  commitLog: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const head = yield* readHeadSha(real)
+      if (head === null) return ""
+      return yield* shadowGit(spec.shadowPath, real, [
+        "log",
+        "--no-show-signature",
+        "--pretty=format:%H%x00%s%x00%b%x00",
+        "--cherry",
+        `${spec.baseRef}...${head}`,
+      ])
     }),
 
   listFiles: (spec) =>

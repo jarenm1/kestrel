@@ -6,7 +6,9 @@ import {
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
+  CreateMeterHostBody,
   GithubRepoSlug,
+  MeterReportBody,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -337,6 +339,33 @@ const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<R
 }
 
 /**
+ * Nest usage metering for operators (`KESTREL_OPERATORS`): host registration and the reconciled report.
+ * Anyone else gets 404.
+ */
+const handleMeter = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  const meter = hub(env)
+  const method = request.method
+
+  if (url.pathname === ControlPaths.meterHosts) {
+    if (method === "GET") return json(await meter.meterHosts())
+    if (method === "POST") {
+      const body = await decodeBody(request, CreateMeterHostBody)
+      if (body instanceof Response) return body
+      return json(await meter.createMeterHost(body), 201)
+    }
+  }
+  if (url.pathname === ControlPaths.meterReport && method === "POST") {
+    const body = await decodeBody(request, MeterReportBody)
+    if (body instanceof Response) return body
+    return answerBox(await meter.meterReport(body, new Date().toISOString()))
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
+/**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
  */
@@ -347,6 +376,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)
   }
+  if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)

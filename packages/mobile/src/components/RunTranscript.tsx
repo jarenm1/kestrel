@@ -119,18 +119,40 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
   );
 }
 
-/** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId, running }: { taskId: string; runId: string; running: boolean }) {
+/**
+ * One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. Shows the
+ * items at positions `from` up to `to` (null: the end); a tool keeps its subagent items.
+ */
+export function RunTranscript({
+  taskId,
+  runId,
+  running,
+  from,
+  to,
+}: {
+  taskId: string;
+  runId: string;
+  running: boolean;
+  from: number;
+  to: number | null;
+}) {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const { data } = useQuery(queries.runItems(runId));
   const tree = useMemo(() => buildTree(data ?? []), [data]);
   const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running]);
   const source = useMemo(() => ({ taskId, runId }), [taskId, runId]);
+  const roots = useMemo(() => {
+    const position = new Map((data ?? []).map((item, index) => [item.id, index]));
+    return tree.roots.filter((item) => {
+      const at = position.get(item.id)!;
+      return at >= from && (to === null || at < to);
+    });
+  }, [data, tree, from, to]);
 
-  if (data === undefined || data.length === 0) return null;
+  if (roots.length === 0) return null;
 
-  return <Items items={tree.roots} ctx={{ source, tree, liveIds, running }} />;
+  return <Items items={roots} ctx={{ source, tree, liveIds, running }} />;
 }
 
 const styles = StyleSheet.create({

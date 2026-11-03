@@ -6,7 +6,11 @@ import { Config } from "../config"
  * error messages carry only GitHub's status and message text.
  */
 
-export class GitHubError extends Data.TaggedError("GitHubError")<{ readonly message: string }> {}
+export class GitHubError extends Data.TaggedError("GitHubError")<{
+  readonly message: string
+  /** HTTP status when GitHub answered; absent for transport and decoding failures. */
+  readonly status?: number
+}> {}
 
 export interface RepoSlug {
   readonly owner: string
@@ -63,6 +67,91 @@ export interface PullRequestStatus extends PullRequest {
   readonly reviewComments: readonly ReviewComment[]
   readonly conversation: readonly { readonly author: string; readonly body: string; readonly url: string }[]
 }
+
+/** Which GitHub reference a number names. The issues endpoint returns pull requests too, so callers must state it. */
+export type ReferenceKind = "pr" | "issue"
+
+export interface ReferenceComment {
+  readonly author: string
+  readonly body: string
+  readonly url: string
+  /** ISO timestamp GitHub reports for the comment. */
+  readonly createdAt: string
+}
+
+export interface ReferenceReview {
+  readonly author: string
+  readonly state: string
+  readonly body: string
+  readonly url: string
+}
+
+export interface ReferenceReviewComment {
+  readonly author: string
+  readonly body: string
+  readonly url: string
+  readonly path: string
+  readonly line: number | null
+}
+
+/** A file a pull request changes. Patches are deliberately omitted: status and line counts are the useful summary. */
+export interface ReferenceFile {
+  readonly path: string
+  readonly status: string
+  readonly additions: number
+  readonly deletions: number
+}
+
+export interface IssueReference {
+  readonly kind: "issue"
+  readonly number: number
+  readonly title: string
+  readonly body: string
+  readonly state: string
+  /** `completed`, `not_planned`, `reopened`, or null when GitHub reports none. */
+  readonly stateReason: string | null
+  readonly author: string
+  readonly url: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly labels: readonly string[]
+  /** Issue comments, in GitHub's chronological order (first page, up to 100). */
+  readonly conversation: readonly ReferenceComment[]
+}
+
+export interface PullRequestReference {
+  readonly kind: "pr"
+  readonly number: number
+  readonly title: string
+  readonly body: string
+  readonly state: "open" | "closed" | "merged"
+  readonly draft: boolean
+  readonly author: string
+  readonly url: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly labels: readonly string[]
+  readonly baseRef: string
+  readonly headRef: string
+  readonly headSha: string
+  /** null while GitHub is still computing mergeability. */
+  readonly mergeable: boolean | null
+  readonly mergeableState: string
+  readonly reviewDecision: PullRequestStatus["reviewDecision"]
+  /** null when GitHub will not report check runs for this head commit (for example a token without checks access). */
+  readonly checks: PullRequestStatus["checks"] | null
+  /** Reviews in the order GitHub returns them; bodies are often empty. */
+  readonly reviews: readonly ReferenceReview[]
+  /** Most recent review comments, newest first. */
+  readonly reviewComments: readonly ReferenceReviewComment[]
+  /** Conversation comments, in GitHub's chronological order (first page, up to 100). */
+  readonly conversation: readonly ReferenceComment[]
+  /** Files the pull request changes, up to GitHub's first page of 100. */
+  readonly files: readonly ReferenceFile[]
+}
+
+/** An issue or pull request read without a checkout. `kind` must match what the number actually is. */
+export type GitHubReference = IssueReference | PullRequestReference
 
 export interface NewPullRequest {
   readonly title: string
@@ -129,11 +218,35 @@ export interface ReviewerRequest {
   readonly teamReviewers: readonly string[]
 }
 
+/** One entry of a GraphQL `errors` array, as GitHub sends it. */
+export interface GraphQLErrorItem {
+  readonly message: string
+  readonly path?: ReadonlyArray<string | number>
+  readonly type?: string
+}
+
+/** A GraphQL answer as GitHub sent it: `errors` may sit beside partial `data`. */
+export interface GraphQLResponse {
+  readonly data: unknown
+  readonly errors: ReadonlyArray<GraphQLErrorItem>
+}
+
 export interface GitHubShape {
   /** Open pull request whose head branch is `head` in `repo`, or null. */
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
   readonly createPullRequest: (token: string, repo: RepoSlug, input: NewPullRequest) => Effect.Effect<PullRequest, GitHubError>
   readonly getPullRequestStatus: (token: string, repo: RepoSlug, number: number) => Effect.Effect<PullRequestStatus, GitHubError>
+  /**
+   * Reads an issue or pull request by number, whichever the caller says it is. Fails with an explicit kind-mismatch
+   * error when the number is the other kind, and with a not-found error when GitHub has no such reference the token
+   * can see. The token is only ever sent to GitHub.
+   */
+  readonly readReference: (
+    token: string,
+    repo: RepoSlug,
+    number: number,
+    kind: ReferenceKind,
+  ) => Effect.Effect<GitHubReference, GitHubError>
   readonly createReview: (token: string, repo: RepoSlug, number: number, review: NewReview) => Effect.Effect<PostedReview, GitHubError>
   /** Edits the given fields and returns the pull request as GitHub now has it. */
   readonly updatePullRequest: (token: string, repo: RepoSlug, number: number, changes: PullRequestChanges) => Effect.Effect<PullRequest, GitHubError>
@@ -149,6 +262,13 @@ export interface GitHubShape {
   readonly removeReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly addLabels: (token: string, repo: RepoSlug, number: number, labels: readonly string[]) => Effect.Effect<void, GitHubError>
   readonly removeLabel: (token: string, repo: RepoSlug, number: number, label: string) => Effect.Effect<void, GitHubError>
+  /**
+   * Runs a GraphQL query or mutation. GraphQL-level errors come back in `errors`, not as a failure; an HTTP failure
+   * is a GitHubError whose message reads like the GitHub CLI's (`HTTP 502: Bad Gateway (<url>)`).
+   */
+  readonly graphql: (token: string, query: string, variables: Readonly<Record<string, unknown>>) => Effect.Effect<GraphQLResponse, GitHubError>
+  /** The pull request's diff (`diff`) or its commits as patches (`patch`), as GitHub renders them. Failures read like `graphql`'s. */
+  readonly pullRequestDiff: (token: string, repo: RepoSlug, number: number, format: "diff" | "patch") => Effect.Effect<string, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
@@ -204,6 +324,39 @@ const ReviewCommentsBody = Schema.Array(
   }),
 )
 
+/** GitHub's issue endpoint answers for pull requests too, with `pull_request` set; that is how kind is checked. */
+const IssueBody = Schema.Struct({
+  number: Schema.Number,
+  html_url: Schema.String,
+  title: Schema.String,
+  body: Schema.optional(Schema.NullOr(Schema.String)),
+  state: Schema.String,
+  state_reason: Schema.optional(Schema.NullOr(Schema.String)),
+  created_at: Schema.String,
+  updated_at: Schema.String,
+  user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+  labels: Schema.Array(Schema.Struct({ name: Schema.String })),
+  pull_request: Schema.optional(Schema.Unknown),
+})
+
+const ReferenceCommentsBody = Schema.Array(
+  Schema.Struct({
+    body: Schema.String,
+    html_url: Schema.String,
+    created_at: Schema.String,
+    user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
+  }),
+)
+
+const PullFilesBody = Schema.Array(
+  Schema.Struct({
+    filename: Schema.String,
+    status: Schema.String,
+    additions: Schema.Number,
+    deletions: Schema.Number,
+  }),
+)
+
 const ReviewPostedBody = Schema.Struct({
   html_url: Schema.String,
   state: Schema.String,
@@ -230,6 +383,31 @@ const GraphQLBody = Schema.Struct({
 
 const PASSING_CONCLUSIONS = ["success", "neutral", "skipped"]
 
+const summarizeChecks = (checks: Schema.Schema.Type<typeof CheckRunsBody>): PullRequestStatus["checks"] => {
+  const failing: string[] = []
+  const pending: string[] = []
+  let passed = 0
+  for (const run of checks.check_runs) {
+    if (run.status !== "completed") pending.push(run.name)
+    else if (PASSING_CONCLUSIONS.includes(run.conclusion ?? "")) passed++
+    else failing.push(run.name)
+  }
+  return { total: checks.check_runs.length, passed, failing, pending }
+}
+
+const GraphQLAnswer = Schema.Struct({
+  data: Schema.optional(Schema.Unknown),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        message: Schema.String,
+        path: Schema.optional(Schema.Array(Schema.Union(Schema.String, Schema.Number))),
+        type: Schema.optional(Schema.String),
+      }),
+    ),
+  ),
+})
+
 /** Latest review state per reviewer, then the strongest signal wins. Dismissed reviews drop out. */
 const reviewDecisionOf = (reviews: readonly { state: string; login: string }[]): PullRequestStatus["reviewDecision"] => {
   const latest = new Map<string, string>()
@@ -249,26 +427,30 @@ export const GitHubLive = Layer.effect(
   Effect.map(Config, (config) => {
     const apiBase = config.githubApiUrl
 
-    const call = (token: string, repo: RepoSlug, method: string, path: string, body?: unknown) =>
+    /** One HTTP exchange with GitHub; the status is the caller's to judge. */
+    const send = (token: string, method: string, path: string, options: { readonly body?: unknown; readonly accept?: string } = {}) =>
       Effect.tryPromise({
         try: async () => {
           const response = await fetch(`${apiBase}${path}`, {
             method,
             headers: {
               authorization: `Bearer ${token}`,
-              accept: "application/vnd.github+json",
+              accept: options.accept ?? "application/vnd.github+json",
               "x-github-api-version": "2022-11-28",
               "user-agent": "kestrel-mcp",
-              ...(body === undefined ? {} : { "content-type": "application/json" }),
+              ...(options.body === undefined ? {} : { "content-type": "application/json" }),
             },
-            body: body === undefined ? undefined : JSON.stringify(body),
+            body: options.body === undefined ? undefined : JSON.stringify(options.body),
             signal: AbortSignal.timeout(30_000),
           })
           const text = await response.text()
           return { status: response.status, text }
         },
         catch: () => new GitHubError({ message: "could not reach the GitHub API" }),
-      }).pipe(
+      })
+
+    const call = (token: string, repo: RepoSlug, method: string, path: string, body?: unknown) =>
+      send(token, method, path, { body }).pipe(
         Effect.flatMap(({ status, text }) => {
           if (status >= 200 && status < 300) {
             return Effect.try({
@@ -276,9 +458,23 @@ export const GitHubLive = Layer.effect(
               catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
             })
           }
-          return Effect.fail(new GitHubError({ message: describeFailure(status, text, repo) }))
+          return Effect.fail(new GitHubError({ message: describeFailure(status, text, repo), status }))
         }),
       )
+
+    /** A non-2xx answer described the way the GitHub CLI prints it. */
+    const cliFailure = (status: number, text: string, path: string): GitHubError => {
+      const url = `${apiBase}${path}`
+      const message = githubMessage(text)
+      const lines = message.split("\n")
+      const described =
+        lines.length > 1
+          ? `HTTP ${status}: ${lines[0]} (${url})\n${lines.slice(1).join("\n")}`
+          : message !== ""
+            ? `HTTP ${status}: ${message} (${url})`
+            : `HTTP ${status} (${url})`
+      return new GitHubError({ message: described, status })
+    }
 
     const decode = <A, I>(schema: Schema.Schema<A, I>, label: string) => (json: unknown) =>
       Schema.decodeUnknown(schema)(json).pipe(
@@ -307,6 +503,144 @@ export const GitHubLive = Layer.effect(
         Effect.flatMap(decode(PullRequestBody, "pull request")),
         Effect.map(toPullRequest),
       )
+
+    const referenceComments = (token: string, repo: RepoSlug, number: number) =>
+      call(token, repo, "GET", `${repoPath(repo)}/issues/${number}/comments?per_page=100`).pipe(
+        Effect.flatMap(decode(ReferenceCommentsBody, "issue comment list")),
+        Effect.map((comments): ReadonlyArray<ReferenceComment> =>
+          comments.map((comment) => ({
+            author: comment.user?.login ?? "ghost",
+            body: comment.body,
+            url: comment.html_url,
+            createdAt: comment.created_at,
+          })),
+        ),
+      )
+
+    const referenceNotFound = (repo: RepoSlug, number: number): GitHubError =>
+      new GitHubError({
+        message: `GitHub has no issue or pull request #${number} in ${repo.owner}/${repo.name} (it does not exist or the connected account cannot see it)`,
+        status: 404,
+      })
+
+    /**
+     * Reads the issue endpoint first: it is the one place that says whether a number is an issue or a pull request,
+     * and it carries the body and author for both. A kind mismatch never falls through to the other endpoint.
+     */
+    const readReference = (token: string, repo: RepoSlug, number: number, kind: ReferenceKind) =>
+      Effect.gen(function* () {
+        const slug = `${repo.owner}/${repo.name}`
+        const issue = yield* call(token, repo, "GET", `${repoPath(repo)}/issues/${number}`).pipe(
+          Effect.flatMap(decode(IssueBody, "issue")),
+          Effect.catchIf(
+            (e) => e.status === 404,
+            () => Effect.fail(referenceNotFound(repo, number)),
+          ),
+        )
+        const isPullRequest = issue.pull_request !== undefined && issue.pull_request !== null
+        const labels = issue.labels.map((label) => label.name)
+        if (kind === "issue") {
+          if (isPullRequest) {
+            return yield* Effect.fail(
+              new GitHubError({
+                message: `#${number} in ${slug} is a pull request, not an issue; read it with kind "pr"`,
+              }),
+            )
+          }
+          const conversation = yield* referenceComments(token, repo, number)
+          return {
+            kind: "issue",
+            number: issue.number,
+            title: issue.title,
+            body: issue.body ?? "",
+            state: issue.state,
+            stateReason: issue.state_reason ?? null,
+            author: issue.user?.login ?? "ghost",
+            url: issue.html_url,
+            createdAt: issue.created_at,
+            updatedAt: issue.updated_at,
+            labels,
+            conversation,
+          } satisfies IssueReference
+        }
+        if (!isPullRequest) {
+          return yield* Effect.fail(
+            new GitHubError({
+              message: `#${number} in ${slug} is an issue, not a pull request; read it with kind "issue"`,
+            }),
+          )
+        }
+        const [pr, reviews, reviewComments, conversation, files] = yield* Effect.all(
+          [
+            getPullRequest(token, repo, number),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/reviews?per_page=100`).pipe(
+              Effect.flatMap(decode(ReviewsBody, "review list")),
+            ),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/comments?sort=created&direction=desc&per_page=100`).pipe(
+              Effect.flatMap(decode(ReviewCommentsBody, "review comment list")),
+            ),
+            referenceComments(token, repo, number),
+            call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/files?per_page=100`).pipe(
+              Effect.flatMap(decode(PullFilesBody, "pull request file list")),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        )
+        const checks = yield* call(token, repo, "GET", `${repoPath(repo)}/commits/${pr.headSha}/check-runs?per_page=100`).pipe(
+          Effect.flatMap(decode(CheckRunsBody, "check run list")),
+          Effect.map(summarizeChecks),
+          // The body and conversation must stay readable even when this optional enrichment is not.
+          Effect.catchAll(() => Effect.succeed(null)),
+        )
+        return {
+          kind: "pr",
+          number: pr.number,
+          title: pr.title,
+          body: issue.body ?? "",
+          state: pr.state,
+          draft: pr.draft,
+          author: issue.user?.login ?? "ghost",
+          url: pr.url,
+          createdAt: issue.created_at,
+          updatedAt: issue.updated_at,
+          labels,
+          baseRef: pr.baseRef,
+          headRef: pr.headRef,
+          headSha: pr.headSha,
+          mergeable: pr.mergeable,
+          mergeableState: pr.mergeableState,
+          reviewDecision: reviewDecisionOf(
+            reviews.map((review) => ({ state: review.state, login: review.user?.login ?? "ghost" })),
+          ),
+          checks,
+          reviews: reviews.map(
+            (review): ReferenceReview => ({
+              author: review.user?.login ?? "ghost",
+              state: review.state,
+              body: review.body ?? "",
+              url: review.html_url ?? "",
+            }),
+          ),
+          reviewComments: reviewComments.map(
+            (comment): ReferenceReviewComment => ({
+              path: comment.path,
+              line: comment.line ?? null,
+              author: comment.user?.login ?? "ghost",
+              body: comment.body,
+              url: comment.html_url,
+            }),
+          ),
+          conversation,
+          files: files.map(
+            (file): ReferenceFile => ({
+              path: file.filename,
+              status: file.status,
+              additions: file.additions,
+              deletions: file.deletions,
+            }),
+          ),
+        } satisfies PullRequestReference
+      })
 
     const toComment = (comment: Schema.Schema.Type<typeof CommentPostedBody>): PostedComment => ({
       id: comment.id,
@@ -385,21 +719,12 @@ export const GitHubLive = Layer.effect(
           Effect.flatMap(([pr, reviews, comments, conversation]) =>
             call(token, repo, "GET", `${repoPath(repo)}/commits/${pr.headSha}/check-runs?per_page=100`).pipe(
               Effect.flatMap(decode(CheckRunsBody, "check run list")),
-              Effect.map((checks): PullRequestStatus => {
-                const failing: string[] = []
-                const pending: string[] = []
-                let passed = 0
-                for (const run of checks.check_runs) {
-                  if (run.status !== "completed") pending.push(run.name)
-                  else if (PASSING_CONCLUSIONS.includes(run.conclusion ?? "")) passed++
-                  else failing.push(run.name)
-                }
-                return {
+              Effect.map((checks): PullRequestStatus => ({
                   ...pr,
                   reviewDecision: reviewDecisionOf(
                     reviews.map((review) => ({ state: review.state, login: review.user?.login ?? "ghost" })),
                   ),
-                  checks: { total: checks.check_runs.length, passed, failing, pending },
+                  checks: summarizeChecks(checks),
                   conversation: [
                     ...reviews.filter((review) => review.body && review.html_url).slice(-20).map((review) => ({ author: review.user?.login ?? "ghost", body: review.body ?? "", url: review.html_url ?? "" })),
                     ...conversation.map((comment) => ({ author: comment.user?.login ?? "ghost", body: comment.body, url: comment.html_url })),
@@ -411,11 +736,11 @@ export const GitHubLive = Layer.effect(
                     body: comment.body,
                     url: comment.html_url,
                   })),
-                }
-              }),
+                })),
             ),
           ),
         ),
+      readReference,
       createReview: (token, repo, number, review) =>
         call(token, repo, "POST", `${repoPath(repo)}/pulls/${number}/reviews`, {
           body: review.body,
@@ -472,21 +797,48 @@ export const GitHubLive = Layer.effect(
         call(token, repo, "POST", `${repoPath(repo)}/issues/${number}/labels`, { labels: [...labels] }).pipe(Effect.asVoid),
       removeLabel: (token, repo, number, label) =>
         call(token, repo, "DELETE", `${repoPath(repo)}/issues/${number}/labels/${encodeURIComponent(label)}`).pipe(Effect.asVoid),
+      graphql: (token, query, variables) =>
+        send(token, "POST", "/graphql", { body: { query, variables } }).pipe(
+          Effect.flatMap(({ status, text }) => {
+            if (status < 200 || status >= 300) return Effect.fail(cliFailure(status, text, "/graphql"))
+            return Effect.try({
+              try: () => JSON.parse(text) as unknown,
+              catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
+            }).pipe(Effect.flatMap(decode(GraphQLAnswer, "GraphQL")))
+          }),
+          Effect.map((answer): GraphQLResponse => ({
+            data: answer.data ?? null,
+            errors: (answer.errors ?? []).map((e) => ({
+              message: e.message,
+              ...(e.path === undefined ? {} : { path: e.path }),
+              ...(e.type === undefined ? {} : { type: e.type }),
+            })),
+          })),
+        ),
+      pullRequestDiff: (token, repo, number, format) => {
+        const path = `${repoPath(repo)}/pulls/${number}`
+        return send(token, "GET", path, { accept: `application/vnd.github.v3.${format}` }).pipe(
+          Effect.flatMap(({ status, text }) => (status === 200 ? Effect.succeed(text) : Effect.fail(cliFailure(status, text, path)))),
+        )
+      },
     }
     return service
   }),
 )
 
+/** The `message` of a GitHub error body, or "" when there is none. */
+const githubMessage = (text: string): string => {
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown }
+    return typeof parsed.message === "string" ? parsed.message : ""
+  } catch {
+    return ""
+  }
+}
+
 const describeFailure = (status: number, text: string, repo: RepoSlug): string => {
   const slug = `${repo.owner}/${repo.name}`
-  const detail = (() => {
-    try {
-      const parsed = JSON.parse(text) as { message?: unknown }
-      return typeof parsed.message === "string" ? parsed.message : ""
-    } catch {
-      return ""
-    }
-  })()
+  const detail = githubMessage(text)
   if (status === 401) return "GitHub rejected the connected token (expired or revoked): reconnect GitHub and retry"
   if (status === 403) return `GitHub denied access to ${slug} (the connected account lacks permission): ${detail}`.trimEnd()
   if (status === 404) return `GitHub repository ${slug} not found or not visible to the connected account`

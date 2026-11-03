@@ -28,6 +28,23 @@
           '';
         };
 
+        # Kept together so a stock Linux box can install the same desktop as the dev stack.
+        desktopDeps = with pkgs; [
+          weston
+          xwayland
+          openbox
+          hsetroot
+          xterm
+          xdotool
+          ffmpeg-full.bin
+          xdamageCapture
+        ];
+        desktopEnv = assert pkgs.lib.versionAtLeast pkgs.weston.version "14"; pkgs.buildEnv {
+          name = "kestrel-desktop-deps";
+          paths = desktopDeps;
+          pathsToLink = [ "/bin" ];
+        };
+
         # Native / system dependencies. npm dependencies are pinned by bun.lock
         # and installed with `bun install` inside the dev shell.
         systemDeps = with pkgs; [
@@ -40,18 +57,9 @@
           bubblewrap
           passt         # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
           util-linux    # `nsenter`: sandbox launches join their task's network namespace
-          # Remote desktop stack (one virtual X display per task)
-          weston        # headless Wayland compositor hosting each desktop's X server
-          xwayland      # rootful X server per desktop; GPU-accelerated (glamor, DRI3) when the host has one
-          openbox       # minimal window manager; themed by packages/server/src/desktop/theme.ts
-          hsetroot      # paints the desktop wallpaper on the root window
-          xterm         # default app on agent desktops
-          xdotool       # input injection (mouse/keyboard) from the web client / MCP
-          ffmpeg-full   # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
-          xdamageCapture # frames from the X damage/cursor events -> ffmpeg rawvideo
           # Local control plane (`wrangler dev`); nixpkgs' build runs workerd on NixOS
           wrangler
-        ];
+        ] ++ desktopDeps;
 
         # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
         sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
@@ -180,7 +188,9 @@
         };
       in
       {
-        packages = toolkits;
+        packages = toolkits // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          desktop-deps = desktopEnv;
+        };
 
         devShells.default = pkgs.mkShell {
           packages = systemDeps;

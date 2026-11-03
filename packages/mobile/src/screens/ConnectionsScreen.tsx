@@ -35,8 +35,9 @@ export function ConnectionsScreen() {
       {connections.isPending ? <Text style={connectionStyles.muted}>Loading…</Text> : null}
       {connections.data ? (
         <Card style={styles.card}>
+          {/* A box switch remounts each row, so a sign-in or key request still pending on the old box cannot finish here. */}
           {connections.data.map((connection, index) => (
-            <View key={connection.provider} style={index > 0 ? styles.divider : null}>
+            <View key={`${api.boxScope}:${connection.provider}`} style={index > 0 ? styles.divider : null}>
               <ConnectionRow connection={connection} />
             </View>
           ))}

@@ -77,7 +77,7 @@ export const CredentialBrokerLive = Layer.effect(
           const token = randomBytes(24).toString("base64url")
           grantByToken.set(token, { runId, user })
           tokenByRun.set(runId, token)
-          const base = `http://127.0.0.1:${config.port}/broker/${token}`
+          const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
           return {
             token,
             env: {

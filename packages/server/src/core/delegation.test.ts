@@ -19,7 +19,7 @@ import { makeWebHandler } from "../http/router"
 test("delegation persists its lineage, deduplicates retries, and delivers one completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-delegation-"))
   const config: ServerConfig = {
-    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
@@ -41,7 +41,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }
         return Either.right(undefined)
-      }), stopAll: () => Effect.void, items: () => Effect.succeed([]),
+      }), stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
     } as never),
   )
   try {
@@ -190,7 +190,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const cancelParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-parent" })
       const cancelChild = yield* core.delegate(cancelParent.id, cancelParent.delegation!.runId!, { ...input, requestId: "cancel-child" })
       expect(Either.isLeft(yield* Effect.either(core.cancelDelegation("other", cancelParent.id)))).toBe(true)
-      const handler = yield* makeWebHandler(core, {} as never)
+      const handler = yield* makeWebHandler(core, {} as never, { version: 1, platform: "other", sandbox: "off", desktop: "unavailable" })
       const url = `http://localhost/api/tasks/parent/delegations/${cancelParent.id}/cancel`
       const forbidden = yield* Effect.promise(() => handler(new Request(url, { method: "POST", headers: { [BOX_USER_HEADER]: "other" } })))
       expect(forbidden.status).toBe(404)

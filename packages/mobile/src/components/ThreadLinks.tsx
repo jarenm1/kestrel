@@ -1,5 +1,5 @@
 import React, { type ReactNode, useState } from "react";
-import { Linking, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Linking, Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import Svg, { Path } from "react-native-svg";
 import { Schema } from "effect";
 import { EllipsisVertical, GitPullRequest } from "lucide-react-native";
@@ -8,6 +8,9 @@ import { Button } from "@/components/ui/Button";
 import { colors, radius, spacing } from "@/theme";
 
 const isGithubRepo = Schema.is(GithubRepoSlug);
+
+/** Most of the screen the links sheet may cover; past that its list scrolls. */
+const SHEET_MAX_SHARE = 0.75;
 
 /** A pull request link as the thread view labels it ("PR #12", or "kestrel PR #12" with several repos). */
 export interface PullRequestLink {
@@ -40,6 +43,7 @@ interface Link {
  */
 export function ThreadLinks({ pullRequests, checkouts }: { pullRequests: readonly PullRequestLink[]; checkouts: readonly Checkout[] }) {
   const [picking, setPicking] = useState(false);
+  const { height } = useWindowDimensions();
   const links: Link[] = [
     ...pullRequests.map((pr) => ({
       key: `pr:${pr.id}`,
@@ -79,42 +83,48 @@ export function ThreadLinks({ pullRequests, checkouts }: { pullRequests: readonl
         onPress={() => setPicking(true)}
       />
       <Modal visible={picking} transparent animationType="fade" onRequestClose={() => setPicking(false)}>
-        <Pressable style={styles.backdrop} onPress={() => setPicking(false)}>
-          <View style={styles.sheet}>
+        <View style={styles.container}>
+          {/* A sibling under the sheet, not its parent, so a drag through the list scrolls instead of closing it. */}
+          <Pressable style={styles.backdrop} accessibilityLabel="Close" onPress={() => setPicking(false)} />
+          {/* Never taller than most of the screen: many repos, landscape or large text scroll inside it. */}
+          <View style={[styles.sheet, { maxHeight: height * SHEET_MAX_SHARE }]}>
             <Text style={styles.heading}>Open</Text>
-            {links.map((link) => (
-              <Pressable
-                key={link.key}
-                style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-                accessibilityRole="link"
-                onPress={() => {
-                  setPicking(false);
-                  void Linking.openURL(link.url);
-                }}
-              >
-                {link.icon(colors.foreground, 18)}
-                <Text style={styles.label} numberOfLines={1}>
-                  {link.label}
-                </Text>
-              </Pressable>
-            ))}
+            <ScrollView contentContainerStyle={styles.list} bounces={false}>
+              {links.map((link) => (
+                <Pressable
+                  key={link.key}
+                  style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+                  accessibilityRole="link"
+                  onPress={() => {
+                    setPicking(false);
+                    void Linking.openURL(link.url);
+                  }}
+                >
+                  {link.icon(colors.foreground, 18)}
+                  <Text style={styles.label} numberOfLines={1}>
+                    {link.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
           </View>
-        </Pressable>
+        </View>
       </Modal>
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: colors.scrim, justifyContent: "flex-end" },
+  container: { flex: 1, justifyContent: "flex-end" },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: colors.scrim },
   sheet: {
     backgroundColor: colors.secondary,
     borderTopLeftRadius: radius.xxl,
     borderTopRightRadius: radius.xxl,
     padding: spacing.sm,
     paddingBottom: spacing.xxl,
-    gap: 2,
   },
+  list: { gap: 2 },
   heading: { color: colors.mutedForeground, fontSize: 12, fontWeight: "600", padding: spacing.md },
   row: { flexDirection: "row", alignItems: "center", gap: 12, minHeight: 44, paddingHorizontal: spacing.md, borderRadius: radius.md },
   rowPressed: { backgroundColor: colors.accent },

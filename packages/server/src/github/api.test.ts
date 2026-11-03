@@ -15,11 +15,13 @@ interface Recorded {
 /** A local stand-in for api.github.com that records every request it receives. */
 const fakeGitHub = (route: (request: Recorded) => { readonly json?: unknown; readonly status?: number }) => {
   const requests: Recorded[] = []
+  const auth: (string | null)[] = []
   const server = Bun.serve({
     port: 0,
     async fetch(request) {
       const url = new URL(request.url)
       const raw = await request.text()
+      auth.push(request.headers.get("authorization"))
       const recorded: Recorded = {
         method: request.method,
         path: url.pathname + url.search,
@@ -33,7 +35,7 @@ const fakeGitHub = (route: (request: Recorded) => { readonly json?: unknown; rea
       })
     },
   })
-  return { requests, url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+  return { requests, auth, url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
 }
 
 const runAgainst = <A>(url: string, program: Effect.Effect<A, unknown, GitHub>) =>
@@ -42,6 +44,28 @@ const runAgainst = <A>(url: string, program: Effect.Effect<A, unknown, GitHub>) 
       Effect.provide(GitHubLive.pipe(Layer.provide(Layer.succeed(Config, { githubApiUrl: url } as unknown as ServerConfig)))),
     ),
   )
+
+const issueJson = (overrides: Record<string, unknown> = {}) => ({
+  number: 1,
+  html_url: "https://github.com/jarenm1/kestrel/issues/1",
+  title: "Fix ?? operator",
+  body: "The `??` operator is broken.",
+  state: "open",
+  state_reason: null,
+  created_at: "2024-01-02T03:04:05Z",
+  updated_at: "2024-02-03T04:05:06Z",
+  user: { login: "alice" },
+  labels: [{ name: "bug" }],
+  ...overrides,
+})
+
+const commentJson = (overrides: Record<string, unknown> = {}) => ({
+  body: "Confirmed on main.",
+  html_url: "https://github.com/jarenm1/kestrel/issues/1#issuecomment-1",
+  created_at: "2024-01-03T00:00:00Z",
+  user: { login: "bob" },
+  ...overrides,
+})
 
 const pullRequestJson = (overrides: Record<string, unknown> = {}) => ({
   number: 7,
@@ -267,6 +291,199 @@ test("viewerLogin reads the login of the account the token belongs to", async ()
   const gh = fakeGitHub(({ path }) => (path === "/user" ? { json: { login: "jarenm1" } } : { status: 500 }))
   try {
     expect(await runAgainst(gh.url, Effect.flatMap(GitHub, (github) => github.viewerLogin("token", repo)))).toBe("jarenm1")
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference reads an issue's body and conversation, sending the token only to GitHub", async () => {
+  const gh = fakeGitHub(({ path }) => {
+    if (path === "/repos/jarenm1/kestrel/issues/1") return { json: issueJson() }
+    if (path === "/repos/jarenm1/kestrel/issues/1/comments?per_page=100") {
+      return { json: [commentJson()] }
+    }
+    return { status: 500 }
+  })
+  try {
+    const reference = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("secret-token", repo, 1, "issue")),
+    )
+    expect(reference).toMatchObject({
+      kind: "issue",
+      number: 1,
+      title: "Fix ?? operator",
+      body: "The `??` operator is broken.",
+      state: "open",
+      stateReason: null,
+      author: "alice",
+      url: "https://github.com/jarenm1/kestrel/issues/1",
+      createdAt: "2024-01-02T03:04:05Z",
+      updatedAt: "2024-02-03T04:05:06Z",
+      labels: ["bug"],
+    })
+    expect(reference.kind === "issue" ? reference.conversation : []).toEqual([
+      {
+        author: "bob",
+        body: "Confirmed on main.",
+        url: "https://github.com/jarenm1/kestrel/issues/1#issuecomment-1",
+        createdAt: "2024-01-03T00:00:00Z",
+      },
+    ])
+    expect(gh.auth).toEqual(["Bearer secret-token", "Bearer secret-token"])
+    expect(gh.requests.map(({ path }) => path).some((path) => path.includes("/pulls"))).toBe(false)
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference refuses a pull request read as an issue without falling through to the pull request endpoint", async () => {
+  const gh = fakeGitHub(({ path }) =>
+    path === "/repos/jarenm1/kestrel/issues/7"
+      ? { json: issueJson({ number: 7, title: "Add references", pull_request: { url: "https://api.github.com/repos/jarenm1/kestrel/pulls/7" } }) }
+      : { status: 500 },
+  )
+  try {
+    const result = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("token", repo, 7, "issue")).pipe(Effect.either),
+    )
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { message: '#7 in jarenm1/kestrel is a pull request, not an issue; read it with kind "pr"' },
+    })
+    expect(gh.requests.map(({ path }) => path)).toEqual(["/repos/jarenm1/kestrel/issues/7"])
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference refuses an issue read as a pull request without falling through to the pull request endpoint", async () => {
+  const gh = fakeGitHub(({ path }) => (path === "/repos/jarenm1/kestrel/issues/1" ? { json: issueJson() } : { status: 500 }))
+  try {
+    const result = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("token", repo, 1, "pr")).pipe(Effect.either),
+    )
+    expect(result).toMatchObject({
+      _tag: "Left",
+      left: { message: '#1 in jarenm1/kestrel is an issue, not a pull request; read it with kind "issue"' },
+    })
+    expect(gh.requests.map(({ path }) => path)).toEqual(["/repos/jarenm1/kestrel/issues/1"])
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference reports a missing reference explicitly and never puts the token in the error", async () => {
+  const gh = fakeGitHub(() => ({ status: 404 }))
+  try {
+    const result = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("secret-token", repo, 99, "issue")).pipe(Effect.either),
+    )
+    expect(result._tag).toBe("Left")
+    if (result._tag === "Left") {
+      expect(result.left.message).toContain("no issue or pull request #99 in jarenm1/kestrel")
+      expect(result.left.message).not.toContain("secret-token")
+    }
+    expect(gh.auth).toEqual(["Bearer secret-token"])
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference returns a pull request's status, checks, changed files and conversation", async () => {
+  const gh = fakeGitHub(({ path }) => {
+    if (path === "/repos/jarenm1/kestrel/issues/156") {
+      return {
+        json: issueJson({
+          number: 156,
+          title: "Add references",
+          body: "PR body",
+          state: "closed",
+          labels: [{ name: "enhancement" }],
+          pull_request: { url: "https://api.github.com/repos/jarenm1/kestrel/pulls/156" },
+        }),
+      }
+    }
+    if (path === "/repos/jarenm1/kestrel/pulls/156") {
+      return {
+        json: pullRequestJson({
+          number: 156,
+          title: "Add references",
+          merged: true,
+          head: { sha: "abc123", ref: "cloudagents/topic" },
+          base: { ref: "main" },
+        }),
+      }
+    }
+    if (path === "/repos/jarenm1/kestrel/pulls/156/reviews?per_page=100") {
+      return { json: [{ state: "APPROVED", body: "Looks good", html_url: "https://github.com/jarenm1/kestrel/pull/156#review", user: { login: "reviewer" } }] }
+    }
+    if (path === "/repos/jarenm1/kestrel/pulls/156/comments?sort=created&direction=desc&per_page=100") {
+      return { json: [{ path: "src/a.ts", line: 12, body: "nit", html_url: "https://github.com/jarenm1/kestrel/pull/156#comment", user: { login: "reviewer" } }] }
+    }
+    if (path === "/repos/jarenm1/kestrel/issues/156/comments?per_page=100") return { json: [commentJson()] }
+    if (path === "/repos/jarenm1/kestrel/pulls/156/files?per_page=100") {
+      return { json: [{ filename: "src/a.ts", status: "modified", additions: 3, deletions: 1 }] }
+    }
+    if (path === "/repos/jarenm1/kestrel/commits/abc123/check-runs?per_page=100") {
+      return { json: { check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] } }
+    }
+    return { status: 500 }
+  })
+  try {
+    const reference = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("token", repo, 156, "pr")),
+    )
+    expect(reference).toMatchObject({
+      kind: "pr",
+      number: 156,
+      title: "Add references",
+      body: "PR body",
+      state: "merged",
+      author: "alice",
+      labels: ["enhancement"],
+      baseRef: "main",
+      headRef: "cloudagents/topic",
+      headSha: "abc123",
+      reviewDecision: "approved",
+      checks: { total: 1, passed: 1, failing: [], pending: [] },
+      files: [{ path: "src/a.ts", status: "modified", additions: 3, deletions: 1 }],
+    })
+    expect(reference.kind === "pr" ? reference.reviews : []).toEqual([
+      { author: "reviewer", state: "APPROVED", body: "Looks good", url: "https://github.com/jarenm1/kestrel/pull/156#review" },
+    ])
+    expect(reference.kind === "pr" ? reference.reviewComments : []).toEqual([
+      { path: "src/a.ts", line: 12, author: "reviewer", body: "nit", url: "https://github.com/jarenm1/kestrel/pull/156#comment" },
+    ])
+    expect(reference.kind === "pr" ? reference.conversation : []).toHaveLength(1)
+  } finally {
+    gh.stop()
+  }
+})
+
+test("readReference keeps a pull request readable when GitHub will not report check runs", async () => {
+  const gh = fakeGitHub(({ path }) => {
+    if (path === "/repos/jarenm1/kestrel/issues/7") {
+      return { json: issueJson({ number: 7, title: "Add references", pull_request: { url: "https://api.github.com/repos/jarenm1/kestrel/pulls/7" } }) }
+    }
+    if (path === "/repos/jarenm1/kestrel/pulls/7") return { json: pullRequestJson({ title: "Add references" }) }
+    if (path === "/repos/jarenm1/kestrel/pulls/7/reviews?per_page=100") return { json: [] }
+    if (path === "/repos/jarenm1/kestrel/pulls/7/comments?sort=created&direction=desc&per_page=100") return { json: [] }
+    if (path === "/repos/jarenm1/kestrel/issues/7/comments?per_page=100") return { json: [] }
+    if (path === "/repos/jarenm1/kestrel/pulls/7/files?per_page=100") return { json: [] }
+    if (path === "/repos/jarenm1/kestrel/commits/abc123/check-runs?per_page=100") return { status: 403 }
+    return { status: 500 }
+  })
+  try {
+    const reference = await runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => github.readReference("token", repo, 7, "pr")),
+    )
+    expect(reference).toMatchObject({ kind: "pr", number: 7, title: "Add references", body: "The `??` operator is broken.", checks: null })
   } finally {
     gh.stop()
   }

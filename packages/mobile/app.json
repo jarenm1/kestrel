@@ -17,6 +17,16 @@
     "android": {
       "package": "com.kestrel.mobile"
     },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "name": "Kestrel",
+      "backgroundColor": "#0a0a0b",
+      "themeColor": "#0a0a0b"
+    },
+    "experiments": {
+      "baseUrl": "/m"
+    },
     "plugins": [
       "expo-secure-store",
       "expo-router"

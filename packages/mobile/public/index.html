@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Phone browsers: the page fills the screen under the notch (safe-area insets come from env()), the keyboard
+      resizes the layout so the composer stays above it (Android), and focusing an input does not zoom (iOS).
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <title>Kestrel</title>
+    <!-- The `react-native-web` recommended style reset: https://necolas.github.io/react-native-web/docs/setup/#root-element -->
+    <style id="expo-reset">
+      html,
+      body {
+        height: 100%;
+        background-color: #0a0a0b;
+      }
+      /*
+       * The app scrolls inside its own ScrollViews; the page itself never scrolls or bounces. The screen slid aside for
+       * the sidebar must not widen the page either: phone browsers grow the layout viewport to fit overflowing content,
+       * which pushes full-screen sheets off the visible screen.
+       */
+      html,
+      body,
+      #root {
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
+      #root {
+        display: flex;
+        height: 100%;
+        flex: 1;
+      }
+    </style>
+  </head>
+
+  <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+  </body>
+</html>

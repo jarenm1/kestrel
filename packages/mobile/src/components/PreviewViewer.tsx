@@ -1,13 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { WebView } from "react-native-webview";
 import { RefreshCw } from "lucide-react-native";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { colors, fonts, radius, spacing } from "@/theme";
-
-const SafeWebView = WebView as unknown as React.ComponentType<any>;
 
 /**
  * Wraps the preview URL in an iframe with the same sandbox as the web viewer. Without `allow-same-origin`
@@ -32,7 +30,7 @@ export function PreviewViewer({
   const [previewToken, setPreviewToken] = useState<string>();
   const [sessionError, setSessionError] = useState<string>();
   const [generation, setGeneration] = useState(0);
-  const webViewRef = useRef<{ reload(): void } | null>(null);
+  const webViewRef = useRef<HtmlViewHandle | null>(null);
 
   useEffect(() => {
     setPreviewToken(undefined);
@@ -83,13 +81,7 @@ export function PreviewViewer({
       {sessionError ? <Alert style={styles.alert}>{sessionError}</Alert> : null}
       <View style={styles.frame}>
         {previewUrl ? (
-          <SafeWebView
-            ref={webViewRef}
-            source={{ html: previewFrameHtml(previewUrl) }}
-            style={styles.webview}
-            javaScriptEnabled
-            domStorageEnabled
-          />
+          <HtmlView ref={webViewRef} html={previewFrameHtml(previewUrl)} style={styles.webview} />
         ) : (
           <View style={styles.loading}>
             <ActivityIndicator color={colors.mutedForeground} />

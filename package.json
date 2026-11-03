@@ -11,7 +11,7 @@
     "typecheck": "bun run --filter '*' typecheck",
     "dev:server": "bun run --filter @cloudagents/server dev",
     "dev:app": "bun run --filter @cloudagents/app dev",
-    "build:app": "bun run --filter @cloudagents/app build",
+    "build:app": "bun run --filter @cloudagents/app build && bun run --filter @cloudagents/mobile build:web",
     "build:box": "bun scripts/build-box.ts",
     "dev:mobile": "bun run --filter @cloudagents/mobile start"
   },

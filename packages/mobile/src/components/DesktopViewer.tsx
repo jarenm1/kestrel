@@ -1,23 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from "react-native";
-import { WebView } from "react-native-webview";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
-import { createQueries, keys } from "@/api/queries";
+import { createQueries, boxKeys, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Paths, type DesktopStatus } from "@cloudagents/protocol";
 
-const SafeWebView = WebView as unknown as React.ComponentType<any>;
-
 /**
- * Desktop viewer for mobile — renders the desktop stream in a WebView.
+ * Desktop viewer for mobile — renders the desktop stream in an HtmlView.
  * The desktop stream uses fMP4 over WebSocket + MediaSource Extensions,
  * which isn't natively supported in React Native, so we use a minimal
- * HTML page inside a WebView to handle video playback.
+ * HTML page (a WebView, or an iframe on the web) to handle video playback.
  */
 export function DesktopViewer({ taskId }: { taskId: string }) {
   const { api } = useApiClient();
@@ -31,16 +29,16 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const active = status?.state === "running" || status?.state === "starting";
 
   const toggle = useMutation({
-    mutationFn: async (): Promise<DesktopStatus> => {
+    mutationFn: async ({ api, taskId, active }: ThreadCall & { active: boolean }): Promise<DesktopStatus> => {
       if (!active) return api.startDesktop(taskId);
       await api.stopDesktop(taskId);
       return api.getDesktop(taskId);
     },
-    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+    onSuccess: (next, { api, taskId }) => queryClient.setQueryData(boxKeys(api.boxScope).desktop(taskId), next),
   });
 
   // Streaming pauses while the app is backgrounded: the page closes its socket and resumes on foreground.
-  const webView = useRef<{ injectJavaScript(script: string): void } | null>(null);
+  const webView = useRef<HtmlViewHandle | null>(null);
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active" || state === "background") {
@@ -259,7 +257,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         <Button
           variant={active ? "soft" : "default"}
           size="sm"
-          onPress={() => toggle.mutate()}
+          onPress={() => toggle.mutate({ api, taskId, active })}
           disabled={toggle.isPending || !status}
         >
           {active ? "Stop" : "Start"}
@@ -274,15 +272,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       {error ? <Alert style={styles.alert}>{error}</Alert> : null}
       <View style={[styles.well, { aspectRatio: aspect }]}>
         {status?.state === "running" && desktopHtml ? (
-          <SafeWebView
-            ref={webView}
-            source={{ html: desktopHtml }}
-            style={styles.webview}
-            javaScriptEnabled
-            mediaPlaybackRequiresUserAction={false}
-            allowsInlineMediaPlayback
-            scrollEnabled={false}
-          />
+          <HtmlView ref={webView} html={desktopHtml} style={styles.webview} />
         ) : (
           <View style={styles.placeholder}>
             {toggle.isPending ? (

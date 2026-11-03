@@ -20,12 +20,20 @@ test("a waiting parent releases the only run slot so a real child can finish", a
   const cli = join(root, "agent.ts")
   await writeFile(cli, `
 import { createInterface } from "node:readline"
-createInterface({ input: process.stdin }).on("line", () => {
-  if (!process.env.CLOUDAGENTS_PROMPT?.includes("hold parent")) console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
+let hold
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  if (message.type === "control_request") {
+    console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true }))
+    return
+  }
+  if (message.type !== "user") return
+  hold ??= message.message.content.includes("hold parent")
+  if (!hold) console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Child finished successfully" }))
 })
 `)
   const config: ServerConfig = {
-    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "" },
@@ -40,7 +48,7 @@ createInterface({ input: process.stdin }).on("line", () => {
       issue: () => Effect.succeed({ token: "test-only", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
-    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), shutdown: () => Effect.void }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never),
   )
@@ -90,7 +98,12 @@ createInterface({ input: process.stdin }).on("line", () => {
           yield* Effect.sleep("50 millis")
         }
         expect(thirdQueued).toBe(true)
-      } finally { yield* agent.stopAll() }
+      } finally {
+        yield* agent.stopAll()
+        // Stop records cancellation before the CLI has exited. Wait for it before deleting its cwd on Windows.
+        for (let i = 0; i < 100 && (yield* agent.activeRunCount()) > 0; i++) yield* Effect.sleep("50 millis")
+        expect(yield* agent.activeRunCount()).toBe(0)
+      }
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness)))))
   } finally { await rm(root, { recursive: true, force: true }) }
 }, 12_000)

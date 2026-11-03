@@ -4,6 +4,31 @@ import { Markdown } from "./Markdown"
 
 const render = (text: string) => renderToStaticMarkup(<Markdown text={text} />)
 
+describe("GitHub references", () => {
+  test("typed references retain their destination and distinguish issues from pull requests", () => {
+    const html = render(
+      "Compare [PR #156](https://github.com/jarenm1/kestrel/pull/156) with " +
+        "[Issue #12](https://github.com/jarenm1/kestrel/issues/12).",
+    )
+    expect(html).toContain('href="https://github.com/jarenm1/kestrel/pull/156"')
+    expect(html).toContain('href="https://github.com/jarenm1/kestrel/issues/12"')
+    expect(html).toContain("lucide-git-pull-request")
+    expect(html).toContain("lucide-circle-dot")
+    expect(html).toContain("font-semibold underline")
+  })
+
+  test("ordinary links and mismatched labels do not become typed references", () => {
+    const html = render(
+      "[Issue #156](https://github.com/jarenm1/kestrel/pull/156) " +
+        "[PR #156](https://example.com/jarenm1/kestrel/pull/156) " +
+        "[documentation](https://github.com/jarenm1/kestrel/issues/12)",
+    )
+    expect(html).not.toContain("<svg")
+    expect(html).not.toContain("font-semibold underline")
+    expect(html).toContain(">documentation</a>")
+  })
+})
+
 describe("agent HTML and SVG", () => {
   test("inline SVG and raw HTML blocks render as elements, with markdown inside HTML blocks", () => {
     const html = render(

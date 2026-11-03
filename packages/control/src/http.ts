@@ -1,4 +1,4 @@
-import { Schema } from "effect"
+import { Schema, SchemaAST } from "effect"
 
 /** Error body shape shared with the rest of the API: `{ _tag, message }`. */
 export const errorResponse = (status: number, tag: string, message: string): Response =>
@@ -11,16 +11,53 @@ export const json = (body: unknown, status = 200, headers?: HeadersInit): Respon
   return new Response(JSON.stringify(body), { status, headers: h })
 }
 
-/** The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. */
-export const decodeBody = async <A, I>(request: Request, schema: Schema.Schema<A, I>): Promise<A | Response> => {
+/**
+ * The request's JSON body decoded with `schema`; a 400 response instead when it is not JSON or does not match. Pass
+ * `options` to make unknown fields an error.
+ */
+export const decodeBody = async <A, I>(
+  request: Request,
+  schema: Schema.Schema<A, I>,
+  options?: SchemaAST.ParseOptions,
+): Promise<A | Response> => {
   let body: unknown
   try {
     body = await request.json()
   } catch {
     return errorResponse(400, "BadRequest", "body must be JSON")
   }
-  const decoded = Schema.decodeUnknownEither(schema)(body)
+  const decoded = Schema.decodeUnknownEither(schema, options)(body)
   return decoded._tag === "Left" ? errorResponse(400, "BadRequest", "invalid request body") : decoded.right
+}
+
+/**
+ * `request` when its body is at most `maxBytes`, with the body read into memory; otherwise a 413 response. Reads no more
+ * than `maxBytes` plus one chunk, so a route bounds what a client can make it buffer.
+ */
+export const cappedRequest = async (request: Request, maxBytes: number): Promise<Request | Response> => {
+  const tooLarge = (): Response => errorResponse(413, "PayloadTooLarge", `body is larger than ${maxBytes} bytes`)
+  if (Number(request.headers.get("content-length") ?? 0) > maxBytes) return tooLarge()
+  if (request.body === null) return request
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > maxBytes) {
+      await reader.cancel()
+      return tooLarge()
+    }
+    chunks.push(value)
+  }
+  const body = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new Request(request.url, { method: request.method, headers: request.headers, body })
 }
 
 /** Failure talking to an upstream (GitHub, box) that should surface as 502. */

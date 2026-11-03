@@ -95,6 +95,24 @@ describe("checkout git runs in the shadow", () => {
     }
   })
 
+  test("commitLog lists only the checkout's own commits, newest first, with subject and body", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const co = await makeCheckout(root, origin)
+    expect(await withWorkspace((ws) => ws.commitLog({ ...co.spec, baseRef: co.pinRef }))).toBe("")
+
+    await writeFile(join(co.spec.dir, "one.txt"), "1\n")
+    git(co.spec.dir, ["add", "one.txt"])
+    git(co.spec.dir, ["commit", "-m", "first change", "-m", "why it matters"])
+    await writeFile(join(co.spec.dir, "two.txt"), "2\n")
+    git(co.spec.dir, ["add", "two.txt"])
+    git(co.spec.dir, ["commit", "-m", "second change"])
+
+    const log = await withWorkspace((ws) => ws.commitLog({ ...co.spec, baseRef: co.pinRef }))
+    const [second, first] = [git(co.spec.dir, ["rev-parse", "HEAD"]), git(co.spec.dir, ["rev-parse", "HEAD~1"])]
+    expect(log).toBe(`${second}\0second change\0\0\n${first}\0first change\0why it matters\n\0`)
+  })
+
   test("listFiles lists files on disk without ignored ones, except committed ones, and caps the list", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)

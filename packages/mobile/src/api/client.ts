@@ -35,6 +35,7 @@ import {
   Usage,
   type UserBox,
 } from "@cloudagents/protocol";
+import { fetchCredentials } from "@/auth/session";
 
 export class ApiError extends Error {
   constructor(
@@ -63,6 +64,12 @@ function errorMessage(text: string, fallback: string): string {
 /** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
+/** Whether two active boxes are the same route; `null` (Kestrel's relayed box) only matches `null`. */
+export function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.id === b.id && a.url === b.url;
+}
+
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
 export interface FileSource {
   uri: string;
@@ -74,6 +81,8 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
+  /** Stable identity for box-served cache entries; includes URL so a changed route cannot reuse old data. */
+  readonly boxScope: string;
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
@@ -87,6 +96,8 @@ export interface ApiClient {
   putApiKey(provider: string, body: PutApiKeyBody): Promise<Connection>;
   deleteConnection(provider: string): Promise<void>;
   githubRepos(): Promise<readonly GithubRepo[]>;
+  /** Branch names of a GitHub repository, its default branch first; 404 without a GitHub connection or access. */
+  githubBranches(repo: string): Promise<readonly string[]>;
   boxes(): Promise<BoxList>;
   setActiveBox(boxId: string | null): Promise<BoxList>;
   box(): Promise<BoxStatus>;
@@ -135,8 +146,8 @@ async function send<A, I>(
     res = await fetch(url, {
       method,
       headers: requestHeaders,
-      // RN's cookie jar would append a second session to our explicit Cookie header.
-      credentials: "omit",
+      // Native: RN's cookie jar would append a second session to our explicit Cookie header. Web: the browser's cookie.
+      credentials: fetchCredentials,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -221,6 +232,7 @@ export function createApiClient(
   }
 
   return {
+    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
       const token = await mintBoxToken(activeBox);
@@ -241,6 +253,7 @@ export function createApiClient(
     deleteConnection: (provider) =>
       request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)).then(() => undefined),
     githubRepos: () => request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos),
+    githubBranches: (repo) => request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo)),
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {

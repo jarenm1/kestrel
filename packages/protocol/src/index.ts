@@ -47,7 +47,7 @@ export const Checkout = Schema.Struct({
   id: Schema.String,
   /** GitHub "owner/name" for github.com repositories, otherwise the https clone URL. */
   repo: Schema.String,
-  /** Directory of the checkout, relative to the thread workspace (the agent's working directory), e.g. `kestrel`. */
+  /** Directory of the checkout, relative to the thread workspace, e.g. `kestrel`. The agent starts in the first one. */
   dir: Schema.String,
   /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`, or the branch of the pull request it took over. */
   branch: Schema.String,
@@ -147,6 +147,12 @@ export const Message = Schema.Struct({
    * came from, with that thread's title when it was sent. Absent on messages the user typed.
    */
   fromThread: Schema.optional(Schema.Struct({ id: Schema.String, title: Schema.String })),
+  /**
+   * Set on a user message that reached a run already going (a steer, an answer, or mail for its inbox): how many of
+   * the run's display items it had shown by then, so the message reads at that point of the transcript. Absent on a
+   * run's prompt and on messages persisted before it was recorded.
+   */
+  afterItems: Schema.optional(Schema.Number),
 })
 export type Message = typeof Message.Type
 
@@ -464,7 +470,7 @@ const noFolderFiles = (): FolderFiles => ({ files: [], truncated: false })
 
 /**
  * `GET Paths.taskFiles(id)` (`?hidden=1` adds hidden files to the folders). `checkouts` has one entry per checkout, in
- * `Task.checkouts` order. `workspace` is the thread's working directory without its checkouts; `home` is the agent's
+ * `Task.checkouts` order. `workspace` is the thread workspace without its checkouts; `home` is the agent's
  * home, where desktop apps save.
  */
 export const FilesResponse = Schema.Struct({
@@ -510,6 +516,18 @@ export const HarnessCommands = Schema.Struct({
   commands: Schema.Array(HarnessCommand),
 })
 export type HarnessCommands = typeof HarnessCommands.Type
+
+/**
+ * Version 1 describes configuration and desktop prerequisites, not a guarantee of a successful start. The `platform`
+ * and `sandbox` value sets are closed within version 1: a new value is a new contract version.
+ */
+export const BoxCapabilities = Schema.Struct({
+  version: Schema.Literal(1),
+  platform: Schema.Literal("linux", "wsl", "lima", "other"),
+  sandbox: Schema.Literal("strict", "basic", "off"),
+  desktop: Schema.Literal("prerequisites-present", "unavailable"),
+})
+export type BoxCapabilities = typeof BoxCapabilities.Type
 
 export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
 export type Health = typeof Health.Type
@@ -627,6 +645,9 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 
 export const Paths = {
   health: "/api/health",
+  capabilities: "/api/capabilities",
+  /** POST a browser's `WebRtcOffer` (box token) -> `WebRtcAnswer`: opens the direct data channel of a user box. */
+  webrtcOffer: "/api/webrtc/offer",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
   /** GET `?tz=<IANA zone>` -> UsageActivity of the signed-in user, days counted in that zone. */
@@ -699,11 +720,14 @@ export const Paths = {
 } as const
 
 export * from "./relay"
+export * from "./rtc"
 export * from "./control"
+export * from "./meter"
 export * from "./refs"
 export * from "./models"
 export * from "./boxtoken"
 export * from "./tool-names"
 export * from "./tool-display"
 export * from "./live-items"
+export * from "./transcript-segments"
 export * from "./thread-identity"

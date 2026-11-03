@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createWriteStream, type WriteStream } from "node:fs"
+import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
@@ -23,6 +23,7 @@ import {
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { Config, VERSION } from "../config"
+import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
@@ -58,15 +59,18 @@ export interface AgentHarnessShape {
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /**
-   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input). False
-   * when the run cannot take it now (no turn going yet, or its last turn is over); the message then waits in the
-   * run's inbox for task_inbox.
+   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input).
+   * `accepted` is false when the run cannot take it now (no turn going yet, or its last turn is over); the message
+   * then waits in the run's inbox for task_inbox. `afterItems` is the run's item count (`itemCount`) in the same
+   * step the text was sent, so every item before it was emitted before the agent got the text.
    */
-  readonly steer: (runId: string, text: string) => Effect.Effect<boolean>
+  readonly steer: (runId: string, text: string) => Effect.Effect<{ readonly accepted: boolean; readonly afterItems: number }>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
   readonly items: (runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, InternalError>
+  /** How many display items a live run has shown so far (a run waiting for a slot shows its queue item); 0 once it is over. */
+  readonly itemCount: (runId: string) => number
   /**
    * Plays a recorded fixture through the normal run pipeline (stdout -> items -> finish) instead
    * of launching an agent. Dev-only `/replay` flow; the fixture path is trusted repo state.
@@ -92,8 +96,6 @@ interface ActiveRun {
   readonly child: ChildProcess
   readonly log: WriteStream
   readonly taskId: string
-  readonly stdoutLines: string[]
-  readonly stderrLines: string[]
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
@@ -107,8 +109,6 @@ interface ActiveRun {
   sessionId: string | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
-  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
-  readonly stderrIsLog: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
@@ -146,6 +146,20 @@ interface ProcessSpec {
   readonly args: ReadonlyArray<string>
   readonly cwd: string
   readonly env: NodeJS.ProcessEnv
+}
+
+/**
+ * Where a thread's agent starts: its first checkout, so the harness finds that repository's root and loads its
+ * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout. The checkout is agent-writable: one
+ * the agent deleted or replaced with anything but a directory (a symlink to elsewhere on the host, say) gives the
+ * workspace root too. The whole workspace stays bound either way; only the starting directory changes.
+ */
+export const agentCwd = (workspacePath: string, task: Pick<Task, "checkouts">): string => {
+  const first = task.checkouts[0]
+  if (first === undefined) return workspacePath
+  const dir = join(workspacePath, first.dir)
+  // lstat, not stat: a symlink is not followed, so it is not a directory here.
+  return lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() === true ? dir : workspacePath
 }
 
 const KILL_GRACE_MS = 3000
@@ -200,10 +214,17 @@ export const AgentHarnessLive = Layer.effect(
     const waiting: Array<{ readonly runId: string; readonly grant: (granted: boolean) => void }> = []
     /** The queue item each waiting run shows, with its task for publishing. */
     const queuedItems = new Map<string, { readonly taskId: string; readonly item: AgentItem }>()
+    /**
+     * The queue item ("Started.") of a run that waited for its slot and is still being launched: the run shows it
+     * already, though it joins the run's items only when `startRun` makes the run active. Dropped then, or when the run
+     * gives up its slot instead.
+     */
+    const startingItems = new Map<string, AgentItem>()
     const suspended = new Map<string, { count: number; closing: boolean; done: Promise<void>; resolve: () => void }>()
 
     /** Frees a run's slot and hands it to the run that has waited longest. No-op for a run that holds no slot. */
     const releaseSlot = (runId: string) => {
+      startingItems.delete(runId)
       if (!holding.delete(runId)) return
       const next = waiting.shift()
       if (next === undefined) return
@@ -230,6 +251,8 @@ export const AgentHarnessLive = Layer.effect(
             queuedItems.delete(runId)
             const item = granted ? queueItem("ok", "Started.") : queueItem("error", "Cancelled before it started.")
             publish({ _tag: "agent.item", taskId, runId, item })
+            // A run getting its slot back (withSlotReleased) is active already and keeps its own items.
+            if (granted && !active.has(runId)) startingItems.set(runId, item)
             return granted ? { queued: item } : null
           }),
         )
@@ -304,7 +327,6 @@ export const AgentHarnessLive = Layer.effect(
         if (!entry) return
         active.delete(runId)
         entry.log.end()
-        if (spawnError) entry.stderrLines.push(spawnError)
         // A run is over when its turn is, whatever the CLI's exit code; a refused request or an early exit shows as
         // the run's error, unless the run was stopped on purpose.
         entry.driver?.close()
@@ -335,13 +357,13 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
-          const failure = turn?.status === "failed" ? turn.error : null
-          const stdout = entry.stdoutLines.join("\n").trim()
-          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
+          const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
+          // Diagnostics stay in output.log and agent.output, never in portable conversation history:
+          // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
           const text =
             entry.transcript.finalText() ??
-            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
-              (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
+            failure ??
+            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -412,7 +434,6 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
-        entry.stderrLines.push(line)
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
       }
@@ -441,7 +462,6 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
-      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
@@ -471,8 +491,6 @@ export const AgentHarnessLive = Layer.effect(
               child,
               log,
               taskId: task.id,
-              stdoutLines: [],
-              stderrLines: [],
               items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
@@ -481,7 +499,6 @@ export const AgentHarnessLive = Layer.effect(
               context: session.seed,
               sessionId: null,
               driver: null,
-              stderrIsLog: session.conversation?.kind === "codex",
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
@@ -520,6 +537,7 @@ export const AgentHarnessLive = Layer.effect(
               entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
             }
             active.set(run.id, entry)
+            startingItems.delete(run.id)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
             createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
             child.on("error", (err) => {
@@ -533,6 +551,10 @@ export const AgentHarnessLive = Layer.effect(
           catch: (e) => new InternalError({ message: `failed to spawn agent: ${String(e)}` }),
         })
       })
+
+    // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
+    const itemCount = (runId: string): number =>
+      active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0)
 
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {
@@ -595,6 +617,9 @@ export const AgentHarnessLive = Layer.effect(
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
           const mcpConfigAgent = join(agentHome(settings, homeDir), ".cloudagents", "mcp.json")
+          // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
+          const ghBinHost = join(homeDir, ".kestrel", "gh")
+          const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
 
           const started = yield* Effect.gen(function* () {
             // The run's token authorizes its MCP session as well as its model calls.
@@ -610,6 +635,9 @@ export const AgentHarnessLive = Layer.effect(
                 // The file carries the run's token: owner-only, including when it already existed.
                 await writeFile(mcpConfigHost, JSON.stringify(mcpJson, null, 2), { encoding: "utf8", mode: 0o600 })
                 await chmod(mcpConfigHost, 0o600)
+                await mkdir(ghBinHost, { recursive: true })
+                await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
+                await chmod(join(ghBinHost, "gh"), 0o755)
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
@@ -625,16 +653,18 @@ export const AgentHarnessLive = Layer.effect(
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
+            const workspacePath = join(config.threadsDir, task.id)
+            const cwd = agentCwd(workspacePath, task)
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
               kind: "run",
-              workspacePath: join(config.threadsDir, task.id),
+              workspacePath,
+              cwd,
               mirrorDir: join(config.mirrorsDir, task.owner),
               homeDir,
               display,
               env: {
-                CLOUDAGENTS_PROMPT: prompt,
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
@@ -642,6 +672,8 @@ export const AgentHarnessLive = Layer.effect(
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
                 CLOUDAGENTS_MCP_TOKEN: lease.token,
+                KESTREL_GH_URL: `${config.mcpBaseUrl}/gh/${task.id}`,
+                KESTREL_GH_TOKEN: lease.token,
                 // Claude Code's MCP tool-call timeout (ms). task_ask has no timeout of its own: the largest timer
                 // delay lets a question wait as long as the user takes to answer.
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
@@ -653,6 +685,7 @@ export const AgentHarnessLive = Layer.effect(
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
+              pathPrefix: [ghBinAgent],
             })
 
             // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
@@ -679,6 +712,8 @@ export const AgentHarnessLive = Layer.effect(
                         input: {
                           text: run.prompt,
                           prompt,
+                          cwd,
+                          workspacePath,
                           resumeThread: resumeSession,
                           model: choice.model,
                           effort: choice.effort,
@@ -745,7 +780,12 @@ export const AgentHarnessLive = Layer.effect(
       cancel: (runId) => stopRun(runId, false),
 
       steer: (runId, text) =>
-        Effect.promise(() => active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)),
+        Effect.promise(() => {
+          // Counted and sent synchronously: no stdout line can add an item between the two.
+          const afterItems = itemCount(runId)
+          const sent = active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)
+          return sent.then((accepted) => ({ accepted, afterItems }))
+        }),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
@@ -780,6 +820,8 @@ export const AgentHarnessLive = Layer.effect(
         }),
 
       items: readItems,
+
+      itemCount,
 
       activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 

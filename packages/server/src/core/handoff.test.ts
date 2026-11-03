@@ -28,11 +28,25 @@ describe("formatHandoff", () => {
         { role: "user", text: "newest" },
       ],
       "new prompt",
-      14,
+      27,
     )
 
     expect(prompt).not.toContain("oldest!")
     expect(prompt.indexOf("middle")).toBeLessThan(prompt.indexOf("newest"))
+  })
+
+  test("bounds an oversized newest turn, including its peer label, without truncating the new request", () => {
+    const request = "new request".repeat(100)
+    const prompt = formatHandoff(
+      [{ role: "user", text: "old".repeat(1000), fromThread: { id: "peer", title: "title".repeat(100) } }],
+      request,
+      100,
+    )
+    const history = prompt.split("oldest first:\n\n")[1]!.split("\n\nContinue the conversation.")[0]!
+    expect(history.length).toBe(100)
+    expect(history).toContain("[Earlier conversation truncated]")
+    expect(prompt.endsWith(request)).toBe(true)
+    expect(formatHandoff([{ role: "agent", text: "old" }], request, 0)).toBe(request)
   })
 
   test("attributes another thread's message to that thread's agent, not the user", () => {

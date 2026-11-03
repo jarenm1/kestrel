@@ -95,6 +95,12 @@ export function storeTask(client: QueryClient, task: Task): void {
   client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task))
 }
 
+/** Removes a deleted task from the cache: the thread list drops it and its own entry goes away. */
+export function dropTask(client: QueryClient, taskId: string): void {
+  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list?.filter((task) => task.id !== taskId))
+  client.removeQueries({ queryKey: keys.task(taskId), exact: true })
+}
+
 /**
  * Stores a box list. When the active box changes, or Kestrel's managed box changes (its id or URL), the queries read
  * from the box that was replaced are cancelled and reset, so mounted views refetch from the new box and no usage

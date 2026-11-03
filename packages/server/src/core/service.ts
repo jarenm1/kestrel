@@ -43,15 +43,15 @@ import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, commentMismatch, type CommentKind,type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type RepoSlug, type ReviewerRequest } from "../github/api"
-import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskNets, stopTaskNet, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
-import { AgentHarness, type AgentChoice } from "./harness"
-import { formatHandoff } from "./handoff"
+import { AgentHarness, agentCwd, type AgentChoice } from "./harness"
+import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { withUserContext } from "./user-context"
-import { peerMessageText, type FromThread } from "./peer"
+import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
@@ -145,6 +145,17 @@ export interface OpenPullRequestInput {
   readonly draft: boolean
   /** Checkout to open the pull request from; required when the thread has several. */
   readonly checkoutId?: string
+  /** Branch to merge into; default: the checkout's base branch. */
+  readonly base?: string
+}
+
+/** A checkout of the thread as the `gh` shim sees it: where it lives on disk and its GitHub repository, if any. */
+export interface GhCheckout {
+  readonly checkout: Checkout
+  /** Absolute path of the checkout; sandboxed processes see the same path. */
+  readonly dir: string
+  /** null for a checkout that is not on github.com. */
+  readonly github: RepoSlug | null
 }
 
 export interface ReviewPullRequestInput extends NewReview {
@@ -165,6 +176,15 @@ export interface PullRequestTarget {
   /** Checkout whose repository holds the pull request; required when the thread has several. */
   readonly checkoutId?: string
   readonly number?: number
+}
+
+/** An issue or pull request read from an explicit repository, with no checkout involved. */
+export interface GitHubReferenceInput {
+  /** `owner/name` on github.com (or its https clone URL). */
+  readonly repo: string
+  readonly number: number
+  /** What the number is. GitHub's issues endpoint returns pull requests too, so a mismatch is refused. */
+  readonly kind: ReferenceKind
 }
 
 export type PullRequestCommentInput =
@@ -397,11 +417,19 @@ export interface CoreShape {
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
   readonly toolkitInstall: (taskId: string, name: ToolkitName) => Effect.Effect<ReadonlyArray<string>, NotFound | InternalError>
-  /** Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking again returns it. */
+  /**
+   * Used by the MCP handler (`repo_checkout`): checks a repository out into the thread. One checkout per repo; asking
+   * again returns it. `path` is the checkout's absolute directory, the same inside the sandbox. `instructionFiles`
+   * are the absolute paths of the agent instruction files at the root of a checkout this call made: the calling run
+   * started before it existed, so its harness has not loaded them. Empty for an existing checkout.
+   */
   readonly checkout: (
     taskId: string,
     input: CheckoutRequest,
-  ) => Effect.Effect<CheckoutOutcome, NotFound | BadRequest | Conflict | InternalError>
+  ) => Effect.Effect<
+    { readonly checkout: Checkout; readonly path: string; readonly instructionFiles: ReadonlyArray<string>; readonly note: string | null },
+    NotFound | BadRequest | Conflict | InternalError
+  >
   /** Used by the MCP handler: pushes a checkout's branch to its GitHub remote (never forced). Returns the branch. */
   readonly gitPush: (taskId: string, checkoutId?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: pushes the checkout's branch and opens its pull request, or returns the open one. */
@@ -414,6 +442,14 @@ export interface CoreShape {
     taskId: string,
     checkoutId?: string,
   ) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
+  /**
+   * Used by the MCP handler (`github_reference_read`): reads an issue or pull request in an explicit repository with
+   * the thread owner's GitHub token. No checkout is needed, and the token stays host-side.
+   */
+  readonly readReference: (
+    taskId: string,
+    input: GitHubReferenceInput,
+  ) => Effect.Effect<GitHubReference, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: posts a review on a pull request of a checkout's GitHub repository. APPROVE is never sent. */
   readonly reviewPullRequest: (
     taskId: string,
@@ -439,6 +475,27 @@ export interface CoreShape {
     taskId: string,
     input: PullRequestTarget & LabelChange,
   ) => Effect.Effect<void, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: the thread's checkouts, with their paths and GitHub repositories. */
+  readonly ghCheckouts: (taskId: string) => Effect.Effect<ReadonlyArray<GhCheckout>, NotFound>
+  /**
+   * Used by the `gh` shim: runs a GraphQL document with the thread owner's token for a checkout's GitHub repository.
+   * The shim builds every document itself and scopes it to that repository; the token stays host-side.
+   */
+  readonly githubGraphql: (
+    taskId: string,
+    checkoutId: string,
+    query: string,
+    variables: Readonly<Record<string, unknown>>,
+  ) => Effect.Effect<GraphQLResponse, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: a pull request's diff or patch series in a checkout's GitHub repository. */
+  readonly pullRequestDiff: (
+    taskId: string,
+    checkoutId: string,
+    number: number,
+    format: "diff" | "patch",
+  ) => Effect.Effect<string, NotFound | BadRequest | InternalError>
+  /** Used by the `gh` shim: the checkout's own commits (since it was created), as `WorkspaceShape.commitLog` prints them. */
+  readonly checkoutCommitLog: (taskId: string, checkoutId: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the automations: the user a thread belongs to, whom its automations act for. */
   readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
   /** Bytes the thread's files took at the last storage check; null before its first check. */
@@ -489,6 +546,7 @@ const parseCheckoutRequest = (request: CheckoutRequest): Effect.Effect<RepoRef, 
 export interface CheckoutOutcome {
   readonly checkout: Checkout
   readonly note: string | null
+  readonly instructionFiles: ReadonlyArray<string>
 }
 
 /**
@@ -502,6 +560,9 @@ const pullRequestBranchBlocker = (pr: PullRequest, slug: RepoSlug, defaultBranch
   if (pr.headRef === defaultBranch) return "its branch is the repository's default branch"
   return null
 }
+
+/** Files at a repository's root that Codex (AGENTS.md) and Claude Code (CLAUDE.md) load from their working directory. */
+const AGENT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"]
 
 /** The repository a stored checkout names. Stored values were validated on the way in. */
 const checkoutRepoRef = (checkout: Checkout): Effect.Effect<RepoRef, InternalError> => {
@@ -822,7 +883,7 @@ export const CoreLive = Layer.effect(
           }
         }
         yield* desktop.stop(taskId)
-        stopTaskNet(taskId)
+        stopTaskHolder(taskId)
         if (sandboxSettings.systemd) {
           yield* removeTask(sandboxSettings.systemd, taskId).pipe(
             Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: ${e.message}`)),
@@ -966,7 +1027,7 @@ export const CoreLive = Layer.effect(
           const ref = yield* parseCheckoutRequest(request)
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
           if (existing) {
-            if (request.pullRequest === undefined) return { checkout: existing, note: null }
+            if (request.pullRequest === undefined) return { checkout: existing, note: null, instructionFiles: [] }
             if (existing.pullRequest?.number !== request.pullRequest) {
               return yield* Effect.fail(
                 new BadRequest({
@@ -987,10 +1048,11 @@ export const CoreLive = Layer.effect(
               .pipe(Effect.mapError(toInternal("fetch pull request")))
             return {
               checkout: existing,
+              instructionFiles: [],
               note: `pull request #${request.pullRequest} is at ${sha}, available in this checkout: \`git merge ${sha}\` brings it in`,
             }
           }
-          const { checkout, note } = yield* cloneCheckout(task, request, ref)
+          const { checkout, note, instructionFiles } = yield* cloneCheckout(task, request, ref)
           const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
@@ -1000,11 +1062,14 @@ export const CoreLive = Layer.effect(
             return Either.right({ ...stored })
           })
           hub.publish({ _tag: "task.updated", task: updated })
-          return { checkout, note }
+          return { checkout, note, instructionFiles }
         }),
       )
 
-    /** Clones the repo's mirror into a new checkout dir of `task`. Runs under `checkoutLock`; removes what it made on failure. */
+    /**
+     * Clones the repo's mirror into a new checkout dir of `task`, and names the agent instruction files at its root.
+     * Runs under `checkoutLock`; removes what it made on failure.
+     */
     const cloneCheckout = (
       task: Task,
       request: CheckoutRequest,
@@ -1075,10 +1140,13 @@ export const CoreLive = Layer.effect(
             pinRef: checkoutPinRef(task.id, id),
           })
           .pipe(Effect.mapError(toInternal("create checkout")))
-        // The icon comes from the mirror at the fork point, never from the agent-writable checkout; a lookup that
-        // fails costs the checkout nothing but its icon.
+        // The icon and the instruction files come from the mirror at the fork point, never from the agent-writable
+        // checkout (which the agent may have replaced with a symlink by now); a lookup that fails costs only the hint.
         const icon = yield* workspace.findIcon(mirrorPath, fork.startSha).pipe(
           Effect.catchAll((e) => Effect.as(Effect.logWarning(`icon for ${ref.repo}: ${e.message}`), null)),
+        )
+        const instructionFiles = yield* workspace.filesAt(mirrorPath, fork.startSha, AGENT_INSTRUCTION_FILES).pipe(
+          Effect.catchAll((e) => Effect.as(Effect.logWarning(`instruction files for ${ref.repo}: ${e.message}`), [])),
         )
         const checkout: Checkout = {
           id,
@@ -1090,7 +1158,7 @@ export const CoreLive = Layer.effect(
           ...(fork.link === undefined ? {} : { pullRequest: fork.link }),
           ...(icon === null ? {} : { icon }),
         }
-        return { checkout, note: fork.note }
+        return { checkout, note: fork.note, instructionFiles }
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 
@@ -1118,10 +1186,20 @@ export const CoreLive = Layer.effect(
         return yield* requireTask(id)
       })
 
-    /** The text an agent reads for a message: the user's words with their uploads, or another agent's, framed as such. */
-    const deliveredText = (taskId: string, m: Pick<Message, "text" | "attachments" | "fromThread">): string => {
+    /**
+     * The text an agent reads for a message: the user's words with their uploads, or another agent's, framed as such.
+     * Delegation mail is framed by what it is: an assignment whose result is delivered automatically, or an automatic
+     * result/question notification that expects no reply. Only ordinary peer messages invite `thread_send`.
+     */
+    const deliveredText = (taskId: string, m: Pick<Message, "id" | "text" | "attachments" | "fromThread">): string => {
       const typed = agentText(m.text, m.attachments ?? [], agentHome(sandboxSettings, join(config.homesDir, taskId)))
-      return m.fromThread === undefined ? typed : m.fromThread.id === "github" ? `GitHub activity notification:\n${typed}` : peerMessageText(m.fromThread, typed)
+      const from = m.fromThread
+      if (from === undefined) return typed
+      if (from.id === "github") return `GitHub activity notification:\n${typed}`
+      if (m.id.startsWith("delegation-assignment:")) return delegatedAssignmentText(from, typed)
+      if (isDelegationResult(m.id, from.id)) return automaticDelegationText(from, typed, false)
+      if (m.id.startsWith("delegation-question:")) return automaticDelegationText(from, typed, true)
+      return peerMessageText(from, typed)
     }
 
     /** Box notes for a new run's preamble: while the thread is over its storage limit, the run is asked to clean up. */
@@ -1209,7 +1287,8 @@ export const CoreLive = Layer.effect(
             const attachments = picked.right
             s.uploads = s.uploads.filter((u) => !attachmentIds.includes(u.id))
             const sent = from === null ? {} : { fromThread: from }
-            const delivered = deliveredText(taskId, { text, attachments, ...sent })
+            const messageId = deliveryId ?? newId()
+            const delivered = deliveredText(taskId, { id: messageId, text, attachments, ...sent })
             const attached = attachments.length === 0 ? {} : { attachments }
             const now = nowIso()
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
@@ -1219,8 +1298,19 @@ export const CoreLive = Layer.effect(
             const running = s.runs.find((r) => r.taskId === taskId && r.status === "running")
             if (running) {
               // Mid-run: the text joins the running run. If that run's call is still waiting on the question, it is
-              // the answer; otherwise it steers the run's live turn, or waits in the run's inbox for task_inbox.
-              const message: Message = { id: deliveryId ?? newId(), taskId, role: "user", text, runId: running.id, createdAt: now, ...attached, ...sent }
+              // the answer; otherwise it steers the run's live turn, or waits in the run's inbox for task_inbox. Either
+              // way it reads where the run's transcript is now.
+              const message: Message = {
+                id: messageId,
+                taskId,
+                role: "user",
+                text,
+                runId: running.id,
+                createdAt: now,
+                afterItems: harness.itemCount(running.id),
+                ...attached,
+                ...sent,
+              }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
               if (answer) {
                 liveAsks.delete(running.id)
@@ -1231,18 +1321,34 @@ export const CoreLive = Layer.effect(
               s.messages.push(message)
               return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false })
             }
-            // No run is going. The new run continues the agent session of the task's latest run, so the agent keeps the
-            // thread's context. Only the latest run counts: a resume that failed before naming its session makes the next
-            // run start fresh instead of retrying the same broken session forever. A session belongs to one provider's
-            // CLI, so when the latest run ran on the other provider this run starts fresh and carries the conversation.
+            // No run is going. The new run continues the native session of the newest run this provider's CLI
+            // recorded, so the agent keeps the thread's context without replaying it. Runs that happened since (the
+            // other provider's, or one that never named a session) are carried as a delta into the resumed session.
+            // A run that failed before naming a session may have failed to resume the newest one: resuming it again
+            // would repeat that failure, so this run starts fresh with the conversation instead. A thread with no
+            // session for this provider starts fresh and carries the whole conversation.
             const question = ask ? (s.messages.find((m) => m.id === ask.messageId)?.text ?? "") : null
-            const latest = s.runs.filter((r) => r.taskId === taskId).at(-1)
-            const latestSession = latest ? s.runSessions.find((x) => x.runId === latest.id) : undefined
-            const resumeSession = latestSession?.provider === provider ? latestSession.sessionId : null
-            const earlier =
-              latestSession !== undefined && latestSession.provider !== provider
-                ? s.messages.filter((m) => m.taskId === taskId)
-                : null
+            const taskRuns = s.runs.filter((r) => r.taskId === taskId)
+            let resumeFrom: Run | undefined
+            let resumeSession: string | null = null
+            for (let i = taskRuns.length - 1; i >= 0; i--) {
+              const previous = taskRuns[i]!
+              const session = s.runSessions.find((x) => x.runId === previous.id)
+              if ((session?.provider ?? previous.provider ?? DEFAULT_MODEL_PROVIDER) !== provider) continue
+              if (session !== undefined) {
+                resumeFrom = previous
+                resumeSession = session.sessionId
+                break
+              }
+              // Keep a failed resume invalidated even if another provider ran afterward.
+              if (previous.status === "failed" && previous.interruptedByRestart !== true) break
+            }
+            const runIndex = new Map(taskRuns.map((r, index) => [r.id, index] as const))
+            const history = s.messages.filter((m) => m.taskId === taskId)
+            const resumeIndex = resumeFrom === undefined ? -1 : (runIndex.get(resumeFrom.id) ?? -1)
+            const earlier = resumeFrom === undefined
+              ? history
+              : history.filter((m) => m.runId !== null && (runIndex.get(m.runId) ?? -1) > resumeIndex)
             const run: Run = {
               id: newId(),
               taskId,
@@ -1254,7 +1360,7 @@ export const CoreLive = Layer.effect(
               provider,
               ...(choice.model === undefined ? {} : { model: choice.model }),
             }
-            const message: Message = { id: deliveryId ?? newId(), taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
+            const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
             task.updatedAt = now
             s.runs.push(run)
@@ -1276,7 +1382,8 @@ export const CoreLive = Layer.effect(
               question === null
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
-            const prompt = withUserContext(user, earlier === null ? asked : formatHandoff(earlier, asked), runNotes(taskId))
+            const carried = formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, resumeFrom === undefined ? "full" : "delta")
+            const prompt = withUserContext(user, carried, runNotes(taskId))
             return Either.right({
               task: { ...task },
               message,
@@ -1290,17 +1397,35 @@ export const CoreLive = Layer.effect(
         )
         if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "task.updated", task: reserved.task })
-        publishMessage(reserved.message)
-        if (reserved.answer) yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
         if (reserved.start === null) {
-          if (reserved.answer === null) {
+          // Mid-run. The run kept emitting items while the message was stored, so its position is taken again in the
+          // step that hands it to the agent: items emitted before that reached the agent before the message did. A run
+          // that ended meanwhile counts 0 items, so the count taken when the message was stored is the floor.
+          let afterItems = reserved.message.afterItems ?? 0
+          if (reserved.answer) {
+            afterItems = Math.max(afterItems, harness.itemCount(reserved.run.id))
+            yield* Deferred.succeed(reserved.answer, { _tag: "answered", text: reserved.delivered })
+          } else {
             // Taken from the inbox before the steer is sent, so task_inbox cannot hand it over a second time.
             const seen = seenFor(reserved.run.id)
             seen.add(reserved.message.id)
-            if (!(yield* harness.steer(reserved.run.id, reserved.delivered))) seen.delete(reserved.message.id)
+            const steered = yield* harness.steer(reserved.run.id, reserved.delivered)
+            if (!steered.accepted) seen.delete(reserved.message.id)
+            afterItems = Math.max(afterItems, steered.afterItems)
           }
-          return { message: reserved.message, run: reserved.run }
+          const message =
+            afterItems === reserved.message.afterItems
+              ? reserved.message
+              : yield* store.update((s) => {
+                  const stored = s.messages.find((m) => m.id === reserved.message.id)
+                  if (stored) stored.afterItems = afterItems
+                  return Either.right({ ...reserved.message, afterItems })
+                })
+          // Published once its position is final, so the thread never shows it in the wrong place.
+          publishMessage(message)
+          return { message, run: reserved.run }
         }
+        publishMessage(reserved.message)
         hub.publish({ _tag: "run.updated", run: reserved.run })
 
         const taskNow = yield* requireTask(taskId)
@@ -1333,12 +1458,16 @@ export const CoreLive = Layer.effect(
       deliverMessage(user, taskId, text, choice, attachmentIds, dev, null)
 
     /**
-     * The choice a run started by another agent's message runs with: the provider of the thread's latest session, so
-     * that session resumes, on the provider's default model (the box default for the default provider).
+     * The choice a run started by another agent's message runs with: the provider of the thread's latest session,
+     * or of its latest run when that run never named a session (a failed launch still says which CLI the thread
+     * uses), on the provider's default model (the box default for the default provider).
      */
     const resumeChoice = (state: Readonly<StoreState>, taskId: string): AgentChoice => {
       const latest = state.runs.filter((r) => r.taskId === taskId).at(-1)
-      const provider = (latest && state.runSessions.find((x) => x.runId === latest.id)?.provider) ?? DEFAULT_MODEL_PROVIDER
+      const provider =
+        (latest && state.runSessions.find((x) => x.runId === latest.id)?.provider) ??
+        latest?.provider ??
+        DEFAULT_MODEL_PROVIDER
       if (provider === DEFAULT_MODEL_PROVIDER) return {}
       const model = providerModels(provider).find((m) => m.shownByDefault)?.id
       return model === undefined ? {} : { model }
@@ -1417,7 +1546,7 @@ export const CoreLive = Layer.effect(
         const model = input.model ?? inheritedModel
         const choice: AgentChoice = model === undefined ? {} : { model }
         const assignment = input.outputSchema === undefined ? input.message : `${input.message}\n\nYour final response must be a JSON value conforming to this JSON Schema:\n${JSON.stringify(input.outputSchema)}`
-        yield* deliverMessage(parent.owner, task.id, assignment, choice, [], false, { id: parent.id, title: parent.title }).pipe(
+        yield* deliverMessage(parent.owner, task.id, assignment, choice, [], false, { id: parent.id, title: parent.title }, `delegation-assignment:${task.id}`).pipe(
           Effect.tapError(() => store.update((s) => {
             const child = s.tasks.find((t) => t.id === task.id)
             if (child && child.delegation?.runId === undefined) child.status = "failed"
@@ -1784,7 +1913,9 @@ export const CoreLive = Layer.effect(
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
           const cliProvider: CliProvider = provider === "anthropic" ? "claude-cli" : "codex-cli"
-          const commands = yield* cliAuth.discoverCommands(user, cliProvider, threadDirOf(task.id))
+          // Started where the agent starts, so the list holds the project commands and skills of its checkout.
+          const workspace = threadDirOf(task.id)
+          const commands = yield* cliAuth.discoverCommands(user, cliProvider, workspace, agentCwd(workspace, task))
           return { provider, commands }
         }),
 
@@ -2175,7 +2306,11 @@ export const CoreLive = Layer.effect(
           return yield* installToolkit(flake, join(config.homesDir, taskId), name)
         }),
 
-      checkout: (taskId, input) => addCheckout(taskId, input),
+      checkout: (taskId, input) =>
+        Effect.map(addCheckout(taskId, input), ({ checkout, instructionFiles, note }) => {
+          const path = join(threadDirOf(taskId), checkout.dir)
+          return { checkout, path, note, instructionFiles: instructionFiles.map((name) => join(path, name)) }
+        }),
 
       taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),
       storageUsed: (taskId) => storageUsed.get(taskId) ?? null,
@@ -2205,7 +2340,7 @@ export const CoreLive = Layer.effect(
                 title,
                 body: input.body,
                 head: checkout.branch,
-                base: checkout.baseBranch,
+                base: input.base ?? checkout.baseBranch,
                 draft: input.draft,
               })
               .pipe(Effect.mapError(fromGitHub)))
@@ -2221,6 +2356,20 @@ export const CoreLive = Layer.effect(
           const { slug, token } = yield* githubAccess(task.owner, ref)
           const number = yield* linkedPullRequestNumber(taskId, checkout, slug, token)
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      readReference: (taskId, input) =>
+        Effect.gen(function* () {
+          if (!Number.isSafeInteger(input.number) || input.number <= 0) {
+            return yield* Effect.fail(new BadRequest({ message: "issue or pull request number must be a positive integer" }))
+          }
+          const task = yield* requireTask(taskId)
+          const ref = parseRepoRef(input.repo)
+          if (ref === null || ref.github === null) {
+            return yield* Effect.fail(new BadRequest({ message: "repo must be owner/name on github.com (or its https clone URL)" }))
+          }
+          const token = yield* requiredGithubToken(task.owner)
+          return yield* github.readReference(token, ref.github, input.number, input.kind).pipe(Effect.mapError(fromGitHub))
         }),
 
       reviewPullRequest: (taskId, input) =>
@@ -2283,11 +2432,47 @@ export const CoreLive = Layer.effect(
           }
         }),
 
+      ghCheckouts: (taskId) =>
+        Effect.map(requireTask(taskId), (task) =>
+          task.checkouts.map((checkout): GhCheckout => ({
+            checkout,
+            dir: checkoutSpec(taskId, checkout).dir,
+            github: parseRepoRef(checkout.repo)?.github ?? null,
+          })),
+        ),
+
+      githubGraphql: (taskId, checkoutId, query, variables) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId)
+          const { token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
+          return yield* github.graphql(token, query, variables).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      pullRequestDiff: (taskId, checkoutId, number, format) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId)
+          const { slug, token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
+          return yield* github.pullRequestDiff(token, slug, number, format).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      checkoutCommitLog: (taskId, checkoutId) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const checkout = yield* pickCheckout(task, checkoutId).pipe(
+            Effect.catchTag("BadRequest", (e) => Effect.fail(new NotFound({ message: e.message }))),
+          )
+          return yield* workspace
+            .commitLog({ ...checkoutSpec(taskId, checkout), baseRef: checkoutPinRef(taskId, checkout.id) })
+            .pipe(Effect.mapError(toInternal("read commits")))
+        }),
+
       shutdown: () =>
         Effect.gen(function* () {
           yield* harness.stopAll()
           yield* desktop.stopAll()
-          stopAllTaskNets()
+          stopAllTaskHolders()
         }),
     }
     return shape

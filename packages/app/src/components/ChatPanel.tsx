@@ -1,9 +1,11 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
-import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
+import { transcriptSegments, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
+import { CircleDot, GitPullRequest } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
+import { githubReferenceLabel, githubReferenceUrl, parseGithubReferenceDraft } from "@cloudagents/composer/reference"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatClock, formatElapsed } from "@/util"
@@ -67,6 +69,36 @@ function MessageTime({ iso }: { iso: string }) {
   return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
 }
 
+/** A sent message keeps its text as written; only exact reference Markdown becomes the same inline chip the editor showed. */
+function UserMessageText({ text }: { text: string }) {
+  const segments = parseGithubReferenceDraft(text)
+  if (!segments.some((segment) => segment.type === "reference")) return <>{text}</>
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === "text" ? (
+          <Fragment key={index}>{segment.text}</Fragment>
+        ) : (
+          <a
+            key={index}
+            href={githubReferenceUrl(segment.reference)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-baseline gap-1 whitespace-nowrap font-semibold underline underline-offset-4"
+          >
+            {segment.reference.kind === "pr" ? (
+              <GitPullRequest aria-hidden="true" className="relative top-0.5 size-3.5 shrink-0 self-center" />
+            ) : (
+              <CircleDot aria-hidden="true" className="relative top-0.5 size-3.5 shrink-0 self-center" />
+            )}
+            {githubReferenceLabel(segment.reference.kind, segment.reference.number)}
+          </a>
+        ),
+      )}
+    </>
+  )
+}
+
 /** Delegated threads are independent conversations; their original run stays linked even after follow-ups. */
 function DelegatedTasks({ taskId }: { taskId: string }) {
   const tasks = useQuery(queries.tasks()).data ?? []
@@ -125,7 +157,7 @@ function ThreadItem({
           {/* A message of only attachments has no text bubble. */}
           {message.text !== "" && (
             <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">
-              {message.text}
+              <UserMessageText text={message.text} />
             </div>
           )}
           {children}
@@ -154,15 +186,17 @@ function ThreadItem({
 
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
+  // The thread query is already the page's baseline; reading it here gives `#` references the checked-out repositories.
+  const task = useQuery(queries.task(taskId))
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo)
   const threadRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const atEnd = useRef(true)
 
   const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  // A run's transcript follows the last user message it took: the prompt, or a later message that steered it or
-  // waited in its inbox. The user's messages read first, then everything the agent did with them.
-  const transcriptAfter = new Map<string, string>()
-  for (const m of sortedMessages) if (m.role === "user" && m.runId !== null) transcriptAfter.set(m.runId, m.id)
+  // After each user message a run took comes what the run showed until its next one, so a message that steered the run
+  // (or waited in its inbox) reads at the point of the transcript where it was sent.
+  const segments = transcriptSegments(sortedMessages)
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
   // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(taskId, run.id)) })
@@ -222,8 +256,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
             <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
           )}
           {sortedMessages.map((m) => {
-            const transcriptRunId =
-              m.role === "user" && m.runId !== null && transcriptAfter.get(m.runId) === m.id ? m.runId : null
+            const segment = segments.get(m.id)
             const pending = m.id === pendingAsk?.id
             // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
             const duplicate =
@@ -240,11 +273,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
                     />
                   ) : null}
                 </ThreadItem>
-                {transcriptRunId !== null && (
+                {segment !== undefined && (
                   <RunTranscript
                     taskId={taskId}
-                    runId={transcriptRunId}
-                    running={runs.some((run) => run.id === transcriptRunId && run.status === "running")}
+                    runId={segment.runId}
+                    running={runs.some((run) => run.id === segment.runId && run.status === "running")}
+                    from={segment.from}
+                    to={segment.to}
                   />
                 )}
               </Fragment>
@@ -273,6 +308,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <Composer
             taskId={taskId}
             draftKey={taskId}
+            repos={checkoutRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
             onSend={(body, files) => send.mutateAsync({ body, files })}

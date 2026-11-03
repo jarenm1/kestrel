@@ -58,6 +58,7 @@ const makeOrigin = async (root: string, branch: string) => {
   git(root, ["init", "--bare", "-b", "main", origin])
   git(root, ["init", "-b", "main", seed])
   await writeFile(join(seed, "README.md"), "hello\n")
+  await writeFile(join(seed, "AGENTS.md"), "Repository instructions\n")
   git(seed, ["add", "."])
   git(seed, ["commit", "-m", "init"])
   git(seed, ["push", origin, "main"])
@@ -78,7 +79,7 @@ const withCore = async <A>(
   body: (core: CoreService["Type"], threadDir: string) => Effect.Effect<A, unknown, never>,
 ): Promise<A> => {
   const config = {
-    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
@@ -134,12 +135,14 @@ describe("repo_checkout with a pull request", () => {
     const prHead = git(origin, ["rev-parse", "refs/pull/7/head"])
     await withCore(prStatus({}), origin, root, (core, threadDir) =>
       Effect.gen(function* () {
-        const { checkout, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        const { checkout, note, path, instructionFiles } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
         expect(checkout.branch).toBe("topic")
         expect(checkout.baseBranch).toBe("main")
         expect(checkout.pullRequest?.number).toBe(7)
         expect(note).toBeNull()
         const dir = join(threadDir, checkout.dir)
+        expect(path).toBe(dir)
+        expect(instructionFiles).toEqual([join(dir, "AGENTS.md")])
         expect(git(dir, ["rev-parse", "HEAD"])).toBe(prHead)
 
         const status = yield* core.pullRequestStatus("t1")
@@ -171,6 +174,7 @@ describe("repo_checkout with a pull request", () => {
         const again = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
         expect(again.checkout.id).toBe(checkout.id)
         expect(again.note).toContain(moved)
+        expect(again.instructionFiles).toEqual([])
 
         git(dir, ["merge", "--ff-only", moved])
         yield* Effect.promise(() => writeFile(join(dir, "fix.txt"), "fix\n"))

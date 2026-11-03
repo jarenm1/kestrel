@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import type { LabelChange, PullRequestCommentInput, PullRequestTarget, ReviewerChange } from "../../core/service"
-import type { NewReview, PostedComment, PostedReview, PullRequest, PullRequestChanges, PullRequestStatus } from "../../github/api"
+import type { NewReview, PostedComment, PostedReview, PullRequest, PullRequestChanges, PullRequestStatus, GitHubReference } from "../../github/api"
 import { type RunContext, guard, runTool, text, truncate } from "./common"
 
 export interface GitHubToolDeps {
@@ -13,6 +13,10 @@ export interface GitHubToolDeps {
       input: { readonly title: string; readonly body: string; readonly draft: boolean; readonly checkoutId?: string },
     ) => Effect.Effect<{ readonly pullRequest: PullRequest; readonly created: boolean }, unknown>
     readonly pullRequestStatus: (taskId: string, checkoutId?: string) => Effect.Effect<PullRequestStatus, unknown>
+    readonly readReference: (
+      taskId: string,
+      input: { readonly repo: string; readonly number: number; readonly kind: "pr" | "issue" },
+    ) => Effect.Effect<GitHubReference, unknown>
     readonly reviewPullRequest: (
       taskId: string,
       input: NewReview & { readonly number: number; readonly checkoutId?: string },
@@ -51,6 +55,62 @@ const formatStatus = (pr: PullRequestStatus): string => {
   if (pr.conversation.length > 0) {
     lines.push("recent review and conversation comments:")
     for (const comment of pr.conversation) lines.push(`- ${comment.author}: ${comment.body} (${comment.url})`)
+  }
+  return lines.join("\n")
+}
+
+const formatReference = (reference: GitHubReference): string => {
+  const lines = [
+    `${reference.kind === "pr" ? "pull request" : "issue"} #${reference.number}: ${reference.title}`,
+    `url: ${reference.url}`,
+    `state: ${reference.state}${reference.kind === "pr" && reference.draft ? " (draft)" : ""}`,
+    `author: ${reference.author}`,
+    `created: ${reference.createdAt} (updated ${reference.updatedAt})`,
+  ]
+  if (reference.labels.length > 0) lines.push(`labels: ${reference.labels.join(", ")}`)
+  if (reference.kind === "issue") {
+    if (reference.stateReason !== null) lines.push(`state reason: ${reference.stateReason}`)
+  } else {
+    const mergeable =
+      reference.mergeable === null
+        ? "unknown (GitHub is still computing; retry shortly)"
+        : reference.mergeable
+          ? "yes"
+          : `no (${reference.mergeableState})`
+    const checksLine =
+      reference.checks === null
+        ? "checks: unavailable to the connected account"
+        : `checks: ${reference.checks.passed}/${reference.checks.total} passed` +
+          (reference.checks.failing.length > 0 ? `; failing: ${reference.checks.failing.join(", ")}` : "") +
+          (reference.checks.pending.length > 0 ? `; pending: ${reference.checks.pending.join(", ")}` : "")
+    lines.push(
+      `branches: ${reference.headRef} -> ${reference.baseRef} (head ${reference.headSha})`,
+      `mergeable: ${mergeable}`,
+      `review: ${reference.reviewDecision}`,
+      checksLine,
+    )
+  }
+  lines.push("", "body:", reference.body.trim() === "" ? "(empty)" : reference.body)
+  if (reference.kind === "pr") {
+    if (reference.files.length > 0) {
+      lines.push("", `changed files (${reference.files.length}):`)
+      for (const file of reference.files) lines.push(`- ${file.path} (${file.status}, +${file.additions} -${file.deletions})`)
+    }
+    const reviews = reference.reviews.filter((review) => review.body.trim() !== "")
+    if (reviews.length > 0) {
+      lines.push("", "reviews:")
+      for (const review of reviews) lines.push(`- ${review.author} (${review.state}): ${review.body}`)
+    }
+    if (reference.reviewComments.length > 0) {
+      lines.push("", "review comments (newest first):")
+      for (const comment of reference.reviewComments) {
+        lines.push(`- ${comment.path}${comment.line === null ? "" : `:${comment.line}`} (${comment.author}): ${comment.body}`)
+      }
+    }
+  }
+  if (reference.conversation.length > 0) {
+    lines.push("", "conversation:")
+    for (const comment of reference.conversation) lines.push(`- ${comment.author}: ${comment.body} (${comment.url})`)
   }
   return lines.join("\n")
 }
@@ -155,6 +215,38 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
           Effect.gen(function* () {
             const status = yield* deps.github.pullRequestStatus(ctx.taskId, checkout)
             return text(truncate(formatStatus(status)))
+          }),
+        ),
+      ),
+  )
+
+  server.registerTool(
+    "github_reference_read",
+    {
+      description:
+        "Read an issue or pull request by explicit repository and number, without a checkout. repo is owner/name on " +
+        "github.com. kind must match what the number really is: GitHub numbers issues and pull requests together, so " +
+        "passing the wrong kind is an error rather than silent reinterpretation. Returns the current title, body, " +
+        "state, author, URL and conversation; for a pull request also its branches, mergeability, review decision, " +
+        "checks, changed files and review comments. Uses the connected GitHub account, so private references it can " +
+        "see are readable.",
+      inputSchema: {
+        repo: z.string().min(1).describe("Repository as owner/name on github.com"),
+        number: z
+          .number()
+          .int()
+          .positive()
+          .max(Number.MAX_SAFE_INTEGER)
+          .describe("Issue or pull request number in that repository"),
+        kind: z.enum(["pr", "issue"]).describe('"pr" for a pull request, "issue" for an issue; the actual kind must match'),
+      },
+    },
+    ({ repo, number, kind }: { repo: string; number: number; kind: "pr" | "issue" }) =>
+      guard(() =>
+        runTool(
+          Effect.gen(function* () {
+            const reference = yield* deps.github.readReference(ctx.taskId, { repo, number, kind })
+            return text(truncate(formatReference(reference)))
           }),
         ),
       ),

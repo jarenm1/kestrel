@@ -10,6 +10,7 @@ import {
   type CliProvider,
   type HarnessCommand,
   type ProviderUsage,
+  type UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { Config } from "./config"
 import {
@@ -20,7 +21,7 @@ import {
   killActiveDiscovery,
   limitDiscovery,
 } from "./harness-commands"
-import { probeClaudeUsage, probeCodexUsage } from "./provider-usage"
+import { probeClaudeUsage, probeCodexUsage, useCodexBankedReset } from "./provider-usage"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
@@ -94,17 +95,25 @@ export interface CliAuthShape {
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
   /**
-   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace): Claude Code
-   * slash commands or Codex skills. Runs the CLI in the user's isolated login home with the workspace read-only,
+   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace), started in `cwd`
+   * (where the thread's agent starts: the workspace or its first checkout): Claude Code slash commands or Codex skills.
+   * Runs the CLI in the user's isolated login home with the workspace read-only,
    * bounded and killed on answer, error or timeout; never tokens, paths or file contents.
    */
   readonly discoverCommands: (
     user: string,
     provider: CliProvider,
     workspacePath: string,
+    cwd: string,
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
   /** The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact. */
   readonly providerUsage: (user: string) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
+  /** Spends banked reset `resetId` of `user`'s `provider` (Codex only); the next usage read asks the CLI afresh. */
+  readonly useBankedReset: (
+    user: string,
+    provider: CliProvider,
+    resetId: string,
+  ) => Effect.Effect<UseBankedResetResult, BadRequest | InternalError>
   /** Kills sign-ins still waiting for the user; called on box shutdown. */
   readonly shutdown: () => Effect.Effect<void>
 }
@@ -305,7 +314,7 @@ export const CliAuthLive = Layer.effect(
       user: string,
       bin: string,
       args: ReadonlyArray<string>,
-      discovery?: { readonly workspacePath: string },
+      discovery?: { readonly workspacePath: string; readonly cwd: string },
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const env = yield* cliEnv(user)
@@ -323,7 +332,7 @@ export const CliAuthLive = Layer.effect(
         const sandbox =
           discovery === undefined
             ? { network: "host" as const }
-            : { network: "none" as const, workspacePath: discovery.workspacePath }
+            : { network: "none" as const, workspacePath: discovery.workspacePath, cwd: discovery.cwd }
         const level = config.sandbox === "strict" ? "strict" : "basic"
         return {
           file: bwrap,
@@ -338,7 +347,8 @@ export const CliAuthLive = Layer.effect(
 
     /**
      * A thread's workspace, and only a thread's workspace: discovery reads project commands/skills from it and must
-     * never be handed an arbitrary host path.
+     * never be handed an arbitrary host path. The workspace is the box's own directory, which the agent cannot
+     * replace; checkouts inside it are agent-writable, so discovery binds the workspace and only starts in them.
      */
     const threadWorkspace = (workspacePath: string): Effect.Effect<string, BadRequest> => {
       const root = resolve(config.threadsDir)
@@ -349,35 +359,47 @@ export const CliAuthLive = Layer.effect(
         : Effect.succeed(target)
     }
 
+    /** `cwd` as an absolute path inside `workspace` (lexically: it is only ever resolved inside the sandbox). */
+    const insideWorkspace = (workspace: string, cwd: string): Effect.Effect<string, BadRequest> => {
+      const target = resolve(cwd)
+      const rel = relative(workspace, target)
+      return rel.startsWith("..") || isAbsolute(rel)
+        ? Effect.fail(new BadRequest({ message: "discovery directory is outside the thread workspace" }))
+        : Effect.succeed(target)
+    }
+
     const commandCache = new Map<string, { readonly at: number; readonly commands: ReadonlyArray<HarnessCommand> }>()
     const discoveryRuns = new Map<string, Promise<ReadonlyArray<HarnessCommand>>>()
     const COMMAND_CACHE_MS = 30_000
     const COMMAND_CACHE_MAX = 64
 
     /**
-     * Runs the provider CLI for `user` in `workspacePath` and returns its real command list. Concurrent requests for
-     * the same user, provider and workspace share one child; a short cache keeps the composer from spawning per key.
+     * Runs the provider CLI for `user` in `workspacePath`, started in `cwd`, and returns its real command list.
+     * Concurrent requests for the same user, provider and directory share one child; a short cache keeps the composer
+     * from spawning per key.
      */
     const discoverCommands = (
       user: string,
       provider: CliProvider,
       workspacePath: string,
+      cwd: string,
     ): Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const workspace = yield* threadWorkspace(workspacePath)
-        const key = `${user}\0${provider}\0${workspace}`
+        const dir = yield* insideWorkspace(workspace, cwd)
+        const key = `${user}\0${provider}\0${dir}`
         const cached = commandCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < COMMAND_CACHE_MS) return cached.commands
         const spec = SPECS[provider]
         const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace })
+        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace, cwd: dir })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
             if (running !== undefined) return running
-            const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: workspace }
+            const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: dir }
             const pending = limitDiscovery(() =>
               provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch),
             )
@@ -402,6 +424,8 @@ export const CliAuthLive = Layer.effect(
 
     const usageCache = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>()
     const usageRuns = new Map<string, Promise<ProviderUsage>>()
+    /** Bumped when a banked reset is spent, so a read that started before it does not cache the old limits. */
+    const usageEpochs = new Map<string, number>()
     /** Providers throttle these reads, so a panel left open or several open tabs share one answer. */
     const USAGE_CACHE_MS = 60_000
     const USAGE_CACHE_MAX = 64
@@ -425,6 +449,7 @@ export const CliAuthLive = Layer.effect(
         const key = keyOf(user, provider)
         const cached = usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
+        const epoch = usageEpochs.get(key) ?? 0
         const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
         const inv = yield* invoke(user, spec.bin, args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
@@ -437,7 +462,8 @@ export const CliAuthLive = Layer.effect(
             )
               .then((usage) => {
                 usageCache.delete(key)
-                if (usage.status !== "signed_out") usageCache.set(key, { at: Date.now(), usage })
+                const current = (usageEpochs.get(key) ?? 0) === epoch
+                if (current && usage.status !== "signed_out") usageCache.set(key, { at: Date.now(), usage })
                 while (usageCache.size > USAGE_CACHE_MAX) {
                   const oldest = usageCache.keys().next().value
                   if (oldest === undefined) break
@@ -445,7 +471,9 @@ export const CliAuthLive = Layer.effect(
                 }
                 return usage
               })
-              .finally(() => usageRuns.delete(key))
+              .finally(() => {
+                if (usageRuns.get(key) === pending) usageRuns.delete(key)
+              })
             usageRuns.set(key, pending)
             return pending
           },
@@ -462,6 +490,34 @@ export const CliAuthLive = Layer.effect(
         PROVIDERS.map((provider) => readUsage(user, provider)),
         { concurrency: "unbounded" },
       )
+
+    const useBankedReset = (user: string, provider: CliProvider, resetId: string) =>
+      Effect.gen(function* () {
+        if (provider !== "codex-cli") {
+          return yield* Effect.fail(new BadRequest({ message: `${SPECS[provider].bin} has no banked resets` }))
+        }
+        const spec = SPECS[provider]
+        const env = yield* cliEnv(user)
+        if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
+          return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
+        }
+        const inv = yield* invoke(user, spec.bin, CODEX_DISCOVERY_ARGS)
+        const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
+        const key = keyOf(user, provider)
+        return yield* Effect.tryPromise({
+          try: () => limitDiscovery(() => useCodexBankedReset(launch, resetId)),
+          catch: (e) => new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} reset failed` }),
+        }).pipe(
+          // Whatever the outcome, the limits and the list of resets may have changed.
+          Effect.ensuring(
+            Effect.sync(() => {
+              usageEpochs.set(key, (usageEpochs.get(key) ?? 0) + 1)
+              usageCache.delete(key)
+              usageRuns.delete(key)
+            }),
+          ),
+        )
+      })
 
     /**
      * One CLI's login as the box sees it. A CLI the box cannot run (not installed where the sandbox looks, or failing)
@@ -647,6 +703,16 @@ export const CliAuthLive = Layer.effect(
         killActiveDiscovery()
       })
 
-    return { status, startLogin, submitCode, logout, loggedInDirs, discoverCommands, providerUsage, shutdown }
+    return {
+      status,
+      startLogin,
+      submitCode,
+      logout,
+      loggedInDirs,
+      discoverCommands,
+      providerUsage,
+      useBankedReset,
+      shutdown,
+    }
   }),
 )

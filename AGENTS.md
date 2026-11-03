@@ -77,15 +77,15 @@ KESTREL_DEV_SLOT=1 CLOUDAGENTS_FAKE_AGENT=1 nix run       # Linux with Nix: same
 - Sign in at `http://localhost:<app port>/auth/dev-login`. The public pages (landing, pricing) are at `http://site.localhost:<app port>/`. From a laptop: `ssh -L <port>:localhost:<port> <you>@<machine>`.
 - **Windows:** `bun run dev` has no box desktop or sandbox. For those, use WSL2 Ubuntu with Nix (install as root via
   `wsl -u root`, enable flakes). Run `nix run` from a clone in WSL's home (a Windows worktree's `.git` is a Windows path).
-  WSLg mounts `/tmp/.X11-unix` read-only; as root: `umount /tmp/.X11-unix && mkdir -m 1777 -p /tmp/.X11-unix`
-  (reverted by `wsl --shutdown`). Ports reach the Windows browser on `localhost`. A first desktop Start can time out
-  (NVENC fails in WSL, then falls back); press Start again.
+  WSLg mounts `/tmp/.X11-unix` read-only; the task desktop does not need it writable: every launch that shows the desktop
+  joins the task's namespace holder, which mounts a private `/tmp/.X11-unix` (all sandbox levels, see
+  `packages/server/src/sandbox/netns.ts`). WSL uses CPU encoding for the desktop.
 
 ## Before opening a PR
 
 ```sh
 bun run typecheck      # all packages, must pass
-bun run build:app      # if packages/app changed
+bun run build:app      # if packages/app or packages/mobile changed (it also builds the mobile web export)
 ```
 
 Then exercise the change for real: run the stack, click through the affected flow (or call the endpoint), and
@@ -101,11 +101,11 @@ need screenshots in the PR:** push them to an orphan branch `<github-login>/<top
 | `packages/control` | Cloudflare Worker: GitHub OAuth, sessions, control API, relay to the box | `src/hub.ts` is the single Durable Object. Serves `packages/app/dist` as assets. |
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
-| `docs/architecture.md` | Diagram and who owns what | Read it before touching an area you don't own. |
+| `docs/architecture.md` | System architecture and boundaries | Read it before changing an unfamiliar area. |
 
 ## Conventions
 
 - TypeScript strict everywhere; validate data crossing a boundary with the Effect schemas in `packages/protocol`.
-- Keep changes scoped to the task; no drive-by refactors in someone else's area.
+- Keep changes scoped to the task; avoid unrelated refactors.
 - Delete code you replace; don't leave fallbacks or commented-out code.
 - Secrets never reach the agent sandbox; model keys go through the broker (`packages/server/src/broker`).

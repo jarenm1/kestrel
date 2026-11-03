@@ -1,13 +1,14 @@
 import type { IncomingMessage } from "node:http"
 import type { Duplex } from "node:stream"
-import { Effect, Either, Runtime } from "effect"
-import { BOX_TOKEN_QUERY, BOX_USER_HEADER, Paths } from "@cloudagents/protocol"
+import { Effect, Either, Runtime, Schema } from "effect"
+import { BOX_TOKEN_QUERY, BOX_USER_HEADER, Paths, WebRtcAnswer, WebRtcOffer } from "@cloudagents/protocol"
 import { WebSocketServer } from "ws"
 import type { CoreShape } from "../core/service"
-import { BOX_DEV_HEADER } from "../relay/client"
+import { BOX_DEV_HEADER } from "../tunnel"
 import { serveStream, streamRoute, type WsServices } from "../http/streams"
 import type { BoxAuth } from "./auth"
 import { wsStreamSocket } from "./socket"
+import { makeRtcServer } from "./rtc"
 
 /** Carries a preview frame's token to the core, which checks it belongs to the task. */
 const PREVIEW_TOKEN_HEADER = "x-kestrel-preview-token"
@@ -30,6 +31,8 @@ interface Routed {
   readonly url: URL
   /** Signed-in user the request acts for; null when no box token was presented. */
   readonly user: string | null
+  /** When the box token lapses, epoch seconds; null unless a box token was presented. */
+  readonly expiresAt: number | null
   readonly dev: boolean
   /** Set only for preview frames: the frame's token, which the core checks against the task. */
   readonly previewToken: string | null
@@ -46,6 +49,7 @@ export interface DirectListenerDeps {
 export interface DirectListener {
   readonly handle: (request: Request) => Promise<Response>
   readonly upgrade: (request: IncomingMessage, socket: Duplex, head: Buffer) => void
+  readonly close: () => void
 }
 
 const bearerOrQueryToken = (url: URL, authorization: string | null): string | null => {
@@ -89,11 +93,12 @@ const route = async (
       user: session.user,
       dev: false,
       previewToken: preview.token,
+      expiresAt: null,
     }
   }
   const token = bearerOrQueryToken(url, authorization)
   url.searchParams.delete(BOX_TOKEN_QUERY)
-  if (token === null) return { url, user: null, dev: false, previewToken: null }
+  if (token === null) return { url, user: null, expiresAt: null, dev: false, previewToken: null }
   const outcome = await Effect.runPromise(Effect.either(deps.auth.authenticate(token)))
   if (Either.isLeft(outcome)) {
     const error = outcome.left
@@ -101,7 +106,13 @@ const route = async (
       ? { status: 401, tag: "Unauthorized", message: error.message }
       : { status: 503, tag: "Unavailable", message: error.message }
   }
-  return { url, user: outcome.right.sub, dev: outcome.right.dev === true, previewToken: null }
+  return {
+    url,
+    user: outcome.right.sub,
+    expiresAt: outcome.right.exp,
+    dev: outcome.right.dev === true,
+    previewToken: null,
+  }
 }
 
 const withIdentity = (headers: Headers, routed: Routed): Headers => {
@@ -121,17 +132,55 @@ const withReferrerPolicy = (response: Response): Response => {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
+const withAllowOrigin = (response: Response, origin: string | null): Response => {
+  if (origin === null) return response
+  const headers = new Headers(response.headers)
+  headers.set("access-control-allow-origin", origin)
+  headers.append("vary", "Origin")
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
 export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => {
   const wss = new WebSocketServer({ noServer: true })
+
+  const rtc = makeRtcServer({ webHandler: deps.webHandler, runtime: deps.runtime })
+
+  const answerOffer = async (request: Request, routed: Routed): Promise<Response> => {
+    if (routed.user === null || routed.expiresAt === null) {
+      return Response.json({ _tag: "Unauthorized", message: "box token is required" }, { status: 401 })
+    }
+    const offer = Schema.decodeUnknownEither(Schema.parseJson(WebRtcOffer))(await request.text())
+    if (Either.isLeft(offer)) {
+      return Response.json({ _tag: "BadRequest", message: "body must be a WebRTC offer" }, { status: 400 })
+    }
+    let answer: WebRtcAnswer | null
+    try {
+      answer = await rtc.answer({ user: routed.user, dev: routed.dev }, offer.right, routed.expiresAt)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return Response.json({ _tag: "BadRequest", message }, { status: 400 })
+    }
+    if (answer === null) {
+      return Response.json(
+        { _tag: "Unavailable", message: "this box already serves its maximum of WebRTC channels" },
+        { status: 503 },
+      )
+    }
+    return Response.json(answer)
+  }
 
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     const routed = await route(deps, url, request.headers.get("referer"), request.headers.get("authorization"))
     if ("status" in routed) {
-      return new Response(JSON.stringify({ _tag: routed.tag, message: routed.message }), {
+      const rejected = new Response(JSON.stringify({ _tag: routed.tag, message: routed.message }), {
         status: routed.status,
         headers: { "content-type": "application/json" },
       })
+      return url.pathname === Paths.webrtcOffer ? withAllowOrigin(rejected, request.headers.get("origin")) : rejected
+    }
+    if (request.method === "POST" && routed.url.pathname === Paths.webrtcOffer) {
+      return withAllowOrigin(await answerOffer(request, routed), request.headers.get("origin"))
     }
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
     const headers = withIdentity(new Headers(request.headers), routed)
@@ -163,7 +212,7 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
     })
   }
 
-  return { handle, upgrade }
+  return { handle, upgrade, close: rtc.close }
 }
 
 const rejectUpgrade = (socket: Duplex, rejection: Rejection): void => {

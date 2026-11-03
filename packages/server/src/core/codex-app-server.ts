@@ -64,9 +64,10 @@ Commit & Pull Request Guidelines
 
 /**
  * What `/review` reviews without instructions. Codex's own default (`uncommittedChanges`) diffs the working
- * directory, but a thread's workspace is not a repository: its checkouts are directories inside it.
+ * directory, which is at most one of the thread's checkouts: they are sibling directories in the workspace.
  */
-const REVIEW_CHANGES = "Review the uncommitted changes in every git repository under the current directory."
+const reviewChanges = (workspacePath: string) =>
+  `Review the uncommitted changes in every git repository under ${workspacePath}.`
 
 type CodexCommandName = "review" | "compact" | "init"
 
@@ -82,6 +83,10 @@ export interface CodexRunInput {
   readonly text: string
   /** What a plain turn sends: the message with the box's user context around it. */
   readonly prompt: string
+  /** Where the thread works: its first checkout, or the workspace root (`agentCwd` in `harness.ts`). */
+  readonly cwd: string
+  /** The thread workspace, which holds every checkout. */
+  readonly workspacePath: string
   /** The thread's previous Codex session, or null for a fresh one. */
   readonly resumeThread: string | null
   readonly model?: string
@@ -114,6 +119,10 @@ const APPROVALS: Readonly<Record<string, unknown>> = {
   execCommandApproval: { decision: "approved" },
   applyPatchApproval: { decision: "approved" },
 }
+
+/** Keeps edits out of throwaway scripts, as `CLAUDE_INSTRUCTIONS` in `config.ts` does for Claude Code. */
+const DEVELOPER_INSTRUCTIONS =
+  "Change and create files with the apply_patch tool, also when a change repeats across many places or files: patch them rather than batching the change in a script. Do not change files through python, bun -e, node -e, sed -i, perl -i or a shell heredoc. Python may not be installed here."
 
 const textInput = (text: string) => [{ type: "text", text, text_elements: [] }]
 
@@ -185,7 +194,10 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
         // starts later.
         request(
           "review/start",
-          { threadId: thread, target: { type: "custom", instructions: command.args === "" ? REVIEW_CHANGES : command.args } },
+          {
+            threadId: thread,
+            target: { type: "custom", instructions: command.args === "" ? reviewChanges(input.workspacePath) : command.args },
+          },
           orFail("review/start", (result) => adoptTurn("review/start", result, false)),
         )
         return
@@ -207,7 +219,14 @@ export const makeCodexDriver = (input: CodexRunInput, io: CodexDriverIo): RunDri
 
   const openThread = () => {
     // Kestrel's bwrap sandbox replaces Codex's own, and nobody is there to approve: approvals never stop a turn.
-    const policy = { approvalPolicy: "never", sandbox: "danger-full-access", ...(input.model === undefined ? {} : { model: input.model }) }
+    // Explicit on resume too: a thread first opened in the workspace root moves into its checkout once it has one.
+    const policy = {
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      cwd: input.cwd,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
+      ...(input.model === undefined ? {} : { model: input.model }),
+    }
     const onThread = (method: string, persisted: boolean) =>
       orFail(method, (result) => {
         const thread = result.thread

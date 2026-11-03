@@ -1,10 +1,21 @@
-import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH } from "@cloudagents/protocol"
+import {
+  BOX_ID_HEADER,
+  BOX_USER_HEADER,
+  ControlPaths,
+  METER_HOST_ID_HEADER,
+  MAX_METER_BODY_BYTES,
+  MeterBatch,
+  PairingPollBody,
+  PairingStartBody,
+  RELAY_CONNECT_PATH,
+} from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
-import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { cappedRequest, decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
+import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
 
 export { Hub } from "./hub"
@@ -57,6 +68,24 @@ const boxCredentials = async (request: Request, env: Env): Promise<Response> => 
 }
 
 /**
+ * A Nest host posts a batch of usage records, proving itself with its secret and id. The Hub stores a batch atomically
+ * and counts records it already holds as duplicates, so a retried batch never stores anything twice.
+ */
+const meterRecords = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const hostId = request.headers.get(METER_HOST_ID_HEADER) ?? ""
+  if (secret === "" || hostId === "") return errorResponse(401, "Unauthorized", "invalid meter host credentials")
+  const capped = await cappedRequest(request, MAX_METER_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const batch = await decodeBody(capped, MeterBatch, { onExcessProperty: "error" })
+  if (batch instanceof Response) return batch
+  const outcome = await hub(env).ingestMeterRecords(hostId, secret, batch)
+  return outcome.ok ? json(outcome.value) : errorResponse(outcome.status, outcome.tag, outcome.message)
+}
+
+/**
  * Automation calls from a managed box, for the user in `BOX_USER_HEADER` when that user is assigned to the box.
  * The legacy relay token is checked before this.
  */
@@ -71,11 +100,6 @@ const managedBoxAutomations = async (request: Request, env: Env, url: URL): Prom
 const isBoxAutomationPath = (pathname: string): boolean =>
   pathname === ControlPaths.boxAutomations || pathname.startsWith(`${ControlPaths.boxAutomations}/`)
 
-/**
- * The marketing hosts serve only the app's public pages. Sessions live on the app host, so sign-in and API calls
- * that land here (e.g. an old bookmark) move there with the same path.
- */
-const SITE_HOSTS: Record<string, true> = { "kestrel-agent.com": true, "www.kestrel-agent.com": true }
 const APP_ORIGIN = "https://app.kestrel-agent.com"
 
 /**
@@ -139,6 +163,7 @@ export default {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
+      if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }
@@ -157,7 +182,7 @@ export default {
         const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null
         return origin ? withCors(response, origin) : response
       }
-      return env.ASSETS.fetch(request)
+      return await serveAppPage(request, env.ASSETS, url)
     } catch (err) {
       if (err instanceof UpstreamError) return errorResponse(502, "BadGateway", err.message)
       console.error(err)

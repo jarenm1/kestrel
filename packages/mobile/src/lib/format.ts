@@ -1,3 +1,5 @@
+import { githubReferenceLabel, parseGithubReferenceDraft } from "@cloudagents/composer/reference";
+
 export function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -38,6 +40,9 @@ const TITLE_MAX = 60;
 
 /** First line of the prompt, shortened, as the thread's title. */
 export function threadTitle(text: string): string {
-  const line = (text.split("\n", 1)[0] ?? "").replace(/\s+/g, " ").trim();
+  const readable = parseGithubReferenceDraft(text).map((segment) => segment.type === "text"
+    ? segment.text
+    : githubReferenceLabel(segment.reference.kind, segment.reference.number)).join("");
+  const line = (readable.split("\n", 1)[0] ?? "").replace(/\s+/g, " ").trim();
   return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1).trimEnd()}…` : line;
 }
