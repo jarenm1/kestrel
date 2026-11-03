@@ -651,7 +651,8 @@ const styles = StyleSheet.create({
   thinkingValue: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
   sliderHitArea: { height: 44, justifyContent: "center" },
   sliderTrack: { height: 32, borderRadius: radius.full, backgroundColor: colors.input },
-  sliderFocused: { outlineColor: colors.ring, outlineWidth: 2, outlineOffset: 2 },
+  // `outlineStyle` is required on the web: CSS outlines default to `none`, so width and colour alone never paint.
+  sliderFocused: { outlineStyle: "solid", outlineColor: colors.ring, outlineWidth: 2, outlineOffset: 2 },
   sliderFill: { position: "absolute", left: 4, top: 4, height: 24, borderRadius: radius.full, backgroundColor: colors.primary + "33" },
   sliderStop: { position: "absolute", top: 14, width: 4, height: 4, borderRadius: radius.full },
   sliderThumb: { position: "absolute", top: 4, width: 24, height: 24, borderRadius: radius.full, backgroundColor: colors.primary, ...shadows.soft },

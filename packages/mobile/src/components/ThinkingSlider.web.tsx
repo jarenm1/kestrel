@@ -1,7 +1,10 @@
 import React from "react";
 import type { ThinkingSliderProps } from "./ThinkingSlider";
 
-/** Preserve browser range keyboard, pointer, touch and screen-reader semantics. */
+/**
+ * Preserve browser range keyboard, pointer, touch and screen-reader semantics. Nothing here takes focus on open:
+ * the sheet's modal records the trigger as the element to restore, and Tab reaches the range as on desktop.
+ */
 export function ThinkingSlider({ value, max, label, onChange, onFocusChange }: ThinkingSliderProps) {
   return (
     <>
@@ -18,7 +21,6 @@ export function ThinkingSlider({ value, max, label, onChange, onFocusChange }: T
         max={max}
         step={1}
         value={value}
-        autoFocus
         onFocus={() => onFocusChange(true)}
         onBlur={() => onFocusChange(false)}
         onChange={(event) => onChange(Number(event.target.value))}
