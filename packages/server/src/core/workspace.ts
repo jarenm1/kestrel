@@ -67,6 +67,12 @@ export interface WorkspaceShape {
   readonly findIcon: (mirrorPath: string, commit: string) => Effect.Effect<CheckoutIcon | null, WorkspaceError>
   /** Bytes of a blob in the mirror, at most `ICON_MAX_BYTES`. */
   readonly readIcon: (mirrorPath: string, blob: string) => Effect.Effect<Uint8Array, WorkspaceError>
+  /** Which of `paths` are regular files at `commit`, read from the mirror (never the agent-writable checkout). */
+  readonly filesAt: (
+    mirrorPath: string,
+    commit: string,
+    paths: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<string>, WorkspaceError>
   /** The commit the checkout's HEAD points at, read from its files. */
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
@@ -524,6 +530,9 @@ const make: WorkspaceShape = {
       })
       yield* git(shadowPath, ["--git-dir", shadowPath, "update-ref", pinRef, baseSha])
     }),
+
+  filesAt: (mirrorPath, commit, paths) =>
+    Effect.map(listBlobs(mirrorPath, commit, paths), (found) => paths.filter((path) => found.has(path))),
 
   findIcon: (mirrorPath, commit) =>
     Effect.gen(function* () {

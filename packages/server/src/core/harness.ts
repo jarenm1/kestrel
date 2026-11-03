@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createWriteStream, existsSync, type WriteStream } from "node:fs"
+import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
@@ -154,14 +154,16 @@ interface ProcessSpec {
 
 /**
  * Where a thread's agent starts: its first checkout, so the harness finds that repository's root and loads its
- * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout (or the agent deleted it). The
- * whole workspace stays bound either way; only the starting directory changes.
+ * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout. The checkout is agent-writable: one
+ * the agent deleted or replaced with anything but a directory (a symlink to elsewhere on the host, say) gives the
+ * workspace root too. The whole workspace stays bound either way; only the starting directory changes.
  */
 export const agentCwd = (workspacePath: string, task: Pick<Task, "checkouts">): string => {
   const first = task.checkouts[0]
   if (first === undefined) return workspacePath
   const dir = join(workspacePath, first.dir)
-  return existsSync(dir) ? dir : workspacePath
+  // lstat, not stat: a symlink is not followed, so it is not a directory here.
+  return lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() === true ? dir : workspacePath
 }
 
 const KILL_GRACE_MS = 3000

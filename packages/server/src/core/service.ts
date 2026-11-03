@@ -543,7 +543,13 @@ const parseCheckoutRequest = (request: CheckoutRequest): Effect.Effect<RepoRef, 
 }
 
 /** Files at a repository's root that Codex (AGENTS.md) and Claude Code (CLAUDE.md) load from their working directory. */
-const AGENT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const
+const AGENT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"]
+
+/** A checkout `repo_checkout` returned, and the instruction files (`AGENT_INSTRUCTION_FILES`) at the root of a new one. */
+interface AddedCheckout {
+  readonly checkout: Checkout
+  readonly instructionFiles: ReadonlyArray<string>
+}
 
 /** The repository a stored checkout names. Stored values were validated on the way in. */
 const checkoutRepoRef = (checkout: Checkout): Effect.Effect<RepoRef, InternalError> => {
@@ -996,7 +1002,7 @@ export const CoreLive = Layer.effect(
     const addCheckout = (
       taskId: string,
       request: CheckoutRequest,
-    ): Effect.Effect<{ readonly checkout: Checkout; readonly created: boolean }, NotFound | BadRequest | Conflict | InternalError> =>
+    ): Effect.Effect<AddedCheckout, NotFound | BadRequest | Conflict | InternalError> =>
       checkoutLock.withPermits(1)(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
@@ -1006,8 +1012,9 @@ export const CoreLive = Layer.effect(
           yield* refuseOverStorage(taskId)
           const ref = yield* parseCheckoutRequest(request)
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
-          if (existing) return { checkout: existing, created: false }
-          const checkout = yield* cloneCheckout(task, request, ref)
+          // An existing checkout was there when this run started, or its instructions were named when it was made.
+          if (existing) return { checkout: existing, instructionFiles: [] }
+          const { checkout, instructionFiles } = yield* cloneCheckout(task, request, ref)
           const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
             const found = findTask(s, taskId)
             if (Either.isLeft(found)) return Either.left(found.left)
@@ -1017,16 +1024,19 @@ export const CoreLive = Layer.effect(
             return Either.right({ ...stored })
           })
           hub.publish({ _tag: "task.updated", task: updated })
-          return { checkout, created: true }
+          return { checkout, instructionFiles }
         }),
       )
 
-    /** Clones the repo's mirror into a new checkout dir of `task`. Runs under `checkoutLock`; removes what it made on failure. */
+    /**
+     * Clones the repo's mirror into a new checkout dir of `task`, and names the agent instruction files at its root.
+     * Runs under `checkoutLock`; removes what it made on failure.
+     */
     const cloneCheckout = (
       task: Task,
       request: CheckoutRequest,
       ref: RepoRef,
-    ): Effect.Effect<Checkout, BadRequest | InternalError> => {
+    ): Effect.Effect<AddedCheckout, BadRequest | InternalError> => {
       const id = newId()
       const threadDir = threadDirOf(task.id)
       const dir = freeDirName(
@@ -1080,12 +1090,15 @@ export const CoreLive = Layer.effect(
             pinRef: checkoutPinRef(task.id, id),
           })
           .pipe(Effect.mapError(toInternal("create checkout")))
-        // The icon comes from the mirror at the fork point, never from the agent-writable checkout; a lookup that
-        // fails costs the checkout nothing but its icon.
+        // The icon and the instruction files come from the mirror at the fork point, never from the agent-writable
+        // checkout (which the agent may have replaced with a symlink by now); a lookup that fails costs only the hint.
         const icon = yield* workspace.findIcon(mirrorPath, fork.startSha).pipe(
           Effect.catchAll((e) => Effect.as(Effect.logWarning(`icon for ${ref.repo}: ${e.message}`), null)),
         )
-        return {
+        const instructionFiles = yield* workspace.filesAt(mirrorPath, fork.startSha, AGENT_INSTRUCTION_FILES).pipe(
+          Effect.catchAll((e) => Effect.as(Effect.logWarning(`instruction files for ${ref.repo}: ${e.message}`), [])),
+        )
+        const checkout: Checkout = {
           id,
           repo: ref.repo,
           dir,
@@ -1094,6 +1107,7 @@ export const CoreLive = Layer.effect(
           createdAt: nowIso(),
           ...(icon === null ? {} : { icon }),
         }
+        return { checkout, instructionFiles }
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 
@@ -1816,8 +1830,9 @@ export const CoreLive = Layer.effect(
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
           const cliProvider: CliProvider = provider === "anthropic" ? "claude-cli" : "codex-cli"
-          // Where the agent starts, so the list holds the project commands and skills of the checkout it runs in.
-          const commands = yield* cliAuth.discoverCommands(user, cliProvider, agentCwd(threadDirOf(task.id), task))
+          // Started where the agent starts, so the list holds the project commands and skills of its checkout.
+          const workspace = threadDirOf(task.id)
+          const commands = yield* cliAuth.discoverCommands(user, cliProvider, workspace, agentCwd(workspace, task))
           return { provider, commands }
         }),
 
@@ -2209,17 +2224,9 @@ export const CoreLive = Layer.effect(
         }),
 
       checkout: (taskId, input) =>
-        Effect.gen(function* () {
-          const { checkout, created } = yield* addCheckout(taskId, input)
+        Effect.map(addCheckout(taskId, input), ({ checkout, instructionFiles }) => {
           const path = join(threadDirOf(taskId), checkout.dir)
-          if (!created) return { checkout, path, instructionFiles: [] }
-          // Names only: the checkout is agent-writable, so nothing in it is followed or read here.
-          const names = yield* Effect.tryPromise({
-            try: () => readdir(path),
-            catch: (e) => new InternalError({ message: `list checkout: ${String(e)}` }),
-          })
-          const found = AGENT_INSTRUCTION_FILES.filter((name) => names.includes(name))
-          return { checkout, path, instructionFiles: found.map((name) => join(path, name)) }
+          return { checkout, path, instructionFiles: instructionFiles.map((name) => join(path, name)) }
         }),
 
       taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),

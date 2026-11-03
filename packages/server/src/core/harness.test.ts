@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Layer } from "effect"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Run, Task } from "@cloudagents/protocol"
@@ -229,7 +229,7 @@ createInterface({ input: process.stdin })
   }
 }, 20_000)
 
-test("a run starts in the thread's first checkout, resumed or fresh, and in the workspace root once that checkout is gone", async () => {
+test("a run starts in the thread's first checkout, resumed or fresh, and in the workspace root once that checkout is gone or a link", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-run-cwd-"))
   const cli = join(root, "cli.ts")
   // Answers the prompt with its working directory and the session it was asked to resume, then ends when the
@@ -289,6 +289,12 @@ createInterface({ input: process.stdin })
         )
         // The first checkout, not the latest: a second repository does not move the thread.
         expect(yield* runIn("two-checkouts", [checkout("app"), checkout("lib")])).toBe(`${join(workspace, "app")} resume=none`)
+        // An agent can replace its checkout with a link to a host directory; the run must not start there.
+        const outside = join(root, "outside")
+        yield* Effect.promise(() => mkdir(outside, { recursive: true }))
+        yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
+        yield* Effect.promise(() => symlink(outside, join(workspace, "app"), "junction"))
+        expect(yield* runIn("symlinked-checkout", [checkout("app"), checkout("lib")])).toBe(`${workspace} resume=none`)
         // An agent can delete its checkout; the thread's next run must still start.
         yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
         expect(yield* runIn("deleted-checkout", [checkout("app"), checkout("lib")])).toBe(`${workspace} resume=none`)

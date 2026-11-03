@@ -229,8 +229,9 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
  * directories and the agent CLIs installed in the box user's home (`homeToolArgs`). `network: "host"` shares the box's
  * network (sign-in needs it). `network: "none"` gives the process an empty network namespace: discovery never needs
  * the network, and the box's loopback services (broker, MCP, other tasks' servers) must stay out of reach. With
- * `workspacePath` it runs there and sees that thread workspace read-only, so project commands and skills are
- * discoverable.
+ * `workspacePath` it sees that thread workspace read-only, so project commands and skills are discoverable, and starts
+ * in `cwd` inside it (default: the workspace). `cwd` is resolved inside the sandbox, never bound from the host: a
+ * checkout the agent replaced with a symlink points at nothing mounted here.
  */
 export const cliBwrapArgs = (
   homeDir: string,
@@ -241,6 +242,7 @@ export const cliBwrapArgs = (
     readonly homeToolArgs: ReadonlyArray<string>
     readonly network: "host" | "none"
     readonly workspacePath?: string
+    readonly cwd?: string
   },
 ): string[] => {
   const workspacePath = options.workspacePath
@@ -272,7 +274,7 @@ export const cliBwrapArgs = (
     argv.push(...options.homeToolArgs)
   }
   for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", workspacePath ?? homeDir, "--", ...command)
+  argv.push("--chdir", options.cwd ?? workspacePath ?? homeDir, "--", ...command)
   return argv
 }
 
