@@ -12,7 +12,8 @@ import {
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
+import { ArrowUp, Brain, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
+import { Popover } from "radix-ui"
 import {
   AgentEffort,
   AgentModel,
@@ -65,40 +66,87 @@ interface ModelSection {
   readonly models: readonly ModelInfo[]
 }
 
-/** A pill that opens a single-choice menu; shows its label until something other than Default is picked. */
-function PillPicker<T extends string>({
-  label,
+/** A stepped thinking slider; Default leaves the provider's effort setting untouched. */
+function ThinkingPicker({
   value,
   options,
   onChange,
 }: {
-  label: string
-  value: T | undefined
-  options: readonly { value: T | undefined; label: string }[]
-  onChange: (value: T | undefined) => void
+  value: AgentEffort | undefined
+  options: readonly { value: AgentEffort | undefined; label: string }[]
+  onChange: (value: AgentEffort | undefined) => void
 }) {
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
+  const selected = options[selectedIndex]!
+  // Keep the stops aligned with the native range's 2rem thumb, including at both ends.
+  const offset = (index: number) => `calc(1rem + (100% - 2rem) * ${index / (options.length - 1)})`
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" className="data-[state=open]:bg-white/[0.06]">
-          {value === undefined ? label : options.find((o) => o.value === value)?.label}
-          <ChevronDown className="opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top">
-        <DropdownMenuLabel>{label}</DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={value ?? ""}
-          onValueChange={(v) => onChange(options.find((o) => (o.value ?? "") === v)?.value)}
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          aria-label={`Thinking level: ${selected.label}`}
+          className="data-[state=open]:bg-white/[0.06]"
         >
-          {options.map((o) => (
-            <DropdownMenuRadioItem key={o.label} value={o.value ?? ""}>
-              {o.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          <Brain className="opacity-60" />
+          {value === undefined ? "Thinking" : selected.label}
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          side="top"
+          sideOffset={8}
+          collisionPadding={12}
+          aria-label="Thinking level"
+          className="z-50 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl bg-popover p-4 text-popover-foreground shadow-soft outline-none"
+        >
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-muted-foreground">Thinking</span>
+            <span className="text-sm font-semibold">{selected.label}</span>
+          </div>
+          <div className="relative flex h-8 items-center rounded-full bg-input shadow-well transition-shadow has-focus-visible:shadow-glow">
+            <div
+              className="pointer-events-none absolute left-1 h-6 rounded-full bg-primary/20"
+              style={{ width: `calc(${offset(selectedIndex)} + 0.5rem)` }}
+            />
+            {options.map((option, index) => (
+              <span
+                key={option.label}
+                aria-hidden="true"
+                className={cn(
+                  "pointer-events-none absolute size-1 -translate-x-1/2 rounded-full",
+                  index <= selectedIndex ? "bg-primary/60" : "bg-muted-foreground/40",
+                )}
+                style={{ left: offset(index) }}
+              />
+            ))}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute size-6 -translate-x-1/2 rounded-full bg-primary shadow-soft"
+              style={{ left: offset(selectedIndex) }}
+            />
+            <input
+              type="range"
+              aria-label="Thinking level"
+              aria-valuetext={selected.label}
+              min={0}
+              max={options.length - 1}
+              step={1}
+              value={selectedIndex}
+              onChange={(event) => onChange(options[Number(event.target.value)]!.value)}
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none rounded-full bg-transparent opacity-0 [&::-moz-range-thumb]:size-8 [&::-moz-range-thumb]:border-0 [&::-webkit-slider-thumb]:size-8 [&::-webkit-slider-thumb]:appearance-none"
+            />
+          </div>
+          <div aria-hidden="true" className="mt-1.5 flex justify-between text-[11px] text-muted-foreground">
+            <span>{options[0]!.label}</span>
+            <span>{options[options.length - 1]!.label}</span>
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -800,7 +848,7 @@ export function Composer({
           </Button>
           <ModelPicker sections={sections} value={model} onChange={setModel} />
           {model !== undefined && model.efforts.length > 0 && (
-            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
           )}
           {onStop && empty ? (
             <Button

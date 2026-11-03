@@ -67,6 +67,8 @@ A thread has a workspace, messages and runs. Repositories are checked out on dem
 
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Sessions resume with the same provider; when switching providers, the earlier conversation is passed into a new session. Model definitions and shared types live in `packages/protocol`.
 
+The web composer's thinking control opens a stepped slider in Kestrel's monochrome theme. It offers Default plus only the selected model's supported effort levels, ordered lowest first. Default leaves effort unspecified for the provider; unsupported saved levels also display as Default, and models without effort support hide the control. The choice survives thread changes and reloads. The slider supports pointer/touch input, arrow keys, Home and End.
+
 Agents normally run in a per-thread bubblewrap sandbox and systemd scope. The `strict`, `basic` and `off` modes provide different isolation; in particular, `basic` shares the host network. MCP provides the agent's box tools. Model requests go through the broker using a per-run token, so the sandbox does not receive the real model key. Host-side GitHub tools likewise use credentials outside the sandbox. See [box.md](box.md#agent-sandbox) for the actual sandbox guarantees and limitations.
 
 MCP, the credential broker and `/gh/` use a separate loopback-only listener rather than the public box listener. Strict task networks forward that listener into the task namespace; basic and off share the host network. Per-run credentials still gate those routes.
