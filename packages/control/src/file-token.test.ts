@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { beforeEach, describe, expect, mock, test } from "bun:test"
 import { BOX_TOKEN_QUERY, CREDENTIALS_HEADER, ControlPaths, Paths } from "@cloudagents/protocol"
-import { FILE_TOKEN_HEADER, type Env } from "./env"
+import { FILE_TOKEN_HEADER, SESSION_HEADER, type Env } from "./env"
 import type { Hub as HubClass } from "./hub"
 
 // The Worker and Hub import `cloudflare:workers`, so the mock must be registered before either module loads.
@@ -50,14 +50,33 @@ beforeEach(() => {
   relayed.length = 0
 })
 
+/** A live session for `login`, as sign-in creates it; returns its id. */
+const signIn = (hub: HubClass, login = "octocat", dev = false): string => {
+  const id = `session-${login}-${dev ? "dev" : "github"}`
+  hub.createSession(id, login, Date.now() + 24 * 60 * 60 * 1000, dev)
+  return id
+}
+
+const ATTACHMENT = Paths.taskAttachment("task-1", "attachment-1")
+
+const mint = (hub: HubClass, sessionId: string): string => {
+  const minted = hub.createFileToken(sessionId)
+  if (minted === null) throw new Error("no file token for a live session")
+  return minted.token
+}
+
+const getFile = (hub: HubClass, path: string, token: string, init: RequestInit = {}) =>
+  hub.fetch(new Request(withToken(path, token), { ...init, headers: { [FILE_TOKEN_HEADER]: token } }))
+
 describe("file token storage", () => {
-  test("mints a token for a login that is valid for an hour", () => {
+  test("mints a token for a live session that is valid for an hour, and none without one", () => {
     const { hub } = newHub()
-    const minted = hub.createFileToken("octocat")
-    expect(minted.token).not.toBe("")
-    const lifetime = Date.parse(minted.expiresAt) - Date.now()
+    const minted = hub.createFileToken(signIn(hub))
+    expect(minted?.token).toBeTruthy()
+    const lifetime = Date.parse(minted!.expiresAt) - Date.now()
     expect(lifetime).toBeGreaterThan(59 * 60 * 1000)
     expect(lifetime).toBeLessThanOrEqual(60 * 60 * 1000)
+    expect(hub.createFileToken("no-such-session")).toBeNull()
   })
 })
 
@@ -65,18 +84,13 @@ describe("box files with a file token", () => {
   test("relays the three file paths with the token user's credentials, without the token or its query", async () => {
     const { hub } = newHub()
     intercept(hub)
-    const { token } = hub.createFileToken("octocat")
+    const token = mint(hub, signIn(hub))
     const paths = [
-      Paths.taskAttachment("task-1", "attachment-1"),
+      ATTACHMENT,
       Paths.taskRunImage("task-1", "run-1", "image-1"),
       Paths.taskCheckoutIcon("task-1", "checkout-1", "blob-1"),
     ]
-    for (const path of paths) {
-      const response = await hub.fetch(
-        new Request(withToken(path, token), { headers: { [FILE_TOKEN_HEADER]: token } }),
-      )
-      expect(response.status).toBe(200)
-    }
+    for (const path of paths) expect((await getFile(hub, path, token)).status).toBe(200)
     expect(relayed.map((call) => call.path)).toEqual(paths)
     for (const call of relayed) {
       expect(call.headers.get(FILE_TOKEN_HEADER)).toBeNull()
@@ -85,22 +99,40 @@ describe("box files with a file token", () => {
     }
   })
 
+  test("a dev-login session's token relays as dev, like its cookie", async () => {
+    const { hub } = newHub()
+    intercept(hub)
+    expect((await getFile(hub, ATTACHMENT, mint(hub, signIn(hub, "dev", true)))).status).toBe(200)
+    expect(JSON.parse(relayed[0]?.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "dev", dev: true })
+  })
+
+  test("signing out revokes the session's tokens", async () => {
+    const { hub } = newHub()
+    intercept(hub)
+    const sessionId = signIn(hub)
+    const token = mint(hub, sessionId)
+    hub.deleteSession(sessionId)
+    expect((await getFile(hub, ATTACHMENT, token)).status).toBe(401)
+    expect(relayed).toHaveLength(0)
+  })
+
   test("refuses other paths, other methods, and unknown or expired tokens", async () => {
     const { hub, db } = newHub()
     intercept(hub)
-    const send = (path: string, init: RequestInit = {}, credential = hub.createFileToken("octocat").token) =>
-      hub.fetch(new Request(withToken(path, credential), { ...init, headers: { [FILE_TOKEN_HEADER]: credential } }))
+    const sessionId = signIn(hub)
+    const send = (path: string, init: RequestInit = {}, credential = mint(hub, sessionId)) =>
+      getFile(hub, path, credential, init)
 
     expect((await send(Paths.taskMessages("task-1"))).status).toBe(401)
     expect((await send(ControlPaths.fileToken)).status).toBe(401)
-    expect((await send(Paths.taskAttachment("task-1", "attachment-1"), { method: "POST" })).status).toBe(401)
-    expect((await send(Paths.taskAttachment("task-1", "attachment-1"), {}, "not-a-token")).status).toBe(401)
+    expect((await send(ATTACHMENT, { method: "POST" })).status).toBe(401)
+    expect((await send(ATTACHMENT, {}, "not-a-token")).status).toBe(401)
     expect(relayed).toHaveLength(0)
 
     // A token lapses an hour after it was minted.
-    const short = hub.createFileToken("octocat")
-    db.run("UPDATE file_tokens SET expires_at = ? WHERE token = ?", Date.now() - 1, short.token)
-    expect((await send(Paths.taskAttachment("task-1", "attachment-1"), {}, short.token)).status).toBe(401)
+    const short = mint(hub, sessionId)
+    db.run("UPDATE session_file_tokens SET expires_at = ? WHERE token = ?", Date.now() - 1, short)
+    expect((await send(ATTACHMENT, {}, short)).status).toBe(401)
     expect(relayed).toHaveLength(0)
   })
 })
@@ -111,8 +143,8 @@ describe("POST /api/file-token", () => {
   const stub = {
     // Durable Object RPC: every call resolves asynchronously, as on Cloudflare.
     session: async (id: string) => (id === "session-user" ? { login: "octocat", dev: false } : null),
-    createFileToken: async (login: string) => {
-      minted.push(login)
+    createFileToken: async (sessionId: string) => {
+      minted.push(sessionId)
       return { token: "file-token", expiresAt: "2026-11-03T01:00:00.000Z" }
     },
     fetch: async (request: Request) => {
@@ -133,18 +165,19 @@ describe("POST /api/file-token", () => {
       headers: { cookie: "session=session-user" },
     })
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ token: "file-token", expiresAt: "2026-11-03T01:00:00.000Z" })
-    expect(minted).toEqual(["octocat"])
+    expect(minted).toEqual(["session-user"])
   })
 
   test("accepts the token only on GET box files, and strips it before relaying", async () => {
     forwarded.length = 0
     const file = Paths.taskAttachment("task-1", "attachment-1")
-    const response = await request(`${file}?${BOX_TOKEN_QUERY}=file-token`)
+    // A session header from the browser must not reach the Hub: only the Worker sets it.
+    const response = await request(`${file}?${BOX_TOKEN_QUERY}=file-token`, { headers: { [SESSION_HEADER]: "session-user" } })
     expect(response.status).toBe(200)
     expect(forwarded).toHaveLength(1)
     expect(forwarded[0]?.path).toBe(file)
     expect(forwarded[0]?.headers.get(FILE_TOKEN_HEADER)).toBe("file-token")
+    expect(forwarded[0]?.headers.get(SESSION_HEADER)).toBeNull()
     expect(forwarded[0]?.headers.get("cookie")).toBeNull()
 
     // Nothing else the relay serves takes a file token in place of the session.

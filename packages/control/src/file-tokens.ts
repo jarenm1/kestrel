@@ -1,8 +1,9 @@
 /**
  * File tokens: opaque, short-lived stand-ins for the session cookie so a WebView or DOM `<img>` can load box files
  * (`Paths.taskAttachment`, `Paths.taskRunImage`, `Paths.taskCheckoutIcon`), which cannot send a Cookie header. Stored in
- * the Hub like preview sessions; a token names the user who minted it and is valid for GET on those paths only.
- * Kept apart from the Hub class so the rules can be exercised against a plain SQLite database.
+ * the Hub like preview sessions. A token names the session that minted it, so it is only as good as that session: it
+ * carries the session's user and dev flag, and it stops working when the session ends (sign-out or expiry). It is
+ * valid for GET on those paths only. Kept apart from the Hub class so the rules can be exercised against plain SQLite.
  */
 import type { FileToken } from "@cloudagents/protocol"
 
@@ -27,28 +28,42 @@ const BOX_FILE_PATH =
 export const isBoxFilePath = (path: string): boolean => BOX_FILE_PATH.test(path)
 
 export const ensureFileTokensTable = (sql: FileTokenSql): void => {
-  sql.exec(`CREATE TABLE IF NOT EXISTS file_tokens (
+  sql.exec(`CREATE TABLE IF NOT EXISTS session_file_tokens (
     token TEXT PRIMARY KEY,
-    login TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     expires_at INTEGER NOT NULL
   )`)
 }
 
-/** Mints a token for `login`, dropping expired ones first. `now` is epoch ms. */
-export const createFileToken = (sql: FileTokenSql, login: string, now = Date.now()): FileToken => {
+/** Mints a token for the session `sessionId`, dropping expired ones first. `now` is epoch ms. */
+export const createFileToken = (sql: FileTokenSql, sessionId: string, now = Date.now()): FileToken => {
   const token = crypto.randomUUID()
   const expiresAt = now + FILE_TOKEN_TTL_MS
-  sql.exec("DELETE FROM file_tokens WHERE expires_at <= ?", now)
-  sql.exec("INSERT INTO file_tokens (token, login, expires_at) VALUES (?, ?, ?)", token, login, expiresAt)
+  sql.exec("DELETE FROM session_file_tokens WHERE expires_at <= ?", now)
+  sql.exec(
+    "INSERT INTO session_file_tokens (token, session_id, expires_at) VALUES (?, ?, ?)",
+    token,
+    sessionId,
+    expiresAt,
+  )
   return { token, expiresAt: new Date(expiresAt).toISOString() }
 }
 
-/** The login that minted a live `token`, or null when it is unknown or expired at `now` (epoch ms). */
-export const fileTokenLogin = (sql: FileTokenSql, token: string, now = Date.now()): string | null => {
-  sql.exec("DELETE FROM file_tokens WHERE expires_at <= ?", now)
+/** The session that minted a live `token`, or null when it is unknown or expired at `now` (epoch ms). */
+export const fileTokenSession = (sql: FileTokenSql, token: string, now = Date.now()): string | null => {
+  sql.exec("DELETE FROM session_file_tokens WHERE expires_at <= ?", now)
   return (
     sql
-      .exec<{ login: string }>("SELECT login FROM file_tokens WHERE token = ? AND expires_at > ?", token, now)
-      .toArray()[0]?.login ?? null
+      .exec<{ sessionId: string }>(
+        "SELECT session_id AS sessionId FROM session_file_tokens WHERE token = ? AND expires_at > ?",
+        token,
+        now,
+      )
+      .toArray()[0]?.sessionId ?? null
   )
+}
+
+/** Revokes every file token a session minted; called when the session ends. */
+export const deleteSessionFileTokens = (sql: FileTokenSql, sessionId: string): void => {
+  sql.exec("DELETE FROM session_file_tokens WHERE session_id = ?", sessionId)
 }

@@ -209,6 +209,8 @@ const forwardFileToken = (request: Request, env: Env, url: URL, token: string): 
   const headers = new Headers(request.headers)
   headers.delete("cookie")
   headers.delete(CREDENTIALS_HEADER)
+  // Only the Worker sets the Hub's session header; one the browser sent must not reach the Hub on this route.
+  headers.delete(SESSION_HEADER)
   headers.set(FILE_TOKEN_HEADER, token)
   return hub(env).fetch(new Request(`https://hub${target.pathname}${target.search}`, { method: "GET", headers }))
 }
@@ -416,7 +418,10 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   const login = session.login
 
   if (path === ControlPaths.fileToken) {
-    return json(await hub(env).createFileToken(login))
+    // `currentSession` found the session from this cookie, so it is present; the token lasts no longer than it.
+    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+    const minted = await hub(env).createFileToken(sessionId)
+    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
   }
 
   const previewSession = PREVIEW_SESSION_PATH.exec(path)

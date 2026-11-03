@@ -57,8 +57,8 @@ reader is at the bottom, like the desktop.
   side asks for a new epoch when it mounts or a patch goes missing (a `seq` gap).
 - **Files.** A WebView `<img>` cannot send the session `Cookie` header, so images use `ApiClient.fileAccess()`: the
   box token on a direct box, or a one-hour file token (`ControlPaths.fileToken`) that the Worker accepts in place of
-  the cookie only for GETs of box files on the relayed box. The token is renewed before it expires, and when an image
-  fails to load.
+  the cookie only for GETs of box files on the relayed box. The token belongs to the session that minted it and ends
+  with it (sign-out). It is renewed before it expires, and when an image fails to load.
 - **Links.** In the native WebView, links and files open in the system browser (`Linking`); on phone web they are
   ordinary anchors. A link to another thread opens it in the app.
 - `components/domHostReset`'s `domFillReset` makes the WebView document exactly the view's size (native only).

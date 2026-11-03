@@ -61,7 +61,13 @@ import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, type Env } from "./env"
-import { createFileToken, ensureFileTokensTable, fileTokenLogin, isBoxFilePath } from "./file-tokens"
+import {
+  createFileToken,
+  deleteSessionFileTokens,
+  ensureFileTokensTable,
+  fileTokenSession,
+  isBoxFilePath,
+} from "./file-tokens"
 import {
   deleteFleetBox,
   ensureFleetTable,
@@ -396,8 +402,10 @@ export class Hub extends DurableObject<Env> {
     return row ? { login: row.login, dev: row.dev === 1 } : null
   }
 
+  /** Ends a session (sign-out); the file tokens it minted end with it. */
   deleteSession(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
+    deleteSessionFileTokens(this.ctx.storage.sql, id)
   }
 
   /** Short-lived preview-only capability; the browser never receives the app session cookie. */
@@ -431,9 +439,13 @@ export class Hub extends DurableObject<Env> {
     return row ?? null
   }
 
-  /** A short-lived token for box files a WebView or DOM `<img>` loads; it stands in for the session cookie. */
-  createFileToken(login: string): FileToken {
-    return createFileToken(this.ctx.storage.sql, login)
+  /**
+   * A short-lived token for box files a WebView or DOM `<img>` loads; it stands in for the session cookie and lasts no
+   * longer than the session `sessionId`. Null when that session is not live.
+   */
+  createFileToken(sessionId: string): FileToken | null {
+    if (this.session(sessionId) === null) return null
+    return createFileToken(this.ctx.storage.sql, sessionId)
   }
 
   // -------------------------------------------------------------------------
@@ -1381,32 +1393,37 @@ export class Hub extends DurableObject<Env> {
     const session = this.session(sessionId)
     if (!session) return errorResponse(401, "Unauthorized", "sign in required")
     if (url.pathname === ControlPaths.box && request.method === "GET") return Response.json(this.boxStatus())
-    const creds = this.credentials(session.login)
-    const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
     const headers = new Headers(request.headers)
     headers.delete(SESSION_HEADER)
-    headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
+    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.sessionCredentials(session)))
     return this.relay(new Request(request, { headers }), url)
+  }
+
+  /** What the box is told about a signed-in caller: the user's credentials, and whether it is a dev-login session. */
+  private sessionCredentials(session: SessionRecord): RelayCredentials {
+    const creds = this.credentials(session.login)
+    return session.dev ? { ...creds, dev: true } : creds
   }
 
   /**
    * A box file loaded with a `FileToken` (`ControlPaths.fileToken`) instead of the session cookie. GET only, and only
-   * the three box file paths: the token can do nothing else. It is dropped, and so is its `?access_token=` query, before
-   * the file is relayed with its user's credentials.
+   * the three box file paths: the token can do nothing else. It relays as the session that minted it (user and dev
+   * flag), and fails once that session has ended. The token and its `?access_token=` query are dropped first.
    */
   private fileApi(request: Request, url: URL, token: string): Promise<Response> | Response {
     if (request.method !== "GET" || !isBoxFilePath(url.pathname)) {
       return errorResponse(401, "Unauthorized", "invalid file token")
     }
-    const login = fileTokenLogin(this.ctx.storage.sql, token)
-    if (login === null) return errorResponse(401, "Unauthorized", "invalid file token")
+    const sessionId = fileTokenSession(this.ctx.storage.sql, token)
+    const session = sessionId === null ? null : this.session(sessionId)
+    if (session === null) return errorResponse(401, "Unauthorized", "invalid file token")
     const target = new URL(url)
     target.searchParams.delete(BOX_TOKEN_QUERY)
     const headers = new Headers(request.headers)
     headers.delete(FILE_TOKEN_HEADER)
     headers.delete("cookie")
     headers.delete("authorization")
-    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.credentials(login)))
+    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.sessionCredentials(session)))
     return this.relay(new Request(request, { headers }), target)
   }
 
