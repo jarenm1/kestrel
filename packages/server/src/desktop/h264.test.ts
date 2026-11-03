@@ -49,6 +49,11 @@ describe("WebRTC H.264 profile", () => {
       expect(argAfter(ffmpegArgs("nvenc", q, "high"), "-vf")).toContain("scale_cuda=")
       expect(argAfter(ffmpegArgs("nvenc", q, "high"), "-vf")).toContain("interp_algo=3")
       expect(argAfter(ffmpegArgs("x264", q, "high"), "-vf")).toContain("flags=area")
+      // An ffmpeg without the CUDA filters keeps NVENC, scaling on the CPU to 4:2:0, and asks for no CUDA device.
+      const noCuda = ffmpegArgs("nvenc", q, "high", false)
+      expect(argAfter(noCuda, "-vf")).toContain("flags=area,format=yuv420p")
+      expect(noCuda).not.toContain("-init_hw_device")
+      expect(noCuda).toContain("h264_nvenc")
     }
   })
 })

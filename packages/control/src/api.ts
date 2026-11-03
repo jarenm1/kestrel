@@ -33,6 +33,7 @@ import {
 import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
 import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
+import { desktopStreamTask } from "./desktop-tokens"
 import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
@@ -232,12 +233,14 @@ const createPreviewSession = async (env: Env, login: string, taskId: string): Pr
 }
 
 const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
+const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
   (path === ControlPaths.fileToken && method === "POST") ||
+  (DESKTOP_TOKEN_PATH.test(path) && method === "POST") ||
   (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
@@ -402,9 +405,12 @@ const handleMeter = async (request: Request, env: Env, url: URL): Promise<Respon
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
-  // A file token stands in for the session cookie on box files: a WebView or DOM `<img>` cannot send a Cookie header.
+  // A file token stands in for the session cookie on box files, and a desktop token on a desktop stream: a WebView or
+  // DOM `<img>` cannot send a Cookie header.
   const fileToken = method === "GET" ? url.searchParams.get(BOX_TOKEN_QUERY) : null
-  if (fileToken !== null && isBoxFilePath(path)) return forwardFileToken(request, env, url, fileToken)
+  if (fileToken !== null && (isBoxFilePath(path) || desktopStreamTask(path) !== null)) {
+    return forwardFileToken(request, env, url, fileToken)
+  }
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)
@@ -421,6 +427,13 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     // `currentSession` found the session from this cookie, so it is present; the token lasts no longer than it.
     const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
     const minted = await hub(env).createFileToken(sessionId)
+    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
+  }
+
+  const desktopToken = DESKTOP_TOKEN_PATH.exec(path)
+  if (desktopToken?.[1] && method === "POST") {
+    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+    const minted = await hub(env).createDesktopToken(sessionId, decodeURIComponent(desktopToken[1]))
     return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
   }
 

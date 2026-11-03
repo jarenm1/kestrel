@@ -80,6 +80,61 @@ describe("file token storage", () => {
   })
 })
 
+describe("a desktop stream with a desktop token", () => {
+  const STREAM = Paths.taskDesktopWs("task-1")
+  const mintDesktop = (hub: HubClass, sessionId: string, taskId = "task-1"): string => {
+    const minted = hub.createDesktopToken(sessionId, taskId)
+    if (minted === null) throw new Error("no desktop token for a live session")
+    return minted.token
+  }
+
+  test("lasts minutes, and a session that is not live gets none", () => {
+    const { hub } = newHub()
+    const minted = hub.createDesktopToken(signIn(hub), "task-1")
+    expect(Date.parse(minted!.expiresAt) - Date.now()).toBeLessThanOrEqual(5 * 60 * 1000)
+    expect(hub.createDesktopToken("no-such-session", "task-1")).toBeNull()
+  })
+
+  test("relays that task's stream as the session, without the token or its query", async () => {
+    const { hub } = newHub()
+    intercept(hub)
+    expect((await getFile(hub, STREAM, mintDesktop(hub, signIn(hub)))).status).toBe(200)
+    expect(relayed.map((call) => call.path)).toEqual([STREAM])
+    expect(relayed[0]!.headers.get(FILE_TOKEN_HEADER)).toBeNull()
+    expect(JSON.parse(relayed[0]!.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "octocat" })
+  })
+
+  test("is refused on another task's stream, on a box file, and on other methods", async () => {
+    const { hub } = newHub()
+    intercept(hub)
+    const token = mintDesktop(hub, signIn(hub))
+    expect((await getFile(hub, Paths.taskDesktopWs("task-2"), token)).status).toBe(401)
+    expect((await getFile(hub, ATTACHMENT, token)).status).toBe(401)
+    expect((await getFile(hub, STREAM, token, { method: "POST" })).status).toBe(401)
+    expect(relayed).toEqual([])
+  })
+
+  test("a file token does not open a desktop stream", async () => {
+    const { hub } = newHub()
+    intercept(hub)
+    expect((await getFile(hub, STREAM, mint(hub, signIn(hub)))).status).toBe(401)
+    expect(relayed).toEqual([])
+  })
+
+  test("ends with its session, and when it expires", async () => {
+    const { hub, db } = newHub()
+    intercept(hub)
+    const session = signIn(hub)
+    const expiring = mintDesktop(hub, session)
+    db.query("UPDATE session_desktop_tokens SET expires_at = 1 WHERE token = ?").run(expiring)
+    expect((await getFile(hub, STREAM, expiring)).status).toBe(401)
+    const token = mintDesktop(hub, session)
+    hub.deleteSession(session)
+    expect((await getFile(hub, STREAM, token)).status).toBe(401)
+    expect(relayed).toEqual([])
+  })
+})
+
 describe("box files with a file token", () => {
   test("relays the three file paths with the token user's credentials, without the token or its query", async () => {
     const { hub } = newHub()

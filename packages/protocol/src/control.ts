@@ -25,6 +25,11 @@ export const ControlPaths = {
    * `Paths.taskRunImage` and `Paths.taskCheckoutIcon`, and on nothing else.
    */
   fileToken: "/api/file-token",
+  /**
+   * POST (no body) -> FileToken: a short-lived token for one task's desktop stream, for a WebView that cannot send the
+   * session cookie. Accepted as `?access_token=` on `Paths.taskDesktopWs` of that task, and on nothing else.
+   */
+  desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
   /** GET -> Connection[] */

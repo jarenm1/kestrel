@@ -9,19 +9,22 @@ import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { colors, fonts, radius, spacing } from "@/theme";
-import { Paths, type DesktopStatus } from "@cloudagents/protocol";
+import type { DesktopStatus } from "@cloudagents/protocol";
 
 /** A second `auth-expired` inside this window means the fresh URL was rejected too: stop retrying. */
 const AUTH_REFRESH_WINDOW_MS = 5_000;
+/** The embed keeps retrying an unreachable stream by itself; a fresh URL, in case its token expired, is minted this often. */
+const UNREACHABLE_REFRESH_MS = 30_000;
 
 /** Messages the desktop embed page (`<app host>/embed/desktop`) posts to the host. */
-type EmbedEvent = { event: "status"; state: string } | { event: "auth-expired" };
+type EmbedEvent = { event: "status"; state: string } | { event: "auth-expired" } | { event: "unreachable" };
 
 function embedEvent(data: unknown): EmbedEvent | null {
   if (typeof data !== "object" || data === null) return null;
   const message = data as { type?: unknown; event?: unknown; state?: unknown };
   if (message.type !== "kestrel-desktop") return null;
   if (message.event === "auth-expired") return { event: "auth-expired" };
+  if (message.event === "unreachable") return { event: "unreachable" };
   if (message.event === "status" && typeof message.state === "string") return { event: "status", state: message.state };
   return null;
 }
@@ -44,6 +47,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const [inForeground, setInForeground] = useState(true);
   const webView = useRef<HtmlViewHandle | null>(null);
   const lastAuthRefresh = useRef(0);
+  const lastUnreachableRefresh = useRef(0);
 
   const active = status?.state === "running" || status?.state === "starting";
 
@@ -61,13 +65,13 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     return () => sub.remove();
   }, []);
 
-  // The embed URL carries the stream's ws URL, and that carries the box token. It is resolved outside render and kept
+  // The embed URL carries the stream's ws URL, and that carries its token. It is resolved outside render and kept
   // while unchanged, so the WebView does not reload. It is re-resolved on each desktop state change and on foreground,
   // so a restarted stream or a resumed app gets a token that has not expired.
   useEffect(() => {
     if (!inForeground) return;
     let current = true;
-    api.socketUrl(Paths.taskDesktopWs(taskId)).then(
+    api.desktopSocketUrl(taskId).then(
       (ws) => {
         if (!current) return;
         const url = api.desktopEmbedUrl(taskId, ws);
@@ -83,13 +87,23 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
     };
   }, [api, taskId, status?.state, inForeground]);
 
-  // The embed's socket was rejected (its box token expired): mint a new one and hand the embed its new ws URL. The
-  // embed keeps its page, so its WebRTC session is re-established without a reload.
+  // The embed's socket was rejected (its token expired): mint a new one and hand the embed its new ws URL. The embed
+  // keeps its page, so its WebRTC session is re-established without a reload. A handshake that merely failed may be a
+  // network or box that is down, so it is not an error: the embed shows that and keeps retrying, and a new URL is minted
+  // now and then in case the token is what failed.
   const onEmbedMessage = useCallback(
     (data: unknown) => {
       const message = embedEvent(data);
       if (message?.event === "status") {
         setViewerState(message.state);
+      } else if (message?.event === "unreachable") {
+        const now = Date.now();
+        if (now - lastUnreachableRefresh.current < UNREACHABLE_REFRESH_MS) return;
+        lastUnreachableRefresh.current = now;
+        api.desktopSocketUrl(taskId, { fresh: true }).then(
+          (ws) => webView.current?.postMessage({ type: "kestrel-desktop", ws }),
+          () => {}
+        );
       } else if (message?.event === "auth-expired") {
         const now = Date.now();
         if (now - lastAuthRefresh.current < AUTH_REFRESH_WINDOW_MS) {
@@ -97,7 +111,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           return;
         }
         lastAuthRefresh.current = now;
-        api.socketUrl(Paths.taskDesktopWs(taskId), { fresh: true }).then(
+        api.desktopSocketUrl(taskId, { fresh: true }).then(
           (ws) => webView.current?.postMessage({ type: "kestrel-desktop", ws }),
           (error: unknown) => setStreamError(error)
         );
@@ -141,7 +155,6 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             ref={webView}
             uri={embed.url}
             onMessage={onEmbedMessage}
-            beforeLoadScript={api.embedCookieScript() ?? undefined}
             style={styles.webview}
           />
         ) : (

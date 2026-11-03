@@ -21,11 +21,6 @@ export type HtmlViewProps = HtmlViewSource & {
   ref?: React.Ref<HtmlViewHandle>;
   /** Messages the page sends to the host, parsed (see `parseHtmlMessage`). */
   onMessage?: (data: unknown) => void;
-  /**
-   * Native only: a script that runs before the page's own scripts, e.g. to set the session cookie the page's WebSocket
-   * sends. The web iframe shares the app's cookies and ignores it.
-   */
-  beforeLoadScript?: string;
 };
 
 /**
@@ -33,7 +28,7 @@ export type HtmlViewProps = HtmlViewSource & {
  * inline autoplaying media; the page reaches the host through `window.ReactNativeWebView.postMessage`. The web build
  * uses `HtmlView.web.tsx`.
  */
-export function HtmlView({ style, ref, onMessage, beforeLoadScript, ...source }: HtmlViewProps) {
+export function HtmlView({ style, ref, onMessage, ...source }: HtmlViewProps) {
   const webView = useRef<WebView | null>(null);
   useImperativeHandle(ref, () => ({
     reload: () => webView.current?.reload(),
@@ -53,8 +48,6 @@ export function HtmlView({ style, ref, onMessage, beforeLoadScript, ...source }:
       domStorageEnabled
       mediaPlaybackRequiresUserAction={false}
       allowsInlineMediaPlayback
-      sharedCookiesEnabled
-      injectedJavaScriptBeforeContentLoaded={beforeLoadScript}
       scrollEnabled={false}
       onMessage={(event: WebViewMessageEvent) => onMessage?.(parseHtmlMessage(event.nativeEvent.data))}
     />

@@ -160,6 +160,13 @@ const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
 let nvencDisabled = false
 let nvencBusyUntil = 0
+/** Process-wide: this ffmpeg has NVENC but not the CUDA filters (common in distro builds), so NVENC scales on the CPU. */
+let cudaFiltersMissing = false
+/** Boot waits this long for the audio server, so apps launched as the desktop comes up get its socket (see prepareLaunch). */
+const AUDIO_BOOT_WAIT_MS = 3_000
+/** Audio that dies is started again this many times per desktop, after this long. Running apps keep their dead socket. */
+const MAX_AUDIO_RESTARTS = 3
+const AUDIO_RESTART_DELAY_MS = 1_000
 
 type EncoderKind = "nvenc" | "x264"
 
@@ -232,6 +239,9 @@ interface Session {
   inputRestartsLeft: number
   /** The desktop's Opus source (PulseAudio and capture), or null when audio is unavailable. */
   audio: DesktopAudio | null
+  /** Ends this desktop's subscription to `audio`, which keeps its capture running; null while nobody is listening. */
+  audioListener: (() => void) | null
+  audioRestartsLeft: number
 }
 
 /** Keeps the tail of a launched app's output. Decodes per stream so UTF-8 split across chunks survives. */
@@ -379,9 +389,16 @@ const encoderArgs = (kind: EncoderKind, gop: number, profile: H264EncoderProfile
  * NVENC: the frames are uploaded to CUDA at full size and scale_cuda shrinks them there. The CPU area scale cost ~75%
  * of a core at 2560x1440 -> 1920x1080 30 fps. scale_cuda takes bgr0 as-is; a format change before it fails in this build.
  */
-export const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality, profile: H264EncoderProfile): string[] => {
+export const ffmpegArgs = (
+  kind: EncoderKind,
+  quality: DesktopQuality,
+  profile: H264EncoderProfile,
+  cudaFilters = true,
+): string[] => {
   const { width, height, fps } = DESKTOP_QUALITIES[quality]
-  const gpu = kind === "nvenc"
+  const gpu = kind === "nvenc" && cudaFilters
+  // NVENC without CUDA filters takes the CPU's scale as 4:2:0: its RGB input would make it write High 4:4:4.
+  const cpuScale = `scale=${width}:${height}:flags=area${kind === "nvenc" ? ",format=yuv420p" : ""}`
   return [
     "-hide_banner",
     "-loglevel",
@@ -402,7 +419,7 @@ export const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality, profile: 
     // Area averaging keeps downscaled text legible on the CPU path. scale_cuda uses bicubic (interp_algo 3): the best of
     // its kernels against the area reference (lanczos, 4, scored ~11 dB lower), and ~3 dB under the CPU area filter.
     "-vf",
-    gpu ? `hwupload_cuda,scale_cuda=${width}:${height}:interp_algo=3` : `scale=${width}:${height}:flags=area`,
+    gpu ? `hwupload_cuda,scale_cuda=${width}:${height}:interp_algo=3` : cpuScale,
     // GOP backstop: equal to KEYFRAME_INTERVAL_S at the capped rate, so the clock normally fires first.
     ...encoderArgs(kind, fps * KEYFRAME_INTERVAL_S, profile),
     "-force_key_frames",
@@ -609,11 +626,30 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     /** Starts the linger countdown once the last viewer has left a live encoder. */
     const scheduleStop = (s: Session) => {
-      if (s.sinks.size > 0 || s.encoder === null || s.lingerTimer !== null) return
+      if (s.sinks.size > 0 || s.lingerTimer !== null) return
+      if (s.encoder === null) {
+        stopListeningToAudio(s)
+        return
+      }
       s.lingerTimer = setTimeout(() => {
         s.lingerTimer = null
-        if (s.sinks.size === 0) stopEncoder(s)
+        if (s.sinks.size > 0) return
+        stopEncoder(s)
+        stopListeningToAudio(s)
       }, LINGER_MS)
+    }
+
+    /** Runs the audio capture for this desktop's viewers. A no-op until the audio server is up (see startAudio). */
+    const listenToAudio = (s: Session) => {
+      if (s.audio === null || s.audioListener !== null) return
+      s.audioListener = s.audio.subscribe((packet) => {
+        for (const sink of s.sinks) sink.onAudio(packet.opus, packet.timestamp)
+      })
+    }
+
+    const stopListeningToAudio = (s: Session) => {
+      s.audioListener?.()
+      s.audioListener = null
     }
 
     const onEncoderBytes = (s: Session, enc: Encoder, data: Buffer) => {
@@ -683,7 +719,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.gopBytes = 0
       s.awaiting = new Set(s.sinks)
       s.profile = profileFor(s)
-      const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality, s.profile)]
+      const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality, s.profile, !cudaFiltersMissing)]
       enc.child = spawnTracked(s, "xdamage-capture", capture, {
         critical: false,
         prefix: s.ipc,
@@ -707,16 +743,25 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     }
 
     /**
-     * Starts the desktop's audio alongside the X server boot, without holding it up: a desktop without audio still
-     * serves video and input. The audio m-line is answered sendonly for every viewer (webrtc.ts), so audio that becomes
-     * ready after a viewer's offer starts flowing to it without renegotiation.
+     * Starts the desktop's audio alongside the X server boot; the returned promise settles when it is up or has failed.
+     * A desktop without audio still serves video and input. The audio m-line is answered sendonly for every viewer
+     * (webrtc.ts), so audio that becomes ready after a viewer's offer starts flowing to it without renegotiation.
      */
-    const startAudio = (s: Session, x11Dir: string) => {
-      void startDesktopAudio({
+    const startAudio = (s: Session, x11Dir: string): Promise<void> =>
+      startDesktopAudio({
         display: s.display,
         x11Dir,
         spawn: (command, args, env) => spawnTracked(s, command, args, { critical: false, prefix: s.ipc, env }),
-        onError: (message) => console.warn(`desktop ${s.display}: audio: ${message}`),
+        onError: (message) => {
+          console.warn(`desktop ${s.display}: audio: ${message}`)
+          s.audio = null
+          s.audioListener = null
+          if (s.audioRestartsLeft === 0) return
+          s.audioRestartsLeft--
+          setTimeout(() => {
+            if (s.state === "starting" || s.state === "running") void startAudio(s, x11Dir)
+          }, AUDIO_RESTART_DELAY_MS)
+        },
       }).then(
         (audio) => {
           if (audio === null) return
@@ -725,13 +770,10 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
             return
           }
           s.audio = audio
-          audio.subscribe((packet) => {
-            for (const sink of s.sinks) sink.onAudio(packet.opus, packet.timestamp)
-          })
+          if (s.sinks.size > 0) listenToAudio(s)
         },
         (e) => console.warn(`desktop ${s.display}: audio failed to start: ${toErr(e).message}`),
       )
-    }
 
     /**
      * Restarts a live encoder whose profile no longer matches the connected viewers. Viewers wait for its keyframe, as
@@ -759,6 +801,13 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       detachEncoder(s)
       const why = `${enc.kind} encoder exited (${reason})`
       if (enc.kind === "nvenc" && !enc.initialized) {
+        // This ffmpeg lacks the CUDA filters, which says nothing about NVENC: scale on the CPU and keep the GPU encoder.
+        if (!cudaFiltersMissing && /No such filter: '(?:hwupload|scale)_cuda'/.test(enc.stderr)) {
+          cudaFiltersMissing = true
+          console.warn(`desktop ${s.display}: ffmpeg has no CUDA filters; nvenc scales on the CPU`)
+          launchEncoder(s, "nvenc")
+          return
+        }
         // NVENC could not start. A busy GPU (session limit) is retried later; anything else disables NVENC.
         if (/OpenEncodeSessionEx|out of memory/i.test(enc.stderr)) nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
         else nvencDisabled = true
@@ -918,7 +967,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         // Xwayland is weston's child, so it is in the same IPC and mount namespaces.
         if (server.pid !== undefined) s.ipc = ns.join(server.pid)
         // Audio boots in parallel with Xwayland: its Pulse server and null sink take about two seconds.
-        startAudio(s, ns.x11Dir)
+        const audioUp = startAudio(s, ns.x11Dir)
         yield* Effect.tryPromise({ try: () => waitForSocket(s, ns.x11Dir), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         const shared = yield* Effect.try({
@@ -943,6 +992,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           ),
           Effect.catchAll((e) => Effect.logWarning(`desktop ${s.display}: no wallpaper: ${e.message}`)),
         )
+        // A launch only gets the audio socket if it exists by then, and nothing can launch before `ready`.
+        yield* Effect.promise(() => Promise.race([audioUp, Bun.sleep(AUDIO_BOOT_WAIT_MS)]))
         yield* Effect.try({
           try: () => {
             spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false, prefix: s.ipc })
@@ -1046,6 +1097,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 error: null,
                 config: null,
                 audio: null,
+                audioListener: null,
+                audioRestartsLeft: MAX_AUDIO_RESTARTS,
                 gop: null,
                 gopBytes: 0,
                 awaiting: new Set(),
@@ -1170,6 +1223,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           s.sinks.add(sink)
           sink.onStatus(toStatus(taskId, s))
           cancelLinger(s)
+          listenToAudio(s)
           if (s.encoder === null && s.state === "running") {
             // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
             yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(

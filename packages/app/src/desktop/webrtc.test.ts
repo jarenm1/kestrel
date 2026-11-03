@@ -4,6 +4,7 @@ import {
   type DesktopRtcServerMessage,
 } from "@cloudagents/protocol"
 import {
+  CONFIG_MAX_AGE_MS,
   CONNECT_TIMEOUT_MS,
   DISCONNECT_GRACE_MS,
   DesktopRtc,
@@ -273,7 +274,7 @@ describe("signaling", () => {
 })
 
 describe("refusal and retry", () => {
-  test("a retryable refusal re-offers after 30 s", async () => {
+  test("a retryable refusal re-offers after the first retry delay", async () => {
     const h = harness()
     h.rtc.handle(config)
     await settle()
@@ -300,8 +301,57 @@ describe("refusal and retry", () => {
     expect(h.states.at(-1)).toBe("unsupported")
   })
 
-  test("retry delay doubles from 30 s and stops at 5 min", () => {
-    expect([0, 1, 2, 3, 4, 5].map(retryDelay)).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 300_000])
+  test("retry delay doubles from 1 s and stops at 30 s", () => {
+    expect([0, 1, 2, 3, 4, 5, 6].map(retryDelay)).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000])
+  })
+
+  test("the state stays retrying across attempts until one goes live", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.set("failed")
+    clock.advance(retryDelay(0))
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+    expect(h.states.at(-1)).toBe("retrying")
+    FakePeer.all[1]!.set("connected")
+    expect(h.states.at(-1)).toBe("live")
+  })
+
+  test("a retry with a stale config asks for a new one, keeps its backoff, and offers with the answer", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    clock.advance(CONFIG_MAX_AGE_MS)
+    peer.set("failed")
+    clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    expect(FakePeer.all.length).toBe(1)
+    const turn: DesktopRtcServerMessage = {
+      _tag: "rtc.config",
+      iceServers: [{ urls: ["turn:turn.example"], username: "new", credential: "new" }],
+      iceTransportPolicy: "all",
+    }
+    h.rtc.handle(turn)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+    expect((FakePeer.all[1]!.config as { iceServers: unknown }).iceServers).toEqual([
+      { urls: ["turn:turn.example"], username: "new", credential: "new" },
+    ])
+    expect(h.states.at(-1)).toBe("retrying")
+    // The refreshed config is fresh: the next failure backs off and offers without asking again.
+    FakePeer.all[1]!.set("failed")
+    clock.advance(retryDelay(1))
+    await settle()
+    expect(FakePeer.all.length).toBe(3)
+  })
+
+  test("a retry with a stale config still offers when the box does not answer", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    clock.advance(CONFIG_MAX_AGE_MS)
+    peer.set("failed")
+    clock.advance(retryDelay(0) + CONNECT_TIMEOUT_MS)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
   })
 
   test("a connect timeout fails the attempt, closes the box's session, and retries", async () => {

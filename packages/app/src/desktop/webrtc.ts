@@ -10,14 +10,16 @@ export const CONNECT_TIMEOUT_MS = 15_000
 export const DISCONNECT_GRACE_MS = 4_000
 /** Without a decoded frame or a new packet for this long on a started video stream, the data path is dead. */
 export const PATH_SILENCE_MS = 3_500
-export const RETRY_MIN_MS = 30_000
-export const RETRY_MAX_MS = 300_000
+export const RETRY_MIN_MS = 1_000
+export const RETRY_MAX_MS = 30_000
 export const STATS_EVERY_MS = 1_000
+/** Half the box's TURN credential lifetime: a retry with a config older than this asks the box for a new one first. */
+export const CONFIG_MAX_AGE_MS = 30 * 60 * 1_000
 
 /**
  * `unsupported`: the box cannot serve this session (a non-retryable refusal, or no WebRTC in this browser); nothing
- * retries until the box sends a new config. `retrying`: a retryable refusal or a failed attempt; a new offer follows
- * after `retryDelay`.
+ * retries until the box sends a new config. `retrying`: a retryable refusal or a failed attempt, until a later attempt
+ * goes live; a new offer follows after `retryDelay`.
  */
 export type RtcState = "idle" | "connecting" | "live" | "retrying" | "unsupported"
 export type RtcPath = "direct" | "relay"
@@ -33,7 +35,7 @@ export interface RtcStats {
   path: RtcPath | null
 }
 
-/** Wait before the next offer after `attempt` (0-based) consecutive refusals or failures: 30 s, doubling to 5 min. */
+/** Wait before the next offer after `attempt` (0-based) consecutive refusals or failures: 1 s, doubling to 30 s. There is no other path for the media. */
 export function retryDelay(attempt: number): number {
   return Math.min(RETRY_MAX_MS, RETRY_MIN_MS * 2 ** attempt)
 }
@@ -101,7 +103,7 @@ export interface DesktopRtcHandlers {
   onAudio(available: boolean): void
 }
 
-type Timer = "connect" | "grace" | "retry" | "stats"
+type Timer = "config" | "connect" | "grace" | "retry" | "stats"
 
 interface Config {
   iceServers: RTCIceServer[]
@@ -115,6 +117,10 @@ interface Config {
  */
 export class DesktopRtc {
   private config: Config | null = null
+  /** The config is past CONFIG_MAX_AGE_MS, so its TURN credentials may be about to expire. */
+  private configStale = false
+  /** The next config answers this session's `rtc.config.request`: a retry goes on, not a new desktop. */
+  private refreshing = false
   private pc: RTCPeerConnection | null = null
   private input: RTCDataChannel | null = null
   private pointer: RTCDataChannel | null = null
@@ -148,7 +154,12 @@ export class DesktopRtc {
           iceServers: message.iceServers.map((s) => ({ ...s, urls: [...s.urls] })),
           iceTransportPolicy: message.iceTransportPolicy,
         }
-        this.attempts = 0
+        this.configStale = false
+        this.arm("config", CONFIG_MAX_AGE_MS, () => {
+          this.configStale = true
+        })
+        if (!this.refreshing) this.attempts = 0
+        this.refreshing = false
         this.negotiate()
         return
       case "rtc.answer":
@@ -177,6 +188,7 @@ export class DesktopRtc {
     this.drop(true)
     this.closed = true
     this.clear("retry")
+    this.clear("config")
     this.setState("idle")
   }
 
@@ -224,7 +236,8 @@ export class DesktopRtc {
     }
     pc.onconnectionstatechange = () => this.connection(pc.connectionState)
 
-    this.setState("connecting")
+    // After a failure the state stays `retrying` until an attempt goes live, so the viewer is told once, not on and off.
+    this.setState(this.attempts > 0 ? "retrying" : "connecting")
     this.arm("connect", CONNECT_TIMEOUT_MS, () => this.fail())
     void this.offer(pc)
   }
@@ -344,8 +357,19 @@ export class DesktopRtc {
 
   private scheduleRetry(): void {
     this.setState("retrying")
-    this.arm("retry", retryDelay(this.attempts), () => this.negotiate())
+    this.arm("retry", retryDelay(this.attempts), () => this.retry())
     this.attempts++
+  }
+
+  /** The next offer, after fetching a new config if this one is old. The offer goes out anyway if no answer comes. */
+  private retry(): void {
+    if (!this.configStale) {
+      this.negotiate()
+      return
+    }
+    this.refreshing = true
+    this.handlers.send({ _tag: "rtc.config.request" })
+    this.arm("retry", CONNECT_TIMEOUT_MS, () => this.negotiate())
   }
 
   /** Tears down the peer connection. `sendClose` tells the box to end its side of the session. */

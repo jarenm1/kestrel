@@ -33,7 +33,7 @@ export interface WebRtcSettings {
   readonly denyPrivate: boolean
 }
 
-/** Session credentials outlive any reasonable viewing, and a viewer that needs new ones renegotiates. */
+/** Session credentials outlive any reasonable viewing; a viewer retrying on an old config asks for a new one (`rtc.config.request`). */
 export const TURN_CREDENTIAL_TTL_S = 60 * 60
 /** Peers a box carries; past it viewers are told to retry later. Each one spends box CPU on encryption. */
 const MAX_PEERS = 16

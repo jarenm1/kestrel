@@ -41,7 +41,6 @@ import {
   type UserBox,
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
-import { sessionCookieScript } from "./embedCookie";
 
 export class ApiError extends Error {
   constructor(
@@ -106,18 +105,15 @@ export interface ApiClient {
   fileSource(path: string): Promise<FileSource>;
   /** Source of any box file for a WebView or DOM `<img>`: `${base}${path}${query}`, valid until `expiresAt` (epoch ms). */
   fileAccess(): Promise<FileAccess>;
+  /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
+  socketUrl(path: string): Promise<string>;
   /**
-   * A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly.
-   * `fresh` mints a new box token instead of reusing the cached one (after the box rejected the socket).
+   * The WebSocket URL for a task's desktop stream, which carries its own auth: the embed page holds no session. A box
+   * token on a user box, a desktop token on the relayed box. `fresh` mints a new one.
    */
-  socketUrl(path: string, options?: { fresh?: boolean }): Promise<string>;
-  /** The desktop embed page URL for a task, given the stream's ws URL from `socketUrl`. */
+  desktopSocketUrl(taskId: string, options?: { fresh?: boolean }): Promise<string>;
+  /** The desktop embed page URL for a task, given the stream's ws URL from `desktopSocketUrl`. */
   desktopEmbedUrl(taskId: string, ws: string): string;
-  /**
-   * The script that gives the native desktop WebView the session cookie, run before the embed page loads. `null` when
-   * the embed needs none: a user box is reached directly, and the web build's iframe already shares the app's cookies.
-   */
-  embedCookieScript(): string | null;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
 
@@ -258,6 +254,28 @@ export function createApiClient(
     return entry.minted;
   }
 
+  // A desktop token for the relayed box, single-flight per task in the same way.
+  let desktopToken: { taskId: string; minted: Promise<FileToken>; refreshAt: number } | null = null;
+  function mintDesktopToken(taskId: string, fresh: boolean): Promise<FileToken> {
+    if (!fresh && desktopToken?.taskId === taskId && Date.now() < desktopToken.refreshAt) return desktopToken.minted;
+    const entry: { taskId: string; minted: Promise<FileToken>; refreshAt: number } = {
+      taskId,
+      refreshAt: Number.POSITIVE_INFINITY,
+      minted: request(FileToken, "POST", ControlPaths.desktopToken(taskId)).then(
+        (minted) => {
+          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
+          return minted;
+        },
+        (error: unknown) => {
+          if (desktopToken === entry) desktopToken = null;
+          throw error;
+        }
+      ),
+    };
+    desktopToken = entry;
+    return entry.minted;
+  }
+
   // Control plane (served by the Worker): authenticated by the session cookie.
   function request<A, I>(
     schema: Schema.Schema<A, I, never>,
@@ -315,15 +333,20 @@ export function createApiClient(
         expiresAt: Date.parse(minted.expiresAt),
       };
     },
-    socketUrl: async (path, options) => {
+    socketUrl: async (path) => {
       if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const { token } = await mintBoxToken(activeBox, options?.fresh);
+      const { token } = await mintBoxToken(activeBox);
       return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+    },
+    desktopSocketUrl: async (taskId, options) => {
+      const path = Paths.taskDesktopWs(taskId);
+      const box = activeBox;
+      const { token } = box !== null ? await mintBoxToken(box, options?.fresh) : await mintDesktopToken(taskId, options?.fresh ?? false);
+      const base = box !== null ? box.url : serverUrl;
+      return `${base.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
     desktopEmbedUrl: (taskId, ws) =>
       `${serverUrl}${DESKTOP_EMBED_PATH}#ws=${encodeURIComponent(ws)}&task=${encodeURIComponent(taskId)}`,
-    embedCookieScript: () =>
-      activeBox === null && sessionCookie !== null ? sessionCookieScript(serverUrl, sessionCookie) : null,
     previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
 
     // Control plane (served by the Worker).

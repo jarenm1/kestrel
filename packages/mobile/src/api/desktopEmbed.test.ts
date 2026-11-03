@@ -12,7 +12,35 @@ test("desktop embed URL is the app host's embed page, with the ws URL and task i
   expect(fragment.get("task")).toBe("task 1");
 });
 
-test("socketUrl reuses the minted box token, and mints a new one when asked for a fresh URL", async () => {
+test("desktopSocketUrl on the relayed box carries a desktop token for that task, reused until fresh is asked for", async () => {
+  const paths: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request: Request) {
+      paths.push(new URL(request.url).pathname);
+      return Response.json({
+        token: `token-${paths.length}`,
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      });
+    },
+  });
+  try {
+    const client = createApiClient(server.url.origin, "session", null);
+    const url = new URL(await client.desktopSocketUrl("t1"));
+    expect(url.protocol).toBe("ws:");
+    expect(url.pathname).toBe("/api/tasks/t1/desktop/stream");
+    expect(url.searchParams.get("access_token")).toBe("token-1");
+    expect(new URL(await client.desktopSocketUrl("t1")).searchParams.get("access_token")).toBe("token-1");
+    expect(new URL(await client.desktopSocketUrl("t1", { fresh: true })).searchParams.get("access_token")).toBe("token-2");
+    expect(new URL(await client.desktopSocketUrl("t2")).searchParams.get("access_token")).toBe("token-3");
+    expect(paths).toEqual(["/api/tasks/t1/desktop/token", "/api/tasks/t1/desktop/token", "/api/tasks/t2/desktop/token"]);
+  } finally {
+    await server.stop(true);
+  }
+});
+
+test("desktopSocketUrl on a user box reuses the minted box token, and mints a new one when asked for a fresh URL", async () => {
   let mints = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -32,7 +60,7 @@ test("socketUrl reuses the minted box token, and mints a new one when asked for 
   try {
     const client = createApiClient(server.url.origin, "session", { id: "box-1", url: server.url.origin });
     const tokenOf = async (options?: { fresh?: boolean }) =>
-      [...new URL(await client.socketUrl("/api/tasks/t/desktop/stream", options)).searchParams.values()][0];
+      [...new URL(await client.desktopSocketUrl("t", options)).searchParams.values()][0];
     expect(await tokenOf()).toBe("token-1");
     expect(await tokenOf()).toBe("token-1");
     expect(await tokenOf({ fresh: true })).toBe("token-2");

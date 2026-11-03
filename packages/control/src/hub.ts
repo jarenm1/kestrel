@@ -62,6 +62,13 @@ import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, type Env } from "./env"
 import {
+  createDesktopToken,
+  deleteSessionDesktopTokens,
+  desktopStreamTask,
+  desktopTokenSession,
+  ensureDesktopTokensTable,
+} from "./desktop-tokens"
+import {
   createFileToken,
   deleteSessionFileTokens,
   ensureFileTokensTable,
@@ -360,6 +367,7 @@ export class Hub extends DurableObject<Env> {
         expires_at INTEGER NOT NULL
       )`)
       ensureFileTokensTable(sql)
+      ensureDesktopTokensTable(sql)
     })
   }
 
@@ -402,10 +410,11 @@ export class Hub extends DurableObject<Env> {
     return row ? { login: row.login, dev: row.dev === 1 } : null
   }
 
-  /** Ends a session (sign-out); the file tokens it minted end with it. */
+  /** Ends a session (sign-out); the file and desktop tokens it minted end with it. */
   deleteSession(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
     deleteSessionFileTokens(this.ctx.storage.sql, id)
+    deleteSessionDesktopTokens(this.ctx.storage.sql, id)
   }
 
   /** Short-lived preview-only capability; the browser never receives the app session cookie. */
@@ -446,6 +455,12 @@ export class Hub extends DurableObject<Env> {
   createFileToken(sessionId: string): FileToken | null {
     if (this.session(sessionId) === null) return null
     return createFileToken(this.ctx.storage.sql, sessionId)
+  }
+
+  /** A short-lived token for one task's desktop stream, for a WebView (`desktop-tokens.ts`). Null when `sessionId` is not live. */
+  createDesktopToken(sessionId: string, taskId: string): FileToken | null {
+    if (this.session(sessionId) === null) return null
+    return createDesktopToken(this.ctx.storage.sql, sessionId, taskId)
   }
 
   // -------------------------------------------------------------------------
@@ -1408,13 +1423,19 @@ export class Hub extends DurableObject<Env> {
   /**
    * A box file loaded with a `FileToken` (`ControlPaths.fileToken`) instead of the session cookie. GET only, and only
    * the three box file paths: the token can do nothing else. It relays as the session that minted it (user and dev
-   * flag), and fails once that session has ended. The token and its `?access_token=` query are dropped first.
+   * flag), and fails once that session has ended. The token and its `?access_token=` query are dropped first. A desktop
+   * stream takes a desktop token (`desktop-tokens.ts`) for that task the same way; neither kind works in the other's place.
    */
   private fileApi(request: Request, url: URL, token: string): Promise<Response> | Response {
-    if (request.method !== "GET" || !isBoxFilePath(url.pathname)) {
-      return errorResponse(401, "Unauthorized", "invalid file token")
-    }
-    const sessionId = fileTokenSession(this.ctx.storage.sql, token)
+    if (request.method !== "GET") return errorResponse(401, "Unauthorized", "invalid file token")
+    const desktopTask = desktopStreamTask(url.pathname)
+    const sql = this.ctx.storage.sql
+    const sessionId =
+      desktopTask !== null
+        ? desktopTokenSession(sql, token, desktopTask)
+        : isBoxFilePath(url.pathname)
+          ? fileTokenSession(sql, token)
+          : null
     const session = sessionId === null ? null : this.session(sessionId)
     if (session === null) return errorResponse(401, "Unauthorized", "invalid file token")
     const target = new URL(url)

@@ -15,6 +15,7 @@ export interface AudioPacket {
 export interface DesktopAudio {
   /** Env that points apps in the desktop at its audio server (for launches that do not go through the sandbox). */
   readonly env: Readonly<Record<string, string>>
+  /** The capture runs only while something is subscribed: encoding Opus for nobody costs CPU on every idle desktop. */
   subscribe(listener: (packet: AudioPacket) => void): () => void
   stop(): void
 }
@@ -73,7 +74,7 @@ export const createSilenceGate = (intervalMs = SILENCE_INTERVAL_MS): ((packet: A
   }
 }
 
-/** Starts the desktop's PulseAudio server, the null sink, and an Opus capture. Null when audio is unavailable. */
+/** Starts the desktop's PulseAudio server and null sink. Null when audio is unavailable. The capture follows `subscribe`. */
 export const startDesktopAudio = async (opts: DesktopAudioOptions): Promise<DesktopAudio | null> => {
   const n = /^:(\d+)$/.exec(opts.display)?.[1]
   if (n === undefined) return null
@@ -94,33 +95,33 @@ export const startDesktopAudio = async (opts: DesktopAudioOptions): Promise<Desk
   }
   const pulseEnv = { PULSE_SERVER: `unix:${socket}` }
 
-  const children: ChildProcess[] = []
+  let server: ChildProcess | null = null
+  let capture: ChildProcess | null = null
   let stopped = false
   let rtp: Socket | null = null
   const listeners = new Set<(packet: AudioPacket) => void>()
+
+  const stopCapture = (): ChildProcess | null => {
+    const running = capture
+    capture = null
+    if (running === null || !isRunning(running)) return null
+    running.kill("SIGTERM")
+    return running
+  }
 
   const teardown = (): void => {
     stopped = true
     rtp?.close()
     rtp = null
     rmSync(join(opts.x11Dir, socketName), { force: true })
-    // Captures stop first: ffmpeg logs a demux error when its pulse source vanishes while it still runs.
-    const [server, ...captures] = children
-    children.length = 0
+    // The capture stops first: ffmpeg logs a demux error when its pulse source vanishes while it still runs.
     const stopServer = (): void => {
-      if (server !== undefined && isRunning(server)) server.kill("SIGTERM")
+      if (server !== null && isRunning(server)) server.kill("SIGTERM")
       rmSync(home, { recursive: true, force: true })
     }
-    const running = captures.filter(isRunning)
-    if (running.length === 0) return stopServer()
-    let pending = running.length
-    for (const capture of running) {
-      capture.once("exit", () => {
-        pending -= 1
-        if (pending === 0) stopServer()
-      })
-      capture.kill("SIGTERM")
-    }
+    const ending = stopCapture()
+    if (ending === null) stopServer()
+    else ending.once("exit", stopServer)
   }
 
   const fail = (message: string): void => {
@@ -151,7 +152,7 @@ export const startDesktopAudio = async (opts: DesktopAudioOptions): Promise<Desk
     ],
     env,
   )
-  children.push(pulse)
+  server = pulse
   pulse.once("exit", (code) => fail(`pulseaudio exited with code ${code}`))
 
   const ready = await waitForSocket(opts.x11Dir, socketName, READY_TIMEOUT_MS)
@@ -168,41 +169,45 @@ export const startDesktopAudio = async (opts: DesktopAudioOptions): Promise<Desk
   await bound.promise
   const port = sock.address().port
 
-  const capture = opts.spawn(
-    ffmpegBin,
-    [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      // The pulse demuxer reads 5 ms fragments; a pipe would make ffmpeg read 85 ms blocks, arriving clumped.
-      "-f",
-      "pulse",
-      "-fragment_size",
-      "960",
-      "-i",
-      `${AUDIO_SINK}.monitor`,
-      "-c:a",
-      "libopus",
-      "-application",
-      "lowdelay",
-      "-frame_duration",
-      "10",
-      "-dtx",
-      "1",
-      "-b:a",
-      "128k",
-      "-flush_packets",
-      "1",
-      "-f",
-      "rtp",
-      "-payload_type",
-      String(RTP_PAYLOAD_TYPE),
-      `rtp://127.0.0.1:${port}`,
-    ],
-    { ...env, ...pulseEnv },
-  )
-  children.push(capture)
-  capture.once("exit", (code) => fail(`audio capture exited with code ${code}`))
+  const startCapture = (): void => {
+    const child = opts.spawn(
+      ffmpegBin,
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        // The pulse demuxer reads 5 ms fragments; a pipe would make ffmpeg read 85 ms blocks, arriving clumped.
+        "-f",
+        "pulse",
+        "-fragment_size",
+        "960",
+        "-i",
+        `${AUDIO_SINK}.monitor`,
+        "-c:a",
+        "libopus",
+        "-application",
+        "lowdelay",
+        "-frame_duration",
+        "10",
+        "-dtx",
+        "1",
+        "-b:a",
+        "128k",
+        "-flush_packets",
+        "1",
+        "-f",
+        "rtp",
+        "-payload_type",
+        String(RTP_PAYLOAD_TYPE),
+        `rtp://127.0.0.1:${port}`,
+      ],
+      { ...env, ...pulseEnv },
+    )
+    capture = child
+    child.once("exit", (code) => {
+      if (capture === child) fail(`audio capture exited with code ${code}`)
+    })
+  }
 
   const gate = createSilenceGate()
   sock.on("message", (msg) => {
@@ -215,7 +220,17 @@ export const startDesktopAudio = async (opts: DesktopAudioOptions): Promise<Desk
     env: pulseEnv,
     subscribe(listener) {
       listeners.add(listener)
-      return () => listeners.delete(listener)
+      if (capture === null && !stopped) {
+        try {
+          startCapture()
+        } catch (e) {
+          fail(`audio capture did not start: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+      return () => {
+        listeners.delete(listener)
+        if (listeners.size === 0) stopCapture()
+      }
     },
     stop() {
       if (!stopped) teardown()

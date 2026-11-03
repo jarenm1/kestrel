@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type ChildProcess, spawn } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { EventEmitter } from "node:events"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { joinTaskDesktop } from "../sandbox/netns"
@@ -185,6 +186,96 @@ describe("desktop audio (live: holder namespace, pulseaudio, ffmpeg Opus capture
       rmSync(root, { recursive: true, force: true })
     }
   }, 60_000)
+})
+
+describe("desktop audio lifecycle", () => {
+  /** A stand-in for the pulse server or ffmpeg: `kill` exits it, as a real one would on SIGTERM. */
+  class FakeChild extends EventEmitter {
+    exitCode: number | null = null
+    signalCode: string | null = null
+    constructor(readonly command: string) {
+      super()
+    }
+    kill(): boolean {
+      this.exit(0)
+      return true
+    }
+    exit(code: number): void {
+      if (this.exitCode !== null) return
+      this.exitCode = code
+      this.emit("exit", code)
+    }
+  }
+
+  /** Audio against fake processes: stub executables on PATH, and a "pulse server" that opens its socket on spawn. */
+  const started = async () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-audio-fake-"))
+    for (const name of ["pulseaudio", "ffmpeg"]) writeFileSync(join(root, name), "", { mode: 0o755 })
+    const path = process.env.PATH
+    process.env.PATH = root
+    const children: FakeChild[] = []
+    const errors: string[] = []
+    const audio = await startDesktopAudio({
+      display: ":101",
+      x11Dir: root,
+      spawn: (command) => {
+        const child = new FakeChild(command)
+        children.push(child)
+        if (command.endsWith("pulseaudio")) writeFileSync(join(root, "pulse-101"), "")
+        return child as unknown as ChildProcess
+      },
+      onError: (message) => errors.push(message),
+    })
+    process.env.PATH = path
+    const captures = () => children.filter((c) => c.command.endsWith("ffmpeg"))
+    const server = children.find((c) => c.command.endsWith("pulseaudio"))!
+    return { root, audio: audio as DesktopAudio, captures, server, errors }
+  }
+
+  test("the capture runs only while something is subscribed", async () => {
+    const { root, audio, captures, errors } = await started()
+    try {
+      expect(captures().length).toBe(0)
+      const first = audio.subscribe(() => {})
+      const second = audio.subscribe(() => {})
+      expect(captures().length).toBe(1)
+      first()
+      expect(captures()[0]!.exitCode).toBeNull()
+      second()
+      expect(captures()[0]!.exitCode).toBe(0)
+      audio.subscribe(() => {})
+      expect(captures().length).toBe(2)
+      // Stopping the capture on purpose is not a failure.
+      expect(errors).toEqual([])
+    } finally {
+      audio.stop()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a capture that dies reports an error and tears the audio down", async () => {
+    const { root, audio, captures, server, errors } = await started()
+    try {
+      audio.subscribe(() => {})
+      captures()[0]!.exit(1)
+      expect(errors).toEqual(["audio capture exited with code 1"])
+      expect(server.exitCode).toBe(0)
+      expect(existsSync(join(root, "pulse-101"))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a pulse server that dies reports an error once", async () => {
+    const { root, audio, server, errors } = await started()
+    try {
+      audio.subscribe(() => {})
+      server.exit(1)
+      expect(errors).toEqual(["pulseaudio exited with code 1"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("silence gate", () => {

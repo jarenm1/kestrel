@@ -346,12 +346,14 @@ const DesktopRtcCandidate = Schema.Struct({
 /**
  * Client -> box WebRTC signaling over the desktop WebSocket, which already proved who the viewer is. `rtc.offer` carries
  * the viewer's SDP offer (recvonly video and audio, and the `input` and `pointer` data channels); `rtc.candidate`
- * trickles its ICE candidates; `rtc.close` ends the session.
+ * trickles its ICE candidates; `rtc.close` ends the session; `rtc.config.request` asks for a new `rtc.config`, whose TURN
+ * credentials are fresh, before a retry on an old one.
  */
 export const DesktopRtcClientMessage = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("rtc.offer"), sdp: Schema.String }),
   DesktopRtcCandidate,
   Schema.Struct({ _tag: Schema.Literal("rtc.close") }),
+  Schema.Struct({ _tag: Schema.Literal("rtc.config.request") }),
 )
 export type DesktopRtcClientMessage = typeof DesktopRtcClientMessage.Type
 

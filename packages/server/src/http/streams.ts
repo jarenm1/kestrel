@@ -160,11 +160,23 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           yield* Effect.logWarning(`desktop message rejected: ${message.left.message}`)
           return
         }
-        yield* Effect.promise(() => rtc.handle(message.right))
+        const signal = message.right
+        if (signal._tag === "rtc.config.request") {
+          if (configSent) sendConfig()
+          return
+        }
+        yield* Effect.promise(() => rtc.handle(signal))
       })
 
-    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it offers.
+    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it
+    // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
     let configSent = false
+    const sendConfig = () =>
+      sendSignal({
+        _tag: "rtc.config",
+        iceServers: mintIceServers(config.webrtc, taskId),
+        iceTransportPolicy: config.webrtc.policy,
+      })
     yield* Effect.acquireUseRelease(
       desktop.subscribe(taskId, {
         get baselineOnly(): boolean {
@@ -174,11 +186,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           if (status.state !== "running") configSent = false
           else if (!configSent) {
             configSent = true
-            sendSignal({
-              _tag: "rtc.config",
-              iceServers: mintIceServers(config.webrtc, taskId),
-              iceTransportPolicy: config.webrtc.policy,
-            })
+            sendConfig()
           }
           socket.sendText(JSON.stringify(status))
         },

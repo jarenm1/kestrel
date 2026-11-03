@@ -52,6 +52,9 @@ const SENTINEL = "\u200b"
 
 const UNSUPPORTED_TEXT = "This desktop cannot stream to this browser"
 
+/** A WebRTC attempt failed and another is coming. Media has no other path, so a blocked network must be told. */
+const RETRYING_TEXT = "Can't reach this desktop. Retrying… Networks that block UDP need a TURN server on the box."
+
 const MOD_LABELS: Readonly<Record<Modifier, string>> = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", super: "Super" }
 
 /** DOM key names for the toolbar's arrow keys, with the glyph each button shows. */
@@ -98,6 +101,8 @@ export interface DesktopScreenProps {
   status: DesktopStatus | null
   /** Shown while there is no stream: a state word, or null for nothing. "loading" and "starting" show the boot bar. */
   idle: string | null
+  /** Shown over the stream instead of the boot bar: why the parent cannot connect right now. */
+  notice?: string | null
   /** Full-bleed touch viewer for the embed, with its toolbar. Otherwise a framed panel with a fullscreen button. */
   embedded?: boolean
   /** The frame element; the parent observes it for visibility. */
@@ -111,6 +116,7 @@ export function DesktopScreen({
   source,
   status,
   idle,
+  notice = null,
   embedded = false,
   frameRef,
   onStatus,
@@ -399,8 +405,12 @@ export function DesktopScreen({
   const aspect = size ? size.width / size.height : DEFAULT_ASPECT
   // Booting until the peer is up. Without a source, the parent's state word says what is happening instead.
   const booting =
-    source === null ? idle === "loading" || idle === "starting" : rtc === "idle" || rtc === "connecting" || rtc === "retrying"
-  const text = booting ? null : source === null ? idle : rtc === "unsupported" ? UNSUPPORTED_TEXT : null
+    source === null ? idle === "loading" || idle === "starting" : notice === null && (rtc === "idle" || rtc === "connecting")
+  const text = booting
+    ? null
+    : source === null
+      ? idle
+      : (notice ?? (rtc === "unsupported" ? UNSUPPORTED_TEXT : rtc === "retrying" ? RETRYING_TEXT : null))
   const live = source !== null && rtc === "live"
 
   return (
@@ -460,7 +470,7 @@ export function DesktopScreen({
           className="absolute top-0 left-0 size-px text-base opacity-0"
         />
         {(booting || text) && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-muted-foreground">
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-muted-foreground">
             {booting ? (
               <div role="progressbar" aria-label="Starting desktop" className="h-1 w-40 overflow-hidden rounded-full bg-white/10">
                 <div className="h-full w-1/3 animate-desktop-boot rounded-full bg-white/70 motion-reduce:animate-pulse" />
