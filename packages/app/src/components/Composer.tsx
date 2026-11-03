@@ -84,19 +84,19 @@ const EFFORT_RING_FILL: Record<AgentEffort, number> = {
   max: 100,
 }
 
-/** A stepped thinking slider; Default leaves the provider's effort setting untouched. */
+/** A stepped slider containing only the selected model's supported thinking levels. */
 function ThinkingPicker({
   value,
   options,
   onChange,
 }: {
   value: AgentEffort | undefined
-  options: readonly { value: AgentEffort | undefined; label: string }[]
-  onChange: (value: AgentEffort | undefined) => void
+  options: readonly { value: AgentEffort; label: string }[]
+  onChange: (value: AgentEffort) => void
 }) {
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
   const selected = options[selectedIndex]!
-  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value]
+  const ringFill = EFFORT_RING_FILL[selected.value]
   // Keep the stops aligned with the native range's 2rem thumb, including at both ends.
   const offset = (index: number) => `calc(1rem + (100% - 2rem) * ${index / (options.length - 1)})`
   return (
@@ -124,7 +124,7 @@ function ThinkingPicker({
               />
             )}
           </svg>
-          {value === undefined ? "Thinking" : selected.label}
+          {selected.label}
         </Button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -491,10 +491,10 @@ export function Composer({
     : null
   const offered = sections?.flatMap((s) => s.models) ?? []
   const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
-  const effortOptions: readonly { value: AgentEffort | undefined; label: string }[] = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ]
+  const effortOptions = (model?.efforts ?? []).map((e) => ({
+    value: e,
+    label: e === "none" ? "Off" : EFFORT_LABELS[e],
+  }))
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
@@ -890,7 +890,7 @@ export function Composer({
           </Button>
           <ModelPicker sections={sections} value={model} onChange={setPickedModel} />
           {model !== undefined && model.efforts.length > 0 && (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={(e) => setPickedEffort(e ?? "default")} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
           )}
           {onStop && empty ? (
             <Button

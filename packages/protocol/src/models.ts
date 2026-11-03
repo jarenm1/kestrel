@@ -176,6 +176,6 @@ export const resolveAgentChoice = (input: {
     onOffer(defaultModel) ??
     offered[0]
   const level = pickedEffort ?? (lastRun?.effort === null ? "default" : lastRun?.effort ?? defaultEffort)
-  const effort = level !== undefined && level !== "default" && model?.efforts.includes(level) ? level : undefined
+  const effort = level !== undefined && level !== "default" && model?.efforts.includes(level) ? level : model?.efforts[0]
   return { model, effort }
 }

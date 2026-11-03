@@ -3,7 +3,7 @@ import { AGENT_MODELS, MODEL_PROVIDERS, resolveAgentChoice, threadChoiceRun, typ
 
 const anthropic = AGENT_MODELS.filter((m) => m.provider === "anthropic" && m.efforts.length > 0)
 const [first, second, hidden] = anthropic.map((m) => m.id) as [AgentModel, AgentModel, AgentModel]
-const level = anthropic[1]!.efforts[0] as AgentEffort
+const level = anthropic[1]!.efforts.at(-1) as AgentEffort
 const offered = anthropic.slice(0, 2)
 const connected = MODEL_PROVIDERS.filter((p) => p.id === "anthropic")
 const base = { offered, connected, pickedModel: undefined, pickedEffort: undefined, lastRun: undefined, defaultModel: undefined, defaultEffort: undefined }
@@ -20,14 +20,14 @@ describe("resolveAgentChoice", () => {
     expect(model?.id).toBe(first)
   })
 
-  test("an explicit default level overrides the last run's level", () => {
+  test("a legacy default pick uses the first supported level", () => {
     const { effort } = resolveAgentChoice({ ...base, pickedEffort: "default", lastRun: { model: second, effort: level } })
-    expect(effort).toBeUndefined()
+    expect(effort).toBe(anthropic[1]!.efforts[0])
   })
 
   test("a run on the default level does not inherit the device's level", () => {
     const { effort } = resolveAgentChoice({ ...base, lastRun: { model: second, effort: null }, defaultEffort: level })
-    expect(effort).toBeUndefined()
+    expect(effort).toBe(anthropic[1]!.efforts[0])
   })
 
   test("older runs without a recorded level retain the device default", () => {
@@ -38,7 +38,7 @@ describe("resolveAgentChoice", () => {
   test("a last run on the box default falls to the device's model and keeps its own level", () => {
     const run = resolveAgentChoice({ ...base, lastRun: { effort: null }, defaultModel: second, defaultEffort: level })
     expect(run.model?.id).toBe(second)
-    expect(run.effort).toBeUndefined()
+    expect(run.effort).toBe(anthropic[1]!.efforts[0])
   })
 
   test("the last run's model stays while hidden from the picker, and falls away once its provider is disconnected", () => {

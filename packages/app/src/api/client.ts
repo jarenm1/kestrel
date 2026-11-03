@@ -43,6 +43,7 @@ import {
   SetActiveBoxBody,
   type SetDesktopQualityBody,
   Task,
+  ToolFailureList,
   UpdateAutomationBody,
   UpdateBoxBody,
   UpdateFleetBoxBody,
@@ -512,6 +513,8 @@ export const api = {
     await run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.fleetBox(id))))
   },
   rotateFleetBoxSecret: (id: string) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxSecret(id))),
+  /** Operator-only: the most common failures of the server's default window, most common first. */
+  fleetToolFailures: () => run(request(ToolFailureList, "GET", ControlPaths.fleetToolFailures)),
   checkBox,
   forgetBox,
   /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */

@@ -70,14 +70,14 @@ function ThinkingPicker({
   onChange,
 }: {
   value: AgentEffort | undefined;
-  options: readonly { value: AgentEffort | undefined; label: string }[];
-  onChange: (value: AgentEffort | undefined) => void;
+  options: readonly { value: AgentEffort; label: string }[];
+  onChange: (value: AgentEffort) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(0);
   const index = Math.max(0, options.findIndex((option) => option.value === value));
   const selected = options[index]!;
-  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value];
+  const ringFill = EFFORT_RING_FILL[selected.value];
   // Both input implementations reserve 16px at each end for the thumb.
   const offset = (stop: number) => 16 + Math.max(0, width - 32) * stop / (options.length - 1);
   return (
@@ -102,7 +102,7 @@ function ThinkingPicker({
             />
           ) : null}
         </Svg>
-        <Text style={styles.pillText}>{value === undefined ? "Thinking" : selected.label}</Text>
+        <Text style={styles.pillText}>{selected.label}</Text>
       </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <View style={styles.modalRoot}>
@@ -358,10 +358,10 @@ export function Composer({
     : null;
   const offered = sections?.flatMap((section) => section.models) ?? [];
   const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort });
-  const effortOptions = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ];
+  const effortOptions = (model?.efforts ?? []).map((e) => ({
+    value: e,
+    label: e === "none" ? "Off" : EFFORT_LABELS[e],
+  }));
 
   // Slash commands
   const visible = view.plain;
@@ -540,7 +540,7 @@ export function Composer({
             onManage={() => navigation.push({ name: "connections" })}
           />
           {model !== undefined && model.efforts.length > 0 ? (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={(e) => setPickedEffort(e ?? "default")} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
           ) : null}
           <View style={styles.flex} />
           {onStop && empty ? (
