@@ -229,16 +229,18 @@ createInterface({ input: process.stdin })
   }
 }, 20_000)
 
-test("a run starts in the thread's first checkout, and in the workspace root once that checkout is gone", async () => {
+test("a run starts in the thread's first checkout, resumed or fresh, and in the workspace root once that checkout is gone", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-run-cwd-"))
   const cli = join(root, "cli.ts")
-  // Answers the prompt with its working directory, then ends when the harness closes its input.
+  // Answers the prompt with its working directory and the session it was asked to resume, then ends when the
+  // harness closes its input.
   await writeFile(cli, `
 import { createInterface } from "node:readline"
 createInterface({ input: process.stdin })
   .on("line", (line) => {
     if (JSON.parse(line).type === "user") {
-      console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: process.cwd() }))
+      const result = process.cwd() + " resume=" + (process.env.CLOUDAGENTS_RESUME_SESSION ?? "none")
+      console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result }))
     }
   })
   .on("close", () => process.exit(0))
@@ -254,8 +256,8 @@ createInterface({ input: process.stdin })
       yield* Effect.promise(() => mkdir(join(workspace, "app"), { recursive: true }))
       yield* Effect.promise(() => mkdir(join(workspace, "lib"), { recursive: true }))
 
-      /** The directory a fresh run of a thread with `checkouts` reports. */
-      const runIn = (runId: string, checkouts: ReadonlyArray<Checkout>) =>
+      /** Where a run of a thread with `checkouts` started, and the session it resumed. */
+      const runIn = (runId: string, checkouts: ReadonlyArray<Checkout>, resumeSession: string | null = null) =>
         Effect.gen(function* () {
           const base = runningTask("task")
           const task = { ...base.task, checkouts: [...checkouts] }
@@ -270,7 +272,7 @@ createInterface({ input: process.stdin })
             if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") finished.resolve()
           })
           try {
-            yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+            yield* harness.spawn(task, run, run.prompt, null, task.owner, resumeSession, {})
             yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
           } finally {
             unsubscribe()
@@ -279,12 +281,17 @@ createInterface({ input: process.stdin })
         })
 
       try {
-        expect(yield* runIn("no-checkout", [])).toBe(workspace)
+        expect(yield* runIn("no-checkout", [])).toBe(`${workspace} resume=none`)
+        // A thread whose first run checked a repository out: its session was recorded in the workspace root, and the
+        // next run resumes it from the checkout (Claude Code 2.1.308 finds a session recorded under a parent directory).
+        expect(yield* runIn("resumed-after-checkout", [checkout("app")], "session-from-root")).toBe(
+          `${join(workspace, "app")} resume=session-from-root`,
+        )
         // The first checkout, not the latest: a second repository does not move the thread.
-        expect(yield* runIn("two-checkouts", [checkout("app"), checkout("lib")])).toBe(join(workspace, "app"))
+        expect(yield* runIn("two-checkouts", [checkout("app"), checkout("lib")])).toBe(`${join(workspace, "app")} resume=none`)
         // An agent can delete its checkout; the thread's next run must still start.
         yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
-        expect(yield* runIn("deleted-checkout", [checkout("app"), checkout("lib")])).toBe(workspace)
+        expect(yield* runIn("deleted-checkout", [checkout("app"), checkout("lib")])).toBe(`${workspace} resume=none`)
       } finally {
         yield* harness.stopAll()
       }
