@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { ToolFailureReport } from "@cloudagents/protocol"
-import { agentFailure, failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentFailure, declinedCodexItem, failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 describe("failureSignature", () => {
+  test("does not scrub oversized output or leak a truncated secret", () => {
+    expect(failureSignature("Read", `error: '${"x".repeat(200_000)}'`)).toBe("(output too large)")
+  })
   test("failures that differ only in their details share a signature", () => {
     const a = failureSignature("Read", "File does not exist: /home/jaren/app/src/a.ts")
     const b = failureSignature("Read", "File does not exist: /tmp/other/b.tsx")
@@ -62,6 +65,12 @@ describe("agentFailure", () => {
 })
 
 describe("toolFailure", () => {
+  test("recognizes a declined Codex completion without suppressing other items", () => {
+    const message = { method: "item/completed", params: { item: { id: "c1", type: "fileChange", status: "declined" } } }
+    expect(declinedCodexItem(message, "c1")).toBe(true)
+    expect(declinedCodexItem(message, "c2")).toBe(false)
+    expect(declinedCodexItem({ ...message, method: "item/started" }, "c1")).toBe(false)
+  })
   test("a call the user stopped is not a failure", () => {
     expect(toolFailure("Bash", "[Request interrupted by user for tool use]")).toBeNull()
   })

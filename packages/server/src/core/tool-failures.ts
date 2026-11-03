@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import { MAX_TOOL_FAILURES_PER_REPORT, type ToolFailureCount, type ToolFailureReport } from "@cloudagents/protocol"
 
 const MAX_SIGNATURE = 200
+const MAX_OUTPUT = 8192
 const MAX_TOOL_NAME = 100
 const FLUSH_MS = 60_000
 /** Shutdown waits for the last report this long at most; telemetry never holds up a restart. */
@@ -50,6 +51,8 @@ const scrub = (line: string): string => {
  * stands in for an error on other tools.
  */
 export const failureSignature = (tool: string, output: string | null): string => {
+  // Never run the scrubber on unbounded input or a truncated secret.
+  if (output !== null && output.length > MAX_OUTPUT) return "(output too large)"
   const plain = (output ?? "").replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/<\/?tool_use_error>/g, "")
   const lines = plain.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "")
   const exit = lines[0]?.match(EXIT_CODE)
@@ -70,9 +73,18 @@ const toolLabel = (name: string): string => {
 
 /** The failure to count for a failed call; null when the user stopped the call, which says nothing about the tool. */
 export const toolFailure = (name: string, output: string | null): Omit<ToolFailureCount, "count"> | null => {
-  if (output !== null && INTERRUPTED.test(output)) return null
+  if (output !== null && output.length <= MAX_OUTPUT && INTERRUPTED.test(output)) return null
   const tool = toolLabel(name)
   return { tool, signature: failureSignature(tool, output) }
+}
+
+/** A declined Codex action is a user decision, even though its transcript item is shown as an error. */
+export const declinedCodexItem = (message: unknown, itemId: string): boolean => {
+  if (typeof message !== "object" || message === null || !("method" in message) || message.method !== "item/completed" || !("params" in message)) return false
+  const params = message.params
+  if (typeof params !== "object" || params === null || !("item" in params)) return false
+  const item = params.item
+  return typeof item === "object" && item !== null && "id" in item && item.id === itemId && "status" in item && item.status === "declined"
 }
 
 /** Turn errors can contain provider or user data, so only report fixed categories. */
