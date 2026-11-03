@@ -15,19 +15,22 @@ import { Schema } from "effect"
 import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
 import { Popover } from "radix-ui"
 import {
-  AgentEffort,
   AgentModel,
   EFFORT_LABELS,
+  EffortPick,
   GithubRepoSlug,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
   harnessCommandPrefix,
+  resolveAgentChoice,
+  type AgentEffort,
   type ContextUsage,
   type HarnessCommand,
   type Message,
   type ModelInfo,
   type ModelProvider,
   type ModelProviderInfo,
+  type Run,
   type SendMessageBody,
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
@@ -391,6 +394,8 @@ interface Props {
   activeRunId?: string | undefined
   /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
   activeRunProvider?: ModelProvider | undefined
+  /** The thread's latest run that recorded a model: the pickers show its choice until a different one is picked. */
+  lastRun?: Pick<Run, "model" | "effort"> | undefined
   placeholder?: string
   autoFocus?: boolean
   className?: string
@@ -433,6 +438,7 @@ export function Composer({
   taskId,
   activeRunId,
   activeRunProvider,
+  lastRun,
   placeholder,
   autoFocus,
   className,
@@ -465,8 +471,12 @@ export function Composer({
   const slashMenuId = useId()
   const referenceMenuId = useId()
   const openUsagePanel = useOpenUsagePanel()
-  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
-  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
+  const pickSuffix = taskId === undefined ? "" : `.${taskId}`
+  const [pickedModel, setPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel)
+  const [pickedEffort, setPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick)
+  const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
+  const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
   const shown = useShownModels()
   // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
@@ -475,15 +485,12 @@ export function Composer({
   const soleCheckout = checkoutRepos.length === 1 ? checkoutRepos[0] : undefined
   const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
   useEffect(() => setPickedReferenceRepo(undefined), [repo])
+  const connected = connections.data ? connectedModelProviders(connections.data) : []
   const sections: readonly ModelSection[] | null = connections.data
-    ? connectedModelProviders(connections.data)
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((s) => s.models.length > 0)
+    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
     : null
-  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((s) => s.models) ?? []
-  const model = offered.find((m) => m.id === storedModel) ?? offered[0]
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined
+  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
   const effortOptions: readonly { value: AgentEffort | undefined; label: string }[] = [
     { value: undefined, label: "Default" },
     ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
@@ -638,6 +645,11 @@ export function Composer({
         setFiles([])
         setFileError(undefined)
         setChoice(undefined)
+        // The new run now records these picks. A message joining a running turn keeps them for the next turn.
+        if (taskId !== undefined && activeRunId === undefined) {
+          setPickedModel(undefined)
+          setPickedEffort(undefined)
+        }
       },
       () => {},
     )
@@ -876,9 +888,9 @@ export function Composer({
           >
             <Paperclip />
           </Button>
-          <ModelPicker sections={sections} value={model} onChange={setModel} />
+          <ModelPicker sections={sections} value={model} onChange={setPickedModel} />
           {model !== undefined && model.efforts.length > 0 && (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={(e) => setPickedEffort(e ?? "default")} />
           )}
           {onStop && empty ? (
             <Button
