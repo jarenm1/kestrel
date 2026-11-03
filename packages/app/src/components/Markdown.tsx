@@ -6,7 +6,7 @@ import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
 import { CircleDot, GitPullRequest } from "lucide-react"
 import { AGENT_HTML_SCHEMA, rehypeAgentSvg } from "@/lib/agentHtml"
-import { githubReferenceFromLink } from "@/lib/githubReference"
+import { githubReferenceFromLink } from "@cloudagents/composer/reference"
 import { cn } from "@/lib/utils"
 
 const COMPONENTS: Components = {

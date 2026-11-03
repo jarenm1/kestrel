@@ -225,6 +225,13 @@ const main = async (): Promise<number> => {
     const health = await fetch(`${base}/api/health`)
     add("GET /api/health", health.status === 200 ? "PASS" : "FAIL", `${health.status} ${await health.text()}`)
 
+    const capabilities = await api("GET", "/api/capabilities")
+    const cap = capabilities.json
+    const capOk = capabilities.status === 200 && isRec(cap) && cap.version === 1 &&
+      (cap.platform === "linux" || cap.platform === "wsl") && cap.sandbox === "basic" &&
+      (cap.desktop === "prerequisites-present" || cap.desktop === "unavailable")
+    add("GET /api/capabilities", capOk ? "PASS" : "FAIL", capabilities.text)
+
     const cli = await api("GET", "/api/cli-auth")
     const cliList = Array.isArray(cli.json) ? cli.json.filter(isRec) : []
     if (cli.status === 200 && cliList.length > 0) {

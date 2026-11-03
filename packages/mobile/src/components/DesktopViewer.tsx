@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApiClient } from "@/hooks/useApiClient";
-import { createQueries, keys } from "@/api/queries";
+import { createQueries, boxKeys, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
@@ -29,12 +29,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const active = status?.state === "running" || status?.state === "starting";
 
   const toggle = useMutation({
-    mutationFn: async (): Promise<DesktopStatus> => {
+    mutationFn: async ({ api, taskId, active }: ThreadCall & { active: boolean }): Promise<DesktopStatus> => {
       if (!active) return api.startDesktop(taskId);
       await api.stopDesktop(taskId);
       return api.getDesktop(taskId);
     },
-    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+    onSuccess: (next, { api, taskId }) => queryClient.setQueryData(boxKeys(api.boxScope).desktop(taskId), next),
   });
 
   // Streaming pauses while the app is backgrounded: the page closes its socket and resumes on foreground.
@@ -257,7 +257,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
         <Button
           variant={active ? "soft" : "default"}
           size="sm"
-          onPress={() => toggle.mutate()}
+          onPress={() => toggle.mutate({ api, taskId, active })}
           disabled={toggle.isPending || !status}
         >
           {active ? "Stop" : "Start"}

@@ -1,5 +1,5 @@
 import { BackHandler } from "react-native";
-import type { Route } from "@/nav/navigation";
+import type { LaunchRoute, Route } from "@/nav/navigation";
 
 /**
  * Platform glue for MainNavigator's in-memory stack. Native: Android's back button; there is no address bar. The web
@@ -13,7 +13,7 @@ export function onBackPress(handler: () => boolean): () => void {
 }
 
 /** The screen the app was opened on (a thread link), taken once after sign-in; `null` opens home. */
-export function takeLaunchRoute(): Route | null {
+export function takeLaunchRoute(): LaunchRoute | null {
   return null;
 }
 

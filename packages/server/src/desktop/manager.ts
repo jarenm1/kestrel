@@ -16,6 +16,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { Mp4Muxer, type Mp4Piece } from "./fmp4"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
+import { isWsl } from "./platform"
 import wallpaper from "./wallpaper.png" with { type: "file" }
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
@@ -55,11 +56,16 @@ export interface DesktopApp {
   readonly output: string
 }
 
-/** The IPC namespace the task's sandboxes share. */
+/**
+ * The task holder's IPC and mount namespaces, which the task desktop and the box's clients of it join. The mount
+ * namespace holds the desktop's X socket directory: a private /tmp/.X11-unix, since WSLg mounts the host's read-only.
+ */
 export interface IpcNamespace {
   /** Pid of a process in it now (the task's namespace holder). */
   readonly holder: number
-  /** Argv prefix that runs a command in the IPC namespace of process `pid`. */
+  /** The X socket directory as this process sees it. */
+  readonly x11Dir: string
+  /** Argv prefix that runs a command in the IPC and mount namespaces of process `pid`. */
   readonly join: (pid: number) => ReadonlyArray<string>
 }
 
@@ -68,9 +74,9 @@ export interface DesktopStartOptions {
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
   /**
    * The X server and the box's MIT-SHM clients (capture, screenshots) run in this namespace, so sandboxed apps can use
-   * MIT-SHM too. Null: everything shares the box's own.
+   * MIT-SHM too.
    */
-  readonly ipcNamespace: Effect.Effect<IpcNamespace | null, DesktopError>
+  readonly ipcNamespace: Effect.Effect<IpcNamespace, DesktopError>
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -140,7 +146,9 @@ const LINGER_MS = 15_000
 const MAX_ENCODER_RESTARTS = 3
 /** Unexpected xdotool helper exits tolerated per desktop before it fails. */
 const MAX_INPUT_RESTARTS = 3
-/** NVENC is skipped for this long after it reports a busy GPU (session limit). */
+/** Leave most of the desktop readiness budget for CPU fallback if NVENC never produces an init segment. */
+const NVENC_START_TIMEOUT_MS = 5_000
+/** NVENC is skipped for this long after it reports a busy GPU (session limit) or misses its startup deadline. */
 const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
 let nvencDisabled = false
@@ -156,6 +164,7 @@ interface Encoder {
   child: ChildProcess | null
   /** The init segment arrived: later exits are restarts, not boot failures. */
   initialized: boolean
+  startupTimer: ReturnType<typeof setTimeout> | null
   /** Tail of stderr, for classifying why NVENC would not start. */
   stderr: string
 }
@@ -181,9 +190,9 @@ interface Session {
   /** Size and frame rate cap of the stream; the encoder is started with it. */
   quality: DesktopQuality
   /**
-   * Argv prefix for the box's MIT-SHM clients: joins the X server's IPC namespace. The server lives as long as the
-   * session, so the target cannot go stale the way a holder pid could. Set by boot once it is spawned; empty without
-   * a namespace.
+   * Argv prefix for the box's clients of the desktop: joins the X server's IPC and mount namespaces (the mount namespace
+   * holds its socket directory). The server lives as long as the session, so the target cannot go stale the way a
+   * holder pid could. Set by boot once it is spawned; empty without a namespace.
    */
   ipc: ReadonlyArray<string>
   /** weston's XDG_RUNTIME_DIR (its Wayland socket); removed when the desktop stops. Null until boot makes it. */
@@ -358,9 +367,8 @@ const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
     "-hide_banner",
     "-loglevel",
     "error",
-    // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
-    "-fflags",
-    "nobuffer",
+    // No -fflags nobuffer: with it, the x264 fallback after a stalled NVENC never produced an init segment on a still
+    // desktop (startup.integration.test.ts, real xterm). Timestamps still come from the arrival clock.
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -410,8 +418,8 @@ const terminate = async (procs: Iterable<ChildProcess>) => {
   for (const p of list) killProcessGroup(p.pid, "SIGKILL")
 }
 
-const waitForSocket = async (s: Session) => {
-  const socket = `/tmp/.X11-unix/X${s.num}`
+const waitForSocket = async (s: Session, x11Dir: string) => {
+  const socket = join(x11Dir, `X${s.num}`)
   const deadline = Date.now() + X_SOCKET_TIMEOUT_MS
   while (!existsSync(socket)) {
     if (s.state !== "starting") throw new Error(s.error ?? "the X server stopped before accepting connections")
@@ -549,6 +557,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     /** Forgets the encoder and everything cached from it. The caller stops the process. */
     const detachEncoder = (s: Session) => {
       cancelLinger(s)
+      if (s.encoder?.startupTimer) clearTimeout(s.encoder.startupTimer)
       s.encoder = null
       s.init = null
       s.gop = null
@@ -597,6 +606,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       for (const piece of pieces) {
         if (piece.kind === "init") {
           enc.initialized = true
+          if (enc.startupTimer) clearTimeout(enc.startupTimer)
+          enc.startupTimer = null
           s.restartsLeft = MAX_ENCODER_RESTARTS
           s.init = piece.bytes
           s.mime = `video/mp4; codecs="${piece.codec}"`
@@ -625,13 +636,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       }
     }
 
+    // WSL desktops use CPU encoding: trying NVENC there can consume the first startup timeout.
+    const wsl = isWsl()
     /** NVENC when it is usable, libx264 otherwise. */
-    const preferredEncoder = (): EncoderKind => (!nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
+    const preferredEncoder = (): EncoderKind => (!wsl && !nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
       const { width, height, fps } = DESKTOP_QUALITIES[s.quality]
-      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, stderr: "" }
+      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, startupTimer: null, stderr: "" }
       s.init = null
       s.gop = null
       s.gopBytes = 0
@@ -647,6 +660,16 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit: (reason) => onEncoderExit(s, enc, reason),
       })
       s.encoder = enc
+      if (kind === "nvenc") {
+        enc.startupTimer = setTimeout(() => {
+          if (s.encoder !== enc || enc.initialized || (s.state !== "starting" && s.state !== "running")) return
+          // A timeout can be transient (slow startup or a quiet display), so retry hardware on a later start.
+          nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
+          console.warn(`desktop ${s.display}: nvenc did not initialize within ${NVENC_START_TIMEOUT_MS} ms; using libx264`)
+          stopEncoder(s)
+          launchEncoder(s, "x264")
+        }, NVENC_START_TIMEOUT_MS)
+      }
     }
 
     /** Starts an encoder from a process callback, where a spawn error must fail the desktop instead of throwing. */
@@ -734,6 +757,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const startInput = (s: Session) => {
       const child: ChildProcess = spawnTracked(s, "xdotool", ["-"], {
         critical: false,
+        prefix: s.ipc,
         stdin: true,
         onStderr: (d) => {
           Effect.runFork(Effect.logWarning(`desktop ${s.display} input: ${d.toString().trim()}`))
@@ -813,14 +837,14 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 "-nolisten",
                 "local",
               ],
-              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder), env },
+              { critical: true, prefix: ns.join(ns.holder), env },
             )
           },
           catch: toErr,
         })
-        // Xwayland is weston's child, so it is in the same IPC namespace.
-        if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
-        yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
+        // Xwayland is weston's child, so it is in the same IPC and mount namespaces.
+        if (server.pid !== undefined) s.ipc = ns.join(server.pid)
+        yield* Effect.tryPromise({ try: () => waitForSocket(s, ns.x11Dir), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         const shared = yield* Effect.try({
           try: () => {
@@ -846,7 +870,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         )
         yield* Effect.try({
           try: () => {
-            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false })
+            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false, prefix: s.ipc })
             startEncoder(s, preferredEncoder())
           },
           catch: toErr,
@@ -988,7 +1012,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
           const r = yield* Effect.tryPromise({
-            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display),
+            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display, s.ipc),
             catch: toErr,
           })
           const x = /^X=(\d+)$/m.exec(r.stdout.toString())
@@ -1004,7 +1028,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const s = yield* requireLive(taskId)
           const args = xdotoolArgs(event)
           if (args.length === 0) return
-          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display), catch: toErr })
+          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display, s.ipc), catch: toErr })
           if (r.exitCode !== 0) {
             return yield* Effect.fail(new DesktopError({ message: `xdotool failed: ${r.stderr.trim()}` }))
           }

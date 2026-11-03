@@ -107,6 +107,8 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
   const nextId = (): string => `c${++counter}`
 
   let finalTextValue: string | null = null
+  /** Last completed main-agent message, for Claude results that omit their optional `result` text. */
+  let claudeLastText: { readonly messageId: string | null; readonly text: string } | null = null
   const tools = new Map<string, ToolCall>()
   /** Codex text built up from deltas, by item id: agent messages, reasoning parts, command output. */
   const codexText = new Map<string, string>()
@@ -197,6 +199,11 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
         const text = asString(block.text)
         if (text === null || text.trim() === "") continue
         items.push({ _tag: "text", id, parentToolId, text })
+        if (parentToolId === null) {
+          const previous = messageId !== null && claudeLastText?.messageId === messageId ? claudeLastText.text : null
+          claudeLastText = { messageId, text: previous === null ? text : `${previous}\n\n${text}` }
+          finalTextValue = claudeLastText.text
+        }
       } else if (kind === "thinking") {
         const id = idFor("thinking")
         const text = asString(block.thinking)

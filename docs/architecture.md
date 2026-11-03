@@ -1,80 +1,132 @@
-# Kestrel architecture and ownership
+# Kestrel architecture
 
-This describes what runs today. For where it is heading, see [goal-state.md](goal-state.md).
+This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
+
+## System overview
+
+Kestrel has an interface for interacting with agents and viewing their desktops, and boxes that run the work. A box may be operated by Kestrel or supplied by a user. The control plane signs users in, coordinates access to boxes and handles shared services. Today Kestrel-operated managed boxes can serve multiple users; the goal is a separate Nest VM per user on a shared host.
 
 ```mermaid
 flowchart TB
-  subgraph Browser["Browser"]
-    APP["App SPA<br/>app.kestrel-agent.com: the app<br/>kestrel-agent.com: landing + pricing<br/>packages/app (React, TanStack Query)<br/>👤 caayd"]
-    VIEW["Desktop + Browser Preview<br/>DesktopViewer.tsx, PreviewViewer.tsx<br/>👤 Jaren"]
+  U["User"] --> WEB["Web app<br/>packages/app"]
+  U --> MOBILE["Mobile app<br/>packages/mobile"]
+  WEB --> CTRL["Control plane<br/>packages/control"]
+  MOBILE --> CTRL
+  CTRL <--> GH["GitHub"]
+  CTRL --> HUB[("Hub Durable Object<br/>sessions, registry, credentials,<br/>automations and watches")]
+  WEB -->|"box token; direct API, events and desktop"| BOX
+  MOBILE -->|"box token; direct to each box"| BOX
+  HUB <-->|"legacy relay when applicable"| BOX
+  subgraph BOX["Box · packages/server"]
+    API["REST API and WebSockets"]
+    HARNESS["Agent harness"]
+    SANDBOX["Per-thread sandbox"]
+    MCP["MCP tools"]
+    BROKER["Credential broker"]
+    DESKTOP["Desktop and capture"]
+    DATA[("Threads, workspaces and mirrors")]
+    API --> HARNESS --> SANDBOX
+    API --> DATA
+    SANDBOX --> MCP
+    SANDBOX --> BROKER
+    MCP --> DESKTOP
   end
-
-  subgraph CF["Cloudflare"]
-    subgraph CTRL["Worker kestrel: packages/control"]
-      AUTH["GitHub OAuth, sessions, allow-list<br/>auth.ts, providers.ts<br/>👤 Person 4"]
-      API["Control API<br/>/api and preview sessions<br/>api.ts, automations.ts<br/>👤 Person 4"]
-      HUB["Hub Durable Object<br/>users, sessions, secrets, preview tokens, fleet registry, legacy relay<br/>hub.ts<br/>👤 Person 4 + Jaren"]
-    end
-  end
-
-  GH["GitHub<br/>OAuth App kestrel-agent-app"]
-
-  subgraph PC["Jaren's PC: the box, packages/server"]
-    RELAY["Legacy relay client<br/>dials out over WSS<br/>relay/*<br/>👤 Jaren"]
-    REST["Box REST + WebSockets<br/>threads, checkouts, runs, diff, events<br/>http/*, core/service.ts<br/>👤 Jaren"]
-    HARN["Harness<br/>runs claude / other CLI agents<br/>core/harness.ts, config.ts<br/>👤 Person 3"]
-    MCP["MCP server /mcp/:taskId<br/>desktop_*, preview_open, workspace_exec, thread_*<br/>mcp/handler.ts<br/>👤 Person 3"]
-    BROKER["Credential broker<br/>per-run token to real model key<br/>broker/*<br/>👤 Jaren"]
-    SB["bwrap sandbox (strict, basic or off) in a systemd scope<br/>per-task and box-wide limits<br/>agent, exec, desktop apps<br/>sandbox/*<br/>👤 Jaren"]
-    DESK["Desktop manager<br/>weston + Xwayland (host GPU) + xdamage-capture → ffmpeg (damage-driven VFR; NVENC next), WebRTC next<br/>desktop/*<br/>👤 Jaren"]
-    STATE[("state.json, thread workspaces,<br/>repo mirrors<br/>core/state.ts")]
-  end
-
-  LLM["Anthropic / OpenAI APIs"]
-
-  APP -->|HTTPS /api, WSS events| API
-  APP -->|sign in| AUTH
-  AUTH <-->|OAuth code to token| GH
-  API -->|list repos| GH
-  API --> HUB
-  HUB <-->|legacy relay frames over WSS| RELAY
-  VIEW -->|sandboxed preview + short-lived token| HUB
-  VIEW <-->|desktop stream WS| HUB
-  APP -->|direct, box token: managed or own box| REST
-  VIEW -.->|planned: WebRTC direct| DESK
-  RELAY --> REST
-  REST -->|loopback proxy in task netns| SB
-  REST --> HARN
-  REST --> STATE
-  HARN -->|spawn| SB
-  SB -->|tool calls| MCP
-  SB -->|model calls with run token| BROKER
-  BROKER --> LLM
-  MCP --> DESK
-  MCP --> REST
-  DESK --> SB
-
-  PROTO["packages/protocol<br/>shared schemas: relay frames, REST bodies, events<br/>👤 everyone reviews"]
-  PROTO -.- APP
-  PROTO -.- CTRL
-  PROTO -.- PC
+  BROKER --> MODEL["Model providers"]
+  PROTOCOL["packages/protocol<br/>shared schemas and types"] -.-> WEB
+  PROTOCOL -.-> CTRL
+  PROTOCOL -.-> BOX
 ```
 
-## How it fits together
+The diagram shows the major paths, not every endpoint. The legacy relay remains for users without a managed or directly connected box. Desktop and preview traffic can also use it. Protocol schemas are shared across packages; changes to them affect all consumers.
 
-- The browser only talks to Cloudflare. One Worker serves the API and one SPA build on two hosts: `app.kestrel-agent.com` is the app, and `kestrel-agent.com` (and `www.`) shows only its public landing and pricing pages, sending every other path, sign-in and the API to the app host. On the app host, phone browsers get the mobile app's web export (`packages/mobile`, built into `dist/m`) on the same URLs instead of the SPA ([details](../packages/mobile/README.md#on-the-web-phones)).
+## Components
+
+| Component | Responsibility | Location |
+|---|---|---|
+| Web interface | Public pages, authenticated workspace, thread and desktop views | `packages/app` |
+| Mobile interface | Multi-box thread lists and box-scoped thread and desktop access | `packages/mobile` |
+| Shared composer | GitHub reference format, draft parsing and the DOM editor used by desktop, phone web and Expo native WebViews | `packages/composer` |
+| Control plane | GitHub OAuth, sessions, box registration and tokens, credentials, automations, PR watches and relay | `packages/control` |
+| Hub | Durable control-plane state and coordination, including fleet registry and scheduled events | `packages/control/src/hub.ts` |
+| Box | Thread API, agent runs, workspaces, sandbox, desktop and tools | `packages/server` |
+| Host experiment | Local per-user CPU VM lifecycle CLI; not yet the Nest host agent | `packages/host` |
+| Shared protocol | Schemas and types for APIs, events, relay and domain objects | `packages/protocol` |
+
+Phone browsers use the mobile app's web export. Its reference composer and the desktop composer share one DOM
+implementation; Expo bundles that surface locally for native iOS/Android through `use dom`. References serialize
+as ordinary GitHub Markdown links with explicit repository, kind and number, so drafts and messages cross UI
+surfaces without a protocol change. See [mobile references](../packages/mobile/README.md#github-references).
+
+## Access and communication
+
+The Worker serves the web app and public site, handles sign-in, and issues box-scoped tokens. Direct clients use each box's URL; the box verifies its token offline. The web app can send eligible API calls over a WebRTC data channel after signaling directly to the box, with HTTP fallback; mobile, events, uploads, previews and desktop streams use their existing HTTP or WebSocket paths. Both apps list threads across boxes and route a thread's requests to its box. See [byo-box.md](byo-box.md) for connection setup and direct-path limits.
+
+The Hub also maintains a legacy WebSocket relay for users without a managed box. In that path the box dials out and the control plane forwards requests and streams. This is a current deployment path, not the goal for low-cost BYOB. The [goal state](goal-state.md#control-plane) describes the planned cutover and direct connectivity work.
+
+Managed boxes are registered in the Hub and can serve multiple users. Users are assigned to an active or draining box, and new assignments favor the active box with the fewest users. BYOB boxes have a single owner. On either path, the box enforces thread ownership using the identity supplied by the relay or a verified box token. The control plane and box have different responsibilities: signing in does not itself authorize access to another user's thread.
+
+The authenticated `GET /api/capabilities` reports a versioned snapshot of platform, sandbox level and desktop prerequisites; it does not guarantee that a desktop will start. Older boxes return 404. This is an initial capability probe, not yet the full goal-state contract.
+
+## Agent execution and data
+
+A thread has a workspace, messages and runs. Repositories are checked out on demand, each on a thread branch. The box maintains per-user repository mirrors, fetching with the user's GitHub credentials on the host. Host-side Git operations use a separate shadow repository so agent-writable repository configuration cannot direct host commands. Thread data, workspaces and mirrors live on the box.
+
+The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
+
+The web composer's thinking control opens a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Default and None leave it empty. It offers Default plus only the selected model's supported effort levels, ordered lowest first. Default leaves effort unspecified for the provider; unsupported saved levels also display as Default, and models without effort support hide the control. The choice survives thread changes and reloads. The slider supports pointer/touch input, arrow keys, Home and End.
+
+Agents normally run in a per-thread bubblewrap sandbox and systemd scope. The `strict`, `basic` and `off` modes provide different isolation; in particular, `basic` shares the host network. MCP provides the agent's box tools. Model requests go through the broker using a per-run token, so the sandbox does not receive the real model key. Host-side GitHub tools likewise use credentials outside the sandbox. See [box.md](box.md#agent-sandbox) for the actual sandbox guarantees and limitations.
+
+MCP, the credential broker and `/gh/` use a separate loopback-only listener rather than the public box listener. Strict task networks forward that listener into the task namespace; basic and off share the host network. Per-run credentials still gate those routes.
+
+## Desktop, preview and evidence
+
+The box manages a desktop for a thread, captures its display and accepts input. The current stream uses H.264 in fMP4 over WebSocket, either directly or through the legacy relay. Capture is damage-driven and the encoder stops shortly after the last viewer leaves. A preview exposes an agent-started web service through a scoped preview session. Desktop and preview isolation depend on the box's sandbox mode.
+
+Screenshots produced by agent tools can be retained and shown in the transcript. Files in a workspace can be downloaded. Saved video clips, marked output files and evidence summaries are proposed in [goal-state.md](goal-state.md#saved-evidence); they are not yet the evidence system described there. Live streaming supports both observing work in progress and reviewing the desktop interactively.
+
+## Automations and PR watches
+
+The control plane stores scheduled and GitHub-triggered automations, verifies webhook deliveries and dispatches work to a box. An automation starts a thread and sends its prompt, optionally with a repository and PR context. PR watches use the shared GitHub webhook to wake a thread when relevant review, comment or completed-check activity arrives. The agent must inspect the current PR state; a webhook payload is not an instruction.
+
+A thread can follow a pull request with `github_pr_watch` and stop with `github_pr_unwatch`. The owner must be able to administer its repository webhook. The control plane verifies and deduplicates deliveries, coalesces notifications in a persistent queue, and retries delivery to the box without polling. Archiving or deleting the thread removes its watch on the next delivery; closing the PR stops it.
+
+Automations and watches currently use managed or legacy boxes, not user-owned boxes. The goal is parity across box types; see [goal-state.md](goal-state.md#the-box-contract).
+
+## Operational boundaries
+
+- **User and thread isolation:** the box checks ownership on thread data and operations. Current managed boxes are shared between users; a per-user Nest VM is a planned boundary, not a property of today's fleet.
+- **Agent isolation:** sandbox strength depends on mode. Run-scoped MCP and broker credentials expire when the run ends. A sandbox is not a substitute for the box's authorization checks.
+- **Credentials:** the control plane stores connection secrets; the box retrieves credentials through its authenticated path. Model keys and GitHub tokens are used outside the agent sandbox.
+- **Availability:** box-local threads, files and direct streams depend on the box being reachable. The control plane's registry and sign-in do not make an offline box available.
+- **Shared changes:** `packages/protocol` is used throughout the system. Coordinate changes to shared schemas and account for compatibility across deployed clients and boxes.
+
+## Direction and outstanding work
+
+The product direction is a common box contract and capabilities across BYOB and The Nest, direct low-cost BYOB connections, cross-platform support through Linux, WSL and Lima, saved visual evidence, and per-user Nest VMs with different resource shapes and usage-based billing. These are goals with implementation and validation work remaining, not present-day guarantees. The architecture, dependencies and open decisions are in [goal-state.md](goal-state.md).
+
+### Nest: current and planned
+
+**Current:** `packages/host` provides a local CPU-VM lifecycle CLI and a QEMU launcher. The non-billable meter collects host-side process and disk samples, ingests records into the control plane, and reports estimates and coverage gaps. These are experiments, not an integrated managed fleet or charging system. See [packages/host/README.md](../packages/host/README.md) and [scripts/nest-meter/README.md](../scripts/nest-meter/README.md).
+
+**Planned:** a host agent and control-plane placement for per-user VMs; CPU and GPU shapes; suspend and wake on activity; parking persistent volumes for later resumption; and reconciled, usage-based billing. Cloud Hypervisor is a candidate, not a completed runtime choice. The detailed design and its constraints remain in [goal-state.md](goal-state.md#the-nest).
+
+## Implementation details
+
+- One Worker serves the control API and the web app on `app.kestrel-agent.com`; `kestrel-agent.com` (and `www.`) serves public pages and sends other paths to the app host. On the app host, phone browsers get the mobile web export (`packages/mobile`, built into `dist/m`) on the same URLs instead of the SPA ([details](../packages/mobile/README.md#on-the-web-phones)). Clients also connect directly to boxes where available.
 - The Hub Durable Object relays app requests to a box over the WebSocket the box dials out to. That is the legacy relay, used by users with no managed box, so nothing on that box is exposed to the internet. Durable Object requests are the scarce resource (100k/day on the free plan; every RPC, every relayed request and every 20 incoming WebSocket messages count as one), so the relay is kept lean: a browser API call costs one Hub request (the Worker forwards the session id and the Hub resolves it, attaches credentials and relays in that request), and what changes often is pushed over WebSockets instead of polled, since the Hub's outgoing messages are free. The thread list comes over `/api/events` (`task.updated` for every thread of the user, `task.deleted`), the Desktop graphs over `/api/tasks/:id/stats/stream`, and the diff is refetched on agent activity rather than every few seconds. The desktop stream is opened only while the desktop is starting or running (the box refuses it otherwise, and retrying would cost a request every 2 s).
 - The control plane signs users in; the box decides what they can see. Each thread is owned by the user who started it, and the box serves a thread and its runs, diffs and desktop only to that user (identity comes from the relay, or on a user's own box from a box token; otherwise the box's own port has no user and gets no thread data).
 - Web and mobile thread lists show a repository identity per thread (after t3code's project favicons), including the web's collapsed rail and both archived-thread views. The shared `threadIdentity` helper keys it on the thread's first checkout: that repository's own icon when it has one, else initials of the repository name, with the finish hashed from the repository, so every thread on a repo looks the same. A thread without a checkout takes initials from its title and its finish from its ID, so a rename changes the letters but not the finish. Initials come from the first two words (or the first two letters of a single word), skip punctuation and emoji, and fall back to `KT`. Finishes are eight two-hue glass tints (`THREAD_TINTS`: cool hues plus graphite, leaving green, amber and red to status); a loaded icon sits on the graphite one. Expanded sidebar rows centre each avatar against the title and status lines, independently of repository chips below them. The status icon sits immediately before matching-colour status text, with timestamps kept muted. Only the collapsed web rail keeps an overlaid status badge, on a soft backing that fades out toward its edge.
 - The box finds a repository icon once, when it makes the checkout, in the owner's mirror at the fork commit (never in the agent-writable checkout): the first regular file (not a symlink) among well-known favicon/icon paths, else the `<link rel="icon">` an index page or root route names, if it is a renderable image of at most 256 KB. `Checkout.icon` records its path and blob id; `Paths.taskCheckoutIcon` serves only that blob, from the mirror, with `Content-Security-Policy: sandbox` and an immutable cache, so a browser fetches each icon once rather than costing a relayed Hub request per render. Checkouts made before this have no icon and show initials.
-- A user can run their own box and make it their active box (Settings › Boxes; [byo-box.md](byo-box.md)). The web app then calls each user box's URL directly with a box token (HS256, signed with the box's secret, `aud` the box id) that the control plane mints for the box's owner, so no box traffic goes through the Hub. It merges every box's threads into one list and sends each thread's requests to the box it lives on. The mobile app calls only its active box. The box verifies tokens offline and fetches its owner's connection secrets from `/box/self` with its secret, again only when a newer token carries a changed credentials version. It also mints preview sessions and serves `/_preview/…` itself. Automations run only on Kestrel's own boxes (see below).
+- A user can run and select their own box (Settings › Boxes; [byo-box.md](byo-box.md)). The control plane mints a box-scoped HS256 token for its owner; the box verifies it offline and fetches the owner's connection secrets from `/box/self` when a newer token carries a changed credentials version. Web and mobile list threads across boxes and route each thread's requests to its box. A mobile `/c/:id` web link without a box identifier opens against the active box. The box also mints preview sessions and serves `/_preview/…`. Automations currently run only on Kestrel's boxes.
 - Kestrel's own boxes form a managed fleet. The Hub keeps a registry of them (`managed_boxes`: id, URL, secret, state `pending`, `active` or `draining`). Each box has its own secret and verifies the same HS256 box tokens as a user's box, but one managed box serves many users. Each user is assigned lazily to one box: they keep their box while it is `active` or `draining`; otherwise they get the active box with the fewest users. Apps call their managed box directly, as with a user's own box. A user with no managed box uses the legacy relay. Operators (`KESTREL_OPERATORS`) add, drain and remove boxes in Settings › Fleet. See [box.md](box.md#managed-boxes-fleet).
 - A thread starts in an empty workspace directory with no repository. The agent checks repositories out on demand with the `repo_checkout` MCP tool (a GitHub `owner/name` the owner's token can read, or a public `https://` URL; never local paths), at most one checkout per repository, each on its own thread branch. The box keeps one bare mirror per user and repository, fetched on the host with the owner's token before every checkout; a checkout is a clone that borrows the mirror's objects, so the sandbox sees that user's mirrors read-only and its own workspace read-write. Host-side git (diff, push) never runs inside a checkout's agent-writable git directory: it works from a host-owned shadow repository per checkout, so repository config the agent writes cannot make the host run commands.
 - Automations are user-defined triggers that start a thread on the owner's box: a cron schedule in an IANA time zone, or a GitHub `pull_request` event (opened, reopened, ready for review, synchronize, review requested). The Hub stores them, arms one alarm for the next schedule fire, and receives GitHub deliveries at `/webhooks/github` (verified with a per-repo HMAC secret; deduped by delivery id). An automation names an optional GitHub repository (required for `pull_request` triggers). Each repo has one webhook shared by its automations, created on GitHub with the owner's token when the first enabled GitHub automation is saved; the Hub change is saved first, and the webhook is removed when the last enabled GitHub automation on the repo is deleted, disabled, or switched to a schedule. Removal is best-effort and needs the owner's token; without one the webhook stays and is reused later. Firing starts a thread on the box (`POST /api/tasks`) with the automation's repository checked out; a PR run also passes `pullRequest` and the PR's base branch, so the checkout forks from the PR head and its diff shows only the agent's edits. Then the automation's prompt is sent.
 - Each automation stores a catalog `model` or `null` for the box default. Web and mobile editors offer connected providers' shown models and retain a saved selection even when hidden or disconnected. Agent tools accept the same model IDs. Creating without a model uses the default; updates preserve an omitted model and reset it with `null`. Existing automations migrate to the default. Scheduled, GitHub and manual runs send the stored model with the thread's first message, selecting the provider's harness.
 - Response decoding accepts older automations that omit `model`, normalizing the missing field to `null` so the web app, mobile app and box control client can read them. Explicit selections are preserved and unknown model IDs are rejected; this response default does not change partial-update semantics.
-- The agent runs inside a bubblewrap sandbox (`strict` with the flake's Nix toolchain, `basic` otherwise; see [box.md](box.md#agent-sandbox)), in a transient systemd scope whose task slice carries the task's limits. Under `strict` it runs in the thread's own network namespace (pasta): internet yes, host loopback no, except the box port for MCP and the broker, and everything the agent can start (runs, `workspace_exec`, the desktop terminal, `desktop_launch` apps) shares that namespace. Under `basic` it shares the host's network. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys. Each run has one token (`CLOUDAGENTS_MCP_TOKEN`): MCP requires it as a bearer header, the broker takes it in its URL, and both refuse it once the run ends; MCP sessions close with the run.
-- Each message names a model from the catalog in `packages/protocol/src/models.ts` (display name, provider, supported thinking levels). The harness runs the model's provider CLI: Claude Code for Anthropic, Codex app-server for OpenAI (`agentCommands` in `config.ts`). The box talks to both while a run works: app-server's JSON-RPC (`core/codex-app-server.ts`) and Claude Code's stream-json input (`core/claude-stream.ts`), so a running turn can be steered and interrupted. Agent sessions are recorded with the provider that printed them; a run resumes the thread's latest session only on the same provider, and a run on the other provider starts fresh with the earlier conversation in its prompt (`core/handoff.ts`).
+- The agent runs inside a bubblewrap sandbox (`strict` with the flake's Nix toolchain, `basic` otherwise; see [box.md](box.md#agent-sandbox)), in a transient systemd scope whose task slice carries the task's limits. Under `strict` it runs in the thread's own network namespace (pasta): internet yes, host loopback no, except the separate loopback listener for MCP and the broker, and everything the agent can start (runs, `workspace_exec`, the desktop terminal, `desktop_launch` apps) shares that namespace. Under `basic` it shares the host's network. It gets tools through MCP and makes model calls through the broker, so it never holds the real model keys. Each run has one token (`CLOUDAGENTS_MCP_TOKEN`): MCP requires it as a bearer header, the broker takes it in its URL, and both refuse it once the run ends; MCP sessions close with the run.
+- Each message names a model from the catalog in `packages/protocol/src/models.ts` (display name, provider, supported thinking levels). The harness runs the model's provider CLI: Claude Code for Anthropic, Codex app-server for OpenAI (`agentCommands` in `config.ts`). The box talks to both while a run works: app-server's JSON-RPC (`core/codex-app-server.ts`) and Claude Code's stream-json input (`core/claude-stream.ts`), so a running turn can be steered and interrupted. Both get a short system-level instruction to edit files with their edit tools instead of scripts (`--append-system-prompt` in `config.ts`, `developerInstructions` in `core/codex-app-server.ts`). Agent sessions are recorded with their provider. Returning to a provider resumes its latest usable native session with only the subsequent runs' messages; without one, the prompt carries bounded conversation history (`core/handoff.ts`). A failed run that never recorded a session invalidates older sessions of that provider, preventing repeated broken resumes without losing the conversation.
+- A run starts in the thread's first checkout, so the harness treats that repository as its project and loads its `AGENTS.md` / `CLAUDE.md` as a local session would; a thread without one (or whose first checkout was deleted) starts in the workspace root (`agentCwd` in `core/harness.ts`). The sandbox binds the whole workspace either way, so the agent still reaches the other checkouts and its home. Codex gets the same directory as the thread's `cwd` on `thread/start` and `thread/resume`, and the composer's slash commands are discovered there. A thread created with a repository (new thread page, automations, `thread_spawn`, delegation) has its checkout before the first run. A `repo_checkout` during a run cannot move that run; its result names the new checkout's `AGENTS.md` / `CLAUDE.md` for the agent to read, and the thread's later runs start in its first checkout.
 - Web and mobile tool-call summaries use the shared `toolDisplayName` helper in `packages/protocol/src/tool-names.ts`: action labels for Kestrel MCP tools and known harness tools, readable words for unknown identifiers, and the server name for third-party MCP tools. Both Claude's `mcp__cloudagents__<tool>` and Codex's `cloudagents.<tool>` names resolve to the same label. The original identifier remains in expanded details with the input and output; stored transcripts and wire schemas are unchanged.
 - The thread desktop is on demand: a run starts without one, and the agent starts it with `desktop_open` (or the user starts it from the Desktop tab). The desktop tools refuse until it is running. When it comes up, the Desktop tab opens for the user. Its X server (a rootful Xwayland in a headless weston, on the host GPU when there is one) and the box's capture run in the thread's IPC namespace, the one the thread's sandboxes share, so desktop apps can use MIT-SHM. Sandboxes that can reach the desktop get the GPU's render nodes and the host's GL/Vulkan drivers.
 - Optional desktop apps (Blender, Roblox Studio via Vinegar) are per-task toolkits, not part of the sandbox toolchain. The agent's `toolkit_install` MCP tool (offered only on a box started from the flake; other boxes have no install tool) runs `nix build` of the flake's `toolkit-<name>` on the host, outside the sandbox, with the out-links in the task home as GC roots; the executables are linked into the task home's `.kestrel/bin`, which every sandbox launch has on `PATH`. The sandbox only ever sees the result read-only through `/nix/store`, and a deleted task drops its GC roots.
@@ -88,21 +140,9 @@ flowchart TB
 - Each thread's agent can start another thread with `thread_spawn`, optionally checking out a repository before sending its first task. The new thread has its own workspace and conversation. Agents can also reach the owner's other threads with `thread_list` (active threads, archived ones left out), `thread_read` (a thread's latest messages) and `thread_send`. A sent message is stored on the target thread as a user message with `fromThread` (the sending thread's id and title) and shown there as coming from that agent. It joins the target's running run (the running turn takes it at once; once the run's last turn is over it waits in the run's `task_inbox`), or starts a run that resumes the target's latest session (on that provider's default model); it never answers the target's open `task_ask` question, and an archived target refuses it with 409. The receiving agent reads who sent it and to answer with `thread_send` only when asked for something, so two agents do not keep waking each other. Everything stays on the box: another user's thread is NotFound, like on every owned route.
 - `delegate_task` starts tracked work in a separate thread, while `thread_spawn` starts an independent thread. The child stores the parent thread, initiating run, retry key and original run; `delegation_status`, `delegation_wait`, and `delegation_cancel` refer to that original work. The parent sees its children in chat. `delegate_batch` prevalidates and dispatches up to ten tasks with shared context; a partial failure leaves prior children in place, and repeating the same key resumes the batch. A request key is scoped to the originating run and cannot be reused with different inputs. A run inherits the parent's selected model when known, otherwise the box default, and the box's existing run queue limits concurrency. A blocked delegation wait lends its parent's slot to queued work, reacquiring it before the tool returns. Delegation depth is limited to four.
 - Child results are delivered to the parent automatically, including after the parent run ends; completion waits for nested work and its result-driven continuations. A wait that takes the result first acknowledges it and suppresses automatic delivery; status remains readable. A stable message id and persisted acknowledgement suppress duplicate delivery during normal operation. When a parent run containing a notification is interrupted by a box restart, delivery is retried in a fresh run with a restart notice: this is at-least-once, since the old run may already have seen the result. Cancellation stops the delegated run and its descendant runs, preserving their threads. A child needing input causes a wait to return and notifies the parent; its question remains for the user to answer in the child thread. Result summaries are bounded in automatic messages; the full thread remains readable. Per-run usage is reported when the harness provides it. If the box restarts before dispatch, the child is marked failed rather than silently creating a second thread; in-flight runs are reconciled as failed as usual.
+- Delegation assignments and automatic result/question notifications have distinct framing from ordinary peer mail. Children give their final response in their own thread rather than also sending it with `thread_send`; automatic notifications do not invite replies or answers to the user's questions.
 - A delegation may supply a JSON Schema for its final response. Kestrel includes it in the assignment and validates the returned JSON; the status and notification report validation failures without hiding the original response. Role names are prompt guidance, not separate permission profiles. Children use their own thread workspace and may check out a repo, branch or PR; local uncommitted files and the parent's transcript are not copied.
 - An agent can call `thread_close` as its final action when its finished work needs no user attention, such as an automation check that found no issues. It archives only its own thread and ends its run.
 - Archiving a thread (`POST /api/tasks/:id/archive`; `DELETE` lifts it) tears down its runtime: running runs are cancelled, the desktop stops, and the sandbox network and systemd slice are removed. The workspace, checkouts, branches, messages and runs stay, and the thread leaves the active list. While archived, sending a message or starting the desktop fails with 409 Conflict. Unarchiving restores both and starts nothing on its own.
-- Kestrel's own boxes (managed and relayed) count failed tool calls and agent turns so operators can see the most common ones: `GET /api/fleet/tool-failures?days=` (`KESTREL_OPERATORS` only). Agent failures use `agent:claude` or `agent:codex` and fixed signatures for early exits or other failed turns; their error text is not sent. The harness turns each failed call into a tool name and a signature (`core/tool-failures.ts`): the line naming the error, with paths, URLs, emails, quoted strings, values, ids and numbers scrubbed. Tool input and the rest of the output are never sent, other MCP servers' names are hidden, their output and shell output count only when a line looks like an error, and calls and runs the user stopped and replays are skipped. Counts go to `/box/telemetry/tool-failures` at most once a minute, best effort. The Hub keeps them per UTC day for 90 days with no user, thread or box attached (`tool-failures-table.ts`). A user's own box never reports. Scrubbing is a heuristic over free text, so tool signatures should be treated as possibly sensitive.
-- Dotted WebRTC line: planned direct video path from the box to the browser, replacing today's stream relayed through the Hub. Until then the box can bundle desktop fragments into fewer relay messages (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`, off by default; see [box.md](box.md#desktop-stream-bundling-cloudagents_desktop_bundle_ms)).
-
-## Owners
-
-| Owner | Area | Starter items |
-|---|---|---|
-| Jaren | Box runtime, relay, sandbox, broker, desktop/GPU streaming (NVENC, WebRTC) | Encoder switch, WebRTC sender, configurable dev ports |
-| caayd | `packages/app` (UI/UX) | Install-on-GitHub link, page titles, reconnect states |
-| Person 3 | Harness and MCP | `desktop_scroll`, `desktop_double_click`, fake-agent coverage, `docs/harness.md` |
-| Person 4 | OAuth / control plane | Friendlier "not allowed" page, repo pagination past 100, reconnect on 401, OG image, `/docs` page |
-
-Changes to `packages/protocol` need a review from everyone, since every package depends on it.
-
-A thread can follow a PR with `github_pr_watch` and stop with `github_pr_unwatch`. The thread must have one checkout linked to the PR via the GitHub tools; its owner must be able to administer the repository webhook. The control plane extends the shared signed GitHub hook for review, review-comment, conversation-comment and completed check events. It remembers delivery IDs and coalesces nearby notifications per thread in a persistent queue. The existing Hub alarm delivers notifications to the thread's box and retries transient failures, without polling. A completed check without GitHub's PR association is matched against the watched PR's current head SHA. Archiving or deleting the thread removes its watch on the next delivery; closing the PR stops it. The event wakes the existing agent session to inspect current feedback, rather than treating the GitHub payload as an instruction or answering an outstanding question. These watches use the same managed or legacy boxes as automations; user-owned boxes are not supported.
+- Kestrel's own managed and relayed boxes count failed tools and agent turns for operators at `GET /api/fleet/tool-failures?days=`. Agent failures use fixed signatures for early exits and other failed turns; their error text is not sent. Tool failures use scrubbed error signatures (`core/tool-failures.ts`), but scrubbing is heuristic and signatures may still be sensitive. Stopped runs and replays are skipped. Reports are best effort, at most once a minute, and kept per UTC day for 90 days without a user, thread or box. User-owned boxes do not report.
+- Direct WebRTC video remains planned. Today's desktop stream uses WebSockets, direct or via the relay; the box can bundle desktop fragments into fewer relay messages (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`, off by default; see [box.md](box.md#desktop-stream-bundling-cloudagents_desktop_bundle_ms)).

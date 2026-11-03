@@ -1,8 +1,9 @@
 import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Paths, transcriptSegments, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
-import { createQueries, keys, upsert } from "@/api/queries";
+import { parseGithubReferenceDraft } from "@cloudagents/composer/reference";
+import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
@@ -14,6 +15,7 @@ import { colors, fonts, radius, shadows, spacing } from "@/theme";
 import { Composer } from "./Composer";
 import { Markdown } from "./Markdown";
 import { RunTranscript } from "./RunTranscript";
+import { GithubReferenceLink } from "./GithubReferenceLink";
 
 interface Props {
   taskId: string;
@@ -74,7 +76,9 @@ function ThreadItem({
           ) : null}
           <View style={styles.userBubble}>
             <Text style={styles.userText} selectable>
-              {message.text}
+              {parseGithubReferenceDraft(message.text).map((segment, index) => segment.type === "text"
+                ? segment.text
+                : <GithubReferenceLink key={index} reference={segment.reference} />)}
             </Text>
           </View>
           {children}
@@ -102,10 +106,11 @@ function ThreadItem({
 /** Stands in for the composer on an archived thread: its history stays readable until it is unarchived. */
 function ArchivedNotice({ task }: { task: Task }) {
   const { unarchive } = useThreadArchive();
+  const { api } = useApiClient();
   return (
     <View style={styles.archived}>
       <Text style={styles.archivedText}>This thread is archived. Unarchive it to send messages again.</Text>
-      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate(task.id)}>
+      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate({ api, taskId: task.id })}>
         Unarchive
       </Button>
       {unarchive.error ? <Alert>{errorText(unarchive.error)}</Alert> : null}
@@ -117,6 +122,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
   const { api } = useApiClient();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
+  const task = useQuery(queries.task(taskId));
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Follow new content only while the reader is at the end, so scrolling back through history is not yanked down.
   const atEnd = useRef(true);
@@ -135,16 +141,18 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined;
 
   const send = useMutation({
-    mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
-    onSuccess: (res) => {
+    mutationFn: ({ api, taskId, body }: ThreadCall & { body: SendMessageBody }) => api.sendMessage(taskId, body),
+    onSuccess: (res, { api, taskId }) => {
       atEnd.current = true;
+      const keys = boxKeys(api.boxScope);
       queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, res.message));
       queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
     },
   });
   const cancel = useMutation({
-    mutationFn: (runId: string) => api.cancelRun(runId),
-    onSuccess: (run) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
+    mutationFn: ({ api, runId }: ThreadCall & { runId: string }) => api.cancelRun(runId),
+    onSuccess: (run, { api, taskId }) =>
+      queryClient.setQueryData<Run[]>(boxKeys(api.boxScope).runs(taskId), (list) => upsert(list, run)),
   });
   const latestRun = sortedRuns.at(-1);
   const activeRun = latestRun?.status === "running" ? latestRun : undefined;
@@ -210,15 +218,17 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
         <ArchivedNotice task={archivedTask} />
       ) : (
         <Composer
+          key={taskId}
+          repos={(task.data?.checkouts ?? []).map((checkout) => checkout.repo)}
           taskId={taskId}
           ask={pendingAsk}
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
-          onSend={(body) => send.mutateAsync(body)}
+          onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}
-          onStop={activeRun ? () => cancel.mutate(activeRun.id) : undefined}
+          onStop={activeRun ? () => cancel.mutate({ api, taskId, runId: activeRun.id }) : undefined}
           stopping={cancel.isPending}
         />
       )}

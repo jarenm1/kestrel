@@ -1,12 +1,20 @@
-import React, { type ReactNode, useMemo, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Check, ChevronDown, Settings2, Square } from "lucide-react-native";
+import { Schema } from "effect";
+import {
+  composerViewOf,
+  findGithubReferenceTrigger,
+  type ComposerEditorView,
+  type GithubReferenceKind,
+} from "@cloudagents/composer/reference";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import {
   AgentEffort,
   AgentModel,
+  GithubRepoSlug,
   EFFORT_LABELS,
   connectedModelProviders,
   harnessCommandPrefix,
@@ -24,12 +32,15 @@ import { createQueries } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { useStoredChoice } from "@/hooks/useStoredChoice";
+import { useStoredDraft } from "@/hooks/useStoredDraft";
 import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
 import { colors, fonts, radius, shadows, spacing } from "@/theme";
 import { ContextBar } from "./ContextBar";
 import { Markdown } from "./Markdown";
 import { SlashCommands } from "./SlashCommands";
+import ComposerEditor, { type DOMRef } from "./ComposerEditor";
+import { GithubReferenceMenu } from "./GithubReferenceMenu";
 
 interface PickerOption<T extends string> {
   readonly value: T | undefined;
@@ -187,6 +198,9 @@ interface ComposerProps {
   readonly context?: ContextUsage | null | undefined;
   readonly activeRunId?: string;
   readonly activeRunProvider?: ModelProvider;
+  readonly repo?: string;
+  readonly onRepoChange?: (repo: string) => void;
+  readonly repos?: readonly string[];
   /** Hangs right under the message box, e.g. the new thread's repository, branch and box bar. */
   readonly below?: ReactNode;
 }
@@ -263,14 +277,30 @@ export function Composer({
   activeRunId,
   activeRunProvider,
   below,
+  repo,
+  onRepoChange,
+  repos = [],
 }: ComposerProps) {
   const { api } = useApiClient();
   const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
   const shown = useShownModels();
-  const [text, setText] = useState("");
+  const [text, setText, draftReady] = useStoredDraft(taskId ?? "new");
+  // Only the initial persisted draft crosses into the DOM. Echoing edits back would let a delayed native
+  // acknowledgement overwrite newer typing; subsequent edits and the successful-send clear stay inside the DOM.
+  const initialDraft = useRef<string | undefined>(undefined);
+  if (draftReady && initialDraft.current === undefined) initialDraft.current = text;
+  const [view, setView] = useState<ComposerEditorView>(() => composerViewOf(""));
   const [focused, setFocused] = useState(false);
+  const editor = useRef<DOMRef>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const [activeReferenceIndex, setActiveReferenceIndex] = useState(0);
+  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const [pickedRepo, setPickedRepo] = useState<string>();
+  const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate));
+  const referenceRepo = pickedRepo ?? repo ?? (checkoutRepos.length === 1 ? checkoutRepos[0] : undefined);
+  useEffect(() => setPickedRepo(undefined), [repo]);
   const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
   const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
   const [choice, setChoice] = useState<{ askId: string; index: number } | undefined>();
@@ -294,17 +324,18 @@ export function Composer({
   ];
 
   // Slash commands
-  const firstSpace = text.search(/\s/);
-  const commandTokenEnd = firstSpace === -1 ? text.length : firstSpace;
-  const trigger: "/" | "$" | undefined = text.startsWith("/") ? "/" : text.startsWith("$") ? "$" : undefined;
+  const visible = view.plain;
+  const firstSpace = visible.search(/\s/);
+  const commandTokenEnd = firstSpace === -1 ? visible.length : firstSpace;
+  const trigger: "/" | "$" | undefined = visible.startsWith("/") ? "/" : visible.startsWith("$") ? "$" : undefined;
   const expectedProvider = activeRunProvider ?? model?.provider;
   const triggerAllowed =
     trigger === "/" ||
     (trigger === "$" &&
       (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)));
   const slashQuery =
-    taskId !== undefined && trigger !== undefined && triggerAllowed && (firstSpace === -1 || text.length <= firstSpace)
-      ? text.slice(1)
+    taskId !== undefined && trigger !== undefined && triggerAllowed && view.caret <= commandTokenEnd
+      ? visible.slice(1, commandTokenEnd)
       : undefined;
 
   const commandQuery = useQuery({
@@ -316,6 +347,7 @@ export function Composer({
   const slashMenuOpen =
     slashQuery !== undefined &&
     (trigger !== "$" || commandProvider === "openai") &&
+    !dismissed &&
     focused;
 
   // Codex lists its commands and skills on `/`, and only its skills on their native `$`.
@@ -328,20 +360,71 @@ export function Composer({
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
         );
 
+  const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret);
+  // A repository sheet or a touch choice takes focus from the editor; keep the active token available until chosen.
+  const referenceMenuOpen = referenceTrigger !== undefined && !dismissed;
+  const menuOpen = referenceMenuOpen || slashMenuOpen;
+
+  useEffect(() => setActiveReferenceIndex(0), [referenceTrigger?.start, referenceTrigger?.number]);
+  useEffect(() => setActiveCommandIndex(0), [slashQuery, taskId, model?.id, activeRunId]);
+
+  function edit(next: ComposerEditorView) {
+    if (next.markdown !== text) setText(next.markdown);
+    if (next.markdown !== view.markdown || next.caret !== view.caret) setDismissed(false);
+    setView(next);
+  }
+
   function chooseCommand(command: HarnessCommand) {
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider);
-    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "");
-    setText(`${prefix}${command.name} ${rest}`);
+    const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0;
+    editor.current?.replaceRange(0, commandTokenEnd + gap, `${prefix}${command.name} `);
+    setDismissed(true);
+  }
+
+  function chooseReference(kind: GithubReferenceKind) {
+    if (referenceTrigger === undefined || referenceRepo === undefined) return;
+    editor.current?.insertReference(
+      { repo: referenceRepo, kind, number: referenceTrigger.number },
+      referenceTrigger.start,
+      referenceTrigger.end
+    );
+    setDismissed(true);
+  }
+
+  function chooseRepo(next: string) {
+    setPickedRepo(next);
+    onRepoChange?.(next);
+    editor.current?.focusAt(referenceTrigger?.end ?? view.caret);
+  }
+
+  async function menuKey(key: string) {
+    if (key === "Escape") {
+      setDismissed(true);
+    } else if (referenceMenuOpen) {
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        setActiveReferenceIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + 2) % 2);
+      } else if (key === "Enter" || key === "Tab") {
+        chooseReference(activeReferenceIndex === 0 ? "pr" : "issue");
+      }
+    } else if (slashMenuOpen && commandMatches.length > 0) {
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        setActiveCommandIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + commandMatches.length) % commandMatches.length);
+      } else if (key === "Enter" || key === "Tab") {
+        const command = commandMatches[activeCommandIndex % commandMatches.length];
+        if (command !== undefined) chooseCommand(command);
+      }
+    }
   }
 
   const empty = text.trim() === "" && chosenOption === undefined;
 
-  function submit() {
-    // Failures surface through `error`; the text stays so it can be resent.
-    if (empty || pending) return;
-    const body = [chosenOption ?? "", text.trim()].filter(Boolean).join("\n\n");
+  async function submit(next: ComposerEditorView) {
+    // Capture the DOM's current Markdown at the button press, not an earlier native bridge acknowledgement.
+    const body = [chosenOption ?? "", next.markdown.trim()].filter(Boolean).join("\n\n");
+    if (body === "" || pending) return;
     void onSend({ text: body, model: model?.id, effort }).then(
       () => {
+        editor.current?.clear();
         setText("");
         setChoice(undefined);
       },
@@ -360,12 +443,22 @@ export function Composer({
   return (
     <View style={styles.wrap}>
       {error ? <Alert>{errorText(error)}</Alert> : null}
-      {slashMenuOpen ? (
+      {referenceMenuOpen && referenceTrigger !== undefined ? (
+        <GithubReferenceMenu
+          number={referenceTrigger.number}
+          repo={referenceRepo}
+          onRepoChange={chooseRepo}
+          onSelect={chooseReference}
+          activeIndex={activeReferenceIndex}
+          onActiveIndexChange={setActiveReferenceIndex}
+        />
+      ) : slashMenuOpen ? (
         <SlashCommands
           matches={commandMatches}
           provider={commandProvider}
           pending={commandQuery.isPending}
           onSelect={chooseCommand}
+          activeIndex={activeCommandIndex}
         />
       ) : null}
       <View style={[styles.box, focused && styles.boxFocused]}>
@@ -377,16 +470,23 @@ export function Composer({
             onChoose={(index) => setChoice({ askId: ask.id, index })}
           />
         ) : null}
-        <TextInput
-          style={styles.input}
-          value={text}
-          onChangeText={setText}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          placeholder={computedPlaceholder}
-          placeholderTextColor={colors.mutedForeground + "b3"}
-          multiline
-        />
+        {draftReady ? (
+          <ComposerEditor
+            ref={editor}
+            value={initialDraft.current ?? ""}
+            placeholder={computedPlaceholder}
+            ariaExpanded={menuOpen}
+            menuOpen={menuOpen}
+            onChange={async (next) => edit(next)}
+            onFocus={async () => setFocused(true)}
+            onBlur={async () => setFocused(false)}
+            onMenuKey={menuKey}
+            onSubmit={submit}
+            // The DOM WebView defaults its container to flex: 1, which collapses inside this auto-height box.
+            // Let matchContents supply the outer height, with the WebView filling that measured container.
+            dom={{ matchContents: true, scrollEnabled: false, containerStyle: { flex: 0 }, style: { flex: 1 } }}
+          />
+        ) : <View style={{ minHeight: 48 }} />}
         <View style={styles.row}>
           <ModelPicker
             sections={sections}
@@ -403,7 +503,7 @@ export function Composer({
               <Square size={14} color={colors.primaryForeground} fill={colors.primaryForeground} />
             </Button>
           ) : (
-            <Button size="icon" accessibilityLabel="Send" disabled={pending || empty} onPress={submit}>
+            <Button size="icon" accessibilityLabel="Send" disabled={pending || empty || !draftReady} onPress={() => editor.current?.requestSubmit()}>
               {pending ? (
                 <ActivityIndicator size="small" color={colors.primaryForeground} />
               ) : (
@@ -492,15 +592,6 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 14,
     color: colors.foreground,
-  },
-  input: {
-    color: colors.foreground,
-    fontSize: 16,
-    minHeight: 48,
-    maxHeight: 160,
-    paddingHorizontal: 6,
-    paddingTop: 6,
-    textAlignVertical: "top",
   },
   row: { flexDirection: "row", alignItems: "center", gap: spacing.xs },
   modelPill: { flexShrink: 1, minWidth: 0 },

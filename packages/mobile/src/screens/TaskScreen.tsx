@@ -4,6 +4,8 @@ import { GestureDetector, usePanGesture } from "react-native-gesture-handler";
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { AppWindow, GitCompare, GitPullRequest, type LucideIcon, Monitor, PanelRightClose } from "lucide-react-native";
 import { ThreadBoxIndicator } from "@/components/BoxStatus";
+import type { ActiveBox } from "@/api/client";
+import { useAuth } from "@/auth/AuthContext";
 import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
 import { DiffView } from "@/components/DiffView";
@@ -14,6 +16,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { useSwipePanel } from "@/hooks/useSwipePanel";
 import { useTaskState } from "@/hooks/useTaskState";
+import { BoxApiContext, useBoxClient } from "@/hooks/useApiClient";
+import { boxLabel } from "@/hooks/useBoxSources";
 import { repoShortName } from "@/lib/format";
 import { useShell } from "@/nav/navigation";
 import { colors, radius, spacing } from "@/theme";
@@ -34,6 +38,8 @@ const CLOSE_EDGE_WIDTH = 18;
 
 interface Props {
   taskId: string;
+  /** The box the thread runs on; `null` is Kestrel's relayed box. */
+  box: ActiveBox | null;
   /** Bottom safe-area inset, passed to the content panel. */
   bottomInset: number;
 }
@@ -42,8 +48,26 @@ interface Props {
  * One thread (task): the web app's ThreadView. Chat fills the screen; the Desktop/Diff panel slides in from the
  * right on a left swipe over the chat (or its top bar buttons) and leaves on a right swipe over its header or left
  * edge. Its content only mounts while it can be seen, so the desktop stream does not connect until it is opened.
+ * Every request under it goes to the thread's box, so a thread from another box keeps reading that box.
  */
-export function TaskScreen({ taskId, bottomInset }: Props) {
+export function TaskScreen({ taskId, box, bottomInset }: Props) {
+  const api = useBoxClient(box);
+  const { boxes, managedBox } = useAuth();
+  return (
+    <BoxApiContext.Provider value={api}>
+      <ThreadView taskId={taskId} boxName={boxLabel(box, boxes, managedBox)} bottomInset={bottomInset} />
+    </BoxApiContext.Provider>
+  );
+}
+
+interface ThreadViewProps {
+  taskId: string;
+  /** Name of the box the thread runs on, shown above the chat. */
+  boxName: string;
+  bottomInset: number;
+}
+
+function ThreadView({ taskId, boxName, bottomInset }: ThreadViewProps) {
   const state = useTaskState(taskId);
   const shell = useShell();
   const { width } = useWindowDimensions();
@@ -119,7 +143,7 @@ export function TaskScreen({ taskId, bottomInset }: Props) {
       <ContentPanel bottomInset={bottomInset}>
         <GestureDetector gesture={openPan}>
           <View style={styles.flex}>
-            <ThreadBoxIndicator />
+            <ThreadBoxIndicator name={boxName} />
             {state.error ? <Alert style={styles.error}>{state.error}</Alert> : null}
             <ChatPanel
               taskId={taskId}

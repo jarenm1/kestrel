@@ -108,7 +108,7 @@ the natural place to begin.
 Gaps to close today:
 
 - Automations and PR watches run only on Kestrel's boxes.
-- The mobile app talks only to the active box, while web merges them all.
+- Web and mobile list threads across boxes. Mobile web links without a box identifier still open on the active box.
 - `toolkit_install` requires a box started from the Nix flake.
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
   remove it: every box uses `/box/self`.
@@ -140,8 +140,10 @@ Today a BYOB user needs their own HTTPS tunnel and a local proxy that blocks `/m
 
 1. **Separate the sandbox listener.** `/mcp` and `/broker` share the box's main server (`packages/server/src/main.ts`).
    Move them to a listener only sandboxes can reach, so a tunnel can point straight at the public listener.
-2. **Spike WebRTC for the stream and the API.** Signaling goes through the box's dial-out socket. If a direct connection
-   proves reliable, the tunnel becomes optional.
+2. **WebRTC for the API, spiked.** The app posts its offer to `POST /api/webrtc/offer` on the box's own port, so signaling
+   needs the same direct route as the API and does not use the dial-out socket yet. Once open, the data channel carries API
+   calls and HTTP stays the fallback ([byo-box.md](byo-box.md#direct-data-path)). The desktop stream still uses the
+   existing path. The tunnel stays optional only once the reach question below is answered.
 3. **Keep tunnels as the fallback.** Tailscale, Cloudflare Tunnel or the user's own domain still work, and the installer
    should automate as much of this as it can.
 
@@ -167,8 +169,6 @@ product copy should say so plainly.
 
 - **Ship the desktop dependencies.** The desktop needs weston 14 or newer, but Ubuntu 24.04 ships 13. A stock Ubuntu box
   on either native Linux or WSL therefore needs a manual install today.
-- **Handle WSLg.** WSLg mounts `/tmp/.X11-unix` read-only, and the documented fix is a manual root `umount` that
-  `wsl --shutdown` reverts. The box should make this work without either step.
 - **Fix the first start on WSL.** The first desktop start can time out while NVENC fails and falls back to x264. Skip
   NVENC there, or do not count the failed attempt against the startup timeout.
 - **Fix hardware graphics on native Linux.** The sandbox exposes host drivers only at `/run/opengl-driver`, and the docs
@@ -429,7 +429,7 @@ records, and usage records. `PLANS` changes when billing arrives.
 - **Resume times:** what suspend and resume cost in practice decides how aggressive the idle timeout can be.
 - **Memory billing:** whether ballooning returns enough memory to bill close to real use.
 - **Fractional GPUs:** which option works with our apps, and whether it is worth its licensing and setup.
-- **WebRTC reach:** how often a direct connection fails, and whether the API can reliably use it as well as the stream.
+- **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback); the stream is not on WebRTC yet.
 - **Evidence in PRs:** what GitHub actually renders, and how long Nest evidence is retained.
 - **Free tier:** whether the Nest has one, given that a free VM has a real cost even when suspended.
 - **Teams:** whether a team shares boxes or each seat gets its own. Boxes are single-owner in this design.

@@ -9,13 +9,21 @@ import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
 
+const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
+
+/**
+ * Left to themselves, agents batch a multi-file change into a throwaway script, usually Python, which the strict
+ * sandbox doesn't have, so the run fails once and redoes it in Bun. The Codex counterpart is in `core/codex-app-server.ts`.
+ */
+const CLAUDE_INSTRUCTIONS =
+  "Change existing files with the Edit tool and create files with the Write tool, also when a change repeats across many places or files: send several Edit calls in one response rather than batching them in a script. Do not change files through python, bun -e, node -e, sed -i, perl -i or a shell heredoc. Python may not be installed here."
+
 /**
  * The prompt goes in on stdin (`--input-format stream-json`), so the harness can add messages to a running turn and
  * interrupt it (`core/claude-stream.ts`). `--include-partial-messages` streams text and thinking as `stream_event`
  * deltas next to the finished blocks.
  */
-const DEFAULT_ANTHROPIC_COMMAND =
-  'claude -p --input-format stream-json ${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --output-format stream-json --verbose --include-partial-messages ${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} ${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}'
+export const DEFAULT_ANTHROPIC_COMMAND = `claude -p --input-format stream-json \${CLOUDAGENTS_RESUME_SESSION:+--resume "$CLOUDAGENTS_RESUME_SESSION"} --mcp-config "$CLOUDAGENTS_MCP_CONFIG" --dangerously-skip-permissions --append-system-prompt ${shellQuote(CLAUDE_INSTRUCTIONS)} --output-format stream-json --verbose --include-partial-messages \${CLOUDAGENTS_MODEL:+--model "$CLOUDAGENTS_MODEL"} \${CLOUDAGENTS_EFFORT:+--effort "$CLOUDAGENTS_EFFORT"}`
 
 /**
  * Codex runs as app-server on stdio; the harness opens the thread and its turn over JSON-RPC
@@ -30,12 +38,14 @@ const DEFAULT_OPENAI_COMMAND =
 export interface ServerConfig {
   readonly port: number
   readonly host: string
+  /** Loopback-only listener for MCP and the credential broker. */
+  readonly sandboxPort: number
   /** Base URL the agent harness uses to reach this server's MCP endpoint. */
   readonly mcpBaseUrl: string
   readonly dataDir: string
   /** Bare mirrors of repositories, one per user per repository; host-only writes, read-only in sandboxes. */
   readonly mirrorsDir: string
-  /** Per-thread workspaces: the agent's working directory, with one checkout directory per repository. */
+  /** Per-thread workspaces, with one checkout directory per repository; the agent starts in the first checkout. */
   readonly threadsDir: string
   /** Host-only shadow git dirs, one per checkout; all host-side git on a checkout runs against these. */
   readonly shadowsDir: string
@@ -44,15 +54,16 @@ export interface ServerConfig {
   readonly stateFile: string
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
-   * cwd = task worktree (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
+   * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
+   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
-   * `--effort`), and `CLOUDAGENTS_RESUME_SESSION` on every run after a task's first: the session the previous run
-   * printed in its stream-json `init`, which it must resume (`claude --resume`) for the agent to keep the thread's
-   * context. `CLOUDAGENTS_PROMPT` still holds the prompt. The OpenAI command must start Codex app-server on stdio:
-   * the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run reaches the model through
-   * the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
+   * `--effort`), and `CLOUDAGENTS_RESUME_SESSION` when continuing a usable native session of this provider, including
+   * after another provider ran. It must resume that session (`claude --resume`) to retain its native context.
+   * Prompts travel only on stdin, not through the inherited environment. The OpenAI command must start
+   * Codex app-server on stdio: the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run
+   * reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
@@ -115,7 +126,8 @@ export const loadConfig = (): ServerConfig => {
     throw new Error(`CLOUDAGENTS_PORT must be a valid port, got "${portRaw}"`)
   }
   const host = process.env.CLOUDAGENTS_HOST ?? "127.0.0.1"
-  const mcpHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host
+  const sandboxPort = intEnv("CLOUDAGENTS_SANDBOX_PORT", ((port + 9999) % 65535) + 1, 1, 65535)
+  if (sandboxPort === port) throw new Error("CLOUDAGENTS_SANDBOX_PORT must differ from CLOUDAGENTS_PORT")
   const dataDir = resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
@@ -158,9 +170,10 @@ export const loadConfig = (): ServerConfig => {
   return {
     port,
     host,
+    sandboxPort,
     relay: loadRelay(controlUrl, direct),
     direct,
-    mcpBaseUrl: `http://${mcpHost.includes(":") ? `[${mcpHost}]` : mcpHost}:${port}`,
+    mcpBaseUrl: `http://127.0.0.1:${sandboxPort}`,
     dataDir,
     mirrorsDir: join(dataDir, "mirrors"),
     threadsDir: join(dataDir, "threads"),
@@ -295,5 +308,3 @@ const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): S
 }
 
 export const ConfigLive = Layer.sync(Config, loadConfig)
-
-const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`

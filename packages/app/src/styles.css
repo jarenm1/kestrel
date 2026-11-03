@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @plugin "@tailwindcss/typography";
+/* The shared composer editor keeps the desktop Tailwind treatment; scan its source so those utilities are emitted. */
+@source "../../../composer/src";
 
 /* Dark-only, monochrome theme: white is the accent; blue (`info`) is reserved for states white can't carry.
    Token names follow shadcn/ui so `bunx shadcn add <component>` works unchanged. */

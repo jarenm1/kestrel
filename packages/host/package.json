@@ -1,0 +1,17 @@
+{
+  "name": "@cloudagents/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kestrel-host": "src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@cloudagents/protocol": "workspace:*",
+    "effect": "^3.22.4"
+  }
+}

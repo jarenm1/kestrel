@@ -1,9 +1,20 @@
-import { BOX_ID_HEADER, BOX_USER_HEADER, ControlPaths, PairingPollBody, PairingStartBody, RELAY_CONNECT_PATH, ToolFailureReport } from "@cloudagents/protocol"
+import {
+  BOX_ID_HEADER,
+  BOX_USER_HEADER,
+  ControlPaths,
+  METER_HOST_ID_HEADER,
+  MAX_METER_BODY_BYTES,
+  MeterBatch,
+  PairingPollBody,
+  PairingStartBody,
+  RELAY_CONNECT_PATH,
+  ToolFailureReport,
+} from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
-import { decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { cappedRequest, decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
@@ -54,6 +65,24 @@ const boxCredentials = async (request: Request, env: Env): Promise<Response> => 
   const caller = managedBoxHeaders(request)
   if (caller === null) return errorResponse(401, "Unauthorized", "invalid box credentials")
   const outcome = await hub(env).managedBoxCredentials(caller.boxId, caller.secret, caller.login)
+  return outcome.ok ? json(outcome.value) : errorResponse(outcome.status, outcome.tag, outcome.message)
+}
+
+/**
+ * A Nest host posts a batch of usage records, proving itself with its secret and id. The Hub stores a batch atomically
+ * and counts records it already holds as duplicates, so a retried batch never stores anything twice.
+ */
+const meterRecords = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const hostId = request.headers.get(METER_HOST_ID_HEADER) ?? ""
+  if (secret === "" || hostId === "") return errorResponse(401, "Unauthorized", "invalid meter host credentials")
+  const capped = await cappedRequest(request, MAX_METER_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const batch = await decodeBody(capped, MeterBatch, { onExcessProperty: "error" })
+  if (batch instanceof Response) return batch
+  const outcome = await hub(env).ingestMeterRecords(hostId, secret, batch)
   return outcome.ok ? json(outcome.value) : errorResponse(outcome.status, outcome.tag, outcome.message)
 }
 
@@ -155,6 +184,7 @@ export default {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
+      if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
       if (url.pathname === ControlPaths.boxToolFailures) return await boxToolFailures(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)

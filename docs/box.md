@@ -4,11 +4,25 @@ How the agent box (`packages/server`) runs agents. For the big picture see [arch
 
 ## Models and harnesses
 
-Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override either command (the OpenAI one must start app-server on stdio). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. Streamed items are published at most every 100 ms each, so a token stream is not one relay message per token. The thinking picker offers only the levels the chosen model supports. A thread resumes its agent session while the provider stays the same; after a switch to the other provider the new run starts a fresh session whose prompt carries the conversation so far (the newest ~60k characters). A message sent with no model (nothing connected) runs on Claude Code's default.
+Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override either command (the OpenAI one must start app-server on stdio). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. Streamed items are published at most every 100 ms each, so a token stream is not one relay message per token. The thinking picker offers only the levels the chosen model supports. A message sent with no model (nothing connected) runs on Claude Code's default.
+
+A thread retains each provider's native session across switches. Returning to a provider resumes its newest usable
+session and carries only messages from subsequent runs, rather than replaying that session's own conversation.
+If that provider has no usable session, the run starts fresh with conversation history. A failed run that never
+recorded a session invalidates older sessions of the same provider (except restart interruptions); recovery carries
+history instead of silently losing it. Automatic deliveries keep the latest run's provider even if it never named
+a session. Both full and delta handoffs cap rendered history at 60,000 characters, including peer labels and
+separators. An oversized newest turn is explicitly truncated; the new user message is not.
 
 A Claude result with `queued_turn_count > 0` is not the run's final outcome: the queued turns must finish too. Those turns have no process-exit deadline after stdin closes; Codex's three-second exit grace applies only after its turn is done. If Claude exits before a queued turn produces its result, the run fails rather than reporting the earlier turn's success.
 
 Codex records a new thread as resumable only after its first turn starts; an existing thread is recorded at resume. Stopping `/review` interrupts the active reviewer turn, while the outer review turn still determines when the run finishes. Failed turns always produce an error item, including when app-server omits the error payload; a preceding error notification is deduplicated only for its own turn.
+
+Prompts travel only on the provider's stdin protocol, never in `CLOUDAGENTS_PROMPT` or descendant process environments.
+Custom harness commands must consume stdin too. Only structured assistant text is saved as the run's conversation
+reply; Claude's completed main-agent message is used when its result omits text. Raw stdout/stderr remain in the run
+log and live output, not in history sent to another provider or parent agent. This prevents prompt echoes and
+diagnostics from recursively becoming conversation context.
 
 Agents need a model key: add one in Settings › Connections. The sandbox only ever sees a per-run token, and the box never reads model keys from its own environment. Users can instead run agents on their own Claude or ChatGPT subscription: sign in under Settings › Connections (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
 
@@ -63,7 +77,11 @@ Under the `strict` and `basic` levels, everything an agent controls runs in bubb
 
 ### Network and IPC
 
-Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the box port, which is forwarded in for the broker and MCP. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
+Each task has its own network namespace, made by `pasta` (passt) when the task first launches something and shared by all of that task's sandboxes, so a browser on the task desktop reaches the agent's dev server on `localhost`. Outbound internet works through pasta's user-space NAT. The host's `127.0.0.1` is out of reach except the sandbox listener, which is forwarded in for the broker, MCP and GitHub. Other tasks' servers and X servers that listen on abstract sockets (such as a desktop session's `:0`) are out of reach too, and the task's own servers are not published on the host. The LAN and the host's non-loopback addresses are still reachable. pasta and its holder process live in the task slice and go away with the task.
+
+The sandbox listener binds only `127.0.0.1` and serves only MCP, the broker and GitHub (`/gh/`). Its port defaults to the public box port plus 10,000, wrapping within 1–65535; set `CLOUDAGENTS_SANDBOX_PORT` to another free port if needed. It must differ from `CLOUDAGENTS_PORT`. Keep this listener local and point tunnels and proxies at the public box port, never the sandbox port. Both interfaces still require a live run token. Basic and off sandbox modes share the host network, so other local processes can reach this listener too.
+
+`bun packages/server/scripts/test-listeners.ts <off|basic|strict>` checks the listener split with a real box process, a local control stub and a fake agent. It exercises authenticated API and event connections, MCP, the broker, workspace execution and token revocation without model keys. Add `--managed` to check the managed credential path. `basic` needs bubblewrap on `PATH`. `strict` needs bubblewrap, pasta, `/dev/net/tun` and the Nix toolchain (`CLOUDAGENTS_SANDBOX_PATH`, which `nix develop` sets). Under `strict` the agent's own loopback must also be unable to reach the box's public port or the control stub, so the script checks that as well.
 
 The holder of that namespace also owns the task's own SysV IPC namespace (`unshare --ipc`). The task's sandboxes, its X server and the box's capture and screenshot processes for it all join it, so GTK and Qt apps on the desktop can use X shared memory (MIT-SHM), and no task can attach another task's shared memory. Starting a desktop therefore starts the task's pasta and holder if nothing else has, and the desktop fails to start if pasta does. Processes keep the namespaces they started in: if the holder dies and is replaced while a desktop runs, apps launched afterwards no longer share memory with that desktop's X server until the desktop is restarted.
 
@@ -76,6 +94,20 @@ Each desktop's X server is a rootful Xwayland in a headless weston. On a host wi
 GPU access is not a tenant isolation boundary: desktop apps reach the host GPU driver and share its memory and scheduling. Keep the existing task CPU/RAM limits, but do not treat them as a VRAM quota.
 
 The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpaper.png` (the logo on black) on the root window, openbox runs with the theme, fonts and bindings from `desktop/theme.ts`, and the flake's `xterm` wrapper uses the app's colors. Openbox gets an explicit set of bindings and an empty menu file, so nothing on the desktop runs a program outside the sandbox: its stock root menu launches programs as the box user. Right-clicking the desktop lists the open windows instead, which is also the way back to an iconified window.
+
+#### Desktop dependencies on Linux
+
+Ubuntu 24.04 packages weston 13.0.0, and the desktop needs weston 14 or newer (see the [README](../README.md)). With Nix and flakes enabled (`experimental-features = nix-command flakes` in `/etc/nix/nix.conf` or `~/.config/nix/nix.conf`), from the checkout root build the desktop tools pinned by this checkout's `flake.lock`, including weston 16, Xwayland, ffmpeg, openbox, hsetroot, xterm, xdotool and the `xdamage-capture` helper:
+
+```sh
+mkdir -p "$HOME/.local/share/kestrel"
+nix build .#desktop-deps --out-link "$HOME/.local/share/kestrel/desktop-deps"
+export PATH="$(readlink -f "$HOME/.local/share/kestrel/desktop-deps")/bin:$PATH"
+```
+
+Run the box from that environment, or run `kestrel-box install` from it so the user service records the store path on its `PATH`. `install` also compiles its own `xdamage-capture` into `~/.local/share/kestrel/bin`, which that `PATH` searches first, so the bundle's helper is used only if that build fails. The build needs a C compiler (`$CC`, default `cc`) and the X11, Xext, Xdamage and Xfixes headers; without them `install` warns and continues. Keep the output link: it prevents garbage collection of the tools used by the service. Rebuild and reinstall the service to pick up a newer checkout's dependencies. The box and agent sandbox still need their own prerequisites; this bundle supplies desktop commands only. Nix is optional if equivalent host packages and the compiled capture helper are already installed.
+
+From a checkout with Bun dependencies installed, `bun packages/server/scripts/desktop-smoke.ts` exercises a real desktop's stream, screenshot and pointer input using the tools on `PATH`. A successful smoke test proves only that environment; it does not establish WSL, Lima or GPU behavior. WSLg's read-only `/tmp/.X11-unix` remains a separate setup issue.
 
 #### Desktop stream bundling (`CLOUDAGENTS_DESKTOP_BUNDLE_MS`)
 
@@ -183,7 +215,7 @@ Nothing moves a box back to `pending`.
 ### Endpoint requirements
 
 - HTTPS, and WSS for the event streams, on a DNS-only hostname (not proxied by Cloudflare).
-- `/mcp` and `/broker` are never public. They are local sandbox interfaces, so the proxy answers them with 404.
+- `/mcp`, `/broker` and `/gh/` are served only on the separate loopback sandbox listener, not on the public box port. Existing proxies may continue to block these paths as defense in depth.
 - The box's port (8787 by default) is reachable only from the proxy, never from the internet.
 
 ### Deploy modules
@@ -259,3 +291,21 @@ Per user, the control plane (the Worker and its Hub Durable Object) handles only
 Until every client and box is cut over, Kestrel's box is also reached through the relay. A box dials `/box/connect` with `CLOUDAGENTS_BOX_TOKEN`, and the control plane forwards each app request over that socket, one Durable Object request per request. Clients use the relay when `BoxList.managedBox` is `null`. Relay deletion is a later change.
 
 Don't run a box against production with the production token from your machine: the control plane keeps one relayed box and a new connection replaces the live one.
+
+### Capability discovery
+
+`GET /api/capabilities` returns version 1 with `platform` (`linux`, `wsl`, `lima`, or `other`), the configured
+`sandbox` (`strict`, `basic`, or `off`), and `desktop`. `lima` is a Lima guest, detected by its cloud-init seed at
+`/mnt/lima-cidata`; Lima guests no longer report `linux`. `prerequisites-present` means Linux and the tools a desktop
+start needs (weston 14 or newer, Xwayland, xdotool, ffmpeg, and the xdamage-capture helper) were found at box startup.
+openbox, hsetroot and xterm are optional and do not change the answer. It does not guarantee a desktop will start;
+permissions, graphics and runtime resources still matter. `unavailable` means that check did not pass. The
+`platform` and `sandbox` value sets are closed within version 1: a value outside them is a new contract version.
+Additive fields within version 1 may be ignored. The response is a startup snapshot; restart the box after installing
+desktop tools to refresh it.
+
+Discovery needs a signed-in user, like the other box routes: send the same box token. Without one it answers 401
+`{"_tag":"Unauthorized"}`; a 401 says nothing about the box and means the token is missing or was rejected. A 404 means
+an older box without this endpoint. Clients treat a 404 as unknown capabilities and keep their existing behavior. They
+must also treat an unsupported contract version as unknown, rather than interpreting it as version 1. This endpoint
+does not change health or existing API behavior.

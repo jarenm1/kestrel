@@ -2,6 +2,15 @@ import { QueryClient, queryOptions } from "@tanstack/react-query";
 import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 
+/**
+ * A request about one thread. It names the box client that sent it, so the response is cached under that box even if
+ * the active box has changed while the request was in flight.
+ */
+export interface ThreadCall {
+  readonly api: ApiClient;
+  readonly taskId: string;
+}
+
 /** Agent box status poll; it feeds the top bar pill. */
 const BOX_POLL_MS = 10_000;
 /** Task statuses change from agent runs with no list-level event stream, so the thread list is polled. */
@@ -19,28 +28,32 @@ export const queryClient = new QueryClient({
 /** Single source of truth for cache keys, so events and mutations update the same entries the screens read. */
 export const keys = {
   me: ["me"] as const,
-  box: ["box"] as const,
   connections: ["connections"] as const,
-  usage: ["usage"] as const,
   githubRepos: ["github-repos"] as const,
   githubBranches: (repo: string) => ["github-repos", repo, "branches"] as const,
   automations: ["automations"] as const,
   automationRuns: (automationId: string) => ["automations", automationId, "runs"] as const,
+};
+
+/** Box-served data is isolated by box identity even when task or run IDs coincide. */
+export const boxKeys = (scope: string) => ({
+  box: ["box-data", scope, "status"] as const,
+  usage: ["box-data", scope, "usage"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
-  tasks: ["task-list"] as const,
-  task: (taskId: string) => ["tasks", taskId] as const,
-  messages: (taskId: string) => ["tasks", taskId, "messages"] as const,
-  runs: (taskId: string) => ["tasks", taskId, "runs"] as const,
-  runItems: (runId: string) => ["runs", runId, "items"] as const,
+  tasks: ["box-data", scope, "task-list"] as const,
+  task: (taskId: string) => ["box-data", scope, "tasks", taskId] as const,
+  messages: (taskId: string) => ["box-data", scope, "tasks", taskId, "messages"] as const,
+  runs: (taskId: string) => ["box-data", scope, "tasks", taskId, "runs"] as const,
+  runItems: (runId: string) => ["box-data", scope, "runs", runId, "items"] as const,
   commands: (
     taskId: string | undefined,
     model: AgentModel | undefined,
     activeRunId: string | undefined,
     activeRunProvider: ModelProvider | undefined,
-  ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
-  diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
-  desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
-};
+  ) => ["box-data", scope, "tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
+  diff: (taskId: string) => ["box-data", scope, "tasks", taskId, "diff"] as const,
+  desktop: (taskId: string) => ["box-data", scope, "tasks", taskId, "desktop"] as const,
+});
 
 type Keyed = { readonly id: string };
 
@@ -65,23 +78,17 @@ function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonl
  * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
  * stays unloaded; its query fetches it, so no partial list is ever cached.
  */
-export function storeTask(client: QueryClient, task: Task): void {
-  client.setQueryData(keys.task(task.id), task);
-  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
-}
-
-/** Roots of the box-served cache entries. Switching the active box drops them: they describe the box that was active. */
-const BOX_SCOPED_ROOTS: readonly unknown[] = [keys.box[0], keys.usage[0], keys.tasks[0], keys.task("")[0], keys.runItems("")[0]];
-
-/** Drops every cached box-served entry; control-plane entries (me, connections, automations, repos) stay. */
-export function clearBoxScopedQueries(client: QueryClient): void {
-  client.removeQueries({ predicate: (query) => BOX_SCOPED_ROOTS.includes(query.queryKey[0]) });
+export function storeTask(client: QueryClient, task: Task, scope: string): void {
+  const scoped = boxKeys(scope);
+  client.setQueryData(scoped.task(task.id), task);
+  client.setQueryData(scoped.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task));
 }
 
 export function createQueries(api: ApiClient) {
+  const scoped = boxKeys(api.boxScope);
   return {
     me: () => queryOptions({ queryKey: keys.me, queryFn: () => api.me() }),
-    box: () => queryOptions({ queryKey: keys.box, queryFn: () => api.box(), refetchInterval: BOX_POLL_MS }),
+    box: () => queryOptions({ queryKey: scoped.box, queryFn: () => api.box(), refetchInterval: BOX_POLL_MS }),
     connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => api.connections() }),
     githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: () => api.githubRepos() }),
     githubBranches: (repo: string) =>
@@ -92,35 +99,35 @@ export function createQueries(api: ApiClient) {
         queryKey: keys.automationRuns(automationId),
         queryFn: () => api.listAutomationRuns(automationId),
       }),
-    tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
-    task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
+    tasks: () => queryOptions({ queryKey: scoped.tasks, queryFn: () => api.listTasks(), refetchInterval: TASK_POLL_MS }),
+    task: (taskId: string) => queryOptions({ queryKey: scoped.task(taskId), queryFn: () => api.getTask(taskId) }),
     messages: (taskId: string) =>
       queryOptions({
-        queryKey: keys.messages(taskId),
+        queryKey: scoped.messages(taskId),
         queryFn: async (): Promise<Message[]> =>
-          mergeSnapshot(await api.listMessages(taskId), queryClient.getQueryData(keys.messages(taskId))),
+          mergeSnapshot(await api.listMessages(taskId), queryClient.getQueryData(scoped.messages(taskId))),
       }),
     runs: (taskId: string) =>
       queryOptions({
-        queryKey: keys.runs(taskId),
+        queryKey: scoped.runs(taskId),
         queryFn: async (): Promise<Run[]> =>
-          mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(keys.runs(taskId))),
+          mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(scoped.runs(taskId))),
       }),
     runItems: (runId: string) =>
       queryOptions({
-        queryKey: keys.runItems(runId),
+        queryKey: scoped.runItems(runId),
         queryFn: async (): Promise<AgentItem[]> =>
-          mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(keys.runItems(runId))),
+          mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(scoped.runItems(runId))),
       }),
     diff: (taskId: string, running = false) =>
       queryOptions({
-        queryKey: keys.diff(taskId),
+        queryKey: scoped.diff(taskId),
         queryFn: () => api.getDiff(taskId),
         refetchInterval: running ? DIFF_POLL_MS : false,
       }),
     desktop: (taskId: string) =>
-      queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
-    usage: () => queryOptions({ queryKey: keys.usage, queryFn: () => api.usage() }),
+      queryOptions({ queryKey: scoped.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
+    usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
     commands: (
       taskId: string | undefined,
       model: AgentModel | undefined,
@@ -128,7 +135,7 @@ export function createQueries(api: ApiClient) {
       activeRunProvider: ModelProvider | undefined,
     ) =>
       queryOptions({
-        queryKey: keys.commands(taskId, model, activeRunId, activeRunProvider),
+        queryKey: scoped.commands(taskId, model, activeRunId, activeRunProvider),
         queryFn: () => {
           if (taskId === undefined || model === undefined) {
             throw new Error("Slash commands need a thread and a model");

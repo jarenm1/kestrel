@@ -54,6 +54,7 @@ import {
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
+import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -87,6 +88,41 @@ function errorMessage(text: string, fallback: string): string {
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
 
+/** Decodes one exchange: a non-2xx status fails with the server's message; a 2xx body is decoded with `schema`. */
+const decodeExchange = <A, I>(
+  schema: Schema.Schema<A, I>,
+  status: number,
+  statusText: string,
+  text: string,
+): Effect.Effect<A, ApiError> =>
+  Effect.gen(function* () {
+    if (status < 200 || status > 299) return yield* Effect.fail(new ApiError(status, errorMessage(text, statusText)))
+    // 204 and other empty bodies carry no JSON; they decode as `undefined`.
+    const json = yield* Effect.try({
+      try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
+      catch: () => new ApiError(status, "Server returned invalid JSON"),
+    })
+    return yield* Schema.decodeUnknown(schema)(json).pipe(
+      Effect.mapError((e) => new ApiError(status, `Unexpected response shape: ${e.message}`)),
+    )
+  })
+
+/** A box call over an open data channel: the box's reply decoded exactly as an HTTP response would be. */
+const viaChannel = <A, I>(
+  channel: BoxChannel,
+  schema: Schema.Schema<A, I>,
+  method: Method,
+  path: string,
+  body: unknown,
+): Effect.Effect<A, ApiError | ChannelUnsent> =>
+  Effect.flatMap(
+    Effect.tryPromise({
+      try: () => channel.request(method, path, body),
+      catch: (e) => (e instanceof ChannelUnsent ? e : new ApiError(0, e instanceof Error ? e.message : String(e))),
+    }),
+    (reply) => decodeExchange(schema, reply.status, "", reply.body),
+  )
+
 /**
  * One HTTP exchange decoded with `schema`. `session` marks control-plane calls: they carry the app session cookie and
  * report a 401 to the unauthorized listeners. Box calls carry `headers` (the box token) and no cookie.
@@ -118,19 +154,10 @@ const send = <A, I>(
       catch: (e) => new ApiError(res.status, String(e)),
     })
     if (session && res.status === 401) {
+      closeChannels()
       unauthorizedListeners.forEach((listener) => listener())
     }
-    if (!res.ok) {
-      return yield* Effect.fail(new ApiError(res.status, errorMessage(text, res.statusText)))
-    }
-    // 204 and other empty bodies carry no JSON; they decode as `undefined`.
-    const json = yield* Effect.try({
-      try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
-      catch: () => new ApiError(res.status, "Server returned invalid JSON"),
-    })
-    return yield* Schema.decodeUnknown(schema)(json).pipe(
-      Effect.mapError((e) => new ApiError(res.status, `Unexpected response shape: ${e.message}`)),
-    )
+    return yield* decodeExchange(schema, res.status, res.statusText, text)
   })
 
 /** A control-plane call: served by the Worker with the app session. */
@@ -250,14 +277,25 @@ const boxCall = <A, I>(
       try: () => boxToken(target.boxId),
       catch: (e) => (e instanceof ApiError ? e : new ApiError(0, String(e))),
     }),
-    (token) =>
-      send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` }).pipe(
+    (token) => {
+      // A body that is a Blob (a file upload) always goes over HTTP; everything else prefers the open channel.
+      const channel = body instanceof Blob ? null : channelFor(target.boxId, target.url, token)
+      const overHttp = () => send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` })
+      const call =
+        channel === null
+          ? overHttp()
+          : viaChannel(channel, schema, method, path, body).pipe(
+              // The channel never delivered the request to the box, so this call goes over HTTP instead.
+              Effect.catchAll((e) => (e instanceof ChannelUnsent ? overHttp() : Effect.fail(e))),
+            )
+      return call.pipe(
         Effect.catchAll((e) => {
           if (e.status !== 401 || retried) return Effect.fail(e)
           forgetBox(target.boxId)
           return boxCall(target, schema, method, path, body, true)
         }),
-      ),
+      )
+    },
   )
 }
 

@@ -16,7 +16,13 @@ interface ExecOutput {
 
 export interface WorkspaceToolDeps {
   readonly workspace: {
-    readonly checkout: (taskId: string, request: CheckoutRequest) => Effect.Effect<Checkout, unknown>
+    readonly checkout: (
+      taskId: string,
+      request: CheckoutRequest,
+    ) => Effect.Effect<
+      { readonly checkout: Checkout; readonly path: string; readonly instructionFiles: ReadonlyArray<string> },
+      unknown
+    >
     readonly exec: (
       taskId: string,
       command: string,
@@ -38,7 +44,7 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
         "the repository's default branch). With `pullRequest`, the checkout starts at that pull request's head and its " +
         "base is the pull request's base branch. The checkout is a directory under the workspace root; the result names " +
         "its path and checkout id. Asking for a repository the thread already has returns that checkout. `repo` is " +
-        "`owner/name` on github.com, otherwise an https clone URL.",
+        "`owner/name` on github.com, otherwise an https clone URL. Later runs of the thread start in its first checkout.",
       inputSchema: {
         repo: z.string().describe("`owner/name` on github.com, or an https clone URL"),
         baseBranch: z.string().optional().describe("Branch to fork from; default: the repository's default branch"),
@@ -57,9 +63,13 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
             const request = yield* Schema.decodeUnknown(CheckoutRequest)({ repo, baseBranch, pullRequest }).pipe(
               Effect.mapError((e) => new Error(`invalid repo_checkout arguments: ${e.message}`)),
             )
-            const checkout = yield* deps.workspace.checkout(ctx.taskId, request)
+            const { checkout, path, instructionFiles } = yield* deps.workspace.checkout(ctx.taskId, request)
+            const checkedOut = `checked out ${checkout.repo} at ${path} (checkout id ${checkout.id}, branch ${checkout.branch}, base ${checkout.baseBranch})`
+            // This run started before the checkout existed, so its harness never loaded the repository's own instructions.
             return text(
-              `checked out ${checkout.repo} at ${checkout.dir} (checkout id ${checkout.id}, branch ${checkout.branch}, base ${checkout.baseBranch})`,
+              instructionFiles.length === 0
+                ? checkedOut
+                : `${checkedOut}\nRead ${instructionFiles.join(" and ")} before working in it.`,
             )
           }),
         ),
@@ -70,7 +80,7 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
     "workspace_exec",
     {
       description:
-        "Run a shell command with sh -c in the thread's workspace root (the agent's working directory; repo_checkout puts repositories under it). Use this only " +
+        "Run a shell command with sh -c in the thread's workspace root (repo_checkout puts repositories under it). Use this only " +
         "when the command needs the task's desktop DISPLAY, or when your harness has no shell of its own; if you " +
         "have a shell, use that instead. Returns the exit code, stdout and stderr; a non-zero exit code is reported " +
         "in the output, not as a tool error. Each stream keeps its first and last 10000 bytes; the middle is " +

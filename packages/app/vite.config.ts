@@ -12,6 +12,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+    // The linked @cloudagents/composer package must share the app's React instance; otherwise hooks see two runtimes.
+    dedupe: ["react", "react-dom"],
   },
   server: {
     port: APP_PORT,

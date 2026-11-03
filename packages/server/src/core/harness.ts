@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createWriteStream, type WriteStream } from "node:fs"
+import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
@@ -98,8 +98,6 @@ interface ActiveRun {
   readonly child: ChildProcess
   readonly log: WriteStream
   readonly taskId: string
-  readonly stdoutLines: string[]
-  readonly stderrLines: string[]
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
@@ -155,6 +153,20 @@ interface ProcessSpec {
   readonly args: ReadonlyArray<string>
   readonly cwd: string
   readonly env: NodeJS.ProcessEnv
+}
+
+/**
+ * Where a thread's agent starts: its first checkout, so the harness finds that repository's root and loads its
+ * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout. The checkout is agent-writable: one
+ * the agent deleted or replaced with anything but a directory (a symlink to elsewhere on the host, say) gives the
+ * workspace root too. The whole workspace stays bound either way; only the starting directory changes.
+ */
+export const agentCwd = (workspacePath: string, task: Pick<Task, "checkouts">): string => {
+  const first = task.checkouts[0]
+  if (first === undefined) return workspacePath
+  const dir = join(workspacePath, first.dir)
+  // lstat, not stat: a symlink is not followed, so it is not a directory here.
+  return lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() === true ? dir : workspacePath
 }
 
 const KILL_GRACE_MS = 3000
@@ -324,7 +336,6 @@ export const AgentHarnessLive = Layer.effect(
         if (!entry) return
         active.delete(runId)
         entry.log.end()
-        if (spawnError) entry.stderrLines.push(spawnError)
         // A run is over when its turn is, whatever the CLI's exit code; a refused request or an early exit shows as
         // the run's error, unless the run was stopped on purpose.
         entry.driver?.close()
@@ -355,13 +366,13 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
-          const failure = turn?.status === "failed" ? turn.error : null
-          const stdout = entry.stdoutLines.join("\n").trim()
-          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
+          const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
+          // Diagnostics stay in output.log and agent.output, never in portable conversation history:
+          // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
           const text =
             entry.transcript.finalText() ??
-            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
-              (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
+            failure ??
+            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -444,7 +455,6 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
-        entry.stderrLines.push(line)
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
       }
@@ -476,7 +486,6 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
-      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
@@ -506,8 +515,6 @@ export const AgentHarnessLive = Layer.effect(
               child,
               log,
               taskId: task.id,
-              stdoutLines: [],
-              stderrLines: [],
               items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
@@ -673,16 +680,18 @@ export const AgentHarnessLive = Layer.effect(
             const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
+            const workspacePath = join(config.threadsDir, task.id)
+            const cwd = agentCwd(workspacePath, task)
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
               kind: "run",
-              workspacePath: join(config.threadsDir, task.id),
+              workspacePath,
+              cwd,
               mirrorDir: join(config.mirrorsDir, task.owner),
               homeDir,
               display,
               env: {
-                CLOUDAGENTS_PROMPT: prompt,
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
@@ -730,6 +739,8 @@ export const AgentHarnessLive = Layer.effect(
                         input: {
                           text: run.prompt,
                           prompt,
+                          cwd,
+                          workspacePath,
                           resumeThread: resumeSession,
                           model: choice.model,
                           effort: choice.effort,

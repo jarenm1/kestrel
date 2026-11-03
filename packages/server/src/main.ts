@@ -1,3 +1,4 @@
+import { boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
@@ -21,7 +22,8 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { BOX_DEV_HEADER, runRelay } from "./relay/client"
+import { runRelay } from "./relay/client"
+import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
@@ -122,7 +124,7 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
-  const webHandler = yield* makeWebHandler(core, cliAuth)
+  const webHandler = yield* makeWebHandler(core, cliAuth, boxCapabilities(config.sandbox))
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
@@ -180,22 +182,27 @@ const program = Effect.gen(function* () {
   const serve = direct === null ? webHandler : direct.handle
 
   const server = createServer((req, res) => {
-    // The broker only answers sandboxed runs holding a live token; it is routed first on purpose.
+    toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+      .catch((error: unknown) => failResponse(res, error))
+  })
+  const sandboxServer = createServer((req, res) => {
     const handled = req.url?.startsWith(BROKER_PREFIX)
       ? handleBroker(broker, req, res)
       : req.url?.startsWith(MCP_PREFIX)
         ? mcpHandler(req, res)
         : req.url?.startsWith(GH_PREFIX)
           ? ghHandler(req, res)
-          : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+          : Promise.resolve().then(() => { res.statusCode = 404; res.end() })
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
   // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
+  yield* listen(sandboxServer, "127.0.0.1", config.sandboxPort)
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
+  yield* Effect.logInfo(`sandbox listener on 127.0.0.1:${config.sandboxPort}`)
 
   // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
   const activity = yield* openActivitySocket(
@@ -217,7 +224,9 @@ const program = Effect.gen(function* () {
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
+  if (direct !== null) direct.close()
   yield* closeServer(server)
+  yield* closeServer(sandboxServer)
 }).pipe(Effect.provide(AppLive))
 
 Effect.runPromise(program).then(

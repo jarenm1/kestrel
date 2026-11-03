@@ -1,4 +1,4 @@
-import type { Route } from "@/nav/navigation";
+import type { LaunchRoute, Route } from "@/nav/navigation";
 
 /**
  * The web build's navigation glue. The stack stays in memory; the browser sees one extra "back" history entry while a
@@ -15,9 +15,9 @@ let armed = false;
 let listening = false;
 /** The path of the screen on top; the extra entry is pushed with it, since the entry under it keeps an older URL. */
 let shownPath = window.location.pathname;
-let launch: Route | null = launchRoute();
+let launch: LaunchRoute | null = launchRoute();
 
-function launchRoute(): Route | null {
+function launchRoute(): LaunchRoute | null {
   const path = window.location.pathname.replace(/(.)\/$/, "$1");
   const thread = THREAD_PATH.exec(path);
   if (thread?.[1]) return { name: "thread", taskId: decodeURIComponent(thread[1]) };
@@ -69,7 +69,7 @@ export function onBackPress(next: () => boolean): () => void {
   };
 }
 
-export function takeLaunchRoute(): Route | null {
+export function takeLaunchRoute(): LaunchRoute | null {
   const route = launch;
   launch = null;
   return route;

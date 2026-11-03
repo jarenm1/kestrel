@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Layer } from "effect"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Run, Task } from "@cloudagents/protocol"
+import type { Checkout, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker } from "../broker"
 import { CliAuth } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
@@ -21,6 +21,7 @@ const harnessLayer = (
   const config: ServerConfig = {
     port: 8897,
     host: "127.0.0.1",
+    sandboxPort: 8897,
     mcpBaseUrl: "http://127.0.0.1:8897",
     dataDir: root,
     stateFile: join(root, "state.json"),
@@ -259,6 +260,139 @@ createInterface({ input: process.stdin })
         unsubscribe()
         proceed.resolve()
         yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a run starts in the thread's first checkout, resumed or fresh, and in the workspace root once that checkout is gone or a link", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-run-cwd-"))
+  const cli = join(root, "cli.ts")
+  // Answers the prompt with its working directory and the session it was asked to resume, then ends when the
+  // harness closes its input.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    if (JSON.parse(line).type === "user") {
+      const result = process.cwd() + " resume=" + (process.env.CLOUDAGENTS_RESUME_SESSION ?? "none")
+      console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result }))
+    }
+  })
+  .on("close", () => process.exit(0))
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  const checkout = (dir: string): Checkout => ({ id: dir, repo: `owner/${dir}`, dir, branch: "b", baseBranch: "main", createdAt: "" })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const workspace = join(config.threadsDir, "task")
+      yield* Effect.promise(() => mkdir(join(workspace, "app"), { recursive: true }))
+      yield* Effect.promise(() => mkdir(join(workspace, "lib"), { recursive: true }))
+
+      /** Where a run of a thread with `checkouts` started, and the session it resumed. */
+      const runIn = (runId: string, checkouts: ReadonlyArray<Checkout>, resumeSession: string | null = null) =>
+        Effect.gen(function* () {
+          const base = runningTask("task")
+          const task = { ...base.task, checkouts: [...checkouts] }
+          const run = { ...base.run, id: runId }
+          yield* store.update((state) => {
+            state.tasks = [task]
+            state.runs.push(run)
+            return Either.right(null)
+          })
+          const finished = Promise.withResolvers<void>()
+          const unsubscribe = hub.subscribe(task.id, (event) => {
+            if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") finished.resolve()
+          })
+          try {
+            yield* harness.spawn(task, run, run.prompt, null, task.owner, resumeSession, {})
+            yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+          } finally {
+            unsubscribe()
+          }
+          return (yield* store.read).messages.at(-1)?.text
+        })
+
+      try {
+        expect(yield* runIn("no-checkout", [])).toBe(`${workspace} resume=none`)
+        // A thread whose first run checked a repository out: its session was recorded in the workspace root, and the
+        // next run resumes it from the checkout (Claude Code 2.1.308 finds a session recorded under a parent directory).
+        expect(yield* runIn("resumed-after-checkout", [checkout("app")], "session-from-root")).toBe(
+          `${join(workspace, "app")} resume=session-from-root`,
+        )
+        // The first checkout, not the latest: a second repository does not move the thread.
+        expect(yield* runIn("two-checkouts", [checkout("app"), checkout("lib")])).toBe(`${join(workspace, "app")} resume=none`)
+        // An agent can replace its checkout with a link to a host directory; the run must not start there.
+        const outside = join(root, "outside")
+        yield* Effect.promise(() => mkdir(outside, { recursive: true }))
+        yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
+        yield* Effect.promise(() => symlink(outside, join(workspace, "app"), "junction"))
+        expect(yield* runIn("symlinked-checkout", [checkout("app"), checkout("lib")])).toBe(`${workspace} resume=none`)
+        // An agent can delete its checkout; the thread's next run must still start.
+        yield* Effect.promise(() => rm(join(workspace, "app"), { recursive: true, force: true }))
+        expect(yield* runIn("deleted-checkout", [checkout("app"), checkout("lib")])).toBe(`${workspace} resume=none`)
+      } finally {
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
+test("prompts reach stdin but not descendant environments, and diagnostics never become conversation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-prompt-boundary-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+import { spawnSync } from "node:child_process"
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  if (message.type !== "user") return
+  const child = spawnSync(process.execPath, ["-e", 'console.log(JSON.stringify(process.env.CLOUDAGENTS_PROMPT ?? null))'], { encoding: "utf8" })
+  const text = JSON.stringify({ received: message.message.content, inheritedPrompt: JSON.parse(child.stdout) })
+  console.log("diagnostic stdout: " + message.message.content)
+  console.error("diagnostic stderr: " + message.message.content)
+  if (message.message.content !== "no answer") {
+    console.log(JSON.stringify({ type: "assistant", parent_tool_use_id: null, message: { id: "answer", content: [{ type: "text", text }] } }))
+  }
+  console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false }))
+})
+`)
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      for (const [id, prompt] of [["answer", "private user message"], ["empty", "no answer"]] as const) {
+        const { task, run: base } = runningTask(id)
+        const run = { ...base, prompt }
+        yield* store.update((state) => {
+          state.tasks.push(task)
+          state.runs.push(run)
+          return Either.right(undefined)
+        })
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+        const finished = Promise.withResolvers<void>()
+        const unsubscribe = hub.subscribe(task.id, (event) => {
+          if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+        })
+        try {
+          yield* harness.spawn(task, run, prompt, null, task.owner, null, {})
+          yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+          const message = (yield* store.read).messages.find((m) => m.runId === run.id)!
+          if (id === "answer") expect(JSON.parse(message.text)).toEqual({ received: prompt, inheritedPrompt: null })
+          else expect(message.text).toBe("Run finished with no output.")
+        } finally {
+          unsubscribe()
+          yield* harness.stopAll()
+        }
       }
     }).pipe(Effect.provide(layer)))
   } finally {

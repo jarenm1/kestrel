@@ -95,14 +95,16 @@ export interface CliAuthShape {
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
   /**
-   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace): Claude Code
-   * slash commands or Codex skills. Runs the CLI in the user's isolated login home with the workspace read-only,
+   * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace), started in `cwd`
+   * (where the thread's agent starts: the workspace or its first checkout): Claude Code slash commands or Codex skills.
+   * Runs the CLI in the user's isolated login home with the workspace read-only,
    * bounded and killed on answer, error or timeout; never tokens, paths or file contents.
    */
   readonly discoverCommands: (
     user: string,
     provider: CliProvider,
     workspacePath: string,
+    cwd: string,
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
   /** The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact. */
   readonly providerUsage: (user: string) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
@@ -312,7 +314,7 @@ export const CliAuthLive = Layer.effect(
       user: string,
       bin: string,
       args: ReadonlyArray<string>,
-      discovery?: { readonly workspacePath: string },
+      discovery?: { readonly workspacePath: string; readonly cwd: string },
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const env = yield* cliEnv(user)
@@ -330,7 +332,7 @@ export const CliAuthLive = Layer.effect(
         const sandbox =
           discovery === undefined
             ? { network: "host" as const }
-            : { network: "none" as const, workspacePath: discovery.workspacePath }
+            : { network: "none" as const, workspacePath: discovery.workspacePath, cwd: discovery.cwd }
         const level = config.sandbox === "strict" ? "strict" : "basic"
         return {
           file: bwrap,
@@ -345,7 +347,8 @@ export const CliAuthLive = Layer.effect(
 
     /**
      * A thread's workspace, and only a thread's workspace: discovery reads project commands/skills from it and must
-     * never be handed an arbitrary host path.
+     * never be handed an arbitrary host path. The workspace is the box's own directory, which the agent cannot
+     * replace; checkouts inside it are agent-writable, so discovery binds the workspace and only starts in them.
      */
     const threadWorkspace = (workspacePath: string): Effect.Effect<string, BadRequest> => {
       const root = resolve(config.threadsDir)
@@ -356,35 +359,47 @@ export const CliAuthLive = Layer.effect(
         : Effect.succeed(target)
     }
 
+    /** `cwd` as an absolute path inside `workspace` (lexically: it is only ever resolved inside the sandbox). */
+    const insideWorkspace = (workspace: string, cwd: string): Effect.Effect<string, BadRequest> => {
+      const target = resolve(cwd)
+      const rel = relative(workspace, target)
+      return rel.startsWith("..") || isAbsolute(rel)
+        ? Effect.fail(new BadRequest({ message: "discovery directory is outside the thread workspace" }))
+        : Effect.succeed(target)
+    }
+
     const commandCache = new Map<string, { readonly at: number; readonly commands: ReadonlyArray<HarnessCommand> }>()
     const discoveryRuns = new Map<string, Promise<ReadonlyArray<HarnessCommand>>>()
     const COMMAND_CACHE_MS = 30_000
     const COMMAND_CACHE_MAX = 64
 
     /**
-     * Runs the provider CLI for `user` in `workspacePath` and returns its real command list. Concurrent requests for
-     * the same user, provider and workspace share one child; a short cache keeps the composer from spawning per key.
+     * Runs the provider CLI for `user` in `workspacePath`, started in `cwd`, and returns its real command list.
+     * Concurrent requests for the same user, provider and directory share one child; a short cache keeps the composer
+     * from spawning per key.
      */
     const discoverCommands = (
       user: string,
       provider: CliProvider,
       workspacePath: string,
+      cwd: string,
     ): Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const workspace = yield* threadWorkspace(workspacePath)
-        const key = `${user}\0${provider}\0${workspace}`
+        const dir = yield* insideWorkspace(workspace, cwd)
+        const key = `${user}\0${provider}\0${dir}`
         const cached = commandCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < COMMAND_CACHE_MS) return cached.commands
         const spec = SPECS[provider]
         const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace })
+        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace, cwd: dir })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
             if (running !== undefined) return running
-            const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: workspace }
+            const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: dir }
             const pending = limitDiscovery(() =>
               provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch),
             )

@@ -1,13 +1,17 @@
 import { createContext, useContext } from "react";
+import type { ActiveBox } from "@/api/client";
 
 /** Every screen the signed-in app can show. The stack lives in MainNavigator. */
 export type Route =
   | { name: "new-thread" }
-  | { name: "thread"; taskId: string }
+  | { name: "thread"; taskId: string; box: ActiveBox | null }
   | { name: "archived" }
   | { name: "automations" }
   | { name: "connections" }
   | { name: "settings" };
+
+/** A screen a link opens. A thread link carries only its id, so the thread opens on the box the app is using. */
+export type LaunchRoute = { name: "thread"; taskId: string } | Exclude<Route, { name: "thread" }>;
 
 export interface Navigation {
   /** The route on screen. */

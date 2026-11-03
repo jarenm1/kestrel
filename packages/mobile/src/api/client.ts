@@ -64,6 +64,12 @@ function errorMessage(text: string, fallback: string): string {
 /** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
+/** Whether two active boxes are the same route; `null` (Kestrel's relayed box) only matches `null`. */
+export function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.id === b.id && a.url === b.url;
+}
+
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
 export interface FileSource {
   uri: string;
@@ -75,6 +81,8 @@ const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
+  /** Stable identity for box-served cache entries; includes URL so a changed route cannot reuse old data. */
+  readonly boxScope: string;
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
@@ -224,6 +232,7 @@ export function createApiClient(
   }
 
   return {
+    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
       const token = await mintBoxToken(activeBox);
