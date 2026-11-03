@@ -168,6 +168,7 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "tailwind-merge": "^3.7.0",
+        "tailwindcss": "^4.3.3",
       },
       "devDependencies": {
         "@types/react": "^19",
