@@ -56,6 +56,15 @@ describe("failureSignature", () => {
 })
 
 describe("agentFailure", () => {
+  test("prefers the request failure over earlier stderr but retains stderr for early exits", () => {
+    expect(agentFailure("codex", "turn/start: Rate limit exceeded", "error: reconnecting", 1, null).signature).toBe(
+      "turn failed: error: <path>: Rate limit exceeded: exit code 1",
+    )
+    expect(agentFailure("codex", "Codex exited before its turn finished.", "error: reconnecting", 1, null).signature).toBe(
+      "exited before turn finished: error: reconnecting: exit code 1",
+    )
+  })
+
   test("retains and scrubs known Codex request errors without error keywords", () => {
     expect(agentFailure("codex", "turn/start: Rate limit exceeded for /home/alice/private", null, 1, null)).toEqual({
       tool: "agent:codex",

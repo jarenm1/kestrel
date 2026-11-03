@@ -105,7 +105,7 @@ export const agentFailure = (agent: "claude" | "codex", error: string | null, di
   const earlyExit = error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
   const prefix = earlyExit ? "exited before turn finished" : "turn failed"
   const termination = [exitCode === null ? null : `exit code ${exitCode}`, signal === null ? null : `signal ${signal}`].filter((part) => part !== null).map((part) => `: ${part}`).join("")
-  const detail = diagnostic ?? (error === null || earlyExit ? null : agentDiagnostic(`error: ${error}`))
+  const detail = (error === null || earlyExit ? null : agentDiagnostic(`error: ${error}`)) ?? diagnostic
   const available = Math.max(0, MAX_SIGNATURE - prefix.length - termination.length - 2)
   const signature = `${prefix}${detail && available > 0 ? `: ${detail.slice(0, available).trimEnd()}` : ""}${termination}`.slice(0, MAX_SIGNATURE)
   return { tool: `agent:${agent}`, signature }
