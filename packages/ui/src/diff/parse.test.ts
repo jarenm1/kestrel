@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type DiffFile, displayPath, parseDiff } from "./diff"
+import { type DiffFile, displayPath, parseDiff } from "./parse"
 
 // Same flags as the box (packages/server/src/core/workspace.ts), so these cases are real git output.
 const DIFF_FLAGS = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/"]

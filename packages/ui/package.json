@@ -11,6 +11,8 @@
     "./transcript/host": "./src/transcript/host.tsx",
     "./markdown": "./src/transcript/Markdown.tsx",
     "./message-attachments": "./src/transcript/MessageAttachments.tsx",
+    "./diff": "./src/diff/DiffView.tsx",
+    "./graphs": "./src/graphs/ThreadGraphs.tsx",
     "./theme.css": "./src/theme.css",
     "./dom.css": "./src/dom.css"
   },

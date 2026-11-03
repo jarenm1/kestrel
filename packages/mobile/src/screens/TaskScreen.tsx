@@ -8,7 +8,7 @@ import type { ActiveBox } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { ChatPanel } from "@/components/ChatPanel";
 import { DesktopViewer } from "@/components/DesktopViewer";
-import { DiffView } from "@/components/DiffView";
+import { DiffPanel } from "@/components/DiffPanel";
 import { PreviewViewer } from "@/components/PreviewViewer";
 import { ThreadLinks } from "@/components/ThreadLinks";
 import { ContentPanel, TopBar } from "@/components/TopBar";
@@ -233,7 +233,7 @@ function PanelBody({
     case "preview":
       return <PreviewViewer taskId={taskId} port={previewPort} />;
     case "diff":
-      return <DiffView taskId={taskId} running={running} />;
+      return <DiffPanel taskId={taskId} running={running} />;
   }
 }
 

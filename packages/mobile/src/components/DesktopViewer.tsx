@@ -7,7 +7,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
-import { ThreadGraphs } from "@/components/ThreadGraphs";
+import ThreadGraphsDom from "@/components/ThreadGraphsDom";
+import { useTaskStats } from "@/hooks/useTaskStats";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Paths, type DesktopStatus } from "@cloudagents/protocol";
 
@@ -23,6 +24,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queries = useMemo(() => createQueries(api), [api]);
   const desktop = useQuery(queries.desktop(taskId));
   const status = desktop.data ?? null;
+  const samples = useTaskStats(taskId);
   const [stream, setStream] = useState<{ taskId: string; url: string } | null>(null);
   const [streamError, setStreamError] = useState<unknown>(null);
 
@@ -283,7 +285,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           </View>
         )}
       </View>
-      <ThreadGraphs taskId={taskId} />
+      <ThreadGraphsDom samples={samples} dom={{ matchContents: true, scrollEnabled: false }} />
     </ScrollView>
   );
 }

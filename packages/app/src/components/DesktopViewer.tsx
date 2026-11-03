@@ -26,7 +26,8 @@ import { keyInput, mouseButton, normalizePoint } from "@/desktop/input"
 import { VideoRenderer, type RenderStats } from "@/desktop/videoRenderer"
 import { errorText } from "@/util"
 import { StatusIcon } from "./StatusIcon"
-import { ThreadGraphs } from "./ThreadGraphs"
+import { ThreadGraphs } from "@cloudagents/ui/graphs"
+import { useTaskStats } from "@/hooks/useTaskStats"
 
 const RECONNECT_MS = 2000
 
@@ -128,6 +129,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const frameRef = useRef<HTMLDivElement>(null)
   const fullscreen = useIsFullscreen(frameRef)
   const desktop = useQuery(queries.desktop(taskId))
+  const samples = useTaskStats(taskId)
   const status = desktop.data ?? null
   const [streamError, setStreamError] = useState<string | null>(null)
   const [stats, setStats] = useState<RenderStats | null>(null)
@@ -340,7 +342,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </Button>
         </div>
-        <ThreadGraphs taskId={taskId} />
+        <ThreadGraphs samples={samples} />
       </div>
     </div>
   )

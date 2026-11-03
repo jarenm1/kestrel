@@ -1,7 +1,6 @@
 import { useId, useState, type PointerEvent } from "react"
 import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
-import { useTaskStats } from "@/hooks/useTaskStats"
-import { cn } from "@/lib/utils"
+import { cn } from "../cn"
 
 /** Graph drawing units; the SVG stretches to the card, and strokes do not scale with it. */
 const W = 1000
@@ -149,10 +148,10 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
 
 /**
  * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
- * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer.
+ * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer. The host
+ * streams `samples` (the stats WebSocket), newest last.
  */
-export function ThreadGraphs({ taskId }: { taskId: string }) {
-  const samples = useTaskStats(taskId)
+export function ThreadGraphs({ samples }: { samples: readonly TaskStatsSample[] }) {
   return (
     <div className="flex flex-col gap-2">
       {GRAPHS.map((g) => (
