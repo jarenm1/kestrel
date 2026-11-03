@@ -1,5 +1,4 @@
-import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useLayoutEffect, useRef, type ReactNode } from "react"
 import {
   outputText,
   Paths,
@@ -34,9 +33,9 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react"
-import { queries } from "@/api/queries"
-import { useAutoOpen } from "@/hooks/useAutoOpen"
-import { cn } from "@/lib/utils"
+import { cn } from "../cn"
+import { useTranscriptHost } from "./host"
+import { useAutoOpen } from "./useAutoOpen"
 
 const SHIMMER_CLASS =
   "motion-safe:animate-title-shimmer motion-safe:bg-[linear-gradient(90deg,var(--color-muted-foreground)_40%,var(--color-foreground)_50%,var(--color-muted-foreground)_60%)] motion-safe:bg-[length:250%_100%] motion-safe:bg-clip-text motion-safe:text-transparent"
@@ -156,39 +155,17 @@ export interface RunSource {
   readonly runId: string
 }
 
-/**
- * An image a tool call returned, at transcript size; a click opens it whole in a new tab. On a user's own box the URL
- * carries a box token that expires after an hour, while the row can stay mounted far longer: the click asks for a
- * fresh URL first, and an image that fails to load (it scrolled into view after the token expired) asks once per URL.
- */
+/** An image a tool call returned, at transcript size; a click opens it whole (how is up to the host). */
 function RunImage({ source, image }: { source: RunSource; image: Attachment }) {
-  const queryClient = useQueryClient()
-  const options = queries.taskFileUrl(source.taskId, Paths.taskRunImage(source.taskId, source.runId, image.id))
-  const { data: url, refetch } = useQuery(options)
-  const [failedUrl, setFailedUrl] = useState<string | null>(null)
-  if (url === undefined) return null
-  const openFresh = (event: MouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault()
-    // Opened before the await, while the click still allows a new tab; pointed at the image once the URL is fresh.
-    const tab = window.open("", "_blank")
-    if (tab === null) return
-    tab.opener = null
-    queryClient
-      .fetchQuery({ ...options, staleTime: 0 })
-      .then((fresh) => tab.location.replace(fresh))
-      .catch(() => tab.close())
-  }
+  const file = useTranscriptHost().useFileLink(source.taskId, Paths.taskRunImage(source.taskId, source.runId, image.id))
+  if (file.url === undefined) return null
   return (
-    <a href={url} target="_blank" rel="noreferrer" onClick={openFresh} className="w-fit">
+    <a href={file.url} target="_blank" rel="noreferrer" onClick={file.onOpen} className="w-fit">
       <img
-        src={url}
+        src={file.url}
         alt="Tool screenshot"
         loading="lazy"
-        onError={() => {
-          if (failedUrl === url) return
-          setFailedUrl(url)
-          void refetch()
-        }}
+        onError={file.onError}
         className="max-h-72 rounded-lg shadow-soft"
       />
     </a>

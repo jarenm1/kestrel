@@ -31,8 +31,8 @@ rather than a potentially delayed bridge update. No GitHub credentials enter the
 ## Shared desktop components
 
 Some screens render the desktop's own components from `packages/ui` instead of a React Native copy, so a change to
-them lands on desktop, phone web and native at once. **Settings › Quotas** (`/settings/usage`) is the first: the
-desktop's quotas panel (limits, banked resets, activity).
+them lands on desktop, phone web and native at once: the **chat transcript** (messages, run items, tool calls,
+Markdown) and **Settings › Quotas** (`/settings/usage`, the desktop's quotas panel).
 
 - `screens/UsageScreen` owns the data (TanStack Query, the box client) and passes plain JSON props and async
   callbacks to `components/UsageQuotasDom`, a `"use dom"` wrapper around `@cloudagents/ui/usage`.
@@ -44,6 +44,24 @@ desktop's quotas panel (limits, banked resets, activity).
   the wrapper. `components/domHostReset` shrink-wraps the WebView document (native only).
 - To add another: move the component into `packages/ui` with JSON-only props, render it from the desktop as before,
   and add a `*Dom.tsx` wrapper plus a screen that supplies the data.
+
+### The chat transcript
+
+`components/ChatPanel` keeps the native composer and working indicator, and renders the thread through
+`components/TranscriptDom` (`@cloudagents/ui/transcript`), which scrolls itself and follows new output while the
+reader is at the bottom, like the desktop.
+
+- **Data.** `useTaskState` keeps the query cache live as before. `hooks/useTranscriptBridge` sends the DOM side the
+  whole thread once per epoch (a prop), then each change as a patch through its ref: only the changed tail of the
+  messages, runs or a run's items (`lib/transcriptBridge`). A streamed token costs one item, not the thread. The DOM
+  side asks for a new epoch when it mounts or a patch goes missing (a `seq` gap).
+- **Files.** A WebView `<img>` cannot send the session `Cookie` header, so images use `ApiClient.fileAccess()`: the
+  box token on a direct box, or a one-hour file token (`ControlPaths.fileToken`) that the Worker accepts in place of
+  the cookie only for GETs of box files on the relayed box. The token is renewed before it expires, and when an image
+  fails to load.
+- **Links.** In the native WebView, links and files open in the system browser (`Linking`); on phone web they are
+  ordinary anchors. A link to another thread opens it in the app.
+- `components/domHostReset`'s `domFillReset` makes the WebView document exactly the view's size (native only).
 
 ## On the web (phones)
 

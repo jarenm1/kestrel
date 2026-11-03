@@ -62,8 +62,8 @@ import { useStoredDraft } from "@/hooks/useStoredDraft"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
-import { Markdown } from "./Markdown"
-import { MessageAttachments } from "./MessageAttachments"
+import { Markdown } from "@cloudagents/ui/markdown"
+import { MessageAttachments } from "@cloudagents/ui/message-attachments"
 
 /** A connected provider and the models the user keeps in the picker for it. */
 interface ModelSection {

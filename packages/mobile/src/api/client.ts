@@ -17,6 +17,7 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  FileToken,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -80,6 +81,16 @@ export interface FileSource {
   headers: Record<string, string>;
 }
 
+/**
+ * How a WebView or DOM `<img>` loads box files: `${base}${path}${query}`. Nothing here can send a Cookie header, so the
+ * query carries a token instead; refresh before `expiresAt` (epoch ms).
+ */
+export interface FileAccess {
+  readonly base: string;
+  readonly query: string;
+  readonly expiresAt: number;
+}
+
 /** A minted box token is replaced this long before the box says it expires. */
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
@@ -89,6 +100,8 @@ export interface ApiClient {
   readonly boxScope: string;
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
+  /** Source of any box file for a WebView or DOM `<img>`: `${base}${path}${query}`, valid until `expiresAt` (epoch ms). */
+  fileAccess(): Promise<FileAccess>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
   socketUrl(path: string): Promise<string>;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
@@ -189,15 +202,15 @@ export function createApiClient(
   const cookieHeaders: Record<string, string> = sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
 
   // The user's box token, single-flight: concurrent callers share one mint, and a failed mint is not kept.
-  let boxToken: { token: Promise<string>; refreshAt: number } | null = null;
-  function mintBoxToken(box: ActiveBox): Promise<string> {
-    if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.token;
-    const entry: { token: Promise<string>; refreshAt: number } = {
+  let boxToken: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } | null = null;
+  function mintBoxToken(box: ActiveBox): Promise<{ token: string; expiresAt: number }> {
+    if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.minted;
+    const entry: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } = {
       refreshAt: Number.POSITIVE_INFINITY,
-      token: request(BoxToken, "POST", ControlPaths.userBoxToken(box.id)).then(
+      minted: request(BoxToken, "POST", ControlPaths.userBoxToken(box.id)).then(
         (minted) => {
           entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted.token;
+          return { token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
         },
         (error: unknown) => {
           if (boxToken === entry) boxToken = null;
@@ -206,7 +219,28 @@ export function createApiClient(
       ),
     };
     boxToken = entry;
-    return entry.token;
+    return entry.minted;
+  }
+
+  // A file token for the relayed box, single-flight in the same way: reused until a minute before it expires.
+  let fileToken: { minted: Promise<FileToken>; refreshAt: number } | null = null;
+  function mintFileToken(): Promise<FileToken> {
+    if (fileToken && Date.now() < fileToken.refreshAt) return fileToken.minted;
+    const entry: { minted: Promise<FileToken>; refreshAt: number } = {
+      refreshAt: Number.POSITIVE_INFINITY,
+      minted: request(FileToken, "POST", ControlPaths.fileToken).then(
+        (minted) => {
+          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
+          return minted;
+        },
+        (error: unknown) => {
+          if (fileToken === entry) fileToken = null;
+          throw error;
+        }
+      ),
+    };
+    fileToken = entry;
+    return entry.minted;
   }
 
   // Control plane (served by the Worker): authenticated by the session cookie.
@@ -229,7 +263,13 @@ export function createApiClient(
     if (activeBox === null) return request(schema, method, path, body);
     const box = activeBox;
     const attempt = async () =>
-      send(schema, method, `${box.url}${path}`, { Authorization: `Bearer ${await mintBoxToken(box)}` }, body);
+      send(
+        schema,
+        method,
+        `${box.url}${path}`,
+        { Authorization: `Bearer ${(await mintBoxToken(box)).token}` },
+        body
+      );
     try {
       return await attempt();
     } catch (error) {
@@ -244,12 +284,25 @@ export function createApiClient(
     boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
-      const token = await mintBoxToken(activeBox);
+      const { token } = await mintBoxToken(activeBox);
       return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
+    },
+    fileAccess: async () => {
+      if (activeBox !== null) {
+        const { token, expiresAt } = await mintBoxToken(activeBox);
+        return { base: activeBox.url, query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, expiresAt };
+      }
+      // The relayed Kestrel box: a WebView cannot send the session cookie, so the Worker accepts a file token instead.
+      const minted = await mintFileToken();
+      return {
+        base: serverUrl,
+        query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(minted.token)}`,
+        expiresAt: Date.parse(minted.expiresAt),
+      };
     },
     socketUrl: async (path) => {
       if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const token = await mintBoxToken(activeBox);
+      const { token } = await mintBoxToken(activeBox);
       return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
     previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),

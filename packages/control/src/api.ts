@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import {
   ApprovePairingBody,
+  BOX_TOKEN_QUERY,
   CREDENTIALS_HEADER,
   CliAuthStatus,
   ControlPaths,
@@ -30,8 +31,9 @@ import {
   type Provider,
 } from "./providers"
 import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { SESSION_HEADER, hub, isOperator, type Env } from "./env"
+import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
+import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
 import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
@@ -200,6 +202,17 @@ const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> |
   return hub(env).fetch(forwarded)
 }
 
+/** Relays a box file to the Hub with a file token in place of the session cookie; the token query is dropped. */
+const forwardFileToken = (request: Request, env: Env, url: URL, token: string): Promise<Response> => {
+  const target = new URL(url)
+  target.searchParams.delete(BOX_TOKEN_QUERY)
+  const headers = new Headers(request.headers)
+  headers.delete("cookie")
+  headers.delete(CREDENTIALS_HEADER)
+  headers.set(FILE_TOKEN_HEADER, token)
+  return hub(env).fetch(new Request(`https://hub${target.pathname}${target.search}`, { method: "GET", headers }))
+}
+
 const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
   const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
   if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
@@ -222,6 +235,7 @@ const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
+  (path === ControlPaths.fileToken && method === "POST") ||
   (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
@@ -386,6 +400,9 @@ const handleMeter = async (request: Request, env: Env, url: URL): Promise<Respon
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
+  // A file token stands in for the session cookie on box files: a WebView or DOM `<img>` cannot send a Cookie header.
+  const fileToken = method === "GET" ? url.searchParams.get(BOX_TOKEN_QUERY) : null
+  if (fileToken !== null && isBoxFilePath(path)) return forwardFileToken(request, env, url, fileToken)
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)
@@ -397,6 +414,10 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
+
+  if (path === ControlPaths.fileToken) {
+    return json(await hub(env).createFileToken(login))
+  }
 
   const previewSession = PREVIEW_SESSION_PATH.exec(path)
   if (previewSession?.[1] && method === "POST") {

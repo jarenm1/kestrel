@@ -6,7 +6,9 @@
 @layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-animate-css";
 @import "./theme.css";
+@plugin "@tailwindcss/typography";
 
 @layer base {
   [data-kestrel-dom] {
@@ -35,6 +37,18 @@
   [data-kestrel-dom] a {
     color: inherit;
     text-decoration: inherit;
+  }
+  [data-kestrel-dom] :is(img, video) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+  [data-kestrel-dom] table {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+  [data-kestrel-dom] :is(pre, code, kbd, samp) {
+    font-family: var(--font-mono);
   }
   [data-kestrel-dom] button {
     font: inherit;

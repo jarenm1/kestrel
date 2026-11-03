@@ -7,12 +7,6 @@ export function formatTime(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
-/** Time of day only (e.g. "14:05"), for chat turns. */
-export function formatClock(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
 /** Coarse time since `iso` relative to `now` (ms): "just now", "5m ago", "3h ago", "2d ago". */
 export function formatAgo(iso: string, now: number): string {
   const seconds = Math.max(0, (now - new Date(iso).getTime()) / 1000)

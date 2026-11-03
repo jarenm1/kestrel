@@ -19,6 +19,12 @@ export const ControlPaths = {
   connectOAuth: (provider: string) => `/auth/connect/${provider}`,
   /** GET: OAuth callback for connections. */
   connectCallback: (provider: string) => `/auth/connect/${provider}/callback`,
+  /**
+   * POST (no body) -> FileToken: a short-lived token for box files loaded where a cookie cannot be sent (a WebView or
+   * DOM `<img>`). The token is accepted as `?access_token=` on GET requests for `Paths.taskAttachment`,
+   * `Paths.taskRunImage` and `Paths.taskCheckoutIcon`, and on nothing else.
+   */
+  fileToken: "/api/file-token",
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
   /** GET -> Connection[] */
@@ -358,6 +364,18 @@ export const BoxToken = Schema.Struct({
   expiresAt: Schema.String,
 })
 export type BoxToken = typeof BoxToken.Type
+
+/**
+ * A token that stands in for the session cookie on box files a WebView or DOM `<img>` loads (`ControlPaths.fileToken`).
+ * It names the user who minted it, only loads files (`Paths.taskAttachment`, `Paths.taskRunImage`,
+ * `Paths.taskCheckoutIcon`), and expires one hour after it is minted.
+ */
+export const FileToken = Schema.Struct({
+  token: Schema.String,
+  /** ISO time the token expires. */
+  expiresAt: Schema.String,
+})
+export type FileToken = typeof FileToken.Type
 
 /** What a user's own box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
 export const BoxSelf = Schema.Struct({

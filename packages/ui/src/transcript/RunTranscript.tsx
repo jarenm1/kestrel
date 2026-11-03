@@ -1,15 +1,15 @@
 import { useMemo } from "react"
-import { useQuery } from "@tanstack/react-query"
 import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol"
-import { queries } from "@/api/queries"
-import { cn } from "@/lib/utils"
-import { Alert } from "@cloudagents/ui/alert"
+import { Alert } from "../alert"
+import { cn } from "../cn"
 import { Markdown } from "./Markdown"
 import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
 interface Props {
   taskId: string
   runId: string
+  /** The run's items in arrival order, as far as they have loaded. */
+  items: readonly AgentItem[]
   /** The run is still going: its last item may still be streaming. */
   running: boolean
   /** The part of the run's items to show: positions `from` up to `to` (null: the end). A tool keeps its subagent items. */
@@ -137,18 +137,17 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId, running, from, to }: Props) {
-  const { data } = useQuery(queries.runItems(taskId, runId))
-  const tree = useMemo(() => buildTree(data ?? []), [data])
-  const liveIds = useMemo(() => liveItemIds(data ?? [], running), [data, running])
+export function RunTranscript({ taskId, runId, items, running, from, to }: Props) {
+  const tree = useMemo(() => buildTree(items), [items])
+  const liveIds = useMemo(() => liveItemIds(items, running), [items, running])
   const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
   const roots = useMemo(() => {
-    const position = new Map((data ?? []).map((item, index) => [item.id, index]))
+    const position = new Map(items.map((item, index) => [item.id, index]))
     return tree.roots.filter((item) => {
       const at = position.get(item.id)!
       return at >= from && (to === null || at < to)
     })
-  }, [data, tree, from, to])
+  }, [items, tree, from, to])
 
   if (roots.length === 0) return null
 

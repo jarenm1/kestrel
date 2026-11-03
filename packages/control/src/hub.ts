@@ -7,6 +7,7 @@ import {
   RELAY_CONNECT_PATH,
   RELAY_PROTOCOL_VERSION,
   AutomationTrigger,
+  BOX_TOKEN_QUERY,
   BOX_TOKEN_TTL_SECONDS,
   MAX_USER_BOXES,
   PAIRING_TTL_SECONDS,
@@ -24,6 +25,7 @@ import {
   type BoxList,
   type BoxSelf,
   type BoxToken,
+  type FileToken,
   type CreateAutomationBody,
   type CreateBoxBody,
   type CreateTaskBody,
@@ -58,7 +60,8 @@ import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { composePrompt } from "./prompt"
-import { SESSION_HEADER, type Env } from "./env"
+import { SESSION_HEADER, FILE_TOKEN_HEADER, type Env } from "./env"
+import { createFileToken, ensureFileTokensTable, fileTokenLogin, isBoxFilePath } from "./file-tokens"
 import {
   deleteFleetBox,
   ensureFleetTable,
@@ -350,6 +353,7 @@ export class Hub extends DurableObject<Env> {
         task_id TEXT NOT NULL,
         expires_at INTEGER NOT NULL
       )`)
+      ensureFileTokensTable(sql)
     })
   }
 
@@ -425,6 +429,11 @@ export class Hub extends DurableObject<Env> {
       )
       .toArray()[0]
     return row ?? null
+  }
+
+  /** A short-lived token for box files a WebView or DOM `<img>` loads; it stands in for the session cookie. */
+  createFileToken(login: string): FileToken {
+    return createFileToken(this.ctx.storage.sql, login)
   }
 
   // -------------------------------------------------------------------------
@@ -1363,10 +1372,14 @@ export class Hub extends DurableObject<Env> {
    */
   private signedInApi(request: Request, url: URL): Promise<Response> | Response {
     const sessionId = request.headers.get(SESSION_HEADER)
-    const session = sessionId ? this.session(sessionId) : null
-    if (!session) {
-      return errorResponse(401, "Unauthorized", "sign in required")
+    if (sessionId === null) {
+      const fileToken = request.headers.get(FILE_TOKEN_HEADER)
+      return fileToken === null
+        ? errorResponse(401, "Unauthorized", "sign in required")
+        : this.fileApi(request, url, fileToken)
     }
+    const session = this.session(sessionId)
+    if (!session) return errorResponse(401, "Unauthorized", "sign in required")
     if (url.pathname === ControlPaths.box && request.method === "GET") return Response.json(this.boxStatus())
     const creds = this.credentials(session.login)
     const relayed: RelayCredentials = session.dev ? { ...creds, dev: true } : creds
@@ -1375,6 +1388,28 @@ export class Hub extends DurableObject<Env> {
     headers.set(CREDENTIALS_HEADER, JSON.stringify(relayed))
     return this.relay(new Request(request, { headers }), url)
   }
+
+  /**
+   * A box file loaded with a `FileToken` (`ControlPaths.fileToken`) instead of the session cookie. GET only, and only
+   * the three box file paths: the token can do nothing else. It is dropped, and so is its `?access_token=` query, before
+   * the file is relayed with its user's credentials.
+   */
+  private fileApi(request: Request, url: URL, token: string): Promise<Response> | Response {
+    if (request.method !== "GET" || !isBoxFilePath(url.pathname)) {
+      return errorResponse(401, "Unauthorized", "invalid file token")
+    }
+    const login = fileTokenLogin(this.ctx.storage.sql, token)
+    if (login === null) return errorResponse(401, "Unauthorized", "invalid file token")
+    const target = new URL(url)
+    target.searchParams.delete(BOX_TOKEN_QUERY)
+    const headers = new Headers(request.headers)
+    headers.delete(FILE_TOKEN_HEADER)
+    headers.delete("cookie")
+    headers.delete("authorization")
+    headers.set(CREDENTIALS_HEADER, JSON.stringify(this.credentials(login)))
+    return this.relay(new Request(request, { headers }), target)
+  }
+
   private previewReferer(request: Request): { token: string; taskId: string } | null {
     const referer = request.headers.get("referer")
     if (referer === null) return null

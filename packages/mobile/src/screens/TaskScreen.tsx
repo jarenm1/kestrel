@@ -55,19 +55,20 @@ export function TaskScreen({ taskId, box, bottomInset }: Props) {
   const { boxes, managedBox } = useAuth();
   return (
     <BoxApiContext.Provider value={api}>
-      <ThreadView taskId={taskId} boxName={boxLabel(box, boxes, managedBox)} bottomInset={bottomInset} />
+      <ThreadView taskId={taskId} box={box} boxName={boxLabel(box, boxes, managedBox)} bottomInset={bottomInset} />
     </BoxApiContext.Provider>
   );
 }
 
 interface ThreadViewProps {
   taskId: string;
+  box: ActiveBox | null;
   /** Name of the box the thread runs on, shown above the chat. */
   boxName: string;
   bottomInset: number;
 }
 
-function ThreadView({ taskId, boxName, bottomInset }: ThreadViewProps) {
+function ThreadView({ taskId, box, boxName, bottomInset }: ThreadViewProps) {
   const state = useTaskState(taskId);
   const shell = useShell();
   const { width } = useWindowDimensions();
@@ -147,6 +148,7 @@ function ThreadView({ taskId, boxName, bottomInset }: ThreadViewProps) {
             {state.error ? <Alert style={styles.error}>{state.error}</Alert> : null}
             <ChatPanel
               taskId={taskId}
+              box={box}
               taskStatus={state.task?.status}
               messages={state.messages}
               runs={state.runs}

@@ -18,17 +18,6 @@
       transform: translateX(300%);
     }
   }
-  /* A working thread's title: a bright band sweeping across muted text. The band starts and ends just outside the
-     text when the gradient is 250% wide, so the loop has no visible jump. */
-  --animate-title-shimmer: title-shimmer 2s linear infinite;
-  @keyframes title-shimmer {
-    from {
-      background-position: 100% 0;
-    }
-    to {
-      background-position: 0% 0;
-    }
-  }
 }
 
 @layer base {
