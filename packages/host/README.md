@@ -40,7 +40,7 @@ deleted    -> (terminal)
 - `starting -> stopping` lets an operator stop a VM whose launcher is alive but not yet QMP-ready.
 - Start verifies the data volume identity with `blkid -p -o export` and refuses on mismatch. It never formats.
 
-## Lifecycle records (PR #162 meter, schema v1)
+## Lifecycle records (`LifecycleRecord` in `@cloudagents/protocol`, schema v1)
 
 `{schemaVersion:1, eventId, hostId, vmId, userId, observedAt (UTC ISO, ms), kind:"lifecycle", state}`,
 with `state` one of `running | parked | deleted`. Records are validated strictly (no unknown keys) before writing.

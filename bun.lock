@@ -66,6 +66,7 @@
         "kestrel-host": "src/cli.ts",
       },
       "dependencies": {
+        "@cloudagents/protocol": "workspace:*",
         "effect": "^3.22.4",
       },
     },

@@ -75,18 +75,5 @@ export const HostRecord = Schema.Struct({
 })
 export type HostRecord = typeof HostRecord.Type
 
-/** One line of `events.jsonl`: the v1 lifecycle record consumed by the usage meter (PR #162). */
-export const LifecycleRecord = Schema.Struct({
-  schemaVersion: Schema.Literal(1),
-  eventId: Uuid,
-  hostId: Uuid,
-  vmId: Uuid,
-  userId: Identifier,
-  observedAt: IsoMillis,
-  kind: Schema.Literal("lifecycle"),
-  state: Schema.Literal("running", "parked", "deleted"),
-})
-export type LifecycleRecord = typeof LifecycleRecord.Type
-
 /** Strict decode: unknown keys are errors, not silently dropped. */
 export const STRICT: { readonly onExcessProperty: "error" } = { onExcessProperty: "error" }

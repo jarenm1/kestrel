@@ -1,21 +1,26 @@
 import { randomUUID } from "node:crypto"
+import { LifecycleRecord, type MeterState } from "@cloudagents/protocol"
 import { Schema } from "effect"
 import { HostError } from "./errors"
 import { appendLineDurable } from "./fs-atomic"
 import { eventsPath } from "./state-store"
-import { LifecycleRecord, STRICT } from "./schema"
+import { STRICT } from "./schema"
 
 /**
- * Lifecycle records for the PR #162 meter (schema v1). Only lifecycle records are written here; usage is
- * not collected by this host. Mapping: start succeeds -> running; clean stop or unexpected exit found by
- * reconcile -> parked, but only if a running record is open (vm.runningReported); destroy -> deleted;
+ * Lifecycle records for the usage meter (`LifecycleRecord` in `@cloudagents/protocol`, schema v1). Only lifecycle
+ * records are written here; usage is not collected by this host. Mapping: start succeeds -> running; clean stop or
+ * unexpected exit found by reconcile -> parked, but only if a running record is open (vm.runningReported);
+ * destroy -> deleted. CPU VMs hold no GPU, so `gpus` is omitted.
  */
+
+/** The lifecycle states this host emits; it never suspends a VM. */
+export type HostLifecycleState = Extract<MeterState, "running" | "parked" | "deleted">
 
 export interface LifecycleInput {
   readonly hostId: string
   readonly vmId: string
   readonly userId: string
-  readonly state: LifecycleRecord["state"]
+  readonly state: HostLifecycleState
   readonly observedAt?: string
   readonly eventId?: string
 }

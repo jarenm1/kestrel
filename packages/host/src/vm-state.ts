@@ -1,7 +1,7 @@
-import { appendLifecycleEvent, buildLifecycleRecord } from "./lifecycle"
+import { appendLifecycleEvent, buildLifecycleRecord, type HostLifecycleState } from "./lifecycle"
 import { writeVm } from "./state-store"
 import { transitionVm, updateVm, type VmFields } from "./transitions"
-import type { LifecycleRecord, VmRecord, VmState } from "./schema"
+import type { VmRecord, VmState } from "./schema"
 
 export interface HostContext {
   /** Absolute state directory. */
@@ -30,7 +30,7 @@ export const commitState = (
   vm: VmRecord,
   to: VmState,
   fields: VmFields,
-  event: LifecycleRecord["state"] | null,
+  event: HostLifecycleState | null,
 ): VmRecord => {
   const runningReported = event === "running" || (event === null && vm.runningReported)
   const next = { ...transitionVm(vm, to, fields, new Date().toISOString()), runningReported }

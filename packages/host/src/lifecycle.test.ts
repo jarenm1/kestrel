@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import { appendLifecycleEvent, buildLifecycleRecord, validateLifecycleRecord } from "./lifecycle"
 import { eventsPath } from "./state-store"
-import type { LifecycleRecord } from "./schema"
+import type { LifecycleRecord } from "@cloudagents/protocol"
 import { makeTempDir, type TempDir } from "./test-support"
 
 let tmp: TempDir
