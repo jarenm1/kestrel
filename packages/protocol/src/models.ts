@@ -136,7 +136,7 @@ export const resolveAgentChoice = (input: {
   readonly connected: readonly ModelProviderInfo[]
   readonly pickedModel: AgentModel | undefined
   readonly pickedEffort: EffortPick | undefined
-  readonly lastRun: { readonly model?: AgentModel | undefined; readonly effort?: AgentEffort | undefined } | undefined
+  readonly lastRun: { readonly model?: AgentModel | undefined; readonly effort?: AgentEffort | null | undefined } | undefined
   readonly defaultModel: AgentModel | undefined
   readonly defaultEffort: EffortPick | undefined
 }): { readonly model: ModelInfo | undefined; readonly effort: AgentEffort | undefined } => {
@@ -148,7 +148,7 @@ export const resolveAgentChoice = (input: {
     (connected.some((p) => p.id === lastModel?.provider) ? lastModel : undefined) ??
     onOffer(defaultModel) ??
     offered[0]
-  const level = pickedEffort ?? (lastRun === undefined ? defaultEffort : lastRun.effort)
+  const level = pickedEffort ?? (lastRun?.effort === null ? "default" : lastRun?.effort ?? defaultEffort)
   const effort = level !== undefined && level !== "default" && model?.efforts.includes(level) ? level : undefined
   return { model, effort }
 }
