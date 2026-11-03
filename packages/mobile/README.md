@@ -33,7 +33,8 @@ rather than a potentially delayed bridge update. No GitHub credentials enter the
 
 Some screens render the desktop's own components from `packages/ui` instead of a React Native copy, so a change to
 them lands on desktop, phone web and native at once: the **chat transcript** (messages, run items, tool calls,
-Markdown) and **Settings › Quotas** (`/settings/usage`, the desktop's quotas panel).
+Markdown), the thread panel's **Diff** tab and **resource graphs** (`components/DiffPanel` → `DiffViewDom`,
+`DesktopViewer` → `ThreadGraphsDom`), and **Settings › Quotas** (`/settings/usage`, the desktop's quotas panel).
 
 - `screens/UsageScreen` owns the data (TanStack Query, the box client) and passes plain JSON props and async
   callbacks to `components/UsageQuotasDom`, a `"use dom"` wrapper around `@cloudagents/ui/usage`.
