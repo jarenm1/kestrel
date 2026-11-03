@@ -71,8 +71,9 @@ describe("toolFailure", () => {
     expect(declinedCodexItem(message, "c2")).toBe(false)
     expect(declinedCodexItem({ ...message, method: "item/started" }, "c1")).toBe(false)
   })
-  test("a call the user stopped is not a failure", () => {
+  test("a call the user stopped or declined is not a failure", () => {
     expect(toolFailure("Bash", "[Request interrupted by user for tool use]")).toBeNull()
+    expect(toolFailure("Edit", "The user doesn't want to proceed with this tool use. The tool use was rejected.")).toBeNull()
   })
 
   test("hides other MCP servers' names and keeps Kestrel's", () => {

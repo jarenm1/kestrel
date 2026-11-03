@@ -19,7 +19,8 @@ const OPEN_OUTPUT_TOOLS = new Set([
 ])
 const ERROR_LINE =
   /\b(error|errors|failed|failure|fatal|panic|exception|denied|forbidden|unauthorized|refused|cannot|can't|could not|unable|invalid|not found|no such|not available|not allowed|timed? ?out|unknown|missing|unexpected|segmentation fault)\b/i
-const INTERRUPTED = /request interrupted by user/i
+// The user stopped the call or declined it; neither says anything about the tool.
+const USER_STOPPED = /request interrupted by user|the user doesn't want to proceed with this tool use/i
 const EXIT_CODE = /^exit code (-?\d+)$/i
 
 // Order matters: each pattern relies on the ones before it having taken their part of the line.
@@ -71,9 +72,9 @@ const toolLabel = (name: string): string => {
   return name.slice(0, MAX_TOOL_NAME)
 }
 
-/** The failure to count for a failed call; null when the user stopped the call, which says nothing about the tool. */
+/** The failure to count for a failed call; null when the user stopped or declined the call. */
 export const toolFailure = (name: string, output: string | null): Omit<ToolFailureCount, "count"> | null => {
-  if (output !== null && output.length <= MAX_OUTPUT && INTERRUPTED.test(output)) return null
+  if (output !== null && output.length <= MAX_OUTPUT && USER_STOPPED.test(output)) return null
   const tool = toolLabel(name)
   return { tool, signature: failureSignature(tool, output) }
 }
