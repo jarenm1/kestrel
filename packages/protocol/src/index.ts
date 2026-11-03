@@ -386,6 +386,44 @@ export const CreateTaskBody = Schema.Struct({
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
 
+/** Limits a box enforces on a webhook run. The gateway composes `prompt`; the payload is untrusted data inside it. */
+export const WEBHOOK_RUN_LIMITS = { maxPromptBytes: 256 * 1024 } as const
+
+/**
+ * A box's webhook run (`POST Paths.webhookRuns`): a new thread and run started from a delivery the gateway accepted.
+ * `deliveryId` is the idempotency key: a repeat with the same body answers the first run's status and starts nothing;
+ * a repeat with a different body is a `Conflict`.
+ */
+export const WebhookRunRequest = Schema.Struct({
+  deliveryId: Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9._:-]{1,128}$/)),
+  automationId: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(128)),
+  title: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(200)),
+  prompt: Schema.String.pipe(
+    Schema.minLength(1),
+    Schema.filter(
+      (prompt) =>
+        new TextEncoder().encode(prompt).length <= WEBHOOK_RUN_LIMITS.maxPromptBytes ||
+        "prompt is larger than 256 KiB",
+    ),
+  ),
+  model: Schema.optional(AgentModel),
+  checkout: Schema.optional(CheckoutRequest),
+})
+export type WebhookRunRequest = typeof WebhookRunRequest.Type
+
+/** A run's status, or `deleted` when its thread was deleted after the delivery was accepted. */
+export const WebhookRunStatus = Schema.Union(RunStatus, Schema.Literal("deleted"))
+export type WebhookRunStatus = typeof WebhookRunStatus.Type
+
+/** The status of a webhook delivery's run: what `POST Paths.webhookRuns` answers and `GET Paths.webhookRun` returns. */
+export const WebhookRunResult = Schema.Struct({
+  deliveryId: Schema.String,
+  taskId: Schema.String,
+  runId: Schema.String,
+  status: WebhookRunStatus,
+})
+export type WebhookRunResult = typeof WebhookRunResult.Type
+
 export const SendMessageBody = Schema.Struct({
   /** May be empty when `attachments` is not. */
   text: Schema.String,
@@ -636,6 +674,11 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
   message: Schema.String,
 }) {}
 
+/** The box could not store the request, so nothing was kept and the caller may retry (503 with `Retry-After`). */
+export class Unavailable extends Schema.TaggedError<Unavailable>()("Unavailable", {
+  message: Schema.String,
+}) {}
+
 // ---------------------------------------------------------------------------
 // HTTP / WS paths (single place to change them)
 // ---------------------------------------------------------------------------
@@ -657,6 +700,10 @@ export const Paths = {
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
   /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
+  /** POST WebhookRunRequest -> WebhookRunResult (201 new, 200 identical duplicate). Owner-scoped; see `WebhookRunRequest`. */
+  webhookRuns: "/api/webhook-runs",
+  /** GET -> WebhookRunResult of the delivery; 404 when this box never persisted it. */
+  webhookRun: (deliveryId: string) => `/api/webhook-runs/${encodeURIComponent(deliveryId)}`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   /** POST cancels a child delegation and its descendants, returning the child thread. */
   taskDelegationCancel: (id: string, childId: string) => `/api/tasks/${id}/delegations/${childId}/cancel`,
@@ -719,6 +766,7 @@ export const Paths = {
 export * from "./relay"
 export * from "./rtc"
 export * from "./control"
+export * from "./webhooks"
 export * from "./meter"
 export * from "./refs"
 export * from "./models"

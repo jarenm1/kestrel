@@ -14,6 +14,11 @@
  */
 
 export const RELAY_CONNECT_PATH = "/box/connect"
+/**
+ * BYOB boxes dial here (`Authorization: Bearer <box secret>`, `BOX_ID_HEADER`) to hold their own outbound control
+ * socket. The Hub verifies the secret against the box's record and routes that box's requests over the socket.
+ */
+export const BOX_CONTROL_PATH = "/box/control"
 export const RELAY_PROTOCOL_VERSION = 1
 
 /**

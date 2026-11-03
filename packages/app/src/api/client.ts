@@ -13,6 +13,8 @@ import {
   CliLoginStart,
   CliProvider,
   Connection,
+  CreateAutomationBody,
+  CreatedAutomation,
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
@@ -51,6 +53,8 @@ import {
   UsageActivity,
   type UseBankedResetBody,
   UseBankedResetResult,
+  WebhookDelivery,
+  WebhookRotated,
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
@@ -467,6 +471,9 @@ export const api = {
   deleteConnection: (provider: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
+  /** Creates an automation; a webhook one also returns its secret, once. */
+  createAutomation: (body: CreateAutomationBody) =>
+    run(request(CreatedAutomation, "POST", ControlPaths.automations, body)),
   /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
   /** Branch names of a repository ("owner/name") the GitHub connection can read, the default branch first. */
@@ -475,6 +482,11 @@ export const api = {
     run(request(Automation, "PATCH", ControlPaths.automation(id), body)),
   deleteAutomation: (id: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.automation(id)))),
+  /** Replaces the webhook secret. The old secret stops working at once; the new one is returned only from this call. */
+  rotateAutomationWebhook: (id: string) => run(request(WebhookRotated, "POST", ControlPaths.automationWebhookRotate(id))),
+  /** Recent webhook deliveries of an automation, newest first. */
+  listAutomationDeliveries: (id: string) =>
+    run(request(Schema.Array(WebhookDelivery), "GET", ControlPaths.automationDeliveries(id))),
 
   /** The user's boxes; reading them also makes the active one the target of box calls. */
   boxes: loadBoxes,

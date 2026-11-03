@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { Automation } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
+import { AutomationCreateDialog } from "@/components/AutomationCreateDialog"
 import { AutomationEditDialog } from "@/components/AutomationEditDialog"
 import { Alert } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -13,13 +14,15 @@ import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { describeTrigger, formatNextRun, promptPreview } from "@/lib/automations"
 import { errorText } from "@/util"
 
-/** Every automation the user has. The agent creates them from chat; this view lists, toggles, edits and removes them. */
+/** Every automation the user has. The agent or this view creates them; this view lists, toggles, edits and removes them. */
 export function AutomationsPanel() {
   const queryClient = useQueryClient()
   const automations = useQuery(queries.automations())
   const activeBoxId = useActiveBoxId()
   const [editing, setEditing] = useState<Automation | null>(null)
-  // Automations only fire on Kestrel's box, so their enabled state can't change while a user box is active.
+  const [creating, setCreating] = useState(false)
+  // Schedule and pull request automations run on Kestrel's box, so they can't be toggled while a user box is active.
+  // Webhook automations choose their own box, so they stay toggleable.
   const onUserBox = typeof activeBoxId === "string"
 
   const toggle = useMutation({
@@ -36,17 +39,20 @@ export function AutomationsPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
-        <p className="text-muted-foreground">
-          Tasks the agent starts on a schedule or when a pull request changes.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
+          <p className="text-muted-foreground">
+            Tasks the agent starts on a schedule, when a pull request changes, or when a webhook request arrives.
+          </p>
+        </div>
+        <Button onClick={() => setCreating(true)}>New webhook automation</Button>
       </div>
 
       {error && <Alert>{errorText(error)}</Alert>}
       {onUserBox && (
         <Alert variant="warning">
-          Automations run on Kestrel's box, so they can't be switched on or off while your own box is active.
+          Schedule and pull request automations run on Kestrel's box, so they can't be switched on or off while your own box is active.
         </Alert>
       )}
       {automations.isPending && <p className="text-muted-foreground">Loading…</p>}
@@ -71,7 +77,7 @@ export function AutomationsPanel() {
                 key={automation.id}
                 automation={automation}
                 toggling={toggle.isPending && toggle.variables?.id === automation.id}
-                toggleDisabled={onUserBox}
+                toggleDisabled={onUserBox && automation.trigger._tag !== "webhook"}
                 removing={remove.isPending && remove.variables === automation.id}
                 onEdit={() => setEditing(automation)}
                 onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
@@ -83,6 +89,7 @@ export function AutomationsPanel() {
       )}
 
       <AutomationEditDialog automation={editing} onClose={() => setEditing(null)} />
+      <AutomationCreateDialog open={creating} onClose={() => setCreating(false)} />
     </div>
   )
 }

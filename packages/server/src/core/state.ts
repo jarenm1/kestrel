@@ -27,6 +27,17 @@ const PendingUploadRecord = Schema.Struct({
   createdAt: Schema.String,
 })
 
+/** A webhook run accepted from a gateway delivery: the delivery id (idempotency key), a hash of the body accepted with it, and the thread and run it started. */
+const WebhookRunRecordSchema = Schema.Struct({
+  owner: Schema.String,
+  deliveryId: Schema.String,
+  fingerprint: Schema.String,
+  taskId: Schema.String,
+  runId: Schema.String,
+  createdAt: Schema.String,
+})
+export type WebhookRunRecord = typeof WebhookRunRecordSchema.Type
+
 const PersistedState = Schema.Struct({
   tasks: Schema.Array(Task),
   messages: Schema.Array(Message),
@@ -35,6 +46,7 @@ const PersistedState = Schema.Struct({
   pendingAsks: Schema.optional(Schema.Array(PendingAskRecord)),
   uploads: Schema.optional(Schema.Array(PendingUploadRecord)),
   runSessions: Schema.optional(Schema.Array(RunSessionRecord)),
+  webhookRuns: Schema.optional(Schema.Array(WebhookRunRecordSchema)),
 })
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -68,6 +80,7 @@ export interface StoreState {
   pendingAsks: PendingAsk[]
   uploads: PendingUpload[]
   runSessions: RunSession[]
+  webhookRuns: WebhookRunRecord[]
 }
 
 export interface StoreShape {
@@ -95,7 +108,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
           : Effect.fail(new InternalError({ message: `cannot read ${file}: ${String(e)}` })),
       ),
     )
-    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [] }
+    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [], webhookRuns: [] }
     const decoded = yield* Schema.decodeUnknown(Schema.parseJson(PersistedState))(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
@@ -106,6 +119,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
       pendingAsks: [...(decoded.pendingAsks ?? [])],
       uploads: [...(decoded.uploads ?? [])],
       runSessions: [...(decoded.runSessions ?? [])],
+      webhookRuns: [...(decoded.webhookRuns ?? [])],
     }
   })
 

@@ -23,7 +23,7 @@ const switchTrack = { false: colors.secondary, true: colors.primary };
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
   const { api } = useApiClient();
-  // Automations run on Kestrel's managed box (directly, or relayed); a user's own box cannot run them.
+  // Schedule and pull request automations run on Kestrel's managed box (directly, or relayed); a user's own box cannot run them.
   const { activeBoxId } = useAuth();
   const unavailable = activeBoxId !== null;
   const queries = useMemo(() => createQueries(api), [api]);
@@ -36,20 +36,15 @@ export function AutomationsScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.heading}>
           <Text style={styles.title}>Automations</Text>
-          <Text style={styles.subtitle}>Tasks the agent starts on a schedule or when a pull request changes.</Text>
+          <Text style={styles.subtitle}>Tasks the agent starts on a schedule, when a pull request changes, or when a webhook request arrives.</Text>
         </View>
         {unavailable ? (
           <Alert variant="warning">
-            {"Automations run on Kestrel's box; not yet available on your own box"}
+            {"Schedule and pull request automations run on Kestrel's box, so they can't be created or run while your own box is active. Webhook automations can be created."}
           </Alert>
         ) : null}
 
-        <Button
-          icon={Plus}
-          disabled={unavailable}
-          onPress={() => setEditing({ kind: "create" })}
-          style={styles.newButton}
-        >
+        <Button icon={Plus} onPress={() => setEditing({ kind: "create" })} style={styles.newButton}>
           New automation
         </Button>
 

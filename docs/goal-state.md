@@ -107,16 +107,69 @@ the natural place to begin.
 
 Gaps to close today:
 
-- Automations and PR watches run only on Kestrel's boxes.
+- Scheduled and GitHub-triggered automations and PR watches run only on Kestrel's boxes; webhook automations already reach user boxes.
 - Web and mobile list threads across boxes. Mobile web links without a box identifier still open on the active box.
 - `toolkit_install` requires a box started from the Nix flake.
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
   remove it: every box uses `/box/self`.
 
+### Webhook automations
+
+**Status: implemented except Nest fallback** (see [architecture.md](architecture.md#webhook-automations)). The gateway
+routes deliveries to the user's Kestrel box or one of their own boxes, with retry-or-fail when the box is unavailable.
+Nest fallback below still needs the host agent and wake-up path.
+
+The sender posts to a stable Kestrel gateway URL for an automation. The gateway authenticates the delivery, applies the
+owner's limits and routes it to the automation's preferred box. The box starts a **new** thread and run using the
+automation's prompt, model, optional repository and webhook payload. BYOB and Nest use the same box execution contract;
+the gateway is not a general-purpose relay for threads, events, desktop traffic or files.
+
+The control plane retains the automation definition, target box, fallback policy and credentials needed to identify
+and authenticate a webhook even when the preferred box is offline. Boxes execute a self-contained run request. A fallback
+box does not inherit another box's local files, uncommitted changes or existing thread state. The UI must make that
+boundary and any Nest charges clear before the owner enables fallback.
+
+**Delivery and fallback**
+
+- An automation names a preferred box and one policy: retry the preferred box, fail if it is unavailable, or use an
+  explicitly selected Nest fallback. Fallback is opt-in and requires an available, authorized Nest box and spending
+  permission. An unavailable fallback must not silently become a different target.
+- The gateway persists accepted deliveries with a stable Kestrel delivery ID before returning success to the sender.
+  Sender-provided delivery IDs are deduplicated when available. Retries carry the same ID; boxes persist acceptance and
+  deduplicate that ID across restarts. Expose delivery status and terminal failures to the owner.
+- A timeout or lost acknowledgement does not prove the preferred box did not start the run. Do not automatically
+  reroute an ambiguously delivered event: reconcile with the original box or require an explicit owner decision.
+  Automatic fallback is safe only when the original target is known not to have accepted it. Delivery is at least once,
+  not an exactly-once guarantee across independent boxes.
+- Bound payload size, retention, retry count and backoff. If a request cannot be accepted durably, return a failure
+  rather than a success; expired or exhausted deliveries become visible failures. Keep payloads only as long as delivery
+  requires and do not put payloads or webhook secrets in logs.
+- Nest fallback depends on the planned host agent, ingress and VM wake-up path. BYOB parity, box control connectivity
+  and the common automation execution contract are prerequisites; the local host experiment does not provide these
+  guarantees today.
+
+**Cost and safety**
+
+- Free users get a rate-limited gateway allowance; reject excess requests with `429` and a retry hint. Apply limits per
+  owner and endpoint, plus global abuse protection. Set the actual allowance after measuring real gateway, storage,
+  retry and logging costs; shared Cloudflare allowances do not guarantee zero marginal cost at scale.
+- Use low-traffic box presence and wake-ups, with hibernating control sockets and automatic keep-alive responses.
+  Avoid polling boxes or transporting normal box activity through the Hub. The gateway handles webhook payloads, which
+  may contain sensitive data; this is an explicit, bounded exception to the BYOB data-plane goal.
+- Give each automation a high-entropy, rotatable credential, revoke the old credential on rotation, and support sender
+  signatures where available. Treat the payload as untrusted data, not an instruction. Authorize routing against the
+  owner's registered boxes and prevent the gateway from being used as an arbitrary network proxy.
+- The gateway URL provides automatic routing. A future direct-to-box endpoint may be offered for high-volume BYOB use,
+  but it has no Kestrel failover when the box is unreachable.
+
+Prototype and measure the successful path and offline/retry cases before selecting quotas or promising free usage.
+Include tests for authentication, limits, durable acceptance, duplicate delivery, target authorization, offline targets,
+ambiguous acknowledgements, fallback and run creation on both box types.
+
 ## Control plane
 
-The control plane handles short requests only: sign-in, the box registry, box tokens, credentials, placement, usage
-records and billing.
+The control plane handles sign-in, the box registry, box tokens, credentials, placement, usage records and billing.
+The webhook gateway also accepts bounded automation payloads; it does not relay general box traffic.
 
 **Cost guardrails**
 
@@ -409,8 +462,10 @@ Each step is useful by itself, and the Nest work comes after the BYOB and eviden
 3. **Relay:** finish the cutover and delete it.
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.
 5. **Evidence:** explicit recording, clips and run summaries first, then the rolling buffer and desktop idle stop.
-6. **Parity:** automations and PR watches on BYOB through the dial-out socket, and multi-box support on mobile.
-7. **Host layer:** one host and one CPU shape, with suspend and resume, running the meter without charging.
+6. **Parity:** a common box automation and PR-watch contract, BYOB control connectivity and multi-box support on
+   mobile. The rate-limited webhook gateway with preferred-box delivery and retry or fail when unavailable is done.
+7. **Host layer:** one host and one CPU shape, with suspend and resume, running the meter without charging. Add
+   opt-in Nest webhook fallback once wake-up, spending permission and safe delivery reconciliation are available.
 8. **Shapes:** low-RAM and GPU shapes, volumes in object storage, and parking.
 9. **Scheduler:** multiple hosts, placement at resume, and draining.
 10. **Billing:** rate setting from the metered data, spending caps, then charging.

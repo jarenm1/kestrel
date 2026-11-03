@@ -1,4 +1,4 @@
-import type { AutomationTrigger, GithubAutomationEvent } from "@cloudagents/protocol"
+import type { AutomationTrigger, GithubAutomationEvent, WebhookDelivery, WebhookEndpoint } from "@cloudagents/protocol"
 
 export const EVENT_LABELS: Record<GithubAutomationEvent, string> = {
   "pull_request.opened": "Opened",
@@ -6,6 +6,22 @@ export const EVENT_LABELS: Record<GithubAutomationEvent, string> = {
   "pull_request.ready_for_review": "Ready for review",
   "pull_request.synchronize": "New commits pushed",
   "pull_request.review_requested": "Review requested",
+}
+
+/** Plain-language status of a webhook delivery; `ambiguous` means the box may have started the run and is being checked. */
+export const DELIVERY_LABELS: Record<WebhookDelivery["status"], string> = {
+  accepted: "Accepted",
+  delivering: "Delivering",
+  retrying: "Retrying",
+  ambiguous: "Checking with box",
+  delivered: "Delivered",
+  failed: "Failed",
+  expired: "Expired",
+}
+
+export const ON_UNAVAILABLE_LABELS: Record<WebhookEndpoint["onUnavailable"], string> = {
+  retry: "Wait and retry on this box",
+  fail: "Fail the delivery",
 }
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
@@ -47,6 +63,7 @@ export function describeCron(cron: string): string {
 /** One line describing when an automation fires, e.g. "Weekdays at 09:00 · America/New_York". */
 export function describeTrigger(trigger: AutomationTrigger): string {
   if (trigger._tag === "schedule") return `${describeCron(trigger.cron)} · ${trigger.timezone}`
+  if (trigger._tag === "webhook") return "Webhook · runs when a request arrives"
   const parts = [`Pull requests: ${trigger.events.map((e) => EVENT_LABELS[e]).join(", ")}`]
   if (trigger.reviewers?.length) parts.push(`reviewers ${trigger.reviewers.join(", ")}`)
   if (trigger.baseBranches?.length) parts.push(`into ${trigger.baseBranches.join(", ")}`)

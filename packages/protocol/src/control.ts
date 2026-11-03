@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
 import { AgentModel } from "./models"
+import { WebhookEndpoint, WebhookSettings } from "./webhooks"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -60,6 +61,15 @@ export const ControlPaths = {
   automationRuns: (id: string) => `/api/automations/${id}/runs`,
   /** POST TriggerAutomationBody -> AutomationRun: "run now". */
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
+  /** POST -> WebhookRotated: replaces the webhook's secret; the previous secret stops working at once. */
+  automationWebhookRotate: (id: string) => `/api/automations/${id}/webhook/rotate`,
+  /** GET -> WebhookDelivery[] (newest first). Only webhook automations have deliveries. */
+  automationDeliveries: (id: string) => `/api/automations/${id}/deliveries`,
+  /**
+   * POST (the sender, not the browser) -> 202 WebhookAccepted. Public: authenticated by the webhook's secret,
+   * with `Authorization: Bearer <secret>` or `X-Kestrel-Signature`. Not served under `/api`.
+   */
+  webhookAutomation: (id: string) => `/webhooks/automations/${id}`,
   /**
    * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
    * The app talks to the active box directly at its `url` with a box token instead of through the relay.
@@ -462,6 +472,7 @@ export type GithubAutomationEvent = typeof GithubAutomationEvent.Type
  *   `pull_request.review_requested` by the requested reviewer's login (case-insensitive); `baseBranches` keeps
  *   only PRs targeting those branches; `includeDrafts` (default false) also fires on draft PRs. An absent or empty
  *   list means no filter.
+ * - webhook: fires when the automation's gateway URL receives an authenticated POST (see `WebhookEndpoint`).
  */
 export const AutomationTrigger = Schema.Union(
   Schema.Struct({
@@ -475,6 +486,10 @@ export const AutomationTrigger = Schema.Union(
     reviewers: Schema.optional(Schema.Array(Schema.String)),
     baseBranches: Schema.optional(Schema.Array(Schema.String)),
     includeDrafts: Schema.optional(Schema.Boolean),
+  }),
+  /** Fires when the automation's gateway URL receives an authenticated delivery. Its settings are in `webhook`. */
+  Schema.Struct({
+    _tag: Schema.Literal("webhook"),
   }),
 )
 export type AutomationTrigger = typeof AutomationTrigger.Type
@@ -496,8 +511,20 @@ export const Automation = Schema.Struct({
   updatedAt: Schema.String, // ISO-8601
   /** Next scheduled fire (ISO-8601); schedule automations only, null otherwise or when disabled. */
   nextRunAt: Schema.NullOr(Schema.String),
+  /**
+   * The public endpoint and target of a webhook automation; null for other triggers. Never carries the secret. Older
+   * responses omit the field; decode those to null.
+   */
+  webhook: Schema.optionalWith(Schema.NullOr(WebhookEndpoint), { default: () => null, exact: true }),
 })
 export type Automation = typeof Automation.Type
+
+/** A create response: the automation, plus the webhook secret for a webhook trigger (shown once, null otherwise). */
+export const CreatedAutomation = Schema.Struct({
+  ...Automation.fields,
+  webhookSecret: Schema.NullOr(Schema.String),
+})
+export type CreatedAutomation = typeof CreatedAutomation.Type
 
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),
@@ -507,8 +534,13 @@ export const CreateAutomationBody = Schema.Struct({
   model: Schema.optional(Schema.NullOr(AgentModel)),
   trigger: AutomationTrigger,
   enabled: Schema.optional(Schema.Boolean),
+  /** Only for a webhook trigger (rejected otherwise). Omitted = `{ preferredBoxId: null, onUnavailable: "retry" }`. */
+  webhook: Schema.optional(WebhookSettings),
 }).pipe(
   Schema.filter((body) => body.trigger._tag !== "github" || body.repo !== undefined || "github triggers need a repo"),
+  Schema.filter(
+    (body) => body.webhook === undefined || body.trigger._tag === "webhook" || "webhook settings need a webhook trigger",
+  ),
 )
 export type CreateAutomationBody = typeof CreateAutomationBody.Type
 
@@ -520,6 +552,8 @@ export const UpdateAutomationBody = Schema.Struct({
   model: Schema.optional(Schema.NullOr(AgentModel)),
   trigger: Schema.optional(AutomationTrigger),
   enabled: Schema.optional(Schema.Boolean),
+  /** Only for webhook automations: the target and unavailability policy. Omitted fields keep their value. */
+  webhook: Schema.optional(Schema.partial(WebhookSettings)),
 })
 export type UpdateAutomationBody = typeof UpdateAutomationBody.Type
 

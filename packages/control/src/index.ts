@@ -1,4 +1,5 @@
 import {
+  BOX_CONTROL_PATH,
   BOX_ID_HEADER,
   BOX_USER_HEADER,
   ControlPaths,
@@ -8,6 +9,8 @@ import {
   PairingPollBody,
   PairingStartBody,
   RELAY_CONNECT_PATH,
+  WEBHOOK_HEADERS,
+  WEBHOOK_LIMITS,
 } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
@@ -44,6 +47,43 @@ const boxSelf = async (request: Request, env: Env): Promise<Response> => {
   const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
   const self = secret === "" || boxId === "" ? null : await hub(env).boxSelf(boxId, secret)
   return self === null ? errorResponse(401, "Unauthorized", "invalid box credentials") : json(self)
+}
+
+/**
+ * A BYOB box dials out here for its webhook runs, so it needs no inbound address. It proves itself with its own secret
+ * and id, as `boxSelf` does; the Hub then owns the socket for that box. The Hub trusts the box id the Worker verified.
+ */
+const boxControl = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
+  const self = secret === "" || boxId === "" ? null : await hub(env).boxSelf(boxId, secret)
+  if (self === null) return errorResponse(401, "Unauthorized", "invalid box credentials")
+  return hub(env).fetch(request)
+}
+
+/**
+ * A sender posts to a webhook here. Public: the webhook's secret authenticates the request. The Hub answers only after
+ * the delivery is stored: 202 for a new one, 200 for a repeat of an earlier `Idempotency-Key`.
+ */
+const receiveWebhook = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const match = /^\/webhooks\/automations\/([^/]+)$/.exec(url.pathname)
+  if (match === null) return errorResponse(404, "NotFound", "no such webhook")
+  const [, automationId = ""] = match
+  const body = await cappedRequest(request, WEBHOOK_LIMITS.maxBodyBytes)
+  if (body instanceof Response) return body
+  const outcome = await hub(env).receiveWebhook({
+    automationId,
+    authorization: request.headers.get(WEBHOOK_HEADERS.authorization),
+    signature: request.headers.get(WEBHOOK_HEADERS.signature),
+    senderId: request.headers.get(WEBHOOK_HEADERS.senderDeliveryId),
+    body: new Uint8Array(await body.arrayBuffer()),
+  })
+  if (outcome.ok) return json(outcome.accepted, outcome.created ? 202 : 200)
+  const headers = outcome.retryAfter === undefined ? undefined : { "retry-after": String(outcome.retryAfter) }
+  return json({ _tag: outcome.tag, message: outcome.message }, outcome.status, headers)
 }
 
 /** The bearer secret, box id and user a managed box's request carries; null when any of them is missing. */
@@ -161,6 +201,7 @@ export default {
     const url = new URL(request.url)
     try {
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
+      if (url.pathname === BOX_CONTROL_PATH) return await boxControl(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
@@ -172,6 +213,7 @@ export default {
         return await managedBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
+      if (url.pathname.startsWith("/webhooks/automations/")) return await receiveWebhook(request, env, url)
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
