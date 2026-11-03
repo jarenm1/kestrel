@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { randomUUID } from "node:crypto"
+import { existsSync, readFileSync } from "node:fs"
 import { InternalError } from "@cloudagents/protocol"
 import { busEnv, scopeArgs, type SystemdSettings } from "./systemd"
 
@@ -50,6 +51,8 @@ export type HolderStart =
       readonly bwrapPath: string
       /** `sleep`: the holder's process. */
       readonly sleepPath: string
+      /** `sh`: writes the holder's readiness marker once bwrap has mounted its private /tmp/.X11-unix. */
+      readonly shPath: string
     }
 
 export interface TaskHolderOptions {
@@ -102,20 +105,12 @@ const configured = (holder: number): boolean => {
   }
 }
 
-/** The holder's private X socket directory is mounted: a tmpfs, so a host bind mount there (WSLg) does not count. */
-const mounted = (holder: number): boolean => {
-  try {
-    return readFileSync(`/proc/${holder}/mountinfo`, "utf8")
-      .split("\n")
-      .some((line) => {
-        // Fields: id, parent, major:minor, root, mount point, options, optional fields, "-", fstype, source, options.
-        const fields = line.split(" ")
-        return fields[4] === X11_DIR && line.includes(" - tmpfs ")
-      })
-  } catch {
-    return false
-  }
-}
+/**
+ * The holder has mounted its private X socket directory and written the readiness marker into it, checked in the
+ * holder's own view as `x11Dir` does. Only the holder writes it, after its tmpfs mount: until then the holder sees the
+ * inherited WSLg tmpfs, which a mount table check cannot tell apart from a private one.
+ */
+const privateReady = (holder: number, markerPath: string): boolean => existsSync(`/proc/${holder}/root${markerPath}`)
 
 const kill = (h: TaskHolder) => {
   for (const pid of [h.holder, h.proc.pid]) {
@@ -129,24 +124,26 @@ const kill = (h: TaskHolder) => {
 }
 
 /**
- * Runs in a pasta holder: mounts its private X socket directory, then execs sleep so the holder's pid stays the
- * namespace's pid. pasta runs its command in a PID namespace of its own and mounts that namespace's /proc over the
- * host's. Processes that join the holder's mount namespace from outside cannot resolve `/proc/self` through it (NVENC
- * fails on that), so the holder unmounts it and joined processes see the host's /proc. The bwrap holder keeps the box
- * user's own uid and mounts its tmpfs without a root check.
+ * Runs in a pasta holder: mounts its private X socket directory, writes the readiness marker there, then execs sleep so
+ * the holder's pid stays the namespace's pid. pasta runs its command in a PID namespace of its own and mounts that
+ * namespace's /proc over the host's. Processes that join the holder's mount namespace from outside cannot resolve
+ * `/proc/self` through it (NVENC fails on that), so the holder unmounts it and joined processes see the host's /proc.
  */
-const holderShell = (start: Extract<HolderStart, { kind: "pasta" }>): string[] => [
+const holderShell = (start: Extract<HolderStart, { kind: "pasta" }>, markerPath: string): string[] => [
   start.shPath,
   "-c",
   // The directory is a tmpfs owned by the holder's root (the box's uid, mapped), mode 1777 like /tmp, created if the host has none.
-  `"$2" /proc && "$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && exec "$1" infinity`,
+  `"$2" /proc && "$0" -t tmpfs -o mode=1777,X-mount.mkdir tmpfs ${X11_DIR} && : > "$3" && exec "$1" infinity`,
   start.mountPath,
   start.sleepPath,
   start.umountPath,
+  markerPath,
 ]
 
 const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
   const { start } = opts
+  /** The holder's readiness marker, written by the holder once its private X socket directory is mounted. */
+  const markerPath = `${X11_DIR}/.holder-ready-${randomUUID()}`
   const argv =
     start.kind === "pasta"
       ? [
@@ -169,15 +166,15 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
           start.unsharePath,
           "--ipc",
           "--mount",
-          ...holderShell(start),
+          ...holderShell(start, markerPath),
         ]
       : [
           start.bwrapPath,
           // Its own user namespace, mapping the box user to itself, so the desktop's processes never see root: xterm
           // chowns its pty to root and the tty group only when it runs as root, and that group is unmapped in a
           // single-id namespace (chown fails with EINVAL, xterm exits). Root is not needed for the tmpfs: bwrap mounts
-          // it without the mount binary's root check. The holder is bwrap's child, which execs sleep (its pid stays the
-          // namespace's pid, as holderShell does for pasta).
+          // it without the mount binary's root check. The holder is bwrap's child: it writes the readiness marker
+          // and execs sleep, so its pid stays the namespace's pid (as holderShell does for pasta).
           "--die-with-parent",
           "--unshare-user",
           "--unshare-ipc",
@@ -193,8 +190,11 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
           "--tmpfs",
           X11_DIR,
           "--",
+          start.shPath,
+          "-c",
+          ': > "$0" && exec "$1" infinity',
+          markerPath,
           start.sleepPath,
-          "infinity",
         ]
   // systemd-run --scope execs in place, so the spawned pid is the holder's starter.
   const [file, args] = opts.systemd
@@ -207,21 +207,35 @@ const startHolder = async (opts: TaskHolderOptions): Promise<TaskHolder> => {
   })
   const deadline = Date.now() + START_TIMEOUT_MS
   let holder: number | null = null
+  let readyHolder: number | null = null
   while (Date.now() < deadline && proc.exitCode === null) {
     holder = proc.pid === undefined ? null : holderPid(proc.pid)
-    if (holder !== null && mounted(holder) && (start.kind === "bwrap" || configured(holder))) {
-      const started: TaskHolder = { proc, holder }
-      proc.on("exit", () => {
-        if (holders.get(opts.taskId) === started) holders.delete(opts.taskId)
-      })
-      return started
+    if (holder !== null && privateReady(holder, markerPath) && (start.kind === "bwrap" || configured(holder))) {
+      readyHolder = holder
+      break
     }
     await Bun.sleep(POLL_MS)
+  }
+  // The marker is the holder's alone: if the box sees it too, the holder's mount was not private.
+  if (readyHolder !== null && !existsSync(markerPath)) {
+    const started: TaskHolder = { proc, holder: readyHolder }
+    proc.on("exit", () => {
+      if (holders.get(opts.taskId) === started) holders.delete(opts.taskId)
+    })
+    return started
   }
   // The holder does not exit with its starter, so both are killed.
   proc.kill("SIGKILL")
   if (holder !== null) kill({ proc, holder })
-  throw new Error(stderr.trim() || `${start.kind} exit ${proc.exitCode ?? "timeout"}`)
+  if (readyHolder !== null) {
+    throw new Error(`${start.kind} holder's ${X11_DIR} is shared with the box: its private mount did not take`)
+  }
+  throw new Error(
+    stderr.trim() ||
+      (proc.exitCode === null
+        ? `${start.kind} holder did not mount its private ${X11_DIR} within ${START_TIMEOUT_MS} ms`
+        : `${start.kind} holder exited before mounting its private ${X11_DIR}`),
+  )
 }
 
 /** In-flight starts, so concurrent launches of one task share a holder. */

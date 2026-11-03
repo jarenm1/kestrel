@@ -419,15 +419,16 @@ const taskHolder = (
     }
     if (settings.level !== "strict") {
       const bwrap = findExecutable("bwrap")
+      const sh = findExecutable("sh")
       const sleep = findExecutable("sleep")
-      if (bwrap === null || sleep === null) {
+      if (bwrap === null || sh === null || sleep === null) {
         return yield* Effect.fail(
-          new InternalError({ message: "bwrap and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+          new InternalError({ message: "bwrap, sh and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
         )
       }
       const holder = yield* ensureTaskHolder({
         taskId,
-        start: { kind: "bwrap", bwrapPath: bwrap, sleepPath: sleep },
+        start: { kind: "bwrap", bwrapPath: bwrap, shPath: sh, sleepPath: sleep },
         systemd,
       })
       return { holder, nsenter }
