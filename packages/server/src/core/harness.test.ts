@@ -16,7 +16,7 @@ import { WorkspaceLive } from "./workspace"
 const harnessLayer = (
   root: string,
   cli: string,
-  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<[]> } = {},
+  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<[]>; readonly controlUrl?: string } = {},
 ) => {
   const config: ServerConfig = {
     port: 8897,
@@ -41,7 +41,7 @@ const harnessLayer = (
     sandboxSslCertFile: null,
     systemd: null,
     maxConcurrentRuns: options.maxConcurrentRuns ?? 0,
-    relay: null,
+    relay: options.controlUrl ? { controlUrl: options.controlUrl, boxToken: "test-token" } : null,
     direct: null,
     toolkitsFlake: null,
     taskDiskMax: 1024 ** 3,
@@ -82,6 +82,44 @@ const runningTask = (id: string): { task: Task; run: Run } => {
     run: { id: `${id}-run`, taskId: id, prompt: "First message", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "anthropic" },
   }
 }
+
+test("an agent exiting early reports its failed turn to the control plane", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-exit-telemetry-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, 'process.stdin.once("data", () => process.exit(1))')
+  const reports: unknown[] = []
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (request) => {
+    reports.push(await request.json())
+    return new Response(null, { status: 204 })
+  } })
+  const { config, layer } = harnessLayer(root, cli, { controlUrl: server.url.toString() })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const { task, run } = runningTask("early-exit")
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.stopAll()
+        expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "exited before turn finished", count: 1 }] }])
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    server.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
 
 test("Claude finishes a queued turn after EOF without the process-exit grace killing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-queued-turn-"))
