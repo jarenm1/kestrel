@@ -47,7 +47,7 @@ export interface WorkspaceShape {
   /** Commit a ref names in the mirror, or null when it does not exist. */
   readonly resolveRef: (mirrorPath: string, ref: string) => Effect.Effect<string | null, WorkspaceError>
   /**
-   * Clones the mirror into `spec.dir` (sharing its objects), creates `branch` at `startSha`, creates the shadow
+   * Clones the mirror into `spec.dir` (sharing its objects), puts `branch` at `startSha`, creates the shadow
    * git dir and pins `pinRef` to `baseSha` in it. `spec.dir` must not exist yet.
    */
   readonly createCheckout: (
@@ -517,7 +517,8 @@ const make: WorkspaceShape = {
       })
       yield* git(threadDir, ["clone", "--shared", "--no-checkout", "--", mirrorPath, dir])
       yield* git(dir, ["remote", "set-url", "origin", url])
-      yield* git(dir, ["checkout", "-q", "-b", branch, startSha])
+      // -B: the clone already has a local branch for the mirror's HEAD, which a pull request's branch may be named like.
+      yield* git(dir, ["checkout", "-q", "-B", branch, startSha])
       yield* Effect.tryPromise({
         try: () => mkdir(dirname(shadowPath), { recursive: true }),
         catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),

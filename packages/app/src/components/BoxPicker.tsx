@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query"
 import type { BoxList } from "@cloudagents/protocol"
 import { ChevronDown, Server } from "lucide-react"
 import { queries } from "@/api/queries"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,

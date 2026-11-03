@@ -8,6 +8,7 @@ import {
   PairingPollBody,
   PairingStartBody,
   RELAY_CONNECT_PATH,
+  ToolFailureReport,
 } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
@@ -97,6 +98,26 @@ const managedBoxAutomations = async (request: Request, env: Env, url: URL): Prom
   return url.pathname === "/box/automations/pr-watch" ? handlePrWatch(request, env, url) : handleBoxAutomations(request, env, url)
 }
 
+/**
+ * Kestrel's own boxes report tool failure counts: the relayed box with the relay token, a managed box with its secret.
+ * A user's own box is neither, so a report from one is refused.
+ */
+const boxToolFailures = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  if (!(await boxAuthorized(request, env))) {
+    const auth = request.headers.get("authorization") ?? ""
+    const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+    const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
+    if (secret === "" || boxId === "" || !(await hub(env).managedBoxVerify(boxId, secret))) {
+      return errorResponse(401, "Unauthorized", "invalid box credentials")
+    }
+  }
+  const body = await decodeBody(request, ToolFailureReport)
+  if (body instanceof Response) return body
+  await hub(env).recordToolFailures(body)
+  return new Response(null, { status: 204 })
+}
+
 const isBoxAutomationPath = (pathname: string): boolean =>
   pathname === ControlPaths.boxAutomations || pathname.startsWith(`${ControlPaths.boxAutomations}/`)
 
@@ -164,6 +185,7 @@ export default {
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
+      if (url.pathname === ControlPaths.boxToolFailures) return await boxToolFailures(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }

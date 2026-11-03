@@ -40,6 +40,8 @@ export interface PullRequest {
   readonly baseRef: string
   /** Branch the pull request was opened from. */
   readonly headRef: string
+  /** owner/name the head branch lives in: a fork's for a pull request from one, null when that repository is gone. */
+  readonly headRepo: string | null
   /** null while GitHub is still computing mergeability. */
   readonly mergeable: boolean | null
   readonly mergeableState: string
@@ -281,7 +283,11 @@ const PullRequestBody = Schema.Struct({
   draft: Schema.Boolean,
   mergeable: Schema.optional(Schema.NullOr(Schema.Boolean)),
   mergeable_state: Schema.optional(Schema.String),
-  head: Schema.Struct({ sha: Schema.String, ref: Schema.String }),
+  head: Schema.Struct({
+    sha: Schema.String,
+    ref: Schema.String,
+    repo: Schema.optional(Schema.NullOr(Schema.Struct({ full_name: Schema.String }))),
+  }),
   base: Schema.Struct({ ref: Schema.String }),
 })
 
@@ -487,6 +493,7 @@ export const GitHubLive = Layer.effect(
       headSha: pr.head.sha,
       baseRef: pr.base.ref,
       headRef: pr.head.ref,
+      headRepo: pr.head.repo?.full_name ?? null,
       mergeable: pr.mergeable ?? null,
       mergeableState: pr.mergeable_state ?? "unknown",
     })

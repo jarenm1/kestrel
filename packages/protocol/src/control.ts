@@ -19,6 +19,12 @@ export const ControlPaths = {
   connectOAuth: (provider: string) => `/auth/connect/${provider}`,
   /** GET: OAuth callback for connections. */
   connectCallback: (provider: string) => `/auth/connect/${provider}/callback`,
+  /**
+   * POST (no body) -> FileToken: a short-lived token for box files loaded where a cookie cannot be sent (a WebView or
+   * DOM `<img>`). The token is accepted as `?access_token=` on GET requests for `Paths.taskAttachment`,
+   * `Paths.taskRunImage` and `Paths.taskCheckoutIcon`, and on nothing else.
+   */
+  fileToken: "/api/file-token",
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
   /** GET -> Connection[] */
@@ -99,6 +105,13 @@ export const ControlPaths = {
   fleetBox: (id: string) => `/api/fleet/boxes/${id}`,
   /** POST -> CreatedFleetBox: replaces the managed box's secret; the box must be restarted with the new one. */
   fleetBoxSecret: (id: string) => `/api/fleet/boxes/${id}/secret`,
+  /** Operator-only: GET `?days=` (1-90, default 30) -> ToolFailureList, most common first. Everyone else gets 404. */
+  fleetToolFailures: "/api/fleet/tool-failures",
+  /**
+   * Box-only, Kestrel's own boxes: POST ToolFailureReport -> 204. Authenticated like the automation routes below, but
+   * names no user: the counts belong to no one. A user's own box never reports. Never reached from a browser.
+   */
+  boxToolFailures: "/box/telemetry/tool-failures",
   /**
    * Nest host only: POST MeterBatch -> MeterIngestResult, with `Authorization: Bearer <host secret>` and
    * METER_HOST_ID_HEADER. Stores each record once per host and eventId; a retry of identical records is acknowledged
@@ -352,6 +365,18 @@ export const BoxToken = Schema.Struct({
 })
 export type BoxToken = typeof BoxToken.Type
 
+/**
+ * A token that stands in for the session cookie on box files a WebView or DOM `<img>` loads (`ControlPaths.fileToken`).
+ * It names the user who minted it, only loads files (`Paths.taskAttachment`, `Paths.taskRunImage`,
+ * `Paths.taskCheckoutIcon`), and expires one hour after it is minted.
+ */
+export const FileToken = Schema.Struct({
+  token: Schema.String,
+  /** ISO time the token expires. */
+  expiresAt: Schema.String,
+})
+export type FileToken = typeof FileToken.Type
+
 /** What a user's own box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
 export const BoxSelf = Schema.Struct({
   owner: Schema.String,
@@ -402,6 +427,34 @@ export type UpdateFleetBoxBody = typeof UpdateFleetBoxBody.Type
  */
 export const CreatedFleetBox = Schema.Struct({ box: FleetBox, secret: Schema.String })
 export type CreatedFleetBox = typeof CreatedFleetBox.Type
+
+/** How often one failure happened: the tool, and its error with everything specific to the run scrubbed out. */
+export const ToolFailureCount = Schema.Struct({
+  tool: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100)),
+  signature: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(200)),
+  count: Schema.Int.pipe(Schema.positive()),
+})
+export type ToolFailureCount = typeof ToolFailureCount.Type
+
+export const MAX_TOOL_FAILURES_PER_REPORT = 200
+
+export const ToolFailureReport = Schema.Struct({
+  failures: Schema.Array(ToolFailureCount).pipe(Schema.maxItems(MAX_TOOL_FAILURES_PER_REPORT)),
+})
+export type ToolFailureReport = typeof ToolFailureReport.Type
+
+/** One failure across all of Kestrel's boxes; `firstSeen` and `lastSeen` are UTC days (`YYYY-MM-DD`) within the window. */
+export const ToolFailureSummary = Schema.Struct({
+  tool: Schema.String,
+  signature: Schema.String,
+  count: Schema.Number,
+  firstSeen: Schema.String,
+  lastSeen: Schema.String,
+})
+export type ToolFailureSummary = typeof ToolFailureSummary.Type
+
+export const ToolFailureList = Schema.Struct({ days: Schema.Number, failures: Schema.Array(ToolFailureSummary) })
+export type ToolFailureList = typeof ToolFailureList.Type
 
 /** How long a pairing code stays valid. */
 export const PAIRING_TTL_SECONDS = 10 * 60

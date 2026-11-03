@@ -193,6 +193,41 @@ describe("checkout git runs in the shadow", () => {
     expect(git(origin, ["rev-parse", "refs/heads/cloudagents/t1"])).toBe(head)
   })
 
+  test("a checkout can be on a branch named like the mirror's HEAD, at another commit", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const seed = join(root, "seed")
+    const start = git(seed, ["rev-parse", "HEAD"])
+    await writeFile(join(seed, "later.txt"), "later\n")
+    git(seed, ["add", "."])
+    git(seed, ["commit", "-m", "later"])
+    const mirrorPath = join(root, "mirrors", "origin.git")
+    await withWorkspace((ws) => ws.syncMirror({ mirrorPath, url: origin }))
+    // The clone makes a local branch for the mirror's HEAD, so that branch has to exist on the remote and be taken over.
+    const branch = git(mirrorPath, ["symbolic-ref", "--short", "HEAD"])
+    git(seed, ["push", "-f", origin, `HEAD:refs/heads/${branch}`])
+    await withWorkspace((ws) => ws.syncMirror({ mirrorPath, url: origin }))
+
+    const threadDir = join(root, "threads", "t1")
+    const dir = join(threadDir, "repo")
+    await withWorkspace((ws) =>
+      ws.createCheckout({
+        threadDir,
+        dir,
+        shadowPath: join(root, "shadows", "t1", "c1.git"),
+        mirrorPath,
+        url: origin,
+        branch,
+        startSha: start,
+        baseSha: start,
+        pinRef: checkoutPinRef("t1", "c1"),
+      }),
+    )
+
+    expect(git(dir, ["symbolic-ref", "--short", "HEAD"])).toBe(branch)
+    expect(git(dir, ["rev-parse", "HEAD"])).toBe(start)
+  })
+
   test("a checkout whose .git points outside the thread workspace is refused", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)

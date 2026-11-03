@@ -49,13 +49,15 @@ export const Checkout = Schema.Struct({
   repo: Schema.String,
   /** Directory of the checkout, relative to the thread workspace, e.g. `kestrel`. The agent starts in the first one. */
   dir: Schema.String,
-  /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`. */
+  /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`, or the branch of the pull request it took over. */
   branch: Schema.String,
   /** Branch the checkout forked from and pull requests target. */
   baseBranch: Schema.String,
   createdAt: Schema.String,
-  /** Set once a pull request has been opened for `branch`; absent before that. */
+  /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
+  pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
   icon: Schema.optional(CheckoutIcon),
 })
@@ -374,10 +376,13 @@ export const CheckoutRequest = Schema.Struct({
   /** Branch to fork from. Defaults to the repository's default branch; with `pullRequest`, the pull request's base. */
   baseBranch: Schema.optional(BranchName),
   /**
-   * Start at the head of this GitHub pull request (`refs/pull/<n>/head`) instead of `baseBranch`. `baseBranch`
-   * stays the pull request's base (for opening a pull request); the checkout's diff is against the head it started at.
+   * Take over this GitHub pull request: start at its head (`refs/pull/<n>/head`) on its own branch, linked to it, so
+   * pushes update it. A pull request from a fork or not open starts on a new thread branch, still linked. `baseBranch`
+   * stays the pull request's base; the checkout's diff is against the head it started at.
    */
   pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+  /** With `pullRequest`: start at its head on a new thread branch, unlinked, so nothing the run pushes can move it. */
+  detached: Schema.optional(Schema.Boolean),
 })
 export type CheckoutRequest = typeof CheckoutRequest.Type
 

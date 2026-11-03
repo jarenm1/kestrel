@@ -33,7 +33,8 @@ export function useBoxOnline(): boolean | undefined {
 
 /**
  * The box a thread runs on, with its online dot: the web app's `ThreadBoxIndicator`. The web floats it over the chat;
- * here it takes its own line above the chat, so it never covers the first message. Each thread runs on the box it was
+ * here it takes its own line above the chat, so it never covers the first message. It sits close under the panel's top
+ * edge and on the chat's `spacing.lg` column, clear of the panel's rounded corner. Each thread runs on the box it was
  * opened from, so the indicator names that box.
  */
 export function ThreadBoxIndicator({ name, style }: { name: string; style?: StyleProp<ViewStyle> }) {
@@ -67,8 +68,8 @@ const styles = StyleSheet.create({
   },
   indicator: {
     alignSelf: "flex-start",
-    marginTop: spacing.md,
-    marginLeft: spacing.md,
+    marginTop: spacing.sm,
+    marginLeft: spacing.lg,
     maxWidth: 192,
     flexDirection: "row",
     alignItems: "center",

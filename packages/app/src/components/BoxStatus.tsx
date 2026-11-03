@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import type { BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
 import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 /** Latest box status, or null while unknown (first poll pending or the last poll failed). */

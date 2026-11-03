@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
-import { boxKeys, createQueries, queryClient, storeTask } from "./queries";
+import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
 
 const task = (title: string): Task => ({
   id: "same-id", owner: "owner", title, status: "idle", createdAt: "2026-01-01T00:00:00Z",
@@ -77,4 +77,25 @@ test("independent HTTP snapshots from two boxes stay in their own query entries"
     first.stop(true);
     second.stop(true);
   }
+});
+
+const taskUsing = (usedTokens: number): Task => ({
+  ...task("thread"), status: "running",
+  context: { model: "claude-opus-5-5", usedTokens, windowTokens: 1_000_000 },
+});
+
+test("a task live events wrote while the snapshot was in flight wins over it", async () => {
+  // The snapshot was read before the run reported 350; the event for 350 landed while it travelled back.
+  const key = ["test-task"];
+  const { promise, resolve } = Promise.withResolvers<Task>();
+  const merging = fetchTaskSnapshot(key, () => promise);
+  queryClient.setQueryData(key, taskUsing(350));
+  resolve(taskUsing(300));
+  expect((await merging).context?.usedTokens).toBe(350);
+});
+
+test("the snapshot replaces a task cached before the fetch started", async () => {
+  const key = ["test-task"];
+  queryClient.setQueryData(key, taskUsing(300));
+  expect((await fetchTaskSnapshot(key, async () => taskUsing(350))).context?.usedTokens).toBe(350);
 });

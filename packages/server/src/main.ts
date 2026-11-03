@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
 import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
-import { ConfigLive, Config, type ServerConfig } from "./config"
+import { ConfigLive, Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
 import { EventHubLive } from "./core/events"
@@ -14,7 +14,7 @@ import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
 import { coreGhBackend } from "./gh/backend"
 import { createGhHandler, GH_PREFIX } from "./gh/handler"
-import { type ControlClient, makeControlClient } from "./control/client"
+import { boxControl } from "./control/client"
 import { CredentialStore, CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
@@ -46,21 +46,6 @@ const CoreWithBase = Layer.provideMerge(CoreLive, HarnessWithBase)
 const AppLive = Layer.provideMerge(TaskStatsLive, CoreWithBase)
 
 const MCP_PREFIX = "/mcp/"
-
-/**
- * The control plane the automation tools call: a managed box with its own secret, else the relayed box with the relay
- * token. A user's own box has no automations.
- */
-const automationControl = (config: ServerConfig): ControlClient | null => {
-  if (config.direct?.managed) {
-    return makeControlClient({
-      controlUrl: config.direct.controlUrl,
-      boxId: config.direct.boxId,
-      boxSecret: config.direct.boxSecret,
-    })
-  }
-  return config.relay === null ? null : makeControlClient(config.relay)
-}
 
 /** Reads a node request body into a web Request so the Effect HttpApp can handle it. */
 const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
@@ -172,7 +157,7 @@ const program = Effect.gen(function* () {
       changeLabels: core.changeLabels,
     },
     ask: core.ask,
-    automations: { control: automationControl(config), taskOwner: core.taskOwner },
+    automations: { control: boxControl(config), taskOwner: core.taskOwner },
     inbox: core.inbox,
     threads: { maxConcurrentRuns: config.maxConcurrentRuns, owner: core.taskOwner, create: core.createTask, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread, delegate: core.delegate, delegatedStatus: core.delegatedStatus, cancelDelegation: core.cancelDelegation, acknowledgeDelegation: core.acknowledgeDelegation, withSlotReleased: harness.withSlotReleased },
     previewOpen: core.previewOpen,

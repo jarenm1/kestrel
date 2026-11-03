@@ -2,7 +2,7 @@ import { PLANS, type PlanId } from "@cloudagents/protocol"
 import { motion } from "framer-motion"
 import { ArrowRight, Check } from "lucide-react"
 import { APP_URL } from "@/components/PublicShell"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { cn } from "@/lib/utils"
 
 const fadeInUp = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.5 } } }

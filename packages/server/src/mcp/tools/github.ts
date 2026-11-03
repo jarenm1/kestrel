@@ -206,7 +206,7 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Show the live GitHub status of this task's pull request: mergeability, review decision, check results and " +
-        "recent review comments. Requires a pull request opened with github_pr_create.",
+        "recent review comments. Requires a pull request opened with github_pr_create or checked out with repo_checkout.",
       inputSchema: { checkout: checkoutArg },
     },
     ({ checkout }: { checkout?: string }) =>

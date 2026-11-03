@@ -79,7 +79,7 @@ function ThreadRow({
     <Pressable
       onPress={() => nav.navigate({ name: "thread", taskId: task.id, box: source.box })}
       accessibilityRole="button"
-      accessibilityLabel={[task.title || "Untitled thread", source.label, STATUS_LABEL[task.status], checkoutsLabel]
+      accessibilityLabel={[task.title || "Untitled thread", STATUS_LABEL[task.status], checkoutsLabel]
         .filter(Boolean)
         .join(" — ")}
       accessibilityState={{ selected: active }}
@@ -92,10 +92,8 @@ function ThreadRow({
             {checkout ? repoShortName(checkout.repo) : null}
             {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
           </Text>
-          <Text style={styles.threadMeta} numberOfLines={1}>
-            {source.label}
-          </Text>
-          {active ? null : <Text style={styles.threadTime}>{formatAgo(task.updatedAt, now)}</Text>}
+          {/* The open thread's archive button covers the time; it keeps its space so the line does not reflow. */}
+          <Text style={[styles.threadTime, active && styles.hidden]}>{formatAgo(task.updatedAt, now)}</Text>
         </View>
         <LiveText live={task.status === "running"} style={[styles.threadTitle, active && styles.threadTitleActive]}>
           {task.title || "Untitled thread"}
@@ -121,7 +119,7 @@ function ThreadRow({
           <StatusIcon status={task.status} size={14} />
         </View>
       </View>
-      {/* The open thread's archive button takes the time's corner, as on the web. */}
+      {/* The open thread's archive button floats over the time's corner, as on the web, so the row keeps its width. */}
       {active ? (
         <Button
           variant="ghost"
@@ -199,7 +197,7 @@ type ThreadEntry = { task: Task; source: BoxSource };
 
 /**
  * The user's threads under the workspace pages, the left drawer: most recent first, working threads last. Threads come
- * from every box the user has; each row names its box, and a box that is still loading or failed says so.
+ * from every box the user has; the thread view names its box, and a box that is still loading or failed says so.
  */
 export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const { user } = useAuth();
@@ -352,21 +350,19 @@ const styles = StyleSheet.create({
   alert: { marginHorizontal: spacing.sm, marginBottom: spacing.sm },
   empty: { color: colors.mutedForeground, fontSize: 14, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   threadRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.md,
     marginVertical: 1,
   },
-  threadInfo: { flex: 1, minWidth: 0, gap: spacing.xs },
+  threadInfo: { gap: spacing.xs },
   threadLine: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
   threadMeta: { flex: 1, color: colors.mutedForeground, fontSize: 12 },
   threadTime: { color: colors.mutedForeground, fontSize: 12, fontVariant: ["tabular-nums"] },
+  hidden: { opacity: 0 },
   threadTitle: { color: colors.mutedForeground, fontSize: 14, fontWeight: "500" },
   threadTitleActive: { color: colors.foreground, fontWeight: "600" },
-  archive: { width: 28, height: 28, marginTop: -spacing.xs, marginRight: -spacing.xs },
+  archive: { position: "absolute", top: spacing.xs, right: spacing.xs, width: 28, height: 28 },
   dock: {
     position: "absolute",
     left: spacing.md,

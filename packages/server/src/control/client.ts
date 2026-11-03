@@ -5,8 +5,10 @@ import {
   BOX_USER_HEADER,
   ControlPaths,
   type CreateAutomationBody,
+  type ToolFailureReport,
   type UpdateAutomationBody,
 } from "@cloudagents/protocol"
+import type { ServerConfig } from "../config"
 
 /** The control plane refused or failed a call. `message` is the control plane's own message, shown to the agent as is. */
 export class ControlError extends Data.TaggedError("ControlError")<{ readonly message: string }> {}
@@ -16,7 +18,10 @@ export type ControlConfig =
   | { readonly controlUrl: string; readonly boxToken: string }
   | { readonly controlUrl: string; readonly boxId: string; readonly boxSecret: string }
 
-/** The automations the box may manage for one user. Every call acts for `user`; the control plane enforces ownership. */
+/**
+ * The automations the box may manage for one user, where every call acts for `user` and the control plane enforces
+ * ownership, and the box's own tool failure counts.
+ */
 export interface ControlClient {
   readonly watchPr: (user: string, taskId: string, repo: string, number: number) => Effect.Effect<void, ControlError>
   readonly unwatchPr: (user: string, taskId: string) => Effect.Effect<void, ControlError>
@@ -25,6 +30,7 @@ export interface ControlClient {
   readonly create: (user: string, body: CreateAutomationBody) => Effect.Effect<Automation, ControlError>
   readonly update: (user: string, id: string, body: UpdateAutomationBody) => Effect.Effect<Automation, ControlError>
   readonly remove: (user: string, id: string) => Effect.Effect<void, ControlError>
+  readonly reportToolFailures: (report: ToolFailureReport) => Effect.Effect<void, ControlError>
 }
 
 const TIMEOUT_MS = 15_000
@@ -54,12 +60,12 @@ const attempt = <A>(run: () => Promise<A>, message: string): Effect.Effect<A, Co
 export const makeControlClient = (config: ControlConfig): ControlClient => {
   const base = controlBase(config.controlUrl)
 
-  // Every call is authenticated as the box, and names the user it acts for in BOX_USER_HEADER.
+  // Every call is authenticated as the box, and names the user it acts for, if any, in BOX_USER_HEADER.
   const boxAuth: Record<string, string> =
     "boxSecret" in config
       ? { authorization: `Bearer ${config.boxSecret}`, [BOX_ID_HEADER]: config.boxId }
       : { authorization: `Bearer ${config.boxToken}` }
-  const call = (user: string, method: string, path: string, body?: unknown): Effect.Effect<unknown, ControlError> =>
+  const call = (user: string | null, method: string, path: string, body?: unknown): Effect.Effect<unknown, ControlError> =>
     Effect.gen(function* () {
       const response = yield* attempt(
         () =>
@@ -67,7 +73,7 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
             method,
             headers: {
               ...boxAuth,
-              [BOX_USER_HEADER]: user,
+              ...(user === null ? {} : { [BOX_USER_HEADER]: user }),
               ...(body === undefined ? {} : { "content-type": "application/json" }),
             },
             body: body === undefined ? undefined : JSON.stringify(body),
@@ -104,5 +110,18 @@ export const makeControlClient = (config: ControlConfig): ControlClient => {
     update: (user, id, body) =>
       call(user, "PATCH", ControlPaths.boxAutomation(id), body).pipe(Effect.flatMap(decodeAutomation)),
     remove: (user, id) => call(user, "DELETE", ControlPaths.boxAutomation(id)).pipe(Effect.asVoid),
+    reportToolFailures: (report) => call(null, "POST", ControlPaths.boxToolFailures, report).pipe(Effect.asVoid),
   }
+}
+
+/** The control plane as this box: a managed box with its own secret, else the relayed box with the relay token. A user's own box has none. */
+export const boxControl = (config: ServerConfig): ControlClient | null => {
+  if (config.direct?.managed) {
+    return makeControlClient({
+      controlUrl: config.direct.controlUrl,
+      boxId: config.direct.boxId,
+      boxSecret: config.direct.boxSecret,
+    })
+  }
+  return config.relay === null ? null : makeControlClient(config.relay)
 }

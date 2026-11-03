@@ -12,8 +12,8 @@ import {
 import { api } from "@/api/client"
 import { openDesktopStream, type DesktopConnection } from "@/api/events"
 import { keys, queries } from "@/api/queries"
-import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
+import { Alert } from "@cloudagents/ui/alert"
+import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,

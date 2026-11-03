@@ -9,7 +9,8 @@ import {
   type ComposerEditorView,
 } from "@cloudagents/composer/editor"
 import type { GithubReference } from "@cloudagents/composer/reference"
-import { composerEditorDomReset, composerEditorStyles } from "./composerEditorStyles"
+import { composerEditorStyles } from "./composerEditorStyles"
+import { domHostReset } from "./domHostReset"
 
 /**
  * The native side's handle. Expo's DOM ref bridge forwards arguments as JSON and discards return values, so every
@@ -113,7 +114,7 @@ export default function ComposerEditor({
 
   return (
     <div data-composer-dom-root="">
-      <style>{composerEditorStyles + (IS_DOM ? composerEditorDomReset : "")}</style>
+      <style>{composerEditorStyles + (IS_DOM ? domHostReset : "")}</style>
       <SharedComposerEditor
         ref={editor}
         value={value}

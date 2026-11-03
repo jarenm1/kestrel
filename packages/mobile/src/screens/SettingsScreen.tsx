@@ -129,6 +129,18 @@ export function SettingsScreen() {
               </View>
             </View>
           )}
+
+          <View style={styles.usageDivider} />
+
+          <View style={styles.connectionsRow}>
+            <View style={styles.connectionsInfo}>
+              <Text style={styles.cardTitle}>Quotas</Text>
+              <Text style={styles.subText}>Claude Code and Codex limits, banked resets and activity.</Text>
+            </View>
+            <Button variant="soft" size="sm" onPress={() => nav.push({ name: "usage" })}>
+              Open
+            </Button>
+          </View>
         </Card>
       </View>
 

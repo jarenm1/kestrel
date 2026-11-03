@@ -18,6 +18,7 @@ import { LoginScreen } from "@/screens/LoginScreen";
 import { NewThreadScreen } from "@/screens/NewThreadScreen";
 import { SettingsScreen } from "@/screens/SettingsScreen";
 import { TaskScreen } from "@/screens/TaskScreen";
+import { UsageScreen } from "@/screens/UsageScreen";
 
 /** Home is the empty chat, as on the web ("/"). */
 const HOME: Route = { name: "new-thread" };
@@ -206,6 +207,8 @@ function pageFor(route: Exclude<Route, { name: "thread" }>): ReactNode {
       return <ConnectionsScreen />;
     case "settings":
       return <SettingsScreen />;
+    case "usage":
+      return <UsageScreen />;
   }
 }
 

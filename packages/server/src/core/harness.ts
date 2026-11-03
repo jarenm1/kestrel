@@ -22,6 +22,7 @@ import {
 } from "@cloudagents/protocol"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
+import { boxControl } from "../control/client"
 import { Config, VERSION } from "../config"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
@@ -33,6 +34,7 @@ import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
+import { agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 export interface AgentHarnessShape {
   /**
@@ -109,6 +111,11 @@ interface ActiveRun {
   sessionId: string | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
+  readonly agentKind: "claude" | "codex" | null
+  /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
+  readonly failedTools: Set<string>
+  /** Set once the run is stopped; what its process reports while it shuts down is not a tool failure. */
+  stopped: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
@@ -203,6 +210,8 @@ export const AgentHarnessLive = Layer.effect(
       )
     }
     const runtime = yield* Effect.runtime<never>()
+    const control = boxControl(config)
+    const toolFailures = control === null ? null : makeToolFailureReporter(control.reportToolFailures)
     const runFork = Runtime.runFork(runtime)
     const active = new Map<string, ActiveRun>()
 
@@ -376,6 +385,9 @@ export const AgentHarnessLive = Layer.effect(
           return Either.right({ run: { ...run }, task: { ...task }, message })
         })
         if (outcome === null) return
+        if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
+          toolFailures?.record(agentFailure(entry.agentKind, turn.error))
+        }
         publish({ _tag: "message.created", message: outcome.message })
         publish({ _tag: "run.updated", run: outcome.run })
         publish({ _tag: "task.updated", task: outcome.task })
@@ -404,6 +416,7 @@ export const AgentHarnessLive = Layer.effect(
         if (waitIndex >= 0) waiting.splice(waitIndex, 1)[0]?.grant(false)
         const entry = active.get(runId)
         if (entry) {
+          entry.stopped = true
           // An interrupted turn ends on its own and closes the process; anything else is signalled now.
           const interrupted = entry.driver?.interrupt() ?? false
           if (!interrupted) killProcessGroup(entry.child.pid, "SIGTERM")
@@ -429,6 +442,15 @@ export const AgentHarnessLive = Layer.effect(
         })
       })
 
+    /** Counts a tool call's failure for the control plane. Replays have no driver; they only repeat old runs. */
+    const noteToolFailure = (entry: ActiveRun, item: AgentItem) => {
+      if (toolFailures === null || entry.driver === null || entry.stopped || item._tag !== "tool" || item.status !== "error") return
+      if (entry.failedTools.has(item.id)) return
+      entry.failedTools.add(item.id)
+      const failure = toolFailure(item.name, item.output)
+      if (failure !== null) toolFailures.record(failure)
+    }
+
     const handleLine = (runId: string, stream: "stdout" | "stderr", line: string) => {
       const entry = active.get(runId)
       if (!entry) return
@@ -443,9 +465,12 @@ export const AgentHarnessLive = Layer.effect(
           const parsed: unknown = JSON.parse(trimmed)
           entry.driver?.receive(parsed)
           // Every parsed line goes through the run's transcript, whether or not it yields items.
-          for (const item of entry.transcript.push(parsed)) putItem(runId, entry, item)
-          const context = entry.transcript.context()
-          if (context !== null && context !== entry.context) {
+          for (const item of entry.transcript.push(parsed)) {
+            putItem(runId, entry, item)
+            if (!endsCodexTurn(parsed) && !declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
+          }
+          const context = entry.transcript.takeContext()
+          if (context !== undefined && context !== entry.context) {
             entry.context = context
             runFork(setContext(entry.taskId, context))
           }
@@ -499,6 +524,9 @@ export const AgentHarnessLive = Layer.effect(
               context: session.seed,
               sessionId: null,
               driver: null,
+              agentKind: session.conversation?.kind ?? null,
+              failedTools: new Set(),
+              stopped: false,
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
@@ -832,7 +860,7 @@ export const AgentHarnessLive = Layer.effect(
           new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]),
           (runId) => stopRun(runId, true).pipe(Effect.ignore),
           { discard: true },
-        ),
+        ).pipe(Effect.zipRight(toolFailures?.flush ?? Effect.void)),
     }
     return shape
   }),

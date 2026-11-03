@@ -8,7 +8,8 @@ export type Route =
   | { name: "archived" }
   | { name: "automations" }
   | { name: "connections" }
-  | { name: "settings" };
+  | { name: "settings" }
+  | { name: "usage" };
 
 /** A screen a link opens. A thread link carries only its id, so the thread opens on the box the app is using. */
 export type LaunchRoute = { name: "thread"; taskId: string } | Exclude<Route, { name: "thread" }>;

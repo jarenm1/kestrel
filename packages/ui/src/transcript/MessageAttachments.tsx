@@ -1,8 +1,7 @@
-import { useQuery } from "@tanstack/react-query"
 import { Paths, type Attachment } from "@cloudagents/protocol"
 import { FileText } from "lucide-react"
-import { queries } from "@/api/queries"
-import { cn } from "@/lib/utils"
+import { cn } from "../cn"
+import { useTranscriptHost } from "./host"
 
 /**
  * A message's files: images inline, other files as a named chip. Either opens the file in a new tab; the box serves
@@ -33,13 +32,13 @@ function AttachmentLink({
   taskId: string
   attachment: Attachment
 }) {
-  const { data: url } = useQuery(queries.taskFileUrl(taskId, Paths.taskAttachment(taskId, a.id)))
-  if (url === undefined) return null
+  const file = useTranscriptHost().useFileLink(taskId, Paths.taskAttachment(taskId, a.id))
+  if (file.url === undefined) return null
   const label = a.name ?? (a.mimeType.startsWith("image/") ? "Image" : "File")
   return (
-    <a href={url} target="_blank" rel="noreferrer" title={label}>
+    <a href={file.url} target="_blank" rel="noreferrer" title={label} onClick={file.onOpen}>
       {a.mimeType.startsWith("image/") ? (
-        <img src={url} alt={label} className="max-h-80 rounded-xl shadow-soft" />
+        <img src={file.url} alt={label} onError={file.onError} className="max-h-80 rounded-xl shadow-soft" />
       ) : (
         <span className="flex h-11 max-w-64 items-center gap-2 rounded-xl bg-white/[0.06] px-3 text-sm shadow-soft transition-colors hover:bg-white/10">
           <FileText className="size-4 shrink-0 text-muted-foreground" />
