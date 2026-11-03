@@ -56,6 +56,14 @@ describe("failureSignature", () => {
 })
 
 describe("agentFailure", () => {
+  test("retains and scrubs known Codex request errors without error keywords", () => {
+    expect(agentFailure("codex", "turn/start: Rate limit exceeded for /home/alice/private", null, 1, null)).toEqual({
+      tool: "agent:codex",
+      signature: "turn failed: error: <path>: Rate limit exceeded for <path>: exit code 1",
+    })
+    expect(agentFailure("codex", `turn/start: ${"x".repeat(9000)}`, null, 1, null).signature).toBe("turn failed: exit code 1")
+  })
+
   test("reports diagnostics and exit details for failed turns", () => {
     expect(agentFailure("claude", "Claude Code exited before its turn finished.", null, 1, null)).toEqual({ tool: "agent:claude", signature: "exited before turn finished: exit code 1" })
     expect(agentFailure("codex", "Codex exited before its turn finished.", "error: rate limit exceeded", null, "SIGKILL")).toEqual({ tool: "agent:codex", signature: "exited before turn finished: error: rate limit exceeded: signal SIGKILL" })
