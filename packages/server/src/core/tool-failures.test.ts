@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { ToolFailureReport } from "@cloudagents/protocol"
-import { agentFailure, declinedCodexItem, failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentFailure, declinedCodexItem, endsCodexTurn, failureSignature, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 describe("failureSignature", () => {
   test("does not scrub oversized output or leak a truncated secret", () => {
@@ -70,6 +70,10 @@ describe("toolFailure", () => {
     expect(declinedCodexItem(message, "c1")).toBe(true)
     expect(declinedCodexItem(message, "c2")).toBe(false)
     expect(declinedCodexItem({ ...message, method: "item/started" }, "c1")).toBe(false)
+  })
+  test("a Codex turn's end is recognized, so the commands it closes are not counted", () => {
+    expect(endsCodexTurn({ method: "turn/completed", params: {} })).toBe(true)
+    expect(endsCodexTurn({ method: "item/completed", params: {} })).toBe(false)
   })
   test("a call the user stopped or declined is not a failure", () => {
     expect(toolFailure("Bash", "[Request interrupted by user for tool use]")).toBeNull()

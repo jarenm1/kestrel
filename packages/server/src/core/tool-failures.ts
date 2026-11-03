@@ -79,6 +79,13 @@ export const toolFailure = (name: string, output: string | null): Omit<ToolFailu
   return { tool, signature: failureSignature(tool, output) }
 }
 
+/**
+ * A Codex turn's end closes the commands it left running as errors. A stop or a steer cut them off, so the turn's
+ * own completion is not evidence the tool failed; a command that really failed was reported by its own item first.
+ */
+export const endsCodexTurn = (message: unknown): boolean =>
+  typeof message === "object" && message !== null && "method" in message && message.method === "turn/completed"
+
 /** A declined Codex action is a user decision, even though its transcript item is shown as an error. */
 export const declinedCodexItem = (message: unknown, itemId: string): boolean => {
   if (typeof message !== "object" || message === null || !("method" in message) || message.method !== "item/completed" || !("params" in message)) return false

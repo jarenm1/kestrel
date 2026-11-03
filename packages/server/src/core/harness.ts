@@ -34,7 +34,7 @@ import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
-import { agentFailure, declinedCodexItem, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
 
 export interface AgentHarnessShape {
   /**
@@ -464,7 +464,7 @@ export const AgentHarnessLive = Layer.effect(
           // Every parsed line goes through the run's transcript, whether or not it yields items.
           for (const item of entry.transcript.push(parsed)) {
             putItem(runId, entry, item)
-            if (!declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
+            if (!endsCodexTurn(parsed) && !declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
           }
           const context = entry.transcript.context()
           if (context !== null && context !== entry.context) {
