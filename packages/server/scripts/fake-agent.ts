@@ -119,7 +119,8 @@ const runCheckoutProbe = async (repo: string): Promise<number> => {
     return 1
   }
   const committed = await call("workspace_exec", {
-    command: `cd '${dir}' && echo committed > CHECKOUT_PROBE.txt && git add CHECKOUT_PROBE.txt && git -c user.name=fake -c user.email=fake@example.com commit -qm "checkout probe"`,
+    // Appends, so a later run of the probe in the same thread has a change to commit too.
+    command: `cd '${dir}' && echo committed >> CHECKOUT_PROBE.txt && git add CHECKOUT_PROBE.txt && git -c user.name=fake -c user.email=fake@example.com commit -qm "checkout probe"`,
   })
   const uncommitted = await call("workspace_exec", { command: `cd '${dir}' && echo uncommitted > UNCOMMITTED_PROBE.txt` })
   if (!committed.text.startsWith("exit code: 0") || !uncommitted.text.startsWith("exit code: 0")) {
