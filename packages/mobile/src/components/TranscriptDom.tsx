@@ -1,11 +1,12 @@
 "use dom"
 
-import { useEffect, useMemo, useRef, useState, type Ref } from "react"
+import { useEffect, useMemo, useRef, useState, type Ref, type TouchEvent } from "react"
 import { IS_DOM, useDOMImperativeHandle, type DOMImperativeFactory, type DOMProps } from "expo/dom"
 import { Transcript } from "@cloudagents/ui/transcript"
 import { TranscriptHostProvider, type TranscriptHost } from "@cloudagents/ui/transcript/host"
 import "@cloudagents/ui/dom.css"
 import { applyTranscriptPatch, type TranscriptData, type TranscriptPatch, type TranscriptSnapshot } from "@/lib/transcriptBridge"
+import { endSwipe, moveSwipe, startSwipe, type SwipeDirection, type SwipeTrack } from "@/lib/swipe"
 import { domFillReset } from "./domHostReset"
 
 /** How a box file is fetched without the native session header: `${base}${path}${query}`. */
@@ -34,6 +35,11 @@ export interface TranscriptDomProps {
   /** Opens a URL in the system browser (native only; phone web follows the anchor). */
   openExternal: (url: string) => Promise<void>
   openThread: (taskId: string) => Promise<void>
+  /**
+   * A horizontal swipe finished over the transcript. Native only: the WebView takes the touch, so the screen's own
+   * swipe gestures never see it. On phone web the transcript is in the page, and those gestures see it directly.
+   */
+  onSwipe: (direction: SwipeDirection) => Promise<void>
   dom?: DOMProps
 }
 
@@ -49,6 +55,7 @@ export default function TranscriptDom({
   onFileError,
   openExternal,
   openThread,
+  onSwipe,
 }: TranscriptDomProps) {
   const [state, setState] = useState<{ epoch: number; seq: number; data: TranscriptData }>(() => ({
     epoch: snapshot.epoch,
@@ -57,8 +64,9 @@ export default function TranscriptDom({
   }))
   const latest = useRef(state)
   latest.current = state
-  const actions = useRef({ onResync, onFileError, openExternal, openThread })
-  actions.current = { onResync, onFileError, openExternal, openThread }
+  const actions = useRef({ onResync, onFileError, openExternal, openThread, onSwipe })
+  actions.current = { onResync, onFileError, openExternal, openThread, onSwipe }
+  const swipe = useRef<SwipeTrack | null>(null)
 
   // A new epoch replaces everything, including patches applied on top of the previous one.
   if (snapshot.epoch !== state.epoch) {
@@ -66,10 +74,6 @@ export default function TranscriptDom({
     latest.current = next
     setState(next)
   }
-
-  useEffect(() => {
-    void actions.current.onResync()
-  }, [])
 
   useDOMImperativeHandle(
     ref,
@@ -89,6 +93,12 @@ export default function TranscriptDom({
     }) as TranscriptDomRef,
     [],
   )
+
+  // After `useDOMImperativeHandle`'s effect: on native it posts the handle's method names to the WebView wrapper, and
+  // this message must follow it, since the native side starts sending patches once it has asked for a snapshot.
+  useEffect(() => {
+    void actions.current.onResync()
+  }, [])
 
   const host = useMemo<TranscriptHost>(
     () => ({
@@ -112,8 +122,41 @@ export default function TranscriptDom({
   )
 
   const { data } = state
+  const touch = (event: TouchEvent) => event.changedTouches[0]
   return (
-    <div data-kestrel-dom="" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%" }}>
+    <div
+      data-kestrel-dom=""
+      style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, height: "100%" }}
+      onTouchStart={
+        IS_DOM
+          ? (event) => {
+              const t = touch(event)
+              swipe.current =
+                t === undefined || scrollsSideways(event.target, event.currentTarget)
+                  ? null
+                  : startSwipe(t.clientX, t.clientY, event.timeStamp)
+            }
+          : undefined
+      }
+      onTouchMove={
+        IS_DOM
+          ? (event) => {
+              const t = touch(event)
+              if (swipe.current !== null && t !== undefined) moveSwipe(swipe.current, t.clientX, t.clientY)
+            }
+          : undefined
+      }
+      onTouchEnd={
+        IS_DOM
+          ? (event) => {
+              const t = touch(event)
+              const direction = swipe.current && t ? endSwipe(swipe.current, t.clientX, event.timeStamp) : null
+              swipe.current = null
+              if (direction !== null) void actions.current.onSwipe(direction)
+            }
+          : undefined
+      }
+    >
       {IS_DOM && <style>{domFillReset}</style>}
       <TranscriptHostProvider value={host}>
         <Transcript
@@ -126,4 +169,13 @@ export default function TranscriptDom({
       </TranscriptHostProvider>
     </div>
   )
+}
+
+/** A touch inside something that scrolls sideways (a wide code block or table) belongs to it, not to the screen. */
+function scrollsSideways(target: EventTarget, root: Element): boolean {
+  for (let el = target instanceof Element ? target : null; el !== null && el !== root; el = el.parentElement) {
+    const overflow = getComputedStyle(el).overflowX
+    if ((overflow === "auto" || overflow === "scroll") && el.scrollWidth > el.clientWidth) return true
+  }
+  return false
 }

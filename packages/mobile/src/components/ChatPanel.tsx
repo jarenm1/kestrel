@@ -15,6 +15,7 @@ import { useNavigation } from "@/nav/navigation";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Composer } from "./Composer";
 import TranscriptDom from "./TranscriptDom";
+import type { SwipeDirection } from "@/lib/swipe";
 
 interface Props {
   taskId: string;
@@ -26,6 +27,8 @@ interface Props {
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined;
   context?: ContextUsage | null | undefined;
+  /** A horizontal swipe over the transcript, which the screen's own swipe gestures cannot see in the native app. */
+  onSwipe: (direction: SwipeDirection) => void;
 }
 
 const ELAPSED_TICK_MS = 1000;
@@ -72,7 +75,7 @@ function ArchivedNotice({ task }: { task: Task }) {
  * The thread's transcript (the desktop's own, in `TranscriptDom`) above the native composer. This side owns the data:
  * it reads the query cache that `useTaskState` keeps live and forwards changes across the DOM bridge.
  */
-export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTask, context }: Props) {
+export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTask, context, onSwipe }: Props) {
   const { api } = useApiClient();
   const nav = useNavigation();
   const queryClient = useQueryClient();
@@ -129,6 +132,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
         onFileError={async () => void files.refetch()}
         openExternal={async (url) => void Linking.openURL(url)}
         openThread={async (id) => nav.push({ name: "thread", taskId: id, box })}
+        onSwipe={async (direction) => onSwipe(direction)}
         dom={{ style: styles.transcript, containerStyle: styles.flex }}
       />
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
