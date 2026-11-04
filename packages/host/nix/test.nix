@@ -66,8 +66,8 @@ pkgs.testers.runNixOSTest {
       services.kestrel-nest = {
         enable = true;
         inherit slug domain hostId;
-        controlUrl = "ws://control:9000";
-        meterUrl = "http://control:9000";
+        controlUrl = "ws://203.0.113.10:9000";
+        meterUrl = "http://203.0.113.10:9000";
         uplink = "eth1";
         cpuVendor = "intel";
         capacity = {
