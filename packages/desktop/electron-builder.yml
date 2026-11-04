@@ -1,0 +1,60 @@
+appId: com.kestrel.desktop
+productName: Kestrel
+executableName: kestrel
+copyright: Copyright © Kestrel
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/main.cjs
+  - package.json
+  - node_modules/**/*
+
+extraResources:
+  - from: ../app/dist
+    to: app-dist
+
+protocols:
+  - name: Kestrel sign-in
+    schemes:
+      - kestrel-desktop
+      - kestrel
+
+# Desktop builds are uploaded to the `desktop-latest` release by the release workflow. A generic feed avoids the
+# updater's "latest GitHub release" lookup, which would otherwise trip over the repo's `box-v*` releases.
+publish:
+  provider: generic
+  url: https://github.com/jarenm1/kestrel/releases/download/desktop-latest/
+
+linux:
+  target:
+    - deb
+  category: Development
+  maintainer: Kestrel <noreply@kestrel-agent.com>
+  syncDesktopName: true
+  artifactName: ${productName}-linux-${arch}.${ext}
+
+# Unsigned builds for now; add Developer ID notarization and a Windows certificate before calling these production.
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  category: public.app-category.developer-tools
+  identity: null
+  artifactName: ${productName}-macos-${arch}.${ext}
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-windows-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+npmRebuild: false

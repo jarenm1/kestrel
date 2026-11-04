@@ -1,0 +1,31 @@
+{
+  "name": "@cloudagents/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kestrel desktop app",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "dev": "bun run build:main && bun run build:app && electron .",
+    "build": "bun run build:main && bun run build:app",
+    "build:main": "bun build src/main.ts --target node --format cjs --external electron --external electron-updater --external http-proxy --outfile dist/main.cjs",
+    "build:app": "bun run --filter @cloudagents/app build",
+    "dist": "bun run build && electron-builder --publish never",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11",
+    "http-proxy": "^1.18.1"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "^1.17.17",
+    "@types/ws": "^8.18.2",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "ws": "^8.22.1"
+  },
+  "author": "Kestrel",
+  "desktopName": "Kestrel",
+  "homepage": "https://kestrel-agent.com"
+}

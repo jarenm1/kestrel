@@ -102,6 +102,7 @@ need screenshots in the PR:** push them to an orphan branch `<github-login>/<top
 | `packages/server` | The agent box: harness, bwrap sandbox, MCP, broker, desktop | Effect services wired in `src/main.ts`. Agent tools in `src/mcp/handler.ts`; harness command in `src/config.ts`. |
 | `packages/protocol` | Effect Schema types shared by everything | Relay frames (`relay.ts`), control API (`control.ts`), domain + REST (`index.ts`). |
 | `packages/ui` | DOM components shared by the desktop app and the phone app (Tailwind v4) | Theme tokens (`theme.css`), the `Button`/`Alert` primitives, the chat transcript (`transcript/`: messages, run items, tool calls, Markdown) and panels such as `usage` (quotas). The desktop renders them directly; the phone app wraps one in an Expo `"use dom"` component (`packages/mobile/src/components/*Dom.tsx`, styled by `dom.css`) and keeps data fetching on its side. Components take plain JSON props; what they need from the app (file URLs, links, navigation) comes from a context such as `TranscriptHostProvider`. Change the transcript here and both apps get it. |
+| `packages/desktop` | Electron desktop app | Bundles `packages/app/dist`; a loopback proxy adds the session cookie; signs in through `/auth/desktop-callback` and updates from the `desktop-latest` GitHub release. See its README before changing packaging or auth. |
 | `docs/architecture.md` | System architecture and boundaries | Read it before changing an unfamiliar area. |
 
 ## Conventions

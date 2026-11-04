@@ -77,7 +77,8 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `
 | [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
-| [`packages/mobile`](packages/mobile) | Expo app; its web export is the app host's UI on phones ([README](packages/mobile/README.md)). |
+| [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
+| [`packages/desktop`](packages/desktop) | Electron desktop app for the same SPA, with GitHub-release auto-updates ([README](packages/desktop/README.md)). |
 
 Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](docs/goal-state.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
 
