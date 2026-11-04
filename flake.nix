@@ -142,6 +142,8 @@
             codex
             opencode
             agy
+            # OMP, Pi and Hermes are not in nixpkgs: install them with their own installers (or npm for Pi) on a
+            # `basic` box, where HOME_TOOLS binds the $HOME binaries into a run. Add them here for a strict-box toolchain.
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];

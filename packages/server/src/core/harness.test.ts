@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Fiber, Layer } from "effect"
 import { createServer } from "node:http"
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Checkout, ModelProvider, Run, Task } from "@cloudagents/protocol"
+import type { Checkout, ModelProvider, RelayCredentials, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker, CredentialBrokerLive } from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
@@ -32,6 +32,7 @@ const harnessLayer = (
     readonly realBroker?: boolean
     readonly fakeAgent?: boolean
     readonly gateways?: ReadonlyArray<ModelProvider>
+    readonly credentials?: RelayCredentials
   } = {},
 ) => {
   const cliCommand = [process.execPath, cli].map((path) => `'${path.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`).join(" ")
@@ -56,9 +57,13 @@ const harnessLayer = (
       deepseek: "",
       minimax: "",
       moonshot: "",
+      deepinfra: "",
       opencode: "",
       "opencode-go": "",
       google: "",
+      omp: "",
+      pi: "",
+      hermes: "",
       ...Object.fromEntries((options.gateways ?? []).map((provider) => [provider, cliCommand] as const)),
     },
     fakeAgent: options.fakeAgent ?? false,
@@ -77,7 +82,16 @@ const harnessLayer = (
   }
   const configLayer = Layer.succeed(Config, config)
   const credentialLayer = Layer.succeed(CredentialStore, {
-    get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),
+    get: () =>
+      Effect.succeed(
+        options.credentials ?? {
+          user: "test",
+          dev: true,
+          anthropic: "test-anthropic",
+          openai: "test-openai",
+          providers: { deepseek: "test-deepseek" },
+        },
+      ),
   } as never)
   const dependencies = Layer.mergeAll(
     configLayer,
@@ -877,6 +891,120 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         server.closeAllConnections()
         server.close()
       }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
+
+test("a Pi run mounts its harness home and reaches only the DeepSeek broker route", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-pi-harness-"))
+  const cli = join(root, "pi-acp.ts")
+  const { config, layer } = harnessLayer(root, cli, { realBroker: true })
+  config.agentCommands.pi = config.agentCommands.anthropic
+  // The operator's harness setup: `HOME=<harness home> pi` writes here, and the run mounts it at ~/.pi.
+  const harnessHome = join(root, "users", "test", "harnesses", "pi")
+  await mkdir(harnessHome, { recursive: true })
+  await writeFile(join(harnessHome, "config.marker"), "operator setup")
+  // `pi-acp` starts `pi` from PATH, and the availability probe wants both binaries.
+  const bin = join(root, "bin")
+  await mkdir(bin, { recursive: true })
+  await writeFile(join(bin, "pi"), "#!/bin/sh\nexit 0\n")
+  await chmod(join(bin, "pi"), 0o755)
+  const pathBefore = process.env.PATH
+  process.env.PATH = `${bin}:${pathBefore ?? ""}`
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const broker = yield* CredentialBroker
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      // Keep the test off the network: an authorized request answers 424, an unauthorized one 403.
+      const server = createServer((req, res) => {
+        void handleBroker({ ...broker, upstreamKey: () => Effect.succeed(null) }, req, res)
+      })
+      const listening = Promise.withResolvers<void>()
+      server.listen(0, "127.0.0.1", () => listening.resolve())
+      yield* Effect.promise(() => listening.promise)
+      const address = server.address()
+      if (address === null || typeof address === "string") throw new Error("missing broker test port")
+      yield* Effect.promise(() => writeFile(cli, `
+import { createInterface } from "node:readline"
+import { readFileSync } from "node:fs"
+const send = (id, result) => console.log(JSON.stringify({ jsonrpc: "2.0", id, result }))
+createInterface({ input: process.stdin }).on("line", async (line) => {
+  const req = JSON.parse(line)
+  if (req.method === "initialize") send(req.id, { protocolVersion: 1 })
+  if (req.method === "session/new") send(req.id, { sessionId: "pi-session" })
+  if (req.method === "session/set_config_option") send(req.id, {})
+  if (req.method === "session/prompt") {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(DEEPSEEK|ANTHROPIC|OPENAI)_/.test(key)))
+    const marker = readFileSync(process.env.HOME + "/.pi/config.marker", "utf8")
+    const denied = []
+    for (const [route, path] of [["deepseek-openai", "/chat/completions"], ["anthropic", "/v1/messages"]]) {
+      const response = await fetch("http://127.0.0.1:${address.port}/broker/" + process.env.CLOUDAGENTS_MCP_TOKEN + "/" + route + path, { method: "POST", body: "{}" })
+      denied.push([route, response.status])
+    }
+    console.log(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: "pi-session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ env, marker, denied }) } }
+    } }))
+    send(req.id, { stopReason: "end_turn" })
+  }
+}).on("close", () => process.exit(0))
+`))
+      const { task, run: base } = runningTask("pi-harness")
+      const run: Run = { ...base, provider: "pi", model: "pi-deepseek-flash" }
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, { model: "pi-deepseek-flash" })
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        const state = yield* store.read
+        expect(state.runs.find((r) => r.id === run.id)?.status).toBe("succeeded")
+        const message = state.messages.find((m) => m.runId === run.id && m.role === "agent")
+        const reported = JSON.parse(message?.text ?? "{}") as {
+          readonly env: Record<string, string>
+          readonly marker: string
+          readonly denied: ReadonlyArray<readonly [string, number]>
+        }
+        expect(Object.keys(reported.env).sort()).toEqual(["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"])
+        expect(reported.env.DEEPSEEK_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/broker\/.+\/deepseek-openai$/)
+        expect(reported.marker).toBe("operator setup")
+        expect(reported.denied).toEqual([["deepseek-openai", 424], ["anthropic", 403]])
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+        server.closeAllConnections()
+        server.close()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    process.env.PATH = pathBefore
+    await rm(root, { recursive: true, force: true })
+  }
+}, 15_000)
+
+test("a standalone harness run without a DeepSeek key or harness setup fails before its CLI starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-harness-credential-"))
+  const cli = join(root, "omp-acp.ts")
+  const { config, layer } = harnessLayer(root, cli, { credentials: { user: "test", dev: true } })
+  config.agentCommands.omp = config.agentCommands.anthropic
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const { task, run: base } = runningTask("omp-no-credential")
+      const run: Run = { ...base, provider: "omp", model: "omp-deepseek-flash" }
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const result = yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, { model: "omp-deepseek-flash" }).pipe(Effect.either)
+      expect(Either.isLeft(result)).toBe(true)
+      if (Either.isLeft(result)) expect(result.left.message).toContain("No DeepSeek credential")
+      expect((yield* store.read).runs.find((r) => r.id === run.id)?.status).toBe("failed")
     }).pipe(Effect.provide(layer)))
   } finally {
     await rm(root, { recursive: true, force: true })

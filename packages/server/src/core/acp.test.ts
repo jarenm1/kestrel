@@ -80,6 +80,19 @@ describe("ACP driver", () => {
     expect(refused.outcomes).toEqual([{ status: "failed", error: "session/resume: session not found" }])
   })
 
+  test("an adapter that only implements session/load resumes with it, not with session/resume", () => {
+    const h = harness({ resumeSession: "s-old", resumeMethod: "session/load" })
+    h.driver.start()
+    h.reply({})
+    expect(h.last()).toMatchObject({
+      method: "session/load",
+      params: { sessionId: "s-old", cwd: "/threads/t1/kestrel" },
+    })
+    h.reply({ configOptions: [] })
+    expect(h.sessions).toEqual(["s-old"])
+    expect(h.last().method).toBe("session/prompt")
+  })
+
   test("the thinking level is set through whatever option the model's thought_level category names, only when offered", () => {
     const opencode = harness({ model: "opencode/glm-5.3-flash-free", effort: "high" })
     opencode.driver.start()

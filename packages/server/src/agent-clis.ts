@@ -244,9 +244,16 @@ export interface Harness {
   /** The oldest `[major, minor]` version (`<bin> --version`) the harness works with; null when any will do. */
   readonly minVersion: readonly [number, number] | null
   /**
-   * Whether a run gets the broker's keys. A standalone harness reaches models through the broker like a vendor CLI;
-   * OpenCode (free or Go) and Antigravity run their own provider's models, so the broker's keys would only offer them
-   * models they are not there for.
+   * The ACP method that reopens a recorded session, when the adapter does not implement `session/resume`. Pi's
+   * `pi-acp` implements only `session/new` and `session/load` (`loadSession: true`, no `resumeSession`).
+   */
+  readonly acpResume?: "session/load"
+  /** Executables the harness's own binary starts from PATH; a run needs them as much as the binary itself. */
+  readonly requires?: readonly string[]
+  /**
+   * Whether a run gets the broker's keys. A vendor CLI or a standalone ACP harness (OMP, Pi, Hermes) reaches models
+   * through the broker like a vendor CLI; OpenCode (free or Go) and Antigravity run their own provider's models, so
+   * the broker's keys would only offer them models they are not there for.
    */
   readonly broker: boolean
 }
@@ -260,10 +267,15 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   deepseek: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   minimax: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  deepinfra: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
   opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
   // The Go plan's sign-in is a key in OpenCode's credential store, which `auth import` fills from 2.1.
   "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
   google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
+  // Standalone ACP harnesses speak ACP themselves and reach models through the broker's harness channel (`core/harness.ts`).
+  omp: { conversation: "acp", cli: null, bin: "omp", minVersion: null, broker: true },
+  pi: { conversation: "acp", cli: null, bin: "pi-acp", minVersion: null, acpResume: "session/load", requires: ["pi"], broker: true },
+  hermes: { conversation: "acp", cli: null, bin: "hermes", minVersion: null, broker: true },
 }

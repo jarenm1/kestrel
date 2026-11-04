@@ -73,12 +73,23 @@ const PROVISION = [
   "set -e",
   "export DEBIAN_FRONTEND=noninteractive",
   "apt-get update",
-  // The box and its sandbox, the agent CLIs' runtime, and the desktop session with what `install` needs to build
-  // its capture helper.
-  "apt-get install -y bubblewrap git curl ca-certificates nodejs npm weston xwayland openbox hsetroot xterm xdotool ffmpeg build-essential libx11-dev libxext-dev libxdamage-dev libxfixes-dev",
-  "npm install -g @anthropic-ai/claude-code @openai/codex @opencode/cli",
+  // The box and its sandbox, the desktop session with what `install` needs to build its capture helper, and curl's
+  // gpg for the NodeSource key. Node comes from NodeSource below, not Ubuntu's 18.
+  "apt-get install -y bubblewrap git curl ca-certificates gnupg weston xwayland openbox hsetroot xterm xdotool ffmpeg build-essential libx11-dev libxext-dev libxdamage-dev libxfixes-dev",
+  // Pi's CLI needs Node >= 22.19 (`node:module`'s enableCompileCache); Ubuntu 24.04 ships Node 18, so install Node 22
+  // before the npm globals. NodeSource's `nodejs` package carries npm.
+  "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
+  "apt-get install -y nodejs",
+  "node -e 'process.exit(Number(process.versions.node.split(\".\")[0]) >= 22 ? 0 : 1)' || { echo 'Node 22 or newer is required for Pi' >&2; exit 1; }",
+  "npm install -g @anthropic-ai/claude-code @openai/codex @opencode/cli @earendil-works/pi-coding-agent pi-acp",
+  // Fail here, not on the first Pi run, if the Pi CLI cannot start on this VM's Node.
+  "pi --version",
   // Antigravity CLI (`agy`) ships only through its own installer; system-wide, so the VM's user finds it.
   "curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+  // OMP and Hermes install into the invoking user's home (their own distributions), where a run's $HOME tools are
+  // bound from. `$SUDO_USER` is the Lima user: this script itself runs under sudo.
+  'sudo -u "$SUDO_USER" sh -lc "curl -fsSL https://omp.sh/install | sh"',
+  'sudo -u "$SUDO_USER" sh -lc "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"',
   // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; bubblewrap needs one. Give bwrap a profile
   // that allows them, only when the VM's user (this runs under sudo) cannot already make one.
   'if ! sudo -u "$SUDO_USER" bwrap --ro-bind / / true 2>/dev/null; then',

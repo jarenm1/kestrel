@@ -106,6 +106,12 @@ export const PROVIDERS: readonly Provider[] = [
     kind: "apikey",
     hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported.",
   },
+  {
+    id: "deepinfra",
+    label: "DeepInfra",
+    kind: "apikey",
+    hint: "Use a DeepInfra API key. Its models run through DeepInfra's Anthropic-compatible endpoint.",
+  },
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },

@@ -71,8 +71,8 @@ export function Connections() {
               {list.filter((connection) => connection.kind !== "apikey").map((connection) =>
                 connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                   <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
-                ) : connection.kind === "cli" && connection.provider === "opencode" ? (
-                  <FreeOpenCodeRow key={connection.provider} connection={connection} />
+                ) : connection.kind === "cli" && MODEL_PROVIDERS.find((provider) => provider.id === connection.provider)?.connections.length === 0 ? (
+                  <FreeHarnessRow key={connection.provider} connection={connection} />
                 ) : (
                   <ConnectionRow key={connection.provider} connection={connection} />
                 ),
@@ -180,7 +180,9 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
         {provider.connections.length === 0 ? (
           <div className="flex items-center gap-2">
             <strong>{provider.name}</strong>
-            <Badge variant="neutral">no sign-in needed</Badge>
+            <Badge variant="neutral">
+              {provider.id === "opencode" ? "no sign-in needed" : "harness login or DeepSeek key"}
+            </Badge>
           </div>
         ) : (
           <ConnectionHeader label={provider.name} connected={connected} />
@@ -191,7 +193,7 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
         {!connected && (
           <span className="text-xs text-muted-foreground">
             {provider.connections.length === 0
-              ? `${provider.name} is not installed on this box.`
+              ? `${provider.name} is not installed on this box.${provider.setup === undefined ? "" : ` Install it with: ${provider.setup}.`}`
               : "Connect a key or subscription above to use these."}
           </span>
         )}
@@ -244,15 +246,18 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
   )
 }
 
-/** Free OpenCode has installation state, not a key or subscription to manage. */
-function FreeOpenCodeRow({ connection }: { connection: Connection }) {
+/** A harness that needs no connection has installation state, not a key or subscription to manage. */
+function FreeHarnessRow({ connection }: { connection: Connection }) {
+  const provider = MODEL_PROVIDERS.find((candidate) => candidate.id === connection.provider)
+  const name = provider?.name ?? connection.label
+  const tools = provider?.mcp === false ? "Kestrel's MCP tools are not available in its runs." : "MCP tools are available."
   return (
     <div className="flex flex-col gap-1 px-5 py-4">
       <ConnectionHeader label={connection.label} connected={connection.available} />
       <span className="text-xs text-muted-foreground">
         {connection.available
-          ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
-          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
+          ? `Installed on the box. ${provider?.id === "opencode" ? "Free models need no sign-in or Go key." : "Runs use the harness's own login, or the DeepSeek API key."} ${tools}`
+          : `${connection.error ?? `${name} is not installed on this box`}.${provider?.setup === undefined ? "" : ` Install it with: ${provider.setup}.`}`}
       </span>
     </div>
   )

@@ -111,21 +111,30 @@ setting.
 
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
 
-OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
-Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX
-complexity without a current need. Pi may be reconsidered later, but Kestrel's constrained customization would
-limit its value. Model selection continues to choose the existing provider's CLI; OpenCode, Antigravity and the
-separately added third-party API-key providers remain supported.
+OMP, Pi and Hermes are supported as standalone ACP harnesses, but there is no separate per-thread harness picker: a
+thread's model selects its provider's harness, and each thread persists that model with its runs. Their #217 integration
+was reverted in #239 (extra harness setup and bundled key-dependent model choices added UX complexity without a current
+need); provider and harness support is restored without the picker. Kestrel's constrained customization leaves Pi's
+ACP adapter without MCP tools.
 
-At startup, historical runs from the retired harnesses retain their tasks, messages and run records, but lose
-obsolete provider/model/harness routing metadata; their unusable resume targets are discarded before state
-validation. The migration is written atomically only after the remaining state validates, so unrelated corruption
-still rejects startup without overwriting the file. New requests continue to reject the retired identifiers.
+OMP, Pi and Hermes catalog models are DeepSeek's. Their runs get the broker's `harness` grant, which authorizes only the
+user's DeepSeek connection and exports `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` at the broker's OpenAI-format
+`deepseek-openai` route; no real key enters the sandbox. Each harness also mounts its per-user harness home
+(`<dataDir>/users/<login>/harnesses/<harness>` at `~/.omp`, `~/.pi` or `~/.hermes`), where the operator's own setup and
+sessions live; a run with neither a DeepSeek connection nor a configured harness home is refused before its CLI starts.
+Pi's adapter implements `session/load` (not `session/resume`), so its runs reopen a recorded session with that method
+and the replayed conversation updates are kept out of the new run's transcript.
+
+At startup, historical runs from #217 keep their tasks, messages and run records. A box that ran the #239 retirement
+already cleared their obsolete provider/model/harness routing metadata and resume targets; this integration no longer
+strips those fields, so new OMP, Pi and Hermes runs persist normally and their sessions stay resumable. State
+decoding still rejects unknown providers and models, so unrelated corruption fails startup without overwriting the
+file.
 Claude Code session records carry the actual model provider, including third-party gateways, so switching to
 Anthropic cannot resume a gateway session and returning to that gateway can resume its own.
-The Hub also resets the six retired model selections in saved automations to `null` (the box default), preserving
-their prompts, schedules, GitHub triggers and enabled state. Model pickers exclude a connected account when it
-explicitly reports unavailable; another usable connection for the same provider can still offer its models.
+Model pickers exclude a connected account when it explicitly reports unavailable; another usable connection for the
+same provider can still offer its models. Saved automation models are kept as stored, including OMP, Pi and Hermes
+selections.
 
 The desktop and mobile composers' thinking controls open a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Off leaves it empty. They offer only the selected model's supported effort levels, ordered lowest first, with `none` labeled Off. There is no Default stop: an absent or unsupported saved level selects and sends the model's catalogued default effort, or its lowest supported effort when no default is specified (Off where supported, otherwise Low). Z.ai models default to Max, preserving the provider's default reasoning depth. With no model or no effort support, the control is hidden and effort is unspecified. The choice survives thread changes and reloads. Desktop uses a popover; mobile web and Expo share a touch-sized bottom sheet. The web sliders use native range inputs for pointer/touch input, arrow keys, Home and End; Expo uses React Native touch responders and screen-reader increment/decrement actions.
 

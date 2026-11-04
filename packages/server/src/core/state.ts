@@ -90,63 +90,6 @@ export interface StoreShape {
 
 export class StateStore extends Context.Tag("cloudagents/StateStore")<StateStore, StoreShape>() {}
 
-/**
- * Provider ids of the retired standalone ACP harnesses (OMP, Pi, Hermes) — the same strings were their harness ids —
- * and the models they offered. Runs and resume targets persisted while they were selectable still name them, but they
- * are no longer in the model catalog, so only the fields holding one of these values are dropped before decoding. Every
- * other field, record and id is left for the schema to accept or reject: unrelated corruption still fails startup
- * instead of being erased.
- */
-const RETIRED_HARNESS_IDS: Record<string, true> = { omp: true, pi: true, hermes: true }
-const RETIRED_MODELS: Record<string, true> = {
-  "omp-deepseek-flash": true,
-  "omp-deepseek-pro": true,
-  "pi-deepseek-flash": true,
-  "pi-deepseek-pro": true,
-  "hermes-deepseek-flash": true,
-  "hermes-deepseek-pro": true,
-}
-
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-
-/**
- * Drops the executable routing metadata of runs recorded on a retired harness: the run keeps its id, prompt, status
- * and timestamps, and simply has no provider, model or harness it could be run with again. A resume target of a retired
- * harness is discarded too, so the thread's next supported run starts a fresh session with the conversation history.
- * Returns whether anything was dropped (and the file should be rewritten).
- */
-const dropRetiredHarnessState = (data: Record<string, unknown>): boolean => {
-  let dropped = false
-  if (Array.isArray(data.runs)) {
-    for (const run of data.runs) {
-      if (!isObject(run)) continue
-      if (typeof run.provider === "string" && RETIRED_HARNESS_IDS[run.provider] === true) {
-        delete run.provider
-        dropped = true
-      }
-      if (typeof run.model === "string" && RETIRED_MODELS[run.model] === true) {
-        delete run.model
-        dropped = true
-      }
-      if (typeof run.harness === "string" && RETIRED_HARNESS_IDS[run.harness] === true) {
-        delete run.harness
-        dropped = true
-      }
-    }
-  }
-  if (Array.isArray(data.runSessions)) {
-    const kept = data.runSessions.filter(
-      (session) => !(isObject(session) && typeof session.provider === "string" && RETIRED_HARNESS_IDS[session.provider] === true),
-    )
-    if (kept.length !== data.runSessions.length) {
-      data.runSessions = kept
-      dropped = true
-    }
-  }
-  return dropped
-}
-
 const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
   Effect.gen(function* () {
     const raw = yield* Effect.tryPromise({
@@ -163,17 +106,9 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
     const parsed = yield* Schema.decodeUnknown(Schema.parseJson())(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
-    const dropped = isObject(parsed) && dropRetiredHarnessState(parsed)
     const decoded = yield* Schema.decodeUnknown(PersistedState)(parsed).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
-    // Rewritten only once the rest of the file decoded, so a file with unrelated corruption keeps its bytes.
-    if (dropped) {
-      yield* Effect.tryPromise({
-        try: () => writeAtomic(file, JSON.stringify(parsed)),
-        catch: (e) => new InternalError({ message: `cannot rewrite ${file}: ${String(e)}` }),
-      })
-    }
     return {
       tasks: [...decoded.tasks],
       messages: [...decoded.messages],

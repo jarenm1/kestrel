@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http"
-import { BROKER_PROVIDERS, BROKER_UPSTREAMS, type BrokerProvider, CredentialBroker, type CredentialBrokerShape } from "./index"
+import { brokerUpstream, CredentialBroker, type CredentialBrokerShape } from "./index"
 
 export const BROKER_PREFIX = "/broker/"
 
@@ -38,20 +38,22 @@ const readBody = (req: IncomingMessage): Promise<Uint8Array<ArrayBuffer>> => {
   return promise
 }
 
-const upstreamHeaders = (headers: IncomingHttpHeaders, provider: BrokerProvider, key: string): Headers => {
+const upstreamHeaders = (headers: IncomingHttpHeaders, keyHeader: "x-api-key" | "bearer", key: string): Headers => {
   const out = new Headers()
   for (const [name, value] of Object.entries(headers)) {
     if (value === undefined || HOP_BY_HOP.has(name) || CLIENT_DROP.has(name)) continue
     out.set(name, Array.isArray(value) ? value.join(", ") : value)
   }
-  if (BROKER_UPSTREAMS[provider].keyHeader === "x-api-key") out.set("x-api-key", key)
+  if (keyHeader === "x-api-key") out.set("x-api-key", key)
   else out.set("authorization", `Bearer ${key}`)
   return out
 }
 
 /**
- * Forwards `/broker/<token>/<provider>/<path>` to the provider with the real key injected.
- * The token is the only credential the sandbox holds; it is checked against live runs.
+ * Forwards `/broker/<token>/<route>/<path>` to the route's upstream with the real key injected. A route is a provider
+ * or an extra OpenAI-format route a standalone harness speaks (`HARNESS_UPSTREAMS`); either way the grant names the
+ * provider whose key pays for the call. The token is the only credential the sandbox holds; it is checked against
+ * live runs.
  */
 export const handleBroker = async (
   broker: CredentialBrokerShape,
@@ -60,36 +62,36 @@ export const handleBroker = async (
 ): Promise<void> => {
   const match = /^\/broker\/([^/?#]+)\/([^/?#]+)(\/[^?#]*)?(\?[^#]*)?(?:#.*)?$/.exec(req.url ?? "")
   if (!match) return sendJson(res, 404, { _tag: "NotFound", message: "no such broker route" })
-  const [, token = "", providerRaw = "", rest = "", query = ""] = match
+  const [, token = "", routeRaw = "", rest = "", query = ""] = match
 
   const grant = await Effect.runPromise(broker.grantForToken(token))
   if (grant === null) return sendJson(res, 401, { _tag: "Unauthorized", message: "unknown or revoked broker token" })
 
-  const provider = BROKER_PROVIDERS.find((p) => p === providerRaw)
-  if (provider === undefined) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${providerRaw}` })
-  if (!grant.providers.includes(provider)) {
-    return sendJson(res, 403, { _tag: "Forbidden", message: `this run is not authorized for ${provider}` })
+  const route = brokerUpstream(routeRaw)
+  if (route === null) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${routeRaw}` })
+  if (!grant.providers.includes(route.provider)) {
+    return sendJson(res, 403, { _tag: "Forbidden", message: `this run is not authorized for ${routeRaw}` })
   }
 
-  const key = await Effect.runPromise(broker.upstreamKey(provider, grant.user))
+  const key = await Effect.runPromise(broker.upstreamKey(route.provider, grant.user))
   if (key === null) {
-    return sendJson(res, 424, { _tag: "MissingCredential", message: `no ${provider} credential is configured` })
+    return sendJson(res, 424, { _tag: "MissingCredential", message: `no ${route.provider} credential is configured` })
   }
 
   const method = req.method ?? "GET"
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(req)
-  const url = `${BROKER_UPSTREAMS[provider].base}${rest}${query}`
+  const url = `${route.base}${rest}${query}`
 
   let upstream: Response
   try {
     upstream = await fetch(url, {
       method,
-      headers: upstreamHeaders(req.headers, provider, key),
+      headers: upstreamHeaders(req.headers, route.keyHeader, key),
       body,
       redirect: "manual",
     })
   } catch {
-    return sendJson(res, 502, { _tag: "BadGateway", message: `upstream ${provider} unreachable` })
+    return sendJson(res, 502, { _tag: "BadGateway", message: `upstream ${routeRaw} unreachable` })
   }
 
   res.statusCode = upstream.status

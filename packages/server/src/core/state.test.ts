@@ -15,7 +15,7 @@ const configOf = (root: string): ServerConfig => ({
   port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
   stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
   shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
-  agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
+  agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", deepinfra: "", opencode: "", "opencode-go": "", google: "", omp: "", pi: "", hermes: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
   sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null,
   taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
   webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
@@ -51,19 +51,19 @@ const run = (id: string, taskId: string, extra: Record<string, unknown>): Record
   id, taskId, prompt: id, status: "succeeded", startedAt: NOW, endedAt: NOW, exitCode: 0, ...extra,
 })
 
-/** State written while OMP, Pi and Hermes were selectable, alongside supported runs and sessions. */
+/** Runs and sessions on the standalone ACP harnesses, alongside supported ones. */
 const mixedState = (): RawState => ({
-  tasks: [task("supported-thread"), task("retired-thread")],
+  tasks: [task("supported-thread"), task("standalone-thread")],
   messages: [
     message("m1", "supported-thread", "r1", "user", "supported request"),
-    message("m2", "retired-thread", "r2", "user", "retired request"),
-    message("m3", "retired-thread", "r3", "agent", "retired answer"),
+    message("m2", "standalone-thread", "r2", "user", "standalone request"),
+    message("m3", "standalone-thread", "r3", "agent", "standalone answer"),
   ],
   runs: [
     run("r1", "supported-thread", { provider: "anthropic", model: "claude-opus-5", harness: "claude" }),
-    run("r2", "retired-thread", { provider: "omp", model: "omp-deepseek-pro", harness: "omp" }),
-    run("r3", "retired-thread", { provider: "hermes", model: "hermes-deepseek-flash", harness: "hermes" }),
-    run("r4", "retired-thread", { provider: "pi" }),
+    run("r2", "standalone-thread", { provider: "omp", model: "omp-deepseek-pro", harness: "omp" }),
+    run("r3", "standalone-thread", { provider: "hermes", model: "hermes-deepseek-flash", harness: "hermes" }),
+    run("r4", "standalone-thread", { provider: "pi" }),
   ],
   pendingAsks: [],
   uploads: [],
@@ -74,9 +74,7 @@ const mixedState = (): RawState => ({
   ],
 })
 
-const readRaw = async (file: string): Promise<RawState> => JSON.parse(await readFile(file, "utf8")) as RawState
-
-describe("retired harness state", () => {
+describe("standalone ACP harness state", () => {
   let root: string
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "kestrel-state-"))
@@ -85,56 +83,38 @@ describe("retired harness state", () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  test("starts from mixed supported and retired runs, keeping history and supported sessions", async () => {
+  test("loads runs and resume targets on every provider, including OMP, Pi and Hermes", async () => {
     const file = join(root, "state.json")
     await writeFile(file, JSON.stringify(mixedState()))
 
     const state = await loadState(root)
 
-    expect(state.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread"])
+    expect(state.tasks.map((t) => t.id)).toEqual(["supported-thread", "standalone-thread"])
     expect(state.messages.map((m) => m.id)).toEqual(["m1", "m2", "m3"])
-    expect(state.messages.map((m) => m.text)).toEqual(["supported request", "retired request", "retired answer"])
+    expect(state.messages.map((m) => m.text)).toEqual(["supported request", "standalone request", "standalone answer"])
     expect(state.runs.map((r) => r.id)).toEqual(["r1", "r2", "r3", "r4"])
     expect(state.runs[0]!.provider).toBe("anthropic")
     expect(state.runs[0]!.model).toBe("claude-opus-5")
-    for (const retired of state.runs.slice(1)) {
-      expect(retired.provider).toBeUndefined()
-      expect(retired.model).toBeUndefined()
-      expect(retired.prompt).toBe(retired.id)
-      expect(retired.status).toBe("succeeded")
-    }
-    // Only the supported resume target survives; a retired one cannot continue on any supported harness.
-    expect(state.runSessions.map((s) => s.runId)).toEqual(["r1"])
-    expect(state.runSessions[0]!.provider).toBe("anthropic")
-
-    const raw = await readRaw(file)
-    expect(raw.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread"])
-    expect(raw.messages.map((m) => m.id)).toEqual(["m1", "m2", "m3"])
-    expect(raw.runs.map((r) => r.id)).toEqual(["r1", "r2", "r3", "r4"])
-    // A supported run keeps its routing metadata, including the harness field the current schema does not read.
-    expect(raw.runs[0]).toMatchObject({ provider: "anthropic", model: "claude-opus-5", harness: "claude" })
-    for (const retired of raw.runs.slice(1)) {
-      expect(retired).not.toHaveProperty("provider")
-      expect(retired).not.toHaveProperty("model")
-      expect(retired).not.toHaveProperty("harness")
-    }
-    expect(raw.runSessions.map((s) => s.runId)).toEqual(["r1"])
+    expect(state.runs[1]!).toMatchObject({ provider: "omp", model: "omp-deepseek-pro", prompt: "r2", status: "succeeded" })
+    expect(state.runs[2]!).toMatchObject({ provider: "hermes", model: "hermes-deepseek-flash" })
+    expect(state.runs[3]!).toMatchObject({ provider: "pi", prompt: "r4", status: "succeeded" })
+    // Their resume targets remain: these providers are selectable again, so a session is still addressable.
+    expect(state.runSessions.map((s) => s.runId)).toEqual(["r1", "r2", "r4"])
+    expect(state.runSessions.map((s) => s.provider)).toEqual(["anthropic", "omp", "pi"])
   })
 
-  test("the rewritten state reloads unchanged and is not rewritten again", async () => {
+  test("a decodable state file is not rewritten", async () => {
     const file = join(root, "state.json")
-    await writeFile(file, JSON.stringify(mixedState()))
+    const original = JSON.stringify(mixedState())
+    await writeFile(file, original)
+
     await loadState(root)
-    const rewritten = await readFile(file, "utf8")
-    expect(rewritten).not.toContain("omp-deepseek-pro")
-    expect(rewritten).not.toContain("hermes-deepseek-flash")
-    expect(rewritten).not.toContain('"sessionId":"omp-session-r2"')
+    expect(await readFile(file, "utf8")).toBe(original)
 
     const reloaded = await loadState(root)
-    expect(await readFile(file, "utf8")).toBe(rewritten)
+    expect(await readFile(file, "utf8")).toBe(original)
     expect(reloaded.runs.map((r) => r.id)).toEqual(["r1", "r2", "r3", "r4"])
-    expect(reloaded.runSessions.map((s) => s.runId)).toEqual(["r1"])
-    expect(reloaded.runs.slice(1).every((r) => r.provider === undefined && r.model === undefined)).toBe(true)
+    expect(reloaded.runSessions.map((s) => s.runId)).toEqual(["r1", "r2", "r4"])
   })
 
   test("unrelated corruption still fails startup and leaves the file untouched", async () => {
@@ -149,7 +129,6 @@ describe("retired harness state", () => {
     expect(Exit.isFailure(exit)).toBe(true)
     const failure = Exit.isFailure(exit) ? Cause.failureOption(exit.cause) : Option.none<InternalError>()
     expect(Option.isSome(failure) ? failure.value.message : "").toContain(`corrupt state file ${file}`)
-    // The retired fields were only dropped in memory, never written over a file that did not validate.
     expect(await readFile(file, "utf8")).toBe(original)
   })
 

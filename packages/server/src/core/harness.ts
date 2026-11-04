@@ -1,7 +1,7 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
 import {
@@ -9,7 +9,9 @@ import {
   RunItems,
   DEFAULT_MODEL_PROVIDER,
   MODEL_PROVIDERS,
+  acpModelOf,
   modelInfo,
+  providerInfo,
   type AgentEffort,
   type AgentItem,
   type AgentModel,
@@ -23,7 +25,7 @@ import {
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, MODEL_HARNESS, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
-import { CredentialBroker, type BrokerProvider } from "../broker"
+import { CredentialBroker, credentialFor, type BrokerChannel, type BrokerProvider } from "../broker"
 import { boxControl } from "../control/client"
 import { Config, VERSION } from "../config"
 import { harnessAvailability, harnessProbe } from "../capabilities"
@@ -101,10 +103,22 @@ export interface AgentChoice {
 
 /**
  * Where a provider's CLI keeps a run's native sessions: `task-home` under the thread's own home (the run uses the
- * broker's keys), `cli-login` in the user's CLI login directory (`AgentCli.configEnv`, e.g. `CLAUDE_CONFIG_DIR`).
- * A session kept in one is not found from the other, so a run resumes only a session kept where it keeps its own.
+ * broker's keys), `cli-login` in the user's CLI login directory (`AgentCli.configEnv`, e.g. `CLAUDE_CONFIG_DIR`) or,
+ * for a standalone harness, its per-user harness home. A session kept in one is not found from the other, so a run
+ * resumes only a session kept where it keeps its own.
  */
 export type SessionContinuation = "task-home" | "cli-login"
+
+/**
+ * The config directory each standalone harness keeps its own settings and sessions in, under the run's home. A run
+ * mounts the user's harness home (`<dataDir>/users/<login>/harnesses/<harness>`) there, so an operator's `HOME=<harness
+ * home> omp login` (or `pi`, `hermes setup`) is what the run sees.
+ */
+const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
+  omp: ".omp",
+  pi: ".pi",
+  hermes: ".hermes",
+}
 
 /** What a run's agent session starts from (see Core.sendMessage). */
 export interface RunStart {
@@ -137,6 +151,8 @@ interface ActiveRun {
   sessionId: string | null
   /** Where the CLI keeps the session; null for replays, whose sessions come from a fixture. */
   readonly continuation: SessionContinuation | null
+  /** A `session/load` is replaying the old conversation; those updates are not this turn's items. */
+  replayingAcpSession: boolean
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
   readonly agentKind: ConversationKind | null
@@ -525,6 +541,9 @@ export const AgentHarnessLive = Layer.effect(
       if (trimmed.startsWith("{")) {
         try {
           const parsed: unknown = JSON.parse(trimmed)
+          // A `session/load` replays the old conversation before the new turn: those updates are already in the
+          // thread's transcript and must not become items of this run.
+          if (entry.replayingAcpSession && typeof parsed === "object" && parsed !== null && "method" in parsed && parsed.method === "session/update") return
           entry.driver?.receive(parsed)
           if (entry.agentKind === "claude" && typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "result" && "is_error" in parsed && parsed.is_error === true) {
             const result = "result" in parsed && typeof parsed.result === "string" ? parsed.result : null
@@ -596,6 +615,10 @@ export const AgentHarnessLive = Layer.effect(
               context: session.seed,
               sessionId: null,
               continuation: session.continuation,
+              replayingAcpSession:
+                session.conversation?.kind === "acp" &&
+                session.conversation.input.resumeSession !== null &&
+                session.conversation.input.resumeMethod === "session/load",
               driver: null,
               agentKind: session.conversation?.kind ?? null,
               diagnostic: null,
@@ -640,6 +663,9 @@ export const AgentHarnessLive = Layer.effect(
                 onSession: (sessionId) => {
                   entry.sessionId = sessionId
                   runFork(recordSession(run.id, sessionId, conversation.provider, entry.continuation))
+                },
+                onLoaded: () => {
+                  entry.replayingAcpSession = false
                 },
                 onDone,
               })
@@ -730,9 +756,11 @@ export const AgentHarnessLive = Layer.effect(
       spawn: (task, run, start, display, user, choice) => {
         const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
-          // A vendor CLI or gateway run reaches models through the broker; a harness that runs its own models
-          // (OpenCode free or Go, Antigravity) gets no broker access at all.
-          const channel: BrokerProvider | null = MODEL_HARNESS[provider].broker ? (provider as BrokerProvider) : null
+          // A vendor CLI or gateway run reaches models through the broker; a standalone ACP harness (OMP, Pi, Hermes)
+          // uses the broker's harness channel, which serves the DeepSeek models it offers; a harness that runs its own
+          // models (OpenCode free or Go, Antigravity) gets no broker access at all.
+          const route = MODEL_HARNESS[provider]
+          const channel: BrokerChannel = route.broker ? (route.cli === null ? "harness" : (provider as BrokerProvider)) : null
           if (MODEL_HARNESS[provider].conversation === "acp") {
             // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run. Probe only the
             // harness this run needs, so a launch never runs every harness's `--version`.
@@ -752,6 +780,19 @@ export const AgentHarnessLive = Layer.effect(
           // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
           const ghBinHost = join(homeDir, ".kestrel", "gh")
           const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
+          // A standalone harness keeps its own settings, provider configuration and session store in one per-user
+          // home: the directory `docs/harnesses.md` tells an operator to set the harness up in (`HOME=<harness home>
+          // omp login`, `pi`, `hermes setup`), and the one every run of that harness mounts. It is per user, so one
+          // user's harness login is never visible to another's runs.
+          const harnessConfigDir = route.conversation === "acp" ? ACP_CONFIG_DIRS[provider] : undefined
+          const harnessHome =
+            harnessConfigDir === undefined ? null : join(config.dataDir, "users", user, "harnesses", provider)
+          const harnessConfigInside =
+            harnessConfigDir === undefined ? null : join(agentHome(settings, homeDir), harnessConfigDir)
+          const harnessBinds =
+            harnessHome !== null && harnessConfigInside !== null && settings.level !== "off"
+              ? [{ host: harnessHome, sandbox: harnessConfigInside }]
+              : []
 
           const started = yield* Effect.gen(function* () {
             // The run's token authorizes its MCP session and, where the harness uses the broker, its model calls.
@@ -770,6 +811,16 @@ export const AgentHarnessLive = Layer.effect(
                 await mkdir(ghBinHost, { recursive: true })
                 await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
                 await chmod(join(ghBinHost, "gh"), 0o755)
+                if (harnessHome !== null && harnessConfigDir !== undefined) {
+                  // Owner-only: the harness writes its own settings and sessions here, and only this user's runs read it.
+                  await mkdir(harnessHome, { recursive: true, mode: 0o700 })
+                  // An unsandboxed run's HOME is the task home, not the host home, so the harness home is linked in.
+                  if (settings.level === "off") {
+                    await symlink(harnessHome, join(homeDir, harnessConfigDir)).catch((e: NodeJS.ErrnoException) => {
+                      if (e.code !== "EEXIST") throw e
+                    })
+                  }
+                }
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
@@ -789,13 +840,39 @@ export const AgentHarnessLive = Layer.effect(
             const cwd = agentCwd(workspacePath, task)
             // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
             // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
+            // A standalone harness with a per-user config dir keeps its sessions there, and every run of it mounts
+            // that dir (see `harnessHome`), so its sessions always live where its CLI keeps them. OpenCode keeps its
+            // sessions in the run's own home instead.
             const harness = MODEL_HARNESS[provider]
-            const continuation: SessionContinuation = logins.some((login) => login.provider === harness.cli)
-              ? "cli-login"
-              : "task-home"
+            const continuation: SessionContinuation = harness.cli === null
+              ? ACP_CONFIG_DIRS[provider] === undefined
+                ? "task-home"
+                : "cli-login"
+              : logins.some((login) => login.provider === harness.cli)
+                ? "cli-login"
+                : "task-home"
             const resumed = start.resume?.continuation === continuation ? start.resume : null
             const resumeSession = resumed?.sessionId ?? null
             const prompt = resumed?.prompt ?? start.fresh
+            // A standalone harness's catalog models are DeepSeek's. The run needs a credential for them before its CLI
+            // starts, or the first model call fails mid-turn: the user's DeepSeek key through the broker, or a harness
+            // home the operator has set up (the harness's own login and provider configuration, mounted above).
+            if (channel === "harness" && !config.fakeAgent) {
+              const userCreds = yield* credentials.get(user)
+              const configured =
+                harnessHome !== null &&
+                (yield* Effect.promise(() => readdir(harnessHome).then((entries) => entries.length > 0, () => false)))
+              if (credentialFor(userCreds, "deepseek") === null && !configured) {
+                return yield* Effect.fail(
+                  new InternalError({
+                    message:
+                      `No DeepSeek credential is configured, so ${providerInfo(provider).name} models cannot run. ` +
+                      `Add a DeepSeek key in Settings › Connections, or set the harness up in its harness home` +
+                      `${harnessHome === null ? "" : ` (${harnessHome})`}.`,
+                  }),
+                )
+              }
+            }
             const creds = yield* credentials.get(task.owner)
             const gitIdentity = creds?.dev
               ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
@@ -830,14 +907,14 @@ export const AgentHarnessLive = Layer.effect(
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
                 // Continues the agent session of the task's previous run, so the agent keeps the thread's context.
                 ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
-                // A harness that runs its own models (free OpenCode, the Go plan, Antigravity) gets no broker keys:
-                // they would only offer it models it is not there for.
+                // A standalone harness gets the DeepSeek key/base URL of its harness channel; a harness that runs its
+                // own models (free OpenCode, the Go plan, Antigravity) gets no broker keys at all.
                 ...(MODEL_HARNESS[provider].broker ? keptBroker : {}),
                 ...loginEnv,
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
-              binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
+              binds: [...loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })), ...harnessBinds],
               pathPrefix: [ghBinAgent],
             })
 
@@ -883,10 +960,16 @@ export const AgentHarnessLive = Layer.effect(
                       prompt,
                       cwd,
                       resumeSession,
-                      model: choice.model,
+                      // Pi's adapter has no `session/resume`; it reopens a recorded session with `session/load`.
+                      resumeMethod: harness.acpResume,
+                      // The harness's own model namespace; the catalog id is it for OpenCode and Antigravity.
+                      model: choice.model === undefined ? undefined : acpModelOf(choice.model),
                       effort: choice.effort,
-                      // The thread's tools, as the other harnesses get them from the run's MCP config.
-                      mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
+                      // The thread's tools, as the other harnesses get them from the run's MCP config. Pi's ACP
+                      // adapter advertises no MCP support, so its runs get none.
+                      mcpServers: providerInfo(provider).mcp === false
+                        ? []
+                        : [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
                     },
                   }),
                 } satisfies Record<ConversationKind, () => RunConversation>)[harness.conversation](),

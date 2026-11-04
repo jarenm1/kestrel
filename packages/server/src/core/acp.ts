@@ -3,9 +3,10 @@ import { isRecord } from "./transcript"
 
 /*
  * A run whose CLI speaks the Agent Client Protocol (ACP) over its stdin/stdout, as `opencode acp` does: JSON-RPC 2.0,
- * `initialize`, then `session/new` (or `session/resume`, which continues a session without replaying it), the model
- * and thinking level as session config options, and one `session/prompt` whose response ends the turn. The agent's
- * work arrives as `session/update` notifications, which the run's transcript turns into items.
+ * `initialize`, then `session/new` (or `session/resume`, which continues a session without replaying it, or
+ * `session/load` for an adapter that only implements that), the model and thinking level as session config options, and
+ * one `session/prompt` whose response ends the turn. The agent's work arrives as `session/update` notifications, which
+ * the run's transcript turns into items; a `session/load` replays the old conversation first, which the run suppresses.
  */
 
 /** An MCP server the agent connects to over streamable HTTP, as `session/new` takes it. */
@@ -23,6 +24,12 @@ export interface AcpRunInput {
   readonly cwd: string
   /** The thread's previous session of this agent, or null for a fresh one. */
   readonly resumeSession: string | null
+  /**
+   * The ACP method that reopens `resumeSession`. `session/resume` continues it without replay; `session/load` is for
+   * adapters that implement only that (Pi's `pi-acp`) and replays its conversation, which the run keeps out of the
+   * transcript. Omitted means `session/resume`.
+   */
+  readonly resumeMethod?: "session/resume" | "session/load"
   readonly model?: string
   readonly effort?: string
   readonly mcpServers: ReadonlyArray<AcpMcpServer>
@@ -33,6 +40,8 @@ export interface AcpDriverIo {
   readonly send: (message: unknown) => void
   /** The run's session, once the agent has opened or resumed it. */
   readonly onSession: (sessionId: string) => void
+  /** A `session/load` finished replaying the old conversation; its later updates belong to this turn. */
+  readonly onLoaded?: () => void
   /** The run's turn is over (or never started); the process can be let go. Called once. */
   readonly onDone: (outcome: RunOutcome) => void
 }
@@ -157,11 +166,13 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
       return
     }
     sessionId = input.resumeSession
+    const method = input.resumeMethod ?? "session/resume"
     request(
-      "session/resume",
+      method,
       { sessionId, ...session },
-      orFail("session/resume", (result) => {
+      orFail(method, (result) => {
         io.onSession(sessionId as string)
+        io.onLoaded?.()
         configure(result)
       }),
     )

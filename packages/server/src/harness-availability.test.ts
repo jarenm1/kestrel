@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { availableHarnesses, type HarnessProbe } from "./capabilities"
+import { availableHarnesses, harnessAvailability, type HarnessProbe } from "./capabilities"
 
 const probe = (installed: Record<string, string>): HarnessProbe => ({
   which: (name) => (name in installed ? `/bin/${name}` : null),
@@ -18,6 +18,7 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
     "deepseek",
     "minimax",
     "moonshot",
+    "deepinfra",
   ])
   expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
   expect(availableHarnesses(box, probe({ opencode: "1.19.5" }))).toEqual([])
@@ -65,4 +66,33 @@ test("a fake-agent box plays every harness itself", () => {
     "opencode-go",
     "google",
   ])
+})
+
+test("standalone ACP harnesses are offered by their own binary", () => {
+  expect(availableHarnesses(box, probe({ omp: "omp 18.12.6" }))).toEqual(["omp"])
+  // Pi needs its adapter and the agent it starts; either alone cannot run a turn.
+  expect(availableHarnesses(box, probe({ "pi-acp": "pi-acp 0.0.34", pi: "0.0.34" }))).toEqual(["pi"])
+  expect(availableHarnesses(box, probe({ hermes: "hermes 0.8.0" }))).toEqual(["hermes"])
+  expect(availableHarnesses(box, probe({ omp: "omp 18.12.6", "pi-acp": "pi-acp 0.0.34", pi: "0.0.34", hermes: "hermes 0.8.0" }))).toEqual([
+    "omp", "pi", "hermes",
+  ])
+})
+
+test("a missing standalone harness names its install command", () => {
+  expect(harnessAvailability("pi", box, probe({}))).toEqual({
+    available: false,
+    error: "its CLI (pi-acp) is not installed on this box; install it with: npm install -g @earendil-works/pi-coding-agent pi-acp",
+  })
+  expect(harnessAvailability("omp", box, probe({}))).toEqual({
+    available: false,
+    error: "its CLI (omp) is not installed on this box; install it with: curl -fsSL https://omp.sh/install | sh",
+  })
+})
+
+test("Pi's adapter is not enough without the pi agent it starts", () => {
+  expect(availableHarnesses(box, probe({ "pi-acp": "pi-acp 0.0.34" }))).toEqual([])
+  expect(harnessAvailability("pi", box, probe({ "pi-acp": "pi-acp 0.0.34" }))).toEqual({
+    available: false,
+    error: "its CLI (pi-acp) needs pi, which is not installed on this box; install it with: npm install -g @earendil-works/pi-coding-agent pi-acp",
+  })
 })

@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Schema } from "effect";
-import { CliProvider, type Connection } from "@cloudagents/protocol";
+import { CliProvider, MODEL_PROVIDERS, type Connection } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
@@ -56,20 +56,22 @@ function ConnectionRow({ connection }: { connection: Connection }) {
   if (connection.kind === "cli" && Schema.is(CliProvider)(connection.provider)) {
     return <ConnectionsCliRow connection={connection} provider={connection.provider} />;
   }
-  if (connection.kind === "cli" && connection.provider === "opencode") {
-    return <FreeOpenCodeRow connection={connection} />;
-  }
+  // The remaining CLI rows are standalone ACP harnesses the box reports (free OpenCode, OMP, Pi, Hermes).
+  if (connection.kind === "cli") return <FreeHarnessRow connection={connection} />;
   return <ApiKeyRow connection={connection} />;
 }
 
-/** Free OpenCode reports installation state and never asks for a Go key. */
-function FreeOpenCodeRow({ connection }: { connection: Connection }) {
+/** A harness that needs no connection reports installation state and never asks for a key. */
+function FreeHarnessRow({ connection }: { connection: Connection }) {
+  const provider = MODEL_PROVIDERS.find((candidate) => candidate.id === connection.provider);
+  const name = provider?.name ?? connection.label;
+  const tools = provider?.mcp === false ? "Kestrel's MCP tools are not available in its runs." : "MCP tools are available.";
   return (
     <ConnectionRowFrame connection={connection}>
       <Text style={connectionStyles.muted}>
         {connection.available
-          ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
-          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
+          ? `Installed on the box. ${provider?.id === "opencode" ? "Free models need no sign-in or Go key." : "Runs use the harness's own login, or the DeepSeek API key."} ${tools}`
+          : `${connection.error ?? `${name} is not installed on this box`}.${provider?.setup === undefined ? "" : ` Install it with: ${provider.setup}.`}`}
       </Text>
     </ConnectionRowFrame>
   );

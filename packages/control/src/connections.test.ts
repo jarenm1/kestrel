@@ -66,6 +66,14 @@ test("installed clients retain CLI subscriptions and the box's free OpenCode row
   })
   // Go is a CLI login, reported by the box's cli-auth like the other subscriptions; this box has no Go key.
   expect(rows.find((row) => row.provider === "opencode-go")).toMatchObject({ kind: "cli", connected: false, available: false })
+  // DeepInfra is an API-key provider: Connections lists its row before any key is stored.
+  expect(rows.find((row) => row.provider === "deepinfra")).toMatchObject({
+    label: "DeepInfra",
+    kind: "apikey",
+    connected: false,
+    available: true,
+    hint: "Use a DeepInfra API key. Its models run through DeepInfra's Anthropic-compatible endpoint.",
+  })
 })
 
 test("updated clients replace legacy box state with their selected box's Go login and harnesses", async () => {
@@ -84,15 +92,17 @@ test("updated clients replace legacy box state with their selected box's Go logi
   expect(selected.find((row) => row.provider === "anthropic")).toEqual(relay[0]!)
 })
 
-test("retired standalone harness rows never reach the selected box's connections", () => {
+test("standalone harness rows are rebuilt from the selected box's capabilities", () => {
   const relay: readonly Connection[] = [
     { provider: "omp", label: "OMP", kind: "cli", connected: true, account: null, available: true },
     { provider: "pi", label: "Pi", kind: "cli", connected: true, account: null, available: true },
     { provider: "hermes", label: "Hermes", kind: "cli", connected: true, account: null, available: true },
   ]
-  const selected = connectionsForBox(relay, { cliAuth: [], harnesses: [] })
-  expect(selected.map((row) => row.provider)).toEqual(["opencode"])
-  expect(selected[0]).toMatchObject({ connected: false, available: false })
+  const selected = connectionsForBox(relay, { cliAuth: [], harnesses: ["omp"] })
+  expect(selected.map((row) => row.provider)).toEqual(["opencode", "omp", "pi", "hermes"])
+  // The stale relay rows above claim everything is connected; the selected box's capabilities decide instead.
+  expect(selected.find((row) => row.provider === "omp")).toMatchObject({ connected: true, available: true })
+  expect(selected.find((row) => row.provider === "opencode")).toMatchObject({ connected: false, available: false })
 })
 
 test("an offline legacy box does not hide stored API keys or claim a CLI is connected", async () => {

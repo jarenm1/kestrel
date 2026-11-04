@@ -227,9 +227,9 @@ export type CliAuthStatus = typeof CliAuthStatus.Type
  * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state with
  * the selected box's CLI logins and the harnesses it reports, preserving stored account/key metadata.
  *
- * Harness rows are never carried over: a retired standalone harness (`omp`, `pi`, `hermes`) and the old `opencode` row
- * are dropped, and every provider that needs no connection is rebuilt from `BoxCapabilities.harnesses` alone. A stale
- * relay row therefore can neither offer a harness the selected box lacks nor hide one it has.
+ * Harness rows are never carried over: a standalone harness row (`opencode`, `omp`, `pi`, `hermes`) from the managed
+ * box is dropped, and every provider that needs no connection is rebuilt from `BoxCapabilities.harnesses` alone. A
+ * stale relay row therefore can neither offer a harness the selected box lacks nor hide one it has.
  */
 export const connectionsForBox = (
   connections: readonly Connection[],

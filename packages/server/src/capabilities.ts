@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
-import { MODEL_PROVIDERS, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
+import { providerInfo, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
 import { MODEL_HARNESS } from "./agent-clis"
 import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
 
@@ -134,20 +134,28 @@ export const harnessAvailability = (
   config: HarnessConfig,
   probe: HarnessProbe,
 ): HarnessAvailability => {
-  const name = MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider
+  const info = providerInfo(provider)
   if (config.fakeAgent) {
     return FAKE_AGENT_PROVIDERS.includes(provider)
       ? { available: true }
-      : { available: false, error: `the fake agent does not play ${name}; start the box without CLOUDAGENTS_FAKE_AGENT` }
+      : { available: false, error: `the fake agent does not play ${info.name}; start the box without CLOUDAGENTS_FAKE_AGENT` }
   }
   const command = config.agentCommands?.[provider]
   const binary = command === undefined ? MODEL_HARNESS[provider].bin : harnessBinary(command)
   if (binary === null) {
-    return { available: false, error: `${name} has no command configured on this box` }
+    return { available: false, error: `${info.name} has no command configured on this box` }
   }
   const path = probe.which(binary)
   if (path === null) {
-    return { available: false, error: `its CLI (${binary}) is not installed on this box` }
+    const install = info.setup === undefined ? "" : `; install it with: ${info.setup}`
+    return { available: false, error: `its CLI (${binary}) is not installed on this box${install}` }
+  }
+  // An adapter that starts the agent itself (Pi's `pi-acp` runs `pi`) needs both binaries in a run.
+  for (const required of MODEL_HARNESS[provider].requires ?? []) {
+    if (probe.which(required) === null) {
+      const install = info.setup === undefined ? "" : `; install it with: ${info.setup}`
+      return { available: false, error: `its CLI (${binary}) needs ${required}, which is not installed on this box${install}` }
+    }
   }
   const minimum = MODEL_HARNESS[provider].minVersion
   if (minimum !== null && !meetsMinimum(probe.version(path), minimum)) {

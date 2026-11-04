@@ -65,7 +65,9 @@ function ModelRow({ provider, connected, divided }: RowProps) {
         <View style={styles.titleBlock}>
           <Text style={styles.label}>{provider.name}</Text>
           {provider.connections.length === 0 ? (
-            <Badge variant="neutral">no sign-in needed</Badge>
+            <Badge variant="neutral">
+              {provider.id === "opencode" ? "no sign-in needed" : "harness login or DeepSeek key"}
+            </Badge>
           ) : (
             <Badge variant={connected ? "success" : "neutral"}>
               {connected ? "connected" : "not connected"}
@@ -87,7 +89,7 @@ function ModelRow({ provider, connected, divided }: RowProps) {
       {connected ? null : (
         <Text style={styles.hint}>
           {provider.connections.length === 0
-            ? `${provider.name} is not installed on this box.`
+            ? `${provider.name} is not installed on this box.${provider.setup === undefined ? "" : ` Install it with: ${provider.setup}.`}`
             : "Connect a key or subscription above to use these."}
         </Text>
       )}

@@ -18,9 +18,13 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   deepseek: "Claude Code via DeepSeek",
   minimax: "Claude Code via MiniMax",
   moonshot: "Claude Code via Kimi",
+  deepinfra: "Claude Code via DeepInfra",
   opencode: "OpenCode",
   "opencode-go": "OpenCode Go",
   google: "Antigravity",
+  omp: "OMP",
+  pi: "Pi",
+  hermes: "Hermes",
 }
 
 function StateLine({ children }: { children: ReactNode }) {

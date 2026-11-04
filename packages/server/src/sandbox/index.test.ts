@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
-import { SANDBOX_HOME, buildBwrapArgv, cliBwrapArgs } from "."
+import { SANDBOX_HOME, buildBwrapArgv, cliBwrapArgs, homeToolArgs } from "."
 
 const base = { workspacePath: "/w", cwd: "/w", mirrorDir: "/m", homeDir: "/h", env: {}, command: "true" }
 
@@ -137,4 +137,25 @@ describe("cliBwrapArgs", () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+})
+
+test("an npm-installed Pi and its adapter are both bound from $HOME", () => {
+  const root = mkdtempSync(join(tmpdir(), "kestrel-home-tools-"))
+  try {
+    const home = join(root, "home")
+    const bin = join(home, ".npm-global", "bin")
+    mkdirSync(bin, { recursive: true })
+    const pi = join(bin, "pi")
+    const adapter = join(bin, "pi-acp")
+    writeFileSync(pi, "#!/bin/sh\nexit 0\n")
+    writeFileSync(adapter, "#!/bin/sh\nexit 0\n")
+    chmodSync(pi, 0o755)
+    chmodSync(adapter, 0o755)
+    const args = homeToolArgs(home, bin)
+    // `basic` binds a CLI found in $HOME; the adapter starts `pi`, so both package entry points must be there.
+    expect(args).toContain(pi)
+    expect(args).toContain(adapter)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

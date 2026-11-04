@@ -70,7 +70,7 @@ describe("ensureAutomationsTable", () => {
     expect(db.query("SELECT model FROM automations WHERE id = 'a1'").get()).toEqual({ model: "gpt-6.1-sol" })
   })
 
-  test("retired harness selections return to the box default without changing automation triggers", () => {
+  test("keeps standalone harness model selections and triggers", () => {
     ensureAutomationsTable(sql)
     const models = [
       "omp-deepseek-flash", "omp-deepseek-pro", "pi-deepseek-flash", "pi-deepseek-pro",
@@ -88,10 +88,9 @@ describe("ensureAutomationsTable", () => {
 
     ensureAutomationsTable(sql)
 
-    const migrated = db.query("SELECT * FROM automations ORDER BY id").all()
-    expect(migrated).toEqual(before.map((row, index) => ({ ...row, model: index < 6 ? null : row.model })))
+    expect(db.query("SELECT * FROM automations ORDER BY id").all()).toEqual(before)
     ensureAutomationsTable(sql)
-    expect(db.query("SELECT * FROM automations ORDER BY id").all()).toEqual(migrated)
+    expect(db.query("SELECT * FROM automations ORDER BY id").all()).toEqual(before)
   })
 
   test("is a no-op once the table is current", () => {
