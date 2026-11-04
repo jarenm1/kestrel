@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
-import { AgentModel, AcpHarnessId, HARNESS_LABELS, MODEL_PROVIDERS, type ModelProvider } from "./models"
+import { AgentModel, MODEL_PROVIDERS, type ModelProvider } from "./models"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -49,10 +49,6 @@ export const ControlPaths = {
   cliAuth: "/api/cli-auth",
   /** GET -> CliAuthStatus[] restricted to the provider literals this client can decode, on its selected box. */
   cliAuthFor: (providers: readonly CliProvider[]) => `/api/cli-auth?providers=${encodeURIComponent(providers.join(","))}`,
-  /**
-   * GET -> HarnessStatus[]: which standalone ACP harnesses this box can launch. Served by the box (direct or relayed).
-   */
-  harnessStatus: "/api/harness-status",
   /** GET -> ProviderUsage[] with the pre-Go provider catalog. Go-aware clients use `cliUsageFor`. */
   cliUsage: "/api/cli-auth/usage",
   /** GET -> ProviderUsage[] restricted to the provider literals this client can decode, on its selected box. */
@@ -181,7 +177,7 @@ export const ConnectionKind = Schema.Literal("oauth", "apikey", "cli")
 export type ConnectionKind = typeof ConnectionKind.Type
 
 export const Connection = Schema.Struct({
-  provider: Schema.String, // Stored provider, managed CLI login, or client-supplied standalone harness id.
+  provider: Schema.String, // "github", a MODEL_PROVIDERS id (API key), a CliProvider, or a legacy harness id.
   label: Schema.String, // display name
   kind: ConnectionKind,
   connected: Schema.Boolean,
@@ -206,19 +202,6 @@ export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravit
 export type CliProvider = typeof CliProvider.Type
 
 /**
- * One standalone ACP harness as the box reports it: whether its CLI is installed where a run would start it.
- * Carries no secrets or login state. OpenCode runs its free models; other standalone harnesses use the broker.
- */
-export const HarnessStatus = Schema.Struct({
-  harness: AcpHarnessId,
-  /** True when a run on this box can start the harness's CLI. */
-  available: Schema.Boolean,
-  /** Why the box cannot launch it (not installed, or the fake agent is running); absent when it can. */
-  error: Schema.optional(Schema.String),
-})
-export type HarnessStatus = typeof HarnessStatus.Type
-
-/**
  * How the user signs a CLI in: on the provider's own page (`cliLogin`, then `cliLoginCode` or a device code), or with
  * an API key they paste (`cliLoginKey`).
  */
@@ -241,8 +224,12 @@ export const CliAuthStatus = Schema.Struct({
 export type CliAuthStatus = typeof CliAuthStatus.Type
 
 /**
- * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state
- * with the selected box's CLI logins and harness availability, preserving stored account/key metadata.
+ * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state with
+ * the selected box's CLI logins and the harnesses it reports, preserving stored account/key metadata.
+ *
+ * Harness rows are never carried over: a retired standalone harness (`omp`, `pi`, `hermes`) and the old `opencode` row
+ * are dropped, and every provider that needs no connection is rebuilt from `BoxCapabilities.harnesses` alone. A stale
+ * relay row therefore can neither offer a harness the selected box lacks nor hide one it has.
  */
 export const connectionsForBox = (
   connections: readonly Connection[],
@@ -253,12 +240,11 @@ export const connectionsForBox = (
   },
 ): readonly Connection[] => {
   const stored = connections
-    .filter((connection) => !Schema.is(AcpHarnessId)(connection.provider))
+    .filter((connection) => connection.kind !== "cli" || Schema.is(CliProvider)(connection.provider))
     .map((connection): Connection => {
       if (connection.kind !== "cli" || !Schema.is(CliProvider)(connection.provider)) return connection
       const status = box.cliAuth?.find((candidate) => candidate.provider === connection.provider)
-      const acp = MODEL_PROVIDERS.find((provider) => provider.harness === "acp" && provider.connections.includes(connection.provider))
-      const available = status !== undefined && status.error === undefined && (acp === undefined || box.harnesses?.includes(acp.id) === true)
+      const available = status !== undefined && status.error === undefined
       const { error: _relayError, ...metadata } = connection
       const error = status?.error ?? (available ? undefined : box.error ?? "The selected box has not reported this CLI as available.")
       return {
@@ -269,11 +255,11 @@ export const connectionsForBox = (
         ...(error === undefined ? {} : { error }),
       }
     })
-  const standalone = MODEL_PROVIDERS.filter((provider) => provider.standalone === true).map((provider): Connection => {
+  const free = MODEL_PROVIDERS.filter((provider) => provider.connections.length === 0).map((provider): Connection => {
     const available = box.harnesses?.includes(provider.id) === true
     return {
       provider: provider.id,
-      label: HARNESS_LABELS[provider.id as AcpHarnessId],
+      label: provider.name,
       kind: "cli",
       connected: available,
       account: null,
@@ -281,7 +267,7 @@ export const connectionsForBox = (
       ...(available ? {} : { error: box.error ?? `${provider.name} is not available on the selected box.` }),
     }
   })
-  return [...stored, ...standalone]
+  return [...stored, ...free]
 }
 
 /** One limit of a provider subscription, e.g. its 5-hour or weekly window. */

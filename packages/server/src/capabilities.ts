@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
-import { ModelProvider, providerInfo, type BoxCapabilities } from "@cloudagents/protocol"
+import { MODEL_PROVIDERS, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
 import { MODEL_HARNESS } from "./agent-clis"
 import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
 
@@ -58,7 +58,7 @@ export interface HarnessProbe {
 }
 
 /** Agent runs get the toolchain's PATH under `strict` (`CLOUDAGENTS_SANDBOX_PATH`), the box's own otherwise. */
-export const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
+const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
   const PATH = sandboxPath ?? process.env.PATH ?? ""
   return {
     // A configured command may name a binary by path (`/opt/opencode/bin/opencode`); PATH lookup would miss it.
@@ -115,7 +115,7 @@ export interface HarnessConfig {
   readonly agentCommands?: Readonly<Partial<Record<ModelProvider, string>>>
 }
 
-const meetsMinimum = (printed: string, minimum: readonly [number, number] | null): boolean => {
+export const meetsMinimum = (printed: string, minimum: readonly [number, number] | null): boolean => {
   if (minimum === null) return true
   const found = /(\d+)\.(\d+)/.exec(printed)
   if (found === null) return false
@@ -134,15 +134,16 @@ export const harnessAvailability = (
   config: HarnessConfig,
   probe: HarnessProbe,
 ): HarnessAvailability => {
+  const name = MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider
   if (config.fakeAgent) {
     return FAKE_AGENT_PROVIDERS.includes(provider)
       ? { available: true }
-      : { available: false, error: `the fake agent does not play ${providerInfo(provider).name}; start the box without CLOUDAGENTS_FAKE_AGENT` }
+      : { available: false, error: `the fake agent does not play ${name}; start the box without CLOUDAGENTS_FAKE_AGENT` }
   }
   const command = config.agentCommands?.[provider]
   const binary = command === undefined ? MODEL_HARNESS[provider].bin : harnessBinary(command)
   if (binary === null) {
-    return { available: false, error: `${providerInfo(provider).name} has no command configured on this box` }
+    return { available: false, error: `${name} has no command configured on this box` }
   }
   const path = probe.which(binary)
   if (path === null) {
@@ -157,7 +158,7 @@ export const harnessAvailability = (
 
 /**
  * The model providers whose harness CLI the box can run, at startup: found where agent runs look, and at least the
- * version the harness needs. A fake-agent box plays the providers its script speaks for itself.
+ * version the harness needs. A fake-agent box plays every harness itself.
  */
 export const availableHarnesses = (
   config: HarnessConfig & { readonly sandboxPath: string | null },

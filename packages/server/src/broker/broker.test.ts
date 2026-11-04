@@ -94,7 +94,7 @@ describe("broker provider mapping", () => {
     const broker: CredentialBrokerShape = {
       issue: () => Effect.die("unused"),
       revoke: () => Effect.void,
-      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers: ["anthropic"] }),
+      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers: ["anthropic", "openai"] }),
       onRevoke: () => () => undefined,
       upstreamKey: () => Effect.succeed("real-key"),
     }
@@ -118,6 +118,35 @@ describe("broker provider mapping", () => {
       await closed.promise
       upstream.stop(true)
       BROKER_UPSTREAMS.anthropic = previous
+    }
+  })
+
+  test.each([{ providers: [] }, { providers: ["openrouter"] }] as const)("rejects vendor access for a non-vendor grant %j before reading keys", async ({ providers }) => {
+    let keyReads = 0
+    const broker: CredentialBrokerShape = {
+      issue: () => Effect.die("unused"),
+      revoke: () => Effect.void,
+      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers }),
+      onRevoke: () => () => undefined,
+      upstreamKey: () => Effect.sync(() => { keyReads++; return "must-not-be-read" }),
+    }
+    const box = createServer((req, res) => void handleBroker(broker, req, res))
+    const listening = Promise.withResolvers<void>()
+    box.listen(0, "127.0.0.1", listening.resolve)
+    await listening.promise
+    try {
+      const port = (box.address() as AddressInfo).port
+      const response = await fetch(`http://127.0.0.1:${port}/broker/token/anthropic/v1/messages`, {
+        method: "POST",
+        body: "{}",
+      })
+      expect(response.status).toBe(403)
+      expect((await response.json() as { _tag: string })._tag).toBe("Forbidden")
+      expect(keyReads).toBe(0)
+    } finally {
+      const closed = Promise.withResolvers<void>()
+      box.close(() => closed.resolve())
+      await closed.promise
     }
   })
 

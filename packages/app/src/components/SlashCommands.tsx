@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react"
 import { useEffect, useRef, type ReactNode } from "react"
-import { harnessCommandPrefix, providerHarness, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol"
+import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 
@@ -21,9 +21,6 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   opencode: "OpenCode",
   "opencode-go": "OpenCode Go",
   google: "Antigravity",
-  omp: "OMP",
-  pi: "Pi",
-  hermes: "Hermes",
 }
 
 function StateLine({ children }: { children: ReactNode }) {
@@ -80,12 +77,7 @@ export function SlashCommands({
   const selectedIndex = matches.length === 0 ? -1 : Math.min(activeIndex, matches.length - 1)
   const activeOption = useRef<HTMLDivElement>(null)
   // Each command shows how it is typed: `/` for commands, `$` for Codex skills.
-  const noun =
-    provider !== undefined && providerHarness(provider) === "codex"
-      ? trigger === "$"
-        ? "skills"
-        : "commands or skills"
-      : "slash commands"
+  const noun = provider !== "openai" ? "slash commands" : trigger === "$" ? "skills" : "commands or skills"
 
   // Keyboard navigation past the fold must bring the active option into the menu's view.
   useEffect(() => {

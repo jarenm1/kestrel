@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { AGENT_MODELS, MODEL_PROVIDERS, connectedModelProviders, resolveAgentChoice, resolveModelRoute, threadChoiceRun, type AgentEffort, type AgentModel } from "./src/models"
+import { AGENT_MODELS, MODEL_PROVIDERS, connectedModelProviders, resolveAgentChoice, threadChoiceRun, type AgentEffort, type AgentModel } from "./src/models"
 import { connectionsForBox, type Connection } from "./src/control"
 
 const anthropic = AGENT_MODELS.filter((m) => m.provider === "anthropic" && m.efforts.length > 0)
@@ -102,34 +102,37 @@ describe("selected-box connections", () => {
     provider, label: provider, kind: "cli", connected, account: null, available: connected,
   })
 
-  test("box-local Go login and harnesses replace conflicting relay state across a box switch", () => {
+  test("the selected box's Go login and harnesses replace conflicting relay state across a box switch", () => {
     const relay = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
     const selected = connectionsForBox(relay, {
       cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
-      harnesses: ["opencode", "opencode-go"],
+      harnesses: ["opencode"],
     })
-    expect(connectedModelProviders(selected).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
+    expect(connectedModelProviders(selected, ["opencode"]).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
     expect(selected.find((connection) => connection.provider === "opencode-go")?.error).toBeUndefined()
-    const route = resolveModelRoute({ harnessId: "opencode", modelId: "opencode-go/glm-5.3", connections: selected })
-    expect(route.ok && route.route.provider).toBe("opencode-go")
 
     const switched = connectionsForBox(selected, {
       cliAuth: [{ provider: "opencode-go", loggedIn: false, account: null }],
       harnesses: [],
     })
-    expect(connectedModelProviders(switched).map((provider) => provider.id)).toEqual([])
-    expect(resolveModelRoute({ modelId: "opencode/big-pickle", connections: switched }).ok).toBe(false)
+    expect(connectedModelProviders(switched, []).map((provider) => provider.id)).toEqual([])
+    expect(switched.find((connection) => connection.provider === "opencode")).toMatchObject({ connected: false, available: false })
   })
 
-  test("an installed free OpenCode cannot make a saved Go key runnable before Go's minimum version", () => {
-    const rows = connectionsForBox([cli("opencode-go", true)], {
-      cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
+  test("a stale free-OpenCode row does not outlive the selected box's capability", () => {
+    // A relay box offered OpenCode; the selected box has not said it can launch it, so nothing is offered.
+    const rows = connectionsForBox([cli("opencode", true)], { cliAuth: [], harnesses: undefined })
+    expect(rows.find((connection) => connection.provider === "opencode")).toMatchObject({ connected: false, available: false })
+    expect(connectedModelProviders(rows, undefined).map((provider) => provider.id)).toEqual([])
+  })
+
+  test("retired standalone harness rows never survive the merge", () => {
+    const rows = connectionsForBox([cli("omp", true), cli("pi", true), cli("hermes", true), cli("opencode", true)], {
+      cliAuth: [],
       harnesses: ["opencode"],
     })
-    expect(rows.find((connection) => connection.provider === "opencode-go")?.connected).toBe(true)
-    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["opencode"])
-    const route = resolveModelRoute({ modelId: "opencode-go/glm-5.3", connections: rows })
-    expect(route.ok ? null : route.code).toBe("connection-unavailable")
+    expect(rows.map((connection) => connection.provider)).toEqual(["opencode"])
+    expect(connectedModelProviders(rows, ["opencode"]).map((provider) => provider.id)).toEqual(["opencode"])
   })
 
   test("an unreachable box clears stale CLI availability without discarding stored API keys", () => {
@@ -143,6 +146,6 @@ describe("selected-box connections", () => {
     expect(rows.find((connection) => connection.provider === "opencode-go")).toMatchObject({
       connected: false, available: false, error: "Selected box is offline",
     })
-    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["anthropic"])
+    expect(connectedModelProviders(rows, undefined).map((provider) => provider.id)).toEqual(["anthropic"])
   })
 })

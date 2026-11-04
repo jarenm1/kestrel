@@ -57,7 +57,7 @@ test("a configured command's own binary is what the box offers", () => {
 })
 
 test("a fake-agent box plays every harness itself", () => {
-  // The scripted agent speaks Claude stream-json, Codex app-server and ACP: OMP, Pi and Hermes stay unavailable.
+  // The scripted agent speaks Claude stream-json, Codex app-server and ACP, so it plays every remaining provider.
   expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual([
     "anthropic",
     "openai",

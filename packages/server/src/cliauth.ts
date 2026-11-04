@@ -12,7 +12,8 @@ import {
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
-import { AGENT_CLIS, CLI_PROVIDERS, type CliOutput } from "./agent-clis"
+import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type CliOutput } from "./agent-clis"
+import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
 import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
@@ -449,6 +450,20 @@ export const CliAuthLive = Layer.effect(
         // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return { provider, loggedIn: false, account: null, error: `${spec.bin} is not installed on the box (not on its PATH)` }
+        }
+        // The Go plan signs in by importing its key, which OpenCode 2.1 adds: an older CLI reports why here, so the
+        // Connections page never offers a sign-in that cannot work.
+        const minimum = provider === "opencode-go" ? MODEL_HARNESS["opencode-go"].minVersion : null
+        if (minimum !== null) {
+          const printed = yield* runCli(yield* invoke(user, spec.bin, ["--version"]), `${spec.bin} --version`)
+          if (!meetsMinimum(printed === null ? "" : printed.stdout + printed.stderr, minimum)) {
+            return {
+              provider,
+              loggedIn: false,
+              account: null,
+              error: `${spec.bin} must be version ${minimum[0]}.${minimum[1]} or newer for OpenCode Go`,
+            }
+          }
         }
         // No directory means no login: skip spawning the CLI.
         const dir = yield* providerDir(user, provider)

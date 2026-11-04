@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Schema } from "effect";
-import { AcpHarnessId, CliProvider, providerInfo, type Connection } from "@cloudagents/protocol";
+import { CliProvider, type Connection } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
@@ -24,6 +24,7 @@ export function ConnectionsScreen() {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -44,7 +45,7 @@ export function ConnectionsScreen() {
         </Card>
       ) : null}
       {connections.data ? (
-        <ConnectionsModels connections={connections.data} />
+        <ConnectionsModels connections={connections.data} harnesses={capabilities.data?.harnesses} />
       ) : null}
     </ScrollView>
   );
@@ -55,28 +56,21 @@ function ConnectionRow({ connection }: { connection: Connection }) {
   if (connection.kind === "cli" && Schema.is(CliProvider)(connection.provider)) {
     return <ConnectionsCliRow connection={connection} provider={connection.provider} />;
   }
-  if (connection.kind === "cli" && Schema.is(AcpHarnessId)(connection.provider)) {
-    return <HarnessRow connection={connection} harness={connection.provider} />;
+  if (connection.kind === "cli" && connection.provider === "opencode") {
+    return <FreeOpenCodeRow connection={connection} />;
   }
   return <ApiKeyRow connection={connection} />;
 }
 
-/**
- * A standalone ACP harness has no managed sign-in here. OpenCode runs its free models; the other harnesses reach
- * models through Kestrel's broker, so these rows only report the selected box's installation.
- */
-function HarnessRow({ connection, harness }: { connection: Connection; harness: AcpHarnessId }) {
-  const provider = providerInfo(harness);
+/** Free OpenCode reports installation state and never asks for a Go key. */
+function FreeOpenCodeRow({ connection }: { connection: Connection }) {
   return (
     <ConnectionRowFrame connection={connection}>
       <Text style={connectionStyles.muted}>
         {connection.available
-          ? `Installed on the box. ${harness === "opencode" ? "Free models need no sign-in or Go key." : "Runs on the models you connected above."}${provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}`
-          : `${connection.error ?? "its CLI is not installed on the box"}. Install ${provider.name} on the box to offer it in the model picker.`}
+          ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
+          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
       </Text>
-      {connection.available && provider.setup !== undefined ? (
-        <Text style={connectionStyles.hint}>{provider.setup}</Text>
-      ) : null}
     </ConnectionRowFrame>
   );
 }

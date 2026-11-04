@@ -26,8 +26,6 @@ export interface AcpRunInput {
   readonly model?: string
   readonly effort?: string
   readonly mcpServers: ReadonlyArray<AcpMcpServer>
-  /** Kestrel's version, reported to the agent as its `clientInfo`; omitted by drivers without one. */
-  readonly clientVersion?: string
 }
 
 export interface AcpDriverIo {
@@ -188,13 +186,7 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
     start: () => {
       request(
         "initialize",
-        {
-          protocolVersion: 1,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-          ...(input.clientVersion === undefined
-            ? {}
-            : { clientInfo: { name: "kestrel", version: input.clientVersion } }),
-        },
+        { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } },
         orFail("initialize", openSession),
       )
     },

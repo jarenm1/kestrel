@@ -4,15 +4,18 @@ import {
   Connection,
   CliProvider,
   ControlPaths,
+  Paths,
   connectedModelProviders,
   connectionsForBox,
-  resolveModelRoute,
 } from "@cloudagents/protocol"
 import type { Env } from "./env"
 
 // Bun has no cloudflare:workers runtime; install that platform mock before loading the real Worker.
 mock.module("cloudflare:workers", () => ({ DurableObject: class {} }))
 const worker = (await import("./index")).default
+
+/** What the box reports when it has the free OpenCode CLI; its other harnesses do not need a row. */
+const HARNESSES = ["anthropic", "openai", "opencode"] as const
 
 const connections = async (offline = false): Promise<readonly Connection[]> => {
   const stub = {
@@ -28,13 +31,11 @@ const connections = async (offline = false): Promise<readonly Connection[]> => {
           { provider: "codex-cli", loggedIn: true, account: "ChatGPT subscription" },
         ]),
       }
-      if (path === ControlPaths.harnessStatus) return {
+      if (path === Paths.capabilities) return {
         ok: true, status: 200,
-        body: JSON.stringify([
-          { harness: "opencode", available: true },
-          { harness: "omp", available: true },
-          { harness: "pi", available: false, error: "adapter missing" },
-        ]),
+        body: JSON.stringify({
+          version: 1, platform: "linux", sandbox: "off", desktop: "unavailable", harnesses: HARNESSES,
+        }),
       }
       throw new Error(`unexpected box path ${path}`)
     },
@@ -47,11 +48,11 @@ const connections = async (offline = false): Promise<readonly Connection[]> => {
   return Schema.decodeUnknownSync(Schema.Array(Connection))(await response.json())
 }
 
-test("installed clients retain CLI subscriptions and standalone models without a selected-box merge", async () => {
+test("installed clients retain CLI subscriptions and the box's free OpenCode row", async () => {
   const rows = await connections()
   // Installed clients consume this response directly, without connectionsForBox.
-  expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual([
-    "anthropic", "openai", "opencode", "omp",
+  expect(connectedModelProviders(rows, HARNESSES).map((provider) => provider.id)).toEqual([
+    "anthropic", "openai", "opencode",
   ])
   expect(rows.find((row) => row.provider === "claude-cli")).toMatchObject({
     connected: true, available: true, account: "Claude subscription",
@@ -59,26 +60,46 @@ test("installed clients retain CLI subscriptions and standalone models without a
   expect(rows.find((row) => row.provider === "codex-cli")).toMatchObject({
     connected: true, available: true, account: "ChatGPT subscription",
   })
-  expect(rows.find((row) => row.provider === "pi")).toMatchObject({
-    connected: false, available: false, error: "adapter missing",
+  // Free OpenCode has no connection of its own: the box's capabilities said it can launch it.
+  expect(rows.find((row) => row.provider === "opencode")).toMatchObject({
+    kind: "cli", connected: true, available: true, account: null,
   })
+  // Go is a CLI login, reported by the box's cli-auth like the other subscriptions; this box has no Go key.
+  expect(rows.find((row) => row.provider === "opencode-go")).toMatchObject({ kind: "cli", connected: false, available: false })
 })
 
-test("updated clients replace legacy box state with their selected box's Go login and capabilities", async () => {
-  const selected = connectionsForBox(await connections(), {
+test("updated clients replace legacy box state with their selected box's Go login and harnesses", async () => {
+  const relay: readonly Connection[] = [
+    { provider: "anthropic", label: "Anthropic", kind: "apikey", connected: true, account: "saved-key", available: true },
+    { provider: "opencode-go", label: "OpenCode Go", kind: "cli", connected: false, account: null, available: false, error: "not installed on the managed box" },
+  ]
+  const selected = connectionsForBox(relay, {
     cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
-    harnesses: ["opencode", "opencode-go"],
+    harnesses: ["opencode"],
   })
-  expect(connectedModelProviders(selected).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
-  const route = resolveModelRoute({ harnessId: "opencode", modelId: "opencode-go/glm-5.3", connections: selected })
-  expect(route.ok && route.route.provider).toBe("opencode-go")
-  expect(selected.find((row) => row.provider === "claude-cli")?.connected).toBe(false)
-  expect(selected.find((row) => row.provider === "omp")?.available).toBe(false)
+  expect(connectedModelProviders(selected, ["opencode"]).map((provider) => provider.id)).toEqual(["anthropic", "opencode", "opencode-go"])
+  expect(selected.find((row) => row.provider === "opencode-go")).toMatchObject({ connected: true, available: true })
+  expect(selected.find((row) => row.provider === "opencode-go")?.error).toBeUndefined()
+  expect(selected.find((row) => row.provider === "opencode")).toMatchObject({ connected: true, available: true })
+  expect(selected.find((row) => row.provider === "anthropic")).toEqual(relay[0]!)
+})
+
+test("retired standalone harness rows never reach the selected box's connections", () => {
+  const relay: readonly Connection[] = [
+    { provider: "omp", label: "OMP", kind: "cli", connected: true, account: null, available: true },
+    { provider: "pi", label: "Pi", kind: "cli", connected: true, account: null, available: true },
+    { provider: "hermes", label: "Hermes", kind: "cli", connected: true, account: null, available: true },
+  ]
+  const selected = connectionsForBox(relay, { cliAuth: [], harnesses: [] })
+  expect(selected.map((row) => row.provider)).toEqual(["opencode"])
+  expect(selected[0]).toMatchObject({ connected: false, available: false })
 })
 
 test("an offline legacy box does not hide stored API keys or claim a CLI is connected", async () => {
   const rows = await connections(true)
-  expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["anthropic"])
+  // The box could not answer, so it reports no harness and no free OpenCode row is invented.
+  expect(connectedModelProviders(rows, []).map((provider) => provider.id)).toEqual(["anthropic"])
   expect(rows.find((row) => row.provider === "anthropic")).toMatchObject({ connected: true, available: true, account: "saved-key" })
   expect(rows.filter((row) => row.kind === "cli").every((row) => !row.connected && !row.available)).toBe(true)
+  expect(rows.some((row) => row.provider === "opencode")).toBe(false)
 })

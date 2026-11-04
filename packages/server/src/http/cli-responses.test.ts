@@ -29,7 +29,7 @@ const handler = async (goConnected: boolean) => {
   return Effect.runPromise(makeWebHandler({} as never, {
     status: () => Effect.succeed(status),
     providerUsage: () => Effect.succeed(usage),
-  } as never, { version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable" }, []))
+  } as never, { version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable" }))
 }
 
 const request = (path: string) => new Request(`http://box.test${path}`, { headers: { [BOX_USER_HEADER]: "tester" } })

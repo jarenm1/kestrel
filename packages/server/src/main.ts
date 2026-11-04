@@ -1,5 +1,4 @@
 import { availableHarnesses, boxCapabilities } from "./capabilities"
-import { harnessStatuses } from "./harness-status"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
@@ -125,9 +124,8 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
-  // The box's startup snapshot: which harness CLIs it found, and the standalone harnesses' availability detail.
   const capabilities = { ...boxCapabilities(config.sandbox), harnesses: availableHarnesses(config) }
-  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities, harnessStatuses(config))
+  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },

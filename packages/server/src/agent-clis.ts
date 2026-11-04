@@ -238,7 +238,6 @@ export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
  */
 export interface Harness {
   readonly conversation: ConversationKind
-  /** The CLI login whose broker env a user's sign-in replaces; null when Kestrel manages no login for the harness. */
   readonly cli: CliProvider | null
   /** The executable the default command runs; the box offers the provider only where it finds it (`capabilities.ts`). */
   readonly bin: string
@@ -267,8 +266,4 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
   google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
-  // OMP, Pi and Hermes speak ACP themselves; their runs reach models through the broker (`vendors`).
-  omp: { conversation: "acp", cli: null, bin: "omp", minVersion: null, broker: true },
-  pi: { conversation: "acp", cli: null, bin: "pi-acp", minVersion: null, broker: true },
-  hermes: { conversation: "acp", cli: null, bin: "hermes", minVersion: null, broker: true },
 }

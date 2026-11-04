@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { connectedModelProviders, type Connection, type Task } from "@cloudagents/protocol";
+import { connectedModelProviders, type Connection, type ModelProvider, type Task } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
 import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
 
@@ -119,12 +119,19 @@ test("Go availability follows the selected box and stays isolated in the connect
     },
   });
   try {
-    const a = createQueries(createApiClient(control.url.origin, "session", { id: "first", url: first.url.origin })).connections();
-    const b = createQueries(createApiClient(control.url.origin, "session", { id: "second", url: second.url.origin })).connections();
-    const offered = (rows: readonly Connection[]) => connectedModelProviders(rows).map((provider) => provider.id);
-    expect(offered(await queryClient.fetchQuery(a))).toEqual(["opencode", "opencode-go"]);
-    expect(offered(await queryClient.fetchQuery(b))).toEqual([]);
-    expect(offered(queryClient.getQueryData<readonly Connection[]>(a.queryKey) ?? [])).toEqual(["opencode", "opencode-go"]);
+    const firstQueries = createQueries(createApiClient(control.url.origin, "session", { id: "first", url: first.url.origin }));
+    const secondQueries = createQueries(createApiClient(control.url.origin, "session", { id: "second", url: second.url.origin }));
+    const a = firstQueries.connections();
+    const b = secondQueries.connections();
+    const [aRows, bRows, aCapabilities, bCapabilities] = await Promise.all([
+      queryClient.fetchQuery(a), queryClient.fetchQuery(b),
+      queryClient.fetchQuery(firstQueries.capabilities()), queryClient.fetchQuery(secondQueries.capabilities()),
+    ]);
+    const offered = (rows: readonly Connection[], harnesses: readonly ModelProvider[] | undefined) =>
+      connectedModelProviders(rows, harnesses).map((provider) => provider.id);
+    expect(offered(aRows, aCapabilities.harnesses)).toEqual(["opencode", "opencode-go"]);
+    expect(offered(bRows, bCapabilities.harnesses)).toEqual([]);
+    expect(offered(queryClient.getQueryData<readonly Connection[]>(a.queryKey) ?? [], aCapabilities.harnesses)).toEqual(["opencode", "opencode-go"]);
   } finally {
     control.stop(true);
     first.stop(true);

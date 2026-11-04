@@ -111,6 +111,19 @@ setting.
 
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
 
+OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
+Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX
+complexity without a current need. Pi may be reconsidered later, but Kestrel's constrained customization would
+limit its value. Model selection continues to choose the existing provider's CLI; OpenCode, Antigravity and the
+separately added third-party API-key providers remain supported.
+
+At startup, historical runs from the retired harnesses retain their tasks, messages and run records, but lose
+obsolete provider/model/harness routing metadata; their unusable resume targets are discarded before state
+validation. The migration is written atomically only after the remaining state validates, so unrelated corruption
+still rejects startup without overwriting the file. New requests continue to reject the retired identifiers.
+Claude Code session records carry the actual model provider, including third-party gateways, so switching to
+Anthropic cannot resume a gateway session and returning to that gateway can resume its own.
+
 The desktop and mobile composers' thinking controls open a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Off leaves it empty. They offer only the selected model's supported effort levels, ordered lowest first, with `none` labeled Off. There is no Default stop: an absent or unsupported saved level selects and sends the model's lowest supported effort (Off where supported, otherwise Low). With no model or no effort support, the control is hidden and effort is unspecified. The choice survives thread changes and reloads. Desktop uses a popover; mobile web and Expo share a touch-sized bottom sheet. The web sliders use native range inputs for pointer/touch input, arrow keys, Home and End; Expo uses React Native touch responders and screen-reader increment/decrement actions.
 
 The desktop chat composer keeps the last 100 accepted, non-empty prompt texts in this browser's local storage,

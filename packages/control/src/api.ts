@@ -2,6 +2,7 @@ import { Schema } from "effect"
 import {
   ApprovePairingBody,
   BOX_TOKEN_QUERY,
+  BoxCapabilities,
   CREDENTIALS_HEADER,
   CliAuthStatus,
   CliProvider,
@@ -11,8 +12,7 @@ import {
   CreateMeterHostBody,
   GithubRepoSlug,
   MeterReportBody,
-  HARNESS_LABELS,
-  HarnessStatus,
+  MODEL_PROVIDERS,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -23,6 +23,8 @@ import {
   type Connection,
   type GithubRepo,
   type Me,
+  type ModelProvider,
+  type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import {
   PROVIDERS,
@@ -60,17 +62,6 @@ const storedView = (
   ...(provider.kind === "apikey" && provider.hint !== undefined ? { hint: provider.hint } : {}),
 })
 
-/** Legacy clients render this box status directly; newer clients replace it with their selected box's state. */
-const harnessView = (status: HarnessStatus): Connection => ({
-  provider: status.harness,
-  label: HARNESS_LABELS[status.harness],
-  kind: "cli",
-  connected: status.available,
-  account: null,
-  available: status.available,
-  ...(status.error === undefined ? {} : { error: status.error }),
-})
-
 const cliView = (provider: CliConnectionProvider, status: CliAuthStatus | undefined): Connection => ({
   provider: provider.id,
   label: provider.label,
@@ -81,31 +72,41 @@ const cliView = (provider: CliConnectionProvider, status: CliAuthStatus | undefi
   ...(status?.error === undefined ? {} : { error: status.error }),
 })
 
+/** A box GET's JSON body, or null when the box is offline, too old for the route, or answers badly. */
+const boxJson = async (login: string, env: Env, path: string): Promise<unknown> => {
+  const res = await hub(env).boxCall(login, "GET", path)
+  if (!res.ok) return null
+  try {
+    return JSON.parse(res.body) as unknown
+  } catch {
+    return null
+  }
+}
+
 /** Preserve the installed clients' CLI-login response, including offline/older-box handling. */
 const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuthFor(CliProvider.literals))
-  if (!res.ok) return []
-  let body: unknown = null
-  try {
-    body = JSON.parse(res.body)
-  } catch {
-    return []
-  }
+  const body = await boxJson(login, env, ControlPaths.cliAuthFor(CliProvider.literals))
   return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
 }
 
-/** Standalone harness rows remain in the response until installed clients no longer depend on them. */
-const fetchHarnessStatus = async (login: string, env: Env): Promise<readonly HarnessStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.harnessStatus)
-  if (!res.ok) return []
-  let body: unknown = null
-  try {
-    body = JSON.parse(res.body)
-  } catch {
-    return []
-  }
-  return Schema.is(Schema.Array(HarnessStatus))(body) ? body : []
+/** The harnesses the box reports it can launch; none when the box is offline, too old, or answers badly. */
+const fetchHarnesses = async (login: string, env: Env): Promise<readonly ModelProvider[]> => {
+  const body = await boxJson(login, env, Paths.capabilities)
+  return Schema.is(BoxCapabilities)(body) ? body.harnesses ?? [] : []
 }
+
+/**
+ * A provider that needs no connection, as a Connections row for installed clients. The row exists only when the box's
+ * capabilities listed the harness, so it is always connected and available.
+ */
+const freeView = (provider: ModelProviderInfo): Connection => ({
+  provider: provider.id,
+  label: provider.name,
+  kind: "cli",
+  connected: true,
+  account: null,
+  available: true,
+})
 
 /** True when the user has connected `provider` and the provider refuses the stored token. */
 const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: Env): Promise<boolean> => {
@@ -118,7 +119,7 @@ const listConnections = async (login: string, env: Env): Promise<Connection[]> =
   const [rows, cli, harnesses, rejected] = await Promise.all([
     hub(env).connections(login),
     fetchCliAuth(login, env),
-    fetchHarnessStatus(login, env),
+    fetchHarnesses(login, env),
     Promise.all(oauth.map((p) => oauthTokenRejected(login, p, env))),
   ])
   const expired = new Set(oauth.filter((_, i) => rejected[i]).map((p) => p.id))
@@ -128,7 +129,9 @@ const listConnections = async (login: string, env: Env): Promise<Connection[]> =
       ? cliView(p, cli.find((status) => status.provider === p.id))
       : storedView(p, rows.find((r) => r.provider === p.id), env, expired.has(p.id)),
   )
-  return [...stored, ...harnesses.map(harnessView)]
+  // A provider that needs no connection is offered only when the box's capabilities list its harness.
+  const free = MODEL_PROVIDERS.filter((provider) => provider.connections.length === 0 && harnesses.includes(provider.id))
+  return [...stored, ...free.map(freeView)]
 }
 
 const putApiKey = async (request: Request, env: Env, login: string, provider: Provider): Promise<Response> => {

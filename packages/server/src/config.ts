@@ -1,7 +1,7 @@
 import { Context, Layer, Schema } from "effect"
 import { join, resolve } from "node:path"
 import { availableParallelism } from "node:os"
-import { DesktopRtcIceServer, MODEL_PROVIDERS, type AgentHarness, type ModelProvider } from "@cloudagents/protocol"
+import { DesktopRtcIceServer, type ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
 import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
@@ -74,8 +74,10 @@ export interface ServerConfig {
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
    * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
-   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` /
-   * `CLOUDAGENTS_OPENCODE_GO_COMMAND` override the defaults).
+   * (`CLOUDAGENTS_ANTHROPIC_COMMAND`, `CLOUDAGENTS_OPENAI_COMMAND`, `CLOUDAGENTS_OPENROUTER_COMMAND`,
+   * `CLOUDAGENTS_ZAI_COMMAND`, `CLOUDAGENTS_DEEPSEEK_COMMAND`, `CLOUDAGENTS_MINIMAX_COMMAND`,
+   * `CLOUDAGENTS_MOONSHOT_COMMAND`, `CLOUDAGENTS_OPENCODE_COMMAND`, `CLOUDAGENTS_OPENCODE_GO_COMMAND` and
+   * `CLOUDAGENTS_GOOGLE_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
@@ -150,28 +152,32 @@ export const loadConfig = (): ServerConfig => {
   const dataDir = resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
-  const harnessCommands: Record<Exclude<AgentHarness, "acp">, string> = {
-    claude: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
-    codex: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
-  }
-  const acpCommands: Record<string, string> = {
-    opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
-    "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
-    google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
-    omp: process.env.CLOUDAGENTS_OMP_COMMAND ?? "omp acp",
-    pi: process.env.CLOUDAGENTS_PI_COMMAND ?? "pi-acp",
-    hermes: process.env.CLOUDAGENTS_HERMES_COMMAND ?? "hermes acp",
-  }
-  const agentCommands: Record<ModelProvider, string> = Object.fromEntries(
-    MODEL_PROVIDERS.map((provider) => [
-      provider.id,
-      fakeAgent
-        ? fakeCommand
-        : provider.harness === "acp"
-          ? acpCommands[provider.id]!
-          : harnessCommands[provider.harness],
-    ]),
-  ) as Record<ModelProvider, string>
+  const agentCommands: Record<ModelProvider, string> = fakeAgent
+    ? {
+        anthropic: fakeCommand,
+        openai: fakeCommand,
+        openrouter: fakeCommand,
+        zai: fakeCommand,
+        deepseek: fakeCommand,
+        minimax: fakeCommand,
+        moonshot: fakeCommand,
+        opencode: fakeCommand,
+        "opencode-go": fakeCommand,
+        google: fakeCommand,
+      }
+    : {
+        anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        openai: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
+        openrouter: process.env.CLOUDAGENTS_OPENROUTER_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        zai: process.env.CLOUDAGENTS_ZAI_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        deepseek: process.env.CLOUDAGENTS_DEEPSEEK_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        minimax: process.env.CLOUDAGENTS_MINIMAX_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        moonshot: process.env.CLOUDAGENTS_MOONSHOT_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        // The Go plan runs the same OpenCode CLI; its command is the same ACP server with the Go key imported.
+        opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
+        "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
+        google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
+      }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)
   if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")

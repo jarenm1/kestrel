@@ -1,19 +1,15 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
-import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
 import {
   InternalError,
   RunItems,
   DEFAULT_MODEL_PROVIDER,
-  agentChoiceProblem,
-  agentChoiceProvider,
-  defaultModelOf,
+  MODEL_PROVIDERS,
   modelInfo,
-  providerHarness,
-  providerInfo,
   type AgentEffort,
   type AgentItem,
   type AgentModel,
@@ -27,12 +23,12 @@ import {
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, MODEL_HARNESS, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
-import { CredentialBroker, credentialFor, type BrokerProvider } from "../broker"
+import { CredentialBroker, type BrokerProvider } from "../broker"
 import { boxControl } from "../control/client"
-import { CredentialStore } from "../credentials"
 import { Config, VERSION } from "../config"
 import { harnessAvailability, harnessProbe } from "../capabilities"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
+import { CredentialStore } from "../credentials"
 import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
@@ -100,8 +96,6 @@ export class AgentHarness extends Context.Tag("cloudagents/AgentHarness")<AgentH
 /** Per-message agent choice; omitted fields leave the harness default. */
 export interface AgentChoice {
   readonly model?: AgentModel
-  /** The connection the thread selected for this model; omitted means the model's own provider. */
-  readonly provider?: ModelProvider
   readonly effort?: AgentEffort
 }
 
@@ -145,14 +139,12 @@ interface ActiveRun {
   readonly continuation: SessionContinuation | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
-  readonly agentKind: "claude" | "codex" | "acp" | null
+  readonly agentKind: ConversationKind | null
   diagnostic: string | null
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
   readonly failedTools: Set<string>
   /** Set once the run is stopped; what its process reports while it shuts down is not a tool failure. */
   stopped: boolean
-  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
-  readonly stderrIsLog: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
@@ -160,21 +152,6 @@ type RunConversation =
   | { readonly kind: "codex"; readonly input: Omit<CodexRunInput, "clientVersion"> }
   | { readonly kind: "claude"; readonly prompt: string }
   | { readonly kind: "acp"; readonly provider: ModelProvider; readonly input: AcpRunInput }
-
-/** The config directory each standalone harness keeps its own settings and sessions in, under the run's home. */
-const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
-  omp: ".omp",
-  pi: ".pi",
-  hermes: ".hermes",
-}
-
-/**
- * A broker provider for a model run, or null for a standalone ACP harness. The ACP harnesses are exactly the providers
- * `BrokerProvider` excludes, which the record lookup cannot express to the type system on its own.
- */
-const brokerProviderOf = (provider: ModelProvider): BrokerProvider | null =>
-  MODEL_HARNESS[provider].conversation === "acp" ? null : (provider as BrokerProvider)
-
 
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
@@ -282,8 +259,8 @@ export const AgentHarnessLive = Layer.effect(
     const store = yield* StateStore
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
-    const credentials = yield* CredentialStore
     const cliAuth = yield* CliAuth
+    const credentials = yield* CredentialStore
     const github = yield* GitHub
     const settings = sandboxSettingsOf(config)
     if (settings.systemd) {
@@ -452,9 +429,10 @@ export const AgentHarnessLive = Layer.effect(
           const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
           // Diagnostics stay in output.log and agent.output, never in portable conversation history:
           // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
-          const finalText = entry.transcript.finalText()
           const text =
-            finalText ?? failure ?? (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
+            entry.transcript.finalText() ??
+            failure ??
+            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -467,11 +445,7 @@ export const AgentHarnessLive = Layer.effect(
           return Either.right({ run: { ...run }, task: { ...task }, message })
         })
         if (outcome === null) return
-        if (
-          outcome.run.status === "failed" &&
-          (entry.agentKind === "claude" || entry.agentKind === "codex") &&
-          turn?.status === "failed"
-        ) {
+        if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
           toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
         }
         publish({ _tag: "message.created", message: outcome.message })
@@ -627,8 +601,6 @@ export const AgentHarnessLive = Layer.effect(
               diagnostic: null,
               failedTools: new Set(),
               stopped: false,
-              stderrIsLog:
-                session.conversation?.kind === "codex" || session.conversation?.kind === "acp",
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
@@ -757,21 +729,18 @@ export const AgentHarnessLive = Layer.effect(
       ),
       spawn: (task, run, start, display, user, choice) => {
         const launch = (admission: Admission) => Effect.gen(function* () {
-          const provider = agentChoiceProvider(choice)
-          const harness = providerHarness(provider)
-          // The vendor CLI that runs this provider's models; null for a standalone ACP harness, which speaks ACP itself.
-          const cli = MODEL_HARNESS[provider].cli
-          // A standalone harness reaches models through the broker like a vendor CLI does: both vendor APIs stay open.
-          // A harness that runs its own models (OpenCode's free ones) gets no broker access at all.
-          const channel = MODEL_HARNESS[provider].broker ? (cli === null ? "vendors" : brokerProviderOf(provider)) : null
-          if (harness === "acp") {
+          const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
+          // A vendor CLI or gateway run reaches models through the broker; a harness that runs its own models
+          // (OpenCode free or Go, Antigravity) gets no broker access at all.
+          const channel: BrokerProvider | null = MODEL_HARNESS[provider].broker ? (provider as BrokerProvider) : null
+          if (MODEL_HARNESS[provider].conversation === "acp") {
             // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run. Probe only the
             // harness this run needs, so a launch never runs every harness's `--version`.
             const availability = harnessAvailability(provider, config, harnessProbe(config.sandboxPath))
             if (!availability.available) {
               return yield* Effect.fail(
                 new InternalError({
-                  message: `${providerInfo(provider).name} cannot run on this box: ${availability.error ?? "its CLI is not installed"}.`,
+                  message: `${MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider} cannot run on this box: ${availability.error ?? "its CLI is not installed"}.`,
                 }),
               )
             }
@@ -783,21 +752,9 @@ export const AgentHarnessLive = Layer.effect(
           // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
           const ghBinHost = join(homeDir, ".kestrel", "gh")
           const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
-          // A standalone harness keeps its own settings and session store in one per-user directory: the directory
-          // `docs/harnesses.md` tells an operator to set the harness up in, and the one a run mounts. It never holds
-          // model credentials - a run reaches models through the broker - so no credential file enters the sandbox.
-          const harnessConfigDir = harness === "acp" ? ACP_CONFIG_DIRS[provider] : undefined
-          const harnessHome =
-            harnessConfigDir === undefined ? null : join(config.dataDir, "users", user, "harnesses", provider)
-          const harnessConfigInside =
-            harnessConfigDir === undefined ? null : join(agentHome(settings, homeDir), harnessConfigDir)
-          const harnessBinds =
-            harnessHome !== null && harnessConfigInside !== null && settings.level !== "off"
-              ? [{ host: harnessHome, sandbox: harnessConfigInside }]
-              : []
 
           const started = yield* Effect.gen(function* () {
-            // The run's token authorizes its MCP session and its model calls (a vendor CLI's or an ACP harness's).
+            // The run's token authorizes its MCP session and, where the harness uses the broker, its model calls.
             const lease = yield* broker.issue(run.id, user, channel)
             yield* Effect.tryPromise({
               try: async () => {
@@ -813,25 +770,12 @@ export const AgentHarnessLive = Layer.effect(
                 await mkdir(ghBinHost, { recursive: true })
                 await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
                 await chmod(join(ghBinHost, "gh"), 0o755)
-                if (harnessHome !== null && harnessConfigDir !== undefined) {
-                  // Owner-only: the harness writes its own session state here, and only this user's runs read it.
-                  await mkdir(harnessHome, { recursive: true, mode: 0o700 })
-                  if (settings.level === "off") {
-                    await symlink(harnessHome, join(homeDir, harnessConfigDir)).catch((e: NodeJS.ErrnoException) => {
-                      if (e.code !== "EEXIST") throw e
-                    })
-                  }
-                }
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
 
-            // Anthropic and OpenAI runs keep both CLI logins, as before: either CLI may shell out to the other. A key for
-            // OpenRouter, Z.ai, DeepSeek, MiniMax or Kimi is never replaced by a Claude/ChatGPT login.
-            const allLogins = yield* cliAuth
-              .loggedInDirs(user)
-              .pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
-            const logins = loginsForProvider(provider, allLogins)
+            // A user's own CLI logins replace the broker's API keys for that provider.
+            const logins = loginsForProvider(provider, yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message }))))
             const loginDirs = logins.map((login) => ({
               provider: login.provider,
               host: login.dir,
@@ -845,59 +789,17 @@ export const AgentHarnessLive = Layer.effect(
             const cwd = agentCwd(workspacePath, task)
             // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
             // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
-            // A standalone harness with a per-user config dir keeps its sessions there, and every run of it mounts
-            // that dir (see `harnessHome`), so its sessions always live where its CLI keeps them. OpenCode keeps its
-            // sessions in the run's own home instead.
-            const continuation: SessionContinuation =
-              cli === null
-                ? ACP_CONFIG_DIRS[provider] === undefined
-                  ? "task-home"
-                  : "cli-login"
-                : logins.some((login) => login.provider === cli)
-                  ? "cli-login"
-                  : "task-home"
+            const harness = MODEL_HARNESS[provider]
+            const continuation: SessionContinuation = logins.some((login) => login.provider === harness.cli)
+              ? "cli-login"
+              : "task-home"
             const resumed = start.resume?.continuation === continuation ? start.resume : null
             const resumeSession = resumed?.sessionId ?? null
             const prompt = resumed?.prompt ?? start.fresh
-            // Claude Code picks its helper models (summaries, sub-agents) by name unless every tier is pinned, and a
-            // gateway only knows its own ids. A third-party provider's default model fills every tier for that run.
-            const providerModel =
-              choice.model ??
-              (harness === "claude" && provider !== "anthropic" ? defaultModelOf(provider)?.id : undefined)
-            const providerModelEnv: Record<string, string> =
-              harness === "claude" && provider !== "anthropic" && providerModel !== undefined
-                ? claudeTierEnv(providerModel)
-                : {}
-            const creds = yield* credentials.get(user)
-            // Antigravity reaches Google's models only through the user's Google sign-in; without it a run cannot work,
-            // so say that instead of letting the CLI fail mid-turn.
-            if (provider === "google" && !config.fakeAgent && logins.length === 0) {
-              return yield* Effect.fail(
-                new InternalError({
-                  message: "Google (Antigravity) is not signed in. Sign in with your Google account in Settings › Connections.",
-                }),
-              )
-            }
-            // Fail before the CLI starts when a brokered run has neither a key nor its vendor's CLI login. The broker
-            // would only answer 424 mid-turn, which the agent reports as a model error rather than a setup problem.
-            const brokerProvider = brokerProviderOf(provider)
-            if (brokerProvider !== null && !config.fakeAgent) {
-              const key = credentialFor(creds, brokerProvider)
-              const vendorLogin = provider === "anthropic" ? "claude-cli" : provider === "openai" ? "codex-cli" : null
-              const covered = vendorLogin !== null && allLogins.some((login) => login.provider === vendorLogin)
-              if (key === null && !covered) {
-                const signIn = vendorLogin === null ? "" : ` or sign in with the ${vendorLogin === "claude-cli" ? "Claude" : "ChatGPT"} CLI`
-                return yield* Effect.fail(
-                  new InternalError({
-                    message: `No ${providerInfo(provider).name} credential is configured. Add a key${signIn} in Settings › Connections.`,
-                  }),
-                )
-              }
-            }
-            const ownerCreds = yield* credentials.get(task.owner)
-            const gitIdentity = ownerCreds?.dev
+            const creds = yield* credentials.get(task.owner)
+            const gitIdentity = creds?.dev
               ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
-              : yield* github.commitIdentity(task.owner, ownerCreds?.github).pipe(
+              : yield* github.commitIdentity(task.owner, creds?.github).pipe(
                   Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
                 )
             const launch = yield* prepareLaunch({
@@ -913,6 +815,9 @@ export const AgentHarnessLive = Layer.effect(
               env: {
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
+                ...(choice.model !== undefined && provider !== "anthropic" && MODEL_HARNESS[provider].conversation === "claude"
+                  ? claudeTierEnv(choice.model)
+                  : {}),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
                 CLOUDAGENTS_MCP_URL: mcpUrl,
                 CLOUDAGENTS_TASK_ID: task.id,
@@ -925,15 +830,14 @@ export const AgentHarnessLive = Layer.effect(
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
                 // Continues the agent session of the task's previous run, so the agent keeps the thread's context.
                 ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
-                // A harness that runs its own models (OpenCode's free ones) gets no broker keys: they would only offer
-                // it models it is not there for.
+                // A harness that runs its own models (free OpenCode, the Go plan, Antigravity) gets no broker keys:
+                // they would only offer it models it is not there for.
                 ...(MODEL_HARNESS[provider].broker ? keptBroker : {}),
                 ...loginEnv,
-                ...providerModelEnv,
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
-              binds: [...loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })), ...harnessBinds],
+              binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
               pathPrefix: [ghBinAgent],
             })
 
@@ -953,8 +857,8 @@ export const AgentHarnessLive = Layer.effect(
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
               {
                 seed: resumeSession === null ? null : (task.context ?? null),
-                continuation,
                 provider,
+                continuation,
                 queued: admission.queued,
                 conversation: ({
                   codex: () => ({
@@ -977,18 +881,15 @@ export const AgentHarnessLive = Layer.effect(
                     provider,
                     input: {
                       prompt,
-                      // The thread's first checkout, so the harness finds its project and loads AGENTS.md there.
                       cwd,
                       resumeSession,
-                      // A standalone harness's ACP config takes its own model value; OpenCode's catalog id is it.
-                      model: choice.model === undefined ? undefined : (modelInfo(choice.model).acpModel ?? choice.model),
+                      model: choice.model,
                       effort: choice.effort,
                       // The thread's tools, as the other harnesses get them from the run's MCP config.
                       mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
-                      clientVersion: VERSION,
                     },
                   }),
-                } satisfies Record<ConversationKind, () => RunConversation>)[MODEL_HARNESS[provider].conversation](),
+                } satisfies Record<ConversationKind, () => RunConversation>)[harness.conversation](),
               },
             )
           }).pipe(Effect.either)
@@ -1036,13 +937,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            {
-              seed: null,
-              provider: run.provider ?? DEFAULT_MODEL_PROVIDER,
-              conversation: null,
-              continuation: null,
-              queued: null,
-            },
+            { seed: null, provider: run.provider ?? DEFAULT_MODEL_PROVIDER, conversation: null, continuation: null, queued: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
@@ -1113,7 +1008,8 @@ export const AgentHarnessLive = Layer.effect(
 
 /**
  * The agent session a JSON output line names, and the provider that minted it, or null. Claude Code's stream-json
- * opens with `{"type":"system","subtype":"init","session_id":…}`. A Codex run's thread comes from its driver.
+ * opens with `{"type":"system","subtype":"init","session_id":…}`; `provider` is the run's, since Anthropic-compatible
+ * gateways run that same CLI. A Codex run's thread comes from its driver.
  */
 const sessionOf = (
   event: unknown,

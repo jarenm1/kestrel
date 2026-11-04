@@ -1,24 +1,21 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import {
-  AcpHarnessId,
   CLI_SIGN_IN,
   CliProvider,
   ControlPaths,
-  HARNESS_IDS,
-  HARNESS_LABELS,
   MODEL_PROVIDERS,
   connectedModelProviders,
-  providerInfo,
   providerModels,
-  providersForHarness,
+
   type CliLoginStart,
   type Connection,
   type AgentModel,
+  type ModelProvider,
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
-import { Check, ChevronDown, Plus } from "lucide-react"
+import { ChevronDown, Plus } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -36,7 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { useEnabledHarnesses } from "@/hooks/useHarness"
+
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { errorText } from "@/util"
 
@@ -53,66 +50,14 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 }
 
-/** Which agent CLIs chats may use. Each thread keeps its own model and harness; disabling one only narrows the menu. */
-function HarnessCard({ connections }: { connections: readonly Connection[] | undefined }) {
-  const [enabled, , toggle] = useEnabledHarnesses()
-
-  return (
-    <div className="flex flex-col gap-2">
-      <h2 className="font-semibold tracking-tight">Harnesses</h2>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {HARNESS_IDS.map((id) => {
-          const providers = providersForHarness(id)
-          const provider = providers[0]
-          const active = enabled.includes(id)
-          // A standalone harness is only offered when the box reports it can launch that CLI at all.
-          const row = provider?.standalone === true ? connections?.find((c) => c.provider === id) : undefined
-          const missing = provider?.standalone === true && (row === undefined || row.available === false)
-          return (
-            <button
-              key={id}
-              type="button"
-              aria-pressed={active}
-              onClick={() => toggle(id)}
-              className={
-                active
-                  ? "flex flex-col gap-1.5 rounded-xl border border-white/25 bg-white/[0.06] p-4 text-left transition-colors"
-                  : "flex flex-col gap-1.5 rounded-xl border border-white/[0.06] bg-card/40 p-4 text-left transition-colors hover:border-white/15 hover:bg-card/70"
-              }
-            >
-              <span className="flex items-center gap-2 text-sm font-semibold">
-                {HARNESS_LABELS[id]}
-                {active && <Check className="ml-auto size-4 text-foreground/80" />}
-              </span>
-              <span className="text-xs leading-relaxed text-muted-foreground">
-                {providers.map((p) => p.name).join(", ")}
-              </span>
-              <span className="text-xs leading-relaxed text-muted-foreground">
-                {provider?.auth === "harness-login"
-                  ? missing
-                    ? (row?.error ?? "Not installed on this box")
-                    : id === "opencode" ? "Free models need no sign-in; Go uses its own key" : "Runs on the providers connected above"
-                  : provider?.auth === "cli-login"
-                    ? id === "google" ? "Your Google account through Antigravity" : "API key or its CLI subscription"
-                    : "API key from Connections"}
-                {provider?.mcp === false ? " · no MCP tools" : " · MCP tools"}
-              </span>
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
+  const capabilities = useQuery(queries.capabilities())
   const list = connections.data
 
   return (
     <>
-      <HarnessCard connections={list} />
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {list && (
@@ -123,8 +68,8 @@ export function Connections() {
               {list.filter((connection) => connection.kind !== "apikey").map((connection) =>
                 connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                   <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
-                ) : connection.kind === "cli" && Schema.is(AcpHarnessId)(connection.provider) ? (
-                  <HarnessConnectionRow key={connection.provider} connection={connection} harness={connection.provider} />
+                ) : connection.kind === "cli" && connection.provider === "opencode" ? (
+                  <FreeOpenCodeRow key={connection.provider} connection={connection} />
                 ) : (
                   <ConnectionRow key={connection.provider} connection={connection} />
                 ),
@@ -134,7 +79,7 @@ export function Connections() {
         </div>
       )}
       {list && <ApiKeysCard connections={list} />}
-      {list && <ModelListsCard connections={list} />}
+      {list && <ModelListsCard connections={list} harnesses={capabilities.data?.harnesses} />}
     </>
   )
 }
@@ -193,9 +138,16 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   )
 }
 
+
 /** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
-function ModelListsCard({ connections }: { connections: readonly Connection[] }) {
-  const connected = new Set(connectedModelProviders(connections).map((p) => p.id))
+function ModelListsCard({
+  connections,
+  harnesses,
+}: {
+  connections: readonly Connection[]
+  harnesses: readonly ModelProvider[] | undefined
+}) {
+  const connected = new Set(connectedModelProviders(connections, harnesses).map((p) => p.id))
   return (
     <div className="flex flex-col gap-2">
       <h2 className="font-semibold tracking-tight">Models</h2>
@@ -222,21 +174,24 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
   return (
     <div className="flex items-center gap-3 px-5 py-4">
       <div className="flex flex-col gap-0.5">
-        <ConnectionHeader label={provider.name} connected={connected} />
-        {provider.standalone === true ? (
-          <span className="text-xs text-muted-foreground">
-            {provider.id === "opencode" ? "No sign-in needed: " : ""}
-            {connected
-              ? provider.id === "opencode"
-                ? "the box runs OpenCode's free models without a Go key or broker credentials."
-                : "the box can launch this harness; it reaches models through Kestrel's broker."
-              : `Not offered: this box does not have ${provider.name}'s CLI${provider.setup === undefined ? "" : ` (${provider.setup})`}.`}
-            {provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}
-          </span>
+        {provider.connections.length === 0 ? (
+          <div className="flex items-center gap-2">
+            <strong>{provider.name}</strong>
+            <Badge variant="neutral">no sign-in needed</Badge>
+          </div>
         ) : (
-          !connected && <span className="text-xs text-muted-foreground">Connect a key or subscription above to use these.</span>
+          <ConnectionHeader label={provider.name} connected={connected} />
         )}
-        {provider.hint !== undefined && <span className="text-xs text-muted-foreground">{provider.hint}</span>}
+        {provider.id === "opencode" && (
+          <span className="text-xs text-muted-foreground">Free models need no Go key or broker credentials.</span>
+        )}
+        {!connected && (
+          <span className="text-xs text-muted-foreground">
+            {provider.connections.length === 0
+              ? `${provider.name} is not installed on this box.`
+              : "Connect a key or subscription above to use these."}
+          </span>
+        )}
       </div>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -271,23 +226,16 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
   )
 }
 
-/**
- * A standalone ACP harness has no managed sign-in here. OpenCode runs its free models; the other harnesses reach
- * models through Kestrel's broker, so these rows only report the selected box's installation.
- */
-function HarnessConnectionRow({ connection, harness }: { connection: Connection; harness: AcpHarnessId }) {
-  const provider = providerInfo(harness)
+/** Free OpenCode has installation state, not a key or subscription to manage. */
+function FreeOpenCodeRow({ connection }: { connection: Connection }) {
   return (
     <div className="flex flex-col gap-1 px-5 py-4">
       <ConnectionHeader label={connection.label} connected={connection.available} />
       <span className="text-xs text-muted-foreground">
         {connection.available
-          ? `Installed on the box. ${harness === "opencode" ? "Free models need no sign-in or Go key." : "Runs on the models you connected above."}${provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}`
-          : `${connection.error ?? "its CLI is not installed on the box"}. Install ${provider.name} on the box to offer it in the model picker.`}
+          ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
+          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
       </span>
-      {connection.available && provider.setup !== undefined && (
-        <span className="text-xs text-muted-foreground">{provider.setup}</span>
-      )}
     </div>
   )
 }

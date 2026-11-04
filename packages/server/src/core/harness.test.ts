@@ -4,7 +4,7 @@ import { createServer } from "node:http"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Checkout, Run, Task } from "@cloudagents/protocol"
+import type { Checkout, ModelProvider, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker, CredentialBrokerLive } from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
@@ -13,15 +13,27 @@ import { CredentialStore } from "../credentials"
 import { GitHub } from "../github/api"
 import { AgentHarness, AgentHarnessLive } from "./harness"
 import { EventHub, EventHubLive } from "./events"
+import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore } from "./state"
 import { WorkspaceLive } from "./workspace"
 
-/** A harness whose Claude CLI is `cli`, with its state under `root`. `loggedInDirs` runs at every launch. */
+/**
+ * A harness whose Claude CLI is `cli`, with its state under `root`. `loggedInDirs` runs at every launch; `gateways`
+ * runs the gateway providers on the same Claude Code, as they do in production.
+ */
 const harnessLayer = (
   root: string,
   cli: string,
-  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<ReadonlyArray<CliLoginDir>>; readonly controlUrl?: string; readonly realBroker?: boolean; readonly fakeAgent?: boolean } = {},
+  options: {
+    readonly maxConcurrentRuns?: number
+    readonly loggedInDirs?: () => Effect.Effect<ReadonlyArray<CliLoginDir>>
+    readonly controlUrl?: string
+    readonly realBroker?: boolean
+    readonly fakeAgent?: boolean
+    readonly gateways?: ReadonlyArray<ModelProvider>
+  } = {},
 ) => {
+  const cliCommand = [process.execPath, cli].map((path) => `'${path.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`).join(" ")
   const config: ServerConfig = {
     port: 8897,
     host: "127.0.0.1",
@@ -36,7 +48,7 @@ const harnessLayer = (
     attachmentsDir: join(root, "attachments"),
     homesDir: join(root, "homes"),
     agentCommands: {
-      anthropic: [process.execPath, cli].map((path) => `'${path.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`).join(" "),
+      anthropic: cliCommand,
       openai: "",
       openrouter: "",
       zai: "",
@@ -46,9 +58,7 @@ const harnessLayer = (
       opencode: "",
       "opencode-go": "",
       google: "",
-      omp: "",
-      pi: "",
-      hermes: "",
+      ...Object.fromEntries((options.gateways ?? []).map((provider) => [provider, cliCommand] as const)),
     },
     fakeAgent: options.fakeAgent ?? false,
     fakeAgentRoBinds: [],
@@ -98,7 +108,10 @@ const harnessLayer = (
       shutdown: () => Effect.void,
     }),
   )
-  return { config, layer: AgentHarnessLive.pipe(Layer.provide(dependencies), Layer.provideMerge(dependencies)) }
+  return {
+    config,
+    layer: AgentHarnessLive.pipe(Layer.provide(dependencies), Layer.provideMerge(dependencies)),
+  }
 }
 
 const runningTask = (id: string): { task: Task; run: Run } => {
@@ -574,6 +587,82 @@ createInterface({ input: process.stdin })
         expect(yield* runWith("legacy-logged-out", undefined)).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "task-home" })
       } finally {
         yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("a gateway run records its Claude session under its own provider, which an Anthropic turn cannot resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-gateway-session-"))
+  const cli = join(root, "cli.ts")
+  // Names its own session, then answers with the session it was asked to resume.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.type !== "user") return
+    console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "session-" + process.env.CLOUDAGENTS_RUN_ID }))
+    console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "resume=" + (process.env.CLOUDAGENTS_RESUME_SESSION ?? "none") }))
+  })
+  .on("close", () => process.exit(0))
+`)
+  // Gateways run the same Claude Code, so the fixture CLI is their harness too.
+  const { config, layer: harness } = harnessLayer(root, cli, { gateways: ["openrouter"] })
+  const layer = CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness))
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const core = yield* CoreService
+      const agent = yield* AgentHarness
+      const now = new Date().toISOString()
+      yield* store.update((state) => {
+        state.tasks.push({ id: "thread", owner: "test", title: "Thread", status: "idle", createdAt: now, updatedAt: now, checkouts: [] })
+        return Either.right(undefined)
+      })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, "thread"), { recursive: true }))
+
+      /**
+       * Sends a message through the core, then returns the run's answer and the session it recorded. The session
+       * record lands just after the run's last line, so it is awaited (the run's own state already says it is over).
+       */
+      const send = (text: string, model: "anthropic/claude-sonnet-5.5" | "claude-sonnet-5-5") =>
+        Effect.gen(function* () {
+          const { run } = yield* core.sendMessage("test", "thread", text, { model }, [], false)
+          for (let i = 0; i < 100; i++) {
+            const state = yield* store.read
+            const finished = state.runs.find((r) => r.id === run.id)?.status !== "running"
+            const session = state.runSessions.find((record) => record.runId === run.id)
+            if (finished && session !== undefined) {
+              return { runId: run.id, answer: state.messages.at(-1)?.text, session }
+            }
+            yield* Effect.sleep("50 millis")
+          }
+          throw new Error(`run ${run.id} did not finish with a recorded session`)
+        })
+
+      try {
+        const gateway = yield* send("First message through the gateway", "anthropic/claude-sonnet-5.5")
+        // The gateway's Claude Code names a session in its `init`; it belongs to the gateway, not to Anthropic.
+        expect(gateway.session.sessionId).toBe(`session-${gateway.runId}`)
+        expect(gateway.session.provider).toBe("openrouter")
+        expect(gateway.session.continuation).toBe("task-home")
+        expect(gateway.answer).toBe("resume=none")
+
+        const anthropic = yield* send("An Anthropic follow-up", "claude-sonnet-5-5")
+        // The Anthropic turn starts fresh: the gateway's session is not offered to it.
+        expect(anthropic.answer).toBe("resume=none")
+        expect(anthropic.session.provider).toBe("anthropic")
+
+        // The gateway resumes its own session, with only what happened since.
+        const back = yield* send("Back on the gateway", "anthropic/claude-sonnet-5.5")
+        expect(back.answer).toBe(`resume=session-${gateway.runId}`)
+      } finally {
+        yield* agent.stopAll()
+        // The test's cwd is removed below; a CLI that is still exiting would hold it on Windows.
+        for (let i = 0; i < 100 && (yield* agent.activeRunCount()) > 0; i++) yield* Effect.sleep("50 millis")
       }
     }).pipe(Effect.provide(layer)))
   } finally {
