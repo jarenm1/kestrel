@@ -101,7 +101,7 @@ describe("a desktop stream with a desktop token", () => {
     expect((await getFile(hub, STREAM, mintDesktop(hub, signIn(hub)))).status).toBe(200)
     expect(relayed.map((call) => call.path)).toEqual([STREAM])
     expect(relayed[0]!.headers.get(FILE_TOKEN_HEADER)).toBeNull()
-    expect(JSON.parse(relayed[0]!.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "octocat" })
+    expect(JSON.parse(relayed[0]!.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "octocat", providers: {} })
   })
 
   test("is refused on another task's stream, on a box file, and on other methods", async () => {
@@ -150,7 +150,7 @@ describe("box files with a file token", () => {
     for (const call of relayed) {
       expect(call.headers.get(FILE_TOKEN_HEADER)).toBeNull()
       expect(call.headers.get("cookie")).toBeNull()
-      expect(JSON.parse(call.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "octocat" })
+      expect(JSON.parse(call.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "octocat", providers: {} })
     }
   })
 
@@ -158,7 +158,7 @@ describe("box files with a file token", () => {
     const { hub } = newHub()
     intercept(hub)
     expect((await getFile(hub, ATTACHMENT, mint(hub, signIn(hub, "dev", true)))).status).toBe(200)
-    expect(JSON.parse(relayed[0]?.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "dev", dev: true })
+    expect(JSON.parse(relayed[0]?.headers.get(CREDENTIALS_HEADER) ?? "{}")).toEqual({ user: "dev", dev: true, providers: {} })
   })
 
   test("signing out revokes the session's tokens", async () => {
