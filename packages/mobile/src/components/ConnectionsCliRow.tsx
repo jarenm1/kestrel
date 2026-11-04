@@ -13,7 +13,7 @@ import {
   connectionStyles,
 } from "@/components/ConnectionsShared";
 
-/** While a codex sign-in is pending, connections are re-read at this interval until the box reports the login. */
+/** While a device-code sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000;
 
 const CLI_INTRO: Record<CliProvider, string> = {
@@ -83,7 +83,8 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     return () => clearTimeout(id);
   }, [login]);
 
-  const polling = login?.provider === "codex-cli" && !expired && !connection.connected;
+  // A device-code sign-in finishes on the provider's page, so only a re-read shows it.
+  const polling = login !== null && !login.needsCode && !expired && !connection.connected;
   useEffect(() => {
     if (!polling) return;
     const id = setInterval(() => {

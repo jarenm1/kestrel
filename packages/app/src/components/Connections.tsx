@@ -38,8 +38,13 @@ import { errorText } from "@/util"
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8
 
-/** While a codex sign-in is pending, connections are re-read at this interval until the box reports the login. */
+/** While a device-code sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000
+
+const CLI_INTRO: Record<CliProvider, string> = {
+  "claude-cli": "Use your own Claude Pro or Max subscription.",
+  "codex-cli": "Use your own ChatGPT subscription.",
+}
 
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
@@ -302,7 +307,8 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     return () => clearTimeout(id)
   }, [login])
 
-  const polling = login?.provider === "codex-cli" && !expired && !connection.connected
+  // A device-code sign-in finishes on the provider's page, so only a re-read shows it.
+  const polling = login !== null && !login.needsCode && !expired && !connection.connected
   useEffect(() => {
     if (!polling) return
     const id = setInterval(() => invalidateConnections(queryClient), CLI_POLL_MS)
@@ -416,7 +422,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     return (
       <>
         <p className="text-muted-foreground">
-          {provider === "claude-cli" ? "Use your own Claude Pro or Max subscription." : "Use your own ChatGPT subscription."}
+          {CLI_INTRO[provider]}
         </p>
         <Button className="w-fit" disabled={busy} onClick={() => start.mutate()}>
           Connect

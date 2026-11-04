@@ -37,6 +37,7 @@ import {
   type FileRoot,
   providerModels,
 } from "@cloudagents/protocol"
+import { MODEL_CLI } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { dailyActivity } from "./activity"
 import { Config } from "../config"
@@ -47,7 +48,7 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
-import { AgentHarness, agentCwd, CLI_PROVIDER, type AgentChoice, type RunStart } from "./harness"
+import { AgentHarness, agentCwd, type AgentChoice, type RunStart } from "./harness"
 import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
@@ -1955,7 +1956,7 @@ export const CoreLive = Layer.effect(
           const running = state.runs.find((r) => r.taskId === taskId && r.status === "running")
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
-          const cliProvider = CLI_PROVIDER[provider]
+          const cliProvider = MODEL_CLI[provider]
           // Started where the agent starts, so the list holds the project commands and skills of its checkout.
           const workspace = threadDirOf(task.id)
           const commands = yield* cliAuth.discoverCommands(user, cliProvider, workspace, agentCwd(workspace, task))

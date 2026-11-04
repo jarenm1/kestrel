@@ -5,12 +5,13 @@ import { CredentialStore } from "../credentials"
 
 export type BrokerProvider = "anthropic" | "openai"
 
-export const BROKER_PROVIDERS: ReadonlyArray<BrokerProvider> = ["anthropic", "openai"]
-
-export const UPSTREAM_BASE: Record<BrokerProvider, string> = {
-  anthropic: "https://api.anthropic.com",
-  openai: "https://api.openai.com",
+/** Where the broker forwards each provider's calls, and the header that carries the real key. */
+export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; readonly keyHeader: "x-api-key" | "bearer" }> = {
+  anthropic: { base: "https://api.anthropic.com", keyHeader: "x-api-key" },
+  openai: { base: "https://api.openai.com", keyHeader: "bearer" },
 }
+
+export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>
 
 /** A live broker token: the run it was minted for and the user who started that run. */
 export interface BrokerGrant {

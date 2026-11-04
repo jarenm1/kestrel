@@ -12,16 +12,9 @@ import {
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
+import { AGENT_CLIS, CLI_PROVIDERS, type CliOutput } from "./agent-clis"
 import { Config } from "./config"
-import {
-  CLAUDE_DISCOVERY_ARGS,
-  CODEX_DISCOVERY_ARGS,
-  discoverClaudeCommands,
-  discoverCodexCommands,
-  killActiveDiscovery,
-  limitDiscovery,
-} from "./harness-commands"
-import { probeClaudeUsage, probeCodexUsage, useCodexBankedReset } from "./provider-usage"
+import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
@@ -48,34 +41,6 @@ const CODE_MAX = 512
  */
 const CODE_REJECTED = /\b(Invalid code|OAuth error)\b/i
 const MESSAGE_MAX = 200
-
-const PROVIDERS: ReadonlyArray<CliProvider> = ["claude-cli", "codex-cli"]
-
-interface ProviderSpec {
-  /** Directory under the user's root that the CLI uses as its config home. */
-  readonly dir: string
-  readonly bin: string
-  readonly status: ReadonlyArray<string>
-  readonly login: ReadonlyArray<string>
-  readonly logout: ReadonlyArray<string>
-}
-
-const SPECS: Record<CliProvider, ProviderSpec> = {
-  "claude-cli": {
-    dir: "claude",
-    bin: "claude",
-    status: ["auth", "status", "--json"],
-    login: ["auth", "login"],
-    logout: ["auth", "logout"],
-  },
-  "codex-cli": {
-    dir: "codex",
-    bin: "codex",
-    status: ["login", "status"],
-    login: ["login", "--device-auth"],
-    logout: ["logout"],
-  },
-}
 
 /** A provider the user is logged in to, with the host directory holding that login. */
 export interface CliLoginDir {
@@ -120,11 +85,6 @@ export interface CliAuthShape {
 
 export class CliAuth extends Context.Tag("cloudagents/CliAuth")<CliAuth, CliAuthShape>() {}
 
-interface Output {
-  readonly stdout: string
-  readonly stderr: string
-}
-
 /** A concrete process to run: the CLI itself, bwrap wrapping it, or (Windows, unsandboxed) the shell that runs its shim. */
 interface Invocation {
   readonly file: string
@@ -133,8 +93,8 @@ interface Invocation {
 }
 
 /** Runs a CLI. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
-const runCli = (inv: Invocation, label: string): Effect.Effect<Output | null, InternalError> =>
-  Effect.async<Output | null, InternalError>((resume) => {
+const runCli = (inv: Invocation, label: string): Effect.Effect<CliOutput | null, InternalError> =>
+  Effect.async<CliOutput | null, InternalError>((resume) => {
     execFile(inv.file, [...inv.args], { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return resume(Effect.succeed(null))
       if (err && err.killed) return resume(Effect.fail(new InternalError({ message: `${label}: timed out` })))
@@ -142,55 +102,7 @@ const runCli = (inv: Invocation, label: string): Effect.Effect<Output | null, In
     })
   })
 
-const parseClaudeStatus = (out: Output): Effect.Effect<CliAuthStatus, InternalError> =>
-  Effect.gen(function* () {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(out.stdout)
-    } catch {
-      const detail = out.stderr.trim().split("\n")[0]?.slice(0, 200) || "no output"
-      return yield* Effect.fail(new InternalError({ message: `claude auth status: unreadable output (${detail})` }))
-    }
-    if (typeof parsed !== "object" || parsed === null || !("loggedIn" in parsed) || typeof parsed.loggedIn !== "boolean") {
-      return yield* Effect.fail(new InternalError({ message: "claude auth status: unexpected output" }))
-    }
-    const field = (name: string): string | null => {
-      const value = (parsed as Record<string, unknown>)[name]
-      return typeof value === "string" && value !== "" ? value : null
-    }
-    // claude.ai logins carry email/orgName; API-key logins only an auth method.
-    const account = parsed.loggedIn ? (field("email") ?? field("orgName") ?? field("authMethod")) : null
-    return { provider: "claude-cli", loggedIn: parsed.loggedIn, account }
-  })
-
-const parseCodexStatus = (out: Output): Effect.Effect<CliAuthStatus, InternalError> =>
-  Effect.gen(function* () {
-    const text = `${out.stdout}\n${out.stderr}`
-    if (/^Not logged in/m.test(text)) return { provider: "codex-cli", loggedIn: false, account: null }
-    // e.g. "Logged in using ChatGPT", "Logged in using an API key - sk-…": the part after " - " is
-    // a key fragment and is dropped.
-    const match = /^Logged in using (?:an? )?(.+?)(?: - .*)?$/m.exec(text)
-    if (!match) return yield* Effect.fail(new InternalError({ message: "codex login status: unexpected output" }))
-    return { provider: "codex-cli", loggedIn: true, account: match[1] ?? null }
-  })
-
 const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
-
-/** The sign-in link (and, for codex, the device code) once the CLI has printed them; null until then. */
-const parseLink = (provider: CliProvider, text: string): { url: string; userCode: string | null } | null => {
-  const clean = stripAnsi(text)
-  if (provider === "claude-cli") {
-    // The line ends with the link, so a half-written link is not taken.
-    const url = /https:\/\/[^\s]*claude\.(?:com|ai)\/[^\s]*(?=\r?\n)/.exec(clean)?.[0]
-    return url === undefined ? null : { url, userCode: null }
-  }
-  const lines = clean.split(/\r?\n/).map((line) => line.trim())
-  const url = lines.map((line) => /^https:\/\/auth\.openai\.com\/\S*$/.exec(line)?.[0]).find((u) => u !== undefined)
-  const at = lines.findIndex((line) => /one-time code/i.test(line))
-  const userCode = at < 0 ? undefined : lines.slice(at + 1).find((line) => line !== "")
-  if (url === undefined || userCode === undefined || !/^[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(userCode)) return null
-  return { url, userCode }
-}
 
 /** Last meaningful CLI output line, with links and the submitted code hidden, capped for an error message. */
 const lastLine = (text: string, secrets: ReadonlyArray<string>): string => {
@@ -262,7 +174,7 @@ export const CliAuthLive = Layer.effect(
         : Effect.fail(new BadRequest({ message: "signed-in user is not a valid login" }))
 
     const providerDir = (user: string, provider: CliProvider): Effect.Effect<string, BadRequest> =>
-      Effect.map(rootOf(user), (root) => join(root, SPECS[provider].dir))
+      Effect.map(rootOf(user), (root) => join(root, AGENT_CLIS[provider].dir))
 
     const ensureDir = (path: string): Effect.Effect<void, InternalError> =>
       Effect.tryPromise({
@@ -296,8 +208,7 @@ export const CliAuthLive = Layer.effect(
           ...(config.sandbox === "off" ? platformEnv() : {}),
           PATH: path,
           HOME: root,
-          CLAUDE_CONFIG_DIR: join(root, SPECS["claude-cli"].dir),
-          CODEX_HOME: join(root, SPECS["codex-cli"].dir),
+          ...Object.fromEntries(CLI_PROVIDERS.map((provider) => [AGENT_CLIS[provider].configEnv, join(root, AGENT_CLIS[provider].dir)])),
           BROWSER: "/bin/false",
           NO_COLOR: "1",
           ...(ssl === null ? {} : { SSL_CERT_FILE: ssl, NIX_SSL_CERT_FILE: ssl }),
@@ -390,19 +301,16 @@ export const CliAuthLive = Layer.effect(
         const key = `${user}\0${provider}\0${dir}`
         const cached = commandCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < COMMAND_CACHE_MS) return cached.commands
-        const spec = SPECS[provider]
-        const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
+        const spec = AGENT_CLIS[provider]
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, args, { workspacePath: workspace, cwd: dir })
+        const inv = yield* invoke(user, spec.bin, spec.probeArgs, { workspacePath: workspace, cwd: dir })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
             if (running !== undefined) return running
             const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: dir }
-            const pending = limitDiscovery(() =>
-              provider === "claude-cli" ? discoverClaudeCommands(launch) : discoverCodexCommands(launch),
-            )
+            const pending = limitDiscovery(() => spec.discoverCommands(launch))
               .then((commands) => {
                 commandCache.delete(key)
                 commandCache.set(key, { at: Date.now(), commands })
@@ -436,7 +344,7 @@ export const CliAuthLive = Layer.effect(
      */
     const readUsage = (user: string, provider: CliProvider): Effect.Effect<ProviderUsage, BadRequest> =>
       Effect.gen(function* () {
-        const spec = SPECS[provider]
+        const spec = AGENT_CLIS[provider]
         const env = yield* cliEnv(user)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
@@ -450,16 +358,13 @@ export const CliAuthLive = Layer.effect(
         const cached = usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
         const epoch = usageEpochs.get(key) ?? 0
-        const args = provider === "claude-cli" ? CLAUDE_DISCOVERY_ARGS : CODEX_DISCOVERY_ARGS
-        const inv = yield* invoke(user, spec.bin, args)
+        const inv = yield* invoke(user, spec.bin, spec.probeArgs)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         return yield* Effect.tryPromise({
           try: () => {
             const running = usageRuns.get(key)
             if (running !== undefined) return running
-            const pending = limitDiscovery(() =>
-              provider === "claude-cli" ? probeClaudeUsage(launch) : probeCodexUsage(launch),
-            )
+            const pending = limitDiscovery(() => spec.probeUsage(launch))
               .then((usage) => {
                 usageCache.delete(key)
                 const current = (usageEpochs.get(key) ?? 0) === epoch
@@ -487,25 +392,26 @@ export const CliAuthLive = Layer.effect(
 
     const providerUsage = (user: string) =>
       Effect.all(
-        PROVIDERS.map((provider) => readUsage(user, provider)),
+        CLI_PROVIDERS.map((provider) => readUsage(user, provider)),
         { concurrency: "unbounded" },
       )
 
     const useBankedReset = (user: string, provider: CliProvider, resetId: string) =>
       Effect.gen(function* () {
-        if (provider !== "codex-cli") {
-          return yield* Effect.fail(new BadRequest({ message: `${SPECS[provider].bin} has no banked resets` }))
+        const spec = AGENT_CLIS[provider]
+        const bankedReset = spec.useBankedReset
+        if (bankedReset === null) {
+          return yield* Effect.fail(new BadRequest({ message: `${spec.bin} has no banked resets` }))
         }
-        const spec = SPECS[provider]
         const env = yield* cliEnv(user)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
         }
-        const inv = yield* invoke(user, spec.bin, CODEX_DISCOVERY_ARGS)
+        const inv = yield* invoke(user, spec.bin, spec.probeArgs)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         const key = keyOf(user, provider)
         return yield* Effect.tryPromise({
-          try: () => limitDiscovery(() => useCodexBankedReset(launch, resetId)),
+          try: () => limitDiscovery(() => bankedReset(launch, resetId)),
           catch: (e) => new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} reset failed` }),
         }).pipe(
           // Whatever the outcome, the limits and the list of resets may have changed.
@@ -525,7 +431,7 @@ export const CliAuthLive = Layer.effect(
      */
     const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest> =>
       Effect.gen(function* () {
-        const spec = SPECS[provider]
+        const spec = AGENT_CLIS[provider]
         const env = yield* cliEnv(user)
         // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
@@ -538,7 +444,7 @@ export const CliAuthLive = Layer.effect(
         const inv = yield* invoke(user, spec.bin, spec.status)
         const out = yield* runCli(inv, `${spec.bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
-        return provider === "claude-cli" ? yield* parseClaudeStatus(out) : yield* parseCodexStatus(out)
+        return yield* spec.parseStatus(out)
       }).pipe(
         Effect.catchTag("InternalError", (e) =>
           Effect.succeed<CliAuthStatus>({ provider, loggedIn: false, account: null, error: e.message }),
@@ -547,13 +453,13 @@ export const CliAuthLive = Layer.effect(
 
     const status = (user: string) =>
       Effect.all(
-        PROVIDERS.map((provider) => readStatus(user, provider)),
+        CLI_PROVIDERS.map((provider) => readStatus(user, provider)),
         { concurrency: "unbounded" },
       )
 
     const startLogin = (user: string, provider: CliProvider): Effect.Effect<CliLoginStart, BadRequest | InternalError> =>
       Effect.gen(function* () {
-        const spec = SPECS[provider]
+        const spec = AGENT_CLIS[provider]
         yield* ensureUserDirs(user, provider)
         const key = keyOf(user, provider)
         const previous = pending.get(key)
@@ -590,7 +496,7 @@ export const CliAuthLive = Layer.effect(
         })
         pending.set(key, entry)
 
-        const link = yield* Effect.promise(() => waitFor(entry, (text) => parseLink(provider, text), LINK_TIMEOUT_MS))
+        const link = yield* Effect.promise(() => waitFor(entry, (text) => spec.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS))
         if (link === null) {
           killEntry(entry)
           const detail = lastLine(entry.output, [])
@@ -602,7 +508,7 @@ export const CliAuthLive = Layer.effect(
           provider,
           url: link.url,
           userCode: link.userCode,
-          needsCode: provider === "claude-cli",
+          needsCode: spec.needsCode,
           expiresAt: new Date(expiresAt).toISOString(),
         }
       })
@@ -614,9 +520,10 @@ export const CliAuthLive = Layer.effect(
     ): Effect.Effect<CliAuthStatus, BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* rootOf(user)
-        if (provider !== "claude-cli") {
+        const spec = AGENT_CLIS[provider]
+        if (!spec.needsCode) {
           return yield* Effect.fail(
-            new BadRequest({ message: "codex-cli signs in with a device code on the provider's page; there is no code to submit" }),
+            new BadRequest({ message: `${provider} signs in with a device code on the provider's page; there is no code to submit` }),
           )
         }
         const text = code.trim()
@@ -626,7 +533,7 @@ export const CliAuthLive = Layer.effect(
         }
         const entry = pending.get(keyOf(user, provider))
         if (!entry) {
-          return yield* Effect.fail(new BadRequest({ message: "no sign-in is pending for claude-cli; start one first" }))
+          return yield* Effect.fail(new BadRequest({ message: `no sign-in is pending for ${provider}; start one first` }))
         }
         const before = entry.output.length
         entry.child.stdin?.write(`${text}\n`)
@@ -646,7 +553,7 @@ export const CliAuthLive = Layer.effect(
         // An accepted code ends the CLI with exit 0; no exit by now means it did not answer in time.
         if (entry.child.exitCode === null) {
           killEntry(entry)
-          return yield* Effect.fail(new InternalError({ message: "claude: the code was not checked in time" }))
+          return yield* Effect.fail(new InternalError({ message: `${spec.bin}: the code was not checked in time` }))
         }
         if (entry.child.exitCode !== 0) {
           const detail = lastLine(entry.output.slice(before), [text])
@@ -665,8 +572,8 @@ export const CliAuthLive = Layer.effect(
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         // Revoke with the CLI when there is a login to revoke; a failed revoke still removes the local login.
         if (present) {
-          const inv = yield* invoke(user, SPECS[provider].bin, SPECS[provider].logout)
-          yield* runCli(inv, `${SPECS[provider].bin} logout`).pipe(Effect.ignore)
+          const inv = yield* invoke(user, AGENT_CLIS[provider].bin, AGENT_CLIS[provider].logout)
+          yield* runCli(inv, `${AGENT_CLIS[provider].bin} logout`).pipe(Effect.ignore)
         }
         yield* Effect.tryPromise({
           try: () => rm(dir, { recursive: true, force: true }),
@@ -680,7 +587,7 @@ export const CliAuthLive = Layer.effect(
     const loggedInDirs = (user: string): Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError> =>
       Effect.map(
         Effect.all(
-          PROVIDERS.map((provider) =>
+          CLI_PROVIDERS.map((provider) =>
             Effect.flatMap(readStatus(user, provider), (s) =>
               s.loggedIn
                 ? Effect.map(providerDir(user, provider), (dir): CliLoginDir | null => ({ provider, dir }))

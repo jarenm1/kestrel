@@ -13,13 +13,13 @@ import {
   type AgentItem,
   type AgentModel,
   type ContextUsage,
-  type CliProvider,
   type Message,
   type ModelProvider,
   type Run,
   type ServerEvent,
   type Task,
 } from "@cloudagents/protocol"
+import { AGENT_CLIS, MODEL_CLI, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { boxControl } from "../control/client"
@@ -97,7 +97,7 @@ export interface AgentChoice {
 
 /**
  * Where a provider's CLI keeps a run's native sessions: `task-home` under the thread's own home (the run uses the
- * broker's keys), `cli-login` in the user's CLI login directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, see LOGIN_ENV).
+ * broker's keys), `cli-login` in the user's CLI login directory (`AgentCli.configEnv`, e.g. `CLAUDE_CONFIG_DIR`).
  * A session kept in one is not found from the other, so a run resumes only a session kept where it keeps its own.
  */
 export type SessionContinuation = "task-home" | "cli-login"
@@ -113,9 +113,6 @@ export interface RunStart {
    */
   readonly resume: { readonly sessionId: string; readonly continuation: string | undefined; readonly prompt: string } | null
 }
-
-/** The CLI that runs each provider's models; its login decides where the CLI keeps sessions. */
-export const CLI_PROVIDER: Record<ModelProvider, CliProvider> = { anthropic: "claude-cli", openai: "codex-cli" }
 
 interface ActiveRun {
   readonly child: ChildProcess
@@ -136,7 +133,7 @@ interface ActiveRun {
   readonly continuation: SessionContinuation | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
-  readonly agentKind: "claude" | "codex" | null
+  readonly agentKind: ConversationKind | null
   diagnostic: string | null
   /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
   readonly failedTools: Set<string>
@@ -214,12 +211,6 @@ const isDeltaLine = (parsed: unknown): boolean => {
   if (typeof parsed !== "object" || parsed === null) return false
   if ("type" in parsed && parsed.type === "stream_event") return true
   return "method" in parsed && typeof parsed.method === "string" && DELTA_METHOD.test(parsed.method)
-}
-
-/** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
-const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
-  "claude-cli": { env: "CLAUDE_CONFIG_DIR", broker: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
-  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
 }
 
 export const AgentHarnessLive = Layer.effect(
@@ -727,14 +718,15 @@ export const AgentHarnessLive = Layer.effect(
               // Sandboxed runs see the login under their home; unsandboxed runs read it in place.
               inside: settings.level === "off" ? login.dir : join(SANDBOX_HOME, ".kestrel", basename(login.dir)),
             }))
-            const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
+            const dropped = new Set(logins.flatMap((login) => AGENT_CLIS[login.provider].brokerEnv))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
-            const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
+            const loginEnv = Object.fromEntries(loginDirs.map((d) => [AGENT_CLIS[d.provider].configEnv, d.inside]))
             const workspacePath = join(config.threadsDir, task.id)
             const cwd = agentCwd(workspacePath, task)
             // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
             // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
-            const continuation: SessionContinuation = logins.some((login) => login.provider === CLI_PROVIDER[provider])
+            const cli = MODEL_CLI[provider]
+            const continuation: SessionContinuation = logins.some((login) => login.provider === cli)
               ? "cli-login"
               : "task-home"
             const resumed = start.resume?.continuation === continuation ? start.resume : null
@@ -798,23 +790,23 @@ export const AgentHarnessLive = Layer.effect(
                 seed: resumeSession === null ? null : (task.context ?? null),
                 continuation,
                 queued: admission.queued,
-                conversation:
-                  provider === "openai"
-                    ? {
-                        kind: "codex",
-                        input: {
-                          text: run.prompt,
-                          prompt,
-                          cwd,
-                          workspacePath,
-                          resumeThread: resumeSession,
-                          model: choice.model,
-                          effort: choice.effort,
-                          // The run's broker token, unless the user's own Codex login replaced it.
-                          apiKey: keptBroker.OPENAI_API_KEY,
-                        },
-                      }
-                    : { kind: "claude", prompt },
+                conversation: ({
+                  codex: () => ({
+                    kind: "codex",
+                    input: {
+                      text: run.prompt,
+                      prompt,
+                      cwd,
+                      workspacePath,
+                      resumeThread: resumeSession,
+                      model: choice.model,
+                      effort: choice.effort,
+                      // The run's broker token, unless the user's own Codex login replaced it.
+                      apiKey: keptBroker.OPENAI_API_KEY,
+                    },
+                  }),
+                  claude: () => ({ kind: "claude", prompt }),
+                } satisfies Record<ConversationKind, () => RunConversation>)[AGENT_CLIS[cli].conversation](),
               },
             )
           }).pipe(Effect.either)
