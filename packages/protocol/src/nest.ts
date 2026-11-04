@@ -8,7 +8,9 @@
  * one-time token (`ControlPaths.nestEnroll`).
  */
 import { Schema } from "effect"
-import { BoxName, UserBox } from "./control"
+
+/** A Nest box or host name: the same rule as `BoxName` in `control.ts`, which imports this module. */
+const NestName = Schema.String.pipe(Schema.trimmed(), Schema.minLength(1), Schema.maxLength(64))
 
 /** Version of the host link frames below. A host speaking another version is refused at `hello`. */
 export const NEST_HOST_PROTOCOL = 1
@@ -204,18 +206,14 @@ export const NestBoxStatus = Schema.Struct({
 })
 export type NestBoxStatus = typeof NestBoxStatus.Type
 
-/** A user's box, with `nest` set when it is a Nest VM. */
-export const NestUserBox = Schema.Struct({ ...UserBox.fields, nest: Schema.optional(NestBoxStatus) })
-export type NestUserBox = typeof NestUserBox.Type
-
 /** `POST ControlPaths.nestBoxes`: create a Nest box for the signed-in user. Limits default to the standard shape. */
-export const CreateNestBoxBody = Schema.Struct({ name: BoxName, limits: Schema.optional(NestLimits) })
+export const CreateNestBoxBody = Schema.Struct({ name: NestName, limits: Schema.optional(NestLimits) })
 export type CreateNestBoxBody = typeof CreateNestBoxBody.Type
 
 /** A Nest host as operators see it (Settings › Fleet). */
 export const NestHostStatus = Schema.Struct({
   id: Schema.String,
-  name: BoxName,
+  name: NestName,
   slug: Schema.NullOr(Schema.String),
   connected: Schema.Boolean,
   agentVersion: Schema.NullOr(Schema.String),

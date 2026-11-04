@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
 import { AgentModel, type ModelProvider } from "./models"
+import { NestBoxStatus } from "./nest"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -178,12 +179,12 @@ export const ControlPaths = {
   nestHostConnect: "/nest/hosts/connect",
   /** Box-only, no session: POST NestEnrollBody -> NestEnrollResult. A new Nest box trades its one-time token for its secret. */
   nestEnroll: "/box/nest/enroll",
-  /** POST CreateNestBoxBody -> NestUserBox: places and creates a Nest box for the signed-in user. */
+  /** POST CreateNestBoxBody -> UserBox (with `nest`): places and creates a Nest box for the signed-in user. */
   nestBoxes: "/api/nest/boxes",
-  /** POST (no body) -> NestUserBox: asks the box's host to resume or suspend it. Owner only; 404 otherwise. */
+  /** POST (no body) -> UserBox: asks the box's host to resume or suspend it. Owner only; 404 otherwise. */
   nestBoxResume: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/resume`,
   nestBoxSuspend: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/suspend`,
-  /** PUT NestLimits -> NestUserBox: changes the box's limits (its shape). Owner only. */
+  /** PUT NestLimits -> UserBox: changes the box's limits (its shape). Owner only. */
   nestBoxLimits: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/limits`,
   /** Operator-only: GET -> NestHostList. Everyone else gets 404. */
   nestHosts: "/api/nest/hosts",
@@ -413,6 +414,8 @@ export const UserBox = Schema.Struct({
   name: BoxName,
   url: BoxUrl,
   createdAt: Schema.String,
+  /** Set when the box is a Nest VM: its state and size. Absent for a user's own machine. */
+  nest: Schema.optional(NestBoxStatus),
 })
 export type UserBox = typeof UserBox.Type
 
