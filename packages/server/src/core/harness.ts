@@ -704,6 +704,7 @@ export const AgentHarnessLive = Layer.effect(
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
+              owner: task.owner,
               kind: "run",
               workspacePath,
               cwd,

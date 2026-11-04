@@ -78,6 +78,14 @@ The authenticated `GET /api/capabilities` reports a versioned snapshot of platfo
 
 A thread has a workspace, messages and runs. Repositories are checked out on demand, each on a thread branch. The box maintains per-user repository mirrors, fetching with the user's GitHub credentials on the host. Host-side Git operations use a separate shadow repository so agent-writable repository configuration cannot direct host commands. Thread data, workspaces and mirrors live on the box.
 
+Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop terminal and launched apps) receives
+`GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` set to the thread owner's GitHub login and both email variables set to
+`<login>@users.noreply.github.com`. This gives fresh task homes a usable identity and takes precedence over stale
+identities in persisted home or checkout Git config. GitHub credentials authenticate a push; they do not set the
+author of the commits being pushed. Explicit Git authorship (for example `git commit --author` or a cherry-pick)
+still preserves the original contributor. Commit-message co-author trailers are not rewritten, and existing
+commits are not repaired by this setting.
+
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
 
 The desktop and mobile composers' thinking controls open a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Off leaves it empty. They offer only the selected model's supported effort levels, ordered lowest first, with `none` labeled Off. There is no Default stop: an absent or unsupported saved level selects and sends the model's lowest supported effort (Off where supported, otherwise Low). With no model or no effort support, the control is hidden and effort is unspecified. The choice survives thread changes and reloads. Desktop uses a popover; mobile web and Expo share a touch-sized bottom sheet. The web sliders use native range inputs for pointer/touch input, arrow keys, Home and End; Expo uses React Native touch responders and screen-reader increment/decrement actions.

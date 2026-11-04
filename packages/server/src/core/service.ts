@@ -663,6 +663,7 @@ export const CoreLive = Layer.effect(
       prepareLaunch({
         settings: sandboxSettings,
         taskId: task.id,
+        owner: task.owner,
         kind,
         workspacePath: threadDirOf(task.id),
         mirrorDir: join(config.mirrorsDir, task.owner),
