@@ -21,6 +21,7 @@ const wakeRequests: string[] = []
 const frameTags: string[] = []
 const waiting = new Map<string, (frame: HostFrame) => void>()
 let seq = 0
+const enrollTokens = new Map<string, string>()
 
 const send = (frame: unknown): void => {
   if (host === null) throw new Error("host is not connected")
@@ -72,9 +73,18 @@ Bun.serve({
       }
       return server.upgrade(req) ? undefined : new Response("upgrade required", { status: 400 })
     }
+    if (url.pathname === "/box/nest/enroll" && req.method === "POST") {
+      const body = (await req.json()) as { boxId?: string; token?: string }
+      if (body.boxId === undefined || enrollTokens.get(body.boxId) !== body.token) {
+        return new Response("refused", { status: 403 })
+      }
+      return Response.json({ secret: "box-secret-" + body.boxId })
+    }
     if (url.pathname === "/test/command" && req.method === "POST") {
       try {
-        return Response.json(await runCommand(await req.json()))
+        const command = await req.json()
+        if (command._tag === "create") enrollTokens.set(command.boxId, command.enrollToken)
+        return Response.json(await runCommand(command))
       } catch (error) {
         return Response.json({ error: String(error) }, { status: 500 })
       }
