@@ -4,7 +4,6 @@ import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
-import { homedir } from "node:os"
 import {
   InternalError,
   RunItems,
@@ -22,7 +21,6 @@ import {
   type ContextUsage,
   type Message,
   type ModelProvider,
-  type RelayCredentials,
   type Run,
   type ServerEvent,
   type Task,
@@ -174,18 +172,6 @@ const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
 /** A broker provider for a model run, or null when the ACP harness owns its own model credentials. */
 const brokerProviderOf = (provider: ModelProvider): BrokerProvider | null =>
   MODEL_HARNESS[provider].conversation === "acp" ? null : provider
-
-/** API-key env for an ACP CLI from the user's connected Kestrel providers. */
-const acpKeyEnv = (creds: RelayCredentials | null): Record<string, string> => {
-  if (creds === null) return {}
-  const env: Record<string, string> = {}
-  const put = (name: string, value: string | undefined): void => {
-    if (value !== undefined && value !== "") env[name] = value
-  }
-  put("OPENAI_API_KEY", creds.openai ?? undefined)
-  put("ANTHROPIC_API_KEY", creds.anthropic ?? undefined)
-  return env
-}
 
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
@@ -777,7 +763,7 @@ export const AgentHarnessLive = Layer.effect(
           // An ACP harness reads its own model login from this directory; sandboxed runs get it bound in, and
           // unsandboxed runs symlink it into the task home (their HOME) so the CLI finds the same config.
           const acpConfigDir = harness === "acp" ? ACP_CONFIG_DIRS[provider] : undefined
-          const acpConfigHost = acpConfigDir === undefined ? null : join(homedir(), acpConfigDir)
+          const acpConfigHost = acpConfigDir === undefined ? null : join(config.dataDir, "users", user, acpConfigDir)
           const acpConfigInside =
             acpConfigDir === undefined ? null : join(agentHome(settings, homeDir), acpConfigDir)
           const acpBinds =
@@ -874,7 +860,6 @@ export const AgentHarnessLive = Layer.effect(
                 )
               }
             }
-            const acpEnv = harness === "acp" ? acpKeyEnv(creds) : {}
             const ownerCreds = yield* credentials.get(task.owner)
             const gitIdentity = ownerCreds?.dev
               ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
@@ -911,7 +896,6 @@ export const AgentHarnessLive = Layer.effect(
                 ...(MODEL_HARNESS[provider].broker ? keptBroker : {}),
                 ...loginEnv,
                 ...providerModelEnv,
-                ...acpEnv,
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
@@ -959,7 +943,8 @@ export const AgentHarnessLive = Layer.effect(
                     provider,
                     input: {
                       prompt,
-                      cwd: join(config.threadsDir, task.id),
+                      // The thread's first checkout, so the harness finds its project and loads AGENTS.md there.
+                      cwd,
                       resumeSession,
                       // A standalone harness's ACP config takes its own model value; OpenCode's catalog id is it.
                       model: choice.model === undefined ? undefined : (modelInfo(choice.model).acpModel ?? choice.model),
