@@ -199,6 +199,7 @@ in
       CLOUDAGENTS_SANDBOX_SSL = sandboxSsl;
       CLOUDAGENTS_TOOLKITS_FLAKE = guest.self;
       CLOUDAGENTS_GUEST_AGENT_SOCKET = "${guestSocketDir}/box.sock";
+      CLOUDAGENTS_HOST = "0.0.0.0";
     };
     serviceConfig = {
       User = "kestrel";
