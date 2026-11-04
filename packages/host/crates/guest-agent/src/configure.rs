@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::args::Config;
 use crate::http::wait_healthy;
-use crate::protocol::{ConfigureArgs, GuestNetwork, NEST_VOLUME_SERIAL};
+use crate::protocol::{ConfigureArgs, GuestNetwork, NEST_BOX_ENV, NEST_VOLUME_SERIAL};
 use crate::system::{
     ensure_dir, is_mount_point, log, lookup_user, mount_ext4, mountinfo, probe_fs_type,
     remove_if_exists, top_mount_has_option, wait_for_path, write_file, Res, System,
@@ -366,22 +366,27 @@ fn package_configs(net: &GuestNetwork) -> Vec<(&'static str, Option<String>)> {
     ]
 }
 
+/// The box environment file: exactly the `NEST_BOX_ENV` variables, `enrollToken` only when the host sends one.
+fn box_env_content(args: &ConfigureArgs, box_socket: &str, data_dir: &str) -> String {
+    let mut vars = vec![
+        (NEST_BOX_ENV.box_id, args.box_id.as_str()),
+        (NEST_BOX_ENV.control_url, args.control_url.as_str()),
+        (NEST_BOX_ENV.public_url, args.public_url.as_str()),
+        (NEST_BOX_ENV.guest_agent_socket, box_socket),
+        (NEST_BOX_ENV.data_dir, data_dir),
+    ];
+    if let Some(token) = &args.enroll_token {
+        vars.push((NEST_BOX_ENV.enroll_token, token.as_str()));
+    }
+    vars.iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect()
+}
+
 /// Writes the box environment file. Returns whether its content changed, so the caller restarts the box to pick
 /// up a new enrollment token or identity.
 fn write_box_env(cfg: &Config, args: &ConfigureArgs) -> Res<bool> {
-    let mut content = format!(
-        "CLOUDAGENTS_CONTROL_URL={}\nCLOUDAGENTS_BOX_ID={}\nCLOUDAGENTS_NEST_HOST_ID={}\nCLOUDAGENTS_NEST_VM_ID={}\nCLOUDAGENTS_NEST_PUBLIC_URL={}\nCLOUDAGENTS_GUEST_AGENT_SOCKET={}\nCLOUDAGENTS_DATA_DIR={}\n",
-        args.control_url,
-        args.box_id,
-        args.host_id,
-        args.vm_id,
-        args.public_url,
-        path_str(&cfg.box_socket)?,
-        path_str(&cfg.data_dir())?,
-    );
-    if let Some(token) = &args.enroll_token {
-        content.push_str(&format!("CLOUDAGENTS_NEST_ENROLL_TOKEN={token}\n"));
-    }
+    let content = box_env_content(args, path_str(&cfg.box_socket)?, path_str(&cfg.data_dir())?);
     let changed = fs::read_to_string(&cfg.box_env_file).ok().as_deref() != Some(content.as_str());
     if let Some(parent) = cfg.box_env_file.parent() {
         ensure_dir(parent, 0o755, None)?;
@@ -393,4 +398,78 @@ fn write_box_env(cfg: &Config, args: &ConfigureArgs) -> Res<bool> {
 fn path_str(path: &Path) -> Res<&str> {
     path.to_str()
         .ok_or_else(|| format!("{} is not valid UTF-8", path.display()))
+}
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use serde_json::Value;
+
+    use super::*;
+    use crate::protocol::HostToGuest;
+
+    const FIXTURES: &str = include_str!("../tests/fixtures/guest-frames.json");
+
+    fn fixtures() -> Value {
+        serde_json::from_str(FIXTURES).expect("fixture file is JSON")
+    }
+
+    /// Variable names in a rendered box env file.
+    fn written_names(content: &str) -> BTreeSet<String> {
+        content
+            .lines()
+            .map(|line| line.split_once('=').expect("NAME=value line").0.to_string())
+            .collect()
+    }
+
+    /// The fixture's `configure` frames: the first carries an enroll token, the second none.
+    fn configure_frames(fixtures: &Value) -> Vec<ConfigureArgs> {
+        fixtures["hostToGuest"]
+            .as_array()
+            .expect("hostToGuest is an array")
+            .iter()
+            .filter(|frame| frame["_tag"] == "configure")
+            .map(|frame| {
+                let decoded: HostToGuest =
+                    serde_json::from_value(frame.clone()).expect("configure frame decodes");
+                match decoded {
+                    HostToGuest::Configure(args) => *args,
+                    other => panic!("not a configure frame: {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn box_env_writes_exactly_the_pinned_names() {
+        let fixtures = fixtures();
+        let pinned: BTreeSet<String> = fixtures["boxEnv"]
+            .as_object()
+            .expect("boxEnv is an object")
+            .values()
+            .map(|name| name.as_str().expect("name is a string").to_string())
+            .collect();
+        let token_name = fixtures["boxEnv"]["enrollToken"]
+            .as_str()
+            .expect("enrollToken name");
+        let frames = configure_frames(&fixtures);
+        let with_token = frames
+            .iter()
+            .find(|a| a.enroll_token.is_some())
+            .expect("configure frame with a token");
+        let without = frames
+            .iter()
+            .find(|a| a.enroll_token.is_none())
+            .expect("configure frame without a token");
+        let socket = "/run/kestrel-guest/box.sock";
+        let data_dir = "/var/lib/kestrel/box";
+
+        let content = box_env_content(with_token, socket, data_dir);
+        assert_eq!(written_names(&content), pinned);
+
+        let mut expected = pinned;
+        expected.remove(token_name);
+        let content = box_env_content(without, socket, data_dir);
+        assert_eq!(written_names(&content), expected);
+    }
 }

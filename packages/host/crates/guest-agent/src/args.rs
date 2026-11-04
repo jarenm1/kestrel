@@ -61,9 +61,9 @@ impl Config {
         self.volume_mount.join("home")
     }
 
-    /// The box's `CLOUDAGENTS_DATA_DIR`. Under the volume.
+    /// The box's `CLOUDAGENTS_DATA_DIR`: `NEST_VOLUME_MOUNT`/box. Under the volume.
     pub fn data_dir(&self) -> PathBuf {
-        self.volume_mount.join("data")
+        self.volume_mount.join("box")
     }
 
     /// Upper and work directories of the Nix store overlay once it lives on the volume.

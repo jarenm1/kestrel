@@ -1,7 +1,8 @@
 /**
  * Writes `tests/fixtures/guest-frames.json`: one frame per variant of the four guest-link unions, each encoded by the
- * TypeScript schemas in `packages/protocol/src/guest.ts`. The Rust unit test `contract_tests` in `src/protocol.rs`
- * decodes every frame and re-encodes it to the same JSON, so a field name, tag or optionality mismatch fails there.
+ * TypeScript schemas in `packages/protocol/src/guest.ts`, plus `boxEnv`, the variable names of `NEST_BOX_ENV`. The Rust
+ * unit tests decode every frame and re-encode it to the same JSON (`src/protocol.rs`), and the box env writer must
+ * produce exactly the pinned names (`src/configure.rs`), so drift fails there.
  *
  * Regenerate after changing the contract: `bun run tests/fixtures-gen.ts` (from this crate directory).
  */
@@ -9,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Schema } from "effect"
-import { BoxToGuest, GuestToBox, GuestToHost, HostToGuest } from "../../../../protocol/src/guest"
+import { BoxToGuest, GuestToBox, GuestToHost, HostToGuest, NEST_BOX_ENV } from "../../../../protocol/src/guest"
 
 const network = {
   address: "10.77.0.5/32",
@@ -116,9 +117,11 @@ const fixtures = {
   guestToHost: guestToHost.map((frame) => Schema.encodeSync(GuestToHost)(frame)),
   boxToGuest: boxToGuest.map((frame) => Schema.encodeSync(BoxToGuest)(frame)),
   guestToBox: guestToBox.map((frame) => Schema.encodeSync(GuestToBox)(frame)),
+  boxEnv: NEST_BOX_ENV,
 }
 
 const here = dirname(fileURLToPath(import.meta.url))
 mkdirSync(join(here, "fixtures"), { recursive: true })
 writeFileSync(join(here, "fixtures", "guest-frames.json"), `${JSON.stringify(fixtures, null, 2)}\n`)
-console.log(`wrote ${Object.values(fixtures).reduce((n, frames) => n + frames.length, 0)} frames`)
+const frameCount = fixtures.hostToGuest.length + fixtures.guestToHost.length + fixtures.boxToGuest.length + fixtures.guestToBox.length
+console.log(`wrote ${frameCount} frames and ${Object.keys(NEST_BOX_ENV).length} box env names`)

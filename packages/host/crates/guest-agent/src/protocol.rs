@@ -19,6 +19,24 @@ pub const MAX_ID_LEN: usize = 100;
 pub const NEST_VOLUME_MOUNT: &str = "/var/lib/kestrel";
 /// `NEST_VOLUME_SERIAL` in guest.ts; also the filesystem label the agent formats the volume with.
 pub const NEST_VOLUME_SERIAL: &str = "kestrel-volume";
+/// `NEST_BOX_ENV` in guest.ts: the variable names the guest agent writes to the box env file, and nothing else.
+pub struct BoxEnvNames {
+    pub box_id: &'static str,
+    pub control_url: &'static str,
+    pub public_url: &'static str,
+    pub guest_agent_socket: &'static str,
+    pub enroll_token: &'static str,
+    pub data_dir: &'static str,
+}
+
+pub const NEST_BOX_ENV: BoxEnvNames = BoxEnvNames {
+    box_id: "CLOUDAGENTS_BOX_ID",
+    control_url: "CLOUDAGENTS_CONTROL_URL",
+    public_url: "CLOUDAGENTS_BOX_PUBLIC_URL",
+    guest_agent_socket: "CLOUDAGENTS_GUEST_AGENT_SOCKET",
+    enroll_token: "CLOUDAGENTS_NEST_ENROLL_TOKEN",
+    data_dir: "CLOUDAGENTS_DATA_DIR",
+};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
