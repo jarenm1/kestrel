@@ -327,8 +327,13 @@ in
           iifname "kn-*" ip daddr ${hostAddress} tcp dport { 53, 3141, 5000 } accept
           iifname "kn-*" ip daddr ${hostAddress} udp dport 53 accept
           iifname "kn-*" drop
-          tcp dport 22 accept
+          # Everything below is the host's own surface, reached only from outside the taps.
+          tcp dport { 22, 80, 443 } accept
           icmp type echo-request accept
+          # IPv6 neighbour discovery and router advertisements, and DHCP replies on the uplink.
+          meta l4proto ipv6-icmp accept
+          udp dport { 68, 546 } accept
+${lib.optionalString cfg.turn.enable "          udp dport ${toString config.services.coturn.listening-port} accept\n          tcp dport ${toString config.services.coturn.listening-port} accept\n          udp dport ${toString config.services.coturn.min-port}-${toString config.services.coturn.max-port} accept\n"}
         }
         chain output {
           type filter hook output priority filter; policy accept;
