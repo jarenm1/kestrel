@@ -277,12 +277,30 @@ export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
 export const TaskAppUsage = Schema.Struct({
   name: Schema.NullOr(Schema.String),
   processes: Schema.Number,
-  /** Resident anonymous and shared memory in bytes. Memory a fork shares copy-on-write is counted in each process. */
+  /**
+   * Proportional anonymous and shared memory in bytes (Pss_Anon + Pss_Shmem): a page several processes share, such as
+   * a fork's copy-on-write pages, is divided between them, so the groups add up without counting a page twice.
+   */
   ramUsed: Schema.Number,
   /** Share of the thread's CPU quota used since the previous sample, 0 to 1. */
   cpu: Schema.Number,
 })
 export type TaskAppUsage = typeof TaskAppUsage.Type
+
+/**
+ * What a thread's RAM holds besides its processes' own memory, in bytes, from its slice's `memory.stat`. With
+ * `TaskAppUsage.ramUsed` over every group it adds up to `TaskStatsSample.ramUsed`, give or take what changed between
+ * the reads.
+ */
+export const TaskRamOther = Schema.Struct({
+  /** File contents cached in RAM: the kernel can reclaim it before the thread hits its limit. */
+  pageCache: Schema.Number,
+  /** Files in tmpfs (the sandbox's `/tmp`) and shared memory no process maps. */
+  tmpfs: Schema.Number,
+  /** The kernel's own memory for the thread: page tables, sockets, slab. */
+  kernel: Schema.Number,
+})
+export type TaskRamOther = typeof TaskRamOther.Type
 
 /**
  * One reading of a thread's resources against its own limits, in bytes. RAM and CPU come from the thread's systemd
@@ -308,6 +326,8 @@ export const TaskStatsSample = Schema.Struct({
    * clients treat a missing list as unknown rather than empty.
    */
   apps: Schema.optional(Schema.Array(TaskAppUsage)),
+  /** The rest of `ramUsed` beside `apps`; null without systemd, absent from boxes older than the field. */
+  ramOther: Schema.optional(Schema.NullOr(TaskRamOther)),
 })
 export type TaskStatsSample = typeof TaskStatsSample.Type
 

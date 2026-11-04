@@ -1,6 +1,12 @@
 import { useId, useState, type PointerEvent } from "react"
-import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
+import {
+  TASK_STATS_WINDOW_MS,
+  type TaskAppUsage,
+  type TaskRamOther,
+  type TaskStatsSample,
+} from "@cloudagents/protocol"
 import { useTaskStats } from "@/hooks/useTaskStats"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { formatSize } from "@/util"
 
@@ -148,7 +154,7 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
   )
 }
 
-/** One row of the applications list; `program` is false for the summed rows, and CPU is null for memory no process owns. */
+/** One row of the applications list; `program` is false for memory no process maps, which has no CPU. */
 interface AppRow {
   readonly name: string
   readonly program: boolean
@@ -157,14 +163,8 @@ interface AppRow {
   readonly cpu: number | null
 }
 
-/**
- * The latest sample's applications, most memory first, each with its RAM and its bar against the thread's RAM limit.
- * Whatever the slice holds beyond the processes' own memory (page cache, kernel memory) is its own last row, so the
- * rows add up to the RAM graph.
- */
-function Applications({ sample }: { sample: TaskStatsSample }) {
-  const { apps, ramUsed, ramMax } = sample
-  if (apps === undefined || ramUsed === null || ramMax === null || ramMax <= 0) return null
+/** The latest sample as rows: its applications, most memory first, then the slice's memory outside any process. */
+function appRows(apps: readonly TaskAppUsage[], other: TaskRamOther | null | undefined): AppRow[] {
   const rows: AppRow[] = apps.map((a) => ({
     name: a.name ?? "Other",
     program: a.name !== null,
@@ -172,12 +172,34 @@ function Applications({ sample }: { sample: TaskStatsSample }) {
     ramUsed: a.ramUsed,
     cpu: a.cpu,
   }))
-  const cache = ramUsed - apps.reduce((n, a) => n + a.ramUsed, 0)
-  if (cache > 0) rows.push({ name: "Page cache & kernel", program: false, detail: null, ramUsed: cache, cpu: null })
+  if (other) {
+    const rest: readonly [string, number][] = [
+      ["Page cache", other.pageCache],
+      ["tmpfs & shared memory", other.tmpfs],
+      ["Kernel", other.kernel],
+    ]
+    for (const [name, ramUsed] of rest) {
+      if (ramUsed > 0) rows.push({ name, program: false, detail: null, ramUsed, cpu: null })
+    }
+  }
+  return rows
+}
+
+/**
+ * What each application in the thread uses now, with its RAM against the thread's RAM limit, then the memory the
+ * thread holds outside its processes. Memory processes share is divided between them, so the rows add up to the total.
+ */
+function Applications({ sample }: { sample: TaskStatsSample | undefined }) {
+  if (sample === undefined) return <p className="px-1 text-xs text-muted-foreground">Waiting for the first reading…</p>
+  const { apps, ramUsed, ramMax } = sample
+  if (apps === undefined || ramUsed === null || ramMax === null || ramMax <= 0) {
+    return <p className="px-1 text-xs text-muted-foreground">This box does not report applications.</p>
+  }
+  const rows = appRows(apps, sample.ramOther)
   return (
     <div className="rounded-lg bg-card px-2.5 py-2 shadow-well">
       <div className="flex items-baseline justify-between text-[11px] font-medium text-muted-foreground">
-        <span>Applications</span>
+        <span>RAM · CPU</span>
         <span className="tabular-nums">
           {formatSize(ramUsed)} of {formatSize(ramMax)}
         </span>
@@ -216,24 +238,36 @@ function Applications({ sample }: { sample: TaskStatsSample }) {
           ))}
         </ul>
       )}
+      <p className="mt-2 text-[11px] text-muted-foreground">Memory shared by several processes is split between them.</p>
     </div>
   )
 }
 
 /**
- * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
- * (shared by every thread), then what each application in the thread uses now. Each graph spans 0-100%; hovering one
- * shows the sample nearest the pointer.
+ * Two tabs under the desktop. Resources: the thread's RAM, CPU and storage against its own limits over the last
+ * minute, stacked, plus the GPU's VRAM (shared by every thread); each graph spans 0-100%, and hovering one shows the
+ * sample nearest the pointer. Applications: what each application in the thread uses now.
  */
 export function ThreadGraphs({ taskId }: { taskId: string }) {
   const samples = useTaskStats(taskId)
-  const latest = samples.at(-1)
   return (
-    <div className="flex flex-col gap-2">
-      {GRAPHS.map((g) => (
-        <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
-      ))}
-      {latest && <Applications sample={latest} />}
-    </div>
+    <Tabs defaultValue="resources" className="gap-2">
+      <TabsList className="h-8">
+        <TabsTrigger value="resources" className="px-3 text-xs">
+          Resources
+        </TabsTrigger>
+        <TabsTrigger value="applications" className="px-3 text-xs">
+          Applications
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="resources" className="flex flex-col gap-2">
+        {GRAPHS.map((g) => (
+          <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
+        ))}
+      </TabsContent>
+      <TabsContent value="applications">
+        <Applications sample={samples.at(-1)} />
+      </TabsContent>
+    </Tabs>
   )
 }

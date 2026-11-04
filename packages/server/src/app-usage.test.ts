@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { appName, groupApps, MAX_APPS, type ProcessReading } from "./app-usage"
+import { appName, groupApps, MAX_APPS, otherMemory, type ProcessReading } from "./app-usage"
 
 describe("appName", () => {
   test("a runtime is named after the package or file of the script it runs", () => {
@@ -22,7 +22,25 @@ describe("appName", () => {
   })
 })
 
-const proc = (key: string, name: string, memory: number, cpuUsec: number): ProcessReading => ({ key, name, memory, cpuUsec })
+const proc = (key: string, name: string, memory: number, cpuUsec: number, shmem = 0): ProcessReading => ({
+  key,
+  name,
+  memory,
+  shmem,
+  cpuUsec,
+})
+
+describe("otherMemory", () => {
+  test("with the processes' memory it adds up to the slice's memory.current", () => {
+    // anon 600 (all mapped), file 300 of which shmem 100, 40 of the shmem mapped by a process, kernel 50.
+    const processes = [proc("1:1", "node", 400, 0), proc("2:1", "node", 240, 0, 40)]
+    const stat = "anon 600\nfile 300\nkernel 50\nshmem 100\nfile_mapped 20\n"
+    const other = otherMemory(950, stat, processes)
+    expect(other).toEqual({ pageCache: 200, tmpfs: 60, kernel: 50 })
+    const apps = groupApps(processes, new Map(), 1)
+    expect(apps.reduce((n, a) => n + a.ramUsed, 0) + other.pageCache + other.tmpfs + other.kernel).toBe(950)
+  })
+})
 
 describe("groupApps", () => {
   test("sums each program's processes and counts CPU since the previous reading", () => {

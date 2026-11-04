@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises"
 import { basename, join } from "node:path"
-import type { TaskAppUsage } from "@cloudagents/protocol"
+import type { TaskAppUsage, TaskRamOther } from "@cloudagents/protocol"
 
 /** Runtimes named after the script they run (`node · vite`): on their own they say nothing about the application. */
 const RUNTIMES: Record<string, true> = { node: true, bun: true, deno: true, python: true, python3: true }
@@ -14,8 +14,13 @@ export interface ProcessReading {
   /** pid and start time: a reused pid is a different process. */
   readonly key: string
   readonly name: string
-  /** RssAnon + RssShmem, bytes. */
+  /**
+   * Pss_Anon + Pss_Shmem, bytes: each page shared by several processes (a fork's copy-on-write pages, shared memory)
+   * is divided between them, so summed over the slice it is the slice's mapped anonymous and shared memory once.
+   */
   readonly memory: number
+  /** Pss_Shmem alone, bytes. */
+  readonly shmem: number
   /** utime + stime, microseconds. */
   readonly cpuUsec: number
 }
@@ -77,14 +82,33 @@ const cgroupPids = async (dir: string): Promise<number[]> => {
   return pids.concat(...nested)
 }
 
-const kib = (status: string, field: string): number => Number(new RegExp(`^${field}:\\s+(\\d+) kB$`, "m").exec(status)?.[1] ?? 0) * 1024
+/** A `<field>:  <n> kB` line of a /proc file, in bytes; 0 when absent. */
+const kib = (text: string, field: string): number => Number(new RegExp(`^${field}:\\s+(\\d+) kB$`, "m").exec(text)?.[1] ?? 0) * 1024
+
+/**
+ * A process's proportional anonymous and shared memory (bytes). A process that made itself non-dumpable (pasta does)
+ * keeps its `smaps_rollup` from other processes of the same user, so it falls back to its resident memory from
+ * `status`: the same for a process sharing nothing with a fork.
+ */
+const readMemory = async (dir: string): Promise<{ memory: number; shmem: number }> => {
+  try {
+    const smaps = await readFile(join(dir, "smaps_rollup"), "utf8")
+    const shmem = kib(smaps, "Pss_Shmem")
+    return { memory: kib(smaps, "Pss_Anon") + shmem, shmem }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EACCES") throw e
+    const status = await readFile(join(dir, "status"), "utf8")
+    const shmem = kib(status, "RssShmem")
+    return { memory: kib(status, "RssAnon") + shmem, shmem }
+  }
+}
 
 /** One process; null when it exited mid-read. */
 const readProcess = async (pid: number): Promise<ProcessReading | null> => {
   try {
     const dir = `/proc/${pid}`
-    const [status, stat, cmdline] = await Promise.all([
-      readFile(join(dir, "status"), "utf8"),
+    const [{ memory, shmem }, stat, cmdline] = await Promise.all([
+      readMemory(dir),
       readFile(join(dir, "stat"), "utf8"),
       readFile(join(dir, "cmdline"), "utf8"),
     ])
@@ -98,7 +122,8 @@ const readProcess = async (pid: number): Promise<ProcessReading | null> => {
     return {
       key: `${pid}:${fields[19]}`,
       name: appName(argv, comm),
-      memory: kib(status, "RssAnon") + kib(status, "RssShmem"),
+      memory,
+      shmem,
       cpuUsec: Number.isFinite(ticks) ? ticks * USEC_PER_TICK : 0,
     }
   } catch {
@@ -111,6 +136,27 @@ export const readProcesses = async (dir: string): Promise<ProcessReading[]> => {
   const pids = await cgroupPids(dir)
   const readings = await Promise.all(pids.map(readProcess))
   return readings.filter((r) => r !== null)
+}
+
+/** A `<field> <n>` line of a cgroup's `memory.stat`, in bytes; 0 when absent. */
+const statField = (stat: string, field: string): number => Number(new RegExp(`^${field} (\\d+)$`, "m").exec(stat)?.[1] ?? 0)
+
+/**
+ * What the slice's memory holds besides its processes' mapped memory, from its `memory.current` and `memory.stat`:
+ * cached file contents (`file` minus `shmem`), shared memory no process maps (tmpfs files: `shmem` minus the
+ * processes' Pss_Shmem) and the kernel's own (everything beyond `anon` and `file`). With the processes' memory it adds
+ * up to `memory.current`, give or take the anonymous memory that moved between the reads.
+ */
+export const otherMemory = (current: number, stat: string, processes: readonly ProcessReading[]): TaskRamOther => {
+  const anon = statField(stat, "anon")
+  const file = statField(stat, "file")
+  const shmem = statField(stat, "shmem")
+  const mappedShmem = processes.reduce((n, p) => n + p.shmem, 0)
+  return {
+    pageCache: Math.max(0, file - shmem),
+    tmpfs: Math.max(0, shmem - mappedShmem),
+    kernel: Math.max(0, current - anon - file),
+  }
 }
 
 /**

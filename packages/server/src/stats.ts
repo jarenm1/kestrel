@@ -3,8 +3,14 @@ import { execFile } from "node:child_process"
 import { readFile } from "node:fs/promises"
 import { cpus, totalmem } from "node:os"
 import { join } from "node:path"
-import { TASK_STATS_WINDOW_MS, type TaskAppUsage, type TaskStats, type TaskStatsSample } from "@cloudagents/protocol"
-import { groupApps, readProcesses } from "./app-usage"
+import {
+  TASK_STATS_WINDOW_MS,
+  type TaskAppUsage,
+  type TaskRamOther,
+  type TaskStats,
+  type TaskStatsSample,
+} from "@cloudagents/protocol"
+import { groupApps, otherMemory, readProcesses } from "./app-usage"
 import { Config } from "./config"
 import { CoreService } from "./core/service"
 import { sliceCgroup, taskCeilings } from "./sandbox/systemd"
@@ -63,26 +69,30 @@ const vram = (): Effect.Effect<Vram> =>
   })
 
 /**
- * The slice's memory in use, total CPU time and processes; zero and none for a slice that is not running (its files
- * are gone).
+ * The slice's memory in use and what it holds besides its processes, total CPU time and processes; zero and none for a
+ * slice that is not running (its files are gone).
  */
 const readSlice = (cgroup: string) =>
   Effect.promise(async () => {
     const dir = join(CGROUP_ROOT, cgroup)
     const processes = readProcesses(dir)
     try {
-      const [memory, cpuStat] = await Promise.all([
+      const [memory, memoryStat, cpuStat] = await Promise.all([
         readFile(join(dir, "memory.current"), "utf8"),
+        readFile(join(dir, "memory.stat"), "utf8"),
         readFile(join(dir, "cpu.stat"), "utf8"),
       ])
+      const current = Number(memory.trim())
+      const read = await processes
       return {
-        memory: Number(memory.trim()),
+        memory: current,
+        other: otherMemory(current, memoryStat, read),
         cpuUsec: Number(/^usage_usec (\d+)$/m.exec(cpuStat)?.[1] ?? 0),
-        processes: await processes,
+        processes: read,
       }
     } catch {
       await processes
-      return { memory: 0, cpuUsec: 0, processes: [] }
+      return { memory: 0, other: null, cpuUsec: 0, processes: [] }
     }
   })
 
@@ -122,6 +132,7 @@ export const TaskStatsLive = Layer.effect(
         const now = Date.now()
         let ramUsed: number | null = null
         let apps: TaskAppUsage[] = []
+        let ramOther: TaskRamOther | null = null
         let cpu: number | null = null
         if (systemd && ramMax !== null && cores !== null) {
           if (w.cgroup === null && now - w.cgroupCheckedAt >= CGROUP_RETRY_MS) {
@@ -130,8 +141,10 @@ export const TaskStatsLive = Layer.effect(
               Effect.catchAll((e) => Effect.as(Effect.logWarning(`task ${taskId} stats: ${e.message}`), null)),
             )
           }
-          const slice = w.cgroup === null ? { memory: 0, cpuUsec: 0, processes: [] } : yield* readSlice(w.cgroup)
+          const slice =
+            w.cgroup === null ? { memory: 0, other: null, cpuUsec: 0, processes: [] } : yield* readSlice(w.cgroup)
           ramUsed = slice.memory
+          ramOther = slice.other
           const previous = w.previous
           w.previous = {
             cpuUsec: slice.cpuUsec,
@@ -156,6 +169,7 @@ export const TaskStatsLive = Layer.effect(
           diskUsed: core.storageUsed(taskId),
           diskMax: config.taskDiskMax,
           apps,
+          ramOther,
         }
         w.samples.push(sample)
         const oldest = now - TASK_STATS_WINDOW_MS
