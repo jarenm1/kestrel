@@ -69,8 +69,8 @@ Open the printed URL (`http://localhost:5173/auth/dev-login`) to sign in as `dev
 Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `packages/mobile` changed). Contributing workflow: [AGENTS.md](AGENTS.md).
 
 Pull requests require approval from a code owner ([@caayd](https://github.com/caayd) or
-[@jarenm1](https://github.com/jarenm1)). Authors can merge their own pull requests after
-the other owner approves; GitHub does not allow authors to approve their own pull requests.
+[@jarenm1](https://github.com/jarenm1)). @jarenm1 can bypass the review requirement when
+merging a pull request, including their own. GitHub does not allow authors to approve their own pull requests.
 
 ## Repository
 
