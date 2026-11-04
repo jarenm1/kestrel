@@ -103,6 +103,11 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   `ptp_kvm` reference clock, `systemd-oomd`, zswap with a swapfile on the volume. The NVIDIA open kernel modules ship in
   the image and load only when a GPU is hot-plugged; Mesa provides software rendering otherwise.
 - Package managers point at the host's dependency cache and Nix binary cache when `configure` names them.
+- Box environment: `configure` writes `/var/lib/kestrel/box.env` (root, 0600, read by `kestrel-box.service`) with
+  `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_CONTROL_URL`, `CLOUDAGENTS_GUEST_AGENT_SOCKET` (its presence marks a Nest VM),
+  `CLOUDAGENTS_DATA_DIR` (`/var/lib/kestrel/box`), `CLOUDAGENTS_BOX_PUBLIC_URL`, and `CLOUDAGENTS_NEST_ENROLL_TOKEN`
+  while the box is not enrolled. Enrollment needs `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_CONTROL_URL`; the box stores
+  its secret in its data dir and ignores the token afterward. The box never reads `CLOUDAGENTS_BOX_PUBLIC_URL` yet.
 
 ## Host layout
 
