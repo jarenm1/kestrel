@@ -100,6 +100,12 @@ export const PROVIDERS: readonly Provider[] = [
   { id: "zai", label: "Z.ai", kind: "apikey" },
   { id: "deepseek", label: "DeepSeek", kind: "apikey" },
   { id: "minimax", label: "MiniMax", kind: "apikey" },
+  {
+    id: "moonshot",
+    label: "Kimi Platform (Moonshot)",
+    kind: "apikey",
+    hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported.",
+  },
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },

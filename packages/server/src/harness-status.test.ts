@@ -15,6 +15,7 @@ const commands = {
   zai: "claude -p",
   deepseek: "claude -p",
   minimax: "claude -p",
+  moonshot: "claude -p",
   opencode: `OPENCODE_CONFIG_CONTENT='{"share": "disabled", "update": "disable"}' opencode acp`,
   google: 'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry',
   omp: "omp acp",

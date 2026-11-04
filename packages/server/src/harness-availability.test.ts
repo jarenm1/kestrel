@@ -17,6 +17,7 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
     "zai",
     "deepseek",
     "minimax",
+    "moonshot",
   ])
   expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
   expect(availableHarnesses(box, probe({ opencode: "1.19.5" }))).toEqual([])

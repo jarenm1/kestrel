@@ -40,6 +40,7 @@ const harnessLayer = (
       zai: "",
       deepseek: "",
       minimax: "",
+      moonshot: "",
       opencode: "",
       google: "",
       omp: "",

@@ -12,6 +12,7 @@ export const ModelProvider = Schema.Literal(
   "zai",
   "deepseek",
   "minimax",
+  "moonshot",
   "opencode",
   "google",
   "omp",
@@ -99,6 +100,9 @@ export const AgentModel = Schema.Literal(
   "deepseek-flash[1m]",
   "deepseek-v4-pro",
   "MiniMax-M3.1-Flash[1m]",
+  "kimi-k3.1-pro",
+  "kimi-k3[1m]",
+  "kimi-k2.7-code",
   "opencode/big-pickle",
   "opencode/glm-5.3-flash-free",
   "opencode/deepseek-v4.1-flash-free",
@@ -177,6 +181,9 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "deepseek-flash[1m]", provider: "deepseek", name: "DeepSeek Flash", efforts: CLAUDE_NO_XHIGH, shownByDefault: true, compactWindow: 786_432 },
   { id: "deepseek-v4-pro", provider: "deepseek", name: "DeepSeek V4 Pro", efforts: CLAUDE_NO_XHIGH, shownByDefault: false },
   { id: "MiniMax-M3.1-Flash[1m]", provider: "minimax", name: "MiniMax M3.1 Flash", efforts: CLAUDE_ALL, shownByDefault: true, compactWindow: 524_288 },
+  { id: "kimi-k3.1-pro", provider: "moonshot", name: "Kimi K3.1 Pro", efforts: CLAUDE_NO_XHIGH, shownByDefault: true },
+  { id: "kimi-k3[1m]", provider: "moonshot", name: "Kimi K3", efforts: CLAUDE_NO_XHIGH, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "kimi-k2.7-code", provider: "moonshot", name: "Kimi K2.7 Code", efforts: [], shownByDefault: false },
   // OpenCode's catalog id is the value its ACP `model` config option takes.
   { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },
   { id: "opencode/glm-5.3-flash-free", provider: "opencode", name: "GLM-5.3-Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
@@ -228,6 +235,7 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "zai", name: "Z.ai", harness: "claude", connections: ["zai"], auth: "api-key", mcp: true },
   { id: "deepseek", name: "DeepSeek", harness: "claude", connections: ["deepseek"], auth: "api-key", mcp: true },
   { id: "minimax", name: "MiniMax", harness: "claude", connections: ["minimax"], auth: "api-key", mcp: true },
+  { id: "moonshot", name: "Kimi (Moonshot AI)", harness: "claude", connections: ["moonshot"], auth: "api-key", mcp: true, hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported." },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
   { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "npm i -g @opencode/cli", auth: "harness-login", mcp: true },
   // Google's models reach Antigravity CLI only through the user's Google sign-in, a CLI login like Claude's or ChatGPT's.
