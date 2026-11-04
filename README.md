@@ -60,7 +60,7 @@ CLOUDAGENTS_FAKE_AGENT=1 bun run dev
 
 Open the printed URL (`http://localhost:5173/auth/dev-login`) to sign in as `dev`. This starts the Worker (`:8788`), a box connected to it (`:8797`, data in `.data-dev/`) and Vite (`:5173`); Ctrl+C stops all three. The public landing page is at `http://site.localhost:5173/`.
 
-- **Fake agent:** `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent that needs no model key. Drop it for a real agent and add a key or subscription in Settings › Connections.
+- **Fake agent:** `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent that needs no model key. Drop it for a real agent and add a key or subscription in Settings › Connections. Under API keys, choose **Add API key**, select a provider, then enter and save the key. Saved providers stay visible; remove an unsaved row or disconnect a saved key to return that provider to the menu.
 - **Sandbox and desktop (Linux + Nix):** `nix run` runs the same stack with the flake's toolchain and turns on the bubblewrap sandbox and the task desktop. Without Nix, agents run **unsandboxed** and there is no desktop on macOS and Windows. On NixOS use the flake (npm's `workerd` does not start there).
 - **Linux without the Nix dev stack:** the desktop needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool, ffmpeg with x11grab and libx264, and `xdamage-capture`. Ubuntu 24.04 ships weston 13; see [desktop dependencies](docs/box.md#desktop-dependencies-on-linux) for a pinned Nix bundle. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
 - **Windows:** agent commands run through POSIX `sh` (from `PATH` or Git for Windows).

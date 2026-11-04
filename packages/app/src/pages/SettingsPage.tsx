@@ -135,7 +135,7 @@ export function ProfileSettings() {
 export function ConnectionsSettings() {
   return (
     <>
-      <SectionHeader title="Connections" desc="Accounts and keys Kestrel uses on your behalf." />
+      <h2 className="text-lg font-semibold tracking-tight">Connections</h2>
       <Connections />
     </>
   )

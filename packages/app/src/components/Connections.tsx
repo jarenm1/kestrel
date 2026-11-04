@@ -18,7 +18,7 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
-import { Check, ChevronDown } from "lucide-react"
+import { Check, ChevronDown, Plus } from "lucide-react"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -59,13 +59,7 @@ function HarnessCard({ connections }: { connections: readonly Connection[] | und
 
   return (
     <div className="flex flex-col gap-2">
-      <div>
-        <h2 className="font-semibold tracking-tight">Harnesses</h2>
-        <p className="text-muted-foreground">
-          The agent CLIs available to every thread. A thread's own model pick decides which one runs it; this list only
-          controls what is on offer. A disabled harness never takes a thread's next message.
-        </p>
-      </div>
+      <h2 className="font-semibold tracking-tight">Harnesses</h2>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {HARNESS_IDS.map((id) => {
           const providers = providersForHarness(id)
@@ -127,22 +121,80 @@ export function Connections() {
       {cliAuth.error && <Alert>{errorText(cliAuth.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {list && (
+        <div className="flex flex-col gap-2">
+          <h2 className="font-semibold tracking-tight">Accounts and subscriptions</h2>
+          <Card className="py-0">
+            <CardContent className="divide-y divide-white/[0.04] px-0">
+              {list.filter((connection) => connection.kind !== "apikey").map((connection) =>
+                connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
+                  <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
+                ) : connection.kind === "cli" && Schema.is(AcpHarnessId)(connection.provider) ? (
+                  <HarnessConnectionRow key={connection.provider} connection={connection} harness={connection.provider} />
+                ) : (
+                  <ConnectionRow key={connection.provider} connection={connection} />
+                ),
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+      {list && <ApiKeysCard connections={list} />}
+      {list && <ModelListsCard connections={list} />}
+    </>
+  )
+}
+
+function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
+  const [selected, setSelected] = useState<string[]>([])
+  const providers = connections.filter((connection) => connection.kind === "apikey")
+  const visible = providers.filter((connection) => connection.connected || selected.includes(connection.provider))
+  const remaining = providers.filter((connection) => !connection.connected && !selected.includes(connection.provider))
+
+  function remove(provider: string) {
+    setSelected((current) => current.filter((id) => id !== provider))
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="font-semibold tracking-tight">API keys</h2>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="soft" size="sm" disabled={remaining.length === 0}>
+              <Plus />
+              Add API key
+              <ChevronDown className="opacity-60" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+          >
+            {remaining.map((connection) => (
+              <DropdownMenuItem
+                key={connection.provider}
+                onSelect={() => setSelected((current) => [...current, connection.provider])}
+              >
+                {connection.label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {visible.length > 0 && (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
-            {list.map((connection) =>
-              connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
-                <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
-              ) : connection.kind === "cli" && Schema.is(AcpHarnessId)(connection.provider) ? (
-                <HarnessConnectionRow key={connection.provider} connection={connection} harness={connection.provider} />
-              ) : (
-                <ConnectionRow key={connection.provider} connection={connection} />
-              ),
-            )}
+            {visible.map((connection) => (
+              <ConnectionRow
+                key={connection.provider}
+                connection={connection}
+                onRemove={() => remove(connection.provider)}
+              />
+            ))}
           </CardContent>
         </Card>
       )}
-      {list && <ModelListsCard connections={list} />}
-    </>
+    </div>
   )
 }
 
@@ -170,10 +222,7 @@ function ModelListsCard({ connections }: { connections: readonly Connection[] })
   const connected = new Set(connectedModelProviders(connections).map((p) => p.id))
   return (
     <div className="flex flex-col gap-2">
-      <div>
-        <h2 className="font-semibold tracking-tight">Models</h2>
-        <p className="text-muted-foreground">Choose which models each provider offers in the chat's model picker.</p>
-      </div>
+      <h2 className="font-semibold tracking-tight">Models</h2>
       <Card className="py-0">
         <CardContent className="divide-y divide-white/[0.04] px-0">
           {MODEL_PROVIDERS.map((provider) => (
@@ -265,7 +314,7 @@ function HarnessConnectionRow({ connection, harness }: { connection: Connection;
   )
 }
 
-function ConnectionRow({ connection }: { connection: Connection }) {
+function ConnectionRow({ connection, onRemove }: { connection: Connection; onRemove?: () => void }) {
   const queryClient = useQueryClient()
   const [apiKey, setApiKey] = useState("")
   const onSuccess = () => void queryClient.invalidateQueries({ queryKey: keys.connections })
@@ -277,7 +326,13 @@ function ConnectionRow({ connection }: { connection: Connection }) {
       onSuccess()
     },
   })
-  const disconnect = useMutation({ mutationFn: () => api.deleteConnection(connection.provider), onSuccess })
+  const disconnect = useMutation({
+    mutationFn: () => api.deleteConnection(connection.provider),
+    onSuccess: () => {
+      onRemove?.()
+      onSuccess()
+    },
+  })
   const busy = save.isPending || disconnect.isPending
   const error = save.error ?? disconnect.error
 
@@ -310,6 +365,7 @@ function ConnectionRow({ connection }: { connection: Connection }) {
             className="max-w-sm"
             type="password"
             autoComplete="off"
+            aria-label={`${connection.label} API key`}
             placeholder={connection.connected ? "Replace API key" : "API key"}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
@@ -317,9 +373,13 @@ function ConnectionRow({ connection }: { connection: Connection }) {
           <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
             Save
           </Button>
-          {connection.connected && (
+          {connection.connected ? (
             <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
               Disconnect
+            </Button>
+          ) : onRemove && (
+            <Button type="button" variant="soft" disabled={busy} onClick={onRemove}>
+              Remove
             </Button>
           )}
         </form>
