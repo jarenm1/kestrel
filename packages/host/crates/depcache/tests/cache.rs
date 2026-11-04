@@ -1,0 +1,439 @@
+//! End-to-end tests: a real cache server in front of a mock upstream that serves whatever a test sets.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::http::{header, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
+use base64::Engine as _;
+use kestrel_depcache::{router, AppState, Config};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256, Sha512};
+use tokio::net::TcpListener;
+
+#[derive(Default)]
+struct Upstream {
+    routes: Mutex<HashMap<String, (&'static str, Vec<u8>)>>,
+    hits: Mutex<HashMap<String, usize>>,
+}
+
+impl Upstream {
+    fn serve(&self, path: &str, content_type: &'static str, body: impl Into<Vec<u8>>) {
+        self.routes
+            .lock()
+            .expect("routes")
+            .insert(path.to_owned(), (content_type, body.into()));
+    }
+
+    fn hits(&self, path: &str) -> usize {
+        self.hits
+            .lock()
+            .expect("hits")
+            .get(path)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+async fn serve_upstream(State(upstream): State<Arc<Upstream>>, uri: Uri) -> Response {
+    let path = uri.path().to_owned();
+    *upstream
+        .hits
+        .lock()
+        .expect("hits")
+        .entry(path.clone())
+        .or_default() += 1;
+    let found = upstream.routes.lock().expect("routes").get(&path).cloned();
+    match found {
+        Some((content_type, body)) => {
+            ([(header::CONTENT_TYPE, content_type)], body).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+struct Harness {
+    /// Base URL of the cache.
+    cache: String,
+    /// Base URL of the mock upstream.
+    up: String,
+    upstream: Arc<Upstream>,
+    dir: tempfile::TempDir,
+    client: reqwest::Client,
+}
+
+async fn listen() -> (TcpListener, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    (listener, base)
+}
+
+async fn start(metadata_ttl: Duration, max_bytes: u64) -> Harness {
+    let upstream = Arc::new(Upstream::default());
+    let (up_listener, up) = listen().await;
+    let up_router = Router::new()
+        .fallback(serve_upstream)
+        .with_state(upstream.clone());
+    tokio::spawn(async move {
+        axum::serve(up_listener, up_router)
+            .await
+            .expect("upstream serve")
+    });
+
+    let (cache_listener, cache) = listen().await;
+    let config = Config {
+        public_base_url: cache.clone(),
+        metadata_ttl,
+        npm_registry: format!("{up}/npm"),
+        pypi_index: format!("{up}/pypi"),
+        pypi_files: format!("{up}/files"),
+        crates_index: format!("{up}/index"),
+        crates_static: format!("{up}/static/crates"),
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = Arc::new(AppState::new(config, dir.path(), max_bytes).expect("state"));
+    tokio::spawn(async move {
+        axum::serve(cache_listener, router(state))
+            .await
+            .expect("cache serve")
+    });
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    Harness {
+        cache,
+        up,
+        upstream,
+        dir,
+        client,
+    }
+}
+
+impl Harness {
+    async fn get(&self, path: &str) -> (u16, Vec<u8>) {
+        let response = self
+            .client
+            .get(format!("{}{path}", self.cache))
+            .send()
+            .await
+            .expect("send");
+        let status = response.status().as_u16();
+        (status, response.bytes().await.expect("body").to_vec())
+    }
+
+    fn blob(&self, algo: &str, hex: &str) -> PathBuf {
+        self.dir.path().join("blobs").join(algo).join(hex)
+    }
+}
+
+fn sri512(bytes: &[u8]) -> String {
+    format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(Sha512::digest(bytes))
+    )
+}
+
+fn sha512_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha512::digest(bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// An npm packument listing `(version, tarball URL, integrity)`.
+fn packument(name: &str, versions: &[(&str, String, String)]) -> Vec<u8> {
+    let versions: serde_json::Map<String, Value> = versions
+        .iter()
+        .map(|(version, tarball, integrity)| {
+            (
+                version.to_string(),
+                json!({ "dist": { "tarball": tarball, "integrity": integrity } }),
+            )
+        })
+        .collect();
+    json!({ "name": name, "versions": versions })
+        .to_string()
+        .into_bytes()
+}
+
+const FOREVER: Duration = Duration::from_secs(300);
+const BIG: u64 = 1 << 30;
+
+#[tokio::test]
+async fn npm_tarball_is_served_verified_and_cached() {
+    let h = start(FOREVER, BIG).await;
+    let tgz = b"pkg one tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+
+    let (status, doc) = h.get("/npm/pkg").await;
+    assert_eq!(status, 200);
+    let doc: Value = serde_json::from_slice(&doc).expect("packument json");
+    assert_eq!(
+        doc["versions"]["1.0.0"]["dist"]["tarball"],
+        format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.cache)
+    );
+
+    for _ in 0..2 {
+        assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, tgz.clone()));
+    }
+    assert_eq!(
+        h.upstream.hits("/npm/pkg/-/pkg-1.0.0.tgz"),
+        1,
+        "second request is served from the store"
+    );
+}
+
+#[tokio::test]
+async fn tampered_blob_is_refetched_not_served() {
+    let h = start(FOREVER, BIG).await;
+    let tgz = b"pkg tampered tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, tgz.clone()));
+    std::fs::write(h.blob("sha512", &sha512_hex(&tgz)), b"not the tarball").expect("tamper");
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, tgz.clone()));
+    assert_eq!(
+        h.upstream.hits("/npm/pkg/-/pkg-1.0.0.tgz"),
+        2,
+        "the corrupted blob was refetched"
+    );
+}
+
+#[tokio::test]
+async fn upstream_bytes_that_do_not_match_are_refused_and_not_stored() {
+    let h = start(FOREVER, BIG).await;
+    let listed = b"the bytes the packument lists".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&listed))]),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        b"other bytes".to_vec(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await.0, 502);
+    assert!(
+        !h.blob("sha512", &sha512_hex(&listed)).exists(),
+        "nothing unverified is stored"
+    );
+}
+
+#[tokio::test]
+async fn artifact_dropped_by_its_listing_stops_being_served() {
+    let h = start(Duration::from_secs(1), BIG).await;
+    let tgz = b"pkg withdrawn tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, tgz.clone()));
+
+    h.upstream
+        .serve("/npm/pkg", "application/json", packument("pkg", &[]));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(
+        h.get("/npm/pkg").await.0,
+        200,
+        "the packument is refetched after the TTL"
+    );
+
+    assert_eq!(
+        h.get("/npm/pkg/-/pkg-1.0.0.tgz").await.0,
+        404,
+        "the listing no longer names it"
+    );
+    assert!(
+        h.blob("sha512", &sha512_hex(&tgz)).exists(),
+        "the bytes stay stored; only the listing gates serving"
+    );
+}
+
+#[tokio::test]
+async fn pypi_file_is_linked_by_its_page_and_served_by_path() {
+    let h = start(FOREVER, BIG).await;
+    let whl = b"six wheel bytes".to_vec();
+    let file_url = format!("{}/files/packages/six-1.0-py3-none-any.whl", h.up);
+    let page = format!(
+        r#"<a href="{file_url}#sha256={}">six-1.0-py3-none-any.whl</a>"#,
+        sha256_hex(&whl)
+    );
+    h.upstream
+        .serve("/pypi/simple/six/", "text/html", page.into_bytes());
+    h.upstream.serve(
+        "/files/packages/six-1.0-py3-none-any.whl",
+        "application/octet-stream",
+        whl.clone(),
+    );
+
+    let (status, html) = h.get("/pypi/simple/six/").await;
+    assert_eq!(status, 200);
+    let link = format!(
+        "{}/pypi/files/packages/six-1.0-py3-none-any.whl#sha256={}",
+        h.cache,
+        sha256_hex(&whl)
+    );
+    assert!(String::from_utf8(html).expect("utf8").contains(&link));
+
+    assert_eq!(
+        h.get("/pypi/files/packages/six-1.0-py3-none-any.whl").await,
+        (200, whl)
+    );
+}
+
+#[tokio::test]
+async fn crates_config_index_and_download_are_rewritten_and_verified() {
+    let h = start(FOREVER, BIG).await;
+    let krate = b"foo crate bytes".to_vec();
+    let config = format!(
+        r#"{{"dl":"{}/static/crates","api":"https://crates.io"}}"#,
+        h.up
+    );
+    let line = format!(
+        r#"{{"name":"foo","vers":"1.0.0","cksum":"{}"}}"#,
+        sha256_hex(&krate)
+    );
+    h.upstream
+        .serve("/index/config.json", "application/json", config);
+    h.upstream
+        .serve("/index/3/f/foo", "text/plain", format!("{line}\n"));
+    h.upstream.serve(
+        "/static/crates/foo/foo-1.0.0.crate",
+        "application/octet-stream",
+        krate.clone(),
+    );
+
+    let (status, config) = h.get("/crates/index/config.json").await;
+    assert_eq!(status, 200);
+    let config: Value = serde_json::from_slice(&config).expect("config json");
+    assert_eq!(
+        config["dl"],
+        format!("{}/crates/dl/{{crate}}/{{version}}", h.cache)
+    );
+    assert_eq!(
+        h.get("/crates/index/3/f/foo").await,
+        (200, format!("{line}\n").into_bytes())
+    );
+    assert_eq!(h.get("/crates/dl/foo/1.0.0").await, (200, krate));
+}
+
+#[tokio::test]
+async fn requests_with_credentials_never_reach_the_cache_or_upstream() {
+    let h = start(FOREVER, BIG).await;
+    let tgz = b"private tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+
+    let response = h
+        .client
+        .get(format!("{}/npm/pkg", h.cache))
+        .header(header::AUTHORIZATION, "Bearer secret")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status().as_u16(), 403);
+    assert_eq!(h.upstream.hits("/npm/pkg"), 0);
+}
+
+#[tokio::test]
+async fn unsafe_and_unlisted_paths_are_rejected() {
+    let h = start(FOREVER, BIG).await;
+    h.upstream
+        .serve("/npm/pkg", "application/json", packument("pkg", &[]));
+
+    assert_eq!(
+        h.get("/npm/a%2F..%2Fb").await.0,
+        400,
+        "an encoded traversal is not a cache key"
+    );
+    assert_eq!(
+        h.get("/npm/pkg/-/missing-1.0.0.tgz").await.0,
+        404,
+        "a tarball no listing names is not found"
+    );
+}
+
+#[tokio::test]
+async fn least_recently_used_artifacts_are_evicted_above_the_cap() {
+    let a = b"0123456789abcdefghij".to_vec();
+    let b = b"klmnopqrstuvwxyz0123".to_vec();
+    let h = start(FOREVER, 30).await;
+    let tarball = |v: &str| format!("{}/npm/pkg/-/pkg-{v}.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument(
+            "pkg",
+            &[
+                ("1.0.0", tarball("1.0.0"), sri512(&a)),
+                ("1.1.0", tarball("1.1.0"), sri512(&b)),
+            ],
+        ),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        a.clone(),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.1.0.tgz",
+        "application/octet-stream",
+        b.clone(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, a.clone()));
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.1.0.tgz").await, (200, b));
+    assert!(
+        !h.blob("sha512", &sha512_hex(&a)).exists(),
+        "the least recently used blob was evicted"
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, a));
+    assert_eq!(
+        h.upstream.hits("/npm/pkg/-/pkg-1.0.0.tgz"),
+        2,
+        "an evicted artifact is downloaded again"
+    );
+}
