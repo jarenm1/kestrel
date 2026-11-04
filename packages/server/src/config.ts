@@ -76,8 +76,8 @@ export interface ServerConfig {
    * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
    * (`CLOUDAGENTS_ANTHROPIC_COMMAND`, `CLOUDAGENTS_OPENAI_COMMAND`, `CLOUDAGENTS_OPENROUTER_COMMAND`,
    * `CLOUDAGENTS_ZAI_COMMAND`, `CLOUDAGENTS_DEEPSEEK_COMMAND`, `CLOUDAGENTS_MINIMAX_COMMAND`,
-   * `CLOUDAGENTS_MOONSHOT_COMMAND`, `CLOUDAGENTS_OPENCODE_COMMAND`, `CLOUDAGENTS_OPENCODE_GO_COMMAND` and
-   * `CLOUDAGENTS_GOOGLE_COMMAND` override the defaults).
+   * `CLOUDAGENTS_MOONSHOT_COMMAND`, `CLOUDAGENTS_DEEPINFRA_COMMAND`, `CLOUDAGENTS_OPENCODE_COMMAND`,
+   * `CLOUDAGENTS_OPENCODE_GO_COMMAND` and `CLOUDAGENTS_GOOGLE_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
@@ -161,6 +161,7 @@ export const loadConfig = (): ServerConfig => {
         deepseek: "",
         minimax: "",
         moonshot: "",
+        deepinfra: "",
         opencode: fakeCommand,
         "opencode-go": fakeCommand,
         google: fakeCommand,
@@ -173,6 +174,7 @@ export const loadConfig = (): ServerConfig => {
         deepseek: process.env.CLOUDAGENTS_DEEPSEEK_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         minimax: process.env.CLOUDAGENTS_MINIMAX_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         moonshot: process.env.CLOUDAGENTS_MOONSHOT_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        deepinfra: process.env.CLOUDAGENTS_DEEPINFRA_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         // The Go plan runs the same OpenCode CLI; its command is the same ACP server with the Go key imported.
         opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
         "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,

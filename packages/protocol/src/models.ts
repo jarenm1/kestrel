@@ -12,6 +12,7 @@ export const ModelProvider = Schema.Literal(
   "deepseek",
   "minimax",
   "moonshot",
+  "deepinfra",
   "opencode",
   "opencode-go",
   "google",
@@ -74,6 +75,12 @@ export const AgentModel = Schema.Literal(
   "kimi-k3.1-pro-highspeed",
   "kimi-k3[1m]",
   "kimi-k2.7-code",
+  "moonshotai/Kimi-K3[1m]",
+  "deepseek-ai/DeepSeek-V4-Pro-0813[1m]",
+  "deepseek-ai/DeepSeek-V4.1-Flash-1017[1m]",
+  "zai-org/GLM-5.3[1m]",
+  "zai-org/GLM-5.3-Flash[1m]",
+  "inclusionAI/Ling-3.0-flash",
   "opencode/big-pickle",
   "opencode/glm-5.3-flash-free",
   "opencode/deepseek-v4.1-flash-free",
@@ -131,6 +138,8 @@ const GATEWAY_LOW_HIGH_MAX: readonly AgentEffort[] = ["low", "high", "max"]
 const GPT_FROM_LOW: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 const GPT_FROM_NONE: readonly AgentEffort[] = ["none", "low", "medium", "high", "xhigh", "max"]
 const OC_LOW_HIGH_MAX: readonly AgentEffort[] = ["low", "high", "max"]
+/** DeepInfra's `reasoning_effort` takes none/low/medium/high; Claude Code's xhigh and max have no counterpart. */
+const DEEPINFRA_LOW_TO_HIGH: readonly AgentEffort[] = ["low", "medium", "high"]
 const OC_LOW_TO_MAX: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 
 /**
@@ -178,6 +187,14 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "kimi-k3.1-pro-highspeed", provider: "moonshot", name: "Kimi K3.1 Pro Highspeed", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
   { id: "kimi-k3[1m]", provider: "moonshot", name: "Kimi K3", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
   { id: "kimi-k2.7-code", provider: "moonshot", name: "Kimi K2.7 Code", efforts: [], shownByDefault: false },
+  // DeepInfra's Anthropic-compatible endpoint takes its own model names; the [1m] suffix is Claude Code's context hint.
+  // The recommended ladder is DeepInfra's Claude Code guide; efforts follow its reasoning_effort scale.
+  { id: "moonshotai/Kimi-K3[1m]", provider: "deepinfra", name: "Kimi K3", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "deepseek-ai/DeepSeek-V4-Pro-0813[1m]", provider: "deepinfra", name: "DeepSeek V4 Pro 0813", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "deepseek-ai/DeepSeek-V4.1-Flash-1017[1m]", provider: "deepinfra", name: "DeepSeek V4.1 Flash 1017", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "zai-org/GLM-5.3[1m]", provider: "deepinfra", name: "GLM-5.3", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "zai-org/GLM-5.3-Flash[1m]", provider: "deepinfra", name: "GLM-5.3 Flash", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "inclusionAI/Ling-3.0-flash", provider: "deepinfra", name: "Ling 3.0 Flash", efforts: DEEPINFRA_LOW_TO_HIGH, shownByDefault: false, compactWindow: 131_072 },
   // OpenCode's catalog id is the value its ACP `model` config option takes.
   { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },
   { id: "opencode/glm-5.3-flash-free", provider: "opencode", name: "GLM-5.3-Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
@@ -236,6 +253,8 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "deepseek", name: "DeepSeek", connections: ["deepseek"] },
   { id: "minimax", name: "MiniMax", connections: ["minimax"] },
   { id: "moonshot", name: "Kimi (Moonshot AI)", connections: ["moonshot"], hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported." },
+  // DeepInfra serves open-weight models over an Anthropic-compatible Messages API, so Claude Code runs them.
+  { id: "deepinfra", name: "DeepInfra", connections: ["deepinfra"], hint: "Use a DeepInfra API key. Its models run through DeepInfra's Anthropic-compatible endpoint." },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
   { id: "opencode", name: "OpenCode", connections: [] },
   // OpenCode Go runs on the same OpenCode CLI (2.1), but needs the Go plan's key.

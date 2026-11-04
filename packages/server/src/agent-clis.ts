@@ -260,6 +260,7 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   deepseek: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   minimax: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  deepinfra: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
   opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
   // The Go plan's sign-in is a key in OpenCode's credential store, which `auth import` fills from 2.1.

@@ -10,10 +10,12 @@ const BASE = "http://127.0.0.1:8787/broker/run-token"
 
 describe("broker provider mapping", () => {
   test("every brokered provider has an upstream and every model provider has a model", () => {
-    expect(BROKER_PROVIDERS).toEqual(["anthropic", "openai", "openrouter", "zai", "deepseek", "minimax", "moonshot"])
+    expect(BROKER_PROVIDERS).toEqual(["anthropic", "openai", "openrouter", "zai", "deepseek", "minimax", "moonshot", "deepinfra"])
     for (const provider of BROKER_PROVIDERS) {
       expect(BROKER_UPSTREAMS[provider].base).toMatch(/^https:\/\//)
     }
+    // DeepInfra's Anthropic-compatible endpoint sits beside its OpenAI-compatible one.
+    expect(BROKER_UPSTREAMS.deepinfra).toEqual({ base: "https://api.deepinfra.com/anthropic", keyHeader: "bearer" })
     for (const provider of MODEL_PROVIDERS) {
       expect(providerModels(provider.id).length).toBeGreaterThan(0)
     }
@@ -28,7 +30,7 @@ describe("broker provider mapping", () => {
         OPENAI_API_KEY: "t",
       })
     }
-    for (const provider of ["openrouter", "zai", "deepseek", "minimax", "moonshot"] as const) {
+    for (const provider of ["openrouter", "zai", "deepseek", "minimax", "moonshot", "deepinfra"] as const) {
       expect(brokerEnv(provider, BASE, "t")).toEqual({
         ANTHROPIC_BASE_URL: `${BASE}/${provider}`,
         ANTHROPIC_AUTH_TOKEN: "t",
@@ -37,48 +39,51 @@ describe("broker provider mapping", () => {
     }
   })
 
-  test("gateway requests keep the provider path and carry the key as a bearer token", async () => {
-    const seen: Array<{ path: string; headers: Headers }> = []
-    const upstream = Bun.serve({
-      port: 0,
-      fetch(req) {
-        seen.push({ path: new URL(req.url).pathname + new URL(req.url).search, headers: req.headers })
-        return new Response("ok")
-      },
-    })
-    const previous = BROKER_UPSTREAMS.openrouter
-    BROKER_UPSTREAMS.openrouter = { ...previous, base: `http://127.0.0.1:${upstream.port}/api` }
-    const broker: CredentialBrokerShape = {
-      issue: () => Effect.die("unused"),
-      revoke: () => Effect.void,
-      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers: ["openrouter"] }),
-      onRevoke: () => () => undefined,
-      upstreamKey: () => Effect.succeed("real-key"),
-    }
-    const box = createServer((req, res) => void handleBroker(broker, req, res))
-    const listening = Promise.withResolvers<void>()
-    box.listen(0, "127.0.0.1", listening.resolve)
-    await listening.promise
-    const port = (box.address() as AddressInfo).port
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/broker/token/openrouter/v1/messages?beta=1`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: "Bearer client", "x-api-key": "client" },
-        body: '{"model":"anthropic/claude-sonnet-5.5"}',
+  test.each(["openrouter", "deepinfra"] as const)(
+    "gateway requests keep the %s path and carry the key as a bearer token",
+    async (provider) => {
+      const seen: Array<{ path: string; headers: Headers }> = []
+      const upstream = Bun.serve({
+        port: 0,
+        fetch(req) {
+          seen.push({ path: new URL(req.url).pathname + new URL(req.url).search, headers: req.headers })
+          return new Response("ok")
+        },
       })
-      expect(await response.text()).toBe("ok")
-      expect(seen).toHaveLength(1)
-      expect(seen[0]?.path).toBe("/api/v1/messages?beta=1")
-      expect(seen[0]?.headers.get("authorization")).toBe("Bearer real-key")
-      expect(seen[0]?.headers.get("x-api-key")).toBeNull()
-    } finally {
-      const closed = Promise.withResolvers<void>()
-      box.close(() => closed.resolve())
-      await closed.promise
-      upstream.stop(true)
-      BROKER_UPSTREAMS.openrouter = previous
-    }
-  })
+      const previous = BROKER_UPSTREAMS[provider]
+      BROKER_UPSTREAMS[provider] = { ...previous, base: `http://127.0.0.1:${upstream.port}/api` }
+      const broker: CredentialBrokerShape = {
+        issue: () => Effect.die("unused"),
+        revoke: () => Effect.void,
+        grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers: [provider] }),
+        onRevoke: () => () => undefined,
+        upstreamKey: () => Effect.succeed("real-key"),
+      }
+      const box = createServer((req, res) => void handleBroker(broker, req, res))
+      const listening = Promise.withResolvers<void>()
+      box.listen(0, "127.0.0.1", listening.resolve)
+      await listening.promise
+      const port = (box.address() as AddressInfo).port
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/broker/token/${provider}/v1/messages?beta=1`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer client", "x-api-key": "client" },
+          body: '{"model":"anthropic/claude-sonnet-5.5"}',
+        })
+        expect(await response.text()).toBe("ok")
+        expect(seen).toHaveLength(1)
+        expect(seen[0]?.path).toBe("/api/v1/messages?beta=1")
+        expect(seen[0]?.headers.get("authorization")).toBe("Bearer real-key")
+        expect(seen[0]?.headers.get("x-api-key")).toBeNull()
+      } finally {
+        const closed = Promise.withResolvers<void>()
+        box.close(() => closed.resolve())
+        await closed.promise
+        upstream.stop(true)
+        BROKER_UPSTREAMS[provider] = previous
+      }
+    },
+  )
 
   test("Anthropic requests inject the key in x-api-key", async () => {
     const seen: Headers[] = []

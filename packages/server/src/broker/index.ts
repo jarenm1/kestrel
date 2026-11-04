@@ -21,6 +21,8 @@ export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; r
   deepseek: { base: "https://api.deepseek.com/anthropic", keyHeader: "bearer" },
   minimax: { base: "https://api.minimax.io/anthropic", keyHeader: "bearer" },
   moonshot: { base: "https://api.moonshot.ai/anthropic", keyHeader: "bearer" },
+  // DeepInfra exposes the Anthropic Messages API beside its OpenAI-compatible one.
+  deepinfra: { base: "https://api.deepinfra.com/anthropic", keyHeader: "bearer" },
 }
 
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>

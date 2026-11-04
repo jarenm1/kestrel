@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import { Schema } from "effect"
 import { AGENT_MODELS, MODEL_PROVIDERS, connectedModelProviders, resolveAgentChoice, threadChoiceRun, type AgentEffort, type AgentModel } from "./src/models"
 import { connectionsForBox, type Connection } from "./src/control"
+import { SendMessageBody } from "./src/index"
 
 const anthropic = AGENT_MODELS.filter((m) => m.provider === "anthropic" && m.efforts.length > 0)
 const [first, second, hidden] = anthropic.map((m) => m.id) as [AgentModel, AgentModel, AgentModel]
@@ -178,5 +180,66 @@ describe("selected-box connections", () => {
       connected: false, available: false, error: "Selected box is offline",
     })
     expect(connectedModelProviders(rows, undefined).map((provider) => provider.id)).toEqual(["anthropic"])
+  })
+})
+
+describe("DeepInfra models", () => {
+  const deepinfra = AGENT_MODELS.filter((model) => model.provider === "deepinfra")
+  const [kimi, pro, flash] = deepinfra
+  const providers = MODEL_PROVIDERS.filter((provider) => provider.id === "deepinfra" || provider.id === "moonshot")
+
+  test("the catalog uses DeepInfra's own model names and offers only its documented effort scale", () => {
+    expect(deepinfra.map((model) => model.id)).toEqual([
+      "moonshotai/Kimi-K3[1m]",
+      "deepseek-ai/DeepSeek-V4-Pro-0813[1m]",
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017[1m]",
+      "zai-org/GLM-5.3[1m]",
+      "zai-org/GLM-5.3-Flash[1m]",
+      "inclusionAI/Ling-3.0-flash",
+    ])
+    // Adding a provider must not collide with an existing catalog id (ids are unique across providers).
+    expect(new Set(AGENT_MODELS.map((model) => model.id)).size).toBe(AGENT_MODELS.length)
+    for (const model of deepinfra) {
+      expect(model.efforts).toEqual(["low", "medium", "high"])
+      expect(Schema.is(SendMessageBody)({ text: "", model: model.id, effort: "high" })).toBe(true)
+      // xhigh and max have no DeepInfra reasoning_effort counterpart, so a request must be refused before the network.
+      expect(Schema.is(SendMessageBody)({ text: "", model: model.id, effort: "max" })).toBe(false)
+    }
+    expect(kimi?.name).toBe("Kimi K3")
+    expect(pro?.compactWindow).toBe(1_000_000)
+    expect(flash?.compactWindow).toBe(1_000_000)
+    expect(deepinfra.at(-1)?.compactWindow).toBe(131_072)
+  })
+
+  test("a display name shared with another provider keeps each thread on its own provider", () => {
+    const offered = AGENT_MODELS.filter((model) => model.provider === "deepinfra" || model.provider === "moonshot")
+    const choice = { offered, connected: providers, pickedEffort: undefined, lastRun: undefined, defaultModel: undefined, defaultEffort: undefined }
+    const deepinfraThread = resolveAgentChoice({ ...choice, pickedModel: kimi!.id })
+    const moonshotThread = resolveAgentChoice({ ...choice, pickedModel: "kimi-k3[1m]" })
+    expect(deepinfraThread.model?.provider).toBe("deepinfra")
+    expect(moonshotThread.model?.provider).toBe("moonshot")
+    expect(moonshotThread.model?.id).toBe("kimi-k3[1m]")
+  })
+
+  test("DeepInfra is offered only while its connection is connected and available", () => {
+    const offered = (rows: ReadonlyArray<{ provider: string; connected: boolean; available?: boolean }>) =>
+      connectedModelProviders(rows, []).map((provider) => provider.id)
+    expect(offered([{ provider: "deepinfra", connected: true, available: true }])).toContain("deepinfra")
+    expect(offered([{ provider: "deepinfra", connected: true, available: false }])).not.toContain("deepinfra")
+    expect(offered([{ provider: "deepinfra", connected: false }])).not.toContain("deepinfra")
+    expect(offered([])).not.toContain("deepinfra")
+  })
+
+  test("a thread whose DeepInfra connection is gone falls back instead of borrowing a same-named model", () => {
+    const chosen = resolveAgentChoice({
+      offered: AGENT_MODELS.filter((model) => model.provider === "moonshot"),
+      connected: MODEL_PROVIDERS.filter((provider) => provider.id === "moonshot"),
+      pickedModel: kimi!.id,
+      pickedEffort: undefined,
+      lastRun: { model: kimi!.id },
+      defaultModel: undefined,
+      defaultEffort: undefined,
+    })
+    expect(chosen.model?.provider).toBe("moonshot")
   })
 })

@@ -66,6 +66,14 @@ test("installed clients retain CLI subscriptions and the box's free OpenCode row
   })
   // Go is a CLI login, reported by the box's cli-auth like the other subscriptions; this box has no Go key.
   expect(rows.find((row) => row.provider === "opencode-go")).toMatchObject({ kind: "cli", connected: false, available: false })
+  // DeepInfra is an API-key provider: Connections lists its row before any key is stored.
+  expect(rows.find((row) => row.provider === "deepinfra")).toMatchObject({
+    label: "DeepInfra",
+    kind: "apikey",
+    connected: false,
+    available: true,
+    hint: "Use a DeepInfra API key. Its models run through DeepInfra's Anthropic-compatible endpoint.",
+  })
 })
 
 test("updated clients replace legacy box state with their selected box's Go login and harnesses", async () => {

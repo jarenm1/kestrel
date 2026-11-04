@@ -32,6 +32,7 @@ Coverage checked against provider documentation on November 4, 2026:
 | Z.ai | GLM-5.3; GLM-5.3 Flash; GLM-5.3 FlashX; GLM-5.2 | The first two show by default. FlashX is a standard model API option, not currently included in the GLM Coding Plan. |
 | MiniMax | M3.1 Flash; M3 | Both show by default. The current Anthropic-compatible endpoint only advertises these two models; M3 has no documented effort scale. |
 | Kimi (Moonshot AI) | K3.1 Pro; K3.1 Pro Highspeed; K3; K2.7 Code | The two K3.1 variants show by default and have 1M compaction windows. K2.7 Code remains opt-in for existing users; unavailable to accounts registered from November 1 and expected to retire in late December 2026. |
+| DeepInfra | Kimi K3; DeepSeek V4 Pro 0813; DeepSeek V4.1 Flash 1017; GLM-5.3; GLM-5.3 Flash; Ling 3.0 Flash | Open-weight models served over DeepInfra's Anthropic-compatible endpoint and run through Claude Code. The first three show by default. Catalog ids are DeepInfra's own model names; all but Ling 3.0 Flash (128K) carry `[1m]`. Several names also exist under their vendor's provider; the thread's provider picks the connection, never the name alone. |
 
 Z.ai and Kimi expose the documented Low / High / Max effort scale; Kimi does not advertise Medium. Z.ai defaults
 to Max when no supported effort was chosen, including legacy Default selections and runs with no explicit level;
@@ -39,14 +40,18 @@ explicit supported user, run and device choices still win. Slider options remain
 MiniMax M3.1 Flash retains Low / Medium / High / Extra high / Max. DeepSeek retains its supported effort mapping.
 Legacy DeepSeek Flash IDs route to the current Flash model, so they are not separate picker entries.
 Kimi Code membership credentials remain unsupported; use a Moonshot Platform API key.
+DeepInfra passes Claude Code's effort to its `reasoning_effort`, whose documented values end at High: its models offer
+Low / Medium / High, and the picker and `SendMessageBody` reject Extra high and Max before a request is sent.
 
 Sources: [DeepSeek models and alias mapping](https://api-docs.deepseek.com/quick_start/pricing),
 [Z.ai Flash/FlashX](https://docs.z.ai/guides/vlm/glm-5.3-flash),
 [GLM-5.2](https://docs.z.ai/guides/llm/glm-5.2),
 [Z.ai Claude Code effort mapping](https://docs.z.ai/devpack/latest-model),
 [MiniMax Anthropic compatibility](https://platform.minimax.io/docs/api-reference/text-anthropic-api),
-[Kimi model availability](https://platform.kimi.ai/docs/models) and
-[Kimi Messages API](https://platform.kimi.ai/docs/api/messages).
+[Kimi model availability](https://platform.kimi.ai/docs/models),
+[Kimi Messages API](https://platform.kimi.ai/docs/api/messages),
+[DeepInfra Anthropic SDK & Claude Code](https://docs.deepinfra.com/integrations/anthropic) and
+[DeepInfra reasoning effort](https://docs.deepinfra.com/chat/reasoning).
 
 ## On the box
 

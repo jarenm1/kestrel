@@ -56,6 +56,7 @@ const harnessLayer = (
       deepseek: "",
       minimax: "",
       moonshot: "",
+      deepinfra: "",
       opencode: "",
       "opencode-go": "",
       google: "",
