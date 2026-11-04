@@ -297,6 +297,9 @@ in
       matchConfig.Name = "kestrel0";
       address = [ "${hostAddress}/32" ];
     };
+    # The kestrel table is this host's firewall (docs/nest.md). NixOS's nixos-fw input chain has policy drop and
+    # would drop the guests' dependency-cache, Nix-cache and DNS connections before the kestrel accepts run.
+    networking.firewall.enable = false;
     networking.nftables.enable = true;
     networking.nftables.ruleset = ''
       table inet kestrel {
