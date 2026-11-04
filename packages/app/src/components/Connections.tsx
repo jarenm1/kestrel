@@ -308,29 +308,35 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
           <div className="text-muted-foreground">needs server config</div>
         )
       ) : (
-        <form className="flex flex-wrap gap-2" onSubmit={submit}>
-          <Input
-            className="max-w-sm"
-            type="password"
-            autoComplete="off"
-            aria-label={`${connection.label} API key`}
-            placeholder={connection.connected ? "Replace API key" : "API key"}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-          <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
-            Save
-          </Button>
+        <form className="flex flex-wrap items-center gap-2" onSubmit={submit}>
           {connection.connected ? (
-            <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
-              Disconnect
-            </Button>
-          ) : onRemove && (
-            <Button type="button" variant="soft" disabled={busy} onClick={onRemove}>
-              Remove
-            </Button>
+            <>
+              <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
+                Disconnect
+              </Button>
+              {modelProvider && <ModelPicker provider={modelProvider} />}
+            </>
+          ) : (
+            <>
+              <Input
+                className="max-w-sm"
+                type="password"
+                autoComplete="off"
+                aria-label={`${connection.label} API key`}
+                placeholder="API key"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+              />
+              <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
+                Save
+              </Button>
+              {onRemove && (
+                <Button type="button" variant="soft" disabled={busy} onClick={onRemove}>
+                  Remove
+                </Button>
+              )}
+            </>
           )}
-          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
         </form>
       )}
       {error && <Alert>{errorText(error)}</Alert>}
