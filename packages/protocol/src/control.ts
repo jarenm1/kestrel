@@ -168,6 +168,11 @@ export const ControlPaths = {
   /** POST (no body) -> UserBox: asks the box's host to resume or suspend it. Owner only; 404 otherwise. */
   nestBoxResume: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/resume`,
   nestBoxSuspend: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/suspend`,
+  /** POST (no body) -> UserBox: backs the box up and releases its host; it resumes on the next wake. Owner only. */
+  nestBoxPark: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/park`,
+  /** POST (no body) -> UserBox: attaches or detaches the box's GPU. Owner only; needs `limits.gpu` "on-demand". */
+  nestBoxGpuAttach: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/gpu/attach`,
+  nestBoxGpuDetach: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/gpu/detach`,
   /** PUT NestLimits -> UserBox: changes the box's limits (its shape). Owner only. */
   nestBoxLimits: (boxId: string) => `/api/nest/boxes/${encodeURIComponent(boxId)}/limits`,
   /** Operator-only: GET -> NestHostList. Everyone else gets 404. */
@@ -183,6 +188,8 @@ export const Me = Schema.Struct({
   avatarUrl: Schema.String,
   /** May manage Kestrel's managed boxes (`ControlPaths.fleetBoxes`); listed in the Worker's KESTREL_OPERATORS. */
   operator: Schema.Boolean,
+  /** Whether this deployment offers Nest boxes (`KESTREL_NEST_DOMAIN` is set); the app offers Create Nest box only then. */
+  nestEnabled: Schema.Boolean,
 })
 export type Me = typeof Me.Type
 

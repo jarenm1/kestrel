@@ -18,6 +18,11 @@ export interface Env {
   APP_ORIGIN?: string
   /** Comma- or whitespace-separated GitHub logins that run the managed-box fleet (`/api/fleet/boxes`). */
   KESTREL_OPERATORS?: string
+  /**
+   * The domain Nest boxes are served under (`<boxId>.<host slug>.<domain>`). Unset disables Nest: the Nest routes 404
+   * and `Me.nestEnabled` is false.
+   */
+  KESTREL_NEST_DOMAIN?: string
 }
 
 /** RPC stub for the single control-plane Hub instance. */
