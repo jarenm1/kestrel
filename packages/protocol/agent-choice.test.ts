@@ -59,6 +59,24 @@ describe("resolveAgentChoice", () => {
   test("nothing resolves before the connections load", () => {
     expect(resolveAgentChoice({ ...base, offered: [], connected: [], lastRun: { model: second, effort: level } })).toEqual({ model: undefined, effort: undefined })
   })
+
+  test("Z.ai preserves Max for unchosen and legacy defaults without overriding deliberate choices", () => {
+    const zai = {
+      ...base,
+      offered: AGENT_MODELS.filter((m) => m.provider === "zai"),
+      connected: MODEL_PROVIDERS.filter((p) => p.id === "zai"),
+    }
+    for (const model of zai.offered) {
+      const input = { ...zai, pickedModel: model.id }
+      expect(resolveAgentChoice(input).effort).toBe("max")
+      expect(resolveAgentChoice({ ...input, pickedEffort: "default", defaultEffort: "low" }).effort).toBe("max")
+      expect(resolveAgentChoice({ ...input, lastRun: { model: model.id, effort: null }, defaultEffort: "low" }).effort).toBe("max")
+      expect(resolveAgentChoice({ ...input, pickedEffort: "medium" }).effort).toBe("max")
+      expect(resolveAgentChoice({ ...input, pickedEffort: "low" }).effort).toBe("low")
+      expect(resolveAgentChoice({ ...input, lastRun: { model: model.id, effort: "high" } }).effort).toBe("high")
+      expect(resolveAgentChoice({ ...input, defaultEffort: "low" }).effort).toBe("low")
+    }
+  })
 })
 
 describe("threadChoiceRun", () => {

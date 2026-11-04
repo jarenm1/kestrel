@@ -33,8 +33,10 @@ Coverage checked against provider documentation on November 4, 2026:
 | MiniMax | M3.1 Flash; M3 | Both show by default. The current Anthropic-compatible endpoint only advertises these two models; M3 has no documented effort scale. |
 | Kimi (Moonshot AI) | K3.1 Pro; K3.1 Pro Highspeed; K3; K2.7 Code | The two K3.1 variants show by default and have 1M compaction windows. K2.7 Code remains opt-in for existing users; unavailable to accounts registered from November 1 and expected to retire in late December 2026. |
 
-Z.ai and Kimi expose the documented Low / High / Max effort scale; Kimi does not advertise Medium. MiniMax
-M3.1 Flash retains Low / Medium / High / Extra high / Max. DeepSeek retains its supported effort mapping.
+Z.ai and Kimi expose the documented Low / High / Max effort scale; Kimi does not advertise Medium. Z.ai defaults
+to Max when no supported effort was chosen, including legacy Default selections and runs with no explicit level;
+explicit supported user, run and device choices still win. Slider options remain ordered Low / High / Max.
+MiniMax M3.1 Flash retains Low / Medium / High / Extra high / Max. DeepSeek retains its supported effort mapping.
 Legacy DeepSeek Flash IDs route to the current Flash model, so they are not separate picker entries.
 Kimi Code membership credentials remain unsupported; use a Moonshot Platform API key.
 

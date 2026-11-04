@@ -117,6 +117,8 @@ export interface ModelInfo {
   readonly name: string
   /** Thinking levels the model accepts, lowest first. Empty: the model takes no thinking level. */
   readonly efforts: readonly AgentEffort[]
+  /** Composer fallback when no supported effort was chosen; otherwise the lowest supported level. */
+  readonly defaultEffort?: AgentEffort
   /** In the chat model picker until the user edits the provider's list on the connections page. */
   readonly shownByDefault: boolean
   /** Provider-advertised context window for Claude Code's auto-compaction. */
@@ -163,10 +165,10 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "anthropic/claude-sonnet-5.5", provider: "openrouter", name: "Claude Sonnet 5.5", efforts: CLAUDE_ALL, shownByDefault: true },
   { id: "anthropic/claude-fable-5.1", provider: "openrouter", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: false },
   { id: "anthropic/claude-haiku-5.5", provider: "openrouter", name: "Claude Haiku 5.5", efforts: CLAUDE_ALL, shownByDefault: false },
-  { id: "glm-5.3[1m]", provider: "zai", name: "GLM-5.3", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
-  { id: "glm-5.3-flash[1m]", provider: "zai", name: "GLM-5.3 Flash", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
-  { id: "glm-5.3-flashx[1m]", provider: "zai", name: "GLM-5.3 FlashX", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
-  { id: "glm-5.2[1m]", provider: "zai", name: "GLM-5.2", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "glm-5.3[1m]", provider: "zai", name: "GLM-5.3", efforts: GATEWAY_LOW_HIGH_MAX, defaultEffort: "max", shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "glm-5.3-flash[1m]", provider: "zai", name: "GLM-5.3 Flash", efforts: GATEWAY_LOW_HIGH_MAX, defaultEffort: "max", shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "glm-5.3-flashx[1m]", provider: "zai", name: "GLM-5.3 FlashX", efforts: GATEWAY_LOW_HIGH_MAX, defaultEffort: "max", shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "glm-5.2[1m]", provider: "zai", name: "GLM-5.2", efforts: GATEWAY_LOW_HIGH_MAX, defaultEffort: "max", shownByDefault: false, compactWindow: 1_000_000 },
   // deepseek-flash is the live API alias for V4.1 Flash 1017, not the retired V4 Flash.
   { id: "deepseek-flash[1m]", provider: "deepseek", name: "DeepSeek V4.1 Flash 1017", efforts: CLAUDE_NO_XHIGH, shownByDefault: true, compactWindow: 786_432 },
   { id: "deepseek-v4-pro", provider: "deepseek", name: "DeepSeek V4 Pro 0813", efforts: CLAUDE_NO_XHIGH, shownByDefault: true },
@@ -330,6 +332,8 @@ export const resolveAgentChoice = (input: {
     onOffer(defaultModel) ??
     offered[0]
   const level = pickedEffort ?? (lastRun?.effort === null ? "default" : lastRun?.effort ?? defaultEffort)
-  const effort = level !== undefined && level !== "default" && model?.efforts.includes(level) ? level : model?.efforts[0]
+  const effort = level !== undefined && level !== "default" && model?.efforts.includes(level)
+    ? level
+    : model?.defaultEffort ?? model?.efforts[0]
   return { model, effort }
 }
