@@ -1,7 +1,8 @@
 //! Metadata and artifacts. Metadata is fetched through a single-flight lock, rewritten to point at this cache, and
 //! recorded as links. An artifact is served only through a link that is current: its source metadata is fresh and
 //! its latest fetch still lists the artifact with the same digest. Bytes are verified against that digest on every
-//! serve, so a corrupted or tampered blob is refetched instead of served.
+//! serve, so a corrupted or tampered blob is refetched instead of served. All disk access runs on the blocking pool
+//! through `on_store`.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -19,7 +20,7 @@ use tracing::{info, warn};
 
 use crate::digest::{Expected, Hasher};
 use crate::error::Error;
-use crate::store::{Cached, Link};
+use crate::store::{Cached, Link, Store};
 use crate::{AppState, Config};
 
 /// An artifact a metadata document lists, with the digest its bytes must have.
@@ -45,14 +46,22 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_fresh(state: &AppState, fetched_at: u64) -> bool {
-    now_secs().saturating_sub(fetched_at) < state.config.metadata_ttl.as_secs()
+/// Runs a store operation on the blocking pool, so disk I/O never stalls the async runtime.
+pub async fn on_store<T: Send + 'static>(
+    state: &Arc<AppState>,
+    op: impl FnOnce(&Store) -> io::Result<T> + Send + 'static,
+) -> Result<T, Error> {
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || op(&state.store))
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .map_err(Error::from)
 }
 
 /// Returns the metadata document under `kind/variant/key`, fetching and rewriting it when it is missing or older than
 /// the TTL. `upstream` is the origin URL; `accept` is sent upstream.
 pub async fn metadata(
-    state: &AppState,
+    state: &Arc<AppState>,
     kind: &str,
     variant: &str,
     key: &str,
@@ -61,11 +70,11 @@ pub async fn metadata(
     rewrite: Rewrite,
 ) -> Result<Cached, Error> {
     let cache_key = format!("{kind}/{variant}/{key}");
-    if let Some(cached) = fresh_metadata(state, &cache_key)? {
+    if let Some(cached) = fresh_metadata(state, &cache_key).await? {
         return Ok(cached);
     }
     let _flight = state.flights.lock(&format!("meta:{cache_key}")).await;
-    if let Some(cached) = fresh_metadata(state, &cache_key)? {
+    if let Some(cached) = fresh_metadata(state, &cache_key).await? {
         return Ok(cached);
     }
     let response = state
@@ -97,66 +106,68 @@ pub async fn metadata(
         "fetched {cache_key}: {} artifacts listed",
         rewritten.links.len()
     );
-    for (link_kind, link_key, artifact) in rewritten.links {
-        let link = Link {
-            upstream: artifact.upstream,
-            expected: artifact.expected,
-            source: cache_key.clone(),
-            fetched_at,
-        };
-        state.store.write_link(link_kind, &link_key, &link)?;
-    }
+    let links: Vec<(&'static str, String, Link)> = rewritten
+        .links
+        .into_iter()
+        .map(|(link_kind, link_key, artifact)| {
+            let link = Link {
+                upstream: artifact.upstream,
+                expected: artifact.expected,
+                source: cache_key.clone(),
+                fetched_at,
+            };
+            (link_kind, link_key, link)
+        })
+        .collect();
     let cached = Cached {
         fetched_at,
         content_type: rewritten.content_type,
         body: rewritten.body,
     };
-    state.store.write_meta(&cache_key, &cached)?;
-    Ok(cached)
+    let commit_key = cache_key.clone();
+    on_store(state, move |store| {
+        store.commit_metadata(&commit_key, &links, &cached)?;
+        Ok(cached)
+    })
+    .await
 }
 
-fn fresh_metadata(state: &AppState, cache_key: &str) -> Result<Option<Cached>, Error> {
-    Ok(state
-        .store
-        .read_meta(cache_key)?
-        .filter(|cached| is_fresh(state, cached.fetched_at)))
-}
-
-/// A link is current when its source metadata is fresh and that metadata's latest fetch wrote this same link.
-fn link_is_current(state: &AppState, link: &Link) -> io::Result<bool> {
-    Ok(state
-        .store
-        .read_meta_head(&link.source)?
-        .is_some_and(|head| head.fetched_at == link.fetched_at && is_fresh(state, head.fetched_at)))
+async fn fresh_metadata(state: &Arc<AppState>, cache_key: &str) -> Result<Option<Cached>, Error> {
+    let cache_key = cache_key.to_owned();
+    on_store(state, move |store| store.read_fresh_meta(&cache_key)).await
 }
 
 /// The current link for `kind/key`. When there is none, `refresh` (the fetch of the metadata that lists it) runs
 /// once; the link is then looked up again. A listing that dropped the artifact is a 404 even if its bytes are stored.
 pub async fn resolve_link(
-    state: &AppState,
-    kind: &str,
+    state: &Arc<AppState>,
+    kind: &'static str,
     key: &str,
     refresh: impl Future<Output = Result<Cached, Error>>,
 ) -> Result<Link, Error> {
-    if let Some(link) = state.store.read_link(kind, key)? {
-        if link_is_current(state, &link)? {
-            return Ok(link);
-        }
+    if let Some(link) = current_link(state, kind, key).await? {
+        return Ok(link);
     }
     refresh.await?;
-    match state.store.read_link(kind, key)? {
-        Some(link) if link_is_current(state, &link)? => Ok(link),
-        _ => Err(Error::NotFound(format!(
-            "{key} is not listed by its upstream any more"
-        ))),
-    }
+    current_link(state, kind, key)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("{key} is not listed by its upstream any more")))
+}
+
+async fn current_link(
+    state: &Arc<AppState>,
+    kind: &'static str,
+    key: &str,
+) -> Result<Option<Link>, Error> {
+    let key = key.to_owned();
+    on_store(state, move |store| store.current_link(kind, &key)).await
 }
 
 /// Opens the artifact a current link names, verified against the link's digest. Downloads it first when it is not
 /// stored or fails verification. Returns the file and its length.
 pub async fn artifact(
     state: &Arc<AppState>,
-    kind: &str,
+    kind: &'static str,
     key: &str,
     link: &Link,
 ) -> Result<(File, u64), Error> {
@@ -165,31 +176,30 @@ pub async fn artifact(
         .flights
         .lock(&format!("blob:{}", path.display()))
         .await;
-    let verifying = Arc::clone(state);
-    let (verify_path, expected) = (path.clone(), link.expected.clone());
-    let stored =
-        tokio::task::spawn_blocking(move || verify_stored(&verifying, &verify_path, &expected))
-            .await
-            .map_err(|e| Error::Internal(e.to_string()))??;
+    let (verify_path, expected) = (path, link.expected.clone());
+    let stored = on_store(state, move |store| {
+        verify_stored(store, &verify_path, &expected)
+    })
+    .await?;
     match stored {
         Some(found) => Ok(found),
-        None => download(state, kind, key, link, &path).await,
+        None => download(state, kind, key, link).await,
     }
 }
 
 /// Re-hashes a stored blob. A missing or corrupted blob yields `None`, and a corrupted one is removed.
 fn verify_stored(
-    state: &AppState,
+    store: &Store,
     path: &Path,
     expected: &Expected,
-) -> Result<Option<(File, u64)>, Error> {
+) -> io::Result<Option<(File, u64)>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            state.store.forget_blob(path);
+            store.forget_blob(path);
             return Ok(None);
         }
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e),
     };
     let len = file.metadata()?.len();
     let mut hasher = Hasher::new(expected.algo);
@@ -206,21 +216,21 @@ fn verify_stored(
             "stored artifact {} fails verification; removing it",
             path.display()
         );
-        state.store.forget_blob(path);
+        store.forget_blob(path);
         return Ok(None);
     }
     file.seek(SeekFrom::Start(0))?;
-    state.store.touch_blob(path);
+    store.touch_blob(path);
     Ok(Some((file, len)))
 }
 
-/// Streams the artifact into a temporary file, hashing as it goes. Only bytes that match the digest are committed.
+/// Streams the artifact into a temporary file, hashing as it goes. Only bytes that match the digest are committed,
+/// and the file served is the one committed, not a reopen of its path.
 async fn download(
-    state: &AppState,
-    kind: &str,
+    state: &Arc<AppState>,
+    kind: &'static str,
     key: &str,
     link: &Link,
-    path: &Path,
 ) -> Result<(File, u64), Error> {
     let response = state.client.get(&link.upstream).send().await?;
     let status = response.status();
@@ -230,21 +240,26 @@ async fn download(
             link.upstream
         )));
     }
-    let cap = state.store.cap();
+    let limit = state.max_artifact_bytes;
     if let Some(declared) = response.content_length() {
-        if declared > cap {
+        if declared > limit {
             return Err(Error::TooLarge(declared));
         }
     }
-    let tmp = state.store.new_tmp()?;
-    let mut out = tokio::fs::File::from_std(tmp.reopen()?);
+    let (tmp, out) = on_store(state, |store| {
+        let tmp = store.new_tmp()?;
+        let out = tmp.reopen()?;
+        Ok((tmp, out))
+    })
+    .await?;
+    let mut out = tokio::fs::File::from_std(out);
     let mut hasher = Hasher::new(link.expected.algo);
     let mut size = 0u64;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         size += chunk.len() as u64;
-        if size > cap {
+        if size > limit {
             return Err(Error::TooLarge(size));
         }
         hasher.update(&chunk);
@@ -259,9 +274,10 @@ async fn download(
             link.upstream
         )));
     }
-    state.store.commit_blob(tmp, &link.expected, size)?;
+    let expected = link.expected.clone();
+    let file = on_store(state, move |store| store.commit_blob(tmp, &expected, size)).await?;
     info!("stored {kind} {key}: {size} bytes, verified {algo}");
-    Ok((File::open(path)?, size))
+    Ok((file, size))
 }
 
 /// Streams a verified artifact to the client.

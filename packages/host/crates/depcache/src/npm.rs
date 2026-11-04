@@ -1,6 +1,6 @@
 //! npm: packuments (`/npm/<name>`) are fetched, cached for the metadata TTL, and rewritten so each verifiable tarball
 //! URL points at this cache. A tarball (`/npm/<name>/-/<file>.tgz`) is served only through a current packument link
-//! and verified against its `dist.integrity` (or `dist.shasum`).
+//! and verified against its `dist.integrity`.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use axum::response::Response;
 use serde_json::Value;
 
 use crate::cache::{self, Artifact, Rewritten};
-use crate::digest::{parse_shasum, parse_sri};
+use crate::digest::parse_sri;
 use crate::error::Error;
 use crate::store::Cached;
 use crate::{accept_header, is_safe_path, AppState, Config};
@@ -49,7 +49,11 @@ pub async fn serve(
     }
 }
 
-async fn fetch_packument(state: &AppState, name: &str, abbreviated: bool) -> Result<Cached, Error> {
+async fn fetch_packument(
+    state: &Arc<AppState>,
+    name: &str,
+    abbreviated: bool,
+) -> Result<Cached, Error> {
     let (variant, accept) = if abbreviated {
         ("abbreviated", ABBREVIATED_ACCEPT)
     } else {
@@ -98,16 +102,13 @@ pub fn rewrite_packument(
             if !is_safe_path(rest) {
                 continue;
             }
-            let expected = dist
+            let Some(expected) = dist
                 .get("integrity")
                 .and_then(Value::as_str)
                 .and_then(parse_sri)
-                .or_else(|| {
-                    dist.get("shasum")
-                        .and_then(Value::as_str)
-                        .and_then(parse_shasum)
-                });
-            let Some(expected) = expected else { continue };
+            else {
+                continue;
+            };
             let public = format!("{}/npm/{rest}", config.public_base_url);
             links.push((
                 LINK_KIND,
@@ -180,7 +181,7 @@ mod tests {
         );
         assert_eq!(
             tarball("1.1.0"),
-            "http://169.254.0.1:3141/npm/pkg/-/pkg-1.1.0.tgz"
+            "https://registry.npmjs.org/pkg/-/pkg-1.1.0.tgz"
         );
         assert_eq!(
             tarball("1.2.0"),
@@ -195,7 +196,7 @@ mod tests {
             .iter()
             .map(|(_, _, artifact)| artifact.expected.algo)
             .collect();
-        assert_eq!(algos, vec![Algo::Sha512, Algo::Sha1]);
+        assert_eq!(algos, vec![Algo::Sha512]);
     }
 
     fn base64_of(bytes: &[u8]) -> String {

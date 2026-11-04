@@ -15,9 +15,15 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::net::TcpListener;
 
+#[derive(Clone)]
+enum Reply {
+    Body(&'static str, Vec<u8>),
+    Redirect(String),
+}
+
 #[derive(Default)]
 struct Upstream {
-    routes: Mutex<HashMap<String, (&'static str, Vec<u8>)>>,
+    routes: Mutex<HashMap<String, Reply>>,
     hits: Mutex<HashMap<String, usize>>,
 }
 
@@ -26,7 +32,14 @@ impl Upstream {
         self.routes
             .lock()
             .expect("routes")
-            .insert(path.to_owned(), (content_type, body.into()));
+            .insert(path.to_owned(), Reply::Body(content_type, body.into()));
+    }
+
+    fn redirect(&self, path: &str, to: impl Into<String>) {
+        self.routes
+            .lock()
+            .expect("routes")
+            .insert(path.to_owned(), Reply::Redirect(to.into()));
     }
 
     fn hits(&self, path: &str) -> usize {
@@ -49,9 +62,10 @@ async fn serve_upstream(State(upstream): State<Arc<Upstream>>, uri: Uri) -> Resp
         .or_default() += 1;
     let found = upstream.routes.lock().expect("routes").get(&path).cloned();
     match found {
-        Some((content_type, body)) => {
+        Some(Reply::Body(content_type, body)) => {
             ([(header::CONTENT_TYPE, content_type)], body).into_response()
         }
+        Some(Reply::Redirect(to)) => (StatusCode::FOUND, [(header::LOCATION, to)]).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -72,30 +86,46 @@ async fn listen() -> (TcpListener, String) {
     (listener, base)
 }
 
-async fn start(metadata_ttl: Duration, max_bytes: u64) -> Harness {
+async fn spawn_upstream() -> (Arc<Upstream>, String) {
     let upstream = Arc::new(Upstream::default());
-    let (up_listener, up) = listen().await;
-    let up_router = Router::new()
+    let (listener, base) = listen().await;
+    let router = Router::new()
         .fallback(serve_upstream)
         .with_state(upstream.clone());
-    tokio::spawn(async move {
-        axum::serve(up_listener, up_router)
-            .await
-            .expect("upstream serve")
-    });
+    tokio::spawn(async move { axum::serve(listener, router).await.expect("upstream serve") });
+    (upstream, base)
+}
 
-    let (cache_listener, cache) = listen().await;
-    let config = Config {
-        public_base_url: cache.clone(),
+fn config_for(
+    public_base_url: &str,
+    up: &str,
+    metadata_ttl: Duration,
+    allow_http_upstreams: bool,
+) -> Config {
+    Config {
+        public_base_url: public_base_url.to_owned(),
         metadata_ttl,
         npm_registry: format!("{up}/npm"),
         pypi_index: format!("{up}/pypi"),
         pypi_files: format!("{up}/files"),
         crates_index: format!("{up}/index"),
         crates_static: format!("{up}/static/crates"),
-    };
+        allow_http_upstreams,
+    }
+}
+
+async fn start(metadata_ttl: Duration, cache_bytes: u64) -> Harness {
+    start_with(metadata_ttl, cache_bytes, cache_bytes).await
+}
+
+async fn start_with(metadata_ttl: Duration, cache_bytes: u64, max_artifact_bytes: u64) -> Harness {
+    let (upstream, up) = spawn_upstream().await;
+    let (cache_listener, cache) = listen().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let state = Arc::new(AppState::new(config, dir.path(), max_bytes).expect("state"));
+    let config = config_for(&cache, &up, metadata_ttl, true);
+    let state = Arc::new(
+        AppState::new(config, dir.path(), cache_bytes, max_artifact_bytes).expect("state"),
+    );
     tokio::spawn(async move {
         axum::serve(cache_listener, router(state))
             .await
@@ -435,5 +465,164 @@ async fn least_recently_used_artifacts_are_evicted_above_the_cap() {
         h.upstream.hits("/npm/pkg/-/pkg-1.0.0.tgz"),
         2,
         "an evicted artifact is downloaded again"
+    );
+}
+
+fn files_under(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .map(|entry| {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                files_under(&path)
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+#[tokio::test]
+async fn redirect_to_an_unlisted_origin_is_refused() {
+    let h = start(FOREVER, BIG).await;
+    let (elsewhere, elsewhere_base) = spawn_upstream().await;
+    let tgz = b"redirected tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.redirect(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        format!("{elsewhere_base}/steal/pkg-1.0.0.tgz"),
+    );
+    elsewhere.serve(
+        "/steal/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await.0, 502);
+    assert_eq!(
+        elsewhere.hits("/steal/pkg-1.0.0.tgz"),
+        0,
+        "the cache never contacts an origin that is not configured"
+    );
+}
+
+#[tokio::test]
+async fn redirect_within_the_upstream_origin_is_followed() {
+    let h = start(FOREVER, BIG).await;
+    let tgz = b"moved tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.redirect(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        format!("{}/moved/pkg-1.0.0.tgz", h.up),
+    );
+    h.upstream.serve(
+        "/moved/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await, (200, tgz));
+}
+
+#[tokio::test]
+async fn artifact_above_the_per_artifact_limit_is_refused_and_not_stored() {
+    let h = start_with(FOREVER, BIG, 10).await;
+    let tgz = b"twenty byte tarball!".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+    h.upstream.serve(
+        "/npm/pkg/-/pkg-1.0.0.tgz",
+        "application/octet-stream",
+        tgz.clone(),
+    );
+
+    assert_eq!(h.get("/npm/pkg/-/pkg-1.0.0.tgz").await.0, 507);
+    assert!(
+        !h.blob("sha512", &sha512_hex(&tgz)).exists(),
+        "an artifact over the limit is not stored"
+    );
+}
+
+#[tokio::test]
+async fn expired_metadata_and_links_are_swept() {
+    let h = start(Duration::from_secs(1), BIG).await;
+    let tar = |name: &str| format!("{}/npm/{name}/-/{name}-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/a",
+        "application/json",
+        packument("a", &[("1.0.0", tar("a"), sri512(b"a"))]),
+    );
+    h.upstream.serve(
+        "/npm/b",
+        "application/json",
+        packument("b", &[("1.0.0", tar("b"), sri512(b"b"))]),
+    );
+
+    assert_eq!(h.get("/npm/a").await.0, 200);
+    assert_eq!(files_under(&h.dir.path().join("meta")), 2);
+    assert_eq!(files_under(&h.dir.path().join("links")), 1);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.get("/npm/b").await.0, 200);
+    assert_eq!(
+        files_under(&h.dir.path().join("meta")),
+        2,
+        "a's head and body were swept once past the TTL"
+    );
+    assert_eq!(
+        files_under(&h.dir.path().join("links")),
+        1,
+        "a's link was swept once past the TTL"
+    );
+}
+
+#[test]
+fn plain_http_upstreams_need_the_explicit_opt_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let refused = AppState::new(
+        config_for("http://cache", "http://up", FOREVER, false),
+        dir.path(),
+        BIG,
+        BIG,
+    );
+    assert_eq!(
+        refused.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::InvalidInput)
+    );
+    assert!(AppState::new(
+        config_for("http://cache", "http://up", FOREVER, true),
+        dir.path(),
+        BIG,
+        BIG,
+    )
+    .is_ok());
+}
+
+#[test]
+fn per_artifact_limit_must_fit_in_the_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let refused = AppState::new(
+        config_for("http://cache", "https://up", FOREVER, false),
+        dir.path(),
+        10,
+        20,
+    );
+    assert_eq!(
+        refused.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::InvalidInput)
     );
 }

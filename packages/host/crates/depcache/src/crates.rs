@@ -68,7 +68,7 @@ pub async fn download(
     Ok(cache::file_response(file, len))
 }
 
-async fn fetch_index_file(state: &AppState, path: &str) -> Result<Cached, Error> {
+async fn fetch_index_file(state: &Arc<AppState>, path: &str) -> Result<Cached, Error> {
     let upstream = format!("{}/{path}", state.config.crates_index);
     cache::metadata(
         state,

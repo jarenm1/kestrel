@@ -1,9 +1,9 @@
-//! Digests the cache verifies downloads against: npm `dist.integrity` (SRI) or `dist.shasum`, PyPI `#sha256=`
-//! fragments, and crates.io `cksum`. A download is stored only when its bytes hash to the digest.
+//! Digests the cache verifies downloads against: npm `dist.integrity` (SRI), PyPI `#sha256=` fragments, and crates.io
+//! `cksum`. A download is stored only when its bytes hash to the digest. SHA-1 is not accepted anywhere: npm's
+//! `dist.shasum` is not verified, so a packument that lists only that is not rewritten.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
 use sha2::{Digest as _, Sha256, Sha512};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -11,7 +11,6 @@ use sha2::{Digest as _, Sha256, Sha512};
 pub enum Algo {
     Sha512,
     Sha256,
-    Sha1,
 }
 
 impl Algo {
@@ -19,7 +18,6 @@ impl Algo {
         match self {
             Self::Sha512 => "sha512",
             Self::Sha256 => "sha256",
-            Self::Sha1 => "sha1",
         }
     }
 
@@ -27,7 +25,6 @@ impl Algo {
         match name {
             "sha512" => Some(Self::Sha512),
             "sha256" => Some(Self::Sha256),
-            "sha1" => Some(Self::Sha1),
             _ => None,
         }
     }
@@ -36,16 +33,14 @@ impl Algo {
         match self {
             Self::Sha512 => 64,
             Self::Sha256 => 32,
-            Self::Sha1 => 20,
         }
     }
 
     /// Preference when an SRI string lists several algorithms.
     fn strength(self) -> u8 {
         match self {
-            Self::Sha512 => 3,
-            Self::Sha256 => 2,
-            Self::Sha1 => 1,
+            Self::Sha512 => 2,
+            Self::Sha256 => 1,
         }
     }
 }
@@ -78,11 +73,6 @@ pub fn parse_sri(integrity: &str) -> Option<Expected> {
         .max_by_key(|expected| expected.algo.strength())
 }
 
-/// npm `dist.shasum`: SHA-1 hex. Used only when a packument has no `integrity`.
-pub fn parse_shasum(shasum: &str) -> Option<Expected> {
-    parse_hex(Algo::Sha1, shasum)
-}
-
 /// A bare hex digest of the given algorithm (PyPI `sha256=` fragments, crates.io `cksum`).
 pub fn parse_hex(algo: Algo, hex: &str) -> Option<Expected> {
     (hex.len() == algo.digest_len() * 2 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| {
@@ -97,7 +87,6 @@ pub fn parse_hex(algo: Algo, hex: &str) -> Option<Expected> {
 pub enum Hasher {
     Sha512(Sha512),
     Sha256(Sha256),
-    Sha1(Sha1),
 }
 
 impl Hasher {
@@ -105,7 +94,6 @@ impl Hasher {
         match algo {
             Algo::Sha512 => Self::Sha512(Sha512::new()),
             Algo::Sha256 => Self::Sha256(Sha256::new()),
-            Algo::Sha1 => Self::Sha1(Sha1::new()),
         }
     }
 
@@ -113,7 +101,6 @@ impl Hasher {
         match self {
             Self::Sha512(h) => h.update(data),
             Self::Sha256(h) => h.update(data),
-            Self::Sha1(h) => h.update(data),
         }
     }
 
@@ -121,7 +108,6 @@ impl Hasher {
         match self {
             Self::Sha512(h) => hex::encode(h.finalize()),
             Self::Sha256(h) => hex::encode(h.finalize()),
-            Self::Sha1(h) => hex::encode(h.finalize()),
         }
     }
 }
@@ -133,7 +119,7 @@ mod tests {
     fn sri(algo_name: &str, bytes: &[u8]) -> String {
         let encoded = match algo_name {
             "sha512" => base64::engine::general_purpose::STANDARD.encode(Sha512::digest(bytes)),
-            "sha1" => base64::engine::general_purpose::STANDARD.encode(Sha1::digest(bytes)),
+            "sha1" => base64::engine::general_purpose::STANDARD.encode([0u8; 20]),
             _ => unreachable!("test helper only knows sha512 and sha1"),
         };
         format!("{algo_name}-{encoded}")
@@ -149,6 +135,11 @@ mod tests {
     }
 
     #[test]
+    fn sri_without_sha256_or_sha512_is_not_verifiable() {
+        assert_eq!(parse_sri(&sri("sha1", b"hello")), None);
+    }
+
+    #[test]
     fn sri_rejects_unknown_algorithms_wrong_lengths_and_garbage() {
         let short = format!(
             "sha512-{}",
@@ -160,13 +151,13 @@ mod tests {
     }
 
     #[test]
-    fn shasum_and_hex_digests_are_length_checked_and_lowercased() {
-        let upper = "A9993E364706816ABA3E25717850C26C9CD0D89D";
+    fn hex_digests_are_length_checked_and_lowercased() {
+        let upper = "2CF24DBA5FB0A30E26E83B2AC5B9E29E1B161E5C1FA7425E73043362938B9824";
         assert_eq!(
-            parse_shasum(upper).map(|e| e.hex),
+            parse_hex(Algo::Sha256, upper).map(|e| e.hex),
             Some(upper.to_ascii_lowercase())
         );
-        assert_eq!(parse_shasum(&upper[..39]), None);
+        assert_eq!(parse_hex(Algo::Sha256, &upper[..63]), None);
         assert_eq!(parse_hex(Algo::Sha256, &"z".repeat(64)), None);
     }
 

@@ -21,8 +21,11 @@ struct Args {
     /// Origin VMs use to reach this cache; written into rewritten metadata.
     #[arg(long, default_value = "http://169.254.0.1:3141")]
     public_base_url: String,
-    /// Artifact storage cap; least recently used artifacts are evicted above it.
+    /// Total size of stored artifacts; least recently used artifacts are evicted above it.
     #[arg(long, default_value_t = 20 * GIB)]
+    cache_bytes: u64,
+    /// Largest single artifact downloaded; must not exceed `--cache-bytes`.
+    #[arg(long, default_value_t = 4 * GIB)]
     max_artifact_bytes: u64,
     /// How long fetched metadata (packuments, simple pages, index files) is served before refetching.
     #[arg(long, default_value_t = 300)]
@@ -37,6 +40,9 @@ struct Args {
     crates_index: String,
     #[arg(long, default_value = "https://static.crates.io/crates")]
     crates_static: String,
+    /// Permit plain `http` upstreams (test setups only; production upstreams are https).
+    #[arg(long)]
+    allow_http_upstreams: bool,
 }
 
 fn origin(url: String) -> String {
@@ -59,10 +65,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pypi_files: origin(args.pypi_files),
         crates_index: origin(args.crates_index),
         crates_static: origin(args.crates_static),
+        allow_http_upstreams: args.allow_http_upstreams,
     };
     let state = Arc::new(AppState::new(
         config,
         &args.storage_dir,
+        args.cache_bytes,
         args.max_artifact_bytes,
     )?);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;

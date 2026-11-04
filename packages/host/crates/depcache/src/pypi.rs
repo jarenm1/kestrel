@@ -45,7 +45,7 @@ pub async fn simple(
     Ok(cache::cached_response(cached))
 }
 
-async fn fetch_simple(state: &AppState, json: bool, project: &str) -> Result<Cached, Error> {
+async fn fetch_simple(state: &Arc<AppState>, json: bool, project: &str) -> Result<Cached, Error> {
     let (variant, accept) = if json {
         ("json", JSON_ACCEPT)
     } else {
@@ -71,11 +71,14 @@ pub async fn file(
     if !is_safe_path(&rest) {
         return Err(Error::BadRequest(format!("not a PyPI file path: {rest}")));
     }
-    let stored = state.store.read_link(LINK_KIND, &rest)?.ok_or_else(|| {
-        Error::NotFound(format!(
-            "{rest} is not listed by any project page the cache has fetched"
-        ))
-    })?;
+    let lookup = rest.clone();
+    let stored = cache::on_store(&state, move |store| store.read_link(LINK_KIND, &lookup))
+        .await?
+        .ok_or_else(|| {
+            Error::NotFound(format!(
+                "{rest} is not listed by any project page the cache has fetched"
+            ))
+        })?;
     let (json, project) = parse_source(&stored.source)
         .ok_or_else(|| Error::Internal(format!("unrecognised link source {}", stored.source)))?;
     let project = project.to_owned();
