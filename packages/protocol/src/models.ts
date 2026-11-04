@@ -64,10 +64,14 @@ export const AgentModel = Schema.Literal(
   "anthropic/claude-haiku-5.5",
   "glm-5.3[1m]",
   "glm-5.3-flash[1m]",
+  "glm-5.3-flashx[1m]",
+  "glm-5.2[1m]",
   "deepseek-flash[1m]",
   "deepseek-v4-pro",
   "MiniMax-M3.1-Flash[1m]",
+  "MiniMax-M3[1m]",
   "kimi-k3.1-pro",
+  "kimi-k3.1-pro-highspeed",
   "kimi-k3[1m]",
   "kimi-k2.7-code",
   "opencode/big-pickle",
@@ -121,6 +125,7 @@ export interface ModelInfo {
 
 const CLAUDE_ALL: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 const CLAUDE_NO_XHIGH: readonly AgentEffort[] = ["low", "medium", "high", "max"]
+const GATEWAY_LOW_HIGH_MAX: readonly AgentEffort[] = ["low", "high", "max"]
 const GPT_FROM_LOW: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 const GPT_FROM_NONE: readonly AgentEffort[] = ["none", "low", "medium", "high", "xhigh", "max"]
 const OC_LOW_HIGH_MAX: readonly AgentEffort[] = ["low", "high", "max"]
@@ -158,13 +163,18 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "anthropic/claude-sonnet-5.5", provider: "openrouter", name: "Claude Sonnet 5.5", efforts: CLAUDE_ALL, shownByDefault: true },
   { id: "anthropic/claude-fable-5.1", provider: "openrouter", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: false },
   { id: "anthropic/claude-haiku-5.5", provider: "openrouter", name: "Claude Haiku 5.5", efforts: CLAUDE_ALL, shownByDefault: false },
-  { id: "glm-5.3[1m]", provider: "zai", name: "GLM-5.3", efforts: [], shownByDefault: true, compactWindow: 1_000_000 },
-  { id: "glm-5.3-flash[1m]", provider: "zai", name: "GLM-5.3 Flash", efforts: [], shownByDefault: false, compactWindow: 1_000_000 },
-  { id: "deepseek-flash[1m]", provider: "deepseek", name: "DeepSeek Flash", efforts: CLAUDE_NO_XHIGH, shownByDefault: true, compactWindow: 786_432 },
-  { id: "deepseek-v4-pro", provider: "deepseek", name: "DeepSeek V4 Pro", efforts: CLAUDE_NO_XHIGH, shownByDefault: false },
+  { id: "glm-5.3[1m]", provider: "zai", name: "GLM-5.3", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "glm-5.3-flash[1m]", provider: "zai", name: "GLM-5.3 Flash", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "glm-5.3-flashx[1m]", provider: "zai", name: "GLM-5.3 FlashX", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "glm-5.2[1m]", provider: "zai", name: "GLM-5.2", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
+  // deepseek-flash is the live API alias for V4.1 Flash 1017, not the retired V4 Flash.
+  { id: "deepseek-flash[1m]", provider: "deepseek", name: "DeepSeek V4.1 Flash 1017", efforts: CLAUDE_NO_XHIGH, shownByDefault: true, compactWindow: 786_432 },
+  { id: "deepseek-v4-pro", provider: "deepseek", name: "DeepSeek V4 Pro 0813", efforts: CLAUDE_NO_XHIGH, shownByDefault: true },
   { id: "MiniMax-M3.1-Flash[1m]", provider: "minimax", name: "MiniMax M3.1 Flash", efforts: CLAUDE_ALL, shownByDefault: true, compactWindow: 524_288 },
-  { id: "kimi-k3.1-pro", provider: "moonshot", name: "Kimi K3.1 Pro", efforts: CLAUDE_NO_XHIGH, shownByDefault: true },
-  { id: "kimi-k3[1m]", provider: "moonshot", name: "Kimi K3", efforts: CLAUDE_NO_XHIGH, shownByDefault: false, compactWindow: 1_000_000 },
+  { id: "MiniMax-M3[1m]", provider: "minimax", name: "MiniMax M3", efforts: [], shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "kimi-k3.1-pro", provider: "moonshot", name: "Kimi K3.1 Pro", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "kimi-k3.1-pro-highspeed", provider: "moonshot", name: "Kimi K3.1 Pro Highspeed", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "kimi-k3[1m]", provider: "moonshot", name: "Kimi K3", efforts: GATEWAY_LOW_HIGH_MAX, shownByDefault: false, compactWindow: 1_000_000 },
   { id: "kimi-k2.7-code", provider: "moonshot", name: "Kimi K2.7 Code", efforts: [], shownByDefault: false },
   // OpenCode's catalog id is the value its ACP `model` config option takes.
   { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },

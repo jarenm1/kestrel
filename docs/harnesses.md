@@ -17,6 +17,35 @@ picker. OMP, Pi and Hermes are retired; see [the scope decision and historical-s
 - Session records retain their actual model provider, even when multiple providers run Claude Code. Switching providers
   cannot resume another provider's session; returning to a provider can resume its own usable session.
 
+## Third-party model coverage
+
+The shared catalog in `packages/protocol/src/models.ts` drives desktop and mobile model lists. Settings ›
+Connections exposes the full curated list; chat initially shows current flagship/fast choices. A saved custom
+list remains unchanged when the catalog grows; select additional models there or use **Reset to defaults**.
+The `[1m]` suffix is a Claude Code context hint, not a separate upstream model version.
+
+Coverage checked against provider documentation on November 4, 2026:
+
+| Provider | Curated models | Notes |
+|---|---|---|
+| DeepSeek | V4.1 Flash 1017; V4 Pro 0813 | `deepseek-flash` already serves V4.1 Flash 1017. Keep the live API alias rather than inventing a dated API ID. Both models show by default. |
+| Z.ai | GLM-5.3; GLM-5.3 Flash; GLM-5.3 FlashX; GLM-5.2 | The first two show by default. FlashX is a standard model API option, not currently included in the GLM Coding Plan. |
+| MiniMax | M3.1 Flash; M3 | Both show by default. The current Anthropic-compatible endpoint only advertises these two models; M3 has no documented effort scale. |
+| Kimi (Moonshot AI) | K3.1 Pro; K3.1 Pro Highspeed; K3; K2.7 Code | The two K3.1 variants show by default and have 1M compaction windows. K2.7 Code remains opt-in for existing users; unavailable to accounts registered from November 1 and expected to retire in late December 2026. |
+
+Z.ai and Kimi expose the documented Low / High / Max effort scale; Kimi does not advertise Medium. MiniMax
+M3.1 Flash retains Low / Medium / High / Extra high / Max. DeepSeek retains its supported effort mapping.
+Legacy DeepSeek Flash IDs route to the current Flash model, so they are not separate picker entries.
+Kimi Code membership credentials remain unsupported; use a Moonshot Platform API key.
+
+Sources: [DeepSeek models and alias mapping](https://api-docs.deepseek.com/quick_start/pricing),
+[Z.ai Flash/FlashX](https://docs.z.ai/guides/vlm/glm-5.3-flash),
+[GLM-5.2](https://docs.z.ai/guides/llm/glm-5.2),
+[Z.ai Claude Code effort mapping](https://docs.z.ai/devpack/latest-model),
+[MiniMax Anthropic compatibility](https://platform.minimax.io/docs/api-reference/text-anthropic-api),
+[Kimi model availability](https://platform.kimi.ai/docs/models) and
+[Kimi Messages API](https://platform.kimi.ai/docs/api/messages).
+
 ## On the box
 
 Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit PATH).
