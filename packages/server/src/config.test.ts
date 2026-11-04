@@ -14,6 +14,7 @@ const BOX_VARS = [
   "CLOUDAGENTS_PORT",
   "CLOUDAGENTS_HOST",
   "CLOUDAGENTS_SANDBOX_PORT",
+  "CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -53,6 +54,11 @@ describe("sandbox listener settings", () => {
       expect(() => configWith({ CLOUDAGENTS_PORT: "9000", CLOUDAGENTS_SANDBOX_PORT: port })).toThrow()
     }
   })
+})
+
+test("legacy noreply selection accepts only owner logins, case-insensitively", () => {
+  expect(configWith({ CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS: " Alice, BOB " }).gitLegacyNoreplyUsers).toEqual(["alice", "bob"])
+  expect(() => configWith({ CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS: "alice@example.com" })).toThrow("comma-separated GitHub logins")
 })
 
 describe("default Claude command", () => {

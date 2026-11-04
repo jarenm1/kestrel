@@ -30,6 +30,26 @@ diagnostics from recursively becoming conversation context.
 
 Agents need a model key: add one in Settings › Connections. The sandbox only ever sees a per-run token, and the box never reads model keys from its own environment. Users can instead run agents on their own Claude or ChatGPT subscription: sign in under Settings › Connections (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider.
 
+### Git commit identity
+
+Task processes commit as their thread owner using GitHub's ID-based noreply address by default. Some accounts
+created before July 18, 2017 still have a username-only noreply address. GitHub's public profile API does not
+expose that choice: check the address shown under **GitHub Settings → Emails**, rather than guessing from the
+account's age or ID. See [GitHub's email address reference](https://docs.github.com/en/account-and-profile/reference/email-addresses-reference).
+
+If that address is `LOGIN@users.noreply.github.com`, have the box operator include that owner's login in the
+box process's `CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS` environment variable before starting it:
+
+```sh
+export CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS=legacy-owner,another-owner
+```
+
+This is a comma-separated, case-insensitive list of **thread owners**, not repository owners. Only those owners
+use the legacy address; everyone else keeps `ID+LOGIN@users.noreply.github.com`. No private email is needed.
+If an owner switches to GitHub's ID-based format, remove their login from the list. Apply changes by restarting
+the box when idle (a restart interrupts running agents); they affect newly launched processes, not existing
+processes or commits. On a managed box, ask its operator to make this selection.
+
 ### Harness commands
 
 In an existing thread, type `/` at the start of the composer to discover that thread's harness commands. Claude Code supplies slash commands through its stream-JSON initialization API; Codex lists `/review [instructions]`, `/compact` and `/init`, which the box runs over app-server (`review/start`, `thread/compact/start`, and Codex's own AGENTS.md prompt), then the enabled skills from app-server's `skills/list` as `$skill-name`; `$` lists the skills alone. Codex's other slash commands drive its terminal UI, or have their own place in Kestrel (model picker, Diff tab, new thread). `/review` without instructions reviews the uncommitted changes of every checkout, since the workspace itself is not a repository. Use ↑/↓ to navigate, Enter or Tab to insert without sending, Escape to dismiss; existing arguments are preserved. `/usage` is Kestrel's own: it lists first, also on a new thread, and a message starting with it opens the usage panel instead of reaching the agent, overriding any `/usage` of the harness; text after it stays in the draft. The panel shows the subscription limits each signed-in CLI reports for the user (Claude Code's `get_usage` control request, Codex's `account/rateLimits/read`); the box reads them through the CLI and never handles its tokens. When Codex reports banked resets, the provider shows "N banked resets"; clicking it lists each with its expiry, and "Use reset" spends that one through app-server's `account/rateLimitResetCredit/consume` (`POST /api/cli-auth/codex-cli/banked-resets/use`). Claude Code's CLI exposes no reset interface, so Claude shows none.

@@ -13,13 +13,16 @@ test("task commits use their owner, not a stale home identity or another task's 
   const root = mkdtempSync(join(tmpdir(), "kestrel-attribution-"))
   const git = Bun.which("git") as string
   const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
-  const profiles = { alice: { login: "alice", id: 156641090 }, bob: { login: "bob", id: 118569826 } }
+  const profiles = { alice: { login: "alice", id: 156641090 }, bob: { login: "bob", id: 12345 } }
   const api = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (request) => {
     const login = new URL(request.url).pathname.slice("/users/".length)
     return Response.json(profiles[login as keyof typeof profiles])
   } })
   const github = await Effect.runPromise(GitHub.pipe(Effect.provide(
-    GitHubLive.pipe(Layer.provide(Layer.succeed(Config, { githubApiUrl: api.url.origin } as ServerConfig))),
+    GitHubLive.pipe(Layer.provide(Layer.succeed(Config, {
+      githubApiUrl: api.url.origin,
+      gitLegacyNoreplyUsers: ["BOB"],
+    } as unknown as ServerConfig))),
   )))
   try {
     for (const owner of ["alice", "bob"] as const) {
@@ -44,8 +47,12 @@ test("task commits use their owner, not a stale home identity or another task's 
       const result = spawnSync(launch.file, [...launch.args], { cwd: launch.cwd, env: { ...launch.env }, encoding: "utf8" })
       expect(result.status).toBe(0)
       expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-        `${owner} <${profiles[owner].id}+${owner}@users.noreply.github.com>|${owner} <${profiles[owner].id}+${owner}@users.noreply.github.com>`,
-        `Original Author <original@example.com>|${owner} <${profiles[owner].id}+${owner}@users.noreply.github.com>`,
+        owner === "alice"
+          ? "alice <156641090+alice@users.noreply.github.com>|alice <156641090+alice@users.noreply.github.com>"
+          : "bob <bob@users.noreply.github.com>|bob <bob@users.noreply.github.com>",
+        owner === "alice"
+          ? "Original Author <original@example.com>|alice <156641090+alice@users.noreply.github.com>"
+          : "Original Author <original@example.com>|bob <bob@users.noreply.github.com>",
       ])
     }
   } finally {

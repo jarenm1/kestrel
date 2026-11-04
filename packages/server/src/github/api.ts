@@ -467,6 +467,7 @@ export const GitHubLive = Layer.effect(
   GitHub,
   Effect.map(Config, (config) => {
     const apiBase = config.githubApiUrl
+    const legacyNoreplyUsers = new Set(config.gitLegacyNoreplyUsers?.map((login) => login.toLowerCase()))
 
     /** One HTTP exchange with GitHub; the status is the caller's to judge. */
     const send = (token: string | undefined, method: string, path: string, options: { readonly body?: unknown; readonly accept?: string } = {}) =>
@@ -540,7 +541,10 @@ export const GitHubLive = Layer.effect(
       if (profile.login.toLowerCase() !== login.toLowerCase()) {
         return yield* Effect.fail(new GitHubError({ message: "GitHub commit owner does not match the thread owner" }))
       }
-      const identity = { name: profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` }
+      const email = legacyNoreplyUsers.has(profile.login.toLowerCase())
+        ? `${profile.login}@users.noreply.github.com`
+        : `${profile.id}+${profile.login}@users.noreply.github.com`
+      const identity = { name: profile.login, email }
       commitOwners.set(login.toLowerCase(), identity)
       return identity
     })

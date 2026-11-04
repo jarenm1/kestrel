@@ -109,6 +109,8 @@ export interface ServerConfig {
   readonly webrtc: WebRtcSettings
   /** GitHub REST API base URL (no trailing slash). Defaults to api.github.com; set for GitHub Enterprise or tests. */
   readonly githubApiUrl: string
+  /** Owners who explicitly selected GitHub's legacy username-only noreply address. Defaults to none. */
+  readonly gitLegacyNoreplyUsers?: readonly string[]
 }
 
 export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConfig>() {}
@@ -163,6 +165,11 @@ export const loadConfig = (): ServerConfig => {
     : null
   const controlUrl = loadControlUrl()
   const direct = loadDirect(controlUrl)
+  const gitLegacyNoreplyUsers = (process.env.CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS ?? "")
+    .split(",").map((login) => login.trim().toLowerCase()).filter((login) => login !== "")
+  if (gitLegacyNoreplyUsers.some((login) => !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/.test(login))) {
+    throw new Error("CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS must be comma-separated GitHub logins")
+  }
   return {
     port,
     host,
@@ -190,6 +197,7 @@ export const loadConfig = (): ServerConfig => {
     taskDiskMax: diskMaxEnv(),
     webrtc: webRtcEnv(direct?.managed === true),
     githubApiUrl: loadGitHubApiUrl(),
+    gitLegacyNoreplyUsers,
   }
 }
 

@@ -80,11 +80,15 @@ A thread has a workspace, messages and runs. Repositories are checked out on dem
 
 Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop terminal and launched apps) receives
 `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` set to the thread owner's GitHub login and both email variables set to
-`<id>+<login>@users.noreply.github.com`. The host resolves the numeric ID and canonical login through GitHub's
-`GET /users/:login`, validates the response against the thread owner and reuses successful lookups for the box
-process's lifetime. The owner's connected token authenticates that lookup when available; public profiles can
-also be resolved without one. A failed lookup blocks the launch rather than guessing an address. Dev-login
-sessions instead use `<login>@kestrel.invalid`, never an unrelated real GitHub identity.
+`<id>+<login>@users.noreply.github.com` by default. Older accounts can still use GitHub's legacy
+`<login>@users.noreply.github.com`; their owner must select that format through the box's
+`CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS` setting (see [commit identity](box.md#git-commit-identity)).
+The public profile API does not expose this privacy setting, so Kestrel does not infer it from account age.
+The host resolves the numeric ID and canonical login through GitHub's `GET /users/:login`, validates the response
+against the thread owner and reuses successful lookups for the box process's lifetime. The owner's connected
+token authenticates that lookup when available; public profiles can also be resolved without one. A failed
+lookup blocks the launch rather than guessing an account. Dev-login sessions instead use
+`<login>@kestrel.invalid`, never an unrelated real GitHub identity.
 This gives fresh task homes a usable identity and takes precedence over stale identities in persisted home or
 checkout Git config. GitHub credentials authenticate a push; they do not set the author of the commits being
 pushed. Explicit Git authorship (for example `git commit --author` or a cherry-pick) still preserves the original
