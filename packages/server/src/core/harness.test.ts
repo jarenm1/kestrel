@@ -61,7 +61,11 @@ const harnessLayer = (
     configLayer,
     StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))),
     EventHubLive,
-    Layer.succeed(CredentialStore, { get: () => Effect.succeed({ user: "test", dev: true }) } as never),
+    // A run fails before it spawns without a model credential (a vendor key or its CLI login), so the fixture is
+    // signed in: these tests exercise spawn, resume and items, not the Connections setup path.
+    Layer.succeed(CredentialStore, {
+      get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),
+    } as never),
     Layer.succeed(GitHub, {} as never),
     Layer.succeed(CredentialBroker, {
       issue: () => Effect.succeed({ token: "test-only", env: {} }),

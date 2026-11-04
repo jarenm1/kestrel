@@ -129,8 +129,6 @@ interface ActiveRun {
   readonly taskId: string
   /** The model provider that minted this run's session, so a Claude stream is attributed to the right one. */
   readonly provider: ModelProvider
-  readonly stdoutLines: string[]
-  readonly stderrLines: string[]
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
@@ -440,13 +438,9 @@ export const AgentHarnessLive = Layer.effect(
           const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
           // Diagnostics stay in output.log and agent.output, never in portable conversation history:
           // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
-          const stdout = entry.stdoutLines.join("\n").trim()
-          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
           const finalText = entry.transcript.finalText()
           const text =
-            finalText ??
-            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
-              (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
+            finalText ?? failure ?? (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -535,7 +529,6 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
-        entry.stderrLines.push(line)
         entry.diagnostic = agentDiagnostic(line) ?? entry.diagnostic
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
@@ -577,7 +570,6 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
-      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
@@ -608,8 +600,6 @@ export const AgentHarnessLive = Layer.effect(
               log,
               taskId: task.id,
               provider: session.provider,
-              stdoutLines: [],
-              stderrLines: [],
               items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
