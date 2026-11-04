@@ -224,6 +224,9 @@
             root = ./.;
           };
         };
+        checks = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          nest = import ./packages/host/nix/test.nix { inherit self pkgs system; };
+        };
 
         devShells.default = pkgs.mkShell {
           packages = systemDeps;

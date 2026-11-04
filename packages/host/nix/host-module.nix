@@ -244,6 +244,7 @@ in
     ] ++ lib.optional (cfg.gpu.vendorDevices != [ ]) "vfio-pci.ids=${gpuVendorDevice}";
 
     boot.kernelModules = [ "kvm" "vfio-pci" "ublk_drv" "vhost_vsock" "vhost_net" "tun" ];
+    boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
     boot.blacklistedKernelModules = [ "nouveau" ];
 
     environment.systemPackages = [
