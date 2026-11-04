@@ -4,6 +4,8 @@ let
   volumeMount = "/var/lib/kestrel";
   boxEnvFile = "${volumeMount}/box.env";
   guestSocketDir = "/run/kestrel-guest";
+  kestrelUid = 990;
+  kestrelRuntimeDir = "/run/user/${toString kestrelUid}";
 
   # The image's store entries (the overlay lowerdir) and its Nix database rows, see guest.nix.
   imageStore = "/nix/.ro-store/store";
@@ -134,11 +136,14 @@ in
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
   users.groups.kestrel = { };
+  # Lingering keeps the user manager running from boot: the box drives its per-task slices through `systemctl --user`.
   users.users.kestrel = {
     isSystemUser = true;
+    uid = kestrelUid;
     group = "kestrel";
     home = volumeMount;
     createHome = false;
+    linger = true;
   };
 
   # Root, started at boot. Owns the host link and the box socket; on `configure` it mounts the volume, sets up
@@ -184,10 +189,12 @@ in
   systemd.services.kestrel-box = {
     description = "Kestrel box";
     requires = [ "kestrel-volume.service" ];
-    after = [ "kestrel-volume.service" ];
+    after = [ "kestrel-volume.service" "user@${toString kestrelUid}.service" ];
     unitConfig.ConditionPathExists = boxEnvFile;
     path = systemDeps;
     environment = {
+      XDG_RUNTIME_DIR = kestrelRuntimeDir;
+      DBUS_SESSION_BUS_ADDRESS = "unix:path=${kestrelRuntimeDir}/bus";
       CLOUDAGENTS_SANDBOX_PATH = "${sandboxEnv}/bin";
       CLOUDAGENTS_SANDBOX_SSL = sandboxSsl;
       CLOUDAGENTS_TOOLKITS_FLAKE = guest.self;
