@@ -5,7 +5,7 @@
  * Pure Effect Schema: no Node/DOM-specific imports here.
  */
 import { Schema } from "effect"
-import { AgentEffort, AgentModel, ModelProvider, modelInfo } from "./models"
+import { AgentEffort, AgentModel, HarnessId, ModelProvider, agentChoiceProblem, modelInfo, providerHarness } from "./models"
 import { BranchName, RepoRef } from "./refs"
 
 // ---------------------------------------------------------------------------
@@ -174,6 +174,8 @@ export const Run = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Number),
   /** The provider's CLI that ran it; absent on runs recorded before model switching stored it. */
   provider: Schema.optional(ModelProvider),
+  /** The thread-facing harness of that provider; absent on older runs (derive it from `provider`). */
+  harness: Schema.optional(HarnessId),
   /** Explicit model selected for this run; absent for runs using the box default. */
   model: Schema.optional(AgentModel),
   /** Thinking level selected for this run; null is the model default, absent on older runs. */
@@ -434,6 +436,11 @@ export const SendMessageBody = Schema.Struct({
   text: Schema.String,
   /** Omitted = the box's default harness (Claude Code) with its default model. The model's provider picks the CLI. */
   model: Schema.optional(AgentModel),
+  /**
+   * The connection (model provider) the thread selected for this model. It scopes a model id that exists on more
+   * than one harness; omitted clients fall back to `ModelInfo.provider`.
+   */
+  provider: Schema.optional(ModelProvider),
   /** Omitted = the model's default level. Must be one of the model's `ModelInfo.efforts`. */
   effort: Schema.optional(AgentEffort),
   /**
@@ -442,13 +449,12 @@ export const SendMessageBody = Schema.Struct({
    */
   attachments: Schema.optional(Schema.Array(Schema.String)),
 }).pipe(
-  Schema.filter(
-    (body) =>
-      body.model === undefined ||
-      body.effort === undefined ||
-      modelInfo(body.model).efforts.includes(body.effort) ||
-      `${modelInfo(body.model).name} does not support the "${body.effort}" thinking level`,
-  ),
+  Schema.filter((body) => {
+    if (body.model !== undefined && body.effort !== undefined && !modelInfo(body.model).efforts.includes(body.effort)) {
+      return `${modelInfo(body.model).name} does not support the "${body.effort}" thinking level`
+    }
+    return agentChoiceProblem(body) ?? true
+  }),
 )
 export type SendMessageBody = typeof SendMessageBody.Type
 
@@ -545,7 +551,7 @@ export type HarnessCommand = typeof HarnessCommand.Type
 
 /** How `command` is typed in the composer: its own prefix, or the provider's default from boxes that send none. */
 export const harnessCommandPrefix = (command: HarnessCommand, provider: ModelProvider | undefined): "/" | "$" =>
-  command.prefix ?? (provider === "openai" ? "$" : "/")
+  command.prefix ?? (provider === undefined || providerHarness(provider) === "claude" ? "/" : "$")
 
 /**
  * The commands of the harness the thread's next message will run on. `provider` is authoritative: while a run is

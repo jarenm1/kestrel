@@ -170,18 +170,29 @@ export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
  */
 export interface Harness {
   readonly conversation: ConversationKind
+  /** The CLI login whose broker env a user's sign-in replaces; null when Kestrel manages no login for the harness. */
   readonly cli: CliProvider | null
   /** The executable the default command runs; the box offers the provider only where it finds it (`capabilities.ts`). */
   readonly bin: string
   /** The oldest `[major, minor]` version (`<bin> --version`) the harness works with; null when any will do. */
   readonly minVersion: readonly [number, number] | null
+  /**
+   * Whether a run gets the broker's keys. A standalone harness reaches models through the broker like a vendor CLI;
+   * OpenCode and Antigravity run their own provider's models (free ones, or the user's Google account), so the
+   * broker's keys would only offer them models they are not there for.
+   */
+  readonly broker: boolean
 }
 
 export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
-  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null },
-  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null },
+  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
-  opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0] },
+  opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
-  google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5] },
+  google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
+  // OMP, Pi and Hermes speak ACP themselves; their runs reach models through the broker (`vendors`).
+  omp: { conversation: "acp", cli: null, bin: "omp", minVersion: null, broker: true },
+  pi: { conversation: "acp", cli: null, bin: "pi-acp", minVersion: null, broker: true },
+  hermes: { conversation: "acp", cli: null, bin: "hermes", minVersion: null, broker: true },
 }

@@ -33,8 +33,12 @@ import {
   type CreateTaskBody,
   type Delegation,
   type HarnessCommands,
+  agentChoiceProblem,
+  agentChoiceProvider,
+  harnessIdOfProvider,
   modelInfo,
   type FileRoot,
+  providerHarness,
   providerModels,
 } from "@cloudagents/protocol"
 import { MODEL_HARNESS } from "../agent-clis"
@@ -1257,7 +1261,9 @@ export const CoreLive = Layer.effect(
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
-        const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
+        const choiceProblem = agentChoiceProblem(choice)
+        if (choiceProblem !== null) return yield* Effect.fail(new BadRequest({ message: choiceProblem }))
+        const provider = agentChoiceProvider(choice)
         if (text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
@@ -1392,6 +1398,7 @@ export const CoreLive = Layer.effect(
               endedAt: null,
               exitCode: null,
               provider,
+              harness: harnessIdOfProvider(provider),
               ...(choice.model === undefined ? {} : { model: choice.model }),
               effort: choice.effort ?? null,
             }
@@ -1514,7 +1521,7 @@ export const CoreLive = Layer.effect(
         DEFAULT_MODEL_PROVIDER
       if (provider === DEFAULT_MODEL_PROVIDER) return {}
       const model = providerModels(provider).find((m) => m.shownByDefault)?.id
-      return model === undefined ? {} : { model }
+      return model === undefined ? { provider } : { provider, model }
     }
 
     const sendToThread: CoreShape["sendToThread"] = (fromTaskId, toTaskId, text) =>

@@ -19,10 +19,14 @@ import {
   EFFORT_LABELS,
   EffortPick,
   GithubRepoSlug,
+  HARNESS_LABELS,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
   harnessCommandPrefix,
+  harnessIdOfModel,
+  providerHarness,
   resolveAgentChoice,
+  resolveModelRoute,
   type AgentEffort,
   type ContextUsage,
   type HarnessCommand,
@@ -60,6 +64,7 @@ import {
   findGithubReferenceTrigger,
   type GithubReferenceKind,
 } from "@cloudagents/composer/reference"
+import { useEnabledHarnesses, useThreadHarness } from "@/hooks/useHarness"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
@@ -213,7 +218,7 @@ function ModelPicker({
         className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
       >
         {sections !== null && sections.length === 0 && (
-          <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
+          <DropdownMenuLabel>Enable a harness and connect a provider in Settings › Connections.</DropdownMenuLabel>
         )}
         <DropdownMenuRadioGroup
           value={value?.id ?? ""}
@@ -481,24 +486,47 @@ export function Composer({
   const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
   const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
-  const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
+  const [enabledHarnesses] = useEnabledHarnesses()
+  const [, rememberHarness] = useThreadHarness(taskId)
   // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
   const [pickedReferenceRepo, setPickedReferenceRepo] = useState<string>()
   const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate))
   const soleCheckout = checkoutRepos.length === 1 ? checkoutRepos[0] : undefined
   const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
   useEffect(() => setPickedReferenceRepo(undefined), [repo])
-  const connected = connections.data ? connectedModelProviders(connections.data, capabilities.data?.harnesses) : []
+  const connected = connections.data ? connectedModelProviders(connections.data, enabledHarnesses) : []
   const sections: readonly ModelSection[] | null = connections.data
     ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
     : null
   const offered = sections?.flatMap((s) => s.models) ?? []
   const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
-  const effortOptions = (model?.efforts ?? []).map((e) => ({
-    value: e,
-    label: e === "none" ? "Off" : EFFORT_LABELS[e],
-  }))
+  const harness = model === undefined ? undefined : harnessIdOfModel(model.id)
+  // A thread remembers the harness of its last pick/model, without letting that choice reach another thread.
+  useEffect(() => {
+    if (taskId !== undefined && model !== undefined) rememberHarness(harnessIdOfModel(model.id))
+  }, [taskId, model?.id, rememberHarness])
+  // Validate the selection against Connections before a request goes out; a mismatch must be visible, never rerouted.
+  const routeFailure =
+    connections.data === undefined || model === undefined
+      ? undefined
+      : (() => {
+          const resolved = resolveModelRoute({
+            harnessId: harnessIdOfModel(model.id),
+            modelId: model.id,
+            connections: connections.data,
+          })
+          return resolved.ok ? undefined : resolved.message
+        })()
+  // A thread whose last harness was disabled keeps that fact in view instead of silently re-routing the next message.
+  const disabledLastHarness =
+    pickedModel === undefined && lastRun?.model !== undefined && !enabledHarnesses.includes(harnessIdOfModel(lastRun.model))
+  const routeError =
+    routeFailure ??
+    (disabledLastHarness && lastRun?.model !== undefined
+      ? `This thread last ran on ${HARNESS_LABELS[harnessIdOfModel(lastRun.model)]}, which is disabled in Settings › Connections. Enable it or pick another model.`
+      : undefined)
+  const effortOptions = (model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] }))
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
@@ -513,7 +541,8 @@ export function Composer({
   const triggerAllowed =
     trigger === "/" ||
     (trigger === "$" &&
-      (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)))
+      ((expectedProvider !== undefined && providerHarness(expectedProvider) === "codex") ||
+        (activeRunId !== undefined && activeRunProvider === undefined)))
   // A new thread has no harness to ask, so only Kestrel's own `/` commands list there.
   const slashQuery =
     (taskId !== undefined || trigger === "/") &&
@@ -545,7 +574,7 @@ export function Composer({
   // On a new thread nothing but those commands can match, and any other `/text` is an ordinary first message to send.
   const slashMenuOpen =
     slashQuery !== undefined &&
-    (trigger !== "$" || commandProvider === "openai") &&
+    (trigger !== "$" || (commandProvider !== undefined && providerHarness(commandProvider) === "codex")) &&
     (taskId !== undefined || commandMatches.length > 0) &&
     composerFocused &&
     !autocompleteDismissed
@@ -642,7 +671,7 @@ export function Composer({
     // Failures surface through `error`; the text and files stay so they can be resent.
     if (empty || pending) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
-    onSend({ text: message, model: model?.id, effort }, files).then(
+    onSend({ text: message, model: model?.id, provider: model?.provider, effort }, files).then(
       (sent) => {
         promptHistory.remember(text.trim())
         setText("")
@@ -804,7 +833,7 @@ export function Composer({
 
   return (
     <div className={cn("w-full max-w-3xl", className)}>
-      {Boolean(error) && <Alert className="mb-2">{errorText(error)}</Alert>}
+      {routeError !== undefined || Boolean(error) ? <Alert className="mb-2">{routeError ?? errorText(error)}</Alert> : null}
       {fileError && <Alert className="mb-2">{fileError}</Alert>}
       <form
         className={cn(
@@ -933,8 +962,9 @@ export function Composer({
             <Paperclip />
           </Button>
           <ModelPicker sections={sections} value={model} onChange={setPickedModel} />
+          {harness !== undefined && <span className="text-xs text-muted-foreground">{HARNESS_LABELS[harness]}</span>}
           {model !== undefined && model.efforts.length > 0 && (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={(e) => setPickedEffort(e ?? "default")} />
           )}
           {onStop && empty ? (
             <Button
@@ -955,7 +985,7 @@ export function Composer({
               className="ml-auto"
               aria-label="Send"
               title="Send"
-              disabled={pending || empty}
+              disabled={pending || empty || routeError !== undefined}
             >
               <ArrowUp />
             </Button>
