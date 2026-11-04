@@ -134,6 +134,7 @@ export class NestFleet {
       this.forget(row)
       return
     }
+    row.createFailed = false
     row.state = report.state
     row.imageId = report.imageId
     row.vcpus = report.vcpus
@@ -152,6 +153,7 @@ export class NestFleet {
     const kind = row.pendingKind
     this.clearPending(row)
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
+    if (kind === "create" && !ok) row.createFailed = true
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
@@ -254,6 +256,7 @@ export class NestFleet {
       pendingKind: null,
       pendingCommand: null,
       pendingDeadline: null,
+      createFailed: false,
     }
     insertNestBox(this.sql, row)
     const token = await this.issueToken(row)
@@ -288,6 +291,32 @@ export class NestFleet {
     if (row.pendingId !== null) return IN_FLIGHT
     if (row.state !== "running" || row.hostId === null) return failure(409, "NotRunning", "only a running box can be suspended")
     this.dispatch(row, { _tag: "suspend", boxId })
+    return DONE
+  }
+
+  /** Parks a running or suspended box: its host backs the volume up and releases the VM. The next wake places it. */
+  park(login: string, boxId: string): NestOutcome<null> {
+    const row = this.ownedRow(login, boxId)
+    if (row === null) return NO_SUCH_BOX
+    if (row.pendingId !== null) return IN_FLIGHT
+    if ((row.state !== "running" && row.state !== "suspended") || row.hostId === null) {
+      return failure(409, "NotRunning", "only a running or suspended box can be parked")
+    }
+    this.dispatch(row, { _tag: "park", boxId })
+    return DONE
+  }
+
+  /** Hot-plugs or unplugs the box's GPU while it runs; only a box whose limits allow an on-demand GPU may. */
+  gpu(login: string, boxId: string, attach: boolean): NestOutcome<null> {
+    const row = this.ownedRow(login, boxId)
+    if (row === null) return NO_SUCH_BOX
+    if (row.pendingId !== null) return IN_FLIGHT
+    if (row.limits.gpu !== "on-demand") return failure(409, "NoGpuPolicy", "this box's limits do not allow an on-demand GPU")
+    if (row.state !== "running" || row.hostId === null) return failure(409, "NotRunning", "only a running box can change its GPU")
+    if (attach && row.gpus > 0) return failure(409, "GpuAttached", "this box already has its GPU")
+    if (!attach && row.gpus === 0) return failure(409, "NoGpu", "this box has no GPU to detach")
+    const command: NestHostCommand = attach ? { _tag: "gpuAttach", boxId } : { _tag: "gpuDetach", boxId }
+    this.dispatch(row, command)
     return DONE
   }
 

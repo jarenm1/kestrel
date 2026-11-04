@@ -293,6 +293,9 @@ const PAIRING_APPROVE_PATH = /^\/api\/boxes\/pairings\/([^/]+)\/approve$/
 const NEST_BOX_RESUME_PATH = /^\/api\/nest\/boxes\/([^/]+)\/resume$/
 const NEST_BOX_SUSPEND_PATH = /^\/api\/nest\/boxes\/([^/]+)\/suspend$/
 const NEST_BOX_LIMITS_PATH = /^\/api\/nest\/boxes\/([^/]+)\/limits$/
+const NEST_BOX_PARK_PATH = /^\/api\/nest\/boxes\/([^/]+)\/park$/
+const NEST_BOX_GPU_ATTACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/attach$/
+const NEST_BOX_GPU_DETACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/detach$/
 const FLEET_BOX_PATH = /^\/api\/fleet\/boxes\/([^/]+)$/
 const FLEET_BOX_SECRET_PATH = /^\/api\/fleet\/boxes\/([^/]+)\/secret$/
 
@@ -464,6 +467,18 @@ const handleNest = async (request: Request, env: Env, url: URL): Promise<Respons
   const suspend = NEST_BOX_SUSPEND_PATH.exec(path)?.[1]
   if (suspend !== undefined && method === "POST") {
     return answerBox(await boxes.suspendNestBox(sessionId, decodeURIComponent(suspend)))
+  }
+  const park = NEST_BOX_PARK_PATH.exec(path)?.[1]
+  if (park !== undefined && method === "POST") {
+    return answerBox(await boxes.parkNestBox(sessionId, decodeURIComponent(park)))
+  }
+  const gpuAttach = NEST_BOX_GPU_ATTACH_PATH.exec(path)?.[1]
+  if (gpuAttach !== undefined && method === "POST") {
+    return answerBox(await boxes.attachNestGpu(sessionId, decodeURIComponent(gpuAttach)))
+  }
+  const gpuDetach = NEST_BOX_GPU_DETACH_PATH.exec(path)?.[1]
+  if (gpuDetach !== undefined && method === "POST") {
+    return answerBox(await boxes.detachNestGpu(sessionId, decodeURIComponent(gpuDetach)))
   }
   const limits = NEST_BOX_LIMITS_PATH.exec(path)?.[1]
   if (limits !== undefined && method === "PUT") {

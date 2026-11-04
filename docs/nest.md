@@ -315,9 +315,11 @@ cache.nixos.org.
 - **Limits at `hello`**: a VM whose reported limits differ from the box's gets `setLimits` with the box's limits.
 - **Control-side choices** (not in the contract): new boxes get `NEST_STANDARD_LIMITS` (4 vCPUs, 8 GiB, no GPU, 64 GiB
   volume). Each command has a deadline (`resume`/`suspend` 10 min, `park`/`destroy` 15 min, `setLimits` 2 min,
-  `gpuAttach`/`gpuDetach` 5 min; `create` and `evict` none); an unanswered command is dropped at its deadline. A failed
-  `create` leaves the box `provisioning`; the owner can delete it. The control plane does not issue `park`, `gpuAttach`
-  or `gpuDetach`: the host parks on its own, and GPU requests come from the guest.
+  `gpuAttach`/`gpuDetach` 5 min; `create` and `evict` none); an unanswered command is dropped at its deadline. `create`
+  has no deadline: it is resent on reconnect. A `create` the host refuses marks the box `failed` (on `NestBoxStatus`):
+  it has no VM, and the owner can delete it. The owner may park a running or suspended box (`POST .../park`) and attach
+  or detach a GPU on a running box whose limits are `on-demand` (`POST .../gpu/attach`, `.../gpu/detach`). Control sends
+  no GPU request on its own: the host parks by its own policy, and GPU requests otherwise come from the guest.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
 - Usage records keep flowing through `meterRecords`; the host agent emits them from cgroups.
 
