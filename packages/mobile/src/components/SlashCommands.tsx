@@ -12,7 +12,8 @@ interface Props {
 }
 
 export function SlashCommands({ matches, provider, pending, onSelect, activeIndex }: Props) {
-  if (pending) {
+  // App-owned actions are available before (and without) the harness list: only an empty menu waits on it.
+  if (pending && matches.length === 0) {
     return (
       <View style={styles.card}>
         <View style={styles.loadingRow}>

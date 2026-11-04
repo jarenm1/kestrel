@@ -47,6 +47,7 @@
       "name": "@cloudagents/composer",
       "version": "0.1.0",
       "dependencies": {
+        "@cloudagents/protocol": "workspace:*",
         "clsx": "^2.1.1",
         "tailwind-merge": "^3.7.0",
       },

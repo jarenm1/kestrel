@@ -11,12 +11,19 @@ The Expo app. Start Metro with `bun run dev:mobile` (from the repo root) and ope
 
 ## Commands
 
-In a thread, type `/` to browse the selected harness's commands and skills (`$` shows only Codex skills).
-Tap a suggestion, or tap **Select** to complete the highlighted command. The menu stays available when touching
-it takes focus from the editor, on both phone web and native. Selection fills the draft without sending it:
-add any arguments, then tap **Send** to run it. Text with no matching command keeps the ordinary Send action.
-Hardware keyboards can use arrows and Enter/Tab to select, or Escape to dismiss; outside the menu, Return inserts
-a newline.
+Type `/` to browse commands, or `$` in a Codex thread to browse its skills. Tap a harness suggestion to fill the
+draft, add any arguments, then tap **Send**. The menu stays available when touching it takes focus from the editor,
+on both phone web and native. Hardware keyboards can use arrows and Enter/Tab to select, or Escape to dismiss;
+outside the menu, Return inserts a newline.
+
+App commands behave differently: tapping **/usage** immediately opens Quotas, without sending a message to the
+agent. Sending a typed `/usage` does the same. It works in a new thread without a model or while harness commands
+are loading. Only the command and its following whitespace leave the draft; Back returns to any remaining text
+and references.
+
+The app-command catalog and invocation rules live in `@cloudagents/composer/commands`, shared with desktop.
+Add future local actions there and implement their `AppCommandHandlers` entry on both hosts; selection and
+submission use the same resolver, and app actions override same-named slash commands without hiding `$skills`.
 
 ## GitHub references
 

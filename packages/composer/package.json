@@ -6,12 +6,14 @@
   "exports": {
     "./reference": "./src/reference/index.ts",
     "./view": "./src/view.ts",
+    "./commands": "./src/commands.ts",
     "./editor": "./src/editor/ComposerEditor.tsx"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@cloudagents/protocol": "workspace:*",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.7.0"
   },

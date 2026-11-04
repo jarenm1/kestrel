@@ -49,6 +49,13 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
 import {
+  appCommandOf,
+  matchAppCommand,
+  withAppCommands,
+  type AppCommand,
+  type AppCommandHandlers,
+} from "@cloudagents/composer/commands"
+import {
   ComposerEditor,
   composerViewOf,
   type ComposerEditorHandle,
@@ -419,16 +426,6 @@ interface Props {
   repos?: readonly string[]
 }
 
-/** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
-const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your usage limits and activity", prefix: "/" }
-
-/** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
-const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>
-  commands.filter((c) => !(c.name.toLowerCase() === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
-
-/** The leading `/usage` invocation and the whitespace after it; what remains is the rest of the draft. */
-const USAGE_COMMAND_PATTERN = /^\s*\/usage(?:\s+|$)/i
-
 /** Message box with file attachments, the model and thinking-level pickers, slash commands, `#` references, and a round send / stop button. */
 export function Composer({
   onSend,
@@ -472,6 +469,8 @@ export function Composer({
   const slashMenuId = useId()
   const referenceMenuId = useId()
   const openUsagePanel = useOpenUsagePanel()
+  // The shared catalog decides what appears and matches; every app action needs its local implementation here.
+  const appCommandHandlers: AppCommandHandlers = { usage: openUsagePanel }
   // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
   const pickSuffix = taskId === undefined ? "" : `.${taskId}`
   const [pickedModel, setPickedModel, clearPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel)
@@ -531,10 +530,7 @@ export function Composer({
   const commandMatches =
     slashQuery === undefined
       ? []
-      : [
-          ...(trigger === "/" ? [USAGE_COMMAND] : []),
-          ...withoutShadowed(commandQuery.data?.commands ?? [], commandProvider),
-        ].filter(
+      : withAppCommands(commandQuery.data?.commands ?? [], commandProvider).filter(
           (c) =>
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
@@ -572,17 +568,18 @@ export function Composer({
     if (!referenceMenuOpen) setReferenceMenuEngaged(false)
   }, [referenceMenuOpen])
 
-  function runUsageCommand(consumed: number) {
+  /** Runs an app action: only its invocation and the gap after it leave the draft, which never goes to the agent. */
+  function runAppCommand(command: AppCommand, consumed: number) {
     editor.current?.replaceRange(0, consumed, "")
-    openUsagePanel()
+    appCommandHandlers[command.name]()
   }
 
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
-    // Kestrel's own command sends nothing, so picking it runs it and only its token and gap leave the draft.
-    if (command === USAGE_COMMAND) {
-      const usage = USAGE_COMMAND_PATTERN.exec(visible)
-      runUsageCommand(usage?.[0].length ?? commandTokenEnd)
+    // App actions send nothing, so picking one runs it and only its invocation and gap leave the draft.
+    const app = appCommandOf(command, commandProvider)
+    if (app !== undefined) {
+      runAppCommand(app, matchAppCommand(visible)?.consumed ?? commandTokenEnd)
       return
     }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
@@ -628,11 +625,11 @@ export function Composer({
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    // Overrides the harness's `/usage`, typed any way: it never reaches the agent, so it works during a turn too, and
-    // any text after it and any attachments stay for the next message.
-    const usage = USAGE_COMMAND_PATTERN.exec(visible)
-    if (usage !== null && chosenOption === undefined) {
-      runUsageCommand(usage[0].length)
+    // An app command typed any way never reaches the agent, so it works during a turn too; any text after it and any
+    // attachments stay for the next message.
+    const app = matchAppCommand(visible)
+    if (app !== undefined && chosenOption === undefined) {
+      runAppCommand(app.command, app.consumed)
       return
     }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
