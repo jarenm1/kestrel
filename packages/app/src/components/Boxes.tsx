@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type CreatedBox, type UserBox } from "@cloudagents/protocol"
+import { ControlPaths, CreateBoxBody, MAX_USER_BOXES, type BoxList, type CreatedBox, type NestBoxStatus, type UserBox } from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { Link } from "react-router-dom"
 import { api } from "@/api/client"
@@ -13,7 +13,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
-import { errorText } from "@/util"
+import { errorText, formatSize } from "@/util"
 
 /** Kestrel's managed box: its own health, reached directly (Kestrel's box is the relay's only while none is assigned). */
 function ManagedOnline({ url }: { url: string }) {
@@ -24,6 +24,20 @@ function ManagedOnline({ url }: { url: string }) {
 export const BOX_FORM_ERROR =
   "Name must be 1–64 characters. The URL must be an origin such as https://box.example.com (http is allowed only for localhost)."
 
+/** How often a Nest box is read again while it starts or runs a command. */
+const NEST_POLL_MS = 2_000
+
+/** What a Nest box is doing while a command runs; shown beside its state. */
+const NEST_PENDING_LABEL: Record<NonNullable<NestBoxStatus["pending"]>, string> = {
+  resume: "Resuming…",
+  suspend: "Suspending…",
+  park: "Parking…",
+  setLimits: "Resizing…",
+  gpuAttach: "Attaching GPU…",
+  gpuDetach: "Detaching GPU…",
+  destroy: "Deleting…",
+}
+
 /** Validates a box name and URL the way the server does; a trailing slash is dropped first. */
 export function parseBoxForm(name: string, url: string): CreateBoxBody | null {
   const result = Schema.decodeUnknownEither(CreateBoxBody)({ name: name.trim(), url: url.trim().replace(/\/+$/, "") })
@@ -33,7 +47,15 @@ export function parseBoxForm(name: string, url: string): CreateBoxBody | null {
 /** Settings › Boxes: where the apps send their requests. Kestrel's box is the default; your own box is reached at its URL. */
 export function Boxes() {
   const queryClient = useQueryClient()
-  const boxes = useQuery(queries.boxes())
+  const me = useQuery(queries.me())
+  // A Nest box that is starting or running a command changes on its own: read the list again until it settles.
+  const boxes = useQuery({
+    ...queries.boxes(),
+    refetchInterval: (query) =>
+      query.state.data?.boxes.some((box) => box.nest && (box.nest.state === "provisioning" || box.nest.pending !== null))
+        ? NEST_POLL_MS
+        : false,
+  })
   const activeBoxId = useActiveBoxId()
   const setActive = useSetActiveBox()
   const kestrel = useBox()
@@ -65,16 +87,27 @@ export function Boxes() {
                 </Button>
               )}
             </div>
-            {list.map((box) => (
-              <UserBoxRow
-                key={box.id}
-                box={box}
-                active={activeBoxId === box.id}
-                busy={setActive.isPending}
-                onUse={setActive.mutate}
-                onSecret={setCreated}
-              />
-            ))}
+            {list.map((box) =>
+              box.nest ? (
+                <NestBoxRow
+                  key={box.id}
+                  box={box}
+                  nest={box.nest}
+                  active={activeBoxId === box.id}
+                  busy={setActive.isPending}
+                  onUse={setActive.mutate}
+                />
+              ) : (
+                <UserBoxRow
+                  key={box.id}
+                  box={box}
+                  active={activeBoxId === box.id}
+                  busy={setActive.isPending}
+                  onUse={setActive.mutate}
+                  onSecret={setCreated}
+                />
+              ),
+            )}
           </CardContent>
         </Card>
       )}
@@ -84,6 +117,7 @@ export function Boxes() {
           <p className="text-xs text-muted-foreground">You can add up to {MAX_USER_BOXES} boxes.</p>
         ) : (
           <>
+            {me.data?.nestEnabled && <NestCreateForm />}
             <PairHint />
             <AddBoxForm
               onCreated={(next) => {
@@ -250,6 +284,131 @@ function UserBoxRow({
       </div>
       {error && <Alert>{errorText(error)}</Alert>}
     </div>
+  )
+}
+
+/** A Nest VM the user owns: its state and size, and the actions that state allows. */
+function NestBoxRow({
+  box,
+  nest,
+  active,
+  busy,
+  onUse,
+}: {
+  box: UserBox
+  nest: NestBoxStatus
+  active: boolean
+  busy: boolean
+  onUse: (boxId: string) => void
+}) {
+  const queryClient = useQueryClient()
+  const action = useMutation({
+    mutationFn: (act: () => Promise<BoxList>) => act(),
+    onSuccess: (next) => applyBoxList(queryClient, next),
+  })
+  const locked = busy || action.isPending || nest.pending !== null
+  const gpu = nest.gpus > 0 ? "GPU attached" : nest.limits.gpu === "on-demand" ? "GPU on demand" : "no GPU"
+  const variant = nest.failed ? "destructive" : nest.state === "running" ? "success" : nest.state === "provisioning" ? "info" : "neutral"
+
+  return (
+    <div className="flex flex-col gap-2.5 px-5 py-4">
+      <div className="flex items-start gap-4">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="truncate font-medium">{box.name}</span>
+            {active && <Badge variant="success">active</Badge>}
+            <Badge variant={variant}>{nest.failed ? "failed" : nest.state}</Badge>
+            {nest.pending && <span className="text-xs text-muted-foreground">{NEST_PENDING_LABEL[nest.pending]}</span>}
+          </div>
+          <span className="truncate font-mono text-xs text-muted-foreground">{box.url}</span>
+          <span className="text-xs text-muted-foreground">
+            {nest.vcpus} vCPU · {formatSize(nest.memoryBytes)} RAM · {gpu} · {formatSize(nest.limits.volumeBytes)} disk
+          </span>
+        </div>
+        {!active && !nest.failed && (
+          <Button variant="soft" size="sm" disabled={busy || action.isPending} onClick={() => onUse(box.id)}>
+            Use this box
+          </Button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+        <div className="ml-auto flex items-center gap-1">
+          {(nest.state === "suspended" || nest.state === "parked") && (
+            <Button variant="ghost" size="sm" disabled={locked} onClick={() => action.mutate(() => api.resumeNestBox(box.id))}>
+              Resume
+            </Button>
+          )}
+          {nest.state === "running" && (
+            <Button variant="ghost" size="sm" disabled={locked} onClick={() => action.mutate(() => api.suspendNestBox(box.id))}>
+              Suspend
+            </Button>
+          )}
+          {(nest.state === "running" || nest.state === "suspended") && (
+            <Button variant="ghost" size="sm" disabled={locked} onClick={() => action.mutate(() => api.parkNestBox(box.id))}>
+              Park
+            </Button>
+          )}
+          {nest.state === "running" && nest.limits.gpu === "on-demand" && nest.gpus > 0 && (
+            <Button variant="ghost" size="sm" disabled={locked} onClick={() => action.mutate(() => api.detachNestGpu(box.id))}>
+              Detach GPU
+            </Button>
+          )}
+          {nest.state === "running" && nest.limits.gpu === "on-demand" && nest.gpus === 0 && (
+            <Button variant="ghost" size="sm" disabled={locked} onClick={() => action.mutate(() => api.attachNestGpu(box.id))}>
+              Attach GPU
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={locked}
+            onClick={() => {
+              if (window.confirm("Delete this box? Kestrel wipes its volume, and it cannot be recovered.")) {
+                action.mutate(() => api.deleteBox(box.id))
+              }
+            }}
+          >
+            Delete
+          </Button>
+        </div>
+      </div>
+      {action.error && <Alert>{errorText(action.error)}</Alert>}
+    </div>
+  )
+}
+
+/** Creates a Nest box at the standard shape: Kestrel places it on a host with room. */
+function NestCreateForm() {
+  const queryClient = useQueryClient()
+  const [name, setName] = useState("")
+  const create = useMutation({
+    mutationFn: () => api.createNestBox({ name: name.trim() }),
+    onSuccess: async (next) => {
+      setName("")
+      await applyBoxList(queryClient, next)
+    },
+  })
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault()
+        create.mutate()
+      }}
+      className="flex flex-wrap gap-2"
+    >
+      <Input
+        aria-label="Nest box name"
+        placeholder="Nest box name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        className="sm:w-48"
+      />
+      <Button type="submit" size="sm" disabled={create.isPending || name.trim() === ""}>
+        Create Nest box
+      </Button>
+      {create.error && <Alert>{errorText(create.error)}</Alert>}
+    </form>
   )
 }
 

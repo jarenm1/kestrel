@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CreateFleetBoxBody, type CreatedFleetBox, type FleetBox, type FleetActivity } from "@cloudagents/protocol"
+import {
+  CreateFleetBoxBody,
+  type CreatedFleetBox,
+  type FleetBox,
+  type FleetActivity,
+  type NestHostStatus,
+} from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -11,7 +17,7 @@ import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { errorText } from "@/util"
+import { errorText, formatSize, formatTime } from "@/util"
 
 /** Validates a managed box's name and URL the way the server does; a trailing slash is dropped first. */
 function parseFleetForm(name: string, url: string): CreateFleetBoxBody | null {
@@ -31,6 +37,7 @@ export function Fleet() {
     const timer = setInterval(() => setNow(Date.now()), 10_000)
     return () => clearInterval(timer)
   }, [])
+  const me = useQuery(queries.me())
   const [created, setCreated] = useState<CreatedFleetBox | null>(null)
   const boxes = fleet.data?.boxes ?? []
 
@@ -60,9 +67,69 @@ export function Fleet() {
           </CardContent>
         </Card>
       )}
+      {me.data?.nestEnabled && <NestHosts />}
       <AddFleetBoxForm onCreated={setCreated} />
       <ToolFailures />
     </>
+  )
+}
+
+/** Nest hosts and what each one has free. Shown wherever Nest boxes are offered. */
+function NestHosts() {
+  const hosts = useQuery({ ...queries.nestHosts(), refetchInterval: 5_000 })
+
+  return (
+    <>
+      {hosts.error && <Alert>{errorText(hosts.error)}</Alert>}
+      {hosts.isPending && <div className="text-muted-foreground">Loading…</div>}
+      {hosts.data && (
+        <Card className="py-0">
+          <CardContent className="divide-y divide-white/[0.04] px-0">
+            {hosts.data.hosts.length === 0 && <div className="px-5 py-4 text-muted-foreground">No Nest hosts yet.</div>}
+            {hosts.data.hosts.map((host) => (
+              <NestHostRow key={host.id} host={host} />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+    </>
+  )
+}
+
+function NestHostRow({ host }: { host: NestHostStatus }) {
+  const cap = host.capacity
+  return (
+    <div className="flex flex-col gap-2.5 px-5 py-4">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="truncate font-medium">{host.name}</span>
+        <Badge variant={host.connected ? "success" : "neutral"}>{host.connected ? "connected" : "offline"}</Badge>
+        {host.agentVersion && <span className="text-xs text-muted-foreground">agent {host.agentVersion}</span>}
+        {host.lastSeenAt && !host.connected && (
+          <span className="text-xs text-muted-foreground">last seen {formatTime(host.lastSeenAt)}</span>
+        )}
+      </div>
+      {cap ? (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            {cap.running} running, {cap.suspended} suspended
+          </span>
+          <span>
+            vCPUs {cap.vcpusPlugged} of {cap.vcpus} plugged
+          </span>
+          <span>
+            Memory {formatSize(cap.memoryPluggedBytes)} of {formatSize(cap.memoryBytes)} plugged
+          </span>
+          <span>
+            Disk {formatSize(cap.diskFreeBytes)} free, {formatSize(cap.diskReservedBytes)} reserved
+          </span>
+          <span>
+            GPUs {cap.gpus.filter((gpu) => gpu.attachedTo === null).length} of {cap.gpus.length} free
+          </span>
+        </div>
+      ) : (
+        <span className="text-xs text-muted-foreground">No capacity reported yet.</span>
+      )}
+    </div>
   )
 }
 

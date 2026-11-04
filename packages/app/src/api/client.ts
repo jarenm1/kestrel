@@ -18,6 +18,7 @@ import {
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
+  CreateNestBoxBody,
   CreatedBox,
   CreatedFleetBox,
   CreateTaskBody,
@@ -35,6 +36,7 @@ import {
   Me,
   Message,
   type ModelProvider,
+  NestHostList,
   Paths,
   ProviderUsage,
   PendingPairing,
@@ -261,6 +263,13 @@ function boxToken(boxId: string): Promise<string> {
 /** Drops the cached token of a box, after its secret changed or its token was refused. */
 function forgetBox(boxId: string): void {
   tokens.delete(boxId)
+}
+
+/** A Nest box's owner action. Its URL can change (a parked box resumes on another host), so its token is dropped and the list read again. */
+async function nestAction(id: string, path: string): Promise<BoxList> {
+  await run(Effect.asVoid(request(Schema.Unknown, "POST", path)))
+  forgetBox(id)
+  return loadBoxes()
 }
 
 /**
@@ -545,6 +554,18 @@ export const api = {
     forgetBox(id)
     return created
   },
+  /** Nest boxes: creates one for the user and answers with the box list as it now stands. */
+  createNestBox: async (body: CreateNestBoxBody): Promise<BoxList> => {
+    await run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.nestBoxes, body)))
+    return loadBoxes()
+  },
+  resumeNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxResume(id)),
+  suspendNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxSuspend(id)),
+  parkNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxPark(id)),
+  attachNestGpu: (id: string) => nestAction(id, ControlPaths.nestBoxGpuAttach(id)),
+  detachNestGpu: (id: string) => nestAction(id, ControlPaths.nestBoxGpuDetach(id)),
+  /** Operator-only: Nest hosts and their capacity, as the fleet page lists them. */
+  nestHosts: () => run(request(NestHostList, "GET", ControlPaths.nestHosts)),
   setActiveBox: async (boxId: string | null): Promise<BoxList> => {
     const body: SetActiveBoxBody = { boxId }
     return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
