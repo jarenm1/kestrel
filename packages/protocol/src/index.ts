@@ -611,6 +611,13 @@ export const BoxCapabilities = Schema.Struct({
    * reported. Clients offer a provider that needs no connection only when its harness is listed here.
    */
   harnesses: Schema.optional(Schema.Array(ModelProvider)),
+  /**
+   * The box's GPU: `none`, `static` (a GPU the machine always has), or `on-demand` (a Nest VM that borrows one from its
+   * host while needed, see `guest.ts`). Absent on boxes from before it was reported; treat as unknown.
+   */
+  gpu: Schema.optional(Schema.Literal("none", "static", "on-demand")),
+  /** True on a Nest VM: the box suspends when idle and resumes on the next request. Absent means false. */
+  suspend: Schema.optional(Schema.Boolean),
 })
 export type BoxCapabilities = typeof BoxCapabilities.Type
 
@@ -808,6 +815,8 @@ export * from "./relay"
 export * from "./rtc"
 export * from "./control"
 export * from "./meter"
+export * from "./nest"
+export * from "./guest"
 export * from "./refs"
 export * from "./models"
 export * from "./boxtoken"
