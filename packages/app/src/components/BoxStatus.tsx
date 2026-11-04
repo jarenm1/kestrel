@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query"
-import type { BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
+import type { BoxCapabilities, BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
 import { useActiveBoxId } from "@/hooks/useActiveBox"
@@ -13,6 +13,12 @@ export function useBox(): BoxStatusInfo | null {
 /** True only once the box is known to be offline. */
 export function useBoxOffline(): boolean {
   return useBox()?.online === false
+}
+
+/** Capabilities of the active box (`BoxCapabilities`): its GPU and suspend support. Null while unknown. */
+export function useBoxCapabilities(): BoxCapabilities | null {
+  const capabilities = useQuery(queries.capabilities())
+  return capabilities.isError ? null : (capabilities.data ?? null)
 }
 
 export function BoxOfflineBanner({ className }: { className?: string }) {
