@@ -68,6 +68,7 @@ pkgs.testers.runNixOSTest {
         inherit slug domain hostId;
         controlUrl = "ws://203.0.113.10:9000";
         meterUrl = "http://203.0.113.10:9000";
+        backupIntervalMs = 60 * 1000;
         uplink = "eth1";
         cpuVendor = "intel";
         capacity = {
