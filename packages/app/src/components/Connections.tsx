@@ -50,6 +50,9 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 }
 
+/** Providers whose model list stays under Models even though they also take an API key. */
+const MODELS_CARD_PROVIDERS: readonly ModelProvider[] = ["anthropic", "openai"]
+
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
@@ -148,12 +151,20 @@ function ModelListsCard({
   harnesses: readonly ModelProvider[] | undefined
 }) {
   const connected = new Set(connectedModelProviders(connections, harnesses).map((p) => p.id))
+  // A provider whose access is an API key shows its model list in that key's row instead.
+  const apiKeyProviders = new Set(
+    connections.filter((connection) => connection.kind === "apikey").map((connection) => connection.provider),
+  )
+  const rows = MODEL_PROVIDERS.filter(
+    (provider) =>
+      MODELS_CARD_PROVIDERS.includes(provider.id) || !provider.connections.some((id) => apiKeyProviders.has(id)),
+  )
   return (
     <div className="flex flex-col gap-2">
       <h2 className="font-semibold tracking-tight">Models</h2>
       <Card className="py-0">
         <CardContent className="divide-y divide-white/[0.04] px-0">
-          {MODEL_PROVIDERS.map((provider) => (
+          {rows.map((provider) => (
             <ModelListRow key={provider.id} provider={provider} connected={connected.has(provider.id)} />
           ))}
         </CardContent>
@@ -163,14 +174,6 @@ function ModelListsCard({
 }
 
 function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; connected: boolean }) {
-  const all = providerModels(provider.id)
-  const shown = useShownModels()[provider.id]
-  const shownIds = new Set(shown.map((m) => m.id))
-
-  function toggle(id: AgentModel, on: boolean) {
-    setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
-  }
-
   return (
     <div className="flex items-center gap-3 px-5 py-4">
       <div className="flex flex-col gap-0.5">
@@ -193,36 +196,51 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
           </span>
         )}
       </div>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="soft" size="sm" className="ml-auto">
-            {shown.length} of {all.length} shown
-            <ChevronDown className="opacity-60" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
-        >
-          <DropdownMenuLabel>{provider.name} models in chat</DropdownMenuLabel>
-          {all.map((m) => (
-            <DropdownMenuCheckboxItem
-              key={m.id}
-              checked={shownIds.has(m.id)}
-              // Keeps the menu open so several models can be toggled in one go.
-              onSelect={(e) => e.preventDefault()}
-              onCheckedChange={(on) => toggle(m.id, on)}
-            >
-              {m.name}
-            </DropdownMenuCheckboxItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem className="text-muted-foreground" onSelect={() => setShownModels(provider.id, null)}>
-            Reset to defaults
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <ModelPicker provider={provider} />
     </div>
+  )
+}
+
+/** Toggles which of the provider's models the chat's model picker offers. */
+function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
+  const all = providerModels(provider.id)
+  const shown = useShownModels()[provider.id]
+  const shownIds = new Set(shown.map((m) => m.id))
+
+  function toggle(id: AgentModel, on: boolean) {
+    setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
+  }
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="soft" size="sm" className="ml-auto">
+          {shown.length} of {all.length} shown
+          <ChevronDown className="opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+      >
+        <DropdownMenuLabel>{provider.name} models in chat</DropdownMenuLabel>
+        {all.map((m) => (
+          <DropdownMenuCheckboxItem
+            key={m.id}
+            checked={shownIds.has(m.id)}
+            // Keeps the menu open so several models can be toggled in one go.
+            onSelect={(e) => e.preventDefault()}
+            onCheckedChange={(on) => toggle(m.id, on)}
+          >
+            {m.name}
+          </DropdownMenuCheckboxItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-muted-foreground" onSelect={() => setShownModels(provider.id, null)}>
+          Reset to defaults
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }
 
@@ -261,6 +279,10 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
   })
   const busy = save.isPending || disconnect.isPending
   const error = save.error ?? disconnect.error
+  // The provider whose models this key unlocks; its list lives here instead of under Models.
+  const modelProvider = MODEL_PROVIDERS.find(
+    (provider) => !MODELS_CARD_PROVIDERS.includes(provider.id) && provider.connections.includes(connection.provider),
+  )
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -308,6 +330,7 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
               Remove
             </Button>
           )}
+          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
         </form>
       )}
       {error && <Alert>{errorText(error)}</Alert>}
