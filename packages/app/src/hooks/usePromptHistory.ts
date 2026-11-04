@@ -36,10 +36,14 @@ export function usePromptHistory(draftKey: string) {
     }
   }
 
+  function isBrowsing(text: string): boolean {
+    return browsing.current?.key === draftKey && browsing.current.shown === text
+  }
+
   function navigate(direction: -1 | 1, text: string): string | undefined {
     let cursor = browsing.current
     // Editing a recalled prompt starts a new draft rather than silently discarding that edit on Down.
-    if (cursor?.key !== draftKey || cursor.shown !== text) cursor = undefined
+    if (!isBrowsing(text)) cursor = undefined
     if (cursor === undefined) {
       if (direction === 1) return undefined
       const entries = readHistory()
@@ -52,5 +56,5 @@ export function usePromptHistory(draftKey: string) {
     return cursor.shown
   }
 
-  return { remember, navigate }
+  return { remember, navigate, isBrowsing }
 }

@@ -84,7 +84,8 @@ The desktop and mobile composers' thinking controls open a stepped slider in Kes
 
 The desktop chat composer keeps the last 100 accepted, non-empty prompt texts in this browser's local storage,
 shared across threads and retained after reload. Up recalls older prompts at the start of the text, or at the
-end only when the draft fits on one visual line (no newline or soft wrapping).
+end only when the draft fits on one visual line (no newline or soft wrapping). Once browsing history, Up at
+the end of an unchanged recalled prompt continues to older entries, even if that prompt spans multiple lines.
 Down recalls newer prompts at the end, then restores the unsent draft. Editing a recalled prompt makes it the
 new draft. History includes only typed text, not attachments, picked answers or generated element context;
 failed sends and the local `/usage` command are not recorded. Autocomplete menus, question options, text

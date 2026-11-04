@@ -728,11 +728,13 @@ export function Composer({
     ) {
       const current = editor.current?.readView()
       const selection = window.getSelection()
-      // At the end, Up still belongs to the browser if there is a preceding visual line.
-      // Range geometry covers soft wrapping as well as explicit newlines and reference chips.
-      let atHistoryBoundary = current !== undefined &&
-        (e.key === "ArrowUp" ? current.caret === 0 : current.caret === current.plain.length)
-      if (current && !current.plain.includes("\n") && e.key === "ArrowUp" &&
+      // An unchanged recall keeps browsing at the end, even when it spans visual lines.
+      // Ordinary drafts keep native Up movement; Range geometry also detects soft wrapping.
+      const continuingHistory = current !== undefined &&
+        promptHistory.isBrowsing(current.markdown) && current.caret === current.plain.length
+      let atHistoryBoundary = continuingHistory || (current !== undefined &&
+        (e.key === "ArrowUp" ? current.caret === 0 : current.caret === current.plain.length))
+      if (current && !continuingHistory && !current.plain.includes("\n") && e.key === "ArrowUp" &&
         current.caret === current.plain.length && selection?.isCollapsed) {
         const range = document.createRange()
         range.selectNodeContents(e.currentTarget)
