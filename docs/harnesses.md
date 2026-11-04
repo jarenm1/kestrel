@@ -61,7 +61,10 @@ Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit
 `dataDir` is `CLOUDAGENTS_DATA_DIR`, or `.data` under the repository by default. `opencode-ai` and
 opencode.ai/install are OpenCode 1 and do not satisfy these requirements.
 
-Go signs in through Settings › Connections using its password-key form. The box passes the key to
+Go signs in through Settings › Connections › **API keys**: choose **Add API key › OpenCode Go**.
+Its connected row supports replacing the key and choosing which Go models appear in chat; Go is not listed again
+under Accounts and subscriptions or Models. This settings placement does not change its OpenCode ACP harness or
+box-local credential storage. The box passes the key to
 `opencode auth import --standalone` over stdin, not argv or Hub storage. Replacing the named credential preserves
 sessions; Disconnect removes the Go login directory. Its quota panel reports five-hour, weekly and monthly usage.
 

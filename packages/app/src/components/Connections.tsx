@@ -54,6 +54,12 @@ const CLI_INTRO: Record<CliProvider, string> = {
 /** Providers whose model list stays under Models even though they also take an API key. */
 const MODELS_CARD_PROVIDERS: readonly ModelProvider[] = ["anthropic", "openai"]
 
+/** Key-based CLI logins belong with API keys, but keep their box-local authentication. */
+function isApiKeyConnection(connection: Connection) {
+  return connection.kind === "apikey" ||
+    (connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) && CLI_SIGN_IN[connection.provider] === "key")
+}
+
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
@@ -69,7 +75,7 @@ export function Connections() {
           <h2 className="font-semibold tracking-tight">Accounts and subscriptions</h2>
           <Card className="py-0">
             <CardContent className="divide-y divide-white/[0.04] px-0">
-              {list.filter((connection) => connection.kind !== "apikey").map((connection) =>
+              {list.filter((connection) => !isApiKeyConnection(connection)).map((connection) =>
                 connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                   <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
                 ) : connection.kind === "cli" && connection.provider === "opencode" ? (
@@ -90,7 +96,7 @@ export function Connections() {
 
 function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   const [selected, setSelected] = useState<string[]>([])
-  const providers = connections.filter((connection) => connection.kind === "apikey")
+  const providers = connections.filter(isApiKeyConnection)
   const visible = providers.filter((connection) => connection.connected || selected.includes(connection.provider))
   const remaining = providers.filter((connection) => !connection.connected && !selected.includes(connection.provider))
 
@@ -154,7 +160,7 @@ function ModelListsCard({
   const connected = new Set(connectedModelProviders(connections, harnesses).map((p) => p.id))
   // A provider whose access is an API key shows its model list in that key's row instead.
   const apiKeyProviders = new Set(
-    connections.filter((connection) => connection.kind === "apikey").map((connection) => connection.provider),
+    connections.filter(isApiKeyConnection).map((connection) => connection.provider),
   )
   const rows = MODEL_PROVIDERS.filter(
     (provider) =>
@@ -286,17 +292,22 @@ function FreeOpenCodeRow({ connection }: { connection: Connection }) {
 function ConnectionRow({ connection, onRemove }: { connection: Connection; onRemove?: () => void }) {
   const queryClient = useQueryClient()
   const [apiKey, setApiKey] = useState("")
-  const onSuccess = () => void queryClient.invalidateQueries({ queryKey: keys.connections })
+  const keyProvider = connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) &&
+    CLI_SIGN_IN[connection.provider] === "key" ? connection.provider : null
+  const onSuccess = () => invalidateConnections(queryClient)
 
   const save = useMutation({
-    mutationFn: (key: string) => api.putApiKey(connection.provider, { apiKey: key }),
+    mutationFn: async (key: string) => {
+      if (keyProvider) await api.cliLoginKey(keyProvider, { apiKey: key })
+      else await api.putApiKey(connection.provider, { apiKey: key })
+    },
     onSuccess: () => {
       setApiKey("")
       onSuccess()
     },
   })
   const disconnect = useMutation({
-    mutationFn: () => api.deleteConnection(connection.provider),
+    mutationFn: () => keyProvider ? api.cliLogout(keyProvider) : api.deleteConnection(connection.provider),
     onSuccess: () => {
       onRemove?.()
       onSuccess()
@@ -324,6 +335,7 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         account={connection.account}
         expired={connection.expired === true}
       />
+      {keyProvider && <p className="text-xs text-muted-foreground">{CLI_INTRO[keyProvider]}</p>}
       {connection.kind === "oauth" ? (
         connection.available ? (
           <Button asChild variant="soft" className="w-fit">
@@ -334,6 +346,13 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         ) : (
           <div className="text-muted-foreground">needs server config</div>
         )
+      ) : keyProvider && !connection.available ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
+          <Button variant="soft" onClick={onSuccess}>Check again</Button>
+          {!connection.connected && onRemove && <Button variant="soft" onClick={onRemove}>Remove</Button>}
+          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
+        </div>
       ) : (
         <form className="flex flex-wrap items-center gap-2" onSubmit={submit}>
           <Input
@@ -408,9 +427,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   const [login, setLogin] = useState<CliLoginStart | null>(null)
   const [expired, setExpired] = useState(false)
   const [code, setCode] = useState("")
-  const [apiKey, setApiKey] = useState("")
   const refresh = () => invalidateConnections(queryClient)
-  const keySignIn = CLI_SIGN_IN[provider] === "key"
 
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
@@ -440,15 +457,8 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
       refresh()
     },
   })
-  const saveKey = useMutation({
-    mutationFn: (key: string) => api.cliLoginKey(provider, { apiKey: key }),
-    onSuccess: () => {
-      setApiKey("")
-      refresh()
-    },
-  })
-  const busy = start.isPending || submitCode.isPending || saveKey.isPending || logout.isPending
-  const error = start.error ?? submitCode.error ?? saveKey.error ?? logout.error
+  const busy = start.isPending || submitCode.isPending || logout.isPending
+  const error = start.error ?? submitCode.error ?? logout.error
 
   useEffect(() => {
     if (connection.connected) setLogin(null)
@@ -503,33 +513,6 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
           >
             Disconnect
           </Button>
-        </>
-      )
-    }
-    if (keySignIn) {
-      return (
-        <>
-          <p className="text-muted-foreground">{CLI_INTRO[provider]}</p>
-          <form
-            className="flex flex-wrap gap-2"
-            onSubmit={(e) => {
-              e.preventDefault()
-              saveKey.mutate(apiKey.trim())
-            }}
-          >
-            <Input
-              className="max-w-sm"
-              type="password"
-              autoComplete="off"
-              placeholder="API key"
-              aria-label={`${connection.label} API key`}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-            />
-            <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
-              Save
-            </Button>
-          </form>
         </>
       )
     }

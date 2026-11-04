@@ -1,35 +1,21 @@
 import React, { useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  CLI_SIGN_IN,
-  type CliLoginStart,
-  type CliProvider,
-  type Connection,
-} from "@cloudagents/protocol";
+import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
 import { confirmDestructive } from "@/lib/confirm";
-import { boxKeys, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import {
+  CLI_INTRO,
   ConnectionRowFrame,
   connectionStyles,
+  invalidateConnections,
 } from "@/components/ConnectionsShared";
-
-/** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
-const MIN_API_KEY_LENGTH = 8;
 
 /** While a device-code sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000;
-
-const CLI_INTRO: Record<CliProvider, string> = {
-  "claude-cli": "Use your own Claude Pro or Max subscription.",
-  "codex-cli": "Use your own ChatGPT subscription.",
-  "antigravity-cli": "Use your own Google account through Antigravity CLI.",
-  "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
-};
 
 interface Props {
   connection: Connection;
@@ -43,16 +29,6 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   const [login, setLogin] = useState<CliLoginStart | null>(null);
   const [expired, setExpired] = useState(false);
   const [code, setCode] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const keySignIn = CLI_SIGN_IN[provider] === "key";
-
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: keys.connections });
-    const scoped = boxKeys(api.boxScope);
-    void queryClient.invalidateQueries({ queryKey: scoped.usage });
-    void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
-    void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });
-  };
 
   const openPage = useMutation({
     mutationFn: (url: string) => WebBrowser.openBrowserAsync(url),
@@ -65,14 +41,14 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
         setLogin(null);
         setCode("");
       }
-      refresh();
+      invalidateConnections(queryClient, api.boxScope);
     },
   });
   const logout = useMutation({
     mutationFn: () => api.cliLogout(provider),
     onSuccess: () => {
       setLogin(null);
-      refresh();
+      invalidateConnections(queryClient, api.boxScope);
     },
   });
   const start = useMutation({
@@ -85,16 +61,8 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       setCode("");
     },
   });
-  const saveKey = useMutation({
-    mutationFn: (key: string) => api.cliLoginKey(provider, { apiKey: key }),
-    onSuccess: () => {
-      setApiKey("");
-      refresh();
-    },
-  });
-
-  const busy = start.isPending || submitCode.isPending || saveKey.isPending || logout.isPending;
-  const error = openPage.error ?? start.error ?? submitCode.error ?? saveKey.error ?? logout.error;
+  const busy = start.isPending || submitCode.isPending || logout.isPending;
+  const error = openPage.error ?? start.error ?? submitCode.error ?? logout.error;
 
   useEffect(() => {
     if (connection.connected) setLogin(null);
@@ -111,10 +79,10 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   useEffect(() => {
     if (!polling) return;
     const id = setInterval(() => {
-      void queryClient.invalidateQueries({ queryKey: keys.connections });
+      invalidateConnections(queryClient, api.boxScope);
     }, CLI_POLL_MS);
     return () => clearInterval(id);
-  }, [polling, queryClient]);
+  }, [polling, queryClient, api.boxScope]);
 
   function cancel() {
     start.reset();
@@ -134,7 +102,11 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       return (
         <>
           <Text style={connectionStyles.muted}>{connection.error ?? "Agent box is offline."}</Text>
-          <Button variant="soft" style={connectionStyles.fit} onPress={refresh}>
+          <Button
+            variant="soft"
+            style={connectionStyles.fit}
+            onPress={() => invalidateConnections(queryClient, api.boxScope)}
+          >
             Check again
           </Button>
         </>
@@ -149,31 +121,6 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
           <Button variant="soft" style={connectionStyles.fit} disabled={busy} onPress={confirmDisconnect}>
             Disconnect
           </Button>
-        </>
-      );
-    }
-    if (keySignIn) {
-      return (
-        <>
-          <Text style={connectionStyles.muted}>{CLI_INTRO[provider]}</Text>
-          <View style={connectionStyles.actions}>
-            <Input
-              style={styles.keyInput}
-              value={apiKey}
-              onChangeText={setApiKey}
-              placeholder="API key"
-              accessibilityLabel={`${connection.label} API key`}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <Button
-              disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}
-              onPress={() => saveKey.mutate(apiKey.trim())}
-            >
-              Save
-            </Button>
-          </View>
         </>
       );
     }
@@ -263,10 +210,3 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     </ConnectionRowFrame>
   );
 }
-
-const styles = StyleSheet.create({
-  keyInput: {
-    flexGrow: 1,
-    flexBasis: 200,
-  },
-});

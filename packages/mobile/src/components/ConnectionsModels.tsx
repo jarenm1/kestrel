@@ -14,7 +14,11 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol";
 import { setShownModels, useShownModels } from "@/hooks/useShownModels";
+import { isApiKeyConnection } from "@/components/ConnectionsShared";
 import { colors, spacing } from "@/theme";
+
+/** Providers whose model list stays under Models even though they also take an API key. */
+export const MODELS_CARD_PROVIDERS: readonly ModelProvider[] = ["anthropic", "openai"];
 
 interface Props {
   readonly connections: readonly Connection[];
@@ -25,12 +29,19 @@ interface Props {
 /** Per provider, the models the chat's model picker offers; the rest stay out of the way. */
 export function ConnectionsModels({ connections, harnesses }: Props) {
   const connected = new Set(connectedModelProviders(connections, harnesses).map((provider) => provider.id));
+  // A provider whose access is an API key shows its model list in that key's row instead.
+  const apiKeyProviders = new Set(connections.filter(isApiKeyConnection).map((connection) => connection.provider));
+  const rows = MODEL_PROVIDERS.filter(
+    (provider) =>
+      MODELS_CARD_PROVIDERS.includes(provider.id) ||
+      !provider.connections.some((id) => apiKeyProviders.has(id))
+  );
   return (
     <View style={styles.wrap}>
       <Text style={styles.title}>Models</Text>
       <Text style={styles.hint}>Choose which models each provider offers in the chat's model picker.</Text>
       <Card style={styles.card}>
-        {MODEL_PROVIDERS.map((provider, i) => (
+        {rows.map((provider, i) => (
           <ModelRow key={provider.id} provider={provider} connected={connected.has(provider.id)} divided={i > 0} />
         ))}
       </Card>
@@ -46,6 +57,32 @@ interface RowProps {
 }
 
 function ModelRow({ provider, connected, divided }: RowProps) {
+  return (
+    <View style={[styles.row, divided && styles.divided]}>
+      <View style={styles.titleBlock}>
+        <Text style={styles.label}>{provider.name}</Text>
+        {provider.connections.length === 0 ? (
+          <Badge variant="neutral">no sign-in needed</Badge>
+        ) : (
+          <Badge variant={connected ? "success" : "neutral"}>
+            {connected ? "connected" : "not connected"}
+          </Badge>
+        )}
+      </View>
+      {connected ? null : (
+        <Text style={styles.hint}>
+          {provider.connections.length === 0
+            ? `${provider.name} is not installed on this box.`
+            : "Connect a key or subscription above to use these."}
+        </Text>
+      )}
+      <ModelPicker provider={provider} />
+    </View>
+  );
+}
+
+/** Toggles which of the provider's models the chat's model picker offers. Also used inside the connection that unlocks it. */
+export function ModelPicker({ provider }: { readonly provider: ModelProviderInfo }) {
   const [open, setOpen] = useState(false);
   const all = providerModels(provider.id);
   const shown = useShownModels()[provider.id];
@@ -60,37 +97,18 @@ function ModelRow({ provider, connected, divided }: RowProps) {
   }
 
   return (
-    <View style={[styles.row, divided && styles.divided]}>
-      <View style={styles.head}>
-        <View style={styles.titleBlock}>
-          <Text style={styles.label}>{provider.name}</Text>
-          {provider.connections.length === 0 ? (
-            <Badge variant="neutral">no sign-in needed</Badge>
-          ) : (
-            <Badge variant={connected ? "success" : "neutral"}>
-              {connected ? "connected" : "not connected"}
-            </Badge>
-          )}
-        </View>
-        <Button
-          variant="soft"
-          size="sm"
-          icon={open ? ChevronUp : ChevronDown}
-          style={styles.trigger}
-          onPress={() => setOpen((current) => !current)}
-          accessibilityLabel={`${provider.name} models shown in the chat picker`}
-          active={open}
-        >
-          {`${shown.length} of ${all.length} shown`}
-        </Button>
-      </View>
-      {connected ? null : (
-        <Text style={styles.hint}>
-          {provider.connections.length === 0
-            ? `${provider.name} is not installed on this box.`
-            : "Connect a key or subscription above to use these."}
-        </Text>
-      )}
+    <View style={styles.picker}>
+      <Button
+        variant="soft"
+        size="sm"
+        icon={open ? ChevronUp : ChevronDown}
+        style={styles.trigger}
+        onPress={() => setOpen((current) => !current)}
+        accessibilityLabel={`${provider.name} models shown in the chat picker`}
+        active={open}
+      >
+        {`${shown.length} of ${all.length} shown`}
+      </Button>
       {open ? (
         <View style={styles.list}>
           <Text style={styles.listTitle}>{provider.name} models in chat</Text>
@@ -136,10 +154,10 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
   },
   divided: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
-  head: { flexDirection: "row", alignItems: "center", gap: spacing.md },
-  titleBlock: { gap: spacing.xs },
+  titleBlock: { alignItems: "flex-start", gap: spacing.xs },
   label: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
-  trigger: { marginLeft: "auto" },
+  picker: { gap: spacing.xs },
+  trigger: { alignSelf: "flex-start" },
   list: { gap: spacing.xs, marginTop: spacing.xs },
   listTitle: { color: colors.mutedForeground, fontSize: 12, marginBottom: spacing.xs },
   toggle: {

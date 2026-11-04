@@ -1,9 +1,46 @@
 import React, { type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import type { Connection } from "@cloudagents/protocol";
+import type { QueryClient } from "@tanstack/react-query";
+import { Schema } from "effect";
+import { CLI_SIGN_IN, CliProvider, type Connection } from "@cloudagents/protocol";
+import { boxKeys, keys } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { colors, fonts } from "@/theme";
+
+/** What each CLI's sign-in gets the user, keyed by provider. */
+export const CLI_INTRO: Record<CliProvider, string> = {
+  "claude-cli": "Use your own Claude Pro or Max subscription.",
+  "codex-cli": "Use your own ChatGPT subscription.",
+  "antigravity-cli": "Use your own Google account through Antigravity CLI.",
+  "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
+};
+
+/** The CLI provider a key-based CLI connection signs in with, or null for page sign-ins and non-CLI rows. */
+export function keyCliProvider(connection: Connection): CliProvider | null {
+  return connection.kind === "cli" &&
+    Schema.is(CliProvider)(connection.provider) &&
+    CLI_SIGN_IN[connection.provider] === "key"
+    ? connection.provider
+    : null;
+}
+
+/** Rows shown under API keys: provider keys, and key-based CLI logins that keep their box-local authentication. */
+export function isApiKeyConnection(connection: Connection): boolean {
+  return connection.kind === "apikey" || keyCliProvider(connection) !== null;
+}
+
+/**
+ * Re-reads the connections, whose CLI and harness rows come from the active box, and the usage figures a changed login
+ * moves.
+ */
+export function invalidateConnections(queryClient: QueryClient, scope: string): void {
+  void queryClient.invalidateQueries({ queryKey: keys.connections });
+  const scoped = boxKeys(scope);
+  void queryClient.invalidateQueries({ queryKey: scoped.usage });
+  void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
+  void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });
+}
 
 export const connectionStyles = StyleSheet.create({
   body: {
