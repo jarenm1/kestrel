@@ -108,8 +108,8 @@ export interface RunStart {
   readonly fresh: string
   /**
    * The newest native session of the run's provider, where its CLI kept it (undefined when that was not recorded),
-   * and the prompt carrying only what happened since. The run resumes it unless its CLI now keeps sessions elsewhere;
-   * then, or when this is null, it starts fresh.
+   * and the prompt carrying only what happened since. The run resumes it only when its CLI keeps sessions there now;
+   * otherwise (an unrecorded place included, since it may be either), or when this is null, it starts fresh.
    */
   readonly resume: { readonly sessionId: string; readonly continuation: string | undefined; readonly prompt: string } | null
 }
@@ -737,10 +737,7 @@ export const AgentHarnessLive = Layer.effect(
             const continuation: SessionContinuation = logins.some((login) => login.provider === CLI_PROVIDER[provider])
               ? "cli-login"
               : "task-home"
-            const resumed = start.resume !== null &&
-              (start.resume.continuation === undefined || start.resume.continuation === continuation)
-              ? start.resume
-              : null
+            const resumed = start.resume?.continuation === continuation ? start.resume : null
             const resumeSession = resumed?.sessionId ?? null
             const prompt = resumed?.prompt ?? start.fresh
             const creds = yield* credentials.get(task.owner)

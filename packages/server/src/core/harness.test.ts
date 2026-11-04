@@ -547,8 +547,10 @@ createInterface({ input: process.stdin })
         // The user signed in: the CLI now looks for sessions in their login directory, where the earlier one is not.
         expect(yield* runWith("login-from-home", "task-home")).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "cli-login" })
         expect(yield* runWith("login-to-login", "cli-login")).toEqual({ answer: "resume=earlier prompt=delta", recorded: "cli-login" })
-        // A session recorded before its place was: resumed as before.
-        expect(yield* runWith("legacy", undefined)).toEqual({ answer: "resume=earlier prompt=delta", recorded: "cli-login" })
+        // A session recorded before its place was may sit on either side of a login change: start fresh, logged in or out.
+        expect(yield* runWith("legacy-logged-in", undefined)).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "cli-login" })
+        loggedIn = false
+        expect(yield* runWith("legacy-logged-out", undefined)).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "task-home" })
       } finally {
         yield* harness.stopAll()
       }
