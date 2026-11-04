@@ -32,7 +32,7 @@ export const ControlPaths = {
   desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
-  /** GET -> stored Connection[] and CLI definitions; clients add selected-box state with `connectionsForBox`. */
+  /** GET -> Connection[] with legacy managed/relay-box status; updated clients replace box state with `connectionsForBox`. */
   connections: "/api/connections",
   /** PUT { apiKey } for api-key providers -> Connection; DELETE -> 204. */
   connection: (provider: string) => `/api/connections/${provider}`,
@@ -237,8 +237,8 @@ export const CliAuthStatus = Schema.Struct({
 export type CliAuthStatus = typeof CliAuthStatus.Type
 
 /**
- * Stored connections come from the Worker; CLI logins and harness availability belong to the selected box.
- * Never retain the Worker's managed/relay-box status when that box differs from the one a chat will use.
+ * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state
+ * with the selected box's CLI logins and harness availability, preserving stored account/key metadata.
  */
 export const connectionsForBox = (
   connections: readonly Connection[],

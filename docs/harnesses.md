@@ -77,6 +77,10 @@ and capabilities fetched from the **selected box**. They do not use the managed/
 box. Switching boxes resets or scopes this cache; an unreachable box leaves stored accounts manageable but its
 CLI/harness rows unavailable.
 
+For installed clients, `GET /api/connections` retains its existing CLI-login state and standalone harness rows from
+the managed/relay box. Updated clients replace those legacy box fields with the selected box's state; compatibility
+does not make the managed box authoritative for a BYOB box.
+
 - The probe uses the configured `CLOUDAGENTS_*_COMMAND`, including native-binary path overrides.
 - Free OpenCode requires 2.0; Go requires 2.1 and its own saved key; Antigravity requires 1.5 and its Google sign-in.
   Install OpenCode with `npm i -g @opencode/cli`; `opencode-ai` and opencode.ai/install are OpenCode 1.
