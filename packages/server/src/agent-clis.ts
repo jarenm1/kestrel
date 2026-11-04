@@ -189,6 +189,7 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true },
   // Anthropic-compatible gateways run through Claude Code.
   openrouter: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  zai: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
   opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.

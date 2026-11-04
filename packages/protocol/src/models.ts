@@ -9,6 +9,7 @@ export const ModelProvider = Schema.Literal(
   "anthropic",
   "openai",
   "openrouter",
+  "zai",
   "opencode",
   "google",
   "omp",
@@ -91,6 +92,8 @@ export const AgentModel = Schema.Literal(
   "anthropic/claude-opus-5.5",
   "anthropic/claude-sonnet-5.5",
   "anthropic/claude-haiku-5.5",
+  "glm-5.3[1m]",
+  "glm-5.3-flash[1m]",
   "opencode/big-pickle",
   "opencode/glm-5.3-flash-free",
   "opencode/deepseek-v4.1-flash-free",
@@ -164,6 +167,8 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "anthropic/claude-sonnet-5.5", provider: "openrouter", name: "Claude Sonnet 5.5", efforts: CLAUDE_ALL, shownByDefault: true },
   { id: "anthropic/claude-fable-5.1", provider: "openrouter", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: false },
   { id: "anthropic/claude-haiku-5.5", provider: "openrouter", name: "Claude Haiku 5.5", efforts: CLAUDE_ALL, shownByDefault: false },
+  { id: "glm-5.3[1m]", provider: "zai", name: "GLM-5.3", efforts: [], shownByDefault: true, compactWindow: 1_000_000 },
+  { id: "glm-5.3-flash[1m]", provider: "zai", name: "GLM-5.3 Flash", efforts: [], shownByDefault: false, compactWindow: 1_000_000 },
   // OpenCode's catalog id is the value its ACP `model` config option takes.
   { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },
   { id: "opencode/glm-5.3-flash-free", provider: "opencode", name: "GLM-5.3-Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
@@ -212,6 +217,7 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "anthropic", name: "Anthropic", harness: "claude", connections: ["anthropic", "claude-cli"], auth: "cli-login", mcp: true },
   { id: "openai", name: "OpenAI", harness: "codex", connections: ["openai", "codex-cli"], auth: "cli-login", mcp: true },
   { id: "openrouter", name: "OpenRouter", harness: "claude", connections: ["openrouter"], auth: "api-key", mcp: true },
+  { id: "zai", name: "Z.ai", harness: "claude", connections: ["zai"], auth: "api-key", mcp: true },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
   { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "npm i -g @opencode/cli", auth: "harness-login", mcp: true },
   // Google's models reach Antigravity CLI only through the user's Google sign-in, a CLI login like Claude's or ChatGPT's.

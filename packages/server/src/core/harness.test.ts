@@ -37,6 +37,7 @@ const harnessLayer = (
       anthropic: [process.execPath, cli].map((path) => `'${path.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`).join(" "),
       openai: "",
       openrouter: "",
+      zai: "",
       opencode: "",
       google: "",
       omp: "",
