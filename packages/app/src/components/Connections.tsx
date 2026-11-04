@@ -286,6 +286,8 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
+    // The button reads Disconnect while the input is empty; Enter must not send an invalid key.
+    if (apiKey.trim().length < MIN_API_KEY_LENGTH) return
     save.mutate(apiKey.trim())
   }
 
@@ -309,34 +311,30 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         )
       ) : (
         <form className="flex flex-wrap items-center gap-2" onSubmit={submit}>
-          {connection.connected ? (
-            <>
-              <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
-                Disconnect
-              </Button>
-              {modelProvider && <ModelPicker provider={modelProvider} />}
-            </>
+          <Input
+            className="max-w-xs"
+            type="password"
+            autoComplete="off"
+            aria-label={`${connection.label} API key`}
+            placeholder={connection.connected ? "Replace API key" : "API key"}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          {connection.connected && apiKey.trim().length === 0 ? (
+            <Button type="button" variant="soft" disabled={busy} onClick={() => disconnect.mutate()}>
+              Disconnect
+            </Button>
           ) : (
-            <>
-              <Input
-                className="max-w-sm"
-                type="password"
-                autoComplete="off"
-                aria-label={`${connection.label} API key`}
-                placeholder="API key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-              />
-              <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
-                Save
-              </Button>
-              {onRemove && (
-                <Button type="button" variant="soft" disabled={busy} onClick={onRemove}>
-                  Remove
-                </Button>
-              )}
-            </>
+            <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
+              Save
+            </Button>
           )}
+          {!connection.connected && onRemove && (
+            <Button type="button" variant="soft" disabled={busy} onClick={onRemove}>
+              Remove
+            </Button>
+          )}
+          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
         </form>
       )}
       {error && <Alert>{errorText(error)}</Alert>}
