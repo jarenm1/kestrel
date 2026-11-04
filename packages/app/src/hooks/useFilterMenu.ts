@@ -14,9 +14,14 @@ export const filterItemProps = {
  * State of a dropdown menu with a filter box over `items`: the open state (closing clears the filter), the items whose
  * `text` contains the filter, and props for the filter input and the list around the items. In the input, typing stays
  * in the box (the menu's typeahead would move focus to an item), ArrowDown moves to the first item, and Enter picks the
- * first match.
+ * first match. Picking closes the menu unless `keepOpen` (menus that toggle several items in one go).
  */
-export function useFilterMenu<T>(items: readonly T[], text: (item: T) => string, onPick: (item: T) => void) {
+export function useFilterMenu<T>(
+  items: readonly T[],
+  text: (item: T) => string,
+  onPick: (item: T) => void,
+  { keepOpen = false }: { keepOpen?: boolean } = {},
+) {
   const [open, setOpenState] = useState(false)
   const [filter, setFilter] = useState("")
   const listRef = useRef<HTMLDivElement>(null)
@@ -30,7 +35,7 @@ export function useFilterMenu<T>(items: readonly T[], text: (item: T) => string,
 
   function pick(item: T) {
     onPick(item)
-    setOpen(false)
+    if (!keepOpen) setOpen(false)
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -38,7 +43,7 @@ export function useFilterMenu<T>(items: readonly T[], text: (item: T) => string,
     e.stopPropagation()
     if (e.key === "ArrowDown") {
       e.preventDefault()
-      listRef.current?.querySelector<HTMLElement>("[role=menuitemradio]")?.focus()
+      listRef.current?.querySelector<HTMLElement>("[role=menuitemradio],[role=menuitemcheckbox]")?.focus()
     } else if (e.key === "Enter" && needle !== "") {
       e.preventDefault()
       const first = matches[0]

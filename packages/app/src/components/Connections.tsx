@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
 
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
+import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
@@ -201,18 +202,28 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
   )
 }
 
-/** Toggles which of the provider's models the chat's model picker offers. */
+/**
+ * Height of the model list: ten items (2rem each), scrolling past that, less only when the window has less room. Fixed
+ * for longer lists so the menu keeps its size while searching; shorter lists take their own height.
+ */
+const MODEL_LIST_ROWS = 10
+const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 7rem))"
+
+/** Toggles which of the provider's models the chat's model picker offers, with a search box over the list. */
 function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
   const all = providerModels(provider.id)
   const shown = useShownModels()[provider.id]
   const shownIds = new Set(shown.map((m) => m.id))
+  const menu = useFilterMenu(all, (m) => `${m.name} ${m.id}`, (m) => toggle(m.id, !shownIds.has(m.id)), {
+    keepOpen: true,
+  })
 
   function toggle(id: AgentModel, on: boolean) {
     setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
   }
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={menu.open} onOpenChange={menu.setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="soft" size="sm" className="ml-auto">
           {shown.length} of {all.length} shown
@@ -221,20 +232,34 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
-        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+        className="flex w-72 max-w-(--radix-dropdown-menu-content-available-width) flex-col"
       >
         <DropdownMenuLabel>{provider.name} models in chat</DropdownMenuLabel>
-        {all.map((m) => (
-          <DropdownMenuCheckboxItem
-            key={m.id}
-            checked={shownIds.has(m.id)}
-            // Keeps the menu open so several models can be toggled in one go.
-            onSelect={(e) => e.preventDefault()}
-            onCheckedChange={(on) => toggle(m.id, on)}
-          >
-            {m.name}
-          </DropdownMenuCheckboxItem>
-        ))}
+        <Input
+          {...menu.inputProps}
+          placeholder="Search models"
+          aria-label={`Search ${provider.name} models`}
+          className="mb-1 h-8 shrink-0"
+        />
+        <div
+          ref={menu.listRef}
+          className="overflow-y-auto"
+          style={all.length > MODEL_LIST_ROWS ? { height: MODEL_LIST_HEIGHT } : { maxHeight: MODEL_LIST_HEIGHT }}
+        >
+          {menu.matches.map((m) => (
+            <DropdownMenuCheckboxItem
+              key={m.id}
+              checked={shownIds.has(m.id)}
+              // Keeps the menu open so several models can be toggled in one go.
+              onSelect={(e) => e.preventDefault()}
+              onCheckedChange={(on) => toggle(m.id, on)}
+              {...filterItemProps}
+            >
+              <span className="min-w-0 flex-1 truncate">{m.name}</span>
+            </DropdownMenuCheckboxItem>
+          ))}
+          {menu.matches.length === 0 && <DropdownMenuLabel>No model matches “{menu.query}”.</DropdownMenuLabel>}
+        </div>
         <DropdownMenuSeparator />
         <DropdownMenuItem className="text-muted-foreground" onSelect={() => setShownModels(provider.id, null)}>
           Reset to defaults
