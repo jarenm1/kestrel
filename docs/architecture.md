@@ -86,9 +86,11 @@ Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop termina
 The public profile API does not expose this privacy setting, so Kestrel does not infer it from account age.
 The host resolves the numeric ID and canonical login through GitHub's `GET /users/:login`, validates the response
 against the thread owner and reuses successful lookups for the box process's lifetime. The owner's connected
-token authenticates that lookup when available; public profiles can also be resolved without one. A failed
-lookup blocks the launch rather than guessing an account. Dev-login sessions instead use
-`<login>@kestrel.invalid`, never an unrelated real GitHub identity.
+token authenticates that lookup when available; a 401 or 403 response is retried once without the token because
+profiles are public. If identity resolution still fails, the launch is blocked rather than guessing an account.
+Dev-login sessions instead use `<login>@kestrel.invalid`, never an unrelated real GitHub identity. Background
+automation and activity dispatches preserve this dev identity for the configured `DEV_SESSION_LOGIN` on both
+the legacy relay and managed-box token paths, even though they have no browser session.
 This gives fresh task homes a usable identity and takes precedence over stale identities in persisted home or
 checkout Git config. GitHub credentials authenticate a push; they do not set the author of the commits being
 pushed. Explicit Git authorship (for example `git commit --author` or a cherry-pick) still preserves the original

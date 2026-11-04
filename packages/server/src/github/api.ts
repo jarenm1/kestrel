@@ -531,7 +531,12 @@ export const GitHubLive = Layer.effect(
       const cached = commitOwners.get(login.toLowerCase())
       if (cached) return cached
       const path = `/users/${encodeURIComponent(login)}`
-      const { status, text } = yield* send(token, "GET", path)
+      let response = yield* send(token, "GET", path)
+      // Profile data is public: an expired connection must not disable unrelated task launches.
+      if (token && (response.status === 401 || response.status === 403)) {
+        response = yield* send(undefined, "GET", path)
+      }
+      const { status, text } = response
       if (status < 200 || status >= 300) return yield* Effect.fail(cliFailure(status, text, path))
       const json = yield* Effect.try({
         try: () => JSON.parse(text) as unknown,

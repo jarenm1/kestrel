@@ -984,7 +984,9 @@ export class Hub extends DurableObject<Env> {
     if (!box) {
       return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
     }
-    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(this.credentials(login)) }
+    // Background work has no browser session; identify the explicitly configured dev login here as well.
+    const creds = this.sessionCredentials({ login, dev: this.env.DEV_SESSION_LOGIN === login })
+    const headers: Record<string, string> = { [CREDENTIALS_HEADER]: JSON.stringify(creds) }
     const body = payload === undefined ? undefined : new TextEncoder().encode(JSON.stringify(payload))
     if (body !== undefined) headers["content-type"] = "application/json"
     const frame: HttpFrame = {
@@ -1016,6 +1018,7 @@ export class Hub extends DurableObject<Env> {
       iat,
       exp: iat + MANAGED_CALL_TTL_SECONDS,
       cv: this.credentialsVersion(login),
+      ...(this.env.DEV_SESSION_LOGIN === login ? { dev: true } : {}),
     })
     const body = payload === undefined ? undefined : JSON.stringify(payload)
     try {
