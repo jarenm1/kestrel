@@ -59,6 +59,20 @@ export const NEST_VOLUME_MOUNT = "/var/lib/kestrel"
 /** Environment file the guest agent writes on `configure`, read by `kestrel-box.service`. Root-owned, 0600. */
 export const NEST_BOX_ENV_FILE = "/var/lib/kestrel/box.env"
 
+/**
+ * The variables the guest agent writes to `NEST_BOX_ENV_FILE`, and nothing else. `enrollToken` only while the box has
+ * not enrolled; the box stores its secret in its data dir and then ignores the token.
+ */
+export const NEST_BOX_ENV = {
+  boxId: "CLOUDAGENTS_BOX_ID",
+  controlUrl: "CLOUDAGENTS_CONTROL_URL",
+  publicUrl: "CLOUDAGENTS_BOX_PUBLIC_URL",
+  guestAgentSocket: "CLOUDAGENTS_GUEST_AGENT_SOCKET",
+  enrollToken: "CLOUDAGENTS_NEST_ENROLL_TOKEN",
+  /** `NEST_VOLUME_MOUNT`/box. */
+  dataDir: "CLOUDAGENTS_DATA_DIR",
+} as const
+
 const RequestId = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100))
 const NonNegativeInt = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 const Bytes = NonNegativeInt
