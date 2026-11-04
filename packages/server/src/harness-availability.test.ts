@@ -28,6 +28,41 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
   expect(availableHarnesses(box, probe({ agy: "1.4.12" }))).toEqual([])
 })
 
+test("OpenCode 2.1 adds the Go plan", () => {
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.1.0" }))).toEqual(["opencode", "opencode-go"])
+  // The Go plan shares OpenCode's binary but needs 2.1; 2.0 offers only free OpenCode.
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
+})
+
+test("a configured command's own binary is what the box offers", () => {
+  const seen: string[] = []
+  const custom: HarnessProbe = {
+    which: (name) => {
+      seen.push(name)
+      return name === "/opt/opencode/bin/opencode" ? name : null
+    },
+    version: () => "opencode 2.1.0",
+  }
+  const config = {
+    fakeAgent: false,
+    sandboxPath: null,
+    agentCommands: {
+      opencode: "'/opt/opencode/bin/opencode' acp",
+      "opencode-go": `OPENCODE_CONFIG_CONTENT='{"share":"disabled"}' '/opt/opencode/bin/opencode' acp`,
+    },
+  }
+  expect(availableHarnesses(config, custom)).toEqual(["opencode", "opencode-go"])
+  expect(seen.filter((name) => name === "/opt/opencode/bin/opencode")).toHaveLength(2)
+  expect(seen).not.toContain("opencode")
+})
+
 test("a fake-agent box plays every harness itself", () => {
-  expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual(["anthropic", "openai", "opencode", "google"])
+  // The scripted agent speaks Claude stream-json, Codex app-server and ACP: OMP, Pi and Hermes stay unavailable.
+  expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual([
+    "anthropic",
+    "openai",
+    "opencode",
+    "opencode-go",
+    "google",
+  ])
 })

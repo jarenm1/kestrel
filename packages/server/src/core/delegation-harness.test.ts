@@ -36,7 +36,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
-    agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", google: "", omp: "", pi: "", hermes: "" },
+    agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "", omp: "", pi: "", hermes: "" },
     fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
     maxConcurrentRuns: 1, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3,
     githubApiUrl: "https://api.github.com",
@@ -49,7 +49,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       issue: () => Effect.succeed({ token: "test-only", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
-    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, {
       get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),

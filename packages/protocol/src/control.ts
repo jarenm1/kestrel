@@ -1,10 +1,10 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
-import { AgentModel, AcpHarnessId } from "./models"
+import { AgentModel, AcpHarnessId, HARNESS_LABELS, MODEL_PROVIDERS, type ModelProvider } from "./models"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
- * All other `/api/*` paths are relayed to the agent box. `cliAuth` is one of them; the Worker also calls it to merge connections.
+ * Box-specific paths such as `cliAuth` use the selected box directly, or its relay when no direct box is selected.
  * Requests authenticate with the `session` cookie set by the GitHub OAuth callback;
  * unauthenticated `/api/*` requests get 401 `{ _tag: "Unauthorized", message }`.
  */
@@ -32,7 +32,7 @@ export const ControlPaths = {
   desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
-  /** GET -> Connection[] */
+  /** GET -> stored Connection[] and CLI definitions; clients add selected-box state with `connectionsForBox`. */
   connections: "/api/connections",
   /** PUT { apiKey } for api-key providers -> Connection; DELETE -> 204. */
   connection: (provider: string) => `/api/connections/${provider}`,
@@ -45,22 +45,26 @@ export const ControlPaths = {
   githubBranches: (repo: string) => `/api/github/repos/${repo}/branches`,
   /** GET -> BoxStatus */
   box: "/api/box",
-  /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
+  /** GET -> CliAuthStatus[] for the signed-in user, served by the selected box (direct or relayed). */
   cliAuth: "/api/cli-auth",
   /**
-   * GET -> HarnessStatus[]: which standalone ACP harnesses this box can launch. Served by the box (relayed); the Worker
-   * also merges it into connections, where a harness the box does not have is reported unavailable.
+   * GET -> HarnessStatus[]: which standalone ACP harnesses this box can launch. Served by the box (direct or relayed).
    */
   harnessStatus: "/api/harness-status",
   /** GET -> ProviderUsage[]: the signed-in user's subscription limits, as each CLI reports them on the box. Relayed. */
   cliUsage: "/api/cli-auth/usage",
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
-   * user, replacing any login already pending for them. Relayed to the box.
+   * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Relayed.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
   /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Relayed. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
+  /**
+   * POST PutApiKeyBody -> CliAuthStatus: signs the provider's CLI in on the box with the user's API key, replacing the
+   * one it holds. Only providers that sign in with a key (`CLI_SIGN_IN`). Relayed; the key stays with the CLI on the box.
+   */
+  cliLoginKey: (provider: CliProvider) => `/api/cli-auth/${provider}/key`,
   /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
   /**
@@ -173,7 +177,7 @@ export const ConnectionKind = Schema.Literal("oauth", "apikey", "cli")
 export type ConnectionKind = typeof ConnectionKind.Type
 
 export const Connection = Schema.Struct({
-  provider: Schema.String, // "github", a MODEL_PROVIDERS id (API key), or "claude-cli" / "codex-cli"
+  provider: Schema.String, // Stored provider, managed CLI login, or client-supplied standalone harness id.
   label: Schema.String, // display name
   kind: ConnectionKind,
   connected: Schema.Boolean,
@@ -194,12 +198,12 @@ export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.m
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
 /** Subscription logins of the official agent CLIs, held per user on the box. */
-export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli")
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go")
 export type CliProvider = typeof CliProvider.Type
 
 /**
- * One standalone ACP harness as the box reports it: whether its CLI is installed where a run would start it. Carries no
- * secrets and no login state; the harness reaches models through Kestrel's broker, so its own login is not required.
+ * One standalone ACP harness as the box reports it: whether its CLI is installed where a run would start it.
+ * Carries no secrets or login state. OpenCode runs its free models; other standalone harnesses use the broker.
  */
 export const HarnessStatus = Schema.Struct({
   harness: AcpHarnessId,
@@ -210,6 +214,18 @@ export const HarnessStatus = Schema.Struct({
 })
 export type HarnessStatus = typeof HarnessStatus.Type
 
+/**
+ * How the user signs a CLI in: on the provider's own page (`cliLogin`, then `cliLoginCode` or a device code), or with
+ * an API key they paste (`cliLoginKey`).
+ */
+export const CLI_SIGN_IN = {
+  "claude-cli": "page",
+  "codex-cli": "page",
+  "antigravity-cli": "page",
+  "opencode-go": "key",
+} as const satisfies Record<CliProvider, "page" | "key">
+export type CliSignIn = (typeof CLI_SIGN_IN)[CliProvider]
+
 /** One user's CLI login on the box, as reported by the box for `cliAuth`. Carries no secrets. */
 export const CliAuthStatus = Schema.Struct({
   provider: CliProvider,
@@ -219,6 +235,50 @@ export const CliAuthStatus = Schema.Struct({
   error: Schema.optional(Schema.String),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
+
+/**
+ * Stored connections come from the Worker; CLI logins and harness availability belong to the selected box.
+ * Never retain the Worker's managed/relay-box status when that box differs from the one a chat will use.
+ */
+export const connectionsForBox = (
+  connections: readonly Connection[],
+  box: {
+    readonly cliAuth: readonly CliAuthStatus[] | undefined
+    readonly harnesses: readonly ModelProvider[] | undefined
+    readonly error?: string
+  },
+): readonly Connection[] => {
+  const stored = connections
+    .filter((connection) => !Schema.is(AcpHarnessId)(connection.provider))
+    .map((connection): Connection => {
+      if (connection.kind !== "cli" || !Schema.is(CliProvider)(connection.provider)) return connection
+      const status = box.cliAuth?.find((candidate) => candidate.provider === connection.provider)
+      const acp = MODEL_PROVIDERS.find((provider) => provider.harness === "acp" && provider.connections.includes(connection.provider))
+      const available = status !== undefined && status.error === undefined && (acp === undefined || box.harnesses?.includes(acp.id) === true)
+      const { error: _relayError, ...metadata } = connection
+      const error = status?.error ?? (available ? undefined : box.error ?? "The selected box has not reported this CLI as available.")
+      return {
+        ...metadata,
+        connected: status?.loggedIn ?? false,
+        account: status?.account ?? null,
+        available,
+        ...(error === undefined ? {} : { error }),
+      }
+    })
+  const standalone = MODEL_PROVIDERS.filter((provider) => provider.standalone === true).map((provider): Connection => {
+    const available = box.harnesses?.includes(provider.id) === true
+    return {
+      provider: provider.id,
+      label: HARNESS_LABELS[provider.id as AcpHarnessId],
+      kind: "cli",
+      connected: available,
+      account: null,
+      available,
+      ...(available ? {} : { error: box.error ?? `${provider.name} is not available on the selected box.` }),
+    }
+  })
+  return [...stored, ...standalone]
+}
 
 /** One limit of a provider subscription, e.g. its 5-hour or weekly window. */
 export const ProviderUsageWindow = Schema.Struct({

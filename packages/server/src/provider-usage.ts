@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import type {
   CliProvider,
@@ -13,7 +14,8 @@ import { discover, type DiscoveryLaunch } from "./harness-commands"
  * The subscription limits of a signed-in agent CLI, as the CLI itself reports them: Claude Code answers a `get_usage`
  * control request on its stream-json interface, Codex answers `account/rateLimits/read` over app-server (with the
  * banked resets the account holds) and spends one with `account/rateLimitResetCredit/consume`. The CLI reads and
- * refreshes its own login, so no token is read here. None of these calls starts a model turn.
+ * refreshes its own login, so no token is read here. None of these calls starts a model turn. OpenCode has no such
+ * call for a Go key: the box reads the key from OpenCode (`auth export`) and asks the Go plan's usage endpoint itself.
  */
 
 const TIMEOUT_MS = 15_000
@@ -212,3 +214,62 @@ export const useCodexBankedReset = (
       throw new Error(text(fields(record.error)?.message) ?? "codex refused the reset")
     },
   )
+
+/** The Go plan's limits for an API key, as OpenCode itself reads them (its 403 means the account has no Go plan). */
+const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+
+/** The key of the active Go credential in `opencode auth export`'s output; null when there is none. */
+export const openCodeGoKey = (value: unknown): string | null => {
+  for (const item of Array.isArray(value) ? value : []) {
+    const credential = fields(item)
+    const secret = fields(credential?.value)
+    if (credential?.integrationID === "opencode-go" && credential.active === true && secret?.type === "key" && typeof secret.key === "string") {
+      return secret.key
+    }
+  }
+  return null
+}
+
+const goWindow = (id: string, label: string, value: unknown): ProviderUsageWindow | null => {
+  const window = fields(value)
+  const used = finite(window?.percent)
+  return used === null ? null : { id, label, usedPercent: percent(used), resetsAt: isoFromString(window?.resetsAt) }
+}
+
+/** Parses the Go usage endpoint's `{ usage: { rolling, weekly, monthly } }`, each with `percent` and `resetsAt`. */
+export const parseOpenCodeGoUsage = (value: unknown): ProviderUsage => {
+  const usage = fields(fields(value)?.usage)
+  const windows = [
+    goWindow("rolling", "5-hour", usage?.rolling),
+    goWindow("weekly", "Weekly", usage?.weekly),
+    goWindow("monthly", "Monthly", usage?.monthly),
+  ].filter((window) => window !== null)
+  if (windows.length === 0) {
+    return { provider: "opencode-go", status: "unavailable", plan: null, windows: [], error: "OpenCode Go reported no limits" }
+  }
+  return { provider: "opencode-go", status: "ok", plan: "go", windows }
+}
+
+export const probeOpenCodeGoUsage = async (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS): Promise<ProviderUsage> => {
+  const { promise, resolve, reject } = Promise.withResolvers<string>()
+  execFile(launch.file, [...launch.args], { env: { ...launch.env }, cwd: launch.cwd, timeout: timeoutMs }, (err, stdout) =>
+    err ? reject(new Error("opencode auth export failed")) : resolve(stdout),
+  )
+  const exported = await promise
+  let credentials: unknown
+  try {
+    credentials = JSON.parse(exported)
+  } catch {
+    throw new Error("opencode auth export: unreadable output")
+  }
+  const key = openCodeGoKey(credentials)
+  if (key === null) return signedOut("opencode-go")
+  const response = await fetch(OPENCODE_GO_USAGE_URL, {
+    headers: { authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (response.status === 403) return signedOut("opencode-go")
+  if (response.status === 401) throw new Error("OpenCode does not accept the Go key")
+  if (!response.ok) throw new Error(`OpenCode Go usage answered ${response.status}`)
+  return parseOpenCodeGoUsage(await response.json())
+}

@@ -13,6 +13,7 @@ import {
   CliLoginStart,
   CliProvider,
   Connection,
+  connectionsForBox,
   ControlPaths,
   CreateAutomationBody,
   CreateTaskBody,
@@ -24,6 +25,7 @@ import {
   HarnessCommands,
   Me,
   Message,
+  type ModelProvider,
   Paths,
   PreviewSession,
   ProviderUsage,
@@ -131,6 +133,7 @@ export interface ApiClient {
   box(): Promise<BoxStatus>;
   cliLoginStart(provider: CliProvider): Promise<CliLoginStart>;
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
+  cliLoginKey(provider: CliProvider, body: PutApiKeyBody): Promise<CliAuthStatus>;
   cliLogout(provider: CliProvider): Promise<void>;
   listAutomations(): Promise<readonly Automation[]>;
   createAutomation(body: CreateAutomationBody): Promise<Automation>;
@@ -316,6 +319,39 @@ export function createApiClient(
     }
   }
 
+  /**
+   * The box-level half of the connections list. A box too old to report capabilities (404) still reports CLI logins:
+   * its native sign-ins stay usable while no harness is offered. Any other failure marks the whole box unavailable, so
+   * a network error can never expose a harness the box did not confirm.
+   */
+  async function boxConnectionSource(): Promise<{
+    cliAuth: readonly CliAuthStatus[] | undefined;
+    harnesses: readonly ModelProvider[] | undefined;
+    error?: string;
+  }> {
+    let cliAuth: readonly CliAuthStatus[];
+    try {
+      cliAuth = await boxRequest(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth);
+    } catch (error) {
+      return {
+        cliAuth: undefined,
+        harnesses: undefined,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    try {
+      const capabilities = await boxRequest(BoxCapabilities, "GET", Paths.capabilities);
+      return { cliAuth, harnesses: capabilities.harnesses };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return { cliAuth, harnesses: undefined };
+      return {
+        cliAuth: undefined,
+        harnesses: undefined,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   return {
     boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
@@ -355,7 +391,10 @@ export function createApiClient(
     // Control plane (served by the Worker).
     me: () => request(Me, "GET", ControlPaths.me),
     logout: () => request(Schema.Unknown, "POST", ControlPaths.logout).then(() => undefined),
-    connections: () => request(Schema.Array(Connection), "GET", ControlPaths.connections),
+    connections: async () => {
+      const stored = await request(Schema.Array(Connection), "GET", ControlPaths.connections);
+      return connectionsForBox(stored, await boxConnectionSource());
+    },
     putApiKey: (provider, body) => request(Connection, "PUT", ControlPaths.connection(provider), body),
     deleteConnection: (provider) =>
       request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)).then(() => undefined),
@@ -376,6 +415,7 @@ export function createApiClient(
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
     cliLoginCode: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
+    cliLoginKey: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
     cliLogout: (provider) =>
       boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)).then(() => undefined),
     listAutomations: () => request(Schema.Array(Automation), "GET", ControlPaths.automations),

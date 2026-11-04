@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Fiber, Layer } from "effect"
+import { createServer } from "node:http"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Run, Task } from "@cloudagents/protocol"
-import { CredentialBroker } from "../broker"
+import { CredentialBroker, CredentialBrokerLive } from "../broker"
+import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
 import { CredentialStore } from "../credentials"
@@ -18,7 +20,7 @@ import { WorkspaceLive } from "./workspace"
 const harnessLayer = (
   root: string,
   cli: string,
-  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<ReadonlyArray<CliLoginDir>>; readonly controlUrl?: string } = {},
+  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<ReadonlyArray<CliLoginDir>>; readonly controlUrl?: string; readonly realBroker?: boolean; readonly fakeAgent?: boolean } = {},
 ) => {
   const config: ServerConfig = {
     port: 8897,
@@ -42,12 +44,13 @@ const harnessLayer = (
       minimax: "",
       moonshot: "",
       opencode: "",
+      "opencode-go": "",
       google: "",
       omp: "",
       pi: "",
       hermes: "",
     },
-    fakeAgent: false,
+    fakeAgent: options.fakeAgent ?? false,
     fakeAgentRoBinds: [],
     sandbox: "off",
     sandboxPath: null,
@@ -62,28 +65,32 @@ const harnessLayer = (
     githubApiUrl: "https://api.github.com",
   }
   const configLayer = Layer.succeed(Config, config)
+  const credentialLayer = Layer.succeed(CredentialStore, {
+    get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),
+  } as never)
   const dependencies = Layer.mergeAll(
     configLayer,
     StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))),
     EventHubLive,
     // A run fails before it spawns without a model credential (a vendor key or its CLI login), so the fixture is
     // signed in: these tests exercise spawn, resume and items, not the Connections setup path.
-    Layer.succeed(CredentialStore, {
-      get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),
-    } as never),
+    credentialLayer,
     Layer.succeed(GitHub, {} as never),
-    Layer.succeed(CredentialBroker, {
-      issue: () => Effect.succeed({ token: "test-only", env: {} }),
-      revoke: () => Effect.void,
-      grantForToken: () => Effect.succeed(null),
-      onRevoke: () => () => undefined,
-      upstreamKey: () => Effect.succeed(null),
-    }),
+    options.realBroker
+      ? CredentialBrokerLive.pipe(Layer.provide(Layer.merge(configLayer, credentialLayer)))
+      : Layer.succeed(CredentialBroker, {
+          issue: () => Effect.succeed({ token: "test-only", env: {} }),
+          revoke: () => Effect.void,
+          grantForToken: () => Effect.succeed(null),
+          onRevoke: () => () => undefined,
+          upstreamKey: () => Effect.succeed(null),
+        }),
     Layer.succeed(CliAuth, {
       loggedInDirs: options.loggedInDirs ?? (() => Effect.succeed([])),
       status: () => Effect.succeed([]),
       startLogin: () => Effect.die("unused"),
       submitCode: () => Effect.die("unused"),
+      submitKey: () => Effect.die("unused"),
       logout: () => Effect.void,
       discoverCommands: () => Effect.succeed([]),
       providerUsage: () => Effect.succeed([]),
@@ -704,3 +711,73 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     await rm(root, { recursive: true, force: true })
   }
 }, 20_000)
+
+test("a Go subprocess receives no vendor credential env and its MCP token cannot call either vendor broker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-go-broker-isolation-"))
+  const cli = join(root, "go-acp.ts")
+  const { config, layer } = harnessLayer(root, cli, { realBroker: true, fakeAgent: true })
+  config.agentCommands["opencode-go"] = config.agentCommands.anthropic
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const broker = yield* CredentialBroker
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      // Keep the test off the network even if authorization regresses: an authorized request would return 424,
+      // not the required 403. The lease and its grants are the real broker's, with both vendor keys configured.
+      const server = createServer((req, res) => {
+        void handleBroker({ ...broker, upstreamKey: () => Effect.succeed(null) }, req, res)
+      })
+      const listening = Promise.withResolvers<void>()
+      server.listen(0, "127.0.0.1", () => listening.resolve())
+      yield* Effect.promise(() => listening.promise)
+      const address = server.address()
+      if (address === null || typeof address === "string") throw new Error("missing broker test port")
+      yield* Effect.promise(() => writeFile(cli, `
+import { createInterface } from "node:readline"
+const send = (id, result) => console.log(JSON.stringify({ jsonrpc: "2.0", id, result }))
+createInterface({ input: process.stdin }).on("line", async (line) => {
+  const req = JSON.parse(line)
+  if (req.method === "initialize") send(req.id, { protocolVersion: 1 })
+  if (req.method === "session/new") send(req.id, { sessionId: "go-isolation" })
+  if (req.method === "session/set_config_option") send(req.id, {})
+  if (req.method === "session/prompt") {
+    const env = Object.keys(process.env).filter((key) => /^(ANTHROPIC|OPENAI)_/.test(key)).sort()
+    const denied = []
+    for (const provider of ["anthropic", "openai"]) {
+      const response = await fetch("http://127.0.0.1:${address.port}/broker/" + process.env.CLOUDAGENTS_MCP_TOKEN + "/" + provider + "/v1/messages", { method: "POST", body: "{}" })
+      denied.push(response.status)
+    }
+    console.log(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: "go-isolation", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ env, denied }) } }
+    } }))
+    send(req.id, { stopReason: "end_turn" })
+  }
+}).on("close", () => process.exit(0))
+`))
+      const { task, run: base } = runningTask("go-isolation")
+      const run: Run = { ...base, provider: "opencode-go", model: "opencode-go/glm-5.3" }
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, { model: "opencode-go/glm-5.3" })
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        const state = yield* store.read
+        expect(state.runs.find((r) => r.id === run.id)?.status).toBe("succeeded")
+        const message = state.messages.find((m) => m.runId === run.id && m.role === "agent")
+        expect(JSON.parse(message?.text ?? "{}")).toEqual({ env: [], denied: [403, 403] })
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+        server.closeAllConnections()
+        server.close()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)

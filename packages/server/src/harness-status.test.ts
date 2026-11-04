@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import type { HarnessProbe } from "./capabilities"
-import { harnessBinary, harnessStatuses } from "./harness-status"
+import { harnessAvailability, harnessBinary, type HarnessProbe } from "./capabilities"
+import { harnessStatuses } from "./harness-status"
 
 /** A box with these binaries on its PATH, each printing `versions[name]` for `--version`. */
 const installed = (versions: Record<string, string> = {}): HarnessProbe => ({
@@ -17,6 +17,7 @@ const commands = {
   minimax: "claude -p",
   moonshot: "claude -p",
   opencode: `OPENCODE_CONFIG_CONTENT='{"share": "disabled", "update": "disable"}' opencode acp`,
+  "opencode-go": "opencode acp",
   google: 'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry',
   omp: "omp acp",
   pi: "pi-acp",
@@ -54,6 +55,24 @@ describe("harnessStatuses", () => {
     expect(statuses.every((s) => !s.available)).toBe(true)
   })
 
+  test("a configured command path is the binary the box probes, not the default name", () => {
+    const probes: string[] = []
+    const probe: HarnessProbe = {
+      which: (name) => {
+        probes.push(name)
+        return name === "/opt/opencode/bin/opencode" ? name : null
+      },
+      version: () => "opencode 2.1.0",
+    }
+    const statuses = harnessStatuses(
+      { ...box, agentCommands: { ...commands, opencode: "'/opt/opencode/bin/opencode' acp" } },
+      probe,
+    )
+    expect(statuses.find((s) => s.harness === "opencode")).toEqual({ harness: "opencode", available: true })
+    expect(probes).toContain("/opt/opencode/bin/opencode")
+    expect(probes).not.toContain("opencode")
+  })
+
   test("OpenCode is offered only from version 2; a broken shim is not trusted", () => {
     const statuses = (version: string) => harnessStatuses(box, installed({ opencode: version }))
     expect(statuses("opencode v2.0.6")[0]).toEqual({ harness: "opencode", available: true })
@@ -64,11 +83,51 @@ describe("harnessStatuses", () => {
     }
   })
 
-  test("the fake agent cannot run an ACP harness, so none is reported available", () => {
-    // Its scripted CLI config replaces every command, including the harnesses'.
+  test("the fake agent plays OpenCode, but none of the other standalone harnesses", () => {
+    // Its scripted CLI config replaces every command; only OpenCode's ACP is played.
     const fake = { ...commands, opencode: "bun fake-agent.ts", omp: "bun fake-agent.ts", pi: "bun fake-agent.ts", hermes: "bun fake-agent.ts" }
     const statuses = harnessStatuses({ ...box, agentCommands: fake, fakeAgent: true }, installed({ bun: "", opencode: "2.0.6" }))
-    expect(statuses.every((s) => !s.available)).toBe(true)
-    expect(statuses[0]?.error).toContain("fake agent")
+    expect(statuses.find((s) => s.harness === "opencode")).toEqual({ harness: "opencode", available: true })
+    for (const status of statuses.filter((s) => s.harness !== "opencode")) {
+      expect(status.available).toBe(false)
+      expect(status.error).toContain("fake agent")
+    }
+  })
+})
+
+describe("harnessAvailability", () => {
+  test("the fake agent offers OpenCode and Go without probing a binary it does not use", () => {
+    const untouched: HarnessProbe = {
+      which: () => {
+        throw new Error("the fake agent must not probe a binary")
+      },
+      version: () => {
+        throw new Error("the fake agent must not probe a binary")
+      },
+    }
+    expect(harnessAvailability("opencode", { fakeAgent: true }, untouched)).toEqual({ available: true })
+    expect(harnessAvailability("opencode-go", { fakeAgent: true }, untouched)).toEqual({ available: true })
+    expect(harnessAvailability("omp", { fakeAgent: true }, untouched).available).toBe(false)
+  })
+
+  test("OpenCode Go needs OpenCode 2.1 even though it is not a standalone harness", () => {
+    const check = (version: string) => {
+      const probes: string[] = []
+      const probe: HarnessProbe = {
+        which: (name) => {
+          probes.push(name)
+          return "/bin/opencode"
+        },
+        version: () => version,
+      }
+      return { availability: harnessAvailability("opencode-go", box, probe), probes }
+    }
+    expect(check("opencode 2.0.6").availability).toEqual({
+      available: false,
+      error: "its CLI (opencode) must be version 2.1 or newer",
+    })
+    expect(check("opencode 2.1.0").availability).toEqual({ available: true })
+    // Only the requested provider's harness is probed; a spawn never runs all four standalone probes.
+    expect(check("opencode 2.1.0").probes).toEqual(["opencode"])
   })
 })

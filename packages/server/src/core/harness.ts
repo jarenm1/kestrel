@@ -31,7 +31,7 @@ import { CredentialBroker, credentialFor, type BrokerProvider } from "../broker"
 import { boxControl } from "../control/client"
 import { CredentialStore } from "../credentials"
 import { Config, VERSION } from "../config"
-import { harnessStatuses } from "../harness-status"
+import { harnessAvailability, harnessProbe } from "../capabilities"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
@@ -245,9 +245,8 @@ const isDeltaLine = (parsed: unknown): boolean => {
 }
 
 /**
- * The CLI logins a run mounts. Anthropic/OpenAI runs get every login (either CLI may shell out to the other). A harness
- * that reaches no broker (Antigravity) gets its own login, which is how it reaches Google's models. Third-party
- * gateways and the standalone ACP harnesses mount none: they use the broker or their per-user harness home.
+ * The CLI logins a run mounts. Anthropic/OpenAI keep the two vendor logins so either CLI may shell out to the other.
+ * Go and Antigravity get only their own login; free OpenCode, gateways and standalone ACP harnesses get none.
  */
 export const loginsForProvider = <T extends { readonly provider: CliProvider }>(
   provider: ModelProvider,
@@ -255,7 +254,9 @@ export const loginsForProvider = <T extends { readonly provider: CliProvider }>(
 ): readonly T[] => {
   const harness = MODEL_HARNESS[provider]
   if (!harness.broker) return harness.cli === null ? [] : all.filter((login) => login.provider === harness.cli)
-  return provider === "anthropic" || provider === "openai" ? all : []
+  return provider === "anthropic" || provider === "openai"
+    ? all.filter((login) => login.provider === "claude-cli" || login.provider === "codex-cli")
+    : []
 }
 
 /** The Claude Code tier pins and auto-compact window for a third-party gateway run. */
@@ -764,12 +765,13 @@ export const AgentHarnessLive = Layer.effect(
           // A harness that runs its own models (OpenCode's free ones) gets no broker access at all.
           const channel = MODEL_HARNESS[provider].broker ? (cli === null ? "vendors" : brokerProviderOf(provider)) : null
           if (harness === "acp") {
-            // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run.
-            const status = harnessStatuses(config).find((candidate) => candidate.harness === provider)
-            if (status !== undefined && !status.available) {
+            // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run. Probe only the
+            // harness this run needs, so a launch never runs every harness's `--version`.
+            const availability = harnessAvailability(provider, config, harnessProbe(config.sandboxPath))
+            if (!availability.available) {
               return yield* Effect.fail(
                 new InternalError({
-                  message: `${providerInfo(provider).name} cannot run on this box: ${status.error ?? "its CLI is not installed"}.`,
+                  message: `${providerInfo(provider).name} cannot run on this box: ${availability.error ?? "its CLI is not installed"}.`,
                 }),
               )
             }

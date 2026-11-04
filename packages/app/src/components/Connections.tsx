@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import {
   AcpHarnessId,
+  CLI_SIGN_IN,
   CliProvider,
   ControlPaths,
   HARNESS_IDS,
@@ -11,7 +12,6 @@ import {
   providerInfo,
   providerModels,
   providersForHarness,
-  type CliAuthStatus,
   type CliLoginStart,
   type Connection,
   type AgentModel,
@@ -36,7 +36,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { useActiveBoxId } from "@/hooks/useActiveBox"
 import { useEnabledHarnesses } from "@/hooks/useHarness"
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { errorText } from "@/util"
@@ -51,6 +50,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "claude-cli": "Use your own Claude Pro or Max subscription.",
   "codex-cli": "Use your own ChatGPT subscription.",
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
+  "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 }
 
 /** Which agent CLIs chats may use. Each thread keeps its own model and harness; disabling one only narrows the menu. */
@@ -91,9 +91,9 @@ function HarnessCard({ connections }: { connections: readonly Connection[] | und
                 {provider?.auth === "harness-login"
                   ? missing
                     ? (row?.error ?? "Not installed on this box")
-                    : "Runs on the providers connected above"
+                    : id === "opencode" ? "Free models need no sign-in; Go uses its own key" : "Runs on the providers connected above"
                   : provider?.auth === "cli-login"
-                    ? "API key or its CLI subscription"
+                    ? id === "google" ? "Your Google account through Antigravity" : "API key or its CLI subscription"
                     : "API key from Connections"}
                 {provider?.mcp === false ? " · no MCP tools" : " · MCP tools"}
               </span>
@@ -108,17 +108,12 @@ function HarnessCard({ connections }: { connections: readonly Connection[] | und
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
 export function Connections() {
   const connections = useQuery(queries.connections())
-  const activeBoxId = useActiveBoxId()
-  // With a user box active, the CLI sign-ins live on that box, so its login state replaces the relay's view of them.
-  const direct = typeof activeBoxId === "string"
-  const cliAuth = useQuery({ ...queries.cliAuth(), enabled: direct })
-  const list = connections.data && (direct ? withBoxCli(connections.data, cliAuth.data) : connections.data)
+  const list = connections.data
 
   return (
     <>
-      <HarnessCard connections={connections.data} />
+      <HarnessCard connections={list} />
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-      {cliAuth.error && <Alert>{errorText(cliAuth.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {list && (
         <div className="flex flex-col gap-2">
@@ -198,25 +193,6 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   )
 }
 
-/**
- * Direct mode: the CLI rows take login state and availability from the user's box, where the CLI actually runs.
- * Labels and the provider list still come from the relay. Until the box answers, the CLI rows read as unavailable.
- */
-function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAuthStatus[] | undefined): Connection[] {
-  return connections.map((connection) => {
-    // A standalone ACP harness has no CLI login to merge: the relay already reports whether the box can launch it.
-    if (connection.kind !== "cli" || !Schema.is(CliProvider)(connection.provider)) return connection
-    const status = cliAuth?.find((s) => s.provider === connection.provider)
-    return {
-      ...connection,
-      connected: status?.loggedIn ?? false,
-      account: status?.account ?? null,
-      available: status !== undefined && status.error === undefined,
-      error: status?.error,
-    }
-  })
-}
-
 /** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
 function ModelListsCard({ connections }: { connections: readonly Connection[] }) {
   const connected = new Set(connectedModelProviders(connections).map((p) => p.id))
@@ -249,9 +225,11 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
         <ConnectionHeader label={provider.name} connected={connected} />
         {provider.standalone === true ? (
           <span className="text-xs text-muted-foreground">
-            {provider.connections.length === 0 ? "No sign-in needed: " : ""}
+            {provider.id === "opencode" ? "No sign-in needed: " : ""}
             {connected
-              ? "the box can launch this harness; it reaches models through Kestrel's broker."
+              ? provider.id === "opencode"
+                ? "the box runs OpenCode's free models without a Go key or broker credentials."
+                : "the box can launch this harness; it reaches models through Kestrel's broker."
               : `Not offered: this box does not have ${provider.name}'s CLI${provider.setup === undefined ? "" : ` (${provider.setup})`}.`}
             {provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}
           </span>
@@ -294,8 +272,8 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
 }
 
 /**
- * A standalone ACP harness: the box reports whether its CLI is installed. It holds no credential of its own in a run —
- * Kestrel routes the harness's model calls through its broker — so there is nothing to connect or disconnect here.
+ * A standalone ACP harness has no managed sign-in here. OpenCode runs its free models; the other harnesses reach
+ * models through Kestrel's broker, so these rows only report the selected box's installation.
  */
 function HarnessConnectionRow({ connection, harness }: { connection: Connection; harness: AcpHarnessId }) {
   const provider = providerInfo(harness)
@@ -304,7 +282,7 @@ function HarnessConnectionRow({ connection, harness }: { connection: Connection;
       <ConnectionHeader label={connection.label} connected={connection.available} />
       <span className="text-xs text-muted-foreground">
         {connection.available
-          ? `Installed on the box. Runs on the models you connected above.${provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}`
+          ? `Installed on the box. ${harness === "opencode" ? "Free models need no sign-in or Go key." : "Runs on the models you connected above."}${provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}`
           : `${connection.error ?? "its CLI is not installed on the box"}. Install ${provider.name} on the box to offer it in the model picker.`}
       </span>
       {connection.available && provider.setup !== undefined && (
@@ -413,10 +391,15 @@ function ConnectionHeader({
   )
 }
 
-/** Re-reads the relay's connections and the box's CLI sign-ins, which the CLI rows show together. */
+/**
+ * Re-reads the connections, whose CLI and harness rows come from the active box, and the usage figures a changed login
+ * moves.
+ */
 function invalidateConnections(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: keys.connections })
-  void queryClient.invalidateQueries({ queryKey: keys.cliAuth })
+  void queryClient.invalidateQueries({ queryKey: keys.usage })
+  void queryClient.invalidateQueries({ queryKey: keys.providerUsage })
+  void queryClient.invalidateQueries({ queryKey: keys.usageActivity })
 }
 
 /** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */
@@ -425,7 +408,9 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   const [login, setLogin] = useState<CliLoginStart | null>(null)
   const [expired, setExpired] = useState(false)
   const [code, setCode] = useState("")
+  const [apiKey, setApiKey] = useState("")
   const refresh = () => invalidateConnections(queryClient)
+  const keySignIn = CLI_SIGN_IN[provider] === "key"
 
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
@@ -455,8 +440,15 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
       refresh()
     },
   })
-  const busy = start.isPending || submitCode.isPending || logout.isPending
-  const error = start.error ?? submitCode.error ?? logout.error
+  const saveKey = useMutation({
+    mutationFn: (key: string) => api.cliLoginKey(provider, { apiKey: key }),
+    onSuccess: () => {
+      setApiKey("")
+      refresh()
+    },
+  })
+  const busy = start.isPending || submitCode.isPending || saveKey.isPending || logout.isPending
+  const error = start.error ?? submitCode.error ?? saveKey.error ?? logout.error
 
   useEffect(() => {
     if (connection.connected) setLogin(null)
@@ -514,6 +506,33 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
         </>
       )
     }
+    if (keySignIn) {
+      return (
+        <>
+          <p className="text-muted-foreground">{CLI_INTRO[provider]}</p>
+          <form
+            className="flex flex-wrap gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              saveKey.mutate(apiKey.trim())
+            }}
+          >
+            <Input
+              className="max-w-sm"
+              type="password"
+              autoComplete="off"
+              placeholder="API key"
+              aria-label={`${connection.label} API key`}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
+            <Button type="submit" disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}>
+              Save
+            </Button>
+          </form>
+        </>
+      )
+    }
     if (login && expired) {
       return (
         <>
@@ -544,7 +563,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
               className="max-w-xs"
               autoComplete="off"
               placeholder="Code"
-              aria-label="Code from the Claude sign-in page"
+              aria-label="Code from the sign-in page"
               value={code}
               onChange={(e) => setCode(e.target.value)}
             />

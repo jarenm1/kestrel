@@ -1,9 +1,10 @@
 import { Schema } from "effect"
 
 /**
- * Model families the box runs. Anthropic models run through Claude Code, OpenAI models through codex, OpenCode and
- * Antigravity CLI run their own providers' models over the Agent Client Protocol, and every other provider exposes an
- * Anthropic Messages endpoint and runs through Claude Code too (see `harness` below).
+ * Model families the box runs. Anthropic models run through Claude Code, OpenAI models through codex, OpenCode (its
+ * free models and its Go plan) and Antigravity CLI run their own providers' models over the Agent Client Protocol,
+ * and every other provider exposes an Anthropic Messages endpoint and runs through Claude Code too (see `harness`
+ * below).
  */
 export const ModelProvider = Schema.Literal(
   "anthropic",
@@ -14,6 +15,7 @@ export const ModelProvider = Schema.Literal(
   "minimax",
   "moonshot",
   "opencode",
+  "opencode-go",
   "google",
   "omp",
   "pi",
@@ -70,7 +72,8 @@ export const EFFORT_LABELS: Record<AgentEffort, string> = {
 
 /**
  * Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`, the ACP `model`
- * config option of OpenCode, which names OpenCode's own provider first, and of Antigravity CLI).
+ * config option of OpenCode, which names OpenCode's own provider first (`opencode` free, `opencode-go` Go), and of
+ * Antigravity CLI).
  */
 export const AgentModel = Schema.Literal(
   "claude-fable-5-1",
@@ -113,6 +116,28 @@ export const AgentModel = Schema.Literal(
   "opencode/nemotron-3.5-lightning-free",
   "opencode/nemotron-3.5-super-vl-free",
   "opencode/pulse-alpha-free",
+  "opencode-go/kimi-k3.1-pro",
+  "opencode-go/minimax-m3.1-flash",
+  "opencode-go/mimo-v2.6-pro",
+  "opencode-go/mimo-v2.6-flash",
+  "opencode-go/grok-4.7",
+  "opencode-go/step-5-preview",
+  "opencode-go/deepseek-v4.1-flash",
+  "opencode-go/hy4-preview",
+  "opencode-go/glm-5.3-flash",
+  "opencode-go/qwen3.8-flash",
+  "opencode-go/glm-5.3",
+  "opencode-go/qwen3.8-max",
+  "opencode-go/kimi-k3",
+  "opencode-go/hy3",
+  "opencode-go/longcat-2.0",
+  "opencode-go/glm-5.2",
+  "opencode-go/kimi-k2.7-code",
+  "opencode-go/qwen3.7-plus",
+  "opencode-go/minimax-m3",
+  "opencode-go/deepseek-v4-pro",
+  "opencode-go/mimo-v2.5-pro",
+  "opencode-go/mimo-v2.5",
   "gemini-3.8-flash",
   "omp-deepseek-flash",
   "omp-deepseek-pro",
@@ -150,7 +175,8 @@ const OC_LOW_TO_MAX: readonly AgentEffort[] = ["low", "medium", "high", "xhigh",
  * Code's model configuration docs, OpenAI's model pages, and each third-party provider's Claude Code guide.
  * Providers without a documented effort scale list none, so the picker offers no unsupported control. OpenCode's
  * efforts are what its ACP `effort` option offers per model; its free models need no sign-in, and OpenCode rotates
- * them, so the list follows its own.
+ * them, so the list follows its own. OpenCode Go's are the Go plan's models that no other harness here runs (its
+ * Claude, GPT and Gemini models are left to theirs), and none of its free or contributor ones.
  */
 export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "claude-fable-5-1", provider: "anthropic", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: true },
@@ -195,6 +221,29 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "opencode/nemotron-3.5-lightning-free", provider: "opencode", name: "Nemotron 3.5 Lightning Free", efforts: [], shownByDefault: false },
   { id: "opencode/nemotron-3.5-super-vl-free", provider: "opencode", name: "Nemotron 3.5 Super VL Free", efforts: ["none", "low", "medium", "high", "xhigh"], shownByDefault: false },
   { id: "opencode/pulse-alpha-free", provider: "opencode", name: "Pulse Alpha Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: false },
+  { id: "opencode-go/kimi-k3.1-pro", provider: "opencode-go", name: "Kimi K3.1 Pro", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
+  { id: "opencode-go/minimax-m3.1-flash", provider: "opencode-go", name: "MiniMax M3.1 Flash", efforts: OC_LOW_TO_MAX, shownByDefault: true },
+  { id: "opencode-go/mimo-v2.6-pro", provider: "opencode-go", name: "MiMo-V2.6-Pro", efforts: [], shownByDefault: false },
+  { id: "opencode-go/mimo-v2.6-flash", provider: "opencode-go", name: "MiMo-V2.6-Flash", efforts: [], shownByDefault: false },
+  { id: "opencode-go/grok-4.7", provider: "opencode-go", name: "Grok 4.7", efforts: ["low", "medium", "high", "xhigh"], shownByDefault: false },
+  { id: "opencode-go/step-5-preview", provider: "opencode-go", name: "Step 5 Preview", efforts: ["low", "medium", "high"], shownByDefault: false },
+  { id: "opencode-go/deepseek-v4.1-flash", provider: "opencode-go", name: "DeepSeek V4.1 Flash", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
+  { id: "opencode-go/hy4-preview", provider: "opencode-go", name: "Hy4 preview", efforts: ["none", "high"], shownByDefault: false },
+  { id: "opencode-go/glm-5.3-flash", provider: "opencode-go", name: "GLM-5.3-Flash", efforts: OC_LOW_HIGH_MAX, shownByDefault: false },
+  { id: "opencode-go/qwen3.8-flash", provider: "opencode-go", name: "Qwen3.8 Flash", efforts: ["none", "low", "medium", "xhigh"], shownByDefault: false },
+  { id: "opencode-go/glm-5.3", provider: "opencode-go", name: "GLM-5.3", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
+  { id: "opencode-go/qwen3.8-max", provider: "opencode-go", name: "Qwen3.8 Max", efforts: ["none", "low", "medium", "xhigh"], shownByDefault: true },
+  { id: "opencode-go/kimi-k3", provider: "opencode-go", name: "Kimi K3", efforts: ["max"], shownByDefault: false },
+  { id: "opencode-go/hy3", provider: "opencode-go", name: "Hy3", efforts: ["none", "low", "high"], shownByDefault: false },
+  { id: "opencode-go/longcat-2.0", provider: "opencode-go", name: "LongCat-2.0", efforts: [], shownByDefault: false },
+  { id: "opencode-go/glm-5.2", provider: "opencode-go", name: "GLM-5.2", efforts: ["high", "max"], shownByDefault: false },
+  { id: "opencode-go/kimi-k2.7-code", provider: "opencode-go", name: "Kimi K2.7 Code", efforts: [], shownByDefault: false },
+  { id: "opencode-go/qwen3.7-plus", provider: "opencode-go", name: "Qwen3.7 Plus", efforts: ["none", "high", "max"], shownByDefault: false },
+  // Its thinking switch (`none` / `thinking`) has no Kestrel level; it runs at OpenCode's default.
+  { id: "opencode-go/minimax-m3", provider: "opencode-go", name: "MiniMax-M3", efforts: [], shownByDefault: false },
+  { id: "opencode-go/deepseek-v4-pro", provider: "opencode-go", name: "DeepSeek V4 Pro", efforts: ["high", "max"], shownByDefault: false },
+  { id: "opencode-go/mimo-v2.5-pro", provider: "opencode-go", name: "MiMo V2.5 Pro", efforts: [], shownByDefault: false },
+  { id: "opencode-go/mimo-v2.5", provider: "opencode-go", name: "MiMo V2.5", efforts: [], shownByDefault: false },
   // What a signed-in Google account's Antigravity CLI offers, with its `thought_level` option.
   { id: "gemini-3.8-flash", provider: "google", name: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"], shownByDefault: true },
   // ACP harnesses can switch models per chat; `acpModel` is the value their ACP config option takes.
@@ -238,6 +287,8 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "moonshot", name: "Kimi (Moonshot AI)", harness: "claude", connections: ["moonshot"], auth: "api-key", mcp: true, hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported." },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
   { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "npm i -g @opencode/cli", auth: "harness-login", mcp: true },
+  // OpenCode Go runs on the same OpenCode CLI (2.1), but needs the Go plan's key; it is not a standalone harness.
+  { id: "opencode-go", name: "OpenCode Go", harness: "acp", connections: ["opencode-go"], auth: "api-key", mcp: true },
   // Google's models reach Antigravity CLI only through the user's Google sign-in, a CLI login like Claude's or ChatGPT's.
   { id: "google", name: "Google", harness: "acp", connections: ["antigravity-cli"], auth: "cli-login", mcp: true, hint: "Sign in with your Google account above; Antigravity CLI has no key." },
   { id: "omp", name: "OMP", harness: "acp", connections: [], standalone: true, setup: "omp login, run in its harness home", auth: "harness-login", mcp: true },
@@ -266,6 +317,8 @@ export const providerHarness = (id: ModelProvider): AgentHarness => providerInfo
 /** The thread-facing harness id of a provider: the provider itself for ACP, otherwise its CLI. */
 export const harnessIdOfProvider = (id: ModelProvider): HarnessId => {
   const info = providerInfo(id)
+  // OpenCode Go runs on OpenCode's own ACP harness (its CLI, its catalog); only its provider id names the Go plan.
+  if (id === "opencode-go") return "opencode"
   // An ACP harness is the provider itself: OpenCode and Antigravity run their own models, OMP/Pi/Hermes their own CLI.
   return info.harness === "acp" ? (id as HarnessId) : info.harness === "codex" ? "codex" : "claude"
 }
@@ -327,7 +380,7 @@ export const connectedModelProviders = (
       enabledHarnesses.includes(harnessIdOfProvider(p.id)) &&
       (p.standalone === true
         ? connections.some((c) => c.provider === p.id && c.connected && c.enabled !== false && c.available !== false)
-        : connections.some((c) => c.connected && c.enabled !== false && p.connections.includes(c.provider))),
+        : connections.some((c) => c.connected && c.enabled !== false && c.available !== false && p.connections.includes(c.provider))),
   )
 
 /**

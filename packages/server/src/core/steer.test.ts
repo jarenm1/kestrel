@@ -21,7 +21,7 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
     port: 8898, host: "127.0.0.1", sandboxPort: 8898, mcpBaseUrl: "http://127.0.0.1:8898", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
-    agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", google: "", omp: "", pi: "", hermes: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
+    agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "", omp: "", pi: "", hermes: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
     sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 0, relay: null, direct: null, toolkitsFlake: null,
     taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseClaudeUsage, parseCodexResetOutcome, parseCodexUsage } from "./provider-usage"
+import { openCodeGoKey, parseClaudeUsage, parseCodexResetOutcome, parseCodexUsage, parseOpenCodeGoUsage } from "./provider-usage"
 
 describe("parseClaudeUsage", () => {
   test("reads the session, weekly and extra usage windows, not per-model ones", () => {
@@ -113,5 +113,32 @@ describe("parseCodexResetOutcome", () => {
     expect(parseCodexResetOutcome({ outcome: "nothingToReset" })).toEqual({ outcome: "nothing_to_reset" })
     expect(parseCodexResetOutcome({ outcome: "noCredit" })).toEqual({ outcome: "no_reset" })
     expect(() => parseCodexResetOutcome({ outcome: "later" })).toThrow()
+  })
+})
+
+describe("OpenCode Go usage", () => {
+  test("uses only the active Go key, never a different integration or an inactive account", () => {
+    expect(openCodeGoKey([
+      { integrationID: "opencode", active: true, value: { type: "key", key: "console" } },
+      { integrationID: "opencode-go", active: false, value: { type: "key", key: "old" } },
+      { integrationID: "opencode-go", active: true, value: { type: "key", key: "current" } },
+    ])).toBe("current")
+    expect(openCodeGoKey([{ integrationID: "opencode-go", active: true, value: { type: "oauth", access: "token" } }])).toBeNull()
+  })
+
+  test("maps all three windows, normalizes reset times and bounds percentages", () => {
+    expect(parseOpenCodeGoUsage({ usage: {
+      rolling: { percent: 12.5, resetsAt: "2026-11-04T01:00:00-05:00" },
+      weekly: { percent: 125, resetsAt: null },
+      monthly: { percent: -1, resetsAt: "unknown" },
+    } })).toEqual({
+      provider: "opencode-go", status: "ok", plan: "go",
+      windows: [
+        { id: "rolling", label: "5-hour", usedPercent: 12.5, resetsAt: "2026-11-04T06:00:00.000Z" },
+        { id: "weekly", label: "Weekly", usedPercent: 100, resetsAt: null },
+        { id: "monthly", label: "Monthly", usedPercent: 0, resetsAt: null },
+      ],
+    })
+    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: Number.NaN } } }).status).toBe("unavailable")
   })
 })

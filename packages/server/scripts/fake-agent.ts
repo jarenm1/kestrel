@@ -27,7 +27,7 @@ if (!mcpUrl || !mcpToken) {
 }
 
 const appServer = model?.startsWith("gpt-") === true
-const acp = model?.startsWith("opencode/") === true || model?.startsWith("gemini-") === true
+const acp = /^opencode(-go)?\//.test(model ?? "") || model?.startsWith("gemini-") === true
 // A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
 // `thread/start` or `thread/resume` response, an ACP run's session in `session/new` (or the one `session/resume` names).
 // A resumed run keeps its session.

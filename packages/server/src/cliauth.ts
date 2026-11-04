@@ -56,6 +56,8 @@ export interface CliAuthShape {
     provider: CliProvider,
     code: string,
   ) => Effect.Effect<CliAuthStatus, BadRequest | InternalError>
+  /** Stores a key through the CLI's own credential importer; never puts it on a command line. */
+  readonly submitKey: (user: string, provider: CliProvider, key: string) => Effect.Effect<CliAuthStatus, BadRequest | InternalError>
   readonly logout: (user: string, provider: CliProvider) => Effect.Effect<void, BadRequest | InternalError>
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
@@ -93,13 +95,17 @@ interface Invocation {
 }
 
 /** Runs a CLI. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
-const runCli = (inv: Invocation, label: string): Effect.Effect<CliOutput | null, InternalError> =>
+const runCli = (inv: Invocation, label: string, input?: string, requireSuccess = false): Effect.Effect<CliOutput | null, InternalError> =>
   Effect.async<CliOutput | null, InternalError>((resume) => {
-    execFile(inv.file, [...inv.args], { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
+    const child = execFile(inv.file, [...inv.args], { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
       if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return resume(Effect.succeed(null))
       if (err && err.killed) return resume(Effect.fail(new InternalError({ message: `${label}: timed out` })))
+      if (err && requireSuccess) return resume(Effect.fail(new InternalError({ message: `${label}: command failed` })))
       resume(Effect.succeed({ stdout, stderr }))
     })
+    child.stdin?.on("error", () => {})
+    child.stdin?.end(input)
+    return Effect.sync(() => child.kill())
   })
 
 const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
@@ -473,11 +479,13 @@ export const CliAuthLive = Layer.effect(
     const startLogin = (user: string, provider: CliProvider): Effect.Effect<CliLoginStart, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const spec = AGENT_CLIS[provider]
+        const signIn = spec.signIn
+        if (signIn.kind !== "page") return yield* Effect.fail(new BadRequest({ message: `${provider} signs in with an API key` }))
         yield* ensureUserDirs(user, provider)
         const key = keyOf(user, provider)
         const previous = pending.get(key)
         if (previous) killEntry(previous)
-        const inv = yield* invoke(user, spec.bin, spec.login(yield* providerDir(user, provider)))
+        const inv = yield* invoke(user, spec.bin, signIn.args(yield* providerDir(user, provider)))
         const child = yield* Effect.try({
           try: () =>
             ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
@@ -509,7 +517,7 @@ export const CliAuthLive = Layer.effect(
         })
         pending.set(key, entry)
 
-        const link = yield* Effect.promise(() => waitFor(entry, (text) => spec.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS))
+        const link = yield* Effect.promise(() => waitFor(entry, (text) => signIn.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS))
         if (link === null) {
           killEntry(entry)
           const detail = lastLine(entry.output, [])
@@ -521,7 +529,7 @@ export const CliAuthLive = Layer.effect(
           provider,
           url: link.url,
           userCode: link.userCode,
-          needsCode: spec.needsCode,
+          needsCode: signIn.needsCode,
           expiresAt: new Date(expiresAt).toISOString(),
         }
       })
@@ -534,7 +542,7 @@ export const CliAuthLive = Layer.effect(
       Effect.gen(function* () {
         yield* rootOf(user)
         const spec = AGENT_CLIS[provider]
-        if (!spec.needsCode) {
+        if (spec.signIn.kind !== "page" || !spec.signIn.needsCode) {
           return yield* Effect.fail(
             new BadRequest({ message: `${provider} signs in with a device code on the provider's page; there is no code to submit` }),
           )
@@ -598,6 +606,31 @@ export const CliAuthLive = Layer.effect(
         }
       })
 
+    const submitKey = (user: string, provider: CliProvider, rawKey: string): Effect.Effect<CliAuthStatus, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        const spec = AGENT_CLIS[provider]
+        const signIn = spec.signIn
+        if (signIn.kind !== "key") return yield* Effect.fail(new BadRequest({ message: `${provider} signs in on the provider's page` }))
+        const key = rawKey.trim()
+        if (key.length < 8 || key.length > 4096 || /[\r\n]/.test(key)) {
+          return yield* Effect.fail(new BadRequest({ message: "API key must be one line of 8–4096 characters" }))
+        }
+        yield* ensureUserDirs(user, provider)
+        // Import skips an existing credential ID, so remove just that credential, retaining the CLI's sessions.
+        if (spec.logout !== null) {
+          const revoke = yield* invoke(user, spec.bin, spec.logout)
+          yield* runCli(revoke, `${spec.bin} logout`)
+        }
+        const inv = yield* invoke(user, spec.bin, signIn.args)
+        const stored = yield* runCli(inv, `${spec.bin} key import`, signIn.stdin(key), true)
+        if (stored === null) return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed` }))
+        usageCache.delete(keyOf(user, provider))
+        usageEpochs.set(keyOf(user, provider), (usageEpochs.get(keyOf(user, provider)) ?? 0) + 1)
+        const result = yield* readStatus(user, provider)
+        if (!result.loggedIn) return yield* Effect.fail(new InternalError({ message: `${spec.bin} did not store the key` }))
+        return result
+      })
+
     const loggedInDirs = (user: string): Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError> =>
       Effect.map(
         Effect.all(
@@ -628,6 +661,7 @@ export const CliAuthLive = Layer.effect(
       status,
       startLogin,
       submitCode,
+      submitKey,
       logout,
       loggedInDirs,
       discoverCommands,

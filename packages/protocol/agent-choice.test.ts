@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { AGENT_MODELS, MODEL_PROVIDERS, resolveAgentChoice, threadChoiceRun, type AgentEffort, type AgentModel } from "./src/models"
+import { AGENT_MODELS, MODEL_PROVIDERS, connectedModelProviders, resolveAgentChoice, resolveModelRoute, threadChoiceRun, type AgentEffort, type AgentModel } from "./src/models"
+import { connectionsForBox, type Connection } from "./src/control"
 
 const anthropic = AGENT_MODELS.filter((m) => m.provider === "anthropic" && m.efforts.length > 0)
 const [first, second, hidden] = anthropic.map((m) => m.id) as [AgentModel, AgentModel, AgentModel]
@@ -93,5 +94,55 @@ describe("threadChoiceRun", () => {
   test("a thread with no run that recorded a model has no choice to restore", () => {
     expect(threadChoiceRun([{ id: "a" }], [typed("a", "1")])).toBeUndefined()
     expect(threadChoiceRun([], [])).toBeUndefined()
+  })
+})
+
+describe("selected-box connections", () => {
+  const cli = (provider: string, connected: boolean): Connection => ({
+    provider, label: provider, kind: "cli", connected, account: null, available: connected,
+  })
+
+  test("box-local Go login and harnesses replace conflicting relay state across a box switch", () => {
+    const relay = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
+    const selected = connectionsForBox(relay, {
+      cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
+      harnesses: ["opencode", "opencode-go"],
+    })
+    expect(connectedModelProviders(selected).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
+    expect(selected.find((connection) => connection.provider === "opencode-go")?.error).toBeUndefined()
+    const route = resolveModelRoute({ harnessId: "opencode", modelId: "opencode-go/glm-5.3", connections: selected })
+    expect(route.ok && route.route.provider).toBe("opencode-go")
+
+    const switched = connectionsForBox(selected, {
+      cliAuth: [{ provider: "opencode-go", loggedIn: false, account: null }],
+      harnesses: [],
+    })
+    expect(connectedModelProviders(switched).map((provider) => provider.id)).toEqual([])
+    expect(resolveModelRoute({ modelId: "opencode/big-pickle", connections: switched }).ok).toBe(false)
+  })
+
+  test("an installed free OpenCode cannot make a saved Go key runnable before Go's minimum version", () => {
+    const rows = connectionsForBox([cli("opencode-go", true)], {
+      cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
+      harnesses: ["opencode"],
+    })
+    expect(rows.find((connection) => connection.provider === "opencode-go")?.connected).toBe(true)
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["opencode"])
+    const route = resolveModelRoute({ modelId: "opencode-go/glm-5.3", connections: rows })
+    expect(route.ok ? null : route.code).toBe("connection-unavailable")
+  })
+
+  test("an unreachable box clears stale CLI availability without discarding stored API keys", () => {
+    const key: Connection = { provider: "anthropic", label: "Anthropic", kind: "apikey", connected: true, account: "saved key", available: true }
+    const rows = connectionsForBox([key, cli("opencode-go", true), cli("opencode", true)], {
+      cliAuth: undefined,
+      harnesses: undefined,
+      error: "Selected box is offline",
+    })
+    expect(rows.find((connection) => connection.provider === "anthropic")).toEqual(key)
+    expect(rows.find((connection) => connection.provider === "opencode-go")).toMatchObject({
+      connected: false, available: false, error: "Selected box is offline",
+    })
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["anthropic"])
   })
 })

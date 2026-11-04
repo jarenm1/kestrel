@@ -2,7 +2,9 @@ import { Effect } from "effect"
 import {
   CliProvider,
   InternalError,
+  type CLI_SIGN_IN,
   type CliAuthStatus,
+  type CliSignIn,
   type HarnessCommand,
   type ModelProvider,
   type ProviderUsage,
@@ -15,7 +17,7 @@ import {
   discoverCodexCommands,
   type DiscoveryLaunch,
 } from "./harness-commands"
-import { probeClaudeUsage, probeCodexUsage, useCodexBankedReset } from "./provider-usage"
+import { probeClaudeUsage, probeCodexUsage, probeOpenCodeGoUsage, useCodexBankedReset } from "./provider-usage"
 
 /**
  * How the harness holds a run's conversation with its CLI over stdin (`RunConversation` in `core/harness.ts`): Claude
@@ -29,12 +31,32 @@ export interface CliOutput {
   readonly stderr: string
 }
 
+/** The CLI's own sign-in, which the user finishes on the provider's page. */
+interface PageSignIn {
+  readonly kind: "page"
+  /** Starts the sign-in; `dir` is the user's login directory (also `configEnv` in the CLI's environment). */
+  readonly args: (dir: string) => ReadonlyArray<string>
+  /** The sign-in link (and device code, when the CLI uses one) in its output with ANSI codes removed; null until printed. */
+  readonly parseLoginLink: (text: string) => { readonly url: string; readonly userCode: string | null } | null
+  /** Sign-in ends with a code the user pastes back; otherwise it ends on the provider's page (a device code). */
+  readonly needsCode: boolean
+}
+
+/** A sign-in with the user's API key, which the CLI stores itself. */
+interface KeySignIn {
+  readonly kind: "key"
+  /** Stores the key, which it reads from stdin; the CLI's `logout` first removes the one it holds. */
+  readonly args: ReadonlyArray<string>
+  /** What to write to the CLI's stdin for `key`. */
+  readonly stdin: (key: string) => string
+}
+
 /**
  * Everything the box knows about one agent CLI with a login Kestrel manages: where its login and sessions live, how a
  * user signs in to it, and how to ask it for commands and limits. A CLI with a login is a new `CliProvider` with an
- * entry in `AGENT_CLIS`; the record type makes every field required.
+ * entry in `AGENT_CLIS` and in `CLI_SIGN_IN`, which picks its kind of sign-in; the record type makes every field required.
  */
-export interface AgentCli {
+export interface AgentCli<K extends CliSignIn = CliSignIn> {
   readonly bin: string
   /** Directory under the user's root that holds their login: the CLI's config home while they are signed in. */
   readonly dir: string
@@ -49,14 +71,9 @@ export interface AgentCli {
   readonly status:
     | { readonly kind: "command"; readonly args: ReadonlyArray<string>; readonly parse: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError> }
     | { readonly kind: "file"; readonly path: string }
-  /** Starts the sign-in; `dir` is the user's login directory (also `configEnv` in the CLI's environment). */
-  readonly login: (dir: string) => ReadonlyArray<string>
+  readonly signIn: K extends "page" ? PageSignIn : KeySignIn
   /** Revokes the login before its directory is removed; null when removing the directory is the whole sign-out. */
   readonly logout: ReadonlyArray<string> | null
-  /** The sign-in link (and device code, when the CLI uses one) in its output with ANSI codes removed; null until printed. */
-  readonly parseLoginLink: (text: string) => { readonly url: string; readonly userCode: string | null } | null
-  /** Sign-in ends with a code the user pastes back; otherwise it ends on the provider's page (a device code). */
-  readonly needsCode: boolean
   /** The CLI's machine interface for command discovery and limits; null when Kestrel asks it for neither. */
   readonly probe: {
     /** Starts the interface that command discovery and the usage probe talk to. */
@@ -100,21 +117,44 @@ const parseCodexStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
     return { provider: "codex-cli", loggedIn: true, account: match[1] ?? null }
   })
 
-export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
+/** OpenCode's own id for the Go plan's integration, and for the one credential Kestrel keeps in it. */
+const OPENCODE_GO = "opencode-go"
+const OPENCODE_GO_CREDENTIAL = "cred_kestrel"
+
+/** `auth list --format json`: the integrations with their connections; Go is signed in while it has one. */
+const parseOpenCodeGoStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
+  Effect.gen(function* () {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(out.stdout)
+    } catch {
+      const detail = out.stderr.trim().split("\n")[0]?.slice(0, 200) || "no output"
+      return yield* Effect.fail(new InternalError({ message: `opencode auth list: unreadable output (${detail})` }))
+    }
+    if (!Array.isArray(parsed)) return yield* Effect.fail(new InternalError({ message: "opencode auth list: unexpected output" }))
+    const go: unknown = parsed.find((entry) => typeof entry === "object" && entry !== null && entry.id === OPENCODE_GO)
+    const connections = typeof go === "object" && go !== null && "connections" in go ? go.connections : null
+    return { provider: "opencode-go", loggedIn: Array.isArray(connections) && connections.length > 0, account: null }
+  })
+
+export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIGN_IN)[P]> } = {
   "claude-cli": {
     bin: "claude",
     dir: "claude",
     configEnv: "CLAUDE_CONFIG_DIR",
     brokerEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
     status: { kind: "command", args: ["auth", "status", "--json"], parse: parseClaudeStatus },
-    login: () => ["auth", "login"],
-    logout: ["auth", "logout"],
-    parseLoginLink: (text) => {
-      // The line ends with the link, so a half-written link is not taken.
-      const url = /https:\/\/[^\s]*claude\.(?:com|ai)\/[^\s]*(?=\r?\n)/.exec(text)?.[0]
-      return url === undefined ? null : { url, userCode: null }
+    signIn: {
+      kind: "page",
+      args: () => ["auth", "login"],
+      parseLoginLink: (text) => {
+        // The line ends with the link, so a half-written link is not taken.
+        const url = /https:\/\/[^\s]*claude\.(?:com|ai)\/[^\s]*(?=\r?\n)/.exec(text)?.[0]
+        return url === undefined ? null : { url, userCode: null }
+      },
+      needsCode: true,
     },
-    needsCode: true,
+    logout: ["auth", "logout"],
     probe: { args: CLAUDE_DISCOVERY_ARGS, discoverCommands: discoverClaudeCommands, probeUsage: probeClaudeUsage, useBankedReset: null },
   },
   "codex-cli": {
@@ -123,17 +163,20 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
     configEnv: "CODEX_HOME",
     brokerEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
     status: { kind: "command", args: ["login", "status"], parse: parseCodexStatus },
-    login: () => ["login", "--device-auth"],
-    logout: ["logout"],
-    parseLoginLink: (text) => {
-      const lines = text.split(/\r?\n/).map((line) => line.trim())
-      const url = lines.map((line) => /^https:\/\/auth\.openai\.com\/\S*$/.exec(line)?.[0]).find((u) => u !== undefined)
-      const at = lines.findIndex((line) => /one-time code/i.test(line))
-      const userCode = at < 0 ? undefined : lines.slice(at + 1).find((line) => line !== "")
-      if (url === undefined || userCode === undefined || !/^[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(userCode)) return null
-      return { url, userCode }
+    signIn: {
+      kind: "page",
+      args: () => ["login", "--device-auth"],
+      parseLoginLink: (text) => {
+        const lines = text.split(/\r?\n/).map((line) => line.trim())
+        const url = lines.map((line) => /^https:\/\/auth\.openai\.com\/\S*$/.exec(line)?.[0]).find((u) => u !== undefined)
+        const at = lines.findIndex((line) => /one-time code/i.test(line))
+        const userCode = at < 0 ? undefined : lines.slice(at + 1).find((line) => line !== "")
+        if (url === undefined || userCode === undefined || !/^[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(userCode)) return null
+        return { url, userCode }
+      },
+      needsCode: false,
     },
-    needsCode: false,
+    logout: ["logout"],
     probe: { args: CODEX_DISCOVERY_ARGS, discoverCommands: discoverCodexCommands, probeUsage: probeCodexUsage, useBankedReset: useCodexBankedReset },
   },
   // Antigravity CLI keeps everything (its sign-in token, sessions, settings) under the directory `--gemini-dir`
@@ -145,18 +188,43 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
     configEnv: "AGY_GEMINI_DIR",
     brokerEnv: [],
     status: { kind: "file", path: "antigravity-cli/antigravity-oauth-token" },
-    // `acp --login` signs in and exits: it prints a Google link whose page shows a code, and takes the code (or that
-    // page's URL) on stdin.
-    login: (dir) => ["acp", "--login", "--gemini-dir", dir, "--disable-telemetry"],
-    logout: null,
-    parseLoginLink: (text) => {
-      // The line ends with the link, so a half-written link is not taken.
-      const url = /^\s*(https:\/\/accounts\.google\.com\/\S+)[ \t]*\r?\n/m.exec(text)?.[1]
-      return url === undefined ? null : { url, userCode: null }
+    signIn: {
+      kind: "page",
+      // `acp --login` signs in and exits: it prints a Google link whose page shows a code, and takes the code (or that
+      // page's URL) on stdin.
+      args: (dir) => ["acp", "--login", "--gemini-dir", dir, "--disable-telemetry"],
+      parseLoginLink: (text) => {
+        // The line ends with the link, so a half-written link is not taken.
+        const url = /^\s*(https:\/\/accounts\.google\.com\/\S+)[ \t]*\r?\n/m.exec(text)?.[1]
+        return url === undefined ? null : { url, userCode: null }
+      },
+      needsCode: true,
     },
-    needsCode: true,
+    logout: null,
     // Its commands and limits only show inside an ACP session.
     probe: null,
+  },
+  // OpenCode 2 keeps its credentials and its sessions in one database under `$XDG_DATA_HOME/opencode`; the user's Go
+  // key goes in as one credential Kestrel names, which `auth import` (reading stdin, so the key is on no command line)
+  // adds and `auth logout` removes. `--standalone` keeps each command off OpenCode's background service.
+  "opencode-go": {
+    bin: "opencode",
+    dir: "opencode-go",
+    configEnv: "XDG_DATA_HOME",
+    brokerEnv: [],
+    status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeGoStatus },
+    signIn: {
+      kind: "key",
+      args: ["auth", "import", "--standalone"],
+      stdin: (key) =>
+        JSON.stringify([
+          { id: OPENCODE_GO_CREDENTIAL, integrationID: OPENCODE_GO, label: "OpenCode Go", active: true, value: { type: "key", key } },
+        ]),
+    },
+    logout: ["auth", "logout", OPENCODE_GO, OPENCODE_GO_CREDENTIAL, "--standalone"],
+    // OpenCode's commands do nothing over ACP; the limits come from the Go plan's usage endpoint, with the key
+    // `auth export` prints.
+    probe: { args: ["auth", "export", "--standalone"], discoverCommands: async () => [], probeUsage: probeOpenCodeGoUsage, useBankedReset: null },
   },
 }
 
@@ -165,8 +233,8 @@ export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
 
 /**
  * How each model provider's runs work: the conversation the harness holds with its CLI, and the CLI whose login can
- * stand in for the broker, which also discovers the commands a thread can run. A harness without a login Kestrel
- * manages offers no commands: OpenCode's `/init` and `/review` do nothing over ACP (2.0.6 answers `end_turn` at once).
+ * stand in for the broker, which also discovers the commands a thread can run. OpenCode offers no commands: its
+ * `/init` and `/review` do nothing over ACP (2.0.6 answers `end_turn` at once).
  */
 export interface Harness {
   readonly conversation: ConversationKind
@@ -178,8 +246,8 @@ export interface Harness {
   readonly minVersion: readonly [number, number] | null
   /**
    * Whether a run gets the broker's keys. A standalone harness reaches models through the broker like a vendor CLI;
-   * OpenCode and Antigravity run their own provider's models (free ones, or the user's Google account), so the
-   * broker's keys would only offer them models they are not there for.
+   * OpenCode (free or Go) and Antigravity run their own provider's models, so the broker's keys would only offer them
+   * models they are not there for.
    */
   readonly broker: boolean
 }
@@ -195,6 +263,8 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
   opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
+  // The Go plan's sign-in is a key in OpenCode's credential store, which `auth import` fills from 2.1.
+  "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
   google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
   // OMP, Pi and Hermes speak ACP themselves; their runs reach models through the broker (`vendors`).

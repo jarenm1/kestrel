@@ -19,6 +19,7 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   minimax: "Claude Code via MiniMax",
   moonshot: "Claude Code via Kimi",
   opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
   google: "Antigravity",
   omp: "OMP",
   pi: "Pi",

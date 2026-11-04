@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { CliProvider, RelayCredentials } from "@cloudagents/protocol"
+import { ModelProvider, type CliProvider, type RelayCredentials } from "@cloudagents/protocol"
 import { brokerEnv, credentialFor } from "../broker"
 import { claudeTierEnv, loginsForProvider } from "./harness"
 
@@ -22,6 +22,19 @@ describe("per-provider run environment", () => {
   test("third-party gateway runs do not mount either vendor login", () => {
     for (const provider of ["openrouter", "zai", "deepseek", "minimax", "moonshot"] as const) {
       expect(loginsForProvider(provider, logins)).toEqual([])
+    }
+  })
+
+  test("a Go login is mounted only by Go, while vendor runs retain only their two CLI logins", () => {
+    const go: Login = { provider: "opencode-go", dir: "/data/opencode-go" }
+    const google: Login = { provider: "antigravity-cli", dir: "/data/antigravity" }
+    const connected = [...logins, go, google]
+    expect(loginsForProvider("opencode-go", connected)).toEqual([go])
+    expect(loginsForProvider("google", connected)).toEqual([google])
+    expect(loginsForProvider("anthropic", connected)).toEqual(logins)
+    expect(loginsForProvider("openai", connected)).toEqual(logins)
+    for (const provider of ModelProvider.literals.filter((id) => id !== "opencode-go")) {
+      expect(loginsForProvider(provider, connected)).not.toContain(go)
     }
   })
 

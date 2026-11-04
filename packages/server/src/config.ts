@@ -39,7 +39,8 @@ const DEFAULT_OPENAI_COMMAND =
 /**
  * OpenCode runs as an Agent Client Protocol server on stdio (`core/acp.ts`); the harness hands it the thread's MCP
  * server with the session. Its config keeps sessions unshared and the binary as installed, and lets an MCP call run
- * ~2^31 ms, so a `task_ask` waits as long as the user takes.
+ * ~2^31 ms, so a `task_ask` waits as long as the user takes. The Go plan is OpenCode's own provider, reached through
+ * the same binary and the same command.
  */
 const DEFAULT_OPENCODE_COMMAND = `OPENCODE_CONFIG_CONTENT=${shellQuote(
   JSON.stringify({ share: "disabled", update: "disable", mcp: { timeout: { execution: 2 ** 31 - 1 } } }),
@@ -73,7 +74,8 @@ export interface ServerConfig {
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
    * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
-   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` override the defaults).
+   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` /
+   * `CLOUDAGENTS_OPENCODE_GO_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
@@ -82,8 +84,8 @@ export interface ServerConfig {
    * Prompts travel only on stdin, not through the inherited environment. The OpenAI command must start
    * Codex app-server on stdio: the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run
    * reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`. The OpenCode
-   * command must start an ACP server on stdio: the harness opens or resumes the session and sends the prompt, model
-   * and effort over it. OpenCode runs its own models and gets no broker keys.
+   * command (also used for OpenCode Go) must start an ACP server on stdio: the harness opens or resumes the session
+   * and sends the prompt, model and effort over it. OpenCode runs its own models and gets no broker keys.
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
@@ -154,6 +156,7 @@ export const loadConfig = (): ServerConfig => {
   }
   const acpCommands: Record<string, string> = {
     opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
+    "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
     google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
     omp: process.env.CLOUDAGENTS_OMP_COMMAND ?? "omp acp",
     pi: process.env.CLOUDAGENTS_PI_COMMAND ?? "pi-acp",

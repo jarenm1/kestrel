@@ -3,15 +3,12 @@ import {
   ApprovePairingBody,
   BOX_TOKEN_QUERY,
   CREDENTIALS_HEADER,
-  CliAuthStatus,
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
   CreateMeterHostBody,
   GithubRepoSlug,
   MeterReportBody,
-  HARNESS_LABELS,
-  HarnessStatus,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -28,7 +25,6 @@ import {
   findProvider,
   isAvailable,
   type ApiKeyProvider,
-  type CliProvider,
   type OAuthProvider,
   type Provider,
 } from "./providers"
@@ -59,56 +55,6 @@ const storedView = (
   ...(provider.kind === "apikey" && provider.hint !== undefined ? { hint: provider.hint } : {}),
 })
 
-/**
- * A standalone ACP harness as a Connections row. Its own CLI is the connection: `connected` says the box can launch it,
- * and it carries no login, because a harness run reaches models through Kestrel's broker.
- */
-const harnessView = (status: HarnessStatus): Connection => ({
-  provider: status.harness,
-  label: HARNESS_LABELS[status.harness],
-  kind: "cli",
-  connected: status.available,
-  account: null,
-  available: status.available,
-  ...(status.error === undefined ? {} : { error: status.error }),
-})
-
-const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
-  provider: provider.id,
-  label: provider.label,
-  kind: provider.kind,
-  connected: status?.loggedIn ?? false,
-  account: status?.loggedIn ? status.account : null,
-  available: status !== undefined && status.error === undefined,
-  ...(status?.error === undefined ? {} : { error: status.error }),
-})
-
-/** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */
-const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuth)
-  if (!res.ok) return []
-  let body: unknown = null
-  try {
-    body = JSON.parse(res.body)
-  } catch {
-    return []
-  }
-  return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
-}
-
-/** Standalone ACP harnesses the box reports it can launch; empty when the box is offline or answers badly. */
-const fetchHarnessStatus = async (login: string, env: Env): Promise<readonly HarnessStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.harnessStatus)
-  if (!res.ok) return []
-  let body: unknown = null
-  try {
-    body = JSON.parse(res.body)
-  } catch {
-    return []
-  }
-  return Schema.is(Schema.Array(HarnessStatus))(body) ? body : []
-}
-
 /** True when the user has connected `provider` and the provider refuses the stored token. */
 const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: Env): Promise<boolean> => {
   const token = await hub(env).connectionSecret(login, provider.id)
@@ -117,20 +63,18 @@ const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: E
 
 const listConnections = async (login: string, env: Env): Promise<Connection[]> => {
   const oauth = PROVIDERS.filter((p): p is OAuthProvider => p.kind === "oauth")
-  const [rows, cli, harnesses, rejected] = await Promise.all([
+  const [rows, rejected] = await Promise.all([
     hub(env).connections(login),
-    fetchCliAuth(login, env),
-    fetchHarnessStatus(login, env),
     Promise.all(oauth.map((p) => oauthTokenRejected(login, p, env))),
   ])
   const expired = new Set(oauth.filter((_, i) => rejected[i]).map((p) => p.id))
-  const stored = PROVIDERS.map((p) =>
+  // The Worker owns stored connections, not the selected box's login or installation state.
+  // Clients fill these CLI definitions from that box and add its standalone harnesses.
+  return PROVIDERS.map((p): Connection =>
     p.kind === "cli"
-      ? cliView(p, cli.find((s) => s.provider === p.id))
+      ? { provider: p.id, label: p.label, kind: "cli", connected: false, account: null, available: false }
       : storedView(p, rows.find((r) => r.provider === p.id), env, expired.has(p.id)),
   )
-  // A harness row is what tells the picker this box can run it at all.
-  return [...stored, ...harnesses.map(harnessView)]
 }
 
 const putApiKey = async (request: Request, env: Env, login: string, provider: Provider): Promise<Response> => {

@@ -9,7 +9,7 @@ import { CredentialStore } from "../credentials"
  * `vendors`, OpenCode runs its own free models with no broker access at all, and Antigravity reaches Google's models
  * through the user's own sign-in.
  */
-export type BrokerProvider = Exclude<ModelProvider, "opencode" | "omp" | "pi" | "hermes" | "google">
+export type BrokerProvider = Exclude<ModelProvider, "opencode" | "opencode-go" | "omp" | "pi" | "hermes" | "google">
 
 /**
  * What a run's broker token may reach: one provider (a gateway), both vendor APIs (`vendors`: a vendor CLI run or an

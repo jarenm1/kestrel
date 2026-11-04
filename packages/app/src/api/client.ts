@@ -14,6 +14,7 @@ import {
   CliLoginStart,
   CliProvider,
   Connection,
+  connectionsForBox,
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
@@ -32,6 +33,7 @@ import {
   FleetBoxList,
   Me,
   Message,
+  type ModelProvider,
   Paths,
   ProviderUsage,
   PendingPairing,
@@ -317,6 +319,43 @@ function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: strin
   return activeTarget().then((target) => run(boxCall(target, schema, method, path, body)))
 }
 
+/** What `connectionsForBox` needs from one box: its CLI logins and the harnesses it can launch. */
+type BoxConnectionSource = {
+  readonly cliAuth: readonly CliAuthStatus[] | undefined
+  readonly harnesses: readonly ModelProvider[] | undefined
+  readonly error?: string
+}
+
+/**
+ * The box-level half of the connections list, read from one captured target so a box switch mid-call cannot mix two
+ * boxes. A box too old to report capabilities (404) still reports CLI logins: its native sign-ins stay usable while
+ * no harness is offered. Any other failure marks the whole box unavailable, so a network error can never expose a
+ * harness the box did not confirm.
+ */
+async function boxConnectionSource(target: Target): Promise<BoxConnectionSource> {
+  let cliAuth: readonly CliAuthStatus[]
+  try {
+    cliAuth = await run(boxCall(target, Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth))
+  } catch (error) {
+    return {
+      cliAuth: undefined,
+      harnesses: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  try {
+    const capabilities = await run(boxCall(target, BoxCapabilities, "GET", Paths.capabilities))
+    return { cliAuth, harnesses: capabilities.harnesses }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return { cliAuth, harnesses: undefined }
+    return {
+      cliAuth: undefined,
+      harnesses: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
 /**
  * The box a thread lives on. A thread not seen yet is found by reading every box's thread list, so a thread opened
  * straight from a link works before the list is loaded.
@@ -463,7 +502,16 @@ export const api = {
   // Control plane (served by the Worker).
   me: () => run(request(Me, "GET", ControlPaths.me)),
   logout: () => run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.logout))),
-  connections: () => run(request(Schema.Array(Connection), "GET", ControlPaths.connections)),
+  /**
+   * Stored accounts and keys from the Worker, with the CLI logins and harness availability of the active box. The box
+   * is captured once, so rows always describe one box; a box that cannot answer leaves the stored accounts manageable
+   * and marks its CLI rows unavailable.
+   */
+  connections: async () => {
+    const stored = await run(request(Schema.Array(Connection), "GET", ControlPaths.connections))
+    const target = await activeTarget()
+    return connectionsForBox(stored, await boxConnectionSource(target))
+  },
   putApiKey: (provider: string, body: PutApiKeyBody) =>
     run(request(Connection, "PUT", ControlPaths.connection(provider), body)),
   deleteConnection: (provider: string) =>
@@ -531,6 +579,8 @@ export const api = {
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
+  cliLoginKey: (provider: CliProvider, body: PutApiKeyBody) =>
+    onActive(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
   cliLogout: async (provider: CliProvider): Promise<void> => {
     await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
   },

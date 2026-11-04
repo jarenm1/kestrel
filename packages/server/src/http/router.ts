@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities, HarnessStatus } from "@cloudagents/protocol"
@@ -235,6 +235,19 @@ export const makeRouter = (
         Effect.flatMap(cliProvider, (provider) =>
           signedIn((user) =>
             Effect.flatMap(jsonBody(CliLoginCodeBody), (body) => cliAuth.submitCode(user, provider, body.code)),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/key",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(
+              jsonBody(PutApiKeyBody).pipe(Effect.mapError(() => new BadRequest({ message: "invalid API key request" }))),
+              (body) => cliAuth.submitKey(user, provider, body.apiKey),
+            ),
           ),
         ),
       ),

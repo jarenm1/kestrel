@@ -1,10 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
+import {
+  CLI_SIGN_IN,
+  type CliLoginStart,
+  type CliProvider,
+  type Connection,
+} from "@cloudagents/protocol";
 import { confirmDestructive } from "@/lib/confirm";
-import { keys } from "@/api/queries";
+import { boxKeys, keys } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -13,6 +18,9 @@ import {
   connectionStyles,
 } from "@/components/ConnectionsShared";
 
+/** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
+const MIN_API_KEY_LENGTH = 8;
+
 /** While a device-code sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000;
 
@@ -20,6 +28,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "claude-cli": "Use your own Claude Pro or Max subscription.",
   "codex-cli": "Use your own ChatGPT subscription.",
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
+  "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 };
 
 interface Props {
@@ -34,9 +43,15 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   const [login, setLogin] = useState<CliLoginStart | null>(null);
   const [expired, setExpired] = useState(false);
   const [code, setCode] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const keySignIn = CLI_SIGN_IN[provider] === "key";
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: keys.connections });
+    const scoped = boxKeys(api.boxScope);
+    void queryClient.invalidateQueries({ queryKey: scoped.usage });
+    void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
+    void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });
   };
 
   const openPage = useMutation({
@@ -70,9 +85,16 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       setCode("");
     },
   });
+  const saveKey = useMutation({
+    mutationFn: (key: string) => api.cliLoginKey(provider, { apiKey: key }),
+    onSuccess: () => {
+      setApiKey("");
+      refresh();
+    },
+  });
 
-  const busy = start.isPending || submitCode.isPending || logout.isPending;
-  const error = openPage.error ?? start.error ?? submitCode.error ?? logout.error;
+  const busy = start.isPending || submitCode.isPending || saveKey.isPending || logout.isPending;
+  const error = openPage.error ?? start.error ?? submitCode.error ?? saveKey.error ?? logout.error;
 
   useEffect(() => {
     if (connection.connected) setLogin(null);
@@ -130,6 +152,31 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
         </>
       );
     }
+    if (keySignIn) {
+      return (
+        <>
+          <Text style={connectionStyles.muted}>{CLI_INTRO[provider]}</Text>
+          <View style={connectionStyles.actions}>
+            <Input
+              style={styles.keyInput}
+              value={apiKey}
+              onChangeText={setApiKey}
+              placeholder="API key"
+              accessibilityLabel={`${connection.label} API key`}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Button
+              disabled={busy || apiKey.trim().length < MIN_API_KEY_LENGTH}
+              onPress={() => saveKey.mutate(apiKey.trim())}
+            >
+              Save
+            </Button>
+          </View>
+        </>
+      );
+    }
     if (login && expired) {
       return (
         <>
@@ -157,7 +204,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
             value={code}
             onChangeText={setCode}
             placeholder="Code"
-            accessibilityLabel="Code from the Claude sign-in page"
+            accessibilityLabel="Code from the sign-in page"
             autoCapitalize="none"
             autoCorrect={false}
           />
@@ -216,3 +263,10 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     </ConnectionRowFrame>
   );
 }
+
+const styles = StyleSheet.create({
+  keyInput: {
+    flexGrow: 1,
+    flexBasis: 200,
+  },
+});

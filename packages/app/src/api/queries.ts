@@ -75,6 +75,7 @@ export const keys = {
  * screen.
  */
 const ACTIVE_BOX_ROOTS: Record<string, true> = {
+  connections: true,
   usage: true,
   providerUsage: true,
   usageActivity: true,

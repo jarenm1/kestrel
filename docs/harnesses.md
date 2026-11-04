@@ -71,20 +71,21 @@ back the code the Google page shows (or that page's URL). Antigravity needs vers
 
 ## Availability: Connections is the source of truth
 
-At start the box probes the harness binaries once and serves the answer at `GET /api/harness-status`
-(`HarnessStatus[]`). The relay merges it into `GET /api/connections`, one `Connection` per harness, so:
+At startup the box reports runnable providers in `GET /api/capabilities` (`harnesses`), and standalone-harness detail
+in `GET /api/harness-status` (`HarnessStatus[]`). Both apps combine Worker-stored connection metadata with CLI logins
+and capabilities fetched from the **selected box**. They do not use the managed/relay box's availability for a BYOB
+box. Switching boxes resets or scopes this cache; an unreachable box leaves stored accounts manageable but its
+CLI/harness rows unavailable.
 
-- Settings › Connections marks a harness **not installed on this box** (with the reason) instead of offering it. The
-  probe uses the command the box is configured to run, so a `CLOUDAGENTS_*_COMMAND` override is honoured.
-- A harness built against a protocol version cannot run an older CLI: OpenCode needs version 2
-  (`npm i -g @opencode/cli`; the `opencode-ai` package and opencode.ai/install are OpenCode 1) and Antigravity needs
-  1.5 (terminal sign-in, `session/resume`); a box that reports an older one marks it unavailable.
-- Google is a CLI login, not a standalone harness: its row in Connections is the Antigravity sign-in, and a send that
-  asks for Gemini without it fails with an actionable `missing-connection` or a pre-run "not signed in" error.
-- The model picker only offers a standalone harness the box reported, and a send that asks for a missing one fails with
-  an actionable error (`connection-unavailable`) before any process starts.
-- With `CLOUDAGENTS_FAKE_AGENT=1` the scripted agent plays only the providers it speaks for (Anthropic, OpenAI and
-  OpenCode's ACP); OMP, Pi and Hermes are reported unavailable rather than hanging a run.
+- The probe uses the configured `CLOUDAGENTS_*_COMMAND`, including native-binary path overrides.
+- Free OpenCode requires 2.0; Go requires 2.1 and its own saved key; Antigravity requires 1.5 and its Google sign-in.
+  Install OpenCode with `npm i -g @opencode/cli`; `opencode-ai` and opencode.ai/install are OpenCode 1.
+- The picker offers only harnesses the selected box reports. Every ACP launch checks just that provider's configured
+  binary and version again, so an uninstalled or downgraded CLI fails before starting the process.
+- OpenCode's free models need no Go key or broker credential. Go mounts only its own credential/session directory
+  and gets an MCP-only token, never access to the vendor broker. The two providers keep separate sessions.
+- With `CLOUDAGENTS_FAKE_AGENT=1`, the scripted agent plays Anthropic, OpenAI, free OpenCode, Go and Google only;
+  OpenRouter, OMP, Pi and Hermes remain unavailable.
 
 ## What works today
 

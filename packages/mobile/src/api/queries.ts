@@ -37,6 +37,7 @@ export const keys = {
 
 /** Box-served data is isolated by box identity even when task or run IDs coincide. */
 export const boxKeys = (scope: string) => ({
+  connections: [...keys.connections, scope] as const,
   box: ["box-data", scope, "status"] as const,
   usage: ["box-data", scope, "usage"] as const,
   providerUsage: ["box-data", scope, "provider-usage"] as const,
@@ -105,7 +106,7 @@ export function createQueries(api: ApiClient) {
   return {
     me: () => queryOptions({ queryKey: keys.me, queryFn: () => api.me() }),
     box: () => queryOptions({ queryKey: scoped.box, queryFn: () => api.box(), refetchInterval: BOX_POLL_MS }),
-    connections: () => queryOptions({ queryKey: keys.connections, queryFn: () => api.connections() }),
+    connections: () => queryOptions({ queryKey: scoped.connections, queryFn: () => api.connections() }),
     githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: () => api.githubRepos() }),
     githubBranches: (repo: string) =>
       queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
