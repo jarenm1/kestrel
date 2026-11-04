@@ -85,6 +85,11 @@ export const makeBoxAuth = (
     const creds: RelayCredentials = {
       user: self.owner,
       github: self.github,
+      providers: {
+        ...self.providers,
+        ...(self.anthropic === undefined ? {} : { anthropic: self.anthropic }),
+        ...(self.openai === undefined ? {} : { openai: self.openai }),
+      },
       anthropic: self.anthropic,
       openai: self.openai,
       ...(claims.dev === true ? { dev: true } : {}),

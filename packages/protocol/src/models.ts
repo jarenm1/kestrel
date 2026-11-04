@@ -8,6 +8,7 @@ import { Schema } from "effect"
 export const ModelProvider = Schema.Literal(
   "anthropic",
   "openai",
+  "openrouter",
   "opencode",
   "google",
   "omp",
@@ -86,6 +87,10 @@ export const AgentModel = Schema.Literal(
   "gpt-6.1-terra",
   "gpt-6-luna",
   "gpt-6-sol",
+  "anthropic/claude-fable-5.1",
+  "anthropic/claude-opus-5.5",
+  "anthropic/claude-sonnet-5.5",
+  "anthropic/claude-haiku-5.5",
   "opencode/big-pickle",
   "opencode/glm-5.3-flash-free",
   "opencode/deepseek-v4.1-flash-free",
@@ -154,6 +159,11 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "gpt-6.1-terra", provider: "openai", name: "GPT-6.1 Terra", efforts: GPT_FROM_NONE, shownByDefault: true },
   { id: "gpt-6-luna", provider: "openai", name: "GPT-6 Luna", efforts: GPT_FROM_NONE, shownByDefault: true },
   { id: "gpt-6-sol", provider: "openai", name: "GPT-6 Sol", efforts: GPT_FROM_NONE, shownByDefault: false },
+  // OpenRouter's Anthropic skin only guarantees Claude Code compatibility for Anthropic first-party models.
+  { id: "anthropic/claude-opus-5.5", provider: "openrouter", name: "Claude Opus 5.5", efforts: CLAUDE_ALL, shownByDefault: true },
+  { id: "anthropic/claude-sonnet-5.5", provider: "openrouter", name: "Claude Sonnet 5.5", efforts: CLAUDE_ALL, shownByDefault: true },
+  { id: "anthropic/claude-fable-5.1", provider: "openrouter", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: false },
+  { id: "anthropic/claude-haiku-5.5", provider: "openrouter", name: "Claude Haiku 5.5", efforts: CLAUDE_ALL, shownByDefault: false },
   // OpenCode's catalog id is the value its ACP `model` config option takes.
   { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },
   { id: "opencode/glm-5.3-flash-free", provider: "opencode", name: "GLM-5.3-Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
@@ -201,6 +211,7 @@ export interface ModelProviderInfo {
 export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "anthropic", name: "Anthropic", harness: "claude", connections: ["anthropic", "claude-cli"], auth: "cli-login", mcp: true },
   { id: "openai", name: "OpenAI", harness: "codex", connections: ["openai", "codex-cli"], auth: "cli-login", mcp: true },
+  { id: "openrouter", name: "OpenRouter", harness: "claude", connections: ["openrouter"], auth: "api-key", mcp: true },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
   { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "npm i -g @opencode/cli", auth: "harness-login", mcp: true },
   // Google's models reach Antigravity CLI only through the user's Google sign-in, a CLI login like Claude's or ChatGPT's.

@@ -9,7 +9,12 @@ const probe = (installed: Record<string, string>): HarnessProbe => ({
 const box = { fakeAgent: false, sandboxPath: null }
 
 test("a box offers only the harnesses it has, OpenCode only from version 2", () => {
-  expect(availableHarnesses(box, probe({ claude: "2.1.318 (Claude Code)", codex: "codex-cli 0.166.0" }))).toEqual(["anthropic", "openai"])
+  // The Anthropic-compatible gateways run through Claude Code, so having `claude` offers them too.
+  expect(availableHarnesses(box, probe({ claude: "2.1.318 (Claude Code)", codex: "codex-cli 0.166.0" }))).toEqual([
+    "anthropic",
+    "openai",
+    "openrouter",
+  ])
   expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
   expect(availableHarnesses(box, probe({ opencode: "1.19.5" }))).toEqual([])
   // A binary that runs but does not say its version (a broken shim) cannot be trusted to be OpenCode 2.

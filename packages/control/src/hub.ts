@@ -503,24 +503,27 @@ export class Hub extends DurableObject<Env> {
     )
   }
 
-  /** The user's connection secrets, by provider. */
-  connectionSecrets(login: string): { github?: string; anthropic?: string; openai?: string } {
-    const out: { github?: string; anthropic?: string; openai?: string } = {}
+  /** The user's connection secrets, by provider. The flat Anthropic/OpenAI slots keep older boxes working. */
+  connectionSecrets(login: string): {
+    github?: string
+    providers: Record<string, string>
+    anthropic?: string
+    openai?: string
+  } {
+    const out: { github?: string; providers: Record<string, string>; anthropic?: string; openai?: string } = {
+      providers: {},
+    }
     const rows = this.ctx.storage.sql
       .exec<{ provider: string; secret: string }>("SELECT provider, secret FROM connections WHERE login = ?", login)
       .toArray()
     for (const row of rows) {
-      switch (row.provider) {
-        case "github":
-          out.github = row.secret
-          break
-        case "anthropic":
-          out.anthropic = row.secret
-          break
-        case "openai":
-          out.openai = row.secret
-          break
+      if (row.provider === "github") {
+        out.github = row.secret
+        continue
       }
+      out.providers[row.provider] = row.secret
+      if (row.provider === "anthropic") out.anthropic = row.secret
+      if (row.provider === "openai") out.openai = row.secret
     }
     return out
   }

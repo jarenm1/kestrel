@@ -35,6 +35,7 @@ const Credentials = Schema.parseJson(
   Schema.Struct({
     user: Schema.String,
     github: Schema.optional(Schema.String),
+    providers: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.String })),
     anthropic: Schema.optional(Schema.String),
     openai: Schema.optional(Schema.String),
     dev: Schema.optional(Schema.Boolean),

@@ -13,6 +13,7 @@ export const slashOptionId = (baseId: string, index: number) => `${baseId}-optio
 const PROVIDER_LABELS: Record<ModelProvider, string> = {
   anthropic: "Claude Code",
   openai: "Codex",
+  openrouter: "Claude Code via OpenRouter",
   opencode: "OpenCode",
   google: "Antigravity",
   omp: "OMP",

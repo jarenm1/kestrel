@@ -32,6 +32,8 @@ export interface OAuthProvider extends ProviderBase {
 /** API-key provider: the user pastes a key; no OAuth. */
 export interface ApiKeyProvider extends ProviderBase {
   readonly kind: "apikey"
+  /** Setup note shown under the key field. */
+  readonly hint?: string
 }
 
 /** CLI provider: the user signs in with the CLI on the box; the box reports the login state. Nothing is stored here. */
@@ -94,6 +96,7 @@ export const PROVIDERS: readonly Provider[] = [
   },
   { id: "anthropic", label: "Anthropic", kind: "apikey" },
   { id: "openai", label: "OpenAI", kind: "apikey" },
+  { id: "openrouter", label: "OpenRouter", kind: "apikey" },
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },

@@ -175,6 +175,7 @@ const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
 const brokerProviderOf = (provider: ModelProvider): BrokerProvider | null =>
   MODEL_HARNESS[provider].conversation === "acp" ? null : (provider as BrokerProvider)
 
+
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
   readonly seed: ContextUsage | null

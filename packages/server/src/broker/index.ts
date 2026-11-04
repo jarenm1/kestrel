@@ -21,6 +21,8 @@ export type BrokerChannel = BrokerProvider | "vendors" | null
 export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; readonly keyHeader: "x-api-key" | "bearer" }> = {
   anthropic: { base: "https://api.anthropic.com", keyHeader: "x-api-key" },
   openai: { base: "https://api.openai.com", keyHeader: "bearer" },
+  // Anthropic-compatible: Claude Code's `/v1/messages` is forwarded with `Authorization: Bearer`.
+  openrouter: { base: "https://openrouter.ai/api", keyHeader: "bearer" },
 }
 
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>
@@ -28,7 +30,9 @@ export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<B
 /**
  * The env that points a run's CLI at the broker for `provider`.
  *
- * Anthropic and OpenAI keep their own credential env.
+ * Anthropic and OpenAI keep their own credential env. Every other provider speaks the Anthropic Messages API to
+ * Claude Code, which reads a gateway key from `ANTHROPIC_AUTH_TOKEN`; `ANTHROPIC_API_KEY` must be empty or Claude
+ * Code prefers it and sends `x-api-key` to the gateway.
  */
 export const brokerEnv = (channel: BrokerChannel, base: string, token: string): Record<string, string> => {
   switch (channel) {
@@ -45,11 +49,19 @@ export const brokerEnv = (channel: BrokerChannel, base: string, token: string): 
         OPENAI_BASE_URL: `${base}/openai/v1`,
         OPENAI_API_KEY: token,
       }
+    default:
+      return {
+        ANTHROPIC_BASE_URL: `${base}/${channel}`,
+        ANTHROPIC_AUTH_TOKEN: token,
+        ANTHROPIC_API_KEY: "",
+      }
   }
 }
 
-/** The real key for `provider`. */
+/** The real key for `provider`, preferring the provider map and falling back to the legacy flat slots. */
 export const credentialFor = (creds: RelayCredentials | null, provider: BrokerProvider): string | null => {
+  const key = creds?.providers?.[provider]
+  if (key !== undefined && key !== "") return key
   if (provider === "anthropic") return creds?.anthropic ?? null
   if (provider === "openai") return creds?.openai ?? null
   return null

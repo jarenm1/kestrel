@@ -173,7 +173,7 @@ export const ConnectionKind = Schema.Literal("oauth", "apikey", "cli")
 export type ConnectionKind = typeof ConnectionKind.Type
 
 export const Connection = Schema.Struct({
-  provider: Schema.String, // "github" | "anthropic" | "openai" | "claude-cli" | "codex-cli"
+  provider: Schema.String, // "github", a MODEL_PROVIDERS id (API key), or "claude-cli" / "codex-cli"
   label: Schema.String, // display name
   kind: ConnectionKind,
   connected: Schema.Boolean,
@@ -185,6 +185,8 @@ export const Connection = Schema.Struct({
   error: Schema.optional(Schema.String),
   /** OAuth only: true when the provider refuses the stored token (revoked or expired), so Reconnect is needed. */
   expired: Schema.optional(Schema.Boolean),
+  /** Provider-specific setup note, e.g. which Kimi key this connection accepts. */
+  hint: Schema.optional(Schema.String),
 })
 export type Connection = typeof Connection.Type
 
@@ -407,6 +409,9 @@ export const BoxSelf = Schema.Struct({
   /** Matches the `cv` claim of tokens minted while these credentials were current. */
   credentialsVersion: Schema.String,
   github: Schema.optional(Schema.String),
+  /** Model API keys by `ModelProvider` id. */
+  providers: Schema.optional(Schema.Record({ key: Schema.String, value: Schema.String })),
+  /** Legacy Anthropic/OpenAI slots, still sent so boxes older than `providers` keep their keys. */
   anthropic: Schema.optional(Schema.String),
   openai: Schema.optional(Schema.String),
 })
