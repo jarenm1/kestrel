@@ -215,5 +215,13 @@
       "id": "req-4",
       "ok": true
     }
-  ]
+  ],
+  "boxEnv": {
+    "boxId": "CLOUDAGENTS_BOX_ID",
+    "controlUrl": "CLOUDAGENTS_CONTROL_URL",
+    "publicUrl": "CLOUDAGENTS_BOX_PUBLIC_URL",
+    "guestAgentSocket": "CLOUDAGENTS_GUEST_AGENT_SOCKET",
+    "enrollToken": "CLOUDAGENTS_NEST_ENROLL_TOKEN",
+    "dataDir": "CLOUDAGENTS_DATA_DIR"
+  }
 }
