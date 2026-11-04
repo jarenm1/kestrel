@@ -1,4 +1,3 @@
-import type { HarnessCommand } from "@cloudagents/protocol"
 import type { RunDriver, RunOutcome } from "./run-driver"
 import { isRecord } from "./transcript"
 
@@ -18,9 +17,7 @@ export interface AcpMcpServer {
 }
 
 export interface AcpRunInput {
-  /** The user's own message: a leading `/command` the agent offers goes to it as typed. */
-  readonly text: string
-  /** What a plain turn sends: the message with the box's user context around it. */
+  /** What the turn sends: the message with the box's user context and any carried conversation around it. */
   readonly prompt: string
   /** Where the thread works: its first checkout, or the workspace root (`agentCwd` in `harness.ts`). */
   readonly cwd: string
@@ -29,8 +26,6 @@ export interface AcpRunInput {
   readonly model?: string
   readonly effort?: string
   readonly mcpServers: ReadonlyArray<AcpMcpServer>
-  /** The commands the agent offers; a message that starts with one is sent without the user context around it. */
-  readonly commands: ReadonlyArray<HarnessCommand>
 }
 
 export interface AcpDriverIo {
@@ -92,16 +87,11 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
     then(message.result)
   }
 
-  const promptText = (): string => {
-    const command = /^\/(\S+)/.exec(input.text.trim())?.[1]
-    return command !== undefined && input.commands.some((c) => c.name === command) ? input.text.trim() : input.prompt
-  }
-
   const prompt = () => {
     prompting = true
     request(
       "session/prompt",
-      { sessionId, prompt: [{ type: "text", text: promptText() }] },
+      { sessionId, prompt: [{ type: "text", text: input.prompt }] },
       orFail("session/prompt", (result) => {
         prompting = false
         switch (result.stopReason) {

@@ -1957,7 +1957,7 @@ export const CoreLive = Layer.effect(
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
           const harness = MODEL_HARNESS[provider]
-          if (harness.cli === null) return { provider, commands: harness.commands }
+          if (harness.cli === null) return { provider, commands: [] }
           // Started where the agent starts, so the list holds the project commands and skills of its checkout.
           const workspace = threadDirOf(task.id)
           const commands = yield* cliAuth.discoverCommands(user, harness.cli, workspace, agentCwd(workspace, task))

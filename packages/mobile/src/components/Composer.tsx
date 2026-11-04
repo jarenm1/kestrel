@@ -323,6 +323,7 @@ export function Composer({
   const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
   const shown = useShownModels();
   const [text, setText, draftReady] = useStoredDraft(taskId ?? "new");
   // Only the initial persisted draft crosses into the DOM. Echoing edits back would let a delayed native
@@ -351,7 +352,7 @@ export function Composer({
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined;
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex];
 
-  const connected = connections.data ? connectedModelProviders(connections.data) : [];
+  const connected = connections.data ? connectedModelProviders(connections.data, capabilities.data?.harnesses) : [];
   const sections: readonly ModelSection[] | null = connections.data
     ? connected
         .map((provider) => ({ provider, models: shown[provider.id] }))

@@ -26,12 +26,10 @@ const harness = (overrides: Partial<AcpRunInput> = {}) => {
   const outcomes: RunOutcome[] = []
   const driver = makeAcpDriver(
     {
-      text: "fix the test",
       prompt: "user context\n\nfix the test",
       cwd: "/threads/t1/kestrel",
       resumeSession: null,
       mcpServers: [{ type: "http", name: "cloudagents", url: "http://box/mcp/t1", headers: [{ name: "Authorization", value: "Bearer tok" }] }],
-      commands: [{ name: "review", description: "review changes", prefix: "/" }],
       ...overrides,
     },
     { send: (m) => sent.push(m as Sent), onSession: (id) => sessions.push(id), onDone: (o) => outcomes.push(o) },
@@ -98,12 +96,13 @@ describe("ACP driver", () => {
     expect(absent.last().method).toBe("session/prompt")
   })
 
-  test("a message that starts with one of the agent's commands is sent as typed", () => {
-    const h = harness({ text: "/review branch", prompt: "user context\n\n/review branch" })
+  test("a resumed run's message that starts with a slash still carries the context and conversation around it", () => {
+    const prompt = "user context\n\nYour session last ran before the following happened in this thread:\n…\n\n/review branch"
+    const h = harness({ resumeSession: "s-old", prompt })
     h.driver.start()
     h.reply({})
-    h.reply({ sessionId: "s1" })
-    expect(h.last()).toMatchObject({ method: "session/prompt", params: { prompt: [{ type: "text", text: "/review branch" }] } })
+    h.reply({ configOptions: [] })
+    expect(h.last()).toMatchObject({ method: "session/prompt", params: { sessionId: "s-old", prompt: [{ type: "text", text: prompt }] } })
   })
 
   test("permission requests are approved, other agent requests refused, and Stop cancels the prompt", async () => {

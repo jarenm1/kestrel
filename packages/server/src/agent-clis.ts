@@ -142,20 +142,20 @@ export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
 /**
  * How each model provider's runs work: the conversation the harness holds with its CLI, and the CLI whose login can
  * stand in for the broker, which also discovers the commands a thread can run. A harness without a login Kestrel
- * manages lists its commands itself.
+ * manages offers no commands: OpenCode's `/init` and `/review` do nothing over ACP (2.0.6 answers `end_turn` at once).
  */
-export type Harness =
-  | { readonly conversation: ConversationKind; readonly cli: CliProvider }
-  | { readonly conversation: ConversationKind; readonly cli: null; readonly commands: ReadonlyArray<HarnessCommand> }
-
-/** OpenCode's own commands, as its ACP `available_commands_update` lists them; typed as `/name` in the prompt. */
-const OPENCODE_COMMANDS: ReadonlyArray<HarnessCommand> = [
-  { name: "init", description: "guided AGENTS.md setup", prefix: "/" },
-  { name: "review", description: "review changes [commit|branch|pr], defaults to uncommitted", argumentHint: "[commit|branch|pr]", prefix: "/" },
-]
+export interface Harness {
+  readonly conversation: ConversationKind
+  readonly cli: CliProvider | null
+  /** The executable the default command runs; the box offers the provider only where it finds it (`capabilities.ts`). */
+  readonly bin: string
+  /** The oldest major version (`<bin> --version`) the harness works with; null when any will do. */
+  readonly minMajor: number | null
+}
 
 export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
-  anthropic: { conversation: "claude", cli: "claude-cli" },
-  openai: { conversation: "codex", cli: "codex-cli" },
-  opencode: { conversation: "acp", cli: null, commands: OPENCODE_COMMANDS },
+  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minMajor: null },
+  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minMajor: null },
+  // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
+  opencode: { conversation: "acp", cli: null, bin: "opencode", minMajor: 2 },
 }

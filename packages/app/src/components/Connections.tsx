@@ -10,6 +10,7 @@ import {
   type CliLoginStart,
   type Connection,
   type AgentModel,
+  type ModelProvider,
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
@@ -53,6 +54,7 @@ export function Connections() {
   // With a user box active, the CLI sign-ins live on that box, so its login state replaces the relay's view of them.
   const direct = typeof activeBoxId === "string"
   const cliAuth = useQuery({ ...queries.cliAuth(), enabled: direct })
+  const capabilities = useQuery(queries.capabilities())
   const list = connections.data && (direct ? withBoxCli(connections.data, cliAuth.data) : connections.data)
 
   return (
@@ -73,7 +75,7 @@ export function Connections() {
           </CardContent>
         </Card>
       )}
-      {list && <ModelListsCard connections={list} />}
+      {list && <ModelListsCard connections={list} harnesses={capabilities.data?.harnesses} />}
     </>
   )
 }
@@ -97,8 +99,14 @@ function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAut
 }
 
 /** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
-function ModelListsCard({ connections }: { connections: readonly Connection[] }) {
-  const connected = new Set(connectedModelProviders(connections).map((p) => p.id))
+function ModelListsCard({
+  connections,
+  harnesses,
+}: {
+  connections: readonly Connection[]
+  harnesses: readonly ModelProvider[] | undefined
+}) {
+  const connected = new Set(connectedModelProviders(connections, harnesses).map((p) => p.id))
   return (
     <div className="flex flex-col gap-2">
       <div>
@@ -136,7 +144,13 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
         ) : (
           <ConnectionHeader label={provider.name} connected={connected} />
         )}
-        {!connected && <span className="text-xs text-muted-foreground">Connect a key or subscription above to use these.</span>}
+        {!connected && (
+          <span className="text-xs text-muted-foreground">
+            {provider.connections.length === 0
+              ? `${provider.name} is not installed on this box.`
+              : "Connect a key or subscription above to use these."}
+          </span>
+        )}
       </div>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>

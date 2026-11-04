@@ -41,6 +41,8 @@ export const keys = {
   githubBranches: (repo: string) => ["github-branches", repo] as const,
   /** CLI sign-ins on the box the apps talk to. */
   cliAuth: ["cli-auth"] as const,
+  /** What the active box can run (`BoxCapabilities`): which harnesses it has. */
+  capabilities: ["capabilities"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
@@ -74,6 +76,7 @@ const ACTIVE_BOX_ROOTS: Record<string, true> = {
   providerUsage: true,
   usageActivity: true,
   "cli-auth": true,
+  capabilities: true,
   box: true,
 }
 
@@ -148,6 +151,7 @@ export const queries = {
   githubBranches: (repo: string) =>
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
+  capabilities: () => queryOptions({ queryKey: keys.capabilities, queryFn: api.capabilities }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
   task: (taskId: string) =>
     queryOptions({

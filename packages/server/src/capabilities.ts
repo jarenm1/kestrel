@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
-import type { BoxCapabilities } from "@cloudagents/protocol"
+import { ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
+import { MODEL_HARNESS } from "./agent-clis"
 import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
 
 interface CapabilityProbe {
@@ -47,3 +48,41 @@ export const boxCapabilities = (
   }
   return { version: 1, platform, sandbox, desktop: desktop ? "prerequisites-present" : "unavailable" }
 }
+
+/** Finds a harness CLI where agent runs look for it, and asks it its version. */
+export interface HarnessProbe {
+  /** The executable's path on the PATH agent runs get, or null. */
+  readonly which: (name: string) => string | null
+  /** What `<path> --version` printed; empty when it did not answer. */
+  readonly version: (path: string) => string
+}
+
+/** Agent runs get the toolchain's PATH under `strict` (`CLOUDAGENTS_SANDBOX_PATH`), the box's own otherwise. */
+const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
+  const PATH = sandboxPath ?? process.env.PATH ?? ""
+  return {
+    which: (name) => Bun.which(name, { PATH }),
+    version: (path) => {
+      const run = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 5000 })
+      return run.error ? "" : run.stdout + run.stderr
+    },
+  }
+}
+
+/**
+ * The model providers whose harness CLI the box can run, at startup: found where agent runs look, and at least the
+ * major version the harness needs. A fake-agent box plays every harness itself.
+ */
+export const availableHarnesses = (
+  config: { readonly fakeAgent: boolean; readonly sandboxPath: string | null },
+  probe: HarnessProbe = harnessProbe(config.sandboxPath),
+): ReadonlyArray<ModelProvider> =>
+  ModelProvider.literals.filter((provider) => {
+    if (config.fakeAgent) return true
+    const harness = MODEL_HARNESS[provider]
+    const path = probe.which(harness.bin)
+    if (path === null) return false
+    if (harness.minMajor === null) return true
+    const major = /(\d+)\.\d+/.exec(probe.version(path))?.[1]
+    return major !== undefined && Number(major) >= harness.minMajor
+  })

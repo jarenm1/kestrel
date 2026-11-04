@@ -64,7 +64,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
   // agent CLIs it finds there).
   const sandboxed = (config ?? DEFAULT_CONFIG).sandbox === "basic"
   const home = mkdtempSync(join(tmpdir(), "kestrel-doctor-"))
-  const agents = ["claude", "codex"].map((name) => {
+  const agents = ["claude", "codex", "opencode"].map((name) => {
     if (onPath(name) === null) return { name, ok: false, detail: "not on PATH" }
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
     const run = sandboxed
@@ -87,7 +87,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
     ok: agents.some((agent) => agent.ok),
     detail: agents.some((agent) => agent.ok)
       ? agents.filter((agent) => agent.ok).map((agent) => agent.name).join(", ")
-      : "neither claude nor codex runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex)",
+      : "no agent CLI runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex, npm i -g @opencode/cli)",
   })
 
   const port = (config ?? DEFAULT_CONFIG).port

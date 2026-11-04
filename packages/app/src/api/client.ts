@@ -5,6 +5,7 @@ import {
   Attachment,
   Automation,
   BOX_TOKEN_QUERY,
+  BoxCapabilities,
   BoxList,
   BoxStatus,
   BoxToken,
@@ -525,6 +526,8 @@ export const api = {
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
   cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
   providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+  /** What the active box can run, as it found at startup. */
+  capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),

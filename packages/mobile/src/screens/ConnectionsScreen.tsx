@@ -24,6 +24,7 @@ export function ConnectionsScreen() {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -43,7 +44,9 @@ export function ConnectionsScreen() {
           ))}
         </Card>
       ) : null}
-      {connections.data ? <ConnectionsModels connections={connections.data} /> : null}
+      {connections.data ? (
+        <ConnectionsModels connections={connections.data} harnesses={capabilities.data?.harnesses} />
+      ) : null}
     </ScrollView>
   );
 }

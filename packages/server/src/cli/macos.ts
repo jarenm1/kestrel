@@ -76,7 +76,7 @@ const PROVISION = [
   // The box and its sandbox, the agent CLIs' runtime, and the desktop session with what `install` needs to build
   // its capture helper.
   "apt-get install -y bubblewrap git curl ca-certificates nodejs npm weston xwayland openbox hsetroot xterm xdotool ffmpeg build-essential libx11-dev libxext-dev libxdamage-dev libxfixes-dev",
-  "npm install -g @anthropic-ai/claude-code @openai/codex",
+  "npm install -g @anthropic-ai/claude-code @openai/codex @opencode/cli",
   // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; bubblewrap needs one. Give bwrap a profile
   // that allows them, only when the VM's user (this runs under sudo) cannot already make one.
   'if ! sudo -u "$SUDO_USER" bwrap --ro-bind / / true 2>/dev/null; then',

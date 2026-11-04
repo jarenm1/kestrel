@@ -1,4 +1,4 @@
-import { boxCapabilities } from "./capabilities"
+import { availableHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer } from "effect"
@@ -124,7 +124,8 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
-  const webHandler = yield* makeWebHandler(core, cliAuth, boxCapabilities(config.sandbox))
+  const capabilities = { ...boxCapabilities(config.sandbox), harnesses: availableHarnesses(config) }
+  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },

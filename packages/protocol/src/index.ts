@@ -566,6 +566,11 @@ export const BoxCapabilities = Schema.Struct({
   platform: Schema.Literal("linux", "wsl", "lima", "other"),
   sandbox: Schema.Literal("strict", "basic", "off"),
   desktop: Schema.Literal("prerequisites-present", "unavailable"),
+  /**
+   * Model providers whose harness CLI the box found at startup, new enough to run. Absent on boxes from before it was
+   * reported. Clients offer a provider that needs no connection only when its harness is listed here.
+   */
+  harnesses: Schema.optional(Schema.Array(ModelProvider)),
 })
 export type BoxCapabilities = typeof BoxCapabilities.Type
 

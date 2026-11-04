@@ -823,7 +823,6 @@ export const AgentHarnessLive = Layer.effect(
                     kind: "acp",
                     provider,
                     input: {
-                      text: run.prompt,
                       prompt,
                       cwd,
                       resumeSession,
@@ -831,7 +830,6 @@ export const AgentHarnessLive = Layer.effect(
                       effort: choice.effort,
                       // The thread's tools, as the other harnesses get them from the run's MCP config.
                       mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
-                      commands: harness.cli === null ? harness.commands : [],
                     },
                   }),
                 } satisfies Record<ConversationKind, () => RunConversation>)[harness.conversation](),

@@ -4,6 +4,7 @@ import {
   Automation,
   AutomationRun,
   BOX_TOKEN_QUERY,
+  BoxCapabilities,
   BoxList,
   BoxStatus,
   BoxToken,
@@ -155,6 +156,8 @@ export interface ApiClient {
   usage(): Promise<Usage>;
   /** The CLI providers' plan limits on the active box. */
   providerUsage(): Promise<readonly ProviderUsage[]>;
+  /** What the active box can run, as it found at startup. */
+  capabilities(): Promise<BoxCapabilities>;
   useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
   /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
   usageActivity(): Promise<UsageActivity>;
@@ -399,6 +402,7 @@ export function createApiClient(
     stopDesktop: (taskId) => boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),
     usage: () => boxRequest(Usage, "GET", Paths.usage),
     providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+    capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
     useBankedReset: (provider, body) =>
       boxRequest(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
     usageActivity: () =>

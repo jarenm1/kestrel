@@ -36,7 +36,8 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
-`codex`) on the host; the desktop also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
+`codex`, and OpenCode 2 as `opencode` from `npm i -g @opencode/cli` for its free models) on the host; the desktop
+also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
 
 ### What a user's box runs with
 
@@ -79,8 +80,8 @@ releases.
 The Linux binaries must load through the standard `/lib` loader. `build:box` uses bun's `baseline` build for linux-x64
 (when the target matches the host, bun would reuse its own runtime, and on NixOS that one loads through `/nix/store`),
 and fails if a Linux binary names any other loader. Before publishing, `bun scripts/box-ubuntu/test.ts
-dist/box/kestrel-box-linux-x64` (needs docker) runs the binary on Ubuntu 24.04 with Claude Code and Codex installed
-under `$HOME`, and checks that the box answers, reads both CLIs' logins and starts a real agent run in the sandbox.
+dist/box/kestrel-box-linux-x64` (needs docker) runs the binary on Ubuntu 24.04 with Claude Code, Codex and OpenCode
+installed under `$HOME`, and checks that the box answers, reads both CLIs' logins and starts a real agent run in the sandbox.
 
 ### Manual setup
 

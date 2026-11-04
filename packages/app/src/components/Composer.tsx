@@ -481,6 +481,7 @@ export function Composer({
   const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
   const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
+  const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
   // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
   const [pickedReferenceRepo, setPickedReferenceRepo] = useState<string>()
@@ -488,7 +489,7 @@ export function Composer({
   const soleCheckout = checkoutRepos.length === 1 ? checkoutRepos[0] : undefined
   const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
   useEffect(() => setPickedReferenceRepo(undefined), [repo])
-  const connected = connections.data ? connectedModelProviders(connections.data) : []
+  const connected = connections.data ? connectedModelProviders(connections.data, capabilities.data?.harnesses) : []
   const sections: readonly ModelSection[] | null = connections.data
     ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
     : null

@@ -141,12 +141,19 @@ export const modelInfo = (id: AgentModel): ModelInfo => {
 export const providerModels = (provider: ModelProvider): readonly ModelInfo[] =>
   AGENT_MODELS.filter((m) => m.provider === provider)
 
-/** Providers on offer, in `MODEL_PROVIDERS` order: those needing no connection, and those with a connected one. */
+/**
+ * Providers on offer, in `MODEL_PROVIDERS` order: those with a connected connection, and those needing none whose
+ * harness the box has (`BoxCapabilities.harnesses`; a box that does not report it, or has not answered yet, offers
+ * none of them).
+ */
 export const connectedModelProviders = (
   connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean }>,
+  harnesses: ReadonlyArray<ModelProvider> | undefined,
 ): readonly ModelProviderInfo[] =>
-  MODEL_PROVIDERS.filter(
-    (p) => p.connections.length === 0 || connections.some((c) => c.connected && p.connections.includes(c.provider)),
+  MODEL_PROVIDERS.filter((p) =>
+    p.connections.length === 0
+      ? harnesses?.includes(p.id) === true
+      : connections.some((c) => c.connected && p.connections.includes(c.provider)),
   )
 
 /**
