@@ -1,11 +1,17 @@
 import { Context, Effect, Layer } from "effect"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import { MODEL_PROVIDERS, type ModelProvider, type RelayCredentials } from "@cloudagents/protocol"
+import { type ModelProvider, type RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 
-/** Providers Kestrel brokers model calls for. ACP harnesses bring their own login and are not brokered. */
+/** Providers Kestrel brokers model calls for. A standalone ACP harness is not a provider; its runs use `vendors`. */
 export type BrokerProvider = Exclude<ModelProvider, "omp" | "pi" | "hermes">
+
+/**
+ * What a run's broker token may reach: one provider (a gateway), both vendor APIs (`vendors`: a vendor CLI run or an
+ * ACP harness, whose CLI may call either vendor), or nothing (`null`: no broker access at all).
+ */
+export type BrokerChannel = BrokerProvider | "vendors" | null
 
 /** Where the broker forwards each provider's calls, and the header that carries the real key. */
 export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; readonly keyHeader: "x-api-key" | "bearer" }> = {
@@ -20,10 +26,13 @@ export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<B
  *
  * Anthropic and OpenAI keep their own credential env.
  */
-export const brokerEnv = (provider: BrokerProvider, base: string, token: string): Record<string, string> => {
-  switch (provider) {
+export const brokerEnv = (channel: BrokerChannel, base: string, token: string): Record<string, string> => {
+  switch (channel) {
+    case null:
+      return {}
     case "anthropic":
     case "openai":
+    case "vendors":
       // Both vendor CLIs are available to either run: a Claude agent may shell out to codex, and vice versa.
       return {
         ANTHROPIC_BASE_URL: `${base}/anthropic`,
@@ -57,8 +66,8 @@ export interface BrokerLease {
 }
 
 export interface CredentialBrokerShape {
-  /** Mints a per-run token, with env pointing the run's CLI at `provider` (none for an ACP harness). */
-  readonly issue: (runId: string, user: string, provider: BrokerProvider | null) => Effect.Effect<BrokerLease>
+  /** Mints a per-run token, with env pointing the run's CLI at `channel` (none for a run with no broker access). */
+  readonly issue: (runId: string, user: string, channel: BrokerChannel) => Effect.Effect<BrokerLease>
   /** Invalidates the run's token and notifies revoke listeners. Idempotent. */
   readonly revoke: (runId: string) => Effect.Effect<void>
   /** Grant for a live token; null when unknown or revoked. */
@@ -73,6 +82,17 @@ export class CredentialBroker extends Context.Tag("cloudagents/CredentialBroker"
   CredentialBroker,
   CredentialBrokerShape
 >() {}
+
+/**
+ * The providers a channel's token authorizes. A vendor or ACP run keeps both vendor APIs, so either CLI may shell out to
+ * the other; a gateway run is scoped to its own provider.
+ */
+const channelProviders = (channel: BrokerChannel): ReadonlyArray<BrokerProvider> =>
+  channel === null
+    ? []
+    : channel === "vendors" || channel === "anthropic" || channel === "openai"
+      ? ["anthropic", "openai"]
+      : [channel]
 
 export const CredentialBrokerLive = Layer.effect(
   CredentialBroker,
@@ -103,19 +123,14 @@ export const CredentialBrokerLive = Layer.effect(
     }
 
     const broker: CredentialBrokerShape = {
-      issue: (runId, user, provider) =>
+      issue: (runId, user, channel) =>
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
-          // Anthropic/OpenAI runs keep both vendor CLIs: either CLI may shell out to the other. Gateways and ACP stay scoped.
-          grantByToken.set(token, {
-            runId,
-            user,
-            providers: provider === null ? [] : provider === "anthropic" || provider === "openai" ? ["anthropic", "openai"] : [provider],
-          })
+          grantByToken.set(token, { runId, user, providers: channelProviders(channel) })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
-          return { token, env: provider === null ? {} : brokerEnv(provider, base, token) }
+          return { token, env: brokerEnv(channel, base, token) }
         }),
       revoke: (runId) => Effect.sync(() => revokeSync(runId)),
       grantForToken: (token) => Effect.sync(() => grantFor(token)),

@@ -31,6 +31,7 @@ import { CredentialBroker, credentialFor, type BrokerProvider } from "../broker"
 import { boxControl } from "../control/client"
 import { CredentialStore } from "../credentials"
 import { Config, VERSION } from "../config"
+import { harnessStatuses } from "../harness-status"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
 import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
@@ -160,7 +161,7 @@ type RunConversation =
   | { readonly kind: "claude"; readonly prompt: string }
   | { readonly kind: "acp"; readonly provider: ModelProvider; readonly input: AcpRunInput }
 
-/** The CLI config directory each standalone ACP harness reads its own settings and sessions from. */
+/** The config directory each standalone harness keeps its own settings and sessions in, under the run's home. */
 const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
   omp: ".omp",
   pi: ".pi",
@@ -745,6 +746,22 @@ export const AgentHarnessLive = Layer.effect(
         const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = agentChoiceProvider(choice)
           const harness = providerHarness(provider)
+          // The vendor CLI that runs this provider's models; null for a standalone ACP harness, which speaks ACP itself.
+          const cli = MODEL_HARNESS[provider].cli
+          // A standalone harness reaches models through the broker like a vendor CLI does: both vendor APIs stay open.
+          // A harness that runs its own models (OpenCode's free ones) gets no broker access at all.
+          const channel = MODEL_HARNESS[provider].broker ? (cli === null ? "vendors" : brokerProviderOf(provider)) : null
+          if (harness === "acp") {
+            // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run.
+            const status = harnessStatuses(config).find((candidate) => candidate.harness === provider)
+            if (status !== undefined && !status.available) {
+              return yield* Effect.fail(
+                new InternalError({
+                  message: `${providerInfo(provider).name} cannot run on this box: ${status.error ?? "its CLI is not installed"}.`,
+                }),
+              )
+            }
+          }
           const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
@@ -752,20 +769,22 @@ export const AgentHarnessLive = Layer.effect(
           // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
           const ghBinHost = join(homeDir, ".kestrel", "gh")
           const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
-          // An ACP harness reads its own model login from this directory; sandboxed runs get it bound in, and
-          // unsandboxed runs symlink it into the task home (their HOME) so the CLI finds the same config.
-          const acpConfigDir = harness === "acp" ? ACP_CONFIG_DIRS[provider] : undefined
-          const acpConfigHost = acpConfigDir === undefined ? null : join(config.dataDir, "users", user, acpConfigDir)
-          const acpConfigInside =
-            acpConfigDir === undefined ? null : join(agentHome(settings, homeDir), acpConfigDir)
-          const acpBinds =
-            acpConfigHost !== null && acpConfigInside !== null && settings.level !== "off"
-              ? [{ host: acpConfigHost, sandbox: acpConfigInside }]
+          // A standalone harness keeps its own settings and session store in one per-user directory: the directory
+          // `docs/harnesses.md` tells an operator to set the harness up in, and the one a run mounts. It never holds
+          // model credentials - a run reaches models through the broker - so no credential file enters the sandbox.
+          const harnessConfigDir = harness === "acp" ? ACP_CONFIG_DIRS[provider] : undefined
+          const harnessHome =
+            harnessConfigDir === undefined ? null : join(config.dataDir, "users", user, "harnesses", provider)
+          const harnessConfigInside =
+            harnessConfigDir === undefined ? null : join(agentHome(settings, homeDir), harnessConfigDir)
+          const harnessBinds =
+            harnessHome !== null && harnessConfigInside !== null && settings.level !== "off"
+              ? [{ host: harnessHome, sandbox: harnessConfigInside }]
               : []
 
           const started = yield* Effect.gen(function* () {
-            // The run's token authorizes its MCP session; ACP harnesses broker no model calls of their own.
-            const lease = yield* broker.issue(run.id, user, brokerProviderOf(provider))
+            // The run's token authorizes its MCP session and its model calls (a vendor CLI's or an ACP harness's).
+            const lease = yield* broker.issue(run.id, user, channel)
             yield* Effect.tryPromise({
               try: async () => {
                 await mkdir(join(homeDir, ".cloudagents"), { recursive: true })
@@ -780,10 +799,11 @@ export const AgentHarnessLive = Layer.effect(
                 await mkdir(ghBinHost, { recursive: true })
                 await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
                 await chmod(join(ghBinHost, "gh"), 0o755)
-                if (acpConfigHost !== null && acpConfigDir !== undefined) {
-                  await mkdir(acpConfigHost, { recursive: true })
+                if (harnessHome !== null && harnessConfigDir !== undefined) {
+                  // Owner-only: the harness writes its own session state here, and only this user's runs read it.
+                  await mkdir(harnessHome, { recursive: true, mode: 0o700 })
                   if (settings.level === "off") {
-                    await symlink(acpConfigHost, join(homeDir, acpConfigDir)).catch((e: NodeJS.ErrnoException) => {
+                    await symlink(harnessHome, join(homeDir, harnessConfigDir)).catch((e: NodeJS.ErrnoException) => {
                       if (e.code !== "EEXIST") throw e
                     })
                   }
@@ -809,12 +829,11 @@ export const AgentHarnessLive = Layer.effect(
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [AGENT_CLIS[d.provider].configEnv, d.inside]))
             const workspacePath = join(config.threadsDir, task.id)
             const cwd = agentCwd(workspacePath, task)
-            // The vendor CLI that runs this provider's models; null for an ACP harness, which speaks ACP itself.
-            const cli = MODEL_HARNESS[provider].cli
             // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
             // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
-            // A standalone ACP harness with a per-user config dir keeps its sessions there, mounted into every run
-            // (see ACP_CONFIG_DIRS). OpenCode keeps them in the run's own home instead.
+            // A standalone harness with a per-user config dir keeps its sessions there, and every run of it mounts
+            // that dir (see `harnessHome`), so its sessions always live where its CLI keeps them. OpenCode keeps its
+            // sessions in the run's own home instead.
             const continuation: SessionContinuation =
               cli === null
                 ? ACP_CONFIG_DIRS[provider] === undefined
@@ -891,7 +910,7 @@ export const AgentHarnessLive = Layer.effect(
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
-              binds: [...loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })), ...acpBinds],
+              binds: [...loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })), ...harnessBinds],
               pathPrefix: [ghBinAgent],
             })
 
