@@ -1849,7 +1849,10 @@ export class Hub extends DurableObject<Env> {
 
   override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     if (this.isNestSocket(ws)) {
-      void this.onNestFrame(ws, message)
+      this.onNestFrame(ws, message).catch((error: unknown) => {
+        console.error(`nest: host frame failed: ${error instanceof Error ? error.message : String(error)}`)
+        closeQuietly(ws, 1011, "internal error")
+      })
       return
     }
     if (typeof message === "string") {

@@ -40,6 +40,11 @@ export const ensureNestTables = (sql: FleetSql): void => {
     pending_deadline INTEGER,
     create_failed INTEGER NOT NULL DEFAULT 0
   )`)
+  // Tables created before `create_failed` get it here; existing boxes did not fail a create.
+  const boxColumns = sql.exec<{ name: string }>("PRAGMA table_info(nest_boxes)").toArray()
+  if (!boxColumns.some((c) => c.name === "create_failed")) {
+    sql.exec("ALTER TABLE nest_boxes ADD COLUMN create_failed INTEGER NOT NULL DEFAULT 0")
+  }
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_host ON nest_boxes (host_id)`)
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_deadline ON nest_boxes (pending_deadline)`)
 }
