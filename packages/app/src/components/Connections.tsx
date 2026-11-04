@@ -393,7 +393,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
               Open sign-in page
             </a>
           </Button>
-          <p className="text-muted-foreground">Sign in on Anthropic's page, then paste the code it shows you.</p>
+          <p className="text-muted-foreground">Sign in on that page, then paste the code it shows you.</p>
           <form
             className="flex flex-wrap gap-2"
             onSubmit={(e) => {

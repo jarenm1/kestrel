@@ -151,7 +151,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
             Open sign-in page
           </Button>
           <Text style={connectionStyles.muted}>
-            Sign in on Anthropic's page, then paste the code it shows you.
+            Sign in on that page, then paste the code it shows you.
           </Text>
           <Input
             value={code}
