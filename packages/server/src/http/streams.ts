@@ -5,8 +5,9 @@ import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
 import { DesktopManager, DesktopRtcSession, MediaTap, mintIceServers } from "../desktop"
 import { TaskStatsService } from "../stats"
+import { ActivityTracker } from "../platform/tracker"
 
-export type WsServices = CoreService | DesktopManager | EventHub | Config | TaskStatsService
+export type WsServices = CoreService | DesktopManager | EventHub | Config | TaskStatsService | ActivityTracker
 
 /**
  * One bidirectional stream to a browser, tunnelled through the control plane relay.
@@ -223,8 +224,7 @@ const servePreview = (
     socket.onClose(upstream.right.close)
     yield* Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void)))
   })
-/** Runs the handler for a stream route against one socket for the signed-in `user`. Never fails: errors close the socket. */
-export const serveStream = (route: StreamRoute, user: string, socket: StreamSocket): Effect.Effect<void, never, WsServices> => {
+const routeStream = (route: StreamRoute, user: string, socket: StreamSocket): Effect.Effect<void, never, WsServices> => {
   switch (route.kind) {
     case "events":
       return serveEvents(socket, user, route.taskId)
@@ -238,3 +238,22 @@ export const serveStream = (route: StreamRoute, user: string, socket: StreamSock
       return servePreview(route, user, socket)
   }
 }
+
+/**
+ * Runs the handler for a stream route against one socket for the signed-in `user`. Never fails: errors close the
+ * socket. A message a client sends is activity; every stream except a preview counts as a viewer while it is open.
+ */
+export const serveStream = (route: StreamRoute, user: string, rawSocket: StreamSocket): Effect.Effect<void, never, WsServices> =>
+  Effect.gen(function* () {
+    const tracker = yield* ActivityTracker
+    const socket: StreamSocket = {
+      ...rawSocket,
+      onText: (listener) =>
+        rawSocket.onText((data) => {
+          Effect.runSync(tracker.touch)
+          listener(data)
+        }),
+    }
+    const leave = route.kind === "preview" ? Effect.void : yield* tracker.viewerJoined
+    yield* routeStream(route, user, socket).pipe(Effect.ensuring(leave))
+  })

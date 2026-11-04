@@ -5,7 +5,7 @@ import { Either, Schema } from "effect"
 import { Link } from "react-router-dom"
 import { api } from "@/api/client"
 import { applyBoxList, keys, queries } from "@/api/queries"
-import { useBox } from "@/components/BoxStatus"
+import { useBox, useBoxCapabilities } from "@/components/BoxStatus"
 import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
@@ -78,6 +78,7 @@ export function Boxes() {
           </CardContent>
         </Card>
       )}
+      <ActiveBoxFeatures />
       {boxes.data &&
         (list.length >= MAX_USER_BOXES ? (
           <p className="text-xs text-muted-foreground">You can add up to {MAX_USER_BOXES} boxes.</p>
@@ -99,6 +100,21 @@ export function Boxes() {
 export function OnlineBadge({ online }: { online: boolean | undefined }) {
   if (online === undefined) return <Badge variant="neutral">checking</Badge>
   return online ? <Badge variant="success">online</Badge> : <Badge variant="neutral">offline</Badge>
+}
+
+/** What the active box adds beyond its agents: a GPU on request and suspend when idle. Empty while unknown. */
+export function ActiveBoxFeatures() {
+  const capabilities = useBoxCapabilities()
+  if (capabilities === null) return null
+  const gpu = capabilities.gpu === "on-demand" ? "GPU on request" : capabilities.gpu === "static" ? "GPU" : null
+  if (gpu === null && capabilities.suspend !== true) return null
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>Active box:</span>
+      {gpu !== null && <Badge variant="neutral">{gpu}</Badge>}
+      {capabilities.suspend === true && <Badge variant="neutral">Suspends when idle</Badge>}
+    </div>
+  )
 }
 
 /** The quickest way to add a box: the CLI pairs it with your account, then the code is approved on the pairing page. */

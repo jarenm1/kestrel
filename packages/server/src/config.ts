@@ -7,6 +7,7 @@ import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
 import { defaultMemoryHigh, type Provisioning, type SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
+import { readStoredSecret } from "./platform/secret"
 
 export const VERSION: string = pkg.version
 
@@ -95,7 +96,7 @@ export interface ServerConfig {
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
   /**
    * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box without
-   * the relay. Null unless both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET` are set. `managed`
+   * the relay. Null unless the box has an id and a secret (`CLOUDAGENTS_BOX_SECRET`, or the stored Nest secret). `managed`
    * (`CLOUDAGENTS_BOX_MANAGED=1`) marks a Kestrel fleet box that serves many users; otherwise it is the user's own box.
    */
   readonly direct: {
@@ -104,6 +105,11 @@ export interface ServerConfig {
     readonly boxSecret: string
     readonly managed: boolean
   } | null
+  /**
+   * The Nest VM's guest agent socket (`CLOUDAGENTS_GUEST_AGENT_SOCKET`). Null on a plain box. When set the box is a
+   * Nest VM: it reports suspend and GPU capability and speaks the guest protocol over this socket.
+   */
+  readonly nest: { readonly guestSocket: string } | null
   /** Per-task persisted homes; each is bound at /home/agent inside the sandbox. */
   readonly homesDir: string
   /**
@@ -140,6 +146,9 @@ export class Config extends Context.Tag("cloudagents/Config")<Config, ServerConf
 
 const repoRoot = resolve(import.meta.dir, "../../..")
 
+/** The data dir: `CLOUDAGENTS_DATA_DIR`, else `.data` under the repo. Enrollment reads it before the config loads. */
+export const dataDirFromEnv = (): string => resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
+
 export const loadConfig = (): ServerConfig => {
   const portRaw = process.env.CLOUDAGENTS_PORT ?? "8787"
   const port = Number(portRaw)
@@ -149,7 +158,7 @@ export const loadConfig = (): ServerConfig => {
   const host = process.env.CLOUDAGENTS_HOST ?? "127.0.0.1"
   const sandboxPort = intEnv("CLOUDAGENTS_SANDBOX_PORT", ((port + 9999) % 65535) + 1, 1, 65535)
   if (sandboxPort === port) throw new Error("CLOUDAGENTS_SANDBOX_PORT must differ from CLOUDAGENTS_PORT")
-  const dataDir = resolve(process.env.CLOUDAGENTS_DATA_DIR ?? join(repoRoot, ".data"))
+  const dataDir = dataDirFromEnv()
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
   const agentCommands: Record<ModelProvider, string> = fakeAgent
@@ -211,7 +220,7 @@ export const loadConfig = (): ServerConfig => {
       }
     : null
   const controlUrl = loadControlUrl()
-  const direct = loadDirect(controlUrl)
+  const direct = loadDirect(controlUrl, dataDir)
   const gitLegacyNoreplyUsers = (process.env.CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS ?? "")
     .split(",").map((login) => login.trim().toLowerCase()).filter((login) => login !== "")
   if (gitLegacyNoreplyUsers.some((login) => !/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/.test(login))) {
@@ -223,6 +232,7 @@ export const loadConfig = (): ServerConfig => {
     sandboxPort,
     relay: loadRelay(controlUrl, direct),
     direct,
+    nest: loadNest(),
     mcpBaseUrl: `http://127.0.0.1:${sandboxPort}`,
     dataDir,
     mirrorsDir: join(dataDir, "mirrors"),
@@ -371,9 +381,9 @@ const loadControlUrl = (): string | null => {
  * Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. A managed box
  * (`CLOUDAGENTS_BOX_MANAGED=1`) must have all three.
  */
-const loadDirect = (controlUrl: string | null): ServerConfig["direct"] => {
+const loadDirect = (controlUrl: string | null, dataDir: string): ServerConfig["direct"] => {
   const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
-  const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() ?? ""
+  const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() || readStoredSecret(dataDir) || ""
   const managed = process.env.CLOUDAGENTS_BOX_MANAGED === "1"
   if (managed && (boxId === "" || boxSecret === "" || controlUrl === null)) {
     throw new Error(
@@ -399,6 +409,12 @@ const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): S
   }
   if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
   return { controlUrl, boxToken }
+}
+
+/** `CLOUDAGENTS_GUEST_AGENT_SOCKET`: present only on a Nest VM. */
+const loadNest = (): ServerConfig["nest"] => {
+  const guestSocket = process.env.CLOUDAGENTS_GUEST_AGENT_SOCKET?.trim() ?? ""
+  return guestSocket === "" ? null : { guestSocket }
 }
 
 export const ConfigLive = Layer.sync(Config, loadConfig)

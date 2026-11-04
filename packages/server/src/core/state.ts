@@ -86,6 +86,8 @@ export interface StoreShape {
    * persisted, so `f` MUST validate before mutating.
    */
   readonly update: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<A, E | InternalError>
+  /** Resolves once every write made so far is on disk. */
+  readonly flush: Effect.Effect<void>
 }
 
 export class StateStore extends Context.Tag("cloudagents/StateStore")<StateStore, StoreShape>() {}
@@ -241,6 +243,7 @@ export const StateLive = Layer.effect(
             catch: (e) => new InternalError({ message: `state write failed: ${String(e)}` }),
           }).pipe(Effect.as(result.right))
         }),
+      flush: Effect.promise(() => queue),
     }
     return shape
   }),

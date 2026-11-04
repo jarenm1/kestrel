@@ -3,7 +3,8 @@ import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { MODEL_PROVIDERS, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
 import { MODEL_HARNESS, type HarnessMinimum } from "./agent-clis"
-import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
+import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, hasRenderNode, parseWestonVersion } from "./desktop/requirements"
+import type { PlatformHardware } from "./platform/service"
 
 interface CapabilityProbe {
   readonly platform: NodeJS.Platform
@@ -11,6 +12,7 @@ interface CapabilityProbe {
   readonly exists: (path: string) => boolean
   readonly executable: (name: string) => boolean
   readonly westonVersion: () => string
+  readonly renderNode: () => boolean
 }
 
 const hostProbe = (): CapabilityProbe => ({
@@ -23,6 +25,7 @@ const hostProbe = (): CapabilityProbe => ({
     const run = spawnSync("weston", ["--version"], { encoding: "utf8", timeout: 2000 })
     return run.error ? "" : run.stdout + run.stderr
   },
+  renderNode: hasRenderNode,
 })
 
 // Lima mounts its cloud-init seed ISO here on every guest it boots (checked on Lima 2.x, Ubuntu 24.04, qemu).
@@ -38,6 +41,7 @@ const platformOf = (probe: CapabilityProbe): BoxCapabilities["platform"] => {
 export const boxCapabilities = (
   sandbox: BoxCapabilities["sandbox"],
   probe: CapabilityProbe = hostProbe(),
+  hardware: PlatformHardware | null = null,
 ): BoxCapabilities => {
   const platform = platformOf(probe)
   // Only what a desktop start needs; optional tools (see requirements.ts) do not change the answer.
@@ -46,7 +50,16 @@ export const boxCapabilities = (
     const version = parseWestonVersion(probe.westonVersion())
     desktop = version !== null && version.major >= MIN_WESTON_MAJOR
   }
-  return { version: 1, platform, sandbox, desktop: desktop ? "prerequisites-present" : "unavailable" }
+  const gpu = hardware?.gpu ?? (probe.renderNode() ? "static" : "none")
+  const suspend = hardware?.suspend ?? false
+  return {
+    version: 1,
+    platform,
+    sandbox,
+    desktop: desktop ? "prerequisites-present" : "unavailable",
+    gpu,
+    suspend,
+  }
 }
 
 /** Finds a harness CLI where agent runs look for it, and asks it its version. */

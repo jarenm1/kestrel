@@ -1,9 +1,9 @@
 import { availableHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
-import { Effect, Fiber, Layer } from "effect"
+import { Effect, Fiber, Layer, Ref } from "effect"
 import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
-import { ConfigLive, Config } from "./config"
+import { ConfigLive, Config, dataDirFromEnv } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
 import { EventHubLive } from "./core/events"
@@ -28,6 +28,9 @@ import { makeBoxAuth } from "./direct/auth"
 import { makeBoxActivityReporter, type BoxActivityReporter } from "./direct/box-activity"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
+import { ensureNestSecret } from "./platform/enroll"
+import { BoxPlatform, BoxPlatformLive } from "./platform"
+import { ActivityTracker, ActivityTrackerLive } from "./platform/tracker"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -37,13 +40,15 @@ const BaseLive = Layer.provideMerge(
     EventHubLive,
     DesktopManagerLive,
     CredentialStoreLive,
+    ActivityTrackerLive,
     Layer.provide(GitHubLive, ConfigLive),
   ),
 )
 const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
 const StateWithBase = Layer.provideMerge(StateLive, CliAuthWithBase)
 const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
-const CoreWithBase = Layer.provideMerge(CoreLive, HarnessWithBase)
+const PlatformWithBase = Layer.provideMerge(BoxPlatformLive, HarnessWithBase)
+const CoreWithBase = Layer.provideMerge(CoreLive, PlatformWithBase)
 const AppLive = Layer.provideMerge(TaskStatsLive, CoreWithBase)
 
 const MCP_PREFIX = "/mcp/"
@@ -125,8 +130,16 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
-  const capabilities = { ...boxCapabilities(config.sandbox), harnesses: availableHarnesses(config) }
+  const platform = yield* BoxPlatform
+  const tracker = yield* ActivityTracker
+  // The box's startup snapshot: which harness CLIs it found.
+  const capabilities = { ...boxCapabilities(config.sandbox, undefined, platform.hardware), harnesses: availableHarnesses(config) }
   const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
+  // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it.
+  const handle = (request: Request) => {
+    Effect.runSync(tracker.touch)
+    return webHandler(request)
+  }
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
@@ -163,6 +176,7 @@ const program = Effect.gen(function* () {
     inbox: core.inbox,
     threads: { maxConcurrentRuns: config.maxConcurrentRuns, owner: core.taskOwner, create: core.createTask, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread, delegate: core.delegate, delegatedStatus: core.delegatedStatus, cancelDelegation: core.cancelDelegation, acknowledgeDelegation: core.acknowledgeDelegation, withSlotReleased: harness.withSlotReleased },
     previewOpen: core.previewOpen,
+    gpu: platform.gpuOnDemand,
   })
 
   const ghHandler = createGhHandler({
@@ -181,11 +195,11 @@ const program = Effect.gen(function* () {
       auth: makeBoxAuth(config.direct, store, fetch, boxActivity ?? undefined),
       activity: boxActivity ?? undefined,
       core,
-      webHandler,
+      webHandler: handle,
       runtime: yield* Effect.runtime<WsServices>(),
     })
   }
-  const serve = direct === null ? webHandler : direct.handle
+  const serve = direct === null ? handle : direct.handle
 
   const server = createServer((req, res) => {
     toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
@@ -219,19 +233,37 @@ const program = Effect.gen(function* () {
     Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
   )
 
-  let relayFiber: Fiber.RuntimeFiber<void> | null = null
-  if (config.relay) {
-    relayFiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
+  // The control plane link. A Nest VM's resume restarts it, since its socket from before the snapshot is dead.
+  const relayFiber = yield* Ref.make<Fiber.RuntimeFiber<void> | null>(null)
+  const startRelay = Effect.gen(function* () {
+    if (config.relay === null) return
+    const fiber = yield* Effect.forkDaemon(
+      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle }),
     )
+    yield* Ref.set(relayFiber, fiber)
     yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  }
+  })
+  yield* startRelay
+
+  // The resume hook restarts the relay, which needs the services the relay runs with; the platform needs none.
+  const relayServices = yield* Effect.context<WsServices | CredentialStore>()
+  const platformFiber = yield* Effect.forkDaemon(
+    platform.run({
+      resumed: Effect.gen(function* () {
+        const old = yield* Ref.get(relayFiber)
+        if (old !== null) yield* Fiber.interrupt(old)
+        yield* startRelay
+      }).pipe(Effect.provide(relayServices)),
+    }),
+  )
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   boxActivity?.stop()
   if (activity !== null) yield* activity.close
-  if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
+  yield* Fiber.interrupt(platformFiber)
+  const relay = yield* Ref.get(relayFiber)
+  if (relay !== null) yield* Fiber.interrupt(relay)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   if (direct !== null) direct.close()
@@ -239,7 +271,8 @@ const program = Effect.gen(function* () {
   yield* closeServer(sandboxServer)
 }).pipe(Effect.provide(AppLive))
 
-Effect.runPromise(program).then(
+// A Nest VM enrolls before the config loads: the secret it stores is what the config reads.
+Effect.runPromise(ensureNestSecret(process.env, dataDirFromEnv()).pipe(Effect.andThen(program))).then(
   () => process.exit(0),
   (error: unknown) => {
     console.error("cloudagents server failed:", error)
