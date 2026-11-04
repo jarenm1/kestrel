@@ -91,16 +91,24 @@ a Nix GC root while any template or suspended VM references it.
 
 Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>.nest-guest`):
 
-- `kernel` (bzImage), `initrd`, `store.erofs` (the system closure, read-only), `cmdline` (a file), `manifest.json`
-  (`{ imageId, kernel, initrd, store, cmdline }`, `imageId` = the store hash, which names templates).
-- Boot: direct kernel boot. The initrd mounts `/dev/pmem0` (`store.erofs`, DAX) at `/nix/.ro-store`, a tmpfs root,
-  and an overlay `/nix/store` whose upper layer moves to the volume once it is mounted (`NEST_VOLUME_MOUNT/.nix-rw`),
-  so packages a user installs persist.
+- `kernel` (bzImage), `initrd`, `store.erofs`, `cmdline` (a file), `manifest.json` (`{ imageId, kernel, initrd, store,
+  cmdline }`, `imageId` = the store hash of the system closure, which names templates). `store.erofs` holds `store/`
+  (the closure's store entries, the overlay's lower layer) and `registration` (the closure's Nix database rows, loaded
+  at boot).
+- Boot: direct kernel boot. The initrd mounts `/dev/pmem0` (`store.erofs`, DAX, read-only) at `/nix/.ro-store`, a tmpfs
+  root, and an overlay `/nix/store` (lower `/nix/.ro-store/store`, upper on tmpfs). `kestrel-nix-db` loads `registration`
+  into the Nix database on every boot. On `configure` the guest agent mounts the volume at `NEST_VOLUME_MOUNT`, moves the
+  overlay's upper layer to `NEST_VOLUME_MOUNT/.nix-rw/upper` (copied from the tmpfs layer on first use; the agent's
+  `--nix-lower` and `--nix-tmp-upper` flags point it at this layout), and starts `kestrel-volume`, which binds the Nix
+  database to `NEST_VOLUME_MOUNT/.nix-var` (copied on first use), so packages a user installs persist.
 - Kernel: `VIRTIO_{PCI,BLK,NET,MEM,BALLOON,PMEM,VSOCKETS}`, `LIBNVDIMM`, `FS_DAX`, `EROFS_FS`, `OVERLAY_FS`, `VMGENID`,
-  `HW_RANDOM_VIRTIO`, `PTP_1588_CLOCK_KVM`, `MEMORY_HOTPLUG`, `MEMORY_HOTREMOVE`, `HOTPLUG_PCI_ACPI`, `ZSWAP`, `NO_HZ_IDLE`.
+  `HW_RANDOM_VIRTIO`, `PTP_1588_CLOCK_KVM`, `MEMORY_HOTPLUG`, `MEMORY_HOTREMOVE`, `HOTPLUG_PCI_ACPI`, `ZSWAP`, and
+  `NO_HZ_IDLE` (stock nixpkgs sets `NO_HZ_FULL`; the image overrides it so an idle vCPU stops its tick).
 - Command line: `console=hvc0 memhp_default_state=online_movable zswap.enabled=1 zswap.compressor=zstd`.
-- Services: `kestrel-guest-agent` (root), `kestrel-box` (user `kestrel`, not started until `configure`), chrony with the
-  `ptp_kvm` reference clock, `systemd-oomd`, zswap with a swapfile on the volume. The NVIDIA open kernel modules ship in
+- Services: `kestrel-guest-agent` (root, started at boot), `kestrel-box` (user `kestrel`, started by the agent after
+  `configure` once `box.env` exists), `kestrel-volume` (started by the agent after it mounts the volume), chrony with the
+  `ptp_kvm` reference clock, `systemd-oomd`, and zswap backed by the swap disk (`kestrel-swap`, virtio-blk serial
+  `kestrel-swap`), which the agent formats and enables on every boot or clone. The NVIDIA open kernel modules ship in
   the image and load only when a GPU is hot-plugged; Mesa provides software rendering otherwise.
 - Package managers point at the host's dependency cache and Nix binary cache when `configure` names them.
 - Box environment: `configure` writes `/var/lib/kestrel/box.env` (root, 0600, read by `kestrel-box.service`) with

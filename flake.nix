@@ -209,10 +209,20 @@
           # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
           toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
         };
+        # Nest crates and the box's dependency tree (packages/host/nix/packages.nix).
+        nest = import ./packages/host/nix/packages.nix { inherit pkgs; lib = pkgs.lib; root = ./.; };
       in
       {
-        packages = toolkits // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          desktop-deps = desktopEnv;
+        packages = toolkits // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          {
+            desktop-deps = desktopEnv;
+          }
+          // pkgs.lib.mapAttrs' (name: pkgs.lib.nameValuePair "kestrel-${name}") nest
+        ) // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          nest-guest = import ./packages/host/nix/guest.nix {
+            inherit nixpkgs system self systemDeps sandboxEnv sandboxSsl;
+            root = ./.;
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -420,5 +430,7 @@
           };
 
         formatter = pkgs.nixpkgs-fmt;
-      });
+      }) // {
+        nixosModules.nest-host = import ./packages/host/nix/host-module.nix { inherit self; };
+      };
 }
