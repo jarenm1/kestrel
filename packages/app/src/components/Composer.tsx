@@ -63,6 +63,7 @@ import {
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
+import { usePromptHistory } from "@/hooks/usePromptHistory"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
@@ -453,6 +454,7 @@ export function Composer({
   repos = [],
 }: Props) {
   const [text, setText] = useStoredDraft(draftKey)
+  const promptHistory = usePromptHistory(draftKey)
   const [view, setView] = useState<ComposerEditorView>(() => composerViewOf(text))
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
@@ -641,6 +643,7 @@ export function Composer({
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, effort }, files).then(
       (sent) => {
+        promptHistory.remember(text.trim())
         setText("")
         onElementsChange?.([])
         setFiles([])
@@ -717,6 +720,25 @@ export function Composer({
       const start = chosenIndex ?? (delta === 1 ? -1 : askOptions.length)
       setChoice({ askId: ask.id, index: (start + delta + askOptions.length) % askOptions.length })
       return
+    }
+    if (
+      !composing && !slashMenuOpen && !referenceMenuOpen && !ask &&
+      !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+      (e.key === "ArrowUp" || e.key === "ArrowDown")
+    ) {
+      const current = editor.current?.readView()
+      const selection = window.getSelection()
+      // Keep ordinary cursor movement within multiline/wrapped text and selections.
+      // Up recalls only at the start or end; Down advances only at the end.
+      if (current && selection?.isCollapsed &&
+        (current.caret === current.plain.length || (e.key === "ArrowUp" && current.caret === 0))) {
+        const recalled = promptHistory.navigate(e.key === "ArrowUp" ? -1 : 1, current.markdown)
+        if (recalled !== undefined) {
+          e.preventDefault()
+          setAutocompleteDismissed(true)
+          setText(recalled)
+        }
+      }
     }
     if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault()
