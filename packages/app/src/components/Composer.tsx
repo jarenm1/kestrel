@@ -669,7 +669,7 @@ export function Composer({
     }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
     // Failures surface through `error`; the text and files stay so they can be resent.
-    if (empty || pending) return
+    if (empty || pending || routeError !== undefined) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, provider: model?.provider, effort }, files).then(
       (sent) => {

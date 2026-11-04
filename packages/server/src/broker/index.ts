@@ -107,7 +107,12 @@ export const CredentialBrokerLive = Layer.effect(
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
-          grantByToken.set(token, { runId, user, providers: provider === null ? [] : [provider] })
+          // Anthropic/OpenAI runs keep both vendor CLIs: either CLI may shell out to the other. Gateways and ACP stay scoped.
+          grantByToken.set(token, {
+            runId,
+            user,
+            providers: provider === null ? [] : provider === "anthropic" || provider === "openai" ? ["anthropic", "openai"] : [provider],
+          })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
           return { token, env: provider === null ? {} : brokerEnv(provider, base, token) }

@@ -535,6 +535,7 @@ export const AgentHarnessLive = Layer.effect(
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
+        entry.stderrLines.push(line)
         entry.diagnostic = agentDiagnostic(line) ?? entry.diagnostic
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
@@ -576,6 +577,7 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
+      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
