@@ -25,6 +25,7 @@ export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; r
   openrouter: { base: "https://openrouter.ai/api", keyHeader: "bearer" },
   zai: { base: "https://api.z.ai/api/anthropic", keyHeader: "bearer" },
   deepseek: { base: "https://api.deepseek.com/anthropic", keyHeader: "bearer" },
+  minimax: { base: "https://api.minimax.io/anthropic", keyHeader: "bearer" },
 }
 
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>

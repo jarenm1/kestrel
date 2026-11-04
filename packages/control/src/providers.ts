@@ -99,6 +99,7 @@ export const PROVIDERS: readonly Provider[] = [
   { id: "openrouter", label: "OpenRouter", kind: "apikey" },
   { id: "zai", label: "Z.ai", kind: "apikey" },
   { id: "deepseek", label: "DeepSeek", kind: "apikey" },
+  { id: "minimax", label: "MiniMax", kind: "apikey" },
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },

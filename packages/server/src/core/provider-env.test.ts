@@ -20,7 +20,7 @@ describe("per-provider run environment", () => {
   })
 
   test("third-party gateway runs do not mount either vendor login", () => {
-    for (const provider of ["openrouter", "zai", "deepseek"] as const) {
+    for (const provider of ["openrouter", "zai", "deepseek", "minimax"] as const) {
       expect(loginsForProvider(provider, logins)).toEqual([])
     }
   })
@@ -47,6 +47,7 @@ describe("per-provider run environment", () => {
   test("tier pins carry the gateway's auto-compact window", () => {
     expect(claudeTierEnv("glm-5.3[1m]").CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("1000000")
     expect(claudeTierEnv("deepseek-flash[1m]").CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("786432")
+    expect(claudeTierEnv("MiniMax-M3.1-Flash[1m]").CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("524288")
   })
 
   test("a provider-map key wins over the legacy slot", () => {

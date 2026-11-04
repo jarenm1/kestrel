@@ -16,6 +16,7 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   openrouter: "Claude Code via OpenRouter",
   zai: "Claude Code via Z.ai",
   deepseek: "Claude Code via DeepSeek",
+  minimax: "Claude Code via MiniMax",
   opencode: "OpenCode",
   google: "Antigravity",
   omp: "OMP",

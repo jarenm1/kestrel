@@ -39,6 +39,7 @@ const harnessLayer = (
       openrouter: "",
       zai: "",
       deepseek: "",
+      minimax: "",
       opencode: "",
       google: "",
       omp: "",
