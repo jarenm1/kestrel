@@ -264,7 +264,7 @@ pkgs.testers.runNixOSTest {
     host.succeed("ip netns exec guest ip link set lo up")
     host.succeed("ip netns exec guest ip link set eth0g up")
     host.succeed("ip netns exec guest ip addr add 10.77.250.2/24 dev eth0g")
-    host.succeed("ip netns exec guest ip route add default via 169.254.0.1")
+    host.succeed("ip netns exec guest ip route add default via 169.254.0.1 dev eth0g onlink")
     host.succeed("ip route add 10.77.250.2/32 dev kn-probe")
     host.succeed("nft add element inet kestrel tap_addrs '{ \"kn-probe\" . 10.77.250.2 }'")
 
