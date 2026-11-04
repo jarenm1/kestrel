@@ -1,5 +1,5 @@
 import { Data, Effect, Either, Schema } from "effect"
-import { ControlPaths, NestEnrollResult } from "@cloudagents/protocol"
+import { ControlPaths, NEST_BOX_ENV, NestEnrollResult } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import { readStoredSecret, writeStoredSecret } from "./secret"
 
@@ -61,20 +61,20 @@ const enrollWithRetry = (url: string, boxId: string, token: string): Effect.Effe
  * A Nest box's first start. Precedence, so a restarted box never spends its token twice:
  * 1. `CLOUDAGENTS_BOX_SECRET` set (a box the user runs with its own secret): nothing to do.
  * 2. A stored secret in the data dir (an earlier enrollment): nothing to do.
- * 3. `CLOUDAGENTS_NEST_ENROLL_TOKEN` set: exchange it once for the secret and store it, owner-only.
+ * 3. `NEST_BOX_ENV.enrollToken` set: exchange it once for the secret and store it, owner-only.
  * Without a token and without a secret the box runs as a plain box with no direct mode.
  */
 export const ensureNestSecret = (env: Env, dataDir: string): Effect.Effect<void, EnrollError> =>
   Effect.suspend(() => {
-    const token = env.CLOUDAGENTS_NEST_ENROLL_TOKEN?.trim() ?? ""
+    const token = env[NEST_BOX_ENV.enrollToken]?.trim() ?? ""
     if (token === "") return Effect.void
     if ((env.CLOUDAGENTS_BOX_SECRET?.trim() ?? "") !== "") return Effect.void
     if (readStoredSecret(dataDir) !== null) return Effect.void
-    const boxId = env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
-    const controlUrl = env.CLOUDAGENTS_CONTROL_URL?.trim() ?? ""
+    const boxId = env[NEST_BOX_ENV.boxId]?.trim() ?? ""
+    const controlUrl = env[NEST_BOX_ENV.controlUrl]?.trim() ?? ""
     if (boxId === "" || controlUrl === "") {
       return Effect.fail(
-        new EnrollError({ message: "enrolling a Nest box needs CLOUDAGENTS_BOX_ID and CLOUDAGENTS_CONTROL_URL" }),
+        new EnrollError({ message: `enrolling a Nest box needs ${NEST_BOX_ENV.boxId} and ${NEST_BOX_ENV.controlUrl}` }),
       )
     }
     const url = `${controlBase(controlUrl)}${ControlPaths.nestEnroll}`

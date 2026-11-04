@@ -1,7 +1,7 @@
 import { Context, Layer, Schema } from "effect"
 import { join, resolve } from "node:path"
 import { availableParallelism } from "node:os"
-import { DesktopRtcIceServer, type ModelProvider } from "@cloudagents/protocol"
+import { DesktopRtcIceServer, NEST_BOX_ENV, type ModelProvider } from "@cloudagents/protocol"
 import pkg from "../package.json"
 import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
@@ -411,9 +411,9 @@ const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): S
   return { controlUrl, boxToken }
 }
 
-/** `CLOUDAGENTS_GUEST_AGENT_SOCKET`: present only on a Nest VM. */
+/** `NEST_BOX_ENV.guestAgentSocket`: present only on a Nest VM. */
 const loadNest = (): ServerConfig["nest"] => {
-  const guestSocket = process.env.CLOUDAGENTS_GUEST_AGENT_SOCKET?.trim() ?? ""
+  const guestSocket = process.env[NEST_BOX_ENV.guestAgentSocket]?.trim() ?? ""
   return guestSocket === "" ? null : { guestSocket }
 }
 
