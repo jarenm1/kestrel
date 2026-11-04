@@ -52,9 +52,9 @@ const capacityOf = (freeGiB: number): NestHostCapacity => ({
   suspended: 0,
 })
 
-const hello = async (hostId: string, vms: NestVmReport[] = [], results: NestHello["results"] = []) => {
+const hello = async (hostId: string, vms: NestVmReport[] = [], results: NestHello["results"] = [], freeGiB = 8) => {
   connected.add(hostId)
-  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId: "image-1", capacity: capacityOf(8), vms, results })
+  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId: "image-1", capacity: capacityOf(freeGiB), vms, results })
 }
 
 const disconnect = (hostId: string) => {
@@ -80,6 +80,7 @@ const placeBox = async (login: string, boxId: string) => {
   addBox(login, boxId)
   const target = fleet.placement()
   if (target === null) throw new Error("no host to place the box on")
+  db.run("UPDATE user_boxes SET url = ? WHERE id = ?", `https://${boxId}.${target.slug}.${DOMAIN}`, boxId)
   await fleet.createBox(boxId, login, target, NEST_STANDARD_LIMITS)
 }
 
@@ -186,9 +187,20 @@ describe("creating a box", () => {
   test("a create the host refuses leaves the box failed, and the owner can delete it", async () => {
     await hello("host-a")
     await placeBox("alice", "box-1")
-    expect(fleet.nextDeadline()).toBeNull()
     const create = lastCommand("host-a", "create")
     fleet.result("host-a", create.commandId, false, "disk full", undefined)
+    expect(fleet.nextDeadline()).toBeNull()
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "provisioning", failed: true, pending: null })
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-a", "destroy").command).toMatchObject({ boxId: "box-1" })
+  })
+
+  test("a create that never gets an answer is marked failed at its deadline, and the owner can delete it", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    expect(fleet.nextDeadline()).toBe(now + 15 * MINUTE)
+
+    await fleet.expire(now + 15 * MINUTE)
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "provisioning", failed: true, pending: null })
     expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "destroy").command).toMatchObject({ boxId: "box-1" })
@@ -204,9 +216,8 @@ describe("VM reports and epochs", () => {
   test("a copy left at an older epoch on another host is evicted when it reports", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
-    disconnect("host-a")
-    await hello("host-b")
-    fleet.wakeRequest("host-b", "box-1")
+    await hello("host-b", [], [], 9)
+    fleet.wakeRequest("host-a", "box-1")
 
     const resume = lastCommand("host-b", "resume")
     expect(resume.command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
@@ -264,6 +275,46 @@ describe("VM reports and epochs", () => {
     expect(lastCommand("host-c", "resume").command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
   })
 
+  test("a parked box is woken only by the host its URL names", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-b")
+
+    fleet.wakeRequest("host-b", "box-1")
+    expect(sent.some((entry) => entry.frame._tag === "command" && entry.frame.command._tag === "resume")).toBe(false)
+
+    fleet.wakeRequest("host-a", "box-1")
+    expect(lastCommand("host-a", "resume").command).toMatchObject({ ownerEpoch: 2 })
+  })
+
+  test("a resume the host never answers is sent again at its deadline, so the parked box is not left waiting", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    expect(fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
+    const first = lastCommand("host-a", "resume")
+
+    await fleet.expire(now + 10 * MINUTE)
+    const second = lastCommand("host-a", "resume")
+    expect(second.commandId).not.toBe(first.commandId)
+    expect(second.command).toMatchObject({ ownerEpoch: 3, volumeRef: "vol-1" })
+  })
+
+  test("parked boxes woken in one wake loop are spread, so a host is not booked past its room", async () => {
+    const vm1 = await runningBox("box-1")
+    fleet.vm("host-a", vmReport("box-1", vm1, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await placeBox("alice", "box-2")
+    const create = lastCommand("host-a", "create")
+    fleet.result("host-a", create.commandId, true, null, vmReport("box-2", create.command.vmId, 1, "parked", { volumeRef: "vol-2", backedUpAt: now }))
+    disconnect("host-a")
+    fleet.wakeRequest("host-a", "box-1")
+    fleet.wakeRequest("host-a", "box-2")
+
+    // Host-b has 2 GiB free: room for one boot (1 GiB plus 512 MiB headroom), not for two.
+    await hello("host-b", [], [], 2)
+    expect(commandsTo("host-b").filter((entry) => entry.command._tag === "resume")).toHaveLength(1)
+    expect([...fleet.statusesOf("alice").values()].filter((status) => status.pending === "resume")).toHaveLength(1)
+  })
+
   test("limits set on a parked box are sent with its next resume, not to a host now", async () => {
     const vmId = await runningBox()
     fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
@@ -303,10 +354,10 @@ describe("owner commands", () => {
     fleet.suspend("alice", "box-1")
     expect(fleet.nextDeadline()).toBe(now + 10 * MINUTE)
 
-    fleet.expire(now + 10 * MINUTE - 1)
+    await fleet.expire(now + 10 * MINUTE - 1)
     expect(fleet.suspend("alice", "box-1")).toMatchObject({ ok: false, status: 409 })
 
-    fleet.expire(now + 10 * MINUTE)
+    await fleet.expire(now + 10 * MINUTE)
     expect(fleet.suspend("alice", "box-1")).toEqual({ ok: true, value: null })
   })
 
@@ -335,6 +386,19 @@ describe("owner commands", () => {
     const bigger = { ...NEST_STANDARD_LIMITS, maxVcpus: 2 }
     expect(fleet.setLimits("alice", "box-1", bigger)).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: bigger })
+  })
+
+  test("a result from a host other than the one the command went to is ignored", async () => {
+    const vmId = await runningBox()
+    expect(fleet.suspend("alice", "box-1")).toEqual({ ok: true, value: null })
+    const suspend = lastCommand("host-a", "suspend")
+    await hello("host-b")
+
+    fleet.result("host-b", suspend.commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: "suspend" })
+
+    fleet.result("host-a", suspend.commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "suspended", pending: null })
   })
 })
 
