@@ -17,8 +17,11 @@ import {
 } from "./harness-commands"
 import { probeClaudeUsage, probeCodexUsage, useCodexBankedReset } from "./provider-usage"
 
-/** How the harness holds a run's conversation with its CLI over stdin (`RunConversation` in `core/harness.ts`). */
-export type ConversationKind = "claude" | "codex"
+/**
+ * How the harness holds a run's conversation with its CLI over stdin (`RunConversation` in `core/harness.ts`): Claude
+ * Code's stream-json, Codex app-server, or the Agent Client Protocol (`core/acp.ts`).
+ */
+export type ConversationKind = "claude" | "codex" | "acp"
 
 /** What a CLI printed: both streams, since CLIs differ in where they report. */
 export interface CliOutput {
@@ -27,9 +30,9 @@ export interface CliOutput {
 }
 
 /**
- * Everything the box knows about one agent CLI: how a run drives it, where its login and sessions live, how a user
- * signs in to it, and how to ask it for commands and limits. A new harness is a new `CliProvider` with an entry in
- * `AGENT_CLIS`; the record type makes every field required.
+ * Everything the box knows about one agent CLI with a login Kestrel manages: where its login and sessions live, how a
+ * user signs in to it, and how to ask it for commands and limits. A CLI with a login is a new `CliProvider` with an
+ * entry in `AGENT_CLIS`; the record type makes every field required.
  */
 export interface AgentCli {
   readonly bin: string
@@ -39,7 +42,6 @@ export interface AgentCli {
   readonly configEnv: string
   /** The broker env the CLI reads for its model calls; a user's own login replaces it. */
   readonly brokerEnv: ReadonlyArray<string>
-  readonly conversation: ConversationKind
   readonly status: ReadonlyArray<string>
   readonly parseStatus: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError>
   readonly login: ReadonlyArray<string>
@@ -94,7 +96,6 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
     dir: "claude",
     configEnv: "CLAUDE_CONFIG_DIR",
     brokerEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
-    conversation: "claude",
     status: ["auth", "status", "--json"],
     parseStatus: parseClaudeStatus,
     login: ["auth", "login"],
@@ -115,7 +116,6 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
     dir: "codex",
     configEnv: "CODEX_HOME",
     brokerEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
-    conversation: "codex",
     status: ["login", "status"],
     parseStatus: parseCodexStatus,
     login: ["login", "--device-auth"],
@@ -139,5 +139,23 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
 /** Every agent CLI, in a fixed order. */
 export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
 
-/** The CLI that runs each provider's models; its login decides where the CLI keeps sessions. */
-export const MODEL_CLI: Record<ModelProvider, CliProvider> = { anthropic: "claude-cli", openai: "codex-cli" }
+/**
+ * How each model provider's runs work: the conversation the harness holds with its CLI, and the CLI whose login can
+ * stand in for the broker, which also discovers the commands a thread can run. A harness without a login Kestrel
+ * manages lists its commands itself.
+ */
+export type Harness =
+  | { readonly conversation: ConversationKind; readonly cli: CliProvider }
+  | { readonly conversation: ConversationKind; readonly cli: null; readonly commands: ReadonlyArray<HarnessCommand> }
+
+/** OpenCode's own commands, as its ACP `available_commands_update` lists them; typed as `/name` in the prompt. */
+const OPENCODE_COMMANDS: ReadonlyArray<HarnessCommand> = [
+  { name: "init", description: "guided AGENTS.md setup", prefix: "/" },
+  { name: "review", description: "review changes [commit|branch|pr], defaults to uncommitted", argumentHint: "[commit|branch|pr]", prefix: "/" },
+]
+
+export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
+  anthropic: { conversation: "claude", cli: "claude-cli" },
+  openai: { conversation: "codex", cli: "codex-cli" },
+  opencode: { conversation: "acp", cli: null, commands: OPENCODE_COMMANDS },
+}

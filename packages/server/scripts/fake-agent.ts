@@ -2,7 +2,8 @@
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
  * Runs where a real agent would (the thread's first checkout, else its workspace) and talks to the task's MCP
  * endpoint like a real agent would. Like the real CLIs it takes its prompt on stdin: Claude Code's stream-json input
- * for Anthropic models, Codex app-server's JSON-RPC for OpenAI ones, and plays one turn.
+ * for Anthropic models, Codex app-server's JSON-RPC for OpenAI ones, the Agent Client Protocol for OpenCode's, and
+ * plays one turn.
  */
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
@@ -26,10 +27,12 @@ if (!mcpUrl || !mcpToken) {
 }
 
 const appServer = model?.startsWith("gpt-") === true
+const acp = model?.startsWith("opencode/") === true
 // A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
-// `thread/start` or `thread/resume` response. A resumed run keeps its session.
-let resumeSession = appServer ? undefined : process.env.CLOUDAGENTS_RESUME_SESSION
-if (!appServer) {
+// `thread/start` or `thread/resume` response, an ACP run's session in `session/new` (or the one `session/resume` names).
+// A resumed run keeps its session.
+let resumeSession = appServer || acp ? undefined : process.env.CLOUDAGENTS_RESUME_SESSION
+if (!appServer && !acp) {
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: resumeSession ?? randomUUID() }))
 }
 
@@ -430,6 +433,54 @@ const serveAppServer = () => {
     .on("close", () => process.exit(0))
 }
 
+/** The ACP side of an OpenCode run: one session, one prompt, played by `main`. Exits when the harness closes stdin. */
+const serveAcp = () => {
+  const send = (message: Record<string, unknown>) => console.log(JSON.stringify({ jsonrpc: "2.0", ...message }))
+  let sessionId = ""
+  let promptId: number | null = null
+  const endTurn = (stopReason: "end_turn" | "cancelled" | "refusal") => {
+    if (promptId === null) return
+    send({ id: promptId, result: { stopReason } })
+    promptId = null
+  }
+  createInterface({ input: process.stdin })
+    .on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> }
+      const params = message.params ?? {}
+      if (message.method === "session/cancel") {
+        endTurn("cancelled")
+        return
+      }
+      if (message.id === undefined) return
+      switch (message.method) {
+        case "initialize":
+          send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] } })
+          return
+        case "session/new":
+        case "session/resume": {
+          sessionId = message.method === "session/resume" ? String(params.sessionId) : randomUUID()
+          if (message.method === "session/resume") resumeSession = sessionId
+          const configOptions = [{ id: "model", type: "select", currentValue: model ?? "", options: [] }]
+          send({ id: message.id, result: message.method === "session/new" ? { sessionId, configOptions } : { configOptions } })
+          return
+        }
+        case "session/set_config_option":
+          send({ id: message.id, result: { configOptions: [{ id: "model", type: "select", currentValue: model ?? "", options: [] }] } })
+          return
+        case "session/prompt": {
+          const block = Array.isArray(params.prompt) ? (params.prompt[0] as { text?: string } | undefined) : undefined
+          prompt = block?.text ?? ""
+          promptId = message.id
+          void run().then((code) => endTurn(code === 0 ? "end_turn" : "refusal"))
+          return
+        }
+        default:
+          send({ id: message.id, error: { code: -32601, message: `${message.method} is not supported by the fake agent` } })
+      }
+    })
+    .on("close", () => process.exit(0))
+}
+
 /** The Claude Code side of a run: the first stream-json user message is the prompt; later ones steer the turn. */
 const serveClaude = () => {
   const send = (message: unknown) => console.log(JSON.stringify(message))
@@ -465,4 +516,5 @@ const serveClaude = () => {
 }
 
 if (appServer) serveAppServer()
+else if (acp) serveAcp()
 else serveClaude()

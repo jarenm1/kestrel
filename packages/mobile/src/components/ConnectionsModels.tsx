@@ -61,9 +61,13 @@ function ModelRow({ provider, connected, divided }: RowProps) {
       <View style={styles.head}>
         <View style={styles.titleBlock}>
           <Text style={styles.label}>{provider.name}</Text>
-          <Badge variant={connected ? "success" : "neutral"}>
-            {connected ? "connected" : "not connected"}
-          </Badge>
+          {provider.connections.length === 0 ? (
+            <Badge variant="neutral">no sign-in needed</Badge>
+          ) : (
+            <Badge variant={connected ? "success" : "neutral"}>
+              {connected ? "connected" : "not connected"}
+            </Badge>
+          )}
         </View>
         <Button
           variant="soft"

@@ -120,6 +120,7 @@
             bun
             claude-code
             codex
+            opencode
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];

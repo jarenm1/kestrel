@@ -1,7 +1,10 @@
 import { Schema } from "effect"
 
-/** Model families the box runs, each through its own agent CLI: Claude Code for Anthropic, codex for OpenAI. */
-export const ModelProvider = Schema.Literal("anthropic", "openai")
+/**
+ * Model families the box runs, each through its own agent CLI: Claude Code for Anthropic, codex for OpenAI, and
+ * OpenCode (over the Agent Client Protocol) for OpenCode's own models.
+ */
+export const ModelProvider = Schema.Literal("anthropic", "openai", "opencode")
 export type ModelProvider = typeof ModelProvider.Type
 
 /**
@@ -20,7 +23,10 @@ export const EFFORT_LABELS: Record<AgentEffort, string> = {
   max: "Max",
 }
 
-/** Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`). */
+/**
+ * Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`, OpenCode's ACP
+ * `model` config option, which names OpenCode's own provider first).
+ */
 export const AgentModel = Schema.Literal(
   "claude-fable-5-1",
   "claude-opus-5-5",
@@ -40,6 +46,16 @@ export const AgentModel = Schema.Literal(
   "gpt-6.1-terra",
   "gpt-6-luna",
   "gpt-6-sol",
+  "opencode/big-pickle",
+  "opencode/glm-5.3-flash-free",
+  "opencode/deepseek-v4.1-flash-free",
+  "opencode/mimo-v2.6-flash-free",
+  "opencode/beam-free",
+  "opencode/crouton-alpha-free",
+  "opencode/flint-40b-free",
+  "opencode/nemotron-3.5-lightning-free",
+  "opencode/nemotron-3.5-super-vl-free",
+  "opencode/pulse-alpha-free",
 )
 export type AgentModel = typeof AgentModel.Type
 
@@ -58,10 +74,13 @@ const CLAUDE_ALL: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "m
 const CLAUDE_NO_XHIGH: readonly AgentEffort[] = ["low", "medium", "high", "max"]
 const GPT_FROM_LOW: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 const GPT_FROM_NONE: readonly AgentEffort[] = ["none", "low", "medium", "high", "xhigh", "max"]
+const OC_LOW_HIGH_MAX: readonly AgentEffort[] = ["low", "high", "max"]
+const OC_LOW_TO_MAX: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"]
 
 /**
  * Every model the box can run, in picker order (newest first within a provider). Effort support follows Claude
- * Code's model configuration docs and OpenAI's model pages.
+ * Code's model configuration docs and OpenAI's model pages; OpenCode's are what its ACP `effort` option offers per
+ * model. OpenCode's are its free models, which need no sign-in; OpenCode rotates them, so the list follows its own.
  */
 export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "claude-fable-5-1", provider: "anthropic", name: "Claude Fable 5.1", efforts: CLAUDE_ALL, shownByDefault: true },
@@ -82,18 +101,32 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "gpt-6.1-terra", provider: "openai", name: "GPT-6.1 Terra", efforts: GPT_FROM_NONE, shownByDefault: true },
   { id: "gpt-6-luna", provider: "openai", name: "GPT-6 Luna", efforts: GPT_FROM_NONE, shownByDefault: true },
   { id: "gpt-6-sol", provider: "openai", name: "GPT-6 Sol", efforts: GPT_FROM_NONE, shownByDefault: false },
+  { id: "opencode/big-pickle", provider: "opencode", name: "Big Pickle", efforts: [], shownByDefault: true },
+  { id: "opencode/glm-5.3-flash-free", provider: "opencode", name: "GLM-5.3-Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
+  { id: "opencode/deepseek-v4.1-flash-free", provider: "opencode", name: "DeepSeek V4.1 Flash Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: true },
+  { id: "opencode/mimo-v2.6-flash-free", provider: "opencode", name: "MiMo-V2.6-Flash Free", efforts: [], shownByDefault: true },
+  { id: "opencode/beam-free", provider: "opencode", name: "Beam Free", efforts: OC_LOW_TO_MAX, shownByDefault: false },
+  { id: "opencode/crouton-alpha-free", provider: "opencode", name: "Crouton Alpha Free", efforts: OC_LOW_TO_MAX, shownByDefault: false },
+  { id: "opencode/flint-40b-free", provider: "opencode", name: "Flint 40B Free", efforts: OC_LOW_TO_MAX, shownByDefault: false },
+  { id: "opencode/nemotron-3.5-lightning-free", provider: "opencode", name: "Nemotron 3.5 Lightning Free", efforts: [], shownByDefault: false },
+  { id: "opencode/nemotron-3.5-super-vl-free", provider: "opencode", name: "Nemotron 3.5 Super VL Free", efforts: ["none", "low", "medium", "high", "xhigh"], shownByDefault: false },
+  { id: "opencode/pulse-alpha-free", provider: "opencode", name: "Pulse Alpha Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: false },
 ]
 
 export interface ModelProviderInfo {
   readonly id: ModelProvider
   readonly name: string
-  /** `Connection.provider` ids that give the box access to this provider's models: an API key or a CLI login. */
+  /**
+   * `Connection.provider` ids that give the box access to this provider's models: an API key or a CLI login. Empty
+   * when the provider needs none: it is always on offer.
+   */
   readonly connections: readonly string[]
 }
 
 export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "anthropic", name: "Anthropic", connections: ["anthropic", "claude-cli"] },
   { id: "openai", name: "OpenAI", connections: ["openai", "codex-cli"] },
+  { id: "opencode", name: "OpenCode", connections: [] },
 ]
 
 /** The provider a message without a model runs on: the box's default harness. */
@@ -108,11 +141,13 @@ export const modelInfo = (id: AgentModel): ModelInfo => {
 export const providerModels = (provider: ModelProvider): readonly ModelInfo[] =>
   AGENT_MODELS.filter((m) => m.provider === provider)
 
-/** Providers with at least one connected connection, in `MODEL_PROVIDERS` order. */
+/** Providers on offer, in `MODEL_PROVIDERS` order: those needing no connection, and those with a connected one. */
 export const connectedModelProviders = (
   connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean }>,
 ): readonly ModelProviderInfo[] =>
-  MODEL_PROVIDERS.filter((p) => connections.some((c) => c.connected && p.connections.includes(c.provider)))
+  MODEL_PROVIDERS.filter(
+    (p) => p.connections.length === 0 || connections.some((c) => c.connected && p.connections.includes(c.provider)),
+  )
 
 /**
  * The provider's models in the chat picker, in catalog order. `chosen` is the user's saved list for the provider

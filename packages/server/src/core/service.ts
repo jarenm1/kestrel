@@ -37,7 +37,7 @@ import {
   type FileRoot,
   providerModels,
 } from "@cloudagents/protocol"
-import { MODEL_CLI } from "../agent-clis"
+import { MODEL_HARNESS } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { dailyActivity } from "./activity"
 import { Config } from "../config"
@@ -1956,10 +1956,11 @@ export const CoreLive = Layer.effect(
           const running = state.runs.find((r) => r.taskId === taskId && r.status === "running")
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
-          const cliProvider = MODEL_CLI[provider]
+          const harness = MODEL_HARNESS[provider]
+          if (harness.cli === null) return { provider, commands: harness.commands }
           // Started where the agent starts, so the list holds the project commands and skills of its checkout.
           const workspace = threadDirOf(task.id)
-          const commands = yield* cliAuth.discoverCommands(user, cliProvider, workspace, agentCwd(workspace, task))
+          const commands = yield* cliAuth.discoverCommands(user, harness.cli, workspace, agentCwd(workspace, task))
           return { provider, commands }
         }),
 

@@ -36,6 +36,15 @@ export const DEFAULT_ANTHROPIC_COMMAND = `claude -p --input-format stream-json \
 const DEFAULT_OPENAI_COMMAND =
   'codex app-server ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647'
 
+/**
+ * OpenCode runs as an Agent Client Protocol server on stdio (`core/acp.ts`); the harness hands it the thread's MCP
+ * server with the session. Its config keeps sessions unshared and the binary as installed, and lets an MCP call run
+ * ~2^31 ms, so a `task_ask` waits as long as the user takes.
+ */
+const DEFAULT_OPENCODE_COMMAND = `OPENCODE_CONFIG_CONTENT=${shellQuote(
+  JSON.stringify({ share: "disabled", update: "disable", mcp: { timeout: { execution: 2 ** 31 - 1 } } }),
+)} opencode acp`
+
 export interface ServerConfig {
   readonly port: number
   readonly host: string
@@ -56,7 +65,7 @@ export interface ServerConfig {
   /**
    * Shell commands run (via `sh -c`) for each agent run, one per model provider as picked by the message's model,
    * cwd = the thread's first checkout, else its workspace (`agentCwd` in `core/harness.ts`)
-   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` override the defaults).
+   * (`CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` override the defaults).
    * The Anthropic command must read Claude Code's stream-json input on stdin: the harness writes the prompt there as
    * the first user message, adds mid-run messages and sends `interrupt`, and closes stdin after the first `result`.
    * It reads `CLOUDAGENTS_MODEL` / `CLOUDAGENTS_EFFORT` when the message chose them (Claude Code's `--model` /
@@ -64,7 +73,9 @@ export interface ServerConfig {
    * after another provider ran. It must resume that session (`claude --resume`) to retain its native context.
    * Prompts travel only on stdin, not through the inherited environment. The OpenAI command must start
    * Codex app-server on stdio: the harness sends it the prompt, model, effort and the thread to resume. An OpenAI run
-   * reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`.
+   * reaches the model through the broker: `OPENAI_BASE_URL` is passed to codex's `openai_base_url`. The OpenCode
+   * command must start an ACP server on stdio: the harness opens or resumes the session and sends the prompt, model
+   * and effort over it. OpenCode runs its own models and gets no broker keys.
    */
   readonly agentCommands: Record<ModelProvider, string>
   readonly fakeAgent: boolean
@@ -130,10 +141,11 @@ export const loadConfig = (): ServerConfig => {
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
   const agentCommands: Record<ModelProvider, string> = fakeAgent
-    ? { anthropic: fakeCommand, openai: fakeCommand }
+    ? { anthropic: fakeCommand, openai: fakeCommand, opencode: fakeCommand }
     : {
         anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         openai: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
+        opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
       }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)

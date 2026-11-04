@@ -81,7 +81,7 @@ const basicRoArgs = (): string[] => {
 }
 
 /** The agent CLIs and the runtime npm-installed ones need; `basic` makes these visible when installed in $HOME. */
-const HOME_TOOLS = ["claude", "codex", "node"]
+const HOME_TOOLS = ["claude", "codex", "opencode", "node"]
 
 /** Shell interpreter paths for repository scripts; targets stay in the read-only toolchain. */
 const SANDBOX_SHELLS = ["sh", "bash"]

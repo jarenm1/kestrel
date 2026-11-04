@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import { MAX_TOOL_FAILURES_PER_REPORT, type ToolFailureCount, type ToolFailureReport } from "@cloudagents/protocol"
+import type { ConversationKind } from "../agent-clis"
 
 const MAX_SIGNATURE = 200
 const MAX_OUTPUT = 8192
@@ -101,8 +102,15 @@ export const agentDiagnostic = (text: string): string | null => {
   return signature === "(no error line)" || signature === "(no output)" || signature === "(output too large)" ? null : signature
 }
 
-export const agentFailure = (agent: "claude" | "codex", error: string | null, diagnostic: string | null, exitCode: number | null, signal: string | null): Omit<ToolFailureCount, "count"> => {
-  const earlyExit = error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
+/** The error each driver reports when its CLI exits mid-turn (`close` in `claude-stream.ts`, `codex-app-server.ts`, `acp.ts`). */
+const EARLY_EXIT: Record<ConversationKind, string> = {
+  claude: "Claude Code exited before its turn finished.",
+  codex: "Codex exited before its turn finished.",
+  acp: "The agent exited before its turn finished.",
+}
+
+export const agentFailure = (agent: ConversationKind, error: string | null, diagnostic: string | null, exitCode: number | null, signal: string | null): Omit<ToolFailureCount, "count"> => {
+  const earlyExit = error === EARLY_EXIT[agent]
   const prefix = earlyExit ? "exited before turn finished" : "turn failed"
   const termination = [exitCode === null ? null : `exit code ${exitCode}`, signal === null ? null : `signal ${signal}`].filter((part) => part !== null).map((part) => `: ${part}`).join("")
   const detail = (error === null || earlyExit ? null : agentDiagnostic(`error: ${error}`)) ?? diagnostic

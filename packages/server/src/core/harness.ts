@@ -19,7 +19,7 @@ import {
   type ServerEvent,
   type Task,
 } from "@cloudagents/protocol"
-import { AGENT_CLIS, MODEL_CLI, type ConversationKind } from "../agent-clis"
+import { AGENT_CLIS, MODEL_HARNESS, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { boxControl } from "../control/client"
@@ -31,6 +31,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
+import { makeAcpDriver, type AcpRunInput } from "./acp"
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
@@ -145,6 +146,7 @@ interface ActiveRun {
 type RunConversation =
   | { readonly kind: "codex"; readonly input: Omit<CodexRunInput, "clientVersion"> }
   | { readonly kind: "claude"; readonly prompt: string }
+  | { readonly kind: "acp"; readonly provider: ModelProvider; readonly input: AcpRunInput }
 
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
@@ -570,11 +572,11 @@ export const AgentHarnessLive = Layer.effect(
               log.write(`>> ${line}\n`)
               stdin.write(`${line}\n`)
             }
-            // Claude can still be answering queued messages after its first result and EOF. Only Codex's
-            // onDone means all model work is over and the process is merely waiting to exit.
+            // Claude can still be answering queued messages after its first result and EOF. Codex's and an ACP agent's
+            // onDone mean all model work is over and the process is merely waiting to exit.
             const onDone = () => {
               stdin.end()
-              if (session.conversation?.kind === "codex") {
+              if (session.conversation !== null && session.conversation.kind !== "claude") {
                 setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
               }
             }
@@ -594,6 +596,15 @@ export const AgentHarnessLive = Layer.effect(
                   onDone,
                 },
               )
+            } else if (conversation.kind === "acp") {
+              entry.driver = makeAcpDriver(conversation.input, {
+                send,
+                onSession: (sessionId) => {
+                  entry.sessionId = sessionId
+                  runFork(recordSession(run.id, sessionId, conversation.provider, entry.continuation))
+                },
+                onDone,
+              })
             } else {
               // Claude Code names its session in its stream-json `init`, which `handleLine` records.
               entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
@@ -725,8 +736,8 @@ export const AgentHarnessLive = Layer.effect(
             const cwd = agentCwd(workspacePath, task)
             // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
             // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
-            const cli = MODEL_CLI[provider]
-            const continuation: SessionContinuation = logins.some((login) => login.provider === cli)
+            const harness = MODEL_HARNESS[provider]
+            const continuation: SessionContinuation = logins.some((login) => login.provider === harness.cli)
               ? "cli-login"
               : "task-home"
             const resumed = start.resume?.continuation === continuation ? start.resume : null
@@ -763,7 +774,9 @@ export const AgentHarnessLive = Layer.effect(
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
                 // Continues the agent session of the task's previous run, so the agent keeps the thread's context.
                 ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
-                ...keptBroker,
+                // A harness without a Kestrel-managed login runs its own provider's models: the broker's keys for the
+                // other providers would only offer it models it is not there for.
+                ...(harness.cli === null ? {} : keptBroker),
                 ...loginEnv,
               },
               command: config.agentCommands[provider],
@@ -806,7 +819,22 @@ export const AgentHarnessLive = Layer.effect(
                     },
                   }),
                   claude: () => ({ kind: "claude", prompt }),
-                } satisfies Record<ConversationKind, () => RunConversation>)[AGENT_CLIS[cli].conversation](),
+                  acp: () => ({
+                    kind: "acp",
+                    provider,
+                    input: {
+                      text: run.prompt,
+                      prompt,
+                      cwd,
+                      resumeSession,
+                      model: choice.model,
+                      effort: choice.effort,
+                      // The thread's tools, as the other harnesses get them from the run's MCP config.
+                      mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
+                      commands: harness.cli === null ? harness.commands : [],
+                    },
+                  }),
+                } satisfies Record<ConversationKind, () => RunConversation>)[harness.conversation](),
               },
             )
           }).pipe(Effect.either)

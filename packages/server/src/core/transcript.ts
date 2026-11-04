@@ -606,11 +606,177 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
     }
   }
 
+  /** ACP message and thought text, by item id, built up from chunks. */
+  const acpText = new Map<string, string>()
+  /** The chunk stream a message without an id belongs to; a tool call or a switch of kind starts the next one. */
+  let acpOpen: { readonly kind: "text" | "thinking"; readonly id: string } | null = null
+  /** ACP tool calls of the turn, by tool call id: each update merges into what the call reported before. */
+  const acpTools = new Map<string, AgentItem & { _tag: "tool" }>()
+  /** What each ACP tool call reported about itself: the name it first gave (later titles describe the call), its kind, its input. */
+  const acpCalls = new Map<string, { readonly name: string; kind: string | null; input: Record<string, unknown> | null }>()
+  /** Turns seen, so each turn's plan has an item of its own. */
+  let acpTurn = 0
+
+  /** A tool call's content as output text and the images `saveImage` kept: text blocks, diffs, embedded resources. */
+  const acpToolContent = (content: unknown): { output: string | null; images: Attachment[] } => {
+    const parts: string[] = []
+    const images: Attachment[] = []
+    for (const entry of asArray(content)) {
+      if (!isRecord(entry)) continue
+      if (entry.type === "diff") {
+        parts.push(`${asString(entry.path) ?? "file"}: edited`)
+        continue
+      }
+      const block = isRecord(entry.content) ? entry.content : null
+      if (block === null) continue
+      if (block.type === "text" && typeof block.text === "string") parts.push(block.text)
+      else if (block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
+        const kept = saveImage?.(block.data, block.mimeType) ?? null
+        if (kept === null) parts.push("[image]")
+        else images.push(kept)
+      } else if (block.type === "resource" && isRecord(block.resource) && typeof block.resource.text === "string") {
+        parts.push(block.resource.text)
+      }
+    }
+    return { output: parts.length === 0 ? null : parts.join("\n"), images }
+  }
+
+  /**
+   * A shell command, file read or file write under the tool names every harness's calls render with; any other call
+   * keeps its own name and input.
+   */
+  const acpDisplay = (name: string, kind: string | null, input: Record<string, unknown> | null): { name: string; input: unknown } => {
+    const command = input === null ? null : asString(input.command)
+    const path = input === null ? null : (asString(input.path) ?? asString(input.filePath))
+    if (kind === "execute" && command !== null) return { name: "command_execution", input: { command } }
+    if (kind === "read" && path !== null) return { name: "Read", input: { file_path: path } }
+    if (kind === "edit" && name === "write" && path !== null && typeof input?.content === "string") {
+      return { name: "Write", input: { file_path: path, content: input.content } }
+    }
+    return { name, input }
+  }
+
+  const acpChunk = (kind: "text" | "thinking", update: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const content = isRecord(update.content) ? update.content : null
+    const delta = content !== null && content.type === "text" ? asString(content.text) : null
+    if (delta === null) return []
+    const messageId = asString(update.messageId)
+    let id = `${kind}-${messageId}`
+    if (messageId === null) {
+      if (acpOpen?.kind !== kind) acpOpen = { kind, id: nextId() }
+      id = acpOpen.id
+    }
+    const text = (acpText.get(id) ?? "") + delta
+    acpText.set(id, text)
+    if (text.trim() === "") return []
+    if (kind === "text") finalTextValue = text
+    return [{ _tag: kind, id, parentToolId: null, text }]
+  }
+
+  const acpTool = (update: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const id = asString(update.toolCallId)
+    if (id === null) return []
+    acpOpen = null
+    const known = acpTools.get(id)
+    const rawInput = isRecord(update.rawInput) && Object.keys(update.rawInput).length > 0 ? update.rawInput : null
+    const call = acpCalls.get(id) ?? {
+      name: asString(update.title) ?? asString(update.kind) ?? "tool",
+      kind: asString(update.kind),
+      input: null,
+    }
+    if (rawInput !== null) call.input = rawInput
+    call.kind = asString(update.kind) ?? call.kind
+    acpCalls.set(id, call)
+    const status = asString(update.status)
+    const content = update.content === undefined ? null : acpToolContent(update.content)
+    const item: AgentItem & { _tag: "tool" } = {
+      _tag: "tool",
+      id,
+      parentToolId: null,
+      ...acpDisplay(call.name, call.kind, call.input),
+      status: status === "completed" ? "ok" : status === "failed" ? "error" : status === null ? (known?.status ?? "running") : "running",
+      output: content?.output ?? known?.output ?? null,
+      ...(content !== null && content.images.length > 0 ? { images: content.images } : known?.images ? { images: known.images } : {}),
+    }
+    acpTools.set(id, item)
+    return [item]
+  }
+
+  /** One `session/update` notification. */
+  const acpUpdate = (params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const update = isRecord(params.update) ? params.update : null
+    if (update === null) return []
+    switch (asString(update.sessionUpdate)) {
+      case "agent_message_chunk":
+        return acpChunk("text", update)
+      case "agent_thought_chunk":
+        return acpChunk("thinking", update)
+      case "tool_call":
+      case "tool_call_update":
+        return acpTool(update)
+      case "plan": {
+        const entries = asArray(update.entries).filter(isRecord)
+        return [{
+          _tag: "tool",
+          id: `plan-acp-${acpTurn}`,
+          parentToolId: null,
+          name: "todo_list",
+          input: { items: entries.map((e) => ({ text: asString(e.content) ?? "", completed: e.status === "completed" })) },
+          status: entries.length > 0 && entries.every((e) => e.status === "completed") ? "ok" : "running",
+          output: null,
+        }]
+      }
+      case "usage_update":
+        // The session's size against its model's window, as the composer's context bar shows it.
+        usedTokens = asNumber(update.used)
+        windowTokens = asNumber(update.size)
+        refreshContext()
+        return []
+      default:
+        // The user's own message, commands on offer, session titles and the rest add nothing.
+        return []
+    }
+  }
+
+  /** A response from the agent: the session's model from its config options, and the end of a turn (`session/prompt`). */
+  const acpResult = (result: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+    const modelOption = asArray(result.configOptions).find((o) => isRecord(o) && o.id === "model")
+    if (isRecord(modelOption) && typeof modelOption.currentValue === "string") {
+      model = modelOption.currentValue
+      refreshContext()
+    }
+    const stopReason = asString(result.stopReason)
+    if (stopReason === null) return []
+    acpTurn++
+    acpOpen = null
+    // What the turn left running ends with it, unfinished.
+    const items: AgentItem[] = [...acpTools.values()].filter((t) => t.status === "running").map((t) => ({ ...t, status: "error" as const }))
+    acpTools.clear()
+    acpCalls.clear()
+    const usage = isRecord(result.usage) ? result.usage : null
+    items.push({
+      _tag: "turn",
+      id: nextId(),
+      durationMs: null,
+      inputTokens: usage === null ? null : sumTokens([asNumber(usage.inputTokens), asNumber(usage.cachedReadTokens), asNumber(usage.cachedWriteTokens)]),
+      outputTokens: usage === null ? null : asNumber(usage.outputTokens),
+      costUsd: null,
+      isError: stopReason === "refusal",
+    })
+    return items
+  }
+
   return {
     push: (line) => {
       if (!isRecord(line)) return []
       const type = asString(line.type)
       if (type !== null && CLAUDE_LINE_TYPES[type] === true) return claude(line)
+      // ACP speaks JSON-RPC 2.0 with its `jsonrpc` field: the agent's work in `session/update`, a turn's end in the
+      // `session/prompt` response.
+      if (line.jsonrpc === "2.0") {
+        if (line.method === "session/update" && isRecord(line.params)) return acpUpdate(line.params)
+        return isRecord(line.result) ? acpResult(line.result) : []
+      }
       // Codex app-server speaks JSON-RPC 2.0 without the `jsonrpc` field: `method` and/or `id`.
       if (typeof line.method === "string" || line.id !== undefined) return codex(line)
       return []

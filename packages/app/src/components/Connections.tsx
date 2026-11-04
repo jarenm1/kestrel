@@ -128,7 +128,14 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
   return (
     <div className="flex items-center gap-3 px-5 py-4">
       <div className="flex flex-col gap-0.5">
-        <ConnectionHeader label={provider.name} connected={connected} />
+        {provider.connections.length === 0 ? (
+          <div className="flex items-center gap-2">
+            <strong>{provider.name}</strong>
+            <Badge variant="neutral">no sign-in needed</Badge>
+          </div>
+        ) : (
+          <ConnectionHeader label={provider.name} connected={connected} />
+        )}
         {!connected && <span className="text-xs text-muted-foreground">Connect a key or subscription above to use these.</span>}
       </div>
       <DropdownMenu>
