@@ -199,6 +199,8 @@ export const Me = Schema.Struct({
   avatarUrl: Schema.String,
   /** May manage Kestrel's managed boxes (`ControlPaths.fleetBoxes`); listed in the Worker's KESTREL_OPERATORS. */
   operator: Schema.Boolean,
+  /** Whether this deployment offers Nest boxes (`KESTREL_NEST_DOMAIN` is set); the app offers Create Nest box only then. */
+  nestEnabled: Schema.Boolean,
 })
 export type Me = typeof Me.Type
 

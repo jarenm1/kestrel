@@ -8,6 +8,7 @@ import {
   MAX_METER_BODY_BYTES,
   BoxActivityReport,
   MeterBatch,
+  NestEnrollBody,
   PairingPollBody,
   PairingStartBody,
   RELAY_CONNECT_PATH,
@@ -35,6 +36,19 @@ const boxAuthorized = async (request: Request, env: Env): Promise<boolean> => {
 const connectBox = async (request: Request, env: Env): Promise<Response> => {
   if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
   return hub(env).fetch(request)
+}
+
+/**
+ * A Nest VM's first contact: it trades the one-time enrollment token its host's create command issued for its box
+ * secret. Any other token gets 401.
+ */
+const nestEnroll = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  if (!env.KESTREL_NEST_DOMAIN) return errorResponse(404, "NotFound", "no such route")
+  const body = await decodeBody(request, NestEnrollBody)
+  if (body instanceof Response) return body
+  const enrolled = await hub(env).nestEnroll(body)
+  return enrolled === null ? errorResponse(401, "Unauthorized", "invalid enrollment token") : json(enrolled)
 }
 
 /**
@@ -209,6 +223,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     try {
+      if (url.pathname === ControlPaths.nestHostConnect) {
+        return env.KESTREL_NEST_DOMAIN ? hub(env).fetch(request) : errorResponse(404, "NotFound", "no such route")
+      }
+      if (url.pathname === ControlPaths.nestEnroll) return await nestEnroll(request, env)
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)

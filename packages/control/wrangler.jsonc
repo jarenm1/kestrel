@@ -22,6 +22,7 @@
       "/api/*",
       "/auth/*",
       "/box/*",
+      "/nest/*",
       "/webhooks/*",
       "/_preview/*",
       "/",
