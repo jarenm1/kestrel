@@ -15,6 +15,10 @@ const BOX_VARS = [
   "CLOUDAGENTS_HOST",
   "CLOUDAGENTS_SANDBOX_PORT",
   "CLOUDAGENTS_GIT_LEGACY_NOREPLY_USERS",
+  "CLOUDAGENTS_TASK_MEMORY_MAX",
+  "CLOUDAGENTS_TASK_MEMORY_HIGH",
+  "CLOUDAGENTS_TASK_SWAP_MAX",
+  "CLOUDAGENTS_BOX_SWAP_MAX",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -225,5 +229,36 @@ describe("a user's box config", () => {
       iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
       turn: null,
     })
+  })
+})
+
+describe("memory limits", () => {
+  test("MemoryHigh defaults to 90% of the task's MemoryMax", () => {
+    const config = configWith({ CLOUDAGENTS_TASK_MEMORY_MAX: "8G" })
+    expect(config.systemd?.limits.memoryMax).toBe("8G")
+    expect(config.systemd?.limits.memoryHigh).toBe(String(Math.floor(8 * 1024 ** 3 * 0.9)))
+  })
+
+  test("swap is off by default for tasks and the box", () => {
+    const config = configWith({})
+    expect(config.systemd?.limits.swapMax).toBe("0")
+    expect(config.systemd?.box.swapMax).toBe("0")
+  })
+
+  test("explicit swap and MemoryHigh values are used as given", () => {
+    const config = configWith({
+      CLOUDAGENTS_TASK_SWAP_MAX: "1G",
+      CLOUDAGENTS_TASK_MEMORY_HIGH: "infinity",
+      CLOUDAGENTS_BOX_SWAP_MAX: "8G",
+    })
+    expect(config.systemd?.limits.swapMax).toBe("1G")
+    expect(config.systemd?.limits.memoryHigh).toBe("infinity")
+    expect(config.systemd?.box.swapMax).toBe("8G")
+  })
+
+  test("a value that is not a systemd limit is refused", () => {
+    expect(() => configWith({ CLOUDAGENTS_TASK_SWAP_MAX: "1 G" })).toThrow(
+      "CLOUDAGENTS_TASK_SWAP_MAX must be a systemd limit value",
+    )
   })
 })

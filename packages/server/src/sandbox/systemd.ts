@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import { execFile } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { InternalError } from "@cloudagents/protocol"
+import { parseSize } from "../size"
 
 /**
  * Resource limits for every sandboxed process, enforced by the user's systemd manager.
@@ -11,7 +12,8 @@ import { InternalError } from "@cloudagents/protocol"
  * slice `<box>.slice`, which carries the box totals. How tasks share the box is the provisioning mode:
  * - `guaranteed`: each task keeps `memoryMin` (MemoryLow) and a `cpuWeight` share; no task is capped below the box.
  * - `pooled`: tasks share the box totals with no per-task guarantee or cap.
- * - `per-thread`: each task is capped at `memoryMax` and `cpuQuota`, inside the box totals.
+ * - `per-thread`: each task is capped at `memoryMax` and `cpuQuota`, inside the box totals. The kernel throttles it from
+ *   `memoryHigh` and OOM-kills it only at `memoryMax`; it may use `swapMax` of swap.
  * Every mode bounds the processes of a task with `TasksMax`.
  */
 export type Provisioning = "guaranteed" | "pooled" | "per-thread"
@@ -21,18 +23,24 @@ export interface TaskLimits {
   readonly memoryMin: string
   /** systemd CPUWeight (guaranteed): a task's CPU share relative to the others, 1-10000. */
   readonly cpuWeight: number
-  /** systemd MemoryMax (per-thread), e.g. "4G". Swap is disabled for the slice so this is a hard cap. */
+  /** systemd MemoryMax (per-thread), e.g. "4G": the hard cap; past it the kernel OOM-kills inside the task. */
   readonly memoryMax: string
+  /** systemd MemoryHigh (per-thread), e.g. "3600M": above it the kernel throttles and reclaims before MemoryMax. `infinity` disables. */
+  readonly memoryHigh: string
+  /** systemd MemorySwapMax (per-thread), e.g. "0" (no swap) or "1G". */
+  readonly swapMax: string
   /** systemd CPUQuota (per-thread), e.g. "200%" (two cores). */
   readonly cpuQuota: string
   /** systemd TasksMax: processes + threads per task. */
   readonly tasksMax: string
 }
 
-/** The whole box's memory and CPU, all tasks together. Swap is disabled for the box slice too. */
+/** The whole box's memory and CPU, all tasks together. */
 export interface BoxLimits {
   /** systemd MemoryMax, e.g. "80%". */
   readonly memoryMax: string
+  /** systemd MemorySwapMax, e.g. "0" (no swap) or "8G": swap all the box's tasks share. */
+  readonly swapMax: string
   /** systemd CPUQuota, e.g. "600%" (six cores). */
   readonly cpuQuota: string
 }
@@ -93,10 +101,22 @@ export const sliceCgroup = (settings: SystemdSettings, taskId: string): Effect.E
   })
 
 /**
+ * The default MemoryHigh for a task's MemoryMax: 90% of it, so the kernel reclaims and throttles a task before the OOM
+ * kill at MemoryMax. An `infinity` MemoryMax has no cap to stay under, so MemoryHigh is `infinity` too.
+ */
+export const defaultMemoryHigh = (memoryMax: string): string => {
+  const bytes = parseSize(memoryMax)
+  if (bytes !== null) return String(Math.floor(bytes * 0.9))
+  const percent = /^(\d+(?:\.\d+)?)%$/.exec(memoryMax)
+  if (percent) return `${Number((Number(percent[1]) * 0.9).toFixed(2))}%`
+  return "infinity"
+}
+
+/**
  * The `Key=Value` properties a task's slice carries under the box's provisioning mode. Every mode sets every property:
  * runtime drop-ins outlive the box, so a slice made under another mode must not keep that mode's caps or floors.
  */
-const taskProperties = (settings: SystemdSettings): string[] => {
+export const taskProperties = (settings: SystemdSettings): string[] => {
   const { limits } = settings
   const guaranteed = settings.provisioning === "guaranteed"
   const perThread = settings.provisioning === "per-thread"
@@ -104,7 +124,8 @@ const taskProperties = (settings: SystemdSettings): string[] => {
     `MemoryLow=${guaranteed ? limits.memoryMin : "0"}`,
     `CPUWeight=${guaranteed ? limits.cpuWeight : 100}`,
     `MemoryMax=${perThread ? limits.memoryMax : "infinity"}`,
-    `MemorySwapMax=${perThread ? "0" : "infinity"}`,
+    `MemoryHigh=${perThread ? limits.memoryHigh : "infinity"}`,
+    `MemorySwapMax=${perThread ? limits.swapMax : "infinity"}`,
     // An empty CPUQuota clears it.
     `CPUQuota=${perThread ? limits.cpuQuota : ""}`,
     `TasksMax=${limits.tasksMax}`,
@@ -112,7 +133,7 @@ const taskProperties = (settings: SystemdSettings): string[] => {
 }
 
 /** The most memory and CPU one task can get: its own caps under per-thread provisioning, the box totals otherwise. */
-export const taskCeilings = (settings: SystemdSettings): BoxLimits =>
+export const taskCeilings = (settings: SystemdSettings): Pick<BoxLimits, "memoryMax" | "cpuQuota"> =>
   settings.provisioning === "per-thread"
     ? { memoryMax: settings.limits.memoryMax, cpuQuota: settings.limits.cpuQuota }
     : settings.box
@@ -128,7 +149,7 @@ const applyBoxLimits = (settings: SystemdSettings): Effect.Effect<void, Internal
     "--runtime",
     `${settings.boxSlice}.slice`,
     `MemoryMax=${settings.box.memoryMax}`,
-    "MemorySwapMax=0",
+    `MemorySwapMax=${settings.box.swapMax}`,
     `CPUQuota=${settings.box.cpuQuota}`,
   ])
 

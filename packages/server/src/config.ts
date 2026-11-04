@@ -5,7 +5,7 @@ import { DesktopRtcIceServer, MODEL_PROVIDERS, type AgentHarness, type ModelProv
 import pkg from "../package.json"
 import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
-import type { Provisioning, SystemdSettings } from "./sandbox/systemd"
+import { defaultMemoryHigh, type Provisioning, type SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
 
 export const VERSION: string = pkg.version
@@ -180,6 +180,7 @@ export const loadConfig = (): ServerConfig => {
   // shared box as it was (per-thread caps, no box totals, no run limit); a user's own box gets the `kestrel-box`
   // CLI's shipped config instead (packages/server/src/cli/config.ts).
   const cores = availableParallelism()
+  const taskMemoryMax = limitEnv("CLOUDAGENTS_TASK_MEMORY_MAX", "4G")
   const systemd: SystemdSettings | null = systemdEnabled
     ? {
         boxSlice: `kestrel-box${port}`,
@@ -187,12 +188,15 @@ export const loadConfig = (): ServerConfig => {
         limits: {
           memoryMin: limitEnv("CLOUDAGENTS_TASK_MEMORY_MIN", "1G"),
           cpuWeight: intEnv("CLOUDAGENTS_TASK_CPU_WEIGHT", 100, 1, 10_000),
-          memoryMax: limitEnv("CLOUDAGENTS_TASK_MEMORY_MAX", "4G"),
+          memoryMax: taskMemoryMax,
+          memoryHigh: limitEnv("CLOUDAGENTS_TASK_MEMORY_HIGH", defaultMemoryHigh(taskMemoryMax)),
+          swapMax: limitEnv("CLOUDAGENTS_TASK_SWAP_MAX", "0"),
           cpuQuota: limitEnv("CLOUDAGENTS_TASK_CPU_QUOTA", "200%"),
           tasksMax: limitEnv("CLOUDAGENTS_TASK_TASKS_MAX", "1024"),
         },
         box: {
           memoryMax: limitEnv("CLOUDAGENTS_BOX_MEMORY_MAX", "infinity"),
+          swapMax: limitEnv("CLOUDAGENTS_BOX_SWAP_MAX", "0"),
           cpuQuota: limitEnv("CLOUDAGENTS_BOX_CPU_QUOTA", `${cores * 100}%`),
         },
       }
