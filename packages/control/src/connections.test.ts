@@ -2,6 +2,7 @@ import { expect, mock, test } from "bun:test"
 import { Schema } from "effect"
 import {
   Connection,
+  CliProvider,
   ControlPaths,
   connectedModelProviders,
   connectionsForBox,
@@ -20,7 +21,7 @@ const connections = async (offline = false): Promise<readonly Connection[]> => {
     connectionSecret: async () => null,
     boxCall: async (_login: string, _method: string, path: string) => {
       if (offline) return { ok: false, status: 503, body: "box offline" }
-      if (path === ControlPaths.cliAuth) return {
+      if (path === ControlPaths.cliAuthFor(CliProvider.literals)) return {
         ok: true, status: 200,
         body: JSON.stringify([
           { provider: "claude-cli", loggedIn: true, account: "Claude subscription" },

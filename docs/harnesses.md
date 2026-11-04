@@ -81,6 +81,12 @@ For installed clients, `GET /api/connections` retains its existing CLI-login sta
 the managed/relay box. Updated clients replace those legacy box fields with the selected box's state; compatibility
 does not make the managed box authoritative for a BYOB box.
 
+The status and usage arrays also preserve installed clients' provider literals. With no `providers` query,
+`GET /api/cli-auth` and `GET /api/cli-auth/usage` return only Claude, Codex and Antigravity entries (where supported),
+never Go—even when a Go credential is configured. Updated clients advertise the catalog they can decode through
+`ControlPaths.cliAuthFor(CliProvider.literals)` and `cliUsageFor(CliProvider.literals)`. The box returns only advertised
+providers, so those clients retain Go status/quotas and later server-side providers cannot break an older decoder.
+
 - The probe uses the configured `CLOUDAGENTS_*_COMMAND`, including native-binary path overrides.
 - Free OpenCode requires 2.0; Go requires 2.1 and its own saved key; Antigravity requires 1.5 and its Google sign-in.
   Install OpenCode with `npm i -g @opencode/cli`; `opencode-ai` and opencode.ai/install are OpenCode 1.

@@ -83,8 +83,10 @@ test("Go availability follows the selected box and stays isolated in the connect
   const first = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch(request) {
-      const path = new URL(request.url).pathname;
-      if (path === "/api/cli-auth") return Response.json([{ provider: "opencode-go", loggedIn: true, account: null }]);
+      const url = new URL(request.url);
+      const path = url.pathname;
+      if (path === "/api/cli-auth") return Response.json(url.searchParams.get("providers")?.split(",").includes("opencode-go")
+        ? [{ provider: "opencode-go", loggedIn: true, account: null }] : []);
       if (path === "/api/capabilities") return Response.json({
         version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable", harnesses: ["opencode", "opencode-go"],
       });
@@ -94,8 +96,10 @@ test("Go availability follows the selected box and stays isolated in the connect
   const second = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch(request) {
-      const path = new URL(request.url).pathname;
-      if (path === "/api/cli-auth") return Response.json([{ provider: "opencode-go", loggedIn: false, account: null }]);
+      const url = new URL(request.url);
+      const path = url.pathname;
+      if (path === "/api/cli-auth") return Response.json(url.searchParams.get("providers")?.split(",").includes("opencode-go")
+        ? [{ provider: "opencode-go", loggedIn: false, account: null }] : []);
       if (path === "/api/capabilities") return Response.json({
         version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable", harnesses: [],
       });

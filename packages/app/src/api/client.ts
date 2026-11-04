@@ -335,7 +335,7 @@ type BoxConnectionSource = {
 async function boxConnectionSource(target: Target): Promise<BoxConnectionSource> {
   let cliAuth: readonly CliAuthStatus[]
   try {
-    cliAuth = await run(boxCall(target, Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth))
+    cliAuth = await run(boxCall(target, Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)))
   } catch (error) {
     return {
       cliAuth: undefined,
@@ -572,8 +572,8 @@ export const api = {
   kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget()),
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
-  cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
-  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+  cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)),
+  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
   /** What the active box can run, as it found at startup. */
   capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),

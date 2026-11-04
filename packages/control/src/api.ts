@@ -4,6 +4,7 @@ import {
   BOX_TOKEN_QUERY,
   CREDENTIALS_HEADER,
   CliAuthStatus,
+  CliProvider,
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
@@ -28,7 +29,7 @@ import {
   findProvider,
   isAvailable,
   type ApiKeyProvider,
-  type CliProvider,
+  type CliProvider as CliConnectionProvider,
   type OAuthProvider,
   type Provider,
 } from "./providers"
@@ -70,7 +71,7 @@ const harnessView = (status: HarnessStatus): Connection => ({
   ...(status.error === undefined ? {} : { error: status.error }),
 })
 
-const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
+const cliView = (provider: CliConnectionProvider, status: CliAuthStatus | undefined): Connection => ({
   provider: provider.id,
   label: provider.label,
   kind: provider.kind,
@@ -82,7 +83,7 @@ const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Conn
 
 /** Preserve the installed clients' CLI-login response, including offline/older-box handling. */
 const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuth)
+  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuthFor(CliProvider.literals))
   if (!res.ok) return []
   let body: unknown = null
   try {

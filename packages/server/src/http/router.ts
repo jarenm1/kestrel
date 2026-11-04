@@ -96,6 +96,17 @@ const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
   Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
 )
 
+/** The frozen provider catalog accepted by clients installed before OpenCode Go. */
+const legacyCliProviders: Readonly<Record<string, true>> = { "claude-cli": true, "codex-cli": true, "antigravity-cli": true }
+
+/** A client advertises the provider literals it can decode; omitting the query keeps the installed-client contract. */
+const cliArray = <A extends { readonly provider: CliProvider }>(rows: readonly A[]) =>
+  Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
+    const advertised = new URL(req.url, "http://localhost").searchParams.get("providers")
+    const accepted = advertised === null ? null : new Set(advertised.split(","))
+    return rows.filter((row) => accepted === null ? legacyCliProviders[row.provider] === true : accepted.has(row.provider))
+  })
+
 /** The composer's chosen model (`?model=`); the box resolves the harness that will actually run. */
 const chosenModel = Effect.gen(function* () {
   const req = yield* HttpServerRequest.HttpServerRequest
@@ -223,8 +234,8 @@ export const makeRouter = (
       ),
     ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
-    HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
-    HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user)))),
+    HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user).pipe(Effect.flatMap(cliArray))))),
+    HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user).pipe(Effect.flatMap(cliArray))))),
     HttpRouter.post(
       "/api/cli-auth/:provider/login",
       respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),

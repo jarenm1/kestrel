@@ -45,14 +45,18 @@ export const ControlPaths = {
   githubBranches: (repo: string) => `/api/github/repos/${repo}/branches`,
   /** GET -> BoxStatus */
   box: "/api/box",
-  /** GET -> CliAuthStatus[] for the signed-in user, served by the selected box (direct or relayed). */
+  /** GET -> CliAuthStatus[] with the pre-Go provider catalog. Go-aware clients use `cliAuthFor`. */
   cliAuth: "/api/cli-auth",
+  /** GET -> CliAuthStatus[] restricted to the provider literals this client can decode, on its selected box. */
+  cliAuthFor: (providers: readonly CliProvider[]) => `/api/cli-auth?providers=${encodeURIComponent(providers.join(","))}`,
   /**
    * GET -> HarnessStatus[]: which standalone ACP harnesses this box can launch. Served by the box (direct or relayed).
    */
   harnessStatus: "/api/harness-status",
-  /** GET -> ProviderUsage[]: the signed-in user's subscription limits, as each CLI reports them on the box. Relayed. */
+  /** GET -> ProviderUsage[] with the pre-Go provider catalog. Go-aware clients use `cliUsageFor`. */
   cliUsage: "/api/cli-auth/usage",
+  /** GET -> ProviderUsage[] restricted to the provider literals this client can decode, on its selected box. */
+  cliUsageFor: (providers: readonly CliProvider[]) => `/api/cli-auth/usage?providers=${encodeURIComponent(providers.join(","))}`,
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
    * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Relayed.

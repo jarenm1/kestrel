@@ -331,7 +331,7 @@ export function createApiClient(
   }> {
     let cliAuth: readonly CliAuthStatus[];
     try {
-      cliAuth = await boxRequest(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth);
+      cliAuth = await boxRequest(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals));
     } catch (error) {
       return {
         cliAuth: undefined,
@@ -441,7 +441,7 @@ export function createApiClient(
     startDesktop: (taskId) => boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId)),
     stopDesktop: (taskId) => boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),
     usage: () => boxRequest(Usage, "GET", Paths.usage),
-    providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+    providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
     capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
     useBankedReset: (provider, body) =>
       boxRequest(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
