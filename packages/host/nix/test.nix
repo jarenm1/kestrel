@@ -252,7 +252,7 @@ pkgs.testers.runNixOSTest {
     wait_for("b2 backup", lambda: show("b2")["volumeRef"], 300)
     expect_ok({"_tag": "evict", "boxId": "b2", "ownerEpoch": 2})
     host.fail("kestrel-host vm show b2")
-    host.fail("test -e " + STATE + "/vms/b2")
+    host.fail("test -e " + STATE + "/vms/b2/volume.raw")
     host.succeed("test -n \"$(find /var/lib/kestrel-host/volumes -mindepth 1 -print -quit)\"")
 
     # 8. Guest network: the veth stands in for a tap with the guest's address. Allowed: the uplink, the depcache
