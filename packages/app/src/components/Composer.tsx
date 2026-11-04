@@ -728,10 +728,28 @@ export function Composer({
     ) {
       const current = editor.current?.readView()
       const selection = window.getSelection()
-      // Keep ordinary cursor movement within multiline/wrapped text and selections.
-      // Up recalls only at the start or end; Down advances only at the end.
-      if (current && selection?.isCollapsed &&
-        (current.caret === current.plain.length || (e.key === "ArrowUp" && current.caret === 0))) {
+      // At the end, Up still belongs to the browser if there is a preceding visual line.
+      // Range geometry covers soft wrapping as well as explicit newlines and reference chips.
+      let atHistoryBoundary = current !== undefined &&
+        (e.key === "ArrowUp" ? current.caret === 0 : current.caret === current.plain.length)
+      if (current && !current.plain.includes("\n") && e.key === "ArrowUp" &&
+        current.caret === current.plain.length && selection?.isCollapsed) {
+        const range = document.createRange()
+        range.selectNodeContents(e.currentTarget)
+        const rects = range.getClientRects()
+        const first = rects[0]
+        atHistoryBoundary = first === undefined
+        if (first !== undefined) {
+          atHistoryBoundary = true
+          for (const rect of rects) {
+            if (rect.height > 0 && (rect.top >= first.bottom || rect.bottom <= first.top)) {
+              atHistoryBoundary = false
+              break
+            }
+          }
+        }
+      }
+      if (current && selection?.isCollapsed && atHistoryBoundary) {
         const recalled = promptHistory.navigate(e.key === "ArrowUp" ? -1 : 1, current.markdown)
         if (recalled !== undefined) {
           e.preventDefault()

@@ -83,7 +83,8 @@ The harness starts the selected provider's agent CLI. The box supports steering 
 The desktop and mobile composers' thinking controls open a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Off leaves it empty. They offer only the selected model's supported effort levels, ordered lowest first, with `none` labeled Off. There is no Default stop: an absent or unsupported saved level selects and sends the model's lowest supported effort (Off where supported, otherwise Low). With no model or no effort support, the control is hidden and effort is unspecified. The choice survives thread changes and reloads. Desktop uses a popover; mobile web and Expo share a touch-sized bottom sheet. The web sliders use native range inputs for pointer/touch input, arrow keys, Home and End; Expo uses React Native touch responders and screen-reader increment/decrement actions.
 
 The desktop chat composer keeps the last 100 accepted, non-empty prompt texts in this browser's local storage,
-shared across threads and retained after reload. Up recalls older prompts at the start or end of the text;
+shared across threads and retained after reload. Up recalls older prompts at the start of the text, or at the
+end only when the draft fits on one visual line (no newline or soft wrapping).
 Down recalls newer prompts at the end, then restores the unsent draft. Editing a recalled prompt makes it the
 new draft. History includes only typed text, not attachments, picked answers or generated element context;
 failed sends and the local `/usage` command are not recorded. Autocomplete menus, question options, text
