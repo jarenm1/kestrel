@@ -4,6 +4,7 @@
 //! backup (see `extents`), uploads only chunks whose content is new to the store, and then writes a new manifest. The
 //! manifest is the commit point: the baseline advances only after the manifest is stored.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -117,7 +118,7 @@ pub fn fetch_chunk(
         .get(&chunk_key(box_id, name))?
         .ok_or_else(|| anyhow!("chunk {name} is missing from the store"))?;
     let plaintext = key
-        .open(name, &sealed)
+        .open_chunk(name, &sealed)
         .with_context(|| format!("chunk {name}"))?;
     ensure!(
         plaintext.len() == expected_len,
@@ -132,24 +133,28 @@ pub fn chunk_len(size: u64, index: usize) -> usize {
     (size - start).min(CHUNK_SIZE) as usize
 }
 
-/// The newest manifest for `box_id`, with its number.
-pub fn latest_manifest(store: &dyn Store, box_id: &str) -> Result<Option<(u64, Manifest)>> {
+/// The newest manifest for `box_id`, with its number. It must open under `key`.
+pub fn latest_manifest(
+    store: &dyn Store,
+    box_id: &str,
+    key: &BoxKey,
+) -> Result<Option<(u64, Manifest)>> {
     let mut newest: Option<u64> = None;
-    for key in store.list(&manifests_prefix(box_id))? {
-        if let Some(n) = manifest_number(box_id, &key) {
+    for object_key in store.list(&manifests_prefix(box_id))? {
+        if let Some(n) = manifest_number(box_id, &object_key) {
             newest = Some(newest.map_or(n, |current| current.max(n)));
         }
     }
     let Some(n) = newest else { return Ok(None) };
-    let key = manifest_key(box_id, n);
+    let object = manifest_key(box_id, n);
     let bytes = store
-        .get(&key)?
-        .ok_or_else(|| anyhow!("manifest {key} is missing"))?;
-    Ok(Some((n, Manifest::parse(&bytes, box_id)?)))
+        .get(&object)?
+        .ok_or_else(|| anyhow!("manifest {object} is missing"))?;
+    Ok(Some((n, Manifest::open(&bytes, key, box_id, &object)?)))
 }
 
 pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Result<BackupOutput> {
-    let prev = latest_manifest(store, box_id)?;
+    let prev = latest_manifest(store, box_id, key)?;
     let snap_path = suffixed(path, ".snap");
     let base_path = suffixed(path, ".base");
     let ref_path = suffixed(path, ".base.ref");
@@ -195,10 +200,11 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
         }
     }
 
-    let previous_names: Vec<String> = prev
-        .as_ref()
-        .map(|(_, m)| m.chunks.iter().flatten().cloned().collect())
-        .unwrap_or_default();
+    let previous_names: HashSet<&str> = prev
+        .iter()
+        .flat_map(|(_, m)| m.chunks.iter().flatten())
+        .map(String::as_str)
+        .collect();
     let uploads = parallel_map(to_read, |index| {
         let mut buf = vec![0u8; chunk_len(size, index)];
         snap.read_exact_at(&mut buf, index as u64 * CHUNK_SIZE)?;
@@ -206,7 +212,7 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
             return Ok((index, None, 0u64, false));
         }
         let name = key.chunk_name(&buf);
-        if previous_names.contains(&name) || store.exists(&chunk_key(box_id, &name))? {
+        if previous_names.contains(name.as_str()) || store.exists(&chunk_key(box_id, &name))? {
             return Ok((index, Some(name), 0, false));
         }
         let sealed = key.seal(&name, &buf)?;
@@ -225,7 +231,7 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
     let number = prev.as_ref().map_or(1, |(n, _)| n + 1);
     let manifest = Manifest::new(box_id, size, chunks, jiff::Timestamp::now().to_string());
     let manifest_ref = manifest_key(box_id, number);
-    store.put(&manifest_ref, &serde_json::to_vec(&manifest)?)?;
+    store.put(&manifest_ref, &manifest.seal(key, &manifest_ref)?)?;
 
     fs::rename(&snap_path, &base_path)
         .with_context(|| format!("promoting snapshot to {}", base_path.display()))?;
@@ -249,7 +255,7 @@ pub fn restore(
     let bytes = store
         .get(volume_ref)?
         .ok_or_else(|| anyhow!("manifest {volume_ref} is missing"))?;
-    let manifest = Manifest::parse(&bytes, box_id)?;
+    let manifest = Manifest::open(&bytes, key, box_id, volume_ref)?;
 
     let file = File::create_new(dest).with_context(|| format!("creating {}", dest.display()))?;
     let mut guard = Cleanup::new(dest.to_path_buf());
@@ -296,39 +302,15 @@ pub fn delete(box_id: &str, store: &dyn Store) -> Result<DeleteOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::FleetKey;
     use crate::store::FileStore;
+    use crate::testutil::{BOX, box_key, volume};
     use anyhow::bail;
-    use std::io::{Seek, SeekFrom, Write};
-    use std::os::unix::fs::PermissionsExt;
-
-    const BOX: &str = "box-a";
-
-    fn fleet_key(dir: &Path) -> BoxKey {
-        let path = dir.join("volume.key");
-        fs::write(&path, [7u8; 32]).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        FleetKey::load(&path).unwrap().box_key(BOX)
-    }
-
-    fn volume(dir: &Path, chunks: u64) -> PathBuf {
-        let path = dir.join("volume.raw");
-        let mut file = File::create(&path).unwrap();
-        file.set_len(chunks * CHUNK_SIZE).unwrap();
-        for index in 0..chunks {
-            file.seek(SeekFrom::Start(index * CHUNK_SIZE)).unwrap();
-            file.write_all(&vec![index as u8 + 1; CHUNK_SIZE as usize])
-                .unwrap();
-        }
-        file.sync_all().unwrap();
-        path
-    }
 
     #[test]
     fn incremental_backup_uploads_only_changed_chunks_and_restores_exactly() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::new(dir.path().join("store"));
-        let key = fleet_key(dir.path());
+        let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 4);
 
         let first = backup(&path, BOX, &store, &key).unwrap();
@@ -354,7 +336,7 @@ mod tests {
     fn unchanged_volume_uploads_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::new(dir.path().join("store"));
-        let key = fleet_key(dir.path());
+        let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 2);
         backup(&path, BOX, &store, &key).unwrap();
         let again = backup(&path, BOX, &store, &key).unwrap();
@@ -366,10 +348,10 @@ mod tests {
     fn restore_rejects_a_tampered_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::new(dir.path().join("store"));
-        let key = fleet_key(dir.path());
+        let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 1);
         let out = backup(&path, BOX, &store, &key).unwrap();
-        let manifest = latest_manifest(&store, BOX).unwrap().unwrap().1;
+        let manifest = latest_manifest(&store, BOX, &key).unwrap().unwrap().1;
         let name = manifest.chunks[0].clone().unwrap();
         let chunk_path = dir.path().join("store").join(chunk_key(BOX, &name));
         let mut bytes = fs::read(&chunk_path).unwrap();
@@ -385,15 +367,39 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_a_tampered_or_replayed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = volume(dir.path(), 1);
+        let out = backup(&path, BOX, &store, &key).unwrap();
+        let stored = dir.path().join("store").join(&out.volume_ref);
+        let original = fs::read(&stored).unwrap();
+        let dest = dir.path().join("restored.raw");
+
+        let replayed = manifest_key(BOX, 9);
+        store.put(&replayed, &original).unwrap();
+        assert!(restore(&replayed, BOX, &store, &key, &dest).is_err());
+        assert!(!dest.exists());
+
+        let mut bytes = original;
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&stored, bytes).unwrap();
+        assert!(restore(&out.volume_ref, BOX, &store, &key, &dest).is_err());
+        assert!(!dest.exists());
+    }
+
+    #[test]
     fn delete_removes_every_object_for_the_box() {
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::new(dir.path().join("store"));
-        let key = fleet_key(dir.path());
+        let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 2);
         backup(&path, BOX, &store, &key).unwrap();
-        let out = delete(BOX, &store).unwrap();
-        assert_eq!(out.deleted, 3);
-        assert!(latest_manifest(&store, BOX).unwrap().is_none());
+        delete(BOX, &store).unwrap();
+        assert!(store.list(&format!("boxes/{BOX}/")).unwrap().is_empty());
+        assert!(latest_manifest(&store, BOX, &key).unwrap().is_none());
     }
 
     #[test]

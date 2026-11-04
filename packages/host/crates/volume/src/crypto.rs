@@ -1,8 +1,9 @@
-//! Volume encryption: the host fleet key, per-box keys derived from it, content-keyed chunk names, and sealed chunks.
+//! Volume encryption: the host fleet key, per-box subkeys derived from it, content-keyed chunk names, and sealed objects.
 //!
-//! A chunk object is `nonce (12) || AES-256-GCM(ciphertext || tag)` under the box key, with the chunk name as associated
-//! data. The name is `HMAC-SHA256(box key, plaintext)`, so it reveals nothing about the content and is the integrity
-//! check on open: a decrypted chunk must hash back to the name it was fetched under.
+//! Every object (chunk or manifest) is `nonce (12) || AES-256-GCM(plaintext)` under the box's seal key, with the object's
+//! store key as associated data, so an object cannot be moved under another key and still open. A chunk's name is
+//! `HMAC-SHA256(name key, plaintext)`, so it reveals nothing about the content, and a decrypted chunk must hash back to
+//! the name it was fetched under. The name key and the seal key are separate HKDF outputs.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -44,64 +45,81 @@ impl FleetKey {
         Ok(Self(key))
     }
 
-    /// Per-box key: `HKDF-SHA256(fleet key, boxId)`.
+    /// Per-box subkeys: `HKDF-SHA256(fleet key, "kestrel-volume/name/<boxId>")` names chunks and
+    /// `HKDF-SHA256(fleet key, "kestrel-volume/seal/<boxId>")` seals objects.
     pub fn box_key(&self, box_id: &str) -> BoxKey {
         let hk = Hkdf::<Sha256>::new(None, &self.0);
-        let mut okm = [0u8; 32];
-        hk.expand(box_id.as_bytes(), &mut okm)
-            .expect("32 bytes is a valid HKDF-SHA256 output length");
-        BoxKey(okm)
+        BoxKey {
+            name: expand(&hk, &format!("kestrel-volume/name/{box_id}")),
+            seal: expand(&hk, &format!("kestrel-volume/seal/{box_id}")),
+        }
     }
 }
 
-pub struct BoxKey([u8; 32]);
+fn expand(hk: &Hkdf<Sha256>, info: &str) -> [u8; 32] {
+    let mut okm = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut okm)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    okm
+}
+
+pub struct BoxKey {
+    name: [u8; 32],
+    seal: [u8; 32],
+}
 
 impl BoxKey {
-    /// Content-keyed chunk name: `hex(HMAC-SHA256(box key, plaintext))`.
+    /// Content-keyed chunk name: `hex(HMAC-SHA256(name key, plaintext))`.
     pub fn chunk_name(&self, plaintext: &[u8]) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC takes any key length");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.name).expect("HMAC takes any key length");
         mac.update(plaintext);
         hex::encode(mac.finalize().into_bytes())
     }
 
-    /// Encrypts a chunk for the object named `name`.
-    pub fn seal(&self, name: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    /// Encrypts `plaintext` for the object stored under `aad`.
+    pub fn seal(&self, aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|e| anyhow::anyhow!("random nonce: {e}"))?;
-        let cipher = Aes256Gcm::new_from_slice(&self.0).expect("32-byte key");
+        let cipher = Aes256Gcm::new_from_slice(&self.seal).expect("32-byte key");
         let nonce_ref = Nonce::try_from(&nonce[..]).expect("12-byte nonce");
         let ciphertext = cipher
             .encrypt(
                 &nonce_ref,
                 Payload {
                     msg: plaintext,
-                    aad: name.as_bytes(),
+                    aad: aad.as_bytes(),
                 },
             )
-            .map_err(|_| anyhow::anyhow!("sealing chunk failed"))?;
+            .map_err(|_| anyhow::anyhow!("sealing {aad} failed"))?;
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&ciphertext);
         Ok(out)
     }
 
-    /// Decrypts the object stored under `name` and checks that the plaintext hashes back to `name`.
-    pub fn open(&self, name: &str, sealed: &[u8]) -> Result<Vec<u8>> {
+    /// Decrypts the object stored under `aad`. Fails unless it was sealed under this box's key for that same `aad`.
+    pub fn open(&self, aad: &str, sealed: &[u8]) -> Result<Vec<u8>> {
         if sealed.len() < NONCE_LEN {
-            bail!("chunk {name} is truncated");
+            bail!("object {aad} is truncated");
         }
         let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
-        let cipher = Aes256Gcm::new_from_slice(&self.0).expect("32-byte key");
+        let cipher = Aes256Gcm::new_from_slice(&self.seal).expect("32-byte key");
         let nonce_ref = Nonce::try_from(nonce).expect("12-byte nonce");
-        let plaintext = cipher
+        cipher
             .decrypt(
                 &nonce_ref,
                 Payload {
                     msg: ciphertext,
-                    aad: name.as_bytes(),
+                    aad: aad.as_bytes(),
                 },
             )
-            .map_err(|_| anyhow::anyhow!("chunk {name} failed authentication"))?;
+            .map_err(|_| anyhow::anyhow!("object {aad} failed authentication"))
+    }
+
+    /// Decrypts the chunk stored under `name` and checks that the plaintext hashes back to `name`.
+    pub fn open_chunk(&self, name: &str, sealed: &[u8]) -> Result<Vec<u8>> {
+        let plaintext = self.open(name, sealed)?;
         ensure!(
             self.chunk_name(&plaintext) == name,
             "chunk {name} does not match its content"
@@ -124,7 +142,7 @@ mod tests {
         let data = vec![42u8; 4096];
         let name = key.chunk_name(&data);
         let sealed = key.seal(&name, &data).unwrap();
-        assert_eq!(key.open(&name, &sealed).unwrap(), data);
+        assert_eq!(key.open_chunk(&name, &sealed).unwrap(), data);
     }
 
     #[test]
@@ -135,7 +153,7 @@ mod tests {
         assert_ne!(a.chunk_name(&data), b.chunk_name(&data));
         let name = a.chunk_name(&data);
         let sealed = a.seal(&name, &data).unwrap();
-        assert!(b.open(&name, &sealed).is_err());
+        assert!(b.open_chunk(&name, &sealed).is_err());
     }
 
     #[test]
@@ -146,12 +164,12 @@ mod tests {
         let mut sealed = key.seal(&name, &data).unwrap();
         let last = sealed.len() - 1;
         sealed[last] ^= 1;
-        assert!(key.open(&name, &sealed).is_err());
+        assert!(key.open_chunk(&name, &sealed).is_err());
 
         let other = vec![2u8; 128];
         let other_name = key.chunk_name(&other);
         let sealed = key.seal(&name, &data).unwrap();
-        assert!(key.open(&other_name, &sealed).is_err());
+        assert!(key.open_chunk(&other_name, &sealed).is_err());
     }
 
     #[test]

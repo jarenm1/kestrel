@@ -227,19 +227,23 @@ fn expect_success(resp: Response, what: &str) -> Result<Response> {
 
 impl Store for S3Store {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<()> {
-        let url = PutObject::new(&self.bucket, Some(&self.credentials), &self.object(key)?)
-            .sign(PRESIGN_TTL);
+        let object = self.object(key)?;
         let resp = self.send(&format!("put {key}"), || {
-            self.client.put(url.clone()).body(bytes.to_vec())
+            let url =
+                PutObject::new(&self.bucket, Some(&self.credentials), &object).sign(PRESIGN_TTL);
+            self.client.put(url).body(bytes.to_vec())
         })?;
         expect_success(resp, &format!("put {key}"))?;
         Ok(())
     }
 
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let url = GetObject::new(&self.bucket, Some(&self.credentials), &self.object(key)?)
-            .sign(PRESIGN_TTL);
-        let resp = self.send(&format!("get {key}"), || self.client.get(url.clone()))?;
+        let object = self.object(key)?;
+        let resp = self.send(&format!("get {key}"), || {
+            let url =
+                GetObject::new(&self.bucket, Some(&self.credentials), &object).sign(PRESIGN_TTL);
+            self.client.get(url)
+        })?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -249,9 +253,12 @@ impl Store for S3Store {
     }
 
     fn exists(&self, key: &str) -> Result<bool> {
-        let url = HeadObject::new(&self.bucket, Some(&self.credentials), &self.object(key)?)
-            .sign(PRESIGN_TTL);
-        let resp = self.send(&format!("head {key}"), || self.client.head(url.clone()))?;
+        let object = self.object(key)?;
+        let resp = self.send(&format!("head {key}"), || {
+            let url =
+                HeadObject::new(&self.bucket, Some(&self.credentials), &object).sign(PRESIGN_TTL);
+            self.client.head(url)
+        })?;
         match resp.status() {
             StatusCode::NOT_FOUND => Ok(false),
             _ => Ok(expect_success(resp, &format!("head {key}"))?
@@ -266,13 +273,14 @@ impl Store for S3Store {
         let mut keys = Vec::new();
         let mut token: Option<String> = None;
         loop {
-            let mut action = ListObjectsV2::new(&self.bucket, Some(&self.credentials));
-            action.with_prefix(full_prefix.clone());
-            if let Some(t) = token.take() {
-                action.with_continuation_token(t);
-            }
-            let url = action.sign(PRESIGN_TTL);
-            let resp = self.send(&format!("list {prefix}"), || self.client.get(url.clone()))?;
+            let resp = self.send(&format!("list {prefix}"), || {
+                let mut action = ListObjectsV2::new(&self.bucket, Some(&self.credentials));
+                action.with_prefix(full_prefix.clone());
+                if let Some(t) = &token {
+                    action.with_continuation_token(t.clone());
+                }
+                self.client.get(action.sign(PRESIGN_TTL))
+            })?;
             let text = expect_success(resp, &format!("list {prefix}"))?
                 .text()
                 .with_context(|| format!("reading listing of {prefix}"))?;
@@ -291,9 +299,12 @@ impl Store for S3Store {
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let url = DeleteObject::new(&self.bucket, Some(&self.credentials), &self.object(key)?)
-            .sign(PRESIGN_TTL);
-        let resp = self.send(&format!("delete {key}"), || self.client.delete(url.clone()))?;
+        let object = self.object(key)?;
+        let resp = self.send(&format!("delete {key}"), || {
+            let url =
+                DeleteObject::new(&self.bucket, Some(&self.credentials), &object).sign(PRESIGN_TTL);
+            self.client.delete(url)
+        })?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Ok(());
         }

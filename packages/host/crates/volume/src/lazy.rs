@@ -7,7 +7,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -40,7 +40,9 @@ struct Volume {
     file: File,
     bitmap_path: PathBuf,
     identity: Vec<u8>,
-    present: Mutex<Vec<bool>>,
+    present: Presence,
+    /// Serializes bitmap writes, so the file on disk always holds every bit set before its write.
+    persist_lock: Mutex<()>,
     chunk_locks: Vec<Mutex<()>>,
 }
 
@@ -53,25 +55,64 @@ fn identity(box_id: &str, volume_ref: &str) -> Vec<u8> {
     Sha256::digest(format!("{box_id}\n{volume_ref}")).to_vec()
 }
 
-fn encode_bitmap(identity: &[u8], present: &[bool]) -> Vec<u8> {
-    let mut bytes = identity.to_vec();
-    bytes.resize(IDENTITY_LEN + present.len().div_ceil(8), 0);
-    for (index, is_present) in present.iter().enumerate() {
-        if *is_present {
-            bytes[IDENTITY_LEN + index / 8] |= 1 << (index % 8);
-        }
-    }
-    bytes
+/// Which chunks are present, as atomic bits so reads never wait on a fetch. The bitmap file is the identity followed by
+/// one bit per chunk: bit `i` is bit `i % 8` of byte `i / 8`.
+struct Presence {
+    words: Vec<AtomicU64>,
+    chunks: usize,
 }
 
-fn decode_bitmap(bytes: &[u8], identity: &[u8], chunks: usize) -> Result<Vec<bool>> {
-    ensure!(
-        bytes.len() == IDENTITY_LEN + chunks.div_ceil(8) && &bytes[..IDENTITY_LEN] == identity,
-        "the bitmap belongs to a different restore"
-    );
-    Ok((0..chunks)
-        .map(|index| bytes[IDENTITY_LEN + index / 8] & (1 << (index % 8)) != 0)
-        .collect())
+impl Presence {
+    fn new(chunks: usize) -> Self {
+        Self {
+            words: (0..chunks.div_ceil(64))
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+            chunks,
+        }
+    }
+
+    fn get(&self, index: usize) -> bool {
+        self.words[index / 64].load(Ordering::Acquire) & (1 << (index % 64)) != 0
+    }
+
+    fn set(&self, index: usize, present: bool) {
+        let bit = 1u64 << (index % 64);
+        if present {
+            self.words[index / 64].fetch_or(bit, Ordering::AcqRel);
+        } else {
+            self.words[index / 64].fetch_and(!bit, Ordering::AcqRel);
+        }
+    }
+
+    fn encode(&self, identity: &[u8]) -> Vec<u8> {
+        let mut bytes = identity.to_vec();
+        bytes.extend(
+            (0..self.chunks.div_ceil(8)).map(|byte| {
+                (self.words[byte / 8].load(Ordering::Acquire) >> (8 * (byte % 8))) as u8
+            }),
+        );
+        bytes
+    }
+
+    fn decode(bytes: &[u8], identity: &[u8], chunks: usize) -> Result<Self> {
+        ensure!(
+            bytes.len() == IDENTITY_LEN + chunks.div_ceil(8) && &bytes[..IDENTITY_LEN] == identity,
+            "the bitmap belongs to a different restore"
+        );
+        let words = (0..chunks.div_ceil(64))
+            .map(|word| {
+                let mut value = 0u64;
+                for k in 0..8 {
+                    if let Some(byte) = bytes.get(IDENTITY_LEN + word * 8 + k) {
+                        value |= (*byte as u64) << (8 * k);
+                    }
+                }
+                AtomicU64::new(value)
+            })
+            .collect();
+        Ok(Self { words, chunks })
+    }
 }
 
 impl Volume {
@@ -85,7 +126,7 @@ impl Volume {
         let bytes = store
             .get(volume_ref)?
             .ok_or_else(|| anyhow!("manifest {volume_ref} is missing"))?;
-        let manifest = Manifest::parse(&bytes, box_id)?;
+        let manifest = Manifest::open(&bytes, &key, box_id, volume_ref)?;
         let chunks = manifest.chunks.len();
         let identity = identity(box_id, volume_ref);
         let bitmap_path = suffixed(dest, BITMAP_SUFFIX);
@@ -93,7 +134,7 @@ impl Volume {
         let (file, present) = if dest.exists() {
             let bitmap = fs::read(&bitmap_path)
                 .with_context(|| format!("reading {}", bitmap_path.display()))?;
-            let present = decode_bitmap(&bitmap, &identity, chunks)?;
+            let present = Presence::decode(&bitmap, &identity, chunks)?;
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -107,8 +148,8 @@ impl Volume {
             );
             (file, present)
         } else {
-            let present = vec![false; chunks];
-            write_file_atomic(&bitmap_path, &encode_bitmap(&identity, &present))?;
+            let present = Presence::new(chunks);
+            write_file_atomic(&bitmap_path, &present.encode(&identity))?;
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -127,7 +168,8 @@ impl Volume {
             file,
             bitmap_path,
             identity,
-            present: Mutex::new(present),
+            present,
+            persist_lock: Mutex::new(()),
             chunk_locks: (0..chunks).map(|_| Mutex::new(())).collect(),
         })
     }
@@ -136,18 +178,14 @@ impl Volume {
         self.manifest.chunks.len()
     }
 
-    fn is_present(&self, index: usize) -> bool {
-        lock(&self.present)[index]
-    }
-
     /// Makes chunk `index` present in `dest`, fetching and authenticating it on first use.
-    /// A null chunk is zeros, which the sparse file already holds.
+    /// A null chunk is zeros, which the sparse file already holds. The bit is set only after the data is durable.
     fn ensure(&self, index: usize) -> Result<()> {
-        if self.is_present(index) {
+        if self.present.get(index) {
             return Ok(());
         }
         let _fetching = lock(&self.chunk_locks[index]);
-        if self.is_present(index) {
+        if self.present.get(index) {
             return Ok(());
         }
         if let Some(name) = &self.manifest.chunks[index] {
@@ -157,13 +195,15 @@ impl Volume {
                 .write_all_at(&plaintext, index as u64 * CHUNK_SIZE)?;
             self.file.sync_data()?;
         }
-        self.mark_present(index)
+        self.present.set(index, true);
+        self.persist()
+            .inspect_err(|_| self.present.set(index, false))
     }
 
-    fn mark_present(&self, index: usize) -> Result<()> {
-        let mut present = lock(&self.present);
-        present[index] = true;
-        write_file_atomic(&self.bitmap_path, &encode_bitmap(&self.identity, &present))
+    /// Writes the bitmap. Writes are serialized, so the last one on disk includes every bit set before it.
+    fn persist(&self) -> Result<()> {
+        let _writing = lock(&self.persist_lock);
+        write_file_atomic(&self.bitmap_path, &self.present.encode(&self.identity))
     }
 
     fn ensure_range(&self, offset: u64, len: usize) -> Result<()> {
@@ -214,6 +254,7 @@ fn perform(volume: &Volume, op: u32, offset: u64, buf: &mut [u8]) -> i32 {
         sys::UBLK_IO_OP_READ => volume.read(offset, buf),
         sys::UBLK_IO_OP_WRITE => volume.write(offset, buf),
         sys::UBLK_IO_OP_FLUSH => volume.file.sync_data().map_err(Into::into),
+        // libublk advertises only the volatile-cache attribute, so discard, write-zeroes and FUA never arrive here.
         _ => return -libc::EOPNOTSUPP,
     };
     match outcome {
@@ -278,11 +319,12 @@ pub fn restore_lazy(
     let volume = Arc::new(Volume::open(volume_ref, box_id, store, key, dest)?);
     let size = volume.manifest.size_bytes;
 
-    let hydrator = {
+    // Detached: a fetch in flight can take minutes, and a chunk whose bit was not persisted is fetched again on restart.
+    {
         let volume = Arc::clone(&volume);
         let stop = Arc::clone(stop);
-        thread::spawn(move || hydrate(&volume, &stop))
-    };
+        thread::spawn(move || hydrate(&volume, &stop));
+    }
 
     let ctrl = UblkCtrlBuilder::default()
         .name("kestrel-volume")
@@ -317,9 +359,133 @@ pub fn restore_lazy(
     );
 
     stop.store(true, Ordering::Relaxed);
-    hydrator
-        .join()
-        .map_err(|_| anyhow!("the chunk hydrator panicked"))?;
     served.map_err(|e| anyhow!("serving {}: {e}", dest.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backup::backup;
+    use crate::manifest::chunk_key;
+    use crate::store::FileStore;
+    use crate::testutil::{BOX, box_key, volume, volume_bytes};
+
+    fn open(dir: &Path, volume_ref: &str, dest: &Path) -> Result<Volume> {
+        let store = Box::new(FileStore::new(dir.join("store")));
+        Volume::open(volume_ref, BOX, store, box_key(dir, BOX), dest)
+    }
+
+    /// Backs up a volume of `chunks` chunks and returns its manifest ref.
+    fn backed_up(dir: &Path, chunks: u64) -> String {
+        let store = FileStore::new(dir.join("store"));
+        let key = box_key(dir, BOX);
+        let path = volume(dir, chunks);
+        backup(&path, BOX, &store, &key).unwrap().volume_ref
+    }
+
+    #[test]
+    fn presence_bits_round_trip_and_are_bound_to_their_identity() {
+        let id = identity(BOX, "ref-a");
+        let present = Presence::new(70);
+        present.set(0, true);
+        present.set(69, true);
+        present.set(8, true);
+        present.set(8, false);
+        let bytes = present.encode(&id);
+        let decoded = Presence::decode(&bytes, &id, 70).unwrap();
+        let bits: Vec<usize> = (0..70).filter(|i| decoded.get(*i)).collect();
+        assert_eq!(bits, vec![0, 69]);
+        assert!(Presence::decode(&bytes, &identity(BOX, "ref-b"), 70).is_err());
+        assert!(Presence::decode(&bytes, &id, 80).is_err());
+    }
+
+    #[test]
+    fn read_fetches_only_the_chunks_it_touches() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 3);
+        let dest = dir.path().join("dest.raw");
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        let offset = CHUNK_SIZE - 8;
+        let mut buf = vec![0u8; 16];
+        lazy.read(offset, &mut buf).unwrap();
+        let expected = volume_bytes(3);
+        assert_eq!(buf, expected[offset as usize..offset as usize + 16]);
+        assert!(lazy.present.get(0) && lazy.present.get(1));
+        assert!(!lazy.present.get(2));
+    }
+
+    #[test]
+    fn io_past_the_end_fails_and_an_empty_read_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 1);
+        let dest = dir.path().join("dest.raw");
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        let mut buf = [0u8; 8];
+        assert!(lazy.read(CHUNK_SIZE - 4, &mut buf).is_err());
+        lazy.read(0, &mut []).unwrap();
+    }
+
+    #[test]
+    fn present_chunks_survive_a_restart_without_refetching() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 2);
+        let dest = dir.path().join("dest.raw");
+        let name = {
+            let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+            let mut buf = [0u8; 4];
+            lazy.read(0, &mut buf).unwrap();
+            lazy.manifest.chunks[0].clone().unwrap()
+        };
+        // Chunk 0 is present, so its object is no longer needed: a restarted volume must not fetch it.
+        FileStore::new(dir.path().join("store"))
+            .delete(&chunk_key(BOX, &name))
+            .unwrap();
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        let mut buf = [0u8; 4];
+        lazy.read(0, &mut buf).unwrap();
+        assert_eq!(buf, [1; 4]);
+    }
+
+    #[test]
+    fn null_chunks_read_as_zeros_without_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = volume(dir.path(), 1);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(2 * CHUNK_SIZE)
+            .unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let volume_ref = backup(&path, BOX, &store, &key).unwrap().volume_ref;
+        let dest = dir.path().join("dest.raw");
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        assert!(lazy.manifest.chunks[1].is_none());
+        let mut buf = [9u8; 8];
+        lazy.read(CHUNK_SIZE, &mut buf).unwrap();
+        assert_eq!(buf, [0u8; 8]);
+        assert!(lazy.present.get(1));
+    }
+
+    #[test]
+    fn a_bitmap_from_another_restore_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = backed_up(dir.path(), 1);
+        let dest = dir.path().join("dest.raw");
+        open(dir.path(), &first, &dest).unwrap();
+        let path = dir.path().join("volume.raw");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .write_all_at(&[0xAB; 8], 0)
+            .unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let second = backup(&path, BOX, &store, &key).unwrap().volume_ref;
+        assert_ne!(first, second);
+        assert!(open(dir.path(), &second, &dest).is_err());
+    }
 }

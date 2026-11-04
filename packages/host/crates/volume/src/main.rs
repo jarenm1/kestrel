@@ -8,6 +8,8 @@ mod files;
 mod lazy;
 mod manifest;
 mod store;
+#[cfg(test)]
+mod testutil;
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};

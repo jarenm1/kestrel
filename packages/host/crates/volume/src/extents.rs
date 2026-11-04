@@ -208,23 +208,42 @@ mod tests {
         assert_eq!(data_chunks(&file, size).unwrap(), vec![1]);
     }
 
+    /// Needs a reflink filesystem (btrfs, XFS): run with `cargo test -- --ignored`.
     #[test]
+    #[ignore = "needs a reflink filesystem (btrfs/XFS); run with --ignored"]
     fn reflink_shares_extents_and_a_rewrite_changes_them() {
         use std::fs::OpenOptions;
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         fs::write(&src, vec![5u8; CHUNK_SIZE as usize]).unwrap();
         let cloned = dir.path().join("clone");
-        if snapshot(&src, &cloned, true).unwrap() {
-            let src_sig = chunk_signatures(&File::open(&src).unwrap(), CHUNK_SIZE).unwrap();
-            let clone_sig = chunk_signatures(&File::open(&cloned).unwrap(), CHUNK_SIZE).unwrap();
-            assert_eq!(src_sig, clone_sig);
-        }
+        assert!(
+            snapshot(&src, &cloned, true).unwrap(),
+            "the filesystem did not reflink"
+        );
+        let src_sig = chunk_signatures(&File::open(&src).unwrap(), CHUNK_SIZE).unwrap();
+        let clone_sig = chunk_signatures(&File::open(&cloned).unwrap(), CHUNK_SIZE).unwrap();
+        assert_eq!(src_sig, clone_sig);
         let mut edit = OpenOptions::new().write(true).open(&cloned).unwrap();
         edit.write_all(b"changed").unwrap();
         edit.sync_all().unwrap();
         let edited = chunk_signatures(&File::open(&cloned).unwrap(), CHUNK_SIZE).unwrap();
-        let original = chunk_signatures(&File::open(&src).unwrap(), CHUNK_SIZE).unwrap();
-        assert_ne!(edited, original);
+        assert_ne!(edited, src_sig);
+        assert_eq!(
+            fs::read(&src).unwrap(),
+            vec![5u8; CHUNK_SIZE as usize],
+            "a rewrite of the clone reached the source"
+        );
+    }
+
+    #[test]
+    fn copy_fallback_matches_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let data: Vec<u8> = (0..CHUNK_SIZE as usize + 17).map(|i| i as u8).collect();
+        fs::write(&src, &data).unwrap();
+        let copied = dir.path().join("copy");
+        assert!(!snapshot(&src, &copied, false).unwrap());
+        assert_eq!(fs::read(&copied).unwrap(), data);
     }
 }

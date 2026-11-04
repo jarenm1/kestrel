@@ -233,10 +233,13 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
 - **Volumes**: sparse raw files on XFS (mirrored NVMe), `virtio-blk` with `num_queues` = max vCPUs, `direct=on`. The
   guest formats ext4 on first mount (`noatime,lazytime,discard`).
 - **Backups** (`kestrel-volume backup`): reflink `volume.raw` to a point-in-time copy, compare its extents with the
-  previous baseline (FIEMAP shared extents are unchanged), upload changed 4 MiB chunks encrypted with AES-256-GCM
-  under a per-box key `HKDF-SHA256(fleet key, boxId)` (random 96-bit nonce per chunk), named
-  `boxes/<boxId>/chunks/<HMAC-SHA256(box key, plaintext)>` so names reveal nothing about content, and a manifest
-  `boxes/<boxId>/manifests/<n>.json`. Chunks are never shared between boxes.
+  previous baseline (FIEMAP shared extents are unchanged), and upload changed 4 MiB chunks. Each box has two keys, both
+  HKDF-SHA256 from the fleet key: a name key (`info = "kestrel-volume/name/<boxId>"`) names each chunk
+  `boxes/<boxId>/chunks/<HMAC-SHA256(name key, plaintext)>`, so names reveal only equality; a seal key
+  (`info = "kestrel-volume/seal/<boxId>"`) encrypts chunks and manifests with AES-256-GCM (random 96-bit nonce per
+  object, the object's key as AAD). The manifest `boxes/<boxId>/manifests/<n>.json` is sealed the same way, so a
+  tampered, renamed or replayed manifest fails to open. Chunks are never shared between boxes. Limitation: deleting the
+  newest manifest rolls a box back to an older one; the control plane's pinned `volumeRef` is what detects that.
 - **Lazy restore** (`kestrel-volume restore-lazy`): a `ublk` block device backed by a local sparse file and a chunk
   bitmap. A read of a missing chunk fetches it from object storage, writes it locally, then serves it; a background
   task hydrates the rest. Once complete the VM switches to the plain file at its next restore (the disk path is

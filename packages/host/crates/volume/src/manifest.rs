@@ -1,8 +1,11 @@
 //! Manifests and object-store key layout. A manifest lists every 4 MiB chunk of a volume by content-keyed name; a zero
-//! chunk is `null` and needs no object. The manifest key is the `volumeRef` the control plane records.
+//! chunk is `null` and needs no object. A manifest is stored sealed under its own key, so it opens only for the box and
+//! only under the manifest number it was written as. The manifest key is the `volumeRef` the control plane records.
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+
+use crate::crypto::BoxKey;
 
 pub const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 pub const MANIFEST_VERSION: u32 = 1;
@@ -35,9 +38,19 @@ impl Manifest {
         }
     }
 
-    pub fn parse(bytes: &[u8], box_id: &str) -> Result<Self> {
+    /// The stored form of this manifest, sealed under `object_key` (its `boxes/<box>/manifests/<n>.json` key).
+    pub fn seal(&self, key: &BoxKey, object_key: &str) -> Result<Vec<u8>> {
+        key.seal(object_key, &serde_json::to_vec(self)?)
+    }
+
+    /// Opens the stored manifest `object_key`. It fails unless the object was sealed under this box's key for exactly
+    /// this key, so a manifest cannot be altered, replayed under another number, or taken from another box.
+    pub fn open(sealed: &[u8], key: &BoxKey, box_id: &str, object_key: &str) -> Result<Self> {
+        let bytes = key
+            .open(object_key, sealed)
+            .with_context(|| format!("manifest {object_key}"))?;
         let manifest: Manifest =
-            serde_json::from_slice(bytes).context("manifest is not valid JSON")?;
+            serde_json::from_slice(&bytes).context("manifest is not valid JSON")?;
         ensure!(
             manifest.version == MANIFEST_VERSION,
             "unsupported manifest version {}",
@@ -111,6 +124,13 @@ pub fn check_ref(box_id: &str, volume_ref: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{BOX, box_key};
+
+    fn sealed_two_chunk_manifest(key: &BoxKey, object: &str) -> (Manifest, Vec<u8>) {
+        let manifest = Manifest::new(BOX, CHUNK_SIZE * 2, vec![None, None], "t".into());
+        let sealed = manifest.seal(key, object).unwrap();
+        (manifest, sealed)
+    }
 
     #[test]
     fn chunk_count_rounds_up() {
@@ -121,13 +141,52 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejects_wrong_box_and_wrong_length() {
-        let m = Manifest::new("box-a", CHUNK_SIZE * 2, vec![None, None], "t".into());
-        let bytes = serde_json::to_vec(&m).unwrap();
-        assert!(Manifest::parse(&bytes, "box-a").is_ok());
-        assert!(Manifest::parse(&bytes, "box-b").is_err());
-        let short = Manifest::new("box-a", CHUNK_SIZE * 2, vec![None], "t".into());
-        assert!(Manifest::parse(&serde_json::to_vec(&short).unwrap(), "box-a").is_err());
+    fn sealed_manifest_opens_under_its_own_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = box_key(dir.path(), BOX);
+        let object = manifest_key(BOX, 3);
+        let (manifest, sealed) = sealed_two_chunk_manifest(&key, &object);
+        assert_eq!(
+            Manifest::open(&sealed, &key, BOX, &object).unwrap(),
+            manifest
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_tampering_replay_and_other_boxes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = box_key(dir.path(), BOX);
+        let object = manifest_key(BOX, 3);
+        let (_, sealed) = sealed_two_chunk_manifest(&key, &object);
+
+        let mut tampered = sealed.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(Manifest::open(&tampered, &key, BOX, &object).is_err());
+
+        assert!(Manifest::open(&sealed, &key, BOX, &manifest_key(BOX, 4)).is_err());
+
+        let other = box_key(dir.path(), "box-b");
+        assert!(Manifest::open(&sealed, &other, "box-b", &object).is_err());
+
+        let plain = serde_json::to_vec(&Manifest::new(
+            BOX,
+            CHUNK_SIZE * 2,
+            vec![None, None],
+            "t".into(),
+        ))
+        .unwrap();
+        assert!(Manifest::open(&plain, &key, BOX, &object).is_err());
+    }
+
+    #[test]
+    fn manifest_rejects_a_wrong_chunk_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = box_key(dir.path(), BOX);
+        let object = manifest_key(BOX, 1);
+        let short = Manifest::new(BOX, CHUNK_SIZE * 2, vec![None], "t".into());
+        let sealed = short.seal(&key, &object).unwrap();
+        assert!(Manifest::open(&sealed, &key, BOX, &object).is_err());
     }
 
     #[test]
