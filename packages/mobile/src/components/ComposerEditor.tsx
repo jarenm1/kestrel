@@ -4,7 +4,6 @@ import { useRef, type Ref } from "react"
 import { IS_DOM, useDOMImperativeHandle, type DOMImperativeFactory, type DOMProps } from "expo/dom"
 import {
   ComposerEditor as SharedComposerEditor,
-  composerViewOf,
   type ComposerEditorHandle,
   type ComposerEditorView,
 } from "@cloudagents/composer/editor"
@@ -84,11 +83,24 @@ export default function ComposerEditor({
   onMenuKey,
 }: ComposerEditorDomProps) {
   const editor = useRef<ComposerEditorHandle>(null)
-  const latest = useRef<ComposerEditorView>(composerViewOf(value))
+  const snapshotPending = useRef(false)
   const menuOpenRef = useRef(menuOpen)
   menuOpenRef.current = menuOpen
   const callbacks = useRef({ onChange, onSubmit, onAppCommand })
   callbacks.current = { onChange, onSubmit, onAppCommand }
+
+  async function requestSnapshot(action: (view: ComposerEditorView) => Promise<void>) {
+    const current = editor.current
+    if (snapshotPending.current || current === null) return
+    snapshotPending.current = true
+    current.setReadOnly(true)
+    try {
+      await action(current.readView())
+    } finally {
+      snapshotPending.current = false
+      current.setReadOnly(false)
+    }
+  }
 
   useDOMImperativeHandle(
     ref,
@@ -106,13 +118,10 @@ export default function ComposerEditor({
         editor.current?.insertReference(reference as GithubReference, Number(start), Number(end))
       },
       requestSubmit() {
-        // Read the DOM directly: the last `onChange` may still be on the bridge, and Send must send what is visible.
-        const view = editor.current?.readView() ?? latest.current
-        void callbacks.current.onSubmit(view)
+        void requestSnapshot((view) => callbacks.current.onSubmit(view))
       },
       requestAppCommand(name) {
-        const view = editor.current?.readView() ?? latest.current
-        void callbacks.current.onAppCommand(name as AppCommand["name"], view)
+        void requestSnapshot((view) => callbacks.current.onAppCommand(name as AppCommand["name"], view))
       },
       clear() {
         editor.current?.clear()
@@ -131,7 +140,6 @@ export default function ComposerEditor({
         enterInsertsNewline
         ariaExpanded={ariaExpanded}
         onChange={(view) => {
-          latest.current = view
           void callbacks.current.onChange(view)
         }}
         onFocus={() => {

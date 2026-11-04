@@ -33,6 +33,8 @@ export interface ComposerEditorHandle {
   insertReference(reference: GithubReference, start: number, end: number): void
   /** Reads the editor as it is now, including edits the parent has not received yet. */
   readView(): ComposerEditorView
+  /** Synchronously blocks edits before an asynchronous action captures the draft. */
+  setReadOnly(readOnly: boolean): void
   /** Empties the draft after a successful send without moving focus (tap-to-send can blur the surface). */
   clear(): void
 }
@@ -379,6 +381,8 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   const lastSerialized = useRef<string | null>(null)
   const [empty, setEmpty] = useState(() => composerViewOf(value).plain === "")
   const [composingText, setComposingText] = useState(false)
+  const [readOnly, setReadOnlyState] = useState(false)
+  const readOnlyRef = useRef(false)
   const callbacks = useRef({ onChange, onKeyDown, onPaste })
   callbacks.current = { onChange, onKeyDown, onPaste }
 
@@ -404,6 +408,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   }
 
   function insertPlainText(text: string): void {
+    if (readOnlyRef.current) return
     const element = root.current
     if (element === null) return
     const selection = window.getSelection()
@@ -448,6 +453,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         notify()
       },
       replaceRange(start, end, replacement) {
+        if (readOnlyRef.current) return
         const element = root.current
         if (element === null) return
         const range = rangeForVisible(element, start, end)
@@ -459,6 +465,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         insertPlainText(replacement)
       },
       insertReference(reference, start, end) {
+        if (readOnlyRef.current) return
         const element = root.current
         if (element === null) return
         // At the end of a line the chip gets a following space, so the caret sits in plain text: words typed next
@@ -480,6 +487,17 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       },
       readView() {
         return readView()
+      },
+      setReadOnly(next) {
+        readOnlyRef.current = next
+        const element = root.current
+        if (element === null) return
+        // Update the DOM before returning: a React render or a native bridge round trip is too late for a snapshot.
+        element.contentEditable = String(!next)
+        element.setAttribute("aria-readonly", String(next))
+        setReadOnlyState(next)
+        if (next) element.blur()
+        else notify()
       },
       clear() {
         const element = root.current
@@ -521,6 +539,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   useEffect(() => {
     const onSelectionChange = () => {
       if (composing.current) return
+      if (readOnlyRef.current) return
       const element = root.current
       const selection = window.getSelection()
       if (
@@ -544,6 +563,10 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     const element = root.current
     if (element === null) return
     const onBeforeInput = (event: InputEvent) => {
+      if (readOnlyRef.current) {
+        event.preventDefault()
+        return
+      }
       if (event.inputType !== "deleteContentBackward" || event.isComposing || composing.current) return
       const selection = window.getSelection()
       if (selection === null || !selection.isCollapsed || !element.contains(selection.anchorNode)) return
@@ -570,6 +593,10 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   }, [])
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (readOnlyRef.current) {
+      event.preventDefault()
+      return
+    }
     if (!event.nativeEvent.isComposing && root.current !== null) normalizeChipCaret(root.current)
     callbacks.current.onKeyDown?.(event)
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return
@@ -582,6 +609,10 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   }
 
   function handlePaste(event: ClipboardEvent<HTMLDivElement>): void {
+    if (readOnlyRef.current) {
+      event.preventDefault()
+      return
+    }
     callbacks.current.onPaste?.(event)
     if (event.defaultPrevented) return
     // Never let the browser insert clipboard HTML (styles, images, layout) into the editable surface.
@@ -603,16 +634,17 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         aria-controls={ariaControls}
         aria-activedescendant={ariaActiveDescendant}
         aria-multiline="true"
-        contentEditable
+        contentEditable={!readOnly}
+        aria-readonly={readOnly}
         suppressContentEditableWarning
-        tabIndex={0}
+        tabIndex={readOnly ? -1 : 0}
         className={cn(
           "min-h-12 w-full overflow-y-auto rounded-xl bg-input px-3.5 py-2.5 text-sm whitespace-pre-wrap break-words shadow-well transition-[background-color,box-shadow] duration-200 ease-out outline-none",
           "focus-visible:bg-white/[0.07] focus-visible:shadow-glow",
           className,
         )}
         onInput={() => {
-          if (!composing.current) notify()
+          if (!readOnlyRef.current && !composing.current) notify()
         }}
         onCompositionStart={() => {
           composing.current = true
@@ -621,7 +653,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         onCompositionEnd={() => {
           composing.current = false
           setComposingText(false)
-          notify()
+          if (!readOnlyRef.current) notify()
         }}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
