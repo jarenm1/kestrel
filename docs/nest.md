@@ -99,7 +99,7 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   root, and an overlay `/nix/store` (lower `/nix/.ro-store/store`, upper on tmpfs). `kestrel-nix-db` loads `registration`
   into the Nix database on every boot. On `configure` the guest agent mounts the volume at `NEST_VOLUME_MOUNT`, moves the
   overlay's upper layer to `NEST_VOLUME_MOUNT/.nix-rw/upper` (copied from the tmpfs layer on first use; the agent's
-  `--nix-lower` and `--nix-tmp-upper` flags point it at this layout), and starts `kestrel-volume`, which binds the Nix
+  default lower and upper paths are this image's layout, so the unit passes no layout flags), and starts `kestrel-volume`, which binds the Nix
   database to `NEST_VOLUME_MOUNT/.nix-var` (copied on first use), so packages a user installs persist.
 - Kernel: `VIRTIO_{PCI,BLK,NET,MEM,BALLOON,PMEM,VSOCKETS}`, `LIBNVDIMM`, `FS_DAX`, `EROFS_FS`, `OVERLAY_FS`, `VMGENID`,
   `HW_RANDOM_VIRTIO`, `PTP_1588_CLOCK_KVM`, `MEMORY_HOTPLUG`, `MEMORY_HOTREMOVE`, `HOTPLUG_PCI_ACPI`, `ZSWAP`, and

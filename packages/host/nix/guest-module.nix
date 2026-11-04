@@ -149,7 +149,7 @@ in
     after = [ "systemd-modules-load.service" ];
     path = with pkgs; [ coreutils util-linux e2fsprogs iproute2 kmod systemd systemdRandomSeed ];
     serviceConfig = {
-      ExecStart = "${guest.agent}/bin/kestrel-guest-agent --nix-lower ${imageStore} --nix-tmp-upper /nix/.rw-store/store";
+      ExecStart = "${guest.agent}/bin/kestrel-guest-agent";
       Restart = "always";
       RestartSec = 1;
       RuntimeDirectory = "kestrel-guest";
