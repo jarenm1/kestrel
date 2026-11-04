@@ -80,11 +80,16 @@ A thread has a workspace, messages and runs. Repositories are checked out on dem
 
 Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop terminal and launched apps) receives
 `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` set to the thread owner's GitHub login and both email variables set to
-`<login>@users.noreply.github.com`. This gives fresh task homes a usable identity and takes precedence over stale
-identities in persisted home or checkout Git config. GitHub credentials authenticate a push; they do not set the
-author of the commits being pushed. Explicit Git authorship (for example `git commit --author` or a cherry-pick)
-still preserves the original contributor. Commit-message co-author trailers are not rewritten, and existing
-commits are not repaired by this setting.
+`<id>+<login>@users.noreply.github.com`. The host resolves the numeric ID and canonical login through GitHub's
+`GET /users/:login`, validates the response against the thread owner and reuses successful lookups for the box
+process's lifetime. The owner's connected token authenticates that lookup when available; public profiles can
+also be resolved without one. A failed lookup blocks the launch rather than guessing an address. Dev-login
+sessions instead use `<login>@kestrel.invalid`, never an unrelated real GitHub identity.
+This gives fresh task homes a usable identity and takes precedence over stale identities in persisted home or
+checkout Git config. GitHub credentials authenticate a push; they do not set the author of the commits being
+pushed. Explicit Git authorship (for example `git commit --author` or a cherry-pick) still preserves the original
+contributor. Commit-message co-author trailers are not rewritten, and existing commits are not repaired by this
+setting.
 
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
 

@@ -7,6 +7,8 @@ import type { Checkout, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker } from "../broker"
 import { CliAuth } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
+import { CredentialStore } from "../credentials"
+import { GitHub } from "../github/api"
 import { AgentHarness, AgentHarnessLive } from "./harness"
 import { EventHub, EventHubLive } from "./events"
 import { StateLive, StateStore } from "./state"
@@ -54,6 +56,8 @@ const harnessLayer = (
     configLayer,
     StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))),
     EventHubLive,
+    Layer.succeed(CredentialStore, { get: () => Effect.succeed({ user: "test", dev: true }) } as never),
+    Layer.succeed(GitHub, {} as never),
     Layer.succeed(CredentialBroker, {
       issue: () => Effect.succeed({ token: "test-only", env: {} }),
       revoke: () => Effect.void,

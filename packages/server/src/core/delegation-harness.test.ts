@@ -51,7 +51,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }),
     Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
-    Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never),
+    Layer.succeed(CredentialStore, { get: () => Effect.succeed({ user: "test", dev: true }) } as never),
+    Layer.succeed(GitHub, {} as never),
   )
   const harness = AgentHarnessLive.pipe(Layer.provide(deps), Layer.provideMerge(deps))
   try {

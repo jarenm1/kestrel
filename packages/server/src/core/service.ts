@@ -660,17 +660,25 @@ export const CoreLive = Layer.effect(
 
     /** Every agent-controlled process goes through here: bubblewrap inside the task's systemd slice. */
     const launchFor = (task: Task, kind: LaunchKind, display: string | null, command: string) =>
-      prepareLaunch({
-        settings: sandboxSettings,
-        taskId: task.id,
-        owner: task.owner,
-        kind,
-        workspacePath: threadDirOf(task.id),
-        mirrorDir: join(config.mirrorsDir, task.owner),
-        homeDir: join(config.homesDir, task.id),
-        display,
-        env: { CLOUDAGENTS_TASK_ID: task.id },
-        command,
+      Effect.gen(function* () {
+        const creds = yield* credentials.get(task.owner)
+        const gitIdentity = creds?.dev
+          ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
+          : yield* github.commitIdentity(task.owner, creds?.github).pipe(
+              Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
+            )
+        return yield* prepareLaunch({
+          settings: sandboxSettings,
+          taskId: task.id,
+          gitIdentity,
+          kind,
+          workspacePath: threadDirOf(task.id),
+          mirrorDir: join(config.mirrorsDir, task.owner),
+          homeDir: join(config.homesDir, task.id),
+          display,
+          env: { CLOUDAGENTS_TASK_ID: task.id },
+          command,
+        })
       })
 
     /** The desktop's terminal runs in the sandbox too: the agent can type into it. */

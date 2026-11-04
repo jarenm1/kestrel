@@ -345,8 +345,8 @@ export interface LaunchRequest {
   readonly settings: SandboxSettings
   /** Task the process belongs to; its systemd slice carries the resource limits. */
   readonly taskId: string
-  /** GitHub login of the thread owner; supplies Git author and committer identity on every launch. */
-  readonly owner: string
+  /** Resolved GitHub profile identity; dev-login sessions use a non-GitHub `.invalid` address. */
+  readonly gitIdentity: { readonly name: string; readonly email: string }
   readonly kind: LaunchKind
   /** The thread workspace, bound read-write; the whole of it stays reachable whatever `cwd` is. */
   readonly workspacePath: string
@@ -783,10 +783,10 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
       // Task homes persist agent-written git config. Never borrow that identity (or guess one from repo history).
-      GIT_AUTHOR_NAME: req.owner,
-      GIT_AUTHOR_EMAIL: `${req.owner}@users.noreply.github.com`,
-      GIT_COMMITTER_NAME: req.owner,
-      GIT_COMMITTER_EMAIL: `${req.owner}@users.noreply.github.com`,
+      GIT_AUTHOR_NAME: req.gitIdentity.name,
+      GIT_AUTHOR_EMAIL: req.gitIdentity.email,
+      GIT_COMMITTER_NAME: req.gitIdentity.name,
+      GIT_COMMITTER_EMAIL: req.gitIdentity.email,
       ...(settings.sslCertFile
         ? { SSL_CERT_FILE: settings.sslCertFile, NIX_SSL_CERT_FILE: settings.sslCertFile }
         : {}),

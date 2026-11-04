@@ -274,6 +274,8 @@ export interface GitHubShape {
   readonly getComment: (token: string, repo: RepoSlug, kind: CommentKind, commentId: number) => Effect.Effect<CommentDetails, GitHubError>
   /** Login of the account the token belongs to. */
   readonly viewerLogin: (token: string, repo: RepoSlug) => Effect.Effect<string, GitHubError>
+  /** Verified profile identity for commits, looked up by owner login rather than the connected token's account. */
+  readonly commitIdentity: (login: string, token?: string) => Effect.Effect<{ readonly name: string; readonly email: string }, GitHubError>
   readonly requestReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly removeReviewers: (token: string, repo: RepoSlug, number: number, request: ReviewerRequest) => Effect.Effect<void, GitHubError>
   readonly addLabels: (token: string, repo: RepoSlug, number: number, labels: readonly string[]) => Effect.Effect<void, GitHubError>
@@ -397,6 +399,7 @@ const CommentDetailsBody = Schema.Struct({
 })
 
 const ViewerBody = Schema.Struct({ login: Schema.String })
+const CommitOwnerBody = Schema.Struct({ login: Schema.String, id: Schema.Number.pipe(Schema.int(), Schema.positive()) })
 
 /** GraphQL answers HTTP 200 even when a mutation fails; the failure is in `errors`. */
 const GraphQLBody = Schema.Struct({
@@ -466,13 +469,13 @@ export const GitHubLive = Layer.effect(
     const apiBase = config.githubApiUrl
 
     /** One HTTP exchange with GitHub; the status is the caller's to judge. */
-    const send = (token: string, method: string, path: string, options: { readonly body?: unknown; readonly accept?: string } = {}) =>
+    const send = (token: string | undefined, method: string, path: string, options: { readonly body?: unknown; readonly accept?: string } = {}) =>
       Effect.tryPromise({
         try: async () => {
           const response = await fetch(`${apiBase}${path}`, {
             method,
             headers: {
-              authorization: `Bearer ${token}`,
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
               accept: options.accept ?? "application/vnd.github+json",
               "x-github-api-version": "2022-11-28",
               "user-agent": "kestrel-mcp",
@@ -520,6 +523,27 @@ export const GitHubLive = Layer.effect(
       )
 
     const repoPath = (repo: RepoSlug) => `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}`
+
+    // Reuse verified profiles across tool and desktop launches; never cache a failed lookup.
+    const commitOwners = new Map<string, { readonly name: string; readonly email: string }>()
+    const commitIdentity: GitHubShape["commitIdentity"] = (login, token) => Effect.gen(function* () {
+      const cached = commitOwners.get(login.toLowerCase())
+      if (cached) return cached
+      const path = `/users/${encodeURIComponent(login)}`
+      const { status, text } = yield* send(token, "GET", path)
+      if (status < 200 || status >= 300) return yield* Effect.fail(cliFailure(status, text, path))
+      const json = yield* Effect.try({
+        try: () => JSON.parse(text) as unknown,
+        catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
+      })
+      const profile = yield* decode(CommitOwnerBody, "commit owner")(json)
+      if (profile.login.toLowerCase() !== login.toLowerCase()) {
+        return yield* Effect.fail(new GitHubError({ message: "GitHub commit owner does not match the thread owner" }))
+      }
+      const identity = { name: profile.login, email: `${profile.id}+${profile.login}@users.noreply.github.com` }
+      commitOwners.set(login.toLowerCase(), identity)
+      return identity
+    })
 
     const toPullRequest = (pr: Schema.Schema.Type<typeof PullRequestBody>): PullRequest => ({
       number: pr.number,
@@ -794,6 +818,7 @@ export const GitHubLive = Layer.effect(
       )
 
     const service: GitHubShape = {
+      commitIdentity,
       findOpenPullRequest: (token, repo, head) =>
         call(
           token,

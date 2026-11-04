@@ -296,6 +296,31 @@ test("viewerLogin reads the login of the account the token belongs to", async ()
   }
 })
 
+test("commit identity rejects unverified profiles and does not cache failed lookups", async () => {
+  let profile: unknown = { login: "someone-else", id: 123 }
+  const gh = fakeGitHub(() => ({ json: profile }))
+  try {
+    await runAgainst(gh.url, Effect.gen(function* () {
+      const github = yield* GitHub
+      const mismatch = yield* Effect.either(github.commitIdentity("alice", "token"))
+      expect(mismatch._tag).toBe("Left")
+      profile = { login: "alice", id: -1 }
+      const invalid = yield* Effect.either(github.commitIdentity("alice", "token"))
+      expect(invalid._tag).toBe("Left")
+      profile = { login: "Alice", id: 156641090 }
+      expect(yield* github.commitIdentity("alice", "token")).toEqual({
+        name: "Alice", email: "156641090+Alice@users.noreply.github.com",
+      })
+      profile = { login: "other", id: 1 }
+      expect(yield* github.commitIdentity("ALICE", "token")).toEqual({
+        name: "Alice", email: "156641090+Alice@users.noreply.github.com",
+      })
+    }))
+  } finally {
+    gh.stop()
+  }
+})
+
 test("readReference reads an issue's body and conversation, sending the token only to GitHub", async () => {
   const gh = fakeGitHub(({ path }) => {
     if (path === "/repos/jarenm1/kestrel/issues/1") return { json: issueJson() }

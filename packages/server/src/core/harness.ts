@@ -25,6 +25,8 @@ import { CredentialBroker } from "../broker"
 import { boxControl } from "../control/client"
 import { Config, VERSION } from "../config"
 import { GH_SHIM_SCRIPT } from "../gh/shim"
+import { CredentialStore } from "../credentials"
+import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
@@ -203,6 +205,8 @@ export const AgentHarnessLive = Layer.effect(
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
     const cliAuth = yield* CliAuth
+    const credentials = yield* CredentialStore
+    const github = yield* GitHub
     const settings = sandboxSettingsOf(config)
     if (settings.systemd) {
       yield* initBox(settings.systemd)
@@ -701,10 +705,16 @@ export const AgentHarnessLive = Layer.effect(
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
             const workspacePath = join(config.threadsDir, task.id)
             const cwd = agentCwd(workspacePath, task)
+            const creds = yield* credentials.get(task.owner)
+            const gitIdentity = creds?.dev
+              ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
+              : yield* github.commitIdentity(task.owner, creds?.github).pipe(
+                  Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
+                )
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
-              owner: task.owner,
+              gitIdentity,
               kind: "run",
               workspacePath,
               cwd,
