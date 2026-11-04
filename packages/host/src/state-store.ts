@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { Schema } from "effect"
-import { HostError } from "./errors"
+import { HostError, errorMessage } from "./errors"
 import { writeFileAtomic } from "./fs-atomic"
 import { CommandOutcome, STRICT, VmRecord } from "./schema"
 
@@ -69,7 +69,7 @@ const decodeJsonFile = <A, I>(schema: Schema.Schema<A, I>, path: string): A => {
   try {
     json = JSON.parse(readFileSync(path, "utf8"))
   } catch (error) {
-    throw new HostError(`cannot read ${path}: ${(error as Error).message}`)
+    throw new HostError(`cannot read ${path}: ${errorMessage(error)}`)
   }
   const decoded = Schema.decodeUnknownEither(schema)(json, STRICT)
   if (decoded._tag === "Left") throw new HostError(`invalid ${path}: ${String(decoded.left)}`)

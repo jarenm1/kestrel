@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 import { Schema } from "effect"
-import { HostError } from "./errors"
+import { TEMPLATE_BOOT_MEMORY_BYTES } from "./ch-api"
+import { HostError, errorMessage } from "./errors"
 import { STRICT } from "./schema"
 
 const NonNeg = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
@@ -40,7 +41,7 @@ export const HostConfig = Schema.Struct({
   scope: Schema.Literal("systemd-system", "systemd-user", "none"),
   template: Schema.Struct({
     maxVcpus: Positive,
-    maxMemoryBytes: Positive,
+    maxMemoryBytes: Schema.Number.pipe(Schema.int(), Schema.greaterThan(TEMPLATE_BOOT_MEMORY_BYTES)),
   }),
   capacity: Schema.Struct({
     vcpus: Positive,
@@ -56,7 +57,7 @@ export const HostConfig = Schema.Struct({
   nixCacheUrl: Schema.NullOr(Schema.String),
   nixCachePublicKey: Schema.NullOr(Schema.String),
   dns: Schema.Array(Schema.String).pipe(Schema.minItems(1)),
-}, STRICT)
+})
 export type HostConfig = typeof HostConfig.Type
 
 /** Reads and validates the config file. Throws HostError with the first problem found. */
@@ -65,15 +66,15 @@ export const loadConfig = (path: string): HostConfig => {
   try {
     text = readFileSync(path, "utf8")
   } catch (error) {
-    throw new HostError(`cannot read config ${path}: ${(error as Error).message}`)
+    throw new HostError(`cannot read config ${path}: ${errorMessage(error)}`)
   }
   let json: unknown
   try {
     json = JSON.parse(text)
   } catch (error) {
-    throw new HostError(`config ${path} is not JSON: ${(error as Error).message}`)
+    throw new HostError(`config ${path} is not JSON: ${errorMessage(error)}`)
   }
-  const decoded = Schema.decodeUnknownEither(HostConfig)(json)
+  const decoded = Schema.decodeUnknownEither(HostConfig, STRICT)(json)
   if (decoded._tag === "Left") throw new HostError(`invalid config ${path}: ${String(decoded.left)}`)
   return decoded.right
 }
@@ -84,7 +85,7 @@ export const readHostSecret = (path: string): string => {
   try {
     text = readFileSync(path, "utf8")
   } catch (error) {
-    throw new HostError(`cannot read host secret ${path}: ${(error as Error).message}`)
+    throw new HostError(`cannot read host secret ${path}: ${errorMessage(error)}`)
   }
   const secret = text.trim()
   if (secret === "") throw new HostError(`host secret ${path} is empty`)

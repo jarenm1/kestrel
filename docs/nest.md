@@ -243,7 +243,7 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
 
 ## Storage
 
-- **Volumes**: sparse raw files on XFS (mirrored NVMe), `virtio-blk` with `num_queues` = max vCPUs, `direct=on`. The
+- **Volumes**: sparse raw files on XFS (mirrored NVMe), `virtio-blk` with `num_queues` = boot vCPUs (Cloud Hypervisor rejects more queues than boot vCPUs, and every VM restores with the template's boot count of 1), `direct=on`. The
   guest formats ext4 on first mount (`noatime,lazytime,discard`).
 - **Backups** (`kestrel-volume backup --state-dir S`): reflink `volume.raw` to `S/<boxId>.snap` (FICLONE only; there is
   no copy fallback, so the volume and `S` must be on a reflink filesystem), compare its extents with the baseline

@@ -18,9 +18,9 @@ export type MemoryRestoreMode = "Copy" | "OnDemand"
 export class ChClient {
   constructor(readonly socket: string) {}
 
-  private async call(method: string, body?: unknown): Promise<unknown> {
+  private async call(verb: "GET" | "PUT", method: string, body?: unknown): Promise<unknown> {
     const init: RequestInit & { unix: string } = {
-      method: body === undefined ? "GET" : "PUT",
+      method: verb,
       unix: this.socket,
       headers: body === undefined ? {} : { "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -32,68 +32,68 @@ export class ChClient {
   }
 
   ping(): Promise<unknown> {
-    return this.call("vmm.ping")
+    return this.call("GET", "vmm.ping")
   }
 
   /** Stops the VMM process itself. */
   shutdownVmm(): Promise<unknown> {
-    return this.call("vmm.shutdown")
+    return this.call("PUT", "vmm.shutdown")
   }
 
   create(config: VmConfig): Promise<unknown> {
-    return this.call("vm.create", config)
+    return this.call("PUT", "vm.create", config)
   }
 
   boot(): Promise<unknown> {
-    return this.call("vm.boot")
+    return this.call("PUT", "vm.boot")
   }
 
   pause(): Promise<unknown> {
-    return this.call("vm.pause")
+    return this.call("PUT", "vm.pause")
   }
 
   resume(): Promise<unknown> {
-    return this.call("vm.resume")
+    return this.call("PUT", "vm.resume")
   }
 
   /** Powers the VM off (not the VMM). */
   shutdownVm(): Promise<unknown> {
-    return this.call("vm.shutdown")
+    return this.call("PUT", "vm.shutdown")
   }
 
   info(): Promise<VmInfo> {
-    return this.call("vm.info") as Promise<VmInfo>
+    return this.call("GET", "vm.info") as Promise<VmInfo>
   }
 
   /** Changes the vCPU count and/or the total memory in bytes; both are optional. */
   resize(desired: { vcpus?: number; memoryBytes?: number }): Promise<unknown> {
-    return this.call("vm.resize", {
+    return this.call("PUT", "vm.resize", {
       desired_vcpus: desired.vcpus,
       desired_ram: desired.memoryBytes,
     })
   }
 
   addDisk(disk: DiskConfig): Promise<unknown> {
-    return this.call("vm.add-disk", disk)
+    return this.call("PUT", "vm.add-disk", disk)
   }
 
   /** Hot-plugs a host PCI device (e.g. `/sys/bus/pci/devices/<addr>`, bound to vfio-pci). */
   addDevice(path: string, id: string): Promise<unknown> {
-    return this.call("vm.add-device", { path, id })
+    return this.call("PUT", "vm.add-device", { path, id })
   }
 
   removeDevice(id: string): Promise<unknown> {
-    return this.call("vm.remove-device", { id })
+    return this.call("PUT", "vm.remove-device", { id })
   }
 
   /** Writes a memory image, device state and config to `dir` (created by Cloud Hypervisor if missing). */
   snapshot(dir: string): Promise<unknown> {
-    return this.call("vm.snapshot", { destination_url: `file://${dir}` })
+    return this.call("PUT", "vm.snapshot", { destination_url: `file://${dir}` })
   }
 
   /** Restores a snapshot directory into this (freshly started, empty) VMM; the VM stays paused. */
   restore(dir: string, mode: MemoryRestoreMode): Promise<unknown> {
-    return this.call("vm.restore", { source_url: `file://${dir}`, memory_restore_mode: mode })
+    return this.call("PUT", "vm.restore", { source_url: `file://${dir}`, memory_restore_mode: mode })
   }
 }
 
@@ -109,6 +109,7 @@ export interface DiskConfig {
   readonly readonly: boolean
   readonly direct: boolean
   readonly num_queues: number
+  readonly image_type: "Raw"
 }
 
 export interface VmConfig {

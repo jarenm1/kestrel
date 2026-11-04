@@ -87,7 +87,7 @@ export class GuestLink {
       try {
         lines = framer.push(chunk)
       } catch (error) {
-        fail(error as Error)
+        fail(error instanceof Error ? error : new Error(String(error)))
         return
       }
       if (link === null) {

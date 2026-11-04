@@ -2,7 +2,7 @@ import type { Subprocess } from "bun"
 import { closeSync, openSync, unlinkSync } from "node:fs"
 import type { ProcessRef } from "./schema"
 import { ChClient } from "./ch-api"
-import { HostError } from "./errors"
+import { HostError, errorMessage } from "./errors"
 import { isProcessAlive, processIsVmm, readProcStat, sleep, type ProcIdentity } from "./proc"
 
 /** Cloud Hypervisor runs under this slice when `scope` is systemd-system or systemd-user. */
@@ -63,7 +63,7 @@ export const launchVmm = (opts: {
   try {
     child = Bun.spawn(argv, { stdin: "ignore", stdout: log, stderr: log })
   } catch (error) {
-    throw new HostError(`cannot start ${argv[0]}: ${(error as Error).message}`)
+    throw new HostError(`cannot start ${argv[0]}: ${errorMessage(error)}`)
   } finally {
     closeSync(log)
   }

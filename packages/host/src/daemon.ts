@@ -1,0 +1,70 @@
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
+import { loadConfig, readHostSecret } from "./config"
+import { ControlLink } from "./control-link"
+import { acquireVmLock } from "./lock"
+import { startLocalApi } from "./local-api"
+import { shipMeterRecords } from "./outbox"
+import { stateLayout } from "./state-store"
+import { readGuestImage } from "./template"
+import { VmManager } from "./vm-manager"
+
+/** How often queued meter records are posted to the control plane. */
+const METER_SHIP_INTERVAL_MS = 60_000
+
+const log = (message: string): void => {
+  process.stderr.write(`${new Date().toISOString()} kestrel-host: ${message}\n`)
+}
+
+/**
+ * Runs the host agent until SIGTERM or SIGINT. Startup re-adopts the VMs left by a previous run; shutdown leaves the
+ * VMs running, so a restart of the agent does not stop anyone's box.
+ */
+export const runDaemon = async (configPath: string): Promise<void> => {
+  const config = loadConfig(configPath)
+  const secret = readHostSecret(config.hostSecretFile)
+  const layout = stateLayout(config.stateDir)
+  mkdirSync(layout.root, { recursive: true, mode: 0o700 })
+  const lock = acquireVmLock(layout.root)
+  const image = readGuestImage(config.guestImageDir)
+
+  // The manager reports through the link and the link drives the manager, so the link is created as the manager's
+  // event sink is wired; events raised during start() are dropped and the hello that follows carries them.
+  let control: ControlLink | null = null
+  const manager = new VmManager(config, layout, {
+    vm: (report) => control?.sendVm(report),
+    wakeRequest: (boxId) => control?.sendWakeRequest(boxId),
+  })
+  await manager.start()
+  const link = new ControlLink({
+    controlUrl: config.controlUrl,
+    hostId: config.hostId,
+    secret,
+    slug: config.slug,
+    agentVersion: config.agentVersion,
+    imageId: image.imageId,
+    manager,
+    log,
+  })
+  control = link
+  const api = startLocalApi({ socketPath: join(config.runDir, "api.sock"), manager })
+  link.start()
+
+  const shipTimer = setInterval(() => {
+    shipMeterRecords({ outbox: manager.outbox, meterUrl: config.meterUrl, hostId: config.hostId, secret }).catch(
+      (error: unknown) => log(`meter shipping failed: ${error instanceof Error ? error.message : String(error)}`),
+    )
+  }, METER_SHIP_INTERVAL_MS)
+
+  const shutdown = (): void => {
+    clearInterval(shipTimer)
+    link.stop()
+    api.stop()
+    manager.stop()
+    lock.release()
+    process.exit(0)
+  }
+  process.once("SIGTERM", shutdown)
+  process.once("SIGINT", shutdown)
+  log(`host ${config.hostId} running; ${manager.reports().length} VMs adopted`)
+}

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs"
 import { join } from "node:path"
 import {
   GUEST_REPLY_TIMEOUT_MS,
@@ -18,7 +18,7 @@ import {
 import { ChClient, TEMPLATE_BOOT_MEMORY_BYTES, TEMPLATE_BOOT_VCPUS, type MemoryRestoreMode } from "./ch-api"
 import { launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
 import type { HostConfig } from "./config"
-import { HostError } from "./errors"
+import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath } from "./fs-atomic"
 import { type NetCommand, allocateSlot, guestNetwork, networkForSlot, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
@@ -98,13 +98,19 @@ const newRuntime = (): Runtime => ({
   busy: false,
 })
 
-const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
-
 const gpuDeviceId = (pciAddress: string): string => `gpu-${pciAddress}`
 const gpuPath = (pciAddress: string): string => `/sys/bus/pci/devices/${pciAddress}`
 const newCloneId = (): string => randomBytes(16).toString("hex")
 
-const restoreMode = (): MemoryRestoreMode => (existsSync("/dev/userfaultfd") ? "OnDemand" : "Copy")
+const restoreMode = (): MemoryRestoreMode => {
+  try {
+    accessSync("/dev/userfaultfd", constants.R_OK | constants.W_OK)
+    return "OnDemand"
+  } catch {
+    // Present but not usable by this user (the device is root-only unless an ACL grants access): restore in Copy mode.
+    return "Copy"
+  }
+}
 
 const createSparse = (path: string, bytes: number): void => {
   rmSync(path, { force: true })
@@ -311,7 +317,7 @@ export class VmManager {
   /** Where ingress sends a box's requests: its upstream while running, else null. */
   route(boxId: string): { state: NestVmState; upstream: string | null } {
     const vm = this.records.get(boxId)
-    if (vm === undefined || vm.state === "deleted") throw new HostError(`unknown box ${boxId}`)
+    if (vm === undefined || vm.state === "deleted") throw new UnknownBoxError(`unknown box ${boxId}`)
     return { state: vm.state, upstream: vm.state === "running" ? this.upstreamOf(vm) : null }
   }
 
@@ -321,7 +327,7 @@ export class VmManager {
    */
   async wake(boxId: string): Promise<string> {
     const vm = this.records.get(boxId)
-    if (vm === undefined || vm.state === "deleted") throw new HostError(`unknown box ${boxId}`)
+    if (vm === undefined || vm.state === "deleted") throw new UnknownBoxError(`unknown box ${boxId}`)
     if (vm.state === "running") return this.upstreamOf(vm)
     if (vm.state === "suspended" && Date.now() < this.leaseUntil) {
       void this.enqueue(boxId, () => this.resumeSuspendedBox(boxId))
@@ -331,9 +337,9 @@ export class VmManager {
     const deadline = Date.now() + WAKE_TIMEOUT_MS
     for (;;) {
       const current = this.records.get(boxId)
-      if (current === undefined || current.state === "deleted") throw new HostError(`box ${boxId} was deleted`)
+      if (current === undefined || current.state === "deleted") throw new UnknownBoxError(`box ${boxId} was deleted`)
       if (current.state === "running") return this.upstreamOf(current)
-      if (Date.now() >= deadline) throw new HostError(`box ${boxId} did not wake within ${WAKE_TIMEOUT_MS} ms`)
+      if (Date.now() >= deadline) throw new WakeTimeoutError(`box ${boxId} did not wake within ${WAKE_TIMEOUT_MS} ms`)
       await sleep(WAKE_POLL_MS)
     }
   }
@@ -775,9 +781,10 @@ export class VmManager {
       serial: NEST_VOLUME_SERIAL,
       readonly: false,
       direct: true,
-      num_queues: vm.limits.maxVcpus,
+      num_queues: TEMPLATE_BOOT_VCPUS,
+      image_type: "Raw",
     })
-    await client.addDisk({ path: p.swap, id: "swap", serial: NEST_SWAP_SERIAL, readonly: false, direct: false, num_queues: 1 })
+    await client.addDisk({ path: p.swap, id: "swap", serial: NEST_SWAP_SERIAL, readonly: false, direct: false, num_queues: 1, image_type: "Raw" })
     const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
     this.attachLink(rt, link)
     await this.ask(

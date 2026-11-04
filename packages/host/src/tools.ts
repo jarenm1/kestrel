@@ -1,20 +1,25 @@
 import type { Subprocess } from "bun"
 import { accessSync, constants, statSync } from "node:fs"
 import { delimiter, join } from "node:path"
-import { HostError } from "./errors"
+import { HostError, errorMessage } from "./errors"
 
-/** Throws HostError unless `name` is an executable on PATH. */
+/** Throws HostError unless `name` is an executable: the file itself when `name` is a path, else an entry on PATH. */
 export const requireTool = (name: string): void => {
-  const dirs = (process.env.PATH ?? "").split(delimiter).filter((dir) => dir !== "")
-  for (const dir of dirs) {
+  const candidates = name.includes("/")
+    ? [name]
+    : (process.env.PATH ?? "")
+        .split(delimiter)
+        .filter((dir) => dir !== "")
+        .map((dir) => join(dir, name))
+  for (const candidate of candidates) {
     try {
-      accessSync(join(dir, name), constants.X_OK)
-      if (statSync(join(dir, name)).isFile()) return
+      accessSync(candidate, constants.X_OK)
+      if (statSync(candidate).isFile()) return
     } catch {
-      // not in this PATH entry; keep looking
+      // not executable at this candidate; keep looking
     }
   }
-  throw new HostError(`required tool not found on PATH: ${name}`)
+  throw new HostError(`required tool not found: ${name}`)
 }
 
 export interface ToolResult {
@@ -30,7 +35,7 @@ export const runTool = async (name: string, args: readonly string[]): Promise<To
   try {
     child = Bun.spawn([name, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   } catch (error) {
-    throw new HostError(`${name} failed to run: ${(error as Error).message}`)
+    throw new HostError(`${name} failed to run: ${errorMessage(error)}`)
   }
   const [stdout, stderr, status] = await Promise.all([
     new Response(child.stdout).text(),

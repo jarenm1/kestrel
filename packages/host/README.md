@@ -1,104 +1,122 @@
 # @cloudagents/host (`kestrel-host`)
 
-Local-only, non-production CLI that runs on one Linux host and manages per-user CPU VMs through
-`scripts/nest-prototype/run.sh`. Run it with `bun packages/host/src/cli.ts <command>` or the `kestrel-host` bin.
-
-## State directory
-
-`$KESTREL_HOST_HOME`, else `${XDG_STATE_HOME:-$HOME/.local/state}/kestrel-host`.
-
-```
-host.json                  {schemaVersion:1, hostId}  created once by `init` (other commands auto-init)
-events.jsonl               append-only lifecycle outbox, one fsynced JSON line per record
-vms/<vmId>/vm.json         VM record (schemaVersion 1); also the tombstone after destroy
-vms/<vmId>/os.raw          copy of the base OS image (reflink when supported)
-vms/<vmId>/data.raw        ext4 data volume, label kestrel-data, uuid recorded in vm.json
-vms/<vmId>/console.sock    serial console (QEMU chardev, server)
-vms/<vmId>/console.log     serial console log
-vms/<vmId>/qmp.sock        QMP control socket (wait=off)
-vms/<vmId>/launcher.log    stdout/stderr of the detached launcher
-vms/<vmId>/lock            per-VM lock: {pid, startTime, token}
-```
-
-Every `vm.json` write is atomic (temp file, fsync, rename, directory fsync). `vmId` is a fresh UUID v4 for each
-incarnation, so a recreated or moved VM gets a new id.
-
-## State machine
-
-```
-stopped    -> starting | destroying
-starting   -> running | stopped | stopping
-running    -> stopping | stopped
-stopping   -> stopped
-destroying -> deleted
-deleted    -> (terminal)
-```
-
-- `sequence` counts state changes only. Field-only updates (`process`, `lastError`) do not change it.
-- A stop that times out leaves the VM in `stopping`; running `vm stop` again retries it.
-- Known limitation: `stop` sent about 1 s after `start` (guest still booting) did not power the guest off; it timed out at 120 s and stayed `stopping`. A retry after the guest reached login stopped cleanly. Wait for login before stopping.
-- `starting -> stopping` lets an operator stop a VM whose launcher is alive but not yet QMP-ready.
-- Start verifies the data volume identity with `blkid -p -o export` and refuses on mismatch. It never formats.
-
-## Lifecycle records (`LifecycleRecord` in `@cloudagents/protocol`, schema v1)
-
-`{schemaVersion:1, eventId, hostId, vmId, userId, observedAt (UTC ISO, ms), kind:"lifecycle", state}`,
-with `state` one of `running | parked | deleted`. Records are validated strictly (no unknown keys) before writing.
-
-| Event | Record |
-| --- | --- |
-| start succeeds (QMP answers) | `running` |
-| clean stop (QMP powerdown, QEMU exited) | `parked` |
-| `--force` stop (QMP quit) | `parked` (vm.json `lastError` notes the forced stop) |
-| destroy completes | `deleted` |
-| reconcile finds a running/stopping VM whose process is gone | `parked` |
-| stop or reconcile of a VM that never reached running (e.g. stopped while `starting`) | no record |
-| create, failed start, reconcile of a dead `starting` VM | no record |
-
-No usage records are collected by this host.
+The host agent for Nest: one daemon per Linux host that runs per-user VMs on Cloud Hypervisor. It owns VM lifecycle
+(boot from the shared template, idle suspend, park, wake, destroy), live vCPU and memory resizing, on-demand GPU
+hot-plug, lazy volumes, wake-on-request ingress, and metering. The design and every interface are in `docs/nest.md`;
+wire formats are in `packages/protocol/src/nest.ts` (host to control plane) and `packages/protocol/src/guest.ts`
+(host to guest agent, box to guest agent).
 
 ## Commands
 
 ```
-kestrel-host init
-kestrel-host vm create --user <userId> --os-image <raw path> [--cpus N=2 (1-8)] [--memory-mb N=2048 (max 4096)] [--volume-gb N=20]
-kestrel-host vm start <vmId>
-kestrel-host vm stop <vmId> [--timeout SECONDS=120] [--force]
-kestrel-host vm destroy <vmId> --yes
-kestrel-host vm list
-kestrel-host vm show <vmId>
-kestrel-host reconcile
+kestrel-host daemon [--config /etc/kestrel-host/config.json]
+kestrel-host vm list [--socket /run/kestrel-host/api.sock]
+kestrel-host vm show <boxId>      [--socket ...]
+kestrel-host vm suspend <boxId>   [--socket ...]
+kestrel-host vm park <boxId>      [--socket ...]
+kestrel-host vm destroy <boxId>   [--socket ...]
 ```
 
-- `create` copies the OS image (refuses to overwrite), creates `data.raw` (refuses if it exists), and formats it
-  with `mkfs.ext4 -L kestrel-data -U <fresh uuid>`. It emits no record.
-- `start` spawns the launcher detached with `[os.raw, data.raw]` and the `KESTREL_VM_*` environment. The host never
-  holds the image locks. The VM is `running` once QMP answers within 5 s. If the launcher dies first, the VM goes back
-  to `stopped` with `launcher.log` tail in `lastError`.
-- `stop` sends QMP `system_powerdown` and waits up to `--timeout`. It never kills. On timeout the VM stays `stopping`
-  with `lastError` set and the command exits 1. `--force` sends QMP `quit` after the timeout, warns on stderr that
-  disk contents may be inconsistent, and records that in `lastError`.
-- `destroy` requires `--yes` and a `stopped` VM (or resumes an interrupted destroy). It refuses if the recorded pid
-  is still alive. It removes `os.raw`, `data.raw`, sockets, and logs, but keeps `vm.json` (state `deleted`) and the
-  lock file as the tombstone.
-- `list` and `show` print JSON.
-- `reconcile` runs automatically before every command that touches VMs. A `running`/`stopping` VM whose recorded pid
-  is gone, or whose `/proc/<pid>/cmdline` no longer names `kestrel-<vmId>`, becomes `stopped` with lastError
-  `process gone at reconcile` and a `parked` record. Stale locks are cleared. A live `starting` VM that is not yet
-  QMP-ready stays `starting`.
+Exit codes: 0 success, 1 operational failure, 2 usage error. `vm` commands talk to a running daemon through its local
+API; they do not touch VMs directly.
 
-Exit codes: 0 success, 1 operational error (message on stderr), 2 usage error.
+## Configuration
 
-## Environment
+`/etc/kestrel-host/config.json`, validated strictly (unknown keys are refused). Paths are absolute. Durations are
+milliseconds. The host secret is read from `hostSecretFile` at start and is never part of this file.
 
-| Variable | Meaning |
+| Field | Meaning |
 | --- | --- |
-| `KESTREL_HOST_HOME` | state directory |
-| `XDG_STATE_HOME` | used when `KESTREL_HOST_HOME` is unset |
-| `KESTREL_HOST_LAUNCHER` | launcher script (default: repo `scripts/nest-prototype/run.sh`) |
-| `KESTREL_VM_ACCEL` | `auto` (default), `kvm`, or `tcg`, passed to the launcher |
+| `hostId`, `slug`, `agentVersion` | Identity reported in `hello` |
+| `controlUrl`, `meterUrl`, `hostSecretFile` | Control plane WebSocket base, meter origin, bearer secret |
+| `stateDir`, `runDir`, `nestDomain` | State (`stateDir`), local API socket dir (`runDir`), ingress domain |
+| `cloudHypervisor`, `volumeTool` | Binaries for the VMM and `kestrel-volume` |
+| `guestImageDir` | Directory with `manifest.json` (`imageId`, `kernel`, `initrd`, `store`, `cmdline`) |
+| `volumeStore`, `volumeKeyFile` | `kestrel-volume` store URL; key file (or `null` when unencrypted) |
+| `scope` | `systemd-system` or `systemd-user` (VMM in a transient scope under `kestrel-vms.slice`), or `none` (smoke tests) |
+| `template.maxVcpus`, `template.maxMemoryBytes` | Shape of the shared template VM |
+| `capacity.vcpus`, `capacity.memoryBytes` | Capacity advertised to the control plane |
+| `gpus` | `[{pciAddress, model, vramBytes}]` |
+| `egressMbit` | Per-VM egress shaping |
+| `idleSuspendAfterMs`, `parkAfterMs`, `backupIntervalMs`, `meterIntervalMs` | Lifecycle and metering intervals |
+| `depcacheUrl`, `nixCacheUrl`, `nixCachePublicKey` | Dependency cache and Nix binary cache (or `null`) |
+| `dns` | Resolvers handed to guests (at least one) |
+
+## State directory
+
+```
+commands.json            command outcomes for dedupe (newest 512), with a reported flag
+templates/               the shared template VM (memory image, config, metadata)
+vms/<boxId>/vm.json      VM record (schema-checked); written atomically
+vms/<boxId>/volume.raw   lazy data volume served by kestrel-volume
+vms/<boxId>/swap.raw     4 GiB sparse swap
+vms/<boxId>/restore/     snapshot files for this VM's restore (Copy mode unless /dev/userfaultfd is usable by this user)
+vms/<boxId>/api.sock     Cloud Hypervisor API socket
+vms/<boxId>/vsock.sock   hybrid vsock to the guest agent (port 1024)
+vms/<boxId>/console.log  serial console
+vms/<boxId>/snapshot.<n> snapshot generations
+meter/                   usage records waiting to ship (outbox, capped at 50,000)
+lock                     single-instance lock for the daemon (pid, start time)
+```
+
+Every JSON write is atomic (temp file, fsync, rename, directory fsync). A daemon restart adopts running VMs from their
+records; it does not stop them.
+
+## Control link
+
+The daemon keeps one WebSocket to `ControlPaths.nestHostConnect` with `Authorization: Bearer <secret>` and the
+`x-kestrel-nest-host` header.
+
+- Every connection starts with `hello` (capacity, VM reports, unreported command results). Capacity is re-sent every
+  60 s. VM changes are sent as they happen; while disconnected they are not queued, because the next `hello` carries
+  every VM.
+- Commands run through the manager and each is answered with `result`. A result is marked reported only after the
+  socket accepted it, so a result finished while disconnected goes out on the next `hello`. The protocol has no ack,
+  so a result written just before a socket drop can be lost; the control plane must tolerate a missing result.
+- Reconnects use jittered backoff from 1 s to 60 s. After a `refused` frame the link waits 10 minutes.
+- Frames over `MAX_NEST_FRAME_BYTES` or that fail to decode close the socket.
+
+## Local API
+
+HTTP over the Unix socket `<runDir>/api.sock` (directory mode 0750, socket mode 0660). Unknown boxes return 404.
+
+| Route | Result |
+| --- | --- |
+| `GET /v1/vms` | `NestVmReport[]` |
+| `GET /v1/boxes/:boxId` | VM report (404 if not on this host) |
+| `GET /v1/boxes/:boxId/route` | `{state, upstream}` for ingress |
+| `POST /v1/boxes/:boxId/wake` | `{upstream}`; 503 `{error}` when the box does not reach running in time |
+| `POST /v1/boxes/:boxId/suspend` / `park` / `destroy` | `{ok, error, vm}`; 409 when refused |
+| `POST /v1/ingress/activity` | body `{boxes:[{boxId, openConnections, lastRequestAt}]}`; 204 |
+
+## Metering
+
+Usage is measured per VM (CPU from the cumulative delta, memory and disk as trapezoids over time, GPU only while
+running) and stored in `meter/`. Every 60 s the daemon ships pending batches (at most 500 per request) to
+`ControlPaths.meterRecords` with `x-kestrel-meter-host`. Records leave the outbox only after the control plane accepts
+them.
+
+## Layout
+
+- `src/cli.ts`: argument parsing, `daemon` and `vm` commands. `src/errors.ts`: the error classes behind exit codes 1 and 2, and `errorMessage`.
+- `src/config.ts`: strict config and host secret loading. `src/tools.ts`: executable check on PATH.
+- `src/daemon.ts`: wires the manager, control link, local API, meter shipping and shutdown.
+- `src/vm-manager.ts`: VM lifecycle, command execution, policy ticks, meter ticks.
+- `src/recovery.ts`: what survives a restart, decided from the record and live processes. Pure: the caller observes the facts and carries out the plan.
+- `src/control-link.ts`, `src/local-api.ts`: the two network surfaces.
+- `src/ch-api.ts`, `src/ch-process.ts`: Cloud Hypervisor API client and process launch (scope or direct).
+- `src/vsock.ts`: guest agent link (`CONNECT`/`OK` handshake, newline-delimited JSON, per-line cap).
+- `src/template.ts`, `src/restore.ts`: the shared template, and restore with a rewritten config.
+- `src/network.ts`: slot allocation, tap and nftables commands, guest addressing.
+- `src/policy.ts`: memory and vCPU targets, idle detection, suspend victim choice, disk pressure.
+- `src/volume.ts`: `kestrel-volume` service. `src/meter.ts`, `src/outbox.ts`: usage measurement and shipping.
+- `src/state-store.ts`, `src/fs-atomic.ts`, `src/lock.ts`: durable state, atomic writes, and per-VM locks.
+- `src/proc.ts`: process identity (pid plus kernel start time). `src/schema.ts`: shared Effect schemas.
 
 ## Tests
 
-`bun test packages/host`. The create, start, and stop tests need `mkfs.ext4` on PATH and are skipped without it.
-The start and stop tests use a fake launcher and a fake QMP server (`src/test-fake-qemu.ts`), not QEMU.
+`bun test` in this package runs unit tests for the pure and file-level parts: policy, network allocation, restore
+config rewriting, meter usage math, the vsock line framer, command outcomes and the state store, the lock, config
+validation, and tool lookup. Behavior
+that needs a real VMM, tap devices or the guest agent is covered by the smoke runs described in the PR, not by these
+tests.

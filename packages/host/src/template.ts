@@ -4,7 +4,7 @@ import { join, resolve } from "node:path"
 import { Schema } from "effect"
 import { ChClient, templateVmConfig } from "./ch-api"
 import type { HostConfig } from "./config"
-import { HostError } from "./errors"
+import { HostError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath } from "./fs-atomic"
 import { launchVmm, stopVmm, waitForApi, type ScopeMode } from "./ch-process"
 import { GUEST_MAC } from "./network"
@@ -44,7 +44,7 @@ export const readGuestImage = (dir: string): GuestImage => {
   try {
     json = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"))
   } catch (error) {
-    throw new HostError(`cannot read guest image manifest in ${dir}: ${(error as Error).message}`)
+    throw new HostError(`cannot read guest image manifest in ${dir}: ${errorMessage(error)}`)
   }
   const decoded = Schema.decodeUnknownEither(GuestManifest)(json, STRICT)
   if (decoded._tag === "Left") throw new HostError(`invalid guest image manifest in ${dir}: ${String(decoded.left)}`)
