@@ -67,6 +67,9 @@ under Accounts and subscriptions or Models. This settings placement does not cha
 box-local credential storage. The box passes the key to
 `opencode auth import --standalone` over stdin, not argv or Hub storage. Replacing the named credential preserves
 sessions; Disconnect removes the Go login directory. Its quota panel reports five-hour, weekly and monthly usage.
+If the selected box is unavailable or has not reported Go auth, its API-key row stays visible with the error and
+**Check again**. Missing auth does not imply the saved key was removed; the unavailable row is not offered again
+in **Add API key**.
 
 Google signs in through Settings › Connections: the box runs `agy acp --login --gemini-dir <dir>`, and the user sends
 back the code shown by Google (or that page's URL). Antigravity 1.5 is required for terminal sign-in and `session/resume`.

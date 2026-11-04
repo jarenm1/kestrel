@@ -97,8 +97,11 @@ export function Connections() {
 function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   const [selected, setSelected] = useState<string[]>([])
   const providers = connections.filter(isApiKeyConnection)
-  const visible = providers.filter((connection) => connection.connected || selected.includes(connection.provider))
-  const remaining = providers.filter((connection) => !connection.connected && !selected.includes(connection.provider))
+  // Missing box auth is unknown state, not proof that a saved CLI key was removed.
+  const visible = providers.filter((connection) =>
+    connection.connected || selected.includes(connection.provider) || (connection.kind === "cli" && !connection.available),
+  )
+  const remaining = providers.filter((connection) => !visible.includes(connection))
 
   function remove(provider: string) {
     setSelected((current) => current.filter((id) => id !== provider))
@@ -350,7 +353,6 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
           <Button variant="soft" onClick={onSuccess}>Check again</Button>
-          {!connection.connected && onRemove && <Button variant="soft" onClick={onRemove}>Remove</Button>}
           {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
         </div>
       ) : (

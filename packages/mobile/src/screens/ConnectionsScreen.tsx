@@ -93,18 +93,17 @@ function FreeOpenCodeRow({ connection }: { connection: Connection }) {
   );
 }
 
-/** Provider keys and key-based CLI logins. Connected rows and rows the user just added are shown. */
+/** Provider keys and key-based CLI logins, including unavailable logins whose saved-key state is unknown. */
 function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   const { api } = useApiClient();
   const [selected, setSelected] = useState<readonly string[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const providers = connections.filter(isApiKeyConnection);
   const visible = providers.filter(
-    (connection) => connection.connected || selected.includes(connection.provider)
+    (connection) => connection.connected || selected.includes(connection.provider) ||
+      (connection.kind === "cli" && !connection.available)
   );
-  const remaining = providers.filter(
-    (connection) => !connection.connected && !selected.includes(connection.provider)
-  );
+  const remaining = providers.filter((connection) => !visible.includes(connection));
 
   function add(provider: string) {
     setSelected((current) => (current.includes(provider) ? current : [...current, provider]));
@@ -212,11 +211,6 @@ function ApiKeyRow({ connection, onRemove }: ApiKeyRowProps) {
           >
             Check again
           </Button>
-          {!connection.connected && onRemove ? (
-            <Button variant="soft" disabled={busy} onPress={onRemove}>
-              Remove
-            </Button>
-          ) : null}
         </View>
         {connection.connected && modelProvider ? <ModelPicker provider={modelProvider} /> : null}
       </ConnectionRowFrame>
