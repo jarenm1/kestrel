@@ -170,7 +170,9 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     // Local stacks usually have no GitHub OAuth app. With DEV_SESSION_LOGIN set, the normal sign-in button signs in as
     // the dev user instead of answering NotConfigured.
     if (oauthCredentials(env, provider) === null && env.DEV_SESSION_LOGIN) {
-      return redirect(`/auth/dev-login?return=${encodeURIComponent(returnTo)}`)
+      const state = url.searchParams.get("state")
+      const q = state === null ? "" : `&state=${encodeURIComponent(state)}`
+      return redirect(`/auth/dev-login?return=${encodeURIComponent(returnTo)}${q}`)
     }
     return beginOAuth(env, url, "login", provider, returnTo)
   }
@@ -213,7 +215,10 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     await stub.upsertUser({ login, name: login, avatarUrl: "" })
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, login, Date.now() + SESSION_TTL_MS, true)
-    return redirect(safeReturnPath(url.searchParams.get("return"), "/"), {
+    const state = url.searchParams.get("state")
+    const returnTo = safeReturnPath(url.searchParams.get("return"), "/")
+    const withState = state === null ? returnTo : returnTo.includes("?") ? `${returnTo}&state=${encodeURIComponent(state)}` : `${returnTo}?state=${encodeURIComponent(state)}`
+    return redirect(withState, {
       "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000),
     })
   }

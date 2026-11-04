@@ -115,11 +115,8 @@ describe("desktop auth helpers", () => {
     expect(safeLocalPath(null)).toBe("/")
   })
 
-  test("falls back to the mobile callback only when the desktop route is missing", async () => {
+  test("requires the desktop callback", async () => {
     expect(await callbackPath("https://app.example", async () => new Response(null, { status: 404 }))).toBe(
-      "/auth/mobile-callback",
-    )
-    expect(await callbackPath("https://app.example", async () => new Response(null, { status: 401 }))).toBe(
       "/auth/desktop-callback",
     )
     expect(
@@ -192,9 +189,10 @@ describe("desktop proxy", () => {
       headers: { cookie: `kestrel_desktop=${token}` },
     })
     expect(response.status).toBe(302)
-    expect(response.headers.get("location")).toBe(
-      `${controlUrl}/auth/github/login?return=%2Fauth%2Fdesktop-callback`,
-    )
+    const location = new URL(response.headers.get("location") ?? "http://invalid")
+    expect(location.pathname).toBe("/auth/github/login")
+    expect(location.searchParams.get("return")).toBe("/auth/desktop-callback")
+    expect(location.searchParams.get("state") ?? "").not.toBe("")
     expect(desktop.takePendingReturn()).toBe("/c/9")
   })
 
@@ -205,8 +203,9 @@ describe("desktop proxy", () => {
       redirect: "manual",
       headers: { cookie: `kestrel_desktop=${token}` },
     })
-    expect(response.headers.get("location")).toBe(
-      `${controlUrl}/auth/github/login?return=%2Fauth%2Fmobile-callback`,
-    )
+    const location = new URL(response.headers.get("location") ?? "http://invalid")
+    expect(location.pathname).toBe("/auth/github/login")
+    expect(location.searchParams.get("return")).toBe("/auth/mobile-callback")
+    expect(location.searchParams.get("state") ?? "").not.toBe("")
   })
 })

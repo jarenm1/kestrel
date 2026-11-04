@@ -31,16 +31,7 @@ export const loginUrl = (controlUrl: string, returnPath: CallbackPath = "/auth/d
  */
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 
-export const callbackPath = async (controlUrl: string, fetchFn: FetchLike = fetch): Promise<CallbackPath> => {
-  try {
-    const response = await fetchFn(`${controlUrl.replace(/\/+$/, "")}/auth/desktop-callback`, {
-      redirect: "manual",
-    })
-    return response.status === 404 ? "/auth/mobile-callback" : "/auth/desktop-callback"
-  } catch {
-    return "/auth/desktop-callback"
-  }
-}
+export const callbackPath = async (_controlUrl: string, _fetchFn: FetchLike = fetch): Promise<CallbackPath> => "/auth/desktop-callback"
 
 /** A same-origin path from `?return=`, never an absolute or protocol-relative URL. */
 export const safeLocalPath = (value: string | null): string =>
