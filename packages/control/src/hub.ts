@@ -640,11 +640,15 @@ export class Hub extends DurableObject<Env> {
     return { ok: true, value: box }
   }
 
-  deleteBox(sessionId: string, id: string): BoxOutcome<null> {
+  async deleteBox(sessionId: string, id: string): Promise<BoxOutcome<null>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     if (!this.ownedBox(session.login, id)) return NO_SUCH_BOX
-    if (this.nest.isNestBox(id)) return this.nest.destroy(session.login, id)
+    if (this.nest.isNestBox(id)) {
+      const outcome = this.nest.destroy(session.login, id)
+      if (outcome.ok) await this.rearm()
+      return outcome
+    }
     const sql = this.ctx.storage.sql
     sql.exec("UPDATE users SET active_box_id = NULL WHERE login = ? AND active_box_id = ?", session.login, id)
     sql.exec("DELETE FROM user_boxes WHERE id = ? AND login = ?", id, session.login)
@@ -722,30 +726,31 @@ export class Hub extends DurableObject<Env> {
     const created = this.insertBox(session.login, { name: body.name, url: publicUrlFor(id, target.slug, domain) }, id)
     if (!created.ok) return created
     await this.nest.createBox(id, session.login, target, limits)
+    await this.rearm()
     return this.userBoxView(session.login, id)
   }
 
-  resumeNestBox(sessionId: string, id: string): BoxOutcome<UserBox> {
+  async resumeNestBox(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.resume(login, id))
   }
 
-  suspendNestBox(sessionId: string, id: string): BoxOutcome<UserBox> {
+  async suspendNestBox(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.suspend(login, id))
   }
 
-  parkNestBox(sessionId: string, id: string): BoxOutcome<UserBox> {
+  async parkNestBox(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.park(login, id))
   }
 
-  attachNestGpu(sessionId: string, id: string): BoxOutcome<UserBox> {
+  async attachNestGpu(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.gpu(login, id, true))
   }
 
-  detachNestGpu(sessionId: string, id: string): BoxOutcome<UserBox> {
+  async detachNestGpu(sessionId: string, id: string): Promise<BoxOutcome<UserBox>> {
     return this.nestAction(sessionId, id, (login) => this.nest.gpu(login, id, false))
   }
 
-  setNestLimits(sessionId: string, id: string, limits: NestLimits): BoxOutcome<UserBox> {
+  async setNestLimits(sessionId: string, id: string, limits: NestLimits): Promise<BoxOutcome<UserBox>> {
     const shape = nestLimitsError(limits)
     if (shape !== null) return { ok: false, status: 400, tag: "BadRequest", message: shape }
     return this.nestAction(sessionId, id, (login) => this.nest.setLimits(login, id, limits))
@@ -759,11 +764,16 @@ export class Hub extends DurableObject<Env> {
     return this.nest.enroll(body)
   }
 
-  private nestAction(sessionId: string, id: string, act: (login: string) => NestOutcome<null>): BoxOutcome<UserBox> {
+  private async nestAction(
+    sessionId: string,
+    id: string,
+    act: (login: string) => NestOutcome<null>,
+  ): Promise<BoxOutcome<UserBox>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     const outcome = act(session.login)
     if (!outcome.ok) return outcome
+    await this.rearm()
     return this.userBoxView(session.login, id)
   }
 
@@ -1407,7 +1417,7 @@ export class Hub extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now()
-    this.nest.expire(now)
+    await this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
       .toArray()

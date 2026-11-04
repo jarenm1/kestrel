@@ -23,9 +23,9 @@ export const NEST_STANDARD_LIMITS: NestLimits = {
 export const NEST_BOOT_MEMORY_BYTES = 1 * GiB
 export const NEST_PLACEMENT_HEADROOM_BYTES = 512 * MiB
 
-/** How long the control plane waits for a host's `result` before it drops the in-flight marker. `create` and `evict` have none. */
+/** How long the control plane waits for a host's `result` before it drops the in-flight marker. `evict` is not tracked. */
 const COMMAND_TIMEOUT_MS: Record<NestHostCommand["_tag"], number | null> = {
-  create: null,
+  create: 15 * 60_000,
   resume: 10 * 60_000,
   suspend: 10 * 60_000,
   park: 15 * 60_000,
@@ -72,6 +72,16 @@ export const placeHost = (candidates: PlacementCandidate[]): PlacementCandidate 
   }
   return best
 }
+
+/**
+ * `capacity` once `boots` VMs planned on this host in one wake loop have taken their boot memory and their memory
+ * image's disk. Placement inside the loop sees these as used, so the loop does not stack every box on the same host.
+ */
+export const withPlannedBoots = (capacity: NestHostCapacity, boots: number): NestHostCapacity => ({
+  ...capacity,
+  memoryPluggedBytes: capacity.memoryPluggedBytes + boots * NEST_BOOT_MEMORY_BYTES,
+  diskFreeBytes: capacity.diskFreeBytes - boots * NEST_BOOT_MEMORY_BYTES,
+})
 
 export type VmDecision = { _tag: "evict" } | { _tag: "apply" } | { _tag: "ignore"; reason: string }
 

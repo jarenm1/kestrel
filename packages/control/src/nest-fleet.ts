@@ -28,6 +28,7 @@ import {
   placeHost,
   publicUrlFor,
   type PlacementCandidate,
+  withPlannedBoots,
 } from "./nest-control"
 import {
   deleteNestBox,
@@ -149,7 +150,7 @@ export class NestFleet {
   /** The outcome of a command. `vm` is the VM after it, absent once destroyed. */
   result(hostId: string, commandId: string, ok: boolean, error: string | null, vm: NestVmReport | undefined): void {
     const row = nestBoxByPendingId(this.sql, commandId)
-    if (row === null) return
+    if (row === null || row.hostId !== hostId) return
     const kind = row.pendingKind
     this.clearPending(row)
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
@@ -164,11 +165,12 @@ export class NestFleet {
     if (vm !== undefined) this.vm(hostId, vm)
   }
 
-  /** A request reached ingress for a box the host may not wake itself. */
+  /** A request reached ingress for a box. A parked box is woken only by the host its URL names; a suspended one by its host. */
   wakeRequest(hostId: string, boxId: string): void {
     const row = nestBox(this.sql, boxId)
     if (row === null || row.pendingId !== null) return
     if (row.state === "parked") {
+      if (!this.namedOn(hostId, row)) return
       row.wakeWanted = true
       saveNestBox(this.sql, row)
       this.wake(row)
@@ -182,13 +184,21 @@ export class NestFleet {
     touchNestHost(this.sql, hostId, new Date(this.clock()).toISOString())
   }
 
-  /** Drops in-flight markers whose deadline passed. A host that never answers gets the command resent on reconnect. */
-  expire(now: number): void {
+  /**
+   * Drops in-flight markers whose deadline passed. The host's VM reports stay the truth: an expired `create` marks the
+   * box failed, so the owner can delete it; an expired `resume` is retried; other commands are the owner's to retry.
+   * A late `result` for an expired command finds no marker and is ignored.
+   */
+  async expire(now: number): Promise<void> {
     for (const row of nestBoxesDue(this.sql, now)) {
       console.warn(`nest: ${row.pendingKind} for ${row.boxId} timed out`)
+      const kind = row.pendingKind
       this.clearPending(row)
+      if (kind === "create") row.createFailed = true
+      if (kind === "resume") row.wakeWanted = true
       saveNestBox(this.sql, row)
     }
+    await this.wakeWanted()
   }
 
   nextDeadline(): number | null {
@@ -220,11 +230,15 @@ export class NestFleet {
   // Owner actions
   // ---------------------------------------------------------------------------
 
-  /** The connected host a new box would go to, or null when none has room. */
-  placement(): PlacementCandidate | null {
+  /** The connected host a new box would go to, or null when none has room. `boots` counts boots planned in one wake loop. */
+  placement(boots: ReadonlyMap<string, number> = new Map()): PlacementCandidate | null {
     const candidates = nestHostRows(this.sql)
       .filter((host) => this.link.connected(host.id))
-      .map((host) => ({ hostId: host.id, slug: host.slug, capacity: host.capacity }))
+      .map((host) => ({
+        hostId: host.id,
+        slug: host.slug,
+        capacity: withPlannedBoots(host.capacity, boots.get(host.id) ?? 0),
+      }))
     return placeHost(candidates)
   }
 
@@ -423,8 +437,15 @@ export class NestFleet {
     row.pendingDeadline = null
   }
 
+  /** Whether the box's URL names `hostId`, so a request for the box reached that host's ingress. */
+  private namedOn(hostId: string, row: NestBoxRow): boolean {
+    const host = nestHostRow(this.sql, hostId)
+    const url = this.sql.exec<{ url: string }>("SELECT url FROM user_boxes WHERE id = ?", row.boxId).toArray()[0]?.url
+    return host !== null && url === publicUrlFor(row.boxId, host.slug, this.domain)
+  }
+
   /** Brings a waiting box up: a suspended box on a connected host resumes there; a parked one is placed. */
-  private wake(row: NestBoxRow): void {
+  private wake(row: NestBoxRow, boots: Map<string, number> = new Map()): void {
     if (row.pendingId !== null) return
     if (row.state === "suspended" && row.hostId !== null) {
       if (!this.link.connected(row.hostId)) {
@@ -436,12 +457,13 @@ export class NestFleet {
       return
     }
     if (row.state !== "parked") return
-    const target = this.placement()
+    const target = this.placement(boots)
     if (target === null) {
       row.wakeWanted = true
       saveNestBox(this.sql, row)
       return
     }
+    boots.set(target.hostId, (boots.get(target.hostId) ?? 0) + 1)
     // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report.
     row.hostId = target.hostId
     row.ownerEpoch += 1
@@ -451,7 +473,8 @@ export class NestFleet {
   }
 
   private async wakeWanted(): Promise<void> {
-    for (const row of nestBoxesWanted(this.sql)) this.wake(row)
+    const boots = new Map<string, number>()
+    for (const row of nestBoxesWanted(this.sql)) this.wake(row, boots)
   }
 
   private resumeCommand(row: NestBoxRow): NestHostCommand {
