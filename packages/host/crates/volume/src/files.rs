@@ -14,9 +14,11 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     file.sync_all()?;
     drop(file);
     fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no directory", path.display()))?;
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => return Err(anyhow!("{} has no directory", path.display())),
+    };
     File::open(parent)?.sync_all()?;
     Ok(())
 }

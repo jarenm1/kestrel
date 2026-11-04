@@ -136,6 +136,34 @@ fn backup_then_restore_reproduces_the_volume_and_reuploads_only_changes() {
 }
 
 #[test]
+fn backup_accepts_a_relative_volume_path() {
+    let fx = Fixture::new();
+    let volume = fx.create("volume.raw");
+    fill(&volume, 0, 0x5A, 4096);
+    let out = Command::new(env!("CARGO_BIN_EXE_kestrel-volume"))
+        .current_dir(fx.dir.path())
+        .args([
+            "backup",
+            "--path",
+            "volume.raw",
+            "--box",
+            "box-1",
+            "--store",
+            &fx.store,
+            "--key-file",
+            fx.key.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fx.path("volume.raw.base.ref").is_file());
+}
+
+#[test]
 fn restore_with_a_different_key_fails_and_leaves_no_file() {
     let fx = Fixture::new();
     let volume = fx.create("volume.raw");
