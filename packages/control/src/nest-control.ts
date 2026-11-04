@@ -101,6 +101,7 @@ export const enrollTokenHash = async (token: string): Promise<string> => {
 /** The owner's view of a box's VM. A `create` in flight is not shown as pending: the box is already `provisioning`. */
 export const nestStatusOf = (row: NestBoxRow): NestBoxStatus => ({
   state: row.state,
+  failed: row.createFailed,
   pending:
     row.pendingKind === null || row.pendingKind === "create" || row.pendingKind === "evict" ? null : row.pendingKind,
   limits: row.limits,

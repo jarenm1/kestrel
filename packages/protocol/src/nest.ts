@@ -287,6 +287,8 @@ export type NestEnrollResult = typeof NestEnrollResult.Type
 /** A Nest box's VM as the apps see it, on `UserBox.nest`. */
 export const NestBoxStatus = Schema.Struct({
   state: NestVmState,
+  /** The create never produced a VM (it failed or timed out). The box has no VM; the owner can delete it. */
+  failed: Schema.Boolean,
   /** A command is in flight (resume, suspend, park, resize, GPU): the apps show it as pending. */
   pending: Schema.NullOr(Schema.Literal("resume", "suspend", "park", "setLimits", "gpuAttach", "gpuDetach", "destroy")),
   limits: NestLimits,

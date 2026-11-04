@@ -37,7 +37,8 @@ export const ensureNestTables = (sql: FleetSql): void => {
     pending_id TEXT,
     pending_kind TEXT,
     pending_command TEXT,
-    pending_deadline INTEGER
+    pending_deadline INTEGER,
+    create_failed INTEGER NOT NULL DEFAULT 0
   )`)
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_host ON nest_boxes (host_id)`)
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_deadline ON nest_boxes (pending_deadline)`)
@@ -65,6 +66,8 @@ export type NestBoxRow = {
   pendingKind: NestHostCommand["_tag"] | null
   pendingCommand: NestHostCommand | null
   pendingDeadline: number | null
+  /** The create command failed or timed out: the box has no VM and needs the owner to delete it. */
+  createFailed: boolean
 }
 
 /** A `nest_hosts` row; `capacity` is what the host last reported. */
@@ -98,13 +101,14 @@ type NestBoxSqlRow = {
   pendingKind: string | null
   pendingCommand: string | null
   pendingDeadline: number | null
+  createFailed: number
 }
 
 const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vmId, owner_epoch AS ownerEpoch,
   state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
   memory_bytes AS memoryBytes, gpus, wake_wanted AS wakeWanted, enroll_hash AS enrollHash,
   enroll_expires_at AS enrollExpiresAt, pending_id AS pendingId, pending_kind AS pendingKind,
-  pending_command AS pendingCommand, pending_deadline AS pendingDeadline`
+  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed`
 
 const decodeLimits = Schema.decodeUnknownSync(NestLimits)
 const decodeCommand = Schema.decodeUnknownSync(Schema.parseJson(NestHostCommand))
@@ -131,14 +135,15 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
   pendingKind: row.pendingKind as NestBoxRow["pendingKind"],
   pendingCommand: row.pendingCommand === null ? null : decodeCommand(row.pendingCommand),
   pendingDeadline: row.pendingDeadline,
+  createFailed: row.createFailed !== 0,
 })
 
 export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
     `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, state, limits, volume_ref, backed_up_at,
       image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id, pending_kind,
-      pending_command, pending_deadline)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      pending_command, pending_deadline, create_failed)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ...nestBoxBindings(row),
   )
 }
@@ -148,7 +153,8 @@ export const saveNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
     `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, state = ?, limits = ?, volume_ref = ?,
       backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?, enroll_hash = ?,
-      enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?
+      enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?,
+      create_failed = ?
      WHERE box_id = ?`,
     ...nestBoxBindings(row).slice(1),
     row.boxId,
@@ -176,6 +182,7 @@ const nestBoxBindings = (row: NestBoxRow): (string | number | null)[] => [
   row.pendingKind,
   row.pendingCommand === null ? null : JSON.stringify(row.pendingCommand),
   row.pendingDeadline,
+  row.createFailed ? 1 : 0,
 ]
 
 export const deleteNestBox = (sql: FleetSql, boxId: string): void => {

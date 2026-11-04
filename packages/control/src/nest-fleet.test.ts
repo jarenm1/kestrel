@@ -183,15 +183,15 @@ describe("creating a box", () => {
     expect(await fleet.enroll({ boxId: "box-1", token: resent.command.enrollToken })).toEqual({ secret: "box-1-secret" })
   })
 
-  test("a create has no deadline; a failed create leaves the box provisioning", async () => {
+  test("a create the host refuses leaves the box failed, and the owner can delete it", async () => {
     await hello("host-a")
     await placeBox("alice", "box-1")
     expect(fleet.nextDeadline()).toBeNull()
     const create = lastCommand("host-a", "create")
     fleet.result("host-a", create.commandId, false, "disk full", undefined)
-    const status = fleet.statusesOf("alice").get("box-1")
-    expect(status?.state).toBe("provisioning")
-    expect(status?.pending).toBeNull()
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "provisioning", failed: true, pending: null })
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-a", "destroy").command).toMatchObject({ boxId: "box-1" })
   })
 })
 
@@ -335,6 +335,42 @@ describe("owner commands", () => {
     const bigger = { ...NEST_STANDARD_LIMITS, maxVcpus: 2 }
     expect(fleet.setLimits("alice", "box-1", bigger)).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: bigger })
+  })
+})
+
+describe("park and GPU", () => {
+  test("parking a running box sends park to its host, and the report it sends back leaves no host", async () => {
+    const vmId = await runningBox()
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    const park = lastCommand("host-a", "park")
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: "park" })
+    fleet.result("host-a", park.commandId, true, null, vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: null })
+  })
+
+  test("a box another user owns cannot be parked", async () => {
+    await runningBox()
+    expect(fleet.park("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
+  })
+
+  test("a GPU is refused unless the box's limits allow an on-demand GPU", async () => {
+    await runningBox()
+    expect(fleet.gpu("alice", "box-1", true)).toMatchObject({ ok: false, status: 409, tag: "NoGpuPolicy" })
+  })
+
+  test("an on-demand GPU is attached once and detached only while attached", async () => {
+    const vmId = await runningBox()
+    fleet.setLimits("alice", "box-1", { ...NEST_STANDARD_LIMITS, gpu: "on-demand" })
+    fleet.result("host-a", lastCommand("host-a", "setLimits").commandId, true, null, undefined)
+    expect(fleet.gpu("alice", "box-1", false)).toMatchObject({ ok: false, status: 409, tag: "NoGpu" })
+    expect(fleet.gpu("alice", "box-1", true)).toEqual({ ok: true, value: null })
+    const attach = lastCommand("host-a", "gpuAttach")
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ pending: "gpuAttach" })
+    fleet.result("host-a", attach.commandId, true, null, vmReport("box-1", vmId, 1, "running", { gpus: ["0000:01:00.0"] }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ gpus: 1, pending: null })
+    expect(fleet.gpu("alice", "box-1", true)).toMatchObject({ ok: false, status: 409, tag: "GpuAttached" })
+    expect(fleet.gpu("alice", "box-1", false)).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-a", "gpuDetach").command).toMatchObject({ boxId: "box-1" })
   })
 })
 

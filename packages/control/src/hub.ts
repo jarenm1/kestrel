@@ -733,6 +733,18 @@ export class Hub extends DurableObject<Env> {
     return this.nestAction(sessionId, id, (login) => this.nest.suspend(login, id))
   }
 
+  parkNestBox(sessionId: string, id: string): BoxOutcome<UserBox> {
+    return this.nestAction(sessionId, id, (login) => this.nest.park(login, id))
+  }
+
+  attachNestGpu(sessionId: string, id: string): BoxOutcome<UserBox> {
+    return this.nestAction(sessionId, id, (login) => this.nest.gpu(login, id, true))
+  }
+
+  detachNestGpu(sessionId: string, id: string): BoxOutcome<UserBox> {
+    return this.nestAction(sessionId, id, (login) => this.nest.gpu(login, id, false))
+  }
+
   setNestLimits(sessionId: string, id: string, limits: NestLimits): BoxOutcome<UserBox> {
     const shape = nestLimitsError(limits)
     if (shape !== null) return { ok: false, status: 400, tag: "BadRequest", message: shape }
