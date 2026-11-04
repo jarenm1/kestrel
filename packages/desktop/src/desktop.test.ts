@@ -91,8 +91,9 @@ const start = async (callback: CallbackPath = "/auth/desktop-callback"): Promise
 
 describe("desktop auth helpers", () => {
   test("parses the desktop and mobile fallback callbacks", () => {
-    expect(parseCallback("kestrel-desktop://auth-callback?session=abc")).toBe("abc")
-    expect(parseCallback("kestrel://auth-callback?session=abc")).toBe("abc")
+    expect(parseCallback("kestrel-desktop://auth-callback?session=abc")).toEqual({ session: "abc", state: null })
+    expect(parseCallback("kestrel://auth-callback?session=abc")).toEqual({ session: "abc", state: null })
+    expect(parseCallback("kestrel-desktop://auth-callback?session=abc&state=xyz")).toEqual({ session: "abc", state: "xyz" })
     expect(parseCallback("kestrel-desktop://other?session=abc")).toBeNull()
     expect(parseCallback("kestrel-desktop://auth-callback")).toBeNull()
     expect(parseCallback("not a url")).toBeNull()
@@ -104,6 +105,9 @@ describe("desktop auth helpers", () => {
     )
     expect(loginUrl("https://app.example/", "/auth/mobile-callback")).toBe(
       "https://app.example/auth/github/login?return=%2Fauth%2Fmobile-callback",
+    )
+    expect(loginUrl("https://app.example/", "/auth/desktop-callback", "nonce123")).toBe(
+      "https://app.example/auth/github/login?return=%2Fauth%2Fdesktop-callback&state=nonce123",
     )
     expect(safeLocalPath("/c/123?x=1")).toBe("/c/123?x=1")
     expect(safeLocalPath("//evil.example")).toBe("/")

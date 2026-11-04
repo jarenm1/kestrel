@@ -46,6 +46,10 @@ export interface DesktopServer {
   setSession(id: string | null): void
   setPendingReturn(path: string): void
   takePendingReturn(): string
+  /** Sets the one-time sign-in nonce before redirecting to GitHub. */
+  setPendingNonce(nonce: string): void
+  /** One-time sign-in nonce the desktop app set before redirecting to GitHub; null once taken or cleared. */
+  takePendingNonce(): string | null
 }
 
 const cookie = (header: string | undefined, name: string): string | null => {
@@ -59,6 +63,9 @@ const cookie = (header: string | undefined, name: string): string | null => {
 
 const under = (path: string, prefixes: readonly string[]): boolean =>
   prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+
+/** A preview document's root-relative asset requests carry the preview page as their Referer. */
+const isPreviewReferer = (referer: string | undefined): boolean => referer !== undefined && referer.includes("/_preview/")
 
 const send = (res: ServerResponse, status: number, body: string, type = "text/plain; charset=utf-8"): void => {
   res.writeHead(status, { "content-type": type, "cache-control": "no-store" })
@@ -87,6 +94,7 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
   const index = join(root, "index.html")
   let session = await options.getSession()
   let pendingReturn = "/"
+  let pendingNonce: string | null = null
 
   const proxy = createProxyServer({ target: options.controlUrl, changeOrigin: true, ws: true, secure: true })
   proxy.on("proxyReq", (proxyReq) => {
@@ -129,15 +137,16 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
 
       if (url.pathname === "/auth/github/login") {
         pendingReturn = safeLocalPath(url.searchParams.get("return"))
+        pendingNonce = randomBytes(24).toString("base64url")
         res.writeHead(302, {
-          location: loginUrl(options.controlUrl, options.callbackPath),
+          location: loginUrl(options.controlUrl, options.callbackPath, pendingNonce),
           "cache-control": "no-store",
         })
         res.end()
         return
       }
 
-      if (under(url.pathname, PROXY_PREFIXES)) {
+      if (under(url.pathname, PROXY_PREFIXES) || isPreviewReferer(req.headers.referer)) {
         proxy.web(req, res)
         return
       }
@@ -173,7 +182,7 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1")
-    if (!under(url.pathname, WS_PREFIXES) || cookie(req.headers.cookie, COOKIE) !== token) {
+    if ((!under(url.pathname, WS_PREFIXES) && !isPreviewReferer(req.headers.referer)) || cookie(req.headers.cookie, COOKIE) !== token) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n")
       socket.destroy()
       return
@@ -213,6 +222,14 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
       const path = pendingReturn
       pendingReturn = "/"
       return path
+    },
+    setPendingNonce: (nonce) => {
+      pendingNonce = nonce
+    },
+    takePendingNonce: () => {
+      const nonce = pendingNonce
+      pendingNonce = null
+      return nonce
     },
   }
 }

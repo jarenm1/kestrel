@@ -5,8 +5,8 @@ const MOBILE_SCHEME = "kestrel"
 
 export type CallbackPath = "/auth/desktop-callback" | "/auth/mobile-callback"
 
-/** `kestrel-desktop://auth-callback?session=<id>` (or the mobile fallback) -> the session id. */
-export const parseCallback = (value: string): string | null => {
+/** `kestrel-desktop://auth-callback?session=<id>&state=<nonce>` (or the mobile fallback) -> the session id and nonce. */
+export const parseCallback = (value: string): { session: string; state: string | null } | null => {
   let url: URL
   try {
     url = new URL(value)
@@ -17,12 +17,13 @@ export const parseCallback = (value: string): string | null => {
     return null
   }
   const session = url.searchParams.get("session")
-  return session === null || session === "" ? null : session
+  if (session === null || session === "") return null
+  return { session, state: url.searchParams.get("state") }
 }
 
-/** The control-plane URL that starts GitHub sign-in and returns through `returnPath`. */
-export const loginUrl = (controlUrl: string, returnPath: CallbackPath = "/auth/desktop-callback"): string =>
-  `${controlUrl.replace(/\/+$/, "")}/auth/github/login?return=${encodeURIComponent(returnPath)}`
+/** The control-plane URL that starts GitHub sign-in and returns through `returnPath`, bound to a one-time `state`. */
+export const loginUrl = (controlUrl: string, returnPath: CallbackPath = "/auth/desktop-callback", state?: string): string =>
+  `${controlUrl.replace(/\/+$/, "")}/auth/github/login?return=${encodeURIComponent(returnPath)}${state === undefined ? "" : `&state=${encodeURIComponent(state)}`}`
 
 /**
  * Which callback the deployed control plane supports. The desktop route is preferred; a 404 means the Worker is

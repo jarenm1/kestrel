@@ -1,5 +1,6 @@
 import { BrowserWindow, Menu, app, dialog, shell, type MenuItemConstructorOptions } from "electron"
 import { autoUpdater } from "electron-updater"
+import { randomBytes } from "node:crypto"
 import { join, resolve } from "node:path"
 import { CALLBACK_SCHEME, callbackPath, loginUrl, parseCallback, safeLocalPath, type CallbackPath } from "./auth"
 import { startDesktopServer, type DesktopServer } from "./server"
@@ -44,7 +45,9 @@ const wireNavigation = (contents: BrowserWindow["webContents"]): void => {
       if (target.pathname === "/auth/github/login") {
         event.preventDefault()
         server?.setPendingReturn(safeLocalPath(target.searchParams.get("return")))
-        void shell.openExternal(loginUrl(CONTROL_URL, loginReturnPath))
+        const nonce = randomBytes(24).toString("base64url")
+        server?.setPendingNonce(nonce)
+        void shell.openExternal(loginUrl(CONTROL_URL, loginReturnPath, nonce))
       }
       return
     }
@@ -84,14 +87,16 @@ const createWindow = async (): Promise<void> => {
 }
 
 const handleCallback = async (value: string): Promise<void> => {
-  const id = parseCallback(value)
-  if (id === null) return
+  const parsed = parseCallback(value)
+  if (parsed === null) return
   if (server === null || store === null) {
     pendingCallback = value
     return
   }
-  await store.set(id)
-  server.setSession(id)
+  // Reject callbacks that were not preceded by a sign-in initiated from this desktop instance.
+  if (parsed.state === null || parsed.state !== server.takePendingNonce()) return
+  await store.set(parsed.session)
+  server.setSession(parsed.session)
   const path = server.takePendingReturn()
   if (window === null) await createWindow()
   focusWindow()

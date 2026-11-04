@@ -57,7 +57,8 @@ const beginOAuth = async (
 ): Promise<Response> => {
   const creds = oauthCredentials(env, provider)
   if (!creds) return errorResponse(503, "NotConfigured", `${provider.label} OAuth is not configured`)
-  const state = randomToken(24)
+  // A native client passes its own one-time nonce to bind the callback to its sign-in.
+  const state = url.searchParams.get("state") || randomToken(24)
   await hub(env).createOAuthState(state, kind, provider.id, returnTo, Date.now() + STATE_TTL_MS)
   const authorize = new URL(provider.authorizeUrl)
   authorize.searchParams.set("client_id", creds.clientId)
@@ -120,7 +121,8 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
     await stub.putConnection(account.login, provider.id, token, account.login)
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, account.login, Date.now() + SESSION_TTL_MS, false)
-    return redirect(row.returnTo, { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
+    const returnTo = row.returnTo.includes("?") ? `${row.returnTo}&state=${encodeURIComponent(state)}` : `${row.returnTo}?state=${encodeURIComponent(state)}`
+    return redirect(returnTo, { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
   }
 
   const login = (await currentSession(request, env))?.login
@@ -139,14 +141,16 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
 const nativeCallback = async (
   request: Request,
   env: Env,
+  url: URL,
   scheme: string,
   client: string,
 ): Promise<Response> => {
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
   const login = id ? (await hub(env).session(id))?.login : null
   if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
+  const state = url.searchParams.get("state") ?? ""
   return new Response(
-    `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel ${client}...</p><script>window.location.href="${scheme}auth-callback?session=" + encodeURIComponent("${id}");</script></body></html>`,
+    `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel ${client}...</p><script>window.location.href="${scheme}auth-callback?session=" + encodeURIComponent("${id}") + "&state=" + encodeURIComponent("${state}");</script></body></html>`,
     { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
   )
 }
@@ -172,11 +176,11 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
   }
 
   if (path === "/auth/mobile-callback" && request.method === "GET") {
-    return nativeCallback(request, env, "kestrel://", "mobile")
+    return nativeCallback(request, env, url, "kestrel://", "mobile")
   }
 
   if (path === "/auth/desktop-callback" && request.method === "GET") {
-    return nativeCallback(request, env, "kestrel-desktop://", "desktop")
+    return nativeCallback(request, env, url, "kestrel-desktop://", "desktop")
   }
 
   if (path === ControlPaths.logout && request.method === "POST") {
