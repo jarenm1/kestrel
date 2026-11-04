@@ -44,7 +44,7 @@ describe("broker provider mapping", () => {
     const broker: CredentialBrokerShape = {
       issue: () => Effect.die("unused"),
       revoke: () => Effect.void,
-      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat" }),
+      grantForToken: () => Effect.succeed({ runId: "run", user: "octocat", providers: ["anthropic"] }),
       onRevoke: () => () => undefined,
       upstreamKey: () => Effect.succeed("real-key"),
     }

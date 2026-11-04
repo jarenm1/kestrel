@@ -67,6 +67,9 @@ export const handleBroker = async (
 
   const provider = BROKER_PROVIDERS.find((p) => p === providerRaw)
   if (provider === undefined) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${providerRaw}` })
+  if (!grant.providers.includes(provider)) {
+    return sendJson(res, 403, { _tag: "Forbidden", message: "token is not authorized for this provider" })
+  }
 
   const key = await Effect.runPromise(broker.upstreamKey(provider, grant.user))
   if (key === null) {

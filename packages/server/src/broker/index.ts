@@ -46,6 +46,8 @@ export const credentialFor = (creds: RelayCredentials | null, provider: BrokerPr
 export interface BrokerGrant {
   readonly runId: string
   readonly user: string
+  /** Providers the run's token may broker; empty for an ACP run, whose token is MCP-only. */
+  readonly providers: ReadonlyArray<BrokerProvider>
 }
 
 /** What a run gets for its token: the token itself, and the env that points the sandboxed agent at the broker. */
@@ -105,7 +107,7 @@ export const CredentialBrokerLive = Layer.effect(
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
-          grantByToken.set(token, { runId, user })
+          grantByToken.set(token, { runId, user, providers: provider === null ? [] : [provider] })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
           return { token, env: provider === null ? {} : brokerEnv(provider, base, token) }

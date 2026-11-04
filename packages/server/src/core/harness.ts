@@ -847,7 +847,7 @@ export const AgentHarnessLive = Layer.effect(
             // Fail before the CLI starts when a brokered run has neither a key nor its vendor's CLI login. The broker
             // would only answer 424 mid-turn, which the agent reports as a model error rather than a setup problem.
             const brokerProvider = brokerProviderOf(provider)
-            if (brokerProvider !== null) {
+            if (brokerProvider !== null && !config.fakeAgent) {
               const key = credentialFor(creds, brokerProvider)
               const vendorLogin = provider === "anthropic" ? "claude-cli" : provider === "openai" ? "codex-cli" : null
               const covered = vendorLogin !== null && allLogins.some((login) => login.provider === vendorLogin)
