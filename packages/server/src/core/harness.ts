@@ -168,9 +168,12 @@ const ACP_CONFIG_DIRS: Partial<Record<ModelProvider, string>> = {
   hermes: ".hermes",
 }
 
-/** A broker provider for a model run, or null when the ACP harness owns its own model credentials. */
+/**
+ * A broker provider for a model run, or null for a standalone ACP harness. The ACP harnesses are exactly the providers
+ * `BrokerProvider` excludes, which the record lookup cannot express to the type system on its own.
+ */
 const brokerProviderOf = (provider: ModelProvider): BrokerProvider | null =>
-  MODEL_HARNESS[provider].conversation === "acp" ? null : provider
+  MODEL_HARNESS[provider].conversation === "acp" ? null : (provider as BrokerProvider)
 
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
@@ -240,11 +243,19 @@ const isDeltaLine = (parsed: unknown): boolean => {
   return "method" in parsed && typeof parsed.method === "string" && DELTA_METHOD.test(parsed.method)
 }
 
-/** Every CLI login is mounted on Anthropic/OpenAI runs; third-party gateways mount none. */
+/**
+ * The CLI logins a run mounts. Anthropic/OpenAI runs get every login (either CLI may shell out to the other). A harness
+ * that reaches no broker (Antigravity) gets its own login, which is how it reaches Google's models. Third-party
+ * gateways and the standalone ACP harnesses mount none: they use the broker or their per-user harness home.
+ */
 export const loginsForProvider = <T extends { readonly provider: CliProvider }>(
   provider: ModelProvider,
   all: readonly T[],
-): readonly T[] => (provider === "anthropic" || provider === "openai" ? all : [])
+): readonly T[] => {
+  const harness = MODEL_HARNESS[provider]
+  if (!harness.broker) return harness.cli === null ? [] : all.filter((login) => login.provider === harness.cli)
+  return provider === "anthropic" || provider === "openai" ? all : []
+}
 
 /** The Claude Code tier pins and auto-compact window for a third-party gateway run. */
 export const claudeTierEnv = (model: AgentModel): Record<string, string> => {
@@ -855,6 +866,15 @@ export const AgentHarnessLive = Layer.effect(
                 ? claudeTierEnv(providerModel)
                 : {}
             const creds = yield* credentials.get(user)
+            // Antigravity reaches Google's models only through the user's Google sign-in; without it a run cannot work,
+            // so say that instead of letting the CLI fail mid-turn.
+            if (provider === "google" && !config.fakeAgent && logins.length === 0) {
+              return yield* Effect.fail(
+                new InternalError({
+                  message: "Google (Antigravity) is not signed in. Sign in with your Google account in Settings › Connections.",
+                }),
+              )
+            }
             // Fail before the CLI starts when a brokered run has neither a key nor its vendor's CLI login. The broker
             // would only answer 424 mid-turn, which the agent reports as a model error rather than a setup problem.
             const brokerProvider = brokerProviderOf(provider)
@@ -962,6 +982,7 @@ export const AgentHarnessLive = Layer.effect(
                       effort: choice.effort,
                       // The thread's tools, as the other harnesses get them from the run's MCP config.
                       mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
+                      clientVersion: VERSION,
                     },
                   }),
                 } satisfies Record<ConversationKind, () => RunConversation>)[MODEL_HARNESS[provider].conversation](),

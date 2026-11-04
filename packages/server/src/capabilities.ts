@@ -58,7 +58,7 @@ export interface HarnessProbe {
 }
 
 /** Agent runs get the toolchain's PATH under `strict` (`CLOUDAGENTS_SANDBOX_PATH`), the box's own otherwise. */
-const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
+export const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
   const PATH = sandboxPath ?? process.env.PATH ?? ""
   return {
     which: (name) => Bun.which(name, { PATH }),
@@ -69,16 +69,19 @@ const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
   }
 }
 
+/** Providers the scripted agent (`scripts/fake-agent.ts`) plays: Claude stream-json, Codex app-server and ACP. */
+const FAKE_AGENT_PROVIDERS: ReadonlyArray<ModelProvider> = ["anthropic", "openai", "opencode", "google"]
+
 /**
  * The model providers whose harness CLI the box can run, at startup: found where agent runs look, and at least the
- * version the harness needs. A fake-agent box plays every harness itself.
+ * version the harness needs. A fake-agent box plays the providers its script speaks for itself.
  */
 export const availableHarnesses = (
   config: { readonly fakeAgent: boolean; readonly sandboxPath: string | null },
   probe: HarnessProbe = harnessProbe(config.sandboxPath),
 ): ReadonlyArray<ModelProvider> =>
   ModelProvider.literals.filter((provider) => {
-    if (config.fakeAgent) return true
+    if (config.fakeAgent) return FAKE_AGENT_PROVIDERS.includes(provider)
     const harness = MODEL_HARNESS[provider]
     const path = probe.which(harness.bin)
     if (path === null) return false
