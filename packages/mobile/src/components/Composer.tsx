@@ -447,25 +447,27 @@ export function Composer({
   }
 
   /** Keep the live remainder durable before opening a screen that unmounts this editor. */
-  async function runAppCommand(command: AppCommand, markdown: string, consumed: number) {
-    if (handledAppCommand.current) return;
+  async function runAppCommand(command: AppCommand, markdown: string, consumed: number): Promise<boolean> {
+    if (handledAppCommand.current) return true;
     handledAppCommand.current = true;
     setAppCommandPending(true);
     setAppCommandError(undefined);
     try {
       await setText(markdown.slice(consumed));
       if (mounted.current) appCommandHandlers[command.name]();
+      return true;
     } catch (error) {
-      if (!mounted.current) return;
+      if (!mounted.current) return true;
       handledAppCommand.current = false;
       setAppCommandPending(false);
       setAppCommandError(error);
+      return false;
     }
   }
 
   async function selectAppCommand(name: AppCommand["name"], next: ComposerEditorView) {
     const match = matchAppCommand(next.markdown, name);
-    if (match !== undefined) await runAppCommand(match.command, next.markdown, match.consumed);
+    return match === undefined ? false : runAppCommand(match.command, next.markdown, match.consumed);
   }
 
   function chooseCommand(command: HarnessCommand) {
@@ -523,7 +525,8 @@ export function Composer({
     if (chosenOption === undefined) {
       const appCommand = matchAppCommand(next.markdown);
       if (appCommand !== undefined) {
-        await runAppCommand(appCommand.command, next.markdown, appCommand.consumed);
+        // Re-enter the DOM to lock and capture again; ordinary Send must not blur or disable the editor.
+        editor.current?.requestAppCommand(appCommand.command.name);
         return;
       }
     }

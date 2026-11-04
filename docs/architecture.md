@@ -63,10 +63,12 @@ as `/usage` execute locally on suggestion selection or message submission; they 
 override same-named slash commands, but not `$skills`. Each host implements the exhaustive `AppCommandHandlers`
 map, so adding an action requires both desktop and mobile behavior. Desktop opens its Quotas dialog; mobile
 pushes the existing Quotas screen only after a live DOM snapshot's unconsumed draft is durably saved. Native
-menu picks request that snapshot over the same fire-and-forget bridge pattern as Send. The DOM locks editing
-synchronously before capture and unlocks when the callback settles, so pending storage cannot discard visible
-edits. Mobile draft storage serializes reads and writes per key across composer mounts, including pending
-SecureStore operations.
+menu picks request that snapshot over the fire-and-forget bridge. Ordinary Send reads live content without
+locking or blurring; a typed app command hands off to the same locked snapshot path as a menu pick. The DOM
+locks editing synchronously before capture and keeps successful app actions locked until their editor unmounts;
+rejected actions and failed saves unlock. Pending storage and navigation therefore cannot discard visible edits.
+Mobile draft storage serializes reads and writes per key across composer mounts, including pending SecureStore
+operations.
 
 Shared panels follow the same pattern: `packages/ui` holds the DOM component with plain JSON props, each app
 fetches the data with its own client, and the phone app renders the component through a `use dom` wrapper whose

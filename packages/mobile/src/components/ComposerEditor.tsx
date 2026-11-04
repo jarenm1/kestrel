@@ -49,7 +49,8 @@ export interface ComposerEditorDomProps {
   onChange: (view: ComposerEditorView) => Promise<void>
   /** Receives the live view when `requestSubmit` is called, so Send never reads a stale bridged value. */
   onSubmit: (view: ComposerEditorView) => Promise<void>
-  onAppCommand: (name: AppCommand["name"], view: ComposerEditorView) => Promise<void>
+  /** True keeps the snapshot locked until navigation unmounts it; false restores editing after rejection/failure. */
+  onAppCommand: (name: AppCommand["name"], view: ComposerEditorView) => Promise<boolean>
   onFocus: () => Promise<void>
   onBlur: () => Promise<void>
   onMenuKey: (key: string) => Promise<void>
@@ -89,16 +90,19 @@ export default function ComposerEditor({
   const callbacks = useRef({ onChange, onSubmit, onAppCommand })
   callbacks.current = { onChange, onSubmit, onAppCommand }
 
-  async function requestSnapshot(action: (view: ComposerEditorView) => Promise<void>) {
+  async function requestAppSnapshot(name: AppCommand["name"]) {
     const current = editor.current
     if (snapshotPending.current || current === null) return
     snapshotPending.current = true
     current.setReadOnly(true)
+    let navigating = false
     try {
-      await action(current.readView())
+      navigating = await callbacks.current.onAppCommand(name, current.readView())
     } finally {
-      snapshotPending.current = false
-      current.setReadOnly(false)
+      if (!navigating) {
+        snapshotPending.current = false
+        current.setReadOnly(false)
+      }
     }
   }
 
@@ -118,10 +122,12 @@ export default function ComposerEditor({
         editor.current?.insertReference(reference as GithubReference, Number(start), Number(end))
       },
       requestSubmit() {
-        void requestSnapshot((view) => callbacks.current.onSubmit(view))
+        if (snapshotPending.current || editor.current === null) return
+        // Ordinary messages keep focus/the keyboard. App submissions request a separate locked snapshot if needed.
+        void callbacks.current.onSubmit(editor.current.readView())
       },
       requestAppCommand(name) {
-        void requestSnapshot((view) => callbacks.current.onAppCommand(name as AppCommand["name"], view))
+        void requestAppSnapshot(name as AppCommand["name"])
       },
       clear() {
         editor.current?.clear()

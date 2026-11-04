@@ -21,11 +21,12 @@ agent. Sending a typed `/usage` does the same. It works in a new thread without 
 are loading. Only the command and its following whitespace leave the draft; Back returns to any remaining text
 and references.
 
-Both suggestion taps and Send synchronously lock the DOM editor before reading its live content, rather than the
-last bridged change. Editing stays disabled while an app command saves its remaining draft; rejected actions or
-failed saves unlock the original draft. Navigation waits for storage. Reads and writes for each draft share an
-ordering queue across composer mounts, so returning immediately cannot restore the consumed command or race
-newer edits.
+App-command suggestions synchronously lock the DOM editor before taking a live snapshot. Send first reads the
+live editor without changing focus or the keyboard; typed app commands then request their own locked snapshot.
+Ordinary messages never lock the editor. App commands keep editing disabled through saving and the navigation
+handoff until the original editor unmounts; rejected actions or failed saves unlock the original draft.
+Navigation waits for storage. Reads and writes for each draft share an ordering queue across composer mounts,
+so returning immediately cannot restore the consumed command or race newer edits.
 
 The app-command catalog and invocation rules live in `@cloudagents/composer/commands`, shared with desktop.
 Add future local actions there and implement their `AppCommandHandlers` entry on both hosts; selection and
