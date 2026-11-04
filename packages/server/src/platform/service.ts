@@ -10,10 +10,10 @@ export interface PlatformHardware {
 
 /** A GPU the host lends the box while it is needed. */
 export interface GpuOnDemand {
-  /** Asks the host for the GPU and waits until it is attached; fails when it does not attach in time. */
-  readonly request: Effect.Effect<void, PlatformError>
-  /** Stops asking; the host detaches the GPU when nothing else wants it. */
-  readonly release: Effect.Effect<void, PlatformError>
+  /** Asks the host for the GPU on behalf of a run and waits until it is attached; fails when it does not attach in time. */
+  readonly request: (runId: string) => Effect.Effect<void, PlatformError>
+  /** Withdraws the run's request. The host detaches the GPU once no run wants it. */
+  readonly release: (runId: string) => Effect.Effect<void, PlatformError>
 }
 
 export interface PlatformHooks {

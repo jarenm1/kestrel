@@ -217,6 +217,8 @@ interface Session {
   ipc: ReadonlyArray<string>
   /** weston's XDG_RUNTIME_DIR (its Wayland socket); removed when the desktop stops. Null until boot makes it. */
   runtimeDir: string | null
+  /** The renderer weston was started with: `gl` on the GPU, `pixman` in software. Null until boot starts it. */
+  renderer: "gl" | "pixman" | null
   /** Completes when the stream's config has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
@@ -560,6 +562,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
   Effect.gen(function* () {
     const sessions = new Map<string, Session>()
     let hardwareRender = true
+    /** The renderer a desktop booted now gets: the GPU when it is wanted and a render node exists. */
+    const desiredRenderer = (): "gl" | "pixman" => (hardwareRender && hasRenderNode() ? "gl" : "pixman")
     const watchers = new Set<(s: DesktopStatus) => void>()
     /** Openbox config, theme and wallpaper shared by this process's desktops; written on the first boot, removed on exit. */
     let openboxConfig: { readonly dir: string; readonly rc: string; readonly wallpaper: string } | null = null
@@ -927,6 +931,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         // Idle time 0: an idle output stops the frame callbacks that pace Xwayland's Present. weston exits with Xwayland.
         // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the abstract socket
         // (`local`) would let every task's agent reach every display.
+        const renderer = desiredRenderer()
+        s.renderer = renderer
         const server = yield* Effect.try({
           try: () => {
             const runtimeDir = mkdtempSync(join(tmpdir(), `kestrel-wayland-${s.num}-`))
@@ -942,7 +948,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               "weston",
               [
                 "--backend=headless",
-                `--renderer=${hardwareRender && hasRenderNode() ? "gl" : "pixman"}`,
+                `--renderer=${renderer}`,
                 `--width=${WIDTH}`,
                 `--height=${HEIGHT}`,
                 "--shell=kiosk",
@@ -1084,6 +1090,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               quality: DEFAULT_DESKTOP_QUALITY,
               ipc: [],
               runtimeDir: null,
+              renderer: null,
               ready,
               procs: new Set(),
               sinks: new Set(),
@@ -1171,11 +1178,15 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       stop: stopTask,
       setHardwareRender: (enabled) =>
         Effect.gen(function* () {
-          if (hardwareRender === enabled) return
           hardwareRender = enabled
           for (const taskId of [...sessions.keys()]) {
             const s = sessions.get(taskId)
-            if (s !== undefined && (s.state === "starting" || s.state === "running")) yield* restartDesktop(taskId)
+            if (s === undefined || s.renderer === null || s.renderer === desiredRenderer()) continue
+            if (s.state !== "starting" && s.state !== "running") continue
+            // A desktop that fails to restart keeps its old renderer and is retried on the next call; the others still restart.
+            yield* restartDesktop(taskId).pipe(
+              Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
+            )
           }
         }),
 

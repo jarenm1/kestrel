@@ -65,7 +65,7 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   registerThreadTools(server, ctx, deps)
   registerAutomationTools(server, ctx, deps)
   registerGitHubTools(server, ctx, deps)
-  registerGpuTools(server, deps)
+  registerGpuTools(server, ctx, deps)
   return server
 }
 

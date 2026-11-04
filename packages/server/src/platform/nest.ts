@@ -6,6 +6,7 @@ import { StateStore } from "../core/state"
 import { AgentHarness } from "../core/harness"
 import { DesktopManager } from "../desktop"
 import { startGuestLink, type GuestLink } from "./guest-link"
+import { GpuWishes } from "./gpu-wish"
 import { ActivityTracker } from "./tracker"
 import { BoxPlatform, PlatformError, type PlatformHardware, type PlatformHooks } from "./service"
 
@@ -63,6 +64,7 @@ export const NestPlatformLive = (socketPath: string) =>
 
       let link: GuestLink | null = null
       const gpuState = yield* Ref.make<GpuState>("none")
+      const wishes = new GpuWishes()
 
       const activity = (): BoxActivity => {
         const snapshot = Effect.runSync(tracker.snapshot)
@@ -87,27 +89,29 @@ export const NestPlatformLive = (socketPath: string) =>
         yield* waitForGpuRelease
       })
 
-      const request = Effect.gen(function* () {
-        if (link === null) {
-          return yield* Effect.fail(new PlatformError({ message: "the box is not connected to its guest agent" }))
-        }
-        if ((yield* Ref.get(gpuState)) === "attached") return
-        link.setWanted(true)
-        const deadline = Date.now() + GPU_ATTACH_TIMEOUT_MS
-        while ((yield* Ref.get(gpuState)) !== "attached") {
-          if (Date.now() >= deadline) {
-            link.setWanted(false)
-            return yield* Effect.fail(new PlatformError({ message: "the GPU did not attach within 120 s" }))
+      const drop = (runId: string) => Effect.sync(() => link?.setWanted(wishes.remove(runId)))
+
+      const request = (runId: string) =>
+        Effect.gen(function* () {
+          if (link === null) {
+            return yield* Effect.fail(new PlatformError({ message: "the box is not connected to its guest agent" }))
           }
-          yield* Effect.sleep(GPU_POLL_MS)
-        }
-      })
+          link.setWanted(wishes.add(runId))
+          if ((yield* Ref.get(gpuState)) === "attached") return
+          const deadline = Date.now() + GPU_ATTACH_TIMEOUT_MS
+          while ((yield* Ref.get(gpuState)) !== "attached") {
+            if (Date.now() >= deadline) {
+              return yield* Effect.fail(new PlatformError({ message: "the GPU did not attach within 120 s" }))
+            }
+            yield* Effect.sleep(GPU_POLL_MS)
+          }
+        }).pipe(Effect.onError(() => drop(runId)))
 
       return BoxPlatform.of({
         hardware: NEST_HARDWARE,
         gpuOnDemand: {
           request,
-          release: Effect.sync(() => link?.setWanted(false)),
+          release: drop,
         },
         run: (hooks: PlatformHooks) =>
           Effect.async<void>(() => {
@@ -127,6 +131,7 @@ export const NestPlatformLive = (socketPath: string) =>
               },
             })
             link = current
+            if (wishes.wanted()) current.setWanted(true)
             return Effect.sync(() => {
               current.close()
               link = null
