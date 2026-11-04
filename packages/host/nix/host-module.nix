@@ -357,7 +357,7 @@ in
       wants = [ "network-online.target" ];
       serviceConfig = {
         Restart = lib.mkForce "always";
-        RestartSec = 2;
+        RestartSec = lib.mkForce 2;
       };
     };
 
