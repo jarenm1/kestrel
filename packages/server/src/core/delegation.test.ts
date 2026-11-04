@@ -37,7 +37,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
     Layer.succeed(AgentHarness, {
-      spawn: (_task: unknown, _run: unknown, _prompt: unknown, _display: unknown, _user: unknown, _session: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
+      spawn: (_task: unknown, _run: unknown, _start: unknown, _display: unknown, _user: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
       steer: () => Effect.succeed(false), cancel: (id: string) => testStore!.update((s) => {
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }

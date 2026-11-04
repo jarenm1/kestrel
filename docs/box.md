@@ -10,7 +10,10 @@ A thread retains each provider's native session across switches. Returning to a 
 session and carries only messages from subsequent runs, rather than replaying that session's own conversation.
 If that provider has no usable session, the run starts fresh with conversation history. A failed run that never
 recorded a session invalidates older sessions of the same provider (except restart interruptions); recovery carries
-history instead of silently losing it. Automatic deliveries keep the latest run's provider even if it never named
+history instead of silently losing it. A session is also recorded with where its CLI kept it: the thread's home (broker
+keys) or the user's own CLI login directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`). After the user connects or disconnects
+that CLI login, the CLI no longer finds sessions from before, so the next run starts fresh with conversation history
+instead of failing to resume. Automatic deliveries keep the latest run's provider even if it never named
 a session. Both full and delta handoffs cap rendered history at 60,000 characters, including peer labels and
 separators. An oversized newest turn is explicitly truncated; the new user message is not.
 

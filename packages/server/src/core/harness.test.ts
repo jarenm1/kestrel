@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker } from "../broker"
-import { CliAuth } from "../cliauth"
+import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
 import { CredentialStore } from "../credentials"
 import { GitHub } from "../github/api"
@@ -18,7 +18,7 @@ import { WorkspaceLive } from "./workspace"
 const harnessLayer = (
   root: string,
   cli: string,
-  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<[]>; readonly controlUrl?: string } = {},
+  options: { readonly maxConcurrentRuns?: number; readonly loggedInDirs?: () => Effect.Effect<ReadonlyArray<CliLoginDir>>; readonly controlUrl?: string } = {},
 ) => {
   const config: ServerConfig = {
     port: 8897,
@@ -111,7 +111,7 @@ test("an agent exiting early reports its failed turn to the control plane", asyn
         if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
-        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         yield* harness.stopAll()
         expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "exited before turn finished: Error: rate limit exceeded for <path>: exit code 1", count: 1 }] }])
@@ -149,7 +149,7 @@ test("Claude error results report the specific error rather than the result subt
         if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
-        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         yield* harness.stopAll()
         expect(reports).toEqual([{ failures: [{ tool: "agent:claude", signature: "turn failed: error: Rate limit exceeded: exit code 0", count: 1 }] }])
@@ -203,7 +203,7 @@ createInterface({ input: process.stdin })
         if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
-        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
         expect((yield* harness.steer(run.id, "Queued message")).accepted).toBe(true)
         yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
         const state = yield* store.read
@@ -281,8 +281,8 @@ createInterface({ input: process.stdin })
         if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
-        yield* harness.spawn(first.task, first.run, first.run.prompt, null, "test", null, {})
-        yield* harness.spawn(second.task, second.run, second.run.prompt, null, "test", null, {})
+        yield* harness.spawn(first.task, first.run, { fresh: first.run.prompt, resume: null }, null, "test", {})
+        yield* harness.spawn(second.task, second.run, { fresh: second.run.prompt, resume: null }, null, "test", {})
         // The run waits for its slot in the background; its queue item says it got as far as waiting.
         yield* Effect.promise(() => waiting.promise).pipe(Effect.timeout("8 seconds"))
         expect(harness.itemCount(second.run.id)).toBe(1) // "Waiting for a free run slot"
@@ -371,10 +371,10 @@ createInterface({ input: process.stdin })
       })
       const release = Promise.withResolvers<void>()
       try {
-        yield* harness.spawn(parent.task, parent.run, parent.run.prompt, null, parent.task.owner, null, {})
+        yield* harness.spawn(parent.task, parent.run, { fresh: parent.run.prompt, resume: null }, null, parent.task.owner, {})
         yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
         // The child needs the slot the parent holds, as a delegated run does while its parent waits for it.
-        yield* harness.spawn(child.task, child.run, child.run.prompt, null, child.task.owner, null, {})
+        yield* harness.spawn(child.task, child.run, { fresh: child.run.prompt, resume: null }, null, child.task.owner, {})
         const released = yield* Effect.fork(
           harness.withSlotReleased(parent.task.id, parent.run.id, Effect.promise(() => release.promise)),
         )
@@ -449,7 +449,8 @@ createInterface({ input: process.stdin })
             if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") finished.resolve()
           })
           try {
-            yield* harness.spawn(task, run, run.prompt, null, task.owner, resumeSession, {})
+            const resume = resumeSession === null ? null : { sessionId: resumeSession, continuation: "task-home", prompt: run.prompt }
+            yield* harness.spawn(task, run, { fresh: run.prompt, resume }, null, task.owner, {})
             yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
           } finally {
             unsubscribe()
@@ -483,6 +484,79 @@ createInterface({ input: process.stdin })
     await rm(root, { recursive: true, force: true })
   }
 }, 30_000)
+
+test("a run resumes only a session its CLI kept where it keeps sessions now, and records where it kept its own", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-run-continuation-"))
+  const cli = join(root, "cli.ts")
+  // Names a session after its run, then answers with the session it was asked to resume and the prompt it got.
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.type !== "user") return
+    console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "session-" + process.env.CLOUDAGENTS_RUN_ID }))
+    const result = "resume=" + (process.env.CLOUDAGENTS_RESUME_SESSION ?? "none") + " prompt=" + message.message.content
+    console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result }))
+  })
+  .on("close", () => process.exit(0))
+`)
+  const login: CliLoginDir = { provider: "claude-cli", dir: join(root, "login", "claude") }
+  await mkdir(login.dir, { recursive: true })
+  let loggedIn = false
+  const { config, layer } = harnessLayer(root, cli, { loggedInDirs: () => Effect.succeed(loggedIn ? [login] : []) })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, "task"), { recursive: true }))
+
+      /** The answer of a run offered `resume`, and where its own session was recorded. */
+      const runWith = (runId: string, continuation: string | undefined) =>
+        Effect.gen(function* () {
+          const { task, run: base } = runningTask("task")
+          const run = { ...base, id: runId }
+          yield* store.update((state) => {
+            state.tasks = [task]
+            state.runs.push(run)
+            return Either.right(null)
+          })
+          const finished = Promise.withResolvers<void>()
+          const unsubscribe = hub.subscribe(task.id, (event) => {
+            if (event._tag === "run.updated" && event.run.id === runId && event.run.status !== "running") finished.resolve()
+          })
+          try {
+            const resume = { sessionId: "earlier", continuation, prompt: "delta" }
+            yield* harness.spawn(task, run, { fresh: "whole conversation", resume }, null, task.owner, {})
+            yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+          } finally {
+            unsubscribe()
+          }
+          const state = yield* store.read
+          return {
+            answer: state.messages.at(-1)?.text,
+            recorded: state.runSessions.find((s) => s.runId === runId)?.continuation,
+          }
+        })
+
+      try {
+        expect(yield* runWith("home-to-home", "task-home")).toEqual({ answer: "resume=earlier prompt=delta", recorded: "task-home" })
+        expect(yield* runWith("home-to-login-gone", "cli-login")).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "task-home" })
+        loggedIn = true
+        // The user signed in: the CLI now looks for sessions in their login directory, where the earlier one is not.
+        expect(yield* runWith("login-from-home", "task-home")).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "cli-login" })
+        expect(yield* runWith("login-to-login", "cli-login")).toEqual({ answer: "resume=earlier prompt=delta", recorded: "cli-login" })
+        // A session recorded before its place was: resumed as before.
+        expect(yield* runWith("legacy", undefined)).toEqual({ answer: "resume=earlier prompt=delta", recorded: "cli-login" })
+      } finally {
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 40_000)
 
 test("prompts reach stdin but not descendant environments, and diagnostics never become conversation", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-prompt-boundary-"))
@@ -523,7 +597,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
         })
         try {
-          yield* harness.spawn(task, run, prompt, null, task.owner, null, {})
+          yield* harness.spawn(task, run, { fresh: prompt, resume: null }, null, task.owner, {})
           yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
           const message = (yield* store.read).messages.find((m) => m.runId === run.id)!
           if (id === "answer") expect(JSON.parse(message.text)).toEqual({ received: prompt, inheritedPrompt: null })
@@ -599,7 +673,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
       })
       try {
-        yield* harness.spawn(task, run, run.prompt, null, task.owner, null, {})
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
         yield* Effect.promise(() => reported.promise).pipe(Effect.timeout("8 seconds"))
         yield* Effect.promise(() => writeFile(compacted, ""))
         yield* Effect.promise(() => dropped.promise).pipe(Effect.timeout("8 seconds"))

@@ -9,15 +9,17 @@ import { DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
 import { GitHub } from "../github/api"
-import { AgentHarness, type AgentChoice } from "./harness"
+import { AgentHarness, type AgentChoice, type RunStart } from "./harness"
 import { EventHubLive } from "./events"
 import { CoreLive, CoreService, type CoreShape } from "./service"
 import { StateLive, StateStore, type StoreShape } from "./state"
 import { WorkspaceService } from "./workspace"
 
+/** A spawned run as it starts when its CLI still keeps sessions where the offered one is, and its fresh prompt. */
 interface Spawned {
   readonly prompt: string
   readonly resumeSession: string | null
+  readonly fresh: string
   readonly choice: AgentChoice
 }
 
@@ -46,8 +48,10 @@ const withCore = async (
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
     Layer.succeed(AgentHarness, {
-      spawn: (_task: unknown, _run: unknown, prompt: string, _display: unknown, _user: unknown, resumeSession: string | null, choice: AgentChoice) =>
-        Effect.sync(() => { spawned.push({ prompt, resumeSession, choice }) }),
+      spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
+        Effect.sync(() => {
+          spawned.push({ prompt: start.resume?.prompt ?? start.fresh, resumeSession: start.resume?.sessionId ?? null, fresh: start.fresh, choice })
+        }),
       steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
       cancel: (id: string) => testStore!.update((s) => {
         const run = s.runs.find((r) => r.id === id)
@@ -140,6 +144,9 @@ test("a run resumes the newest native session of its provider and carries only t
     // The resumed session already holds the Anthropic turns: replaying them duplicates context.
     expect(back.prompt).not.toContain("Anthropic opening request")
     expect(back.prompt).not.toContain("Anthropic opening answer")
+    // Should the CLI no longer find that session, the run starts fresh and needs the whole conversation.
+    expect(back.fresh).toContain("Anthropic opening request")
+    expect(back.fresh).toContain("OpenAI follow-up answer")
 
     yield* core.sendMessage("owner", "first-switch", "First Claude message", claude, [], false)
     const first = spawned.at(-1)!

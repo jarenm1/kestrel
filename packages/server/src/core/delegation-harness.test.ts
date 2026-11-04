@@ -69,7 +69,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       try {
         yield* Effect.promise(() => mkdir(join(config.threadsDir, "parent"), { recursive: true }))
         const initial = yield* store.read
-        yield* agent.spawn(initial.tasks.find((t) => t.id === "parent")!, initial.runs.find((r) => r.id === "parent-run")!, "hold parent", null, "owner", null, {})
+        yield* agent.spawn(initial.tasks.find((t) => t.id === "parent")!, initial.runs.find((r) => r.id === "parent-run")!, { fresh: "hold parent", resume: null }, null, "owner", {})
         const child = yield* core.delegate("parent", "parent-run", { title: "Child", message: "Do the task", requestId: "once" })
         const sibling = yield* core.delegate("parent", "parent-run", { title: "Sibling", message: "Do the other task", requestId: "twice" })
         let queued = false

@@ -11,12 +11,14 @@ export const nowIso = (): string => new Date().toISOString()
 
 /** A `task_ask` question still waiting for the user. Kept across restarts; at most one per task. */
 const PendingAskRecord = Schema.Struct({ taskId: Schema.String, runId: Schema.String, messageId: Schema.String })
-/** The agent session a run started, and its provider, so the task's next run can resume it. */
+/** The agent session a run started, its provider and where its CLI kept it, so the task's next run can resume it. */
 const RunSessionRecord = Schema.Struct({
   runId: Schema.String,
   sessionId: Schema.String,
   // State files written before model switching hold Claude Code sessions only.
   provider: Schema.optionalWith(ModelProvider, { default: () => DEFAULT_MODEL_PROVIDER }),
+  // Absent in state files written before it existed: such a session resumes wherever the next run keeps its sessions.
+  continuation: Schema.optional(Schema.String),
 })
 /** A user upload waiting for a message to name it; its bytes sit under the attachments dir until then. */
 const PendingUploadRecord = Schema.Struct({
@@ -50,6 +52,11 @@ export interface RunSession {
   readonly runId: string
   readonly sessionId: string
   readonly provider: ModelProvider
+  /**
+   * Where the provider's CLI kept the session (`SessionContinuation` in `harness.ts`). Only a run that keeps its sessions
+   * in the same place can resume it. Absent for sessions recorded before this existed.
+   */
+  readonly continuation?: string | undefined
 }
 
 /** A user upload waiting to be sent with a message. */

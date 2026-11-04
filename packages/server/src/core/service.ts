@@ -30,7 +30,6 @@ import {
   type TaskStatus,
   type Checkout,
   type CheckoutRequest,
-  type CliProvider,
   type CreateTaskBody,
   type Delegation,
   type HarnessCommands,
@@ -48,12 +47,12 @@ import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, remo
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
-import { AgentHarness, agentCwd, type AgentChoice } from "./harness"
+import { AgentHarness, agentCwd, CLI_PROVIDER, type AgentChoice, type RunStart } from "./harness"
 import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
 import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
-import { newId, nowIso, StateStore, type StoreState } from "./state"
+import { newId, nowIso, StateStore, type RunSession, type StoreState } from "./state"
 import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
@@ -1293,7 +1292,7 @@ export const CoreLive = Layer.effect(
               message: Message
               run: Run
               answer: Deferred.Deferred<AskOutcome> | null
-              start: { readonly prompt: string; readonly resumeSession: string | null } | null
+              start: RunStart | null
               delivered: string
               duplicate: boolean
             },
@@ -1359,18 +1358,19 @@ export const CoreLive = Layer.effect(
             // other provider's, or one that never named a session) are carried as a delta into the resumed session.
             // A run that failed before naming a session may have failed to resume the newest one: resuming it again
             // would repeat that failure, so this run starts fresh with the conversation instead. A thread with no
-            // session for this provider starts fresh and carries the whole conversation.
+            // session for this provider starts fresh and carries the whole conversation, and so does a run whose CLI
+            // no longer keeps its sessions where that session is (the harness decides at launch, see `RunStart`).
             const question = ask ? (s.messages.find((m) => m.id === ask.messageId)?.text ?? "") : null
             const taskRuns = s.runs.filter((r) => r.taskId === taskId)
             let resumeFrom: Run | undefined
-            let resumeSession: string | null = null
+            let resumeSession: RunSession | undefined
             for (let i = taskRuns.length - 1; i >= 0; i--) {
               const previous = taskRuns[i]!
               const session = s.runSessions.find((x) => x.runId === previous.id)
               if ((session?.provider ?? previous.provider ?? DEFAULT_MODEL_PROVIDER) !== provider) continue
               if (session !== undefined) {
                 resumeFrom = previous
-                resumeSession = session.sessionId
+                resumeSession = session
                 break
               }
               // Keep a failed resume invalidated even if another provider ran afterward.
@@ -1380,7 +1380,7 @@ export const CoreLive = Layer.effect(
             const history = s.messages.filter((m) => m.taskId === taskId)
             const resumeIndex = resumeFrom === undefined ? -1 : (runIndex.get(resumeFrom.id) ?? -1)
             const earlier = resumeFrom === undefined
-              ? history
+              ? []
               : history.filter((m) => m.runId !== null && (runIndex.get(m.runId) ?? -1) > resumeIndex)
             const run: Run = {
               id: newId(),
@@ -1416,8 +1416,17 @@ export const CoreLive = Layer.effect(
               question === null
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
-            const carried = formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, resumeFrom === undefined ? "full" : "delta")
-            const prompt = withUserContext(user, carried, runNotes(task))
+            const notes = runNotes(task)
+            const start: RunStart = {
+              fresh: withUserContext(user, formatHandoff(history, asked, HANDOFF_HISTORY_LIMIT, "full"), notes),
+              resume: resumeSession === undefined
+                ? null
+                : {
+                    sessionId: resumeSession.sessionId,
+                    continuation: resumeSession.continuation,
+                    prompt: withUserContext(user, formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, "delta"), notes),
+                  },
+            }
             return Either.right({
               task: { ...task },
               message,
@@ -1425,7 +1434,7 @@ export const CoreLive = Layer.effect(
               answer: null,
               delivered,
               duplicate: false,
-              start: { prompt, resumeSession },
+              start,
             })
           },
         )
@@ -1484,7 +1493,7 @@ export const CoreLive = Layer.effect(
         // user already has running is passed on, so the run's sandbox can reach it.
         const desktopNow = yield* desktop.status(taskId)
         const display = desktopNow.state === "running" ? desktopNow.display : null
-        yield* harness.spawn(taskNow, reserved.run, reserved.start.prompt, display, user, reserved.start.resumeSession, choice)
+        yield* harness.spawn(taskNow, reserved.run, reserved.start, display, user, choice)
         return { message: reserved.message, run: reserved.run }
       })
 
@@ -1946,7 +1955,7 @@ export const CoreLive = Layer.effect(
           const running = state.runs.find((r) => r.taskId === taskId && r.status === "running")
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
-          const cliProvider: CliProvider = provider === "anthropic" ? "claude-cli" : "codex-cli"
+          const cliProvider = CLI_PROVIDER[provider]
           // Started where the agent starts, so the list holds the project commands and skills of its checkout.
           const workspace = threadDirOf(task.id)
           const commands = yield* cliAuth.discoverCommands(user, cliProvider, workspace, agentCwd(workspace, task))

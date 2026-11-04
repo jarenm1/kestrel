@@ -44,16 +44,15 @@ export interface AgentHarnessShape {
    * With a free slot (CLOUDAGENTS_MAX_CONCURRENT_RUNS) the run starts at once and, on spawn failure, is aborted before the
    * error is returned. Otherwise it waits for a slot in the background, where a failure aborts it (logged). `user` is the signed-in user
    * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
-   * `resumeSession` is the agent session this run continues, or null for a fresh run.
+   * `start` is the prompt for a fresh session and the session the run may continue instead (`RunStart`).
    * `choice` is the model/effort the user picked for this message; omitted fields use the harness default.
    */
   readonly spawn: (
     task: Task,
     run: Run,
-    prompt: string,
+    start: RunStart,
     display: string | null,
     user: string,
-    resumeSession: string | null,
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
@@ -96,6 +95,28 @@ export interface AgentChoice {
   readonly effort?: AgentEffort
 }
 
+/**
+ * Where a provider's CLI keeps a run's native sessions: `task-home` under the thread's own home (the run uses the
+ * broker's keys), `cli-login` in the user's CLI login directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, see LOGIN_ENV).
+ * A session kept in one is not found from the other, so a run resumes only a session kept where it keeps its own.
+ */
+export type SessionContinuation = "task-home" | "cli-login"
+
+/** What a run's agent session starts from (see Core.sendMessage). */
+export interface RunStart {
+  /** The prompt for a fresh session: the conversation so far in full. */
+  readonly fresh: string
+  /**
+   * The newest native session of the run's provider, where its CLI kept it (undefined when that was not recorded),
+   * and the prompt carrying only what happened since. The run resumes it unless its CLI now keeps sessions elsewhere;
+   * then, or when this is null, it starts fresh.
+   */
+  readonly resume: { readonly sessionId: string; readonly continuation: string | undefined; readonly prompt: string } | null
+}
+
+/** The CLI that runs each provider's models; its login decides where the CLI keeps sessions. */
+export const CLI_PROVIDER: Record<ModelProvider, CliProvider> = { anthropic: "claude-cli", openai: "codex-cli" }
+
 interface ActiveRun {
   readonly child: ChildProcess
   readonly log: WriteStream
@@ -111,6 +132,8 @@ interface ActiveRun {
   context: ContextUsage | null
   /** Agent session id, once the CLI names it. */
   sessionId: string | null
+  /** Where the CLI keeps the session; null for replays, whose sessions come from a fixture. */
+  readonly continuation: SessionContinuation | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
   readonly agentKind: "claude" | "codex" | null
@@ -130,6 +153,8 @@ type RunConversation =
 interface RunSession {
   readonly seed: ContextUsage | null
   readonly conversation: RunConversation | null
+  /** Where the CLI keeps the session; null for replays. */
+  readonly continuation: SessionContinuation | null
   /** The queue item the run showed while it waited for a slot; it seeds the run's items. Null when it got one at once. */
   readonly queued: AgentItem | null
 }
@@ -400,11 +425,12 @@ export const AgentHarnessLive = Layer.effect(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
 
-    /** Remembers the agent session a run runs under and its provider, so the task's next run can resume it. */
-    const recordSession = (runId: string, sessionId: string, provider: ModelProvider) =>
+    /** Remembers the agent session a run runs under, its provider and where its CLI keeps it, so the task's next run can resume it. */
+    const recordSession = (runId: string, sessionId: string, provider: ModelProvider, continuation: SessionContinuation | null) =>
       store
         .update((s) => {
-          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), { runId, sessionId, provider }]
+          const session = { runId, sessionId, provider, ...(continuation === null ? {} : { continuation }) }
+          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), session]
           return Either.right(null)
         })
         .pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: could not record its session: ${e.message}`)))
@@ -492,7 +518,7 @@ export const AgentHarnessLive = Layer.effect(
           const session = sessionOf(parsed)
           if (session !== null) {
             entry.sessionId = session.sessionId
-            runFork(recordSession(runId, session.sessionId, session.provider))
+            runFork(recordSession(runId, session.sessionId, session.provider, entry.continuation))
           }
           if (!isDeltaLine(parsed)) {
             publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
@@ -538,6 +564,7 @@ export const AgentHarnessLive = Layer.effect(
               transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType)),
               context: session.seed,
               sessionId: null,
+              continuation: session.continuation,
               driver: null,
               agentKind: session.conversation?.kind ?? null,
               diagnostic: null,
@@ -571,7 +598,7 @@ export const AgentHarnessLive = Layer.effect(
                   send,
                   onThread: (threadId) => {
                     entry.sessionId = threadId
-                    runFork(recordSession(run.id, threadId, "openai"))
+                    runFork(recordSession(run.id, threadId, "openai", entry.continuation))
                   },
                   onDone,
                 },
@@ -660,7 +687,7 @@ export const AgentHarnessLive = Layer.effect(
           })))
         }),
       ),
-      spawn: (task, run, prompt, display, user, resumeSession, choice) => {
+      spawn: (task, run, start, display, user, choice) => {
         const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
           const homeDir = join(config.homesDir, task.id)
@@ -705,6 +732,17 @@ export const AgentHarnessLive = Layer.effect(
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
             const workspacePath = join(config.threadsDir, task.id)
             const cwd = agentCwd(workspacePath, task)
+            // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
+            // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
+            const continuation: SessionContinuation = logins.some((login) => login.provider === CLI_PROVIDER[provider])
+              ? "cli-login"
+              : "task-home"
+            const resumed = start.resume !== null &&
+              (start.resume.continuation === undefined || start.resume.continuation === continuation)
+              ? start.resume
+              : null
+            const resumeSession = resumed?.sessionId ?? null
+            const prompt = resumed?.prompt ?? start.fresh
             const creds = yield* credentials.get(task.owner)
             const gitIdentity = creds?.dev
               ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
@@ -761,6 +799,7 @@ export const AgentHarnessLive = Layer.effect(
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
               {
                 seed: resumeSession === null ? null : (task.context ?? null),
+                continuation,
                 queued: admission.queued,
                 conversation:
                   provider === "openai"
@@ -826,7 +865,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, conversation: null, queued: null },
+            { seed: null, conversation: null, continuation: null, queued: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
