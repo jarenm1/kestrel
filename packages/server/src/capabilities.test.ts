@@ -11,13 +11,14 @@ const linux = {
   exists: () => false,
   executable: () => true,
   westonVersion: () => "weston 14.0.1\n",
+  renderNode: () => false,
 }
 
 test("reports the configured sandbox, without inferring it from installed tools", () => {
   for (const sandbox of ["strict", "basic", "off"] as const) {
     const capability = boxCapabilities(sandbox, linux)
     expect(Schema.decodeUnknownSync(BoxCapabilities)(capability)).toEqual({
-      version: 1, platform: "linux", sandbox, desktop: "prerequisites-present",
+      version: 1, platform: "linux", sandbox, desktop: "prerequisites-present", gpu: "none", suspend: false,
     })
   }
 })
@@ -28,17 +29,24 @@ test("recognizes WSL and does not promise a desktop on native Windows or macOS",
     expect(boxCapabilities("off", {
       ...linux, platform,
       executable: () => { throw new Error("must not probe Linux tools") },
-    })).toEqual({ version: 1, platform: "other", sandbox: "off", desktop: "unavailable" })
+    })).toEqual({ version: 1, platform: "other", sandbox: "off", desktop: "unavailable", gpu: "none", suspend: false })
   }
 })
 
 test("recognizes a Lima guest by its cloud-init seed, whatever the kernel release", () => {
   const lima = { ...linux, exists: (path: string) => path === "/mnt/lima-cidata" }
   expect(boxCapabilities("basic", lima)).toEqual({
-    version: 1, platform: "lima", sandbox: "basic", desktop: "prerequisites-present",
+    version: 1, platform: "lima", sandbox: "basic", desktop: "prerequisites-present", gpu: "none", suspend: false,
   })
   expect(boxCapabilities("basic", { ...lima, exists: () => false }).platform).toBe("linux")
   expect(boxCapabilities("basic", { ...lima, platform: "darwin" }).platform).toBe("other")
+})
+
+test("a Nest VM reports the GPU and suspend its platform gives; a plain box reports its own render node", () => {
+  const nest = boxCapabilities("basic", linux, { gpu: "on-demand", suspend: true })
+  expect(Schema.decodeUnknownSync(BoxCapabilities)(nest)).toMatchObject({ gpu: "on-demand", suspend: true })
+  expect(boxCapabilities("basic", { ...linux, renderNode: () => true }).gpu).toBe("static")
+  expect(boxCapabilities("basic", linux)).toMatchObject({ gpu: "none", suspend: false })
 })
 
 test("a missing required desktop tool prevents reporting desktop prerequisites; optional tools do not", () => {

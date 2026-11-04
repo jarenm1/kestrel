@@ -1,5 +1,16 @@
 /** The desktop's executables. The box probe (capabilities.ts), `kestrel-box doctor` and the helper build all read this. */
 
+import { readdirSync } from "node:fs"
+
+/** Whether the machine has a DRI render node: a GPU a desktop can render on. */
+export const hasRenderNode = (): boolean => {
+  try {
+    return readdirSync("/dev/dri").some((name) => name.startsWith("renderD"))
+  } catch {
+    return false
+  }
+}
+
 /** The capture helper built by `kestrel-box desktop` (cli/desktop.ts); it runs ffmpeg as its child. */
 export const DESKTOP_HELPER = "xdamage-capture"
 

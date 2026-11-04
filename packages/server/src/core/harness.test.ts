@@ -54,6 +54,7 @@ const harnessLayer = (
     sandboxSslCertFile: null,
     systemd: null,
     maxConcurrentRuns: options.maxConcurrentRuns ?? 0,
+    nest: null,
     relay: options.controlUrl ? { controlUrl: options.controlUrl, boxToken: "test-token" } : null,
     direct: null,
     toolkitsFlake: null,
