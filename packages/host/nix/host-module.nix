@@ -15,6 +15,46 @@ let
   ingressListen = "127.0.0.1:8081";
   hostAddress = "169.254.0.1";
 
+  # Caddy DNS-01 plugins, built into the Caddy package. `tls` is the Caddyfile `dns` directive's arguments.
+  acmeDnsPlugins = {
+    cloudflare = {
+      plugin = "github.com/caddy-dns/cloudflare@v0.2.3";
+      hash = "sha256-weP1HzwGvPlLqiAViJus1GN74bps3bI179gomTCb6N4=";
+      tls = "cloudflare {env.CLOUDFLARE_API_TOKEN}";
+    };
+    route53 = {
+      plugin = "github.com/caddy-dns/route53@v1.6.2";
+      hash = "sha256-/G82qaQUcNaCSmSHWnyOIYbK+K6oHHUHWEpR+4lke54=";
+      tls = "route53";
+    };
+  };
+  acmeDns = acmeDnsPlugins.${cfg.acme.dnsProvider};
+
+  # Sandboxing shared by the host services that take guest or internet input.
+  hardened = {
+    NoNewPrivileges = true;
+    ProtectSystem = "strict";
+    ProtectHome = true;
+    PrivateTmp = true;
+    PrivateDevices = true;
+    ProtectKernelTunables = true;
+    ProtectKernelModules = true;
+    ProtectKernelLogs = true;
+    ProtectControlGroups = true;
+    ProtectClock = true;
+    ProtectHostname = true;
+    RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+    RestrictNamespaces = true;
+    RestrictRealtime = true;
+    RestrictSUIDSGID = true;
+    LockPersonality = true;
+    MemoryDenyWriteExecute = true;
+    CapabilityBoundingSet = [ "" ];
+    SystemCallArchitectures = "native";
+    SystemCallFilter = [ "@system-service" "~@privileged @resources" ];
+    UMask = "0077";
+  };
+
   gpuVendorDevice = lib.concatStringsSep "," cfg.gpu.vendorDevices;
 
   iommuParams =
@@ -55,6 +95,31 @@ in
         default = [ ];
         example = [ "10de:2684" ];
         description = "vendor:device IDs of GPUs bound to vfio-pci at boot (for on-demand attach).";
+      };
+    };
+
+    acme = {
+      dnsProvider = lib.mkOption {
+        type = lib.types.enum (builtins.attrNames acmeDnsPlugins);
+        description = "DNS provider for the wildcard certificate (Caddy DNS-01). Its credentials come from `acme.environmentFile`.";
+      };
+      environmentFile = lib.mkOption {
+        type = lib.types.str;
+        default = "${secretsDir}/caddy.env";
+        description = "EnvironmentFile for Caddy with the DNS provider's credentials: CLOUDFLARE_API_TOKEN for cloudflare; AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_REGION for route53.";
+      };
+    };
+
+    nixCache = {
+      publicKey = lib.mkOption {
+        type = lib.types.str;
+        example = "nest-host-1:0123abcd...=";
+        description = "Public key (`name:base64`) of this host's signed Nix cache. The host agent sends it to guests at `configure`, and guests trust it.";
+      };
+      secretKeyFile = lib.mkOption {
+        type = lib.types.str;
+        default = "${secretsDir}/nix-cache-secret-key";
+        description = "Signing key for the Nix cache, used when it is populated: `nix copy --to 'file:///var/cache/kestrel-nix?secret-key=<file>'`.";
       };
     };
 
@@ -104,7 +169,7 @@ in
       sliceConfig.MemoryAccounting = true;
     };
 
-    # The host's /169.254.0.1 address, where guests reach the dependency cache and the Nix cache.
+    # The host's /169.254.0.1 address, where guests reach the dependency cache, the Nix cache and DNS.
     networking.useNetworkd = true;
     systemd.network.netdevs."10-kestrel0" = {
       netdevConfig = {
@@ -119,21 +184,36 @@ in
     networking.nftables.enable = true;
     networking.nftables.ruleset = ''
       table inet kestrel {
+        # Anti-spoof: a guest's tap may send only from the address the host agent assigned to it. The agent
+        # fills this set when it creates the tap: `nft add element inet kestrel tap_addrs { "kn-<id>" . <vm-ip> }`.
+        set tap_addrs {
+          type ifname . ipv4_addr;
+        }
+        chain tap_source {
+          iifname . ip saddr != @tap_addrs drop
+        }
         chain forward {
           type filter hook forward priority filter; policy drop;
-          # Guests reach the internet only through the host's uplink; per-VM source checks
-          # (the anti-spoof rules for each tap) are added by the host agent when the tap is created.
-          iifname "kn-*" oifname "${cfg.uplink}" accept
+          iifname "kn-*" jump tap_source
           ct state established,related accept
+          # Guests reach the internet only through the uplink, never private, link-local, CGNAT or loopback ranges.
+          iifname "kn-*" oifname "${cfg.uplink}" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8 } accept
         }
         chain input {
           type filter hook input priority filter; policy drop;
           iifname "lo" accept
+          iifname "kn-*" jump tap_source
           ct state established,related accept
+          # Guests reach the dependency cache, the Nix cache and DNS on the host's /32, nothing else on the host.
+          iifname "kn-*" ip daddr ${hostAddress} tcp dport { 53, 3141, 5000 } accept
+          iifname "kn-*" ip daddr ${hostAddress} udp dport 53 accept
+          iifname "kn-*" drop
           tcp dport 22 accept
-          # Guests reach the dependency cache and the Nix cache, nothing else on the host.
-          iifname "kn-*" ip daddr ${hostAddress} tcp dport { 3141, 5000 } accept
           icmp type echo-request accept
+        }
+        chain output {
+          type filter hook output priority filter; policy accept;
+          ${lib.optionalString cfg.turn.enable "          # coturn must not relay to the host's own addresses (the fib match covers every local address).\n          meta skuid ${toString config.users.users.turnserver.uid} fib daddr type local drop\n"}
         }
       }
       table ip kestrel-nat {
@@ -143,6 +223,27 @@ in
         }
       }
     '';
+
+    # Guests resolve names through this resolver on the host's /32. The host keeps its own resolver settings.
+    services.unbound = {
+      enable = true;
+      resolveLocalQueries = false;
+      settings.server = {
+        interface = [ hostAddress ];
+        port = 53;
+        access-control = [ "10.77.0.0/16 allow" "0.0.0.0/0 refuse" ];
+        hide-identity = true;
+        hide-version = true;
+      };
+    };
+    systemd.services.unbound = {
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = {
+        Restart = "always";
+        RestartSec = 2;
+      };
+    };
 
     systemd.services.kestrel-host = {
       description = "Nest host agent";
@@ -164,6 +265,8 @@ in
         KESTREL_VM_SLICE = "kestrel-vms.slice";
         KESTREL_DEPCACHE_URL = "http://${depcacheListen}";
         KESTREL_NIX_CACHE_URL = "http://${nixCacheListen}";
+        KESTREL_NIX_CACHE_PUBLIC_KEY = cfg.nixCache.publicKey;
+        KESTREL_NIX_CACHE_SECRET_KEY_FILE = cfg.nixCache.secretKeyFile;
       };
       serviceConfig = {
         ExecStart = "${packages."kestrel-host"}/bin/kestrel-host";
@@ -171,6 +274,9 @@ in
         RestartSec = 2;
         RuntimeDirectory = "kestrel-host";
         RuntimeDirectoryMode = "0750";
+        # The API socket is shared with kestrel-ingress through this group: the directory is 0750 and the
+        # agent creates the socket 0660 in it.
+        Group = "kestrel-ingress";
         LimitNOFILE = 1048576;
         KillMode = "process";
       };
@@ -180,14 +286,16 @@ in
       description = "Nest dependency cache (read-only for VMs)";
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
       environment = {
         KESTREL_DEPCACHE_LISTEN = depcacheListen;
         KESTREL_DEPCACHE_DIR = "/var/cache/kestrel-depcache";
       };
-      serviceConfig = {
+      serviceConfig = hardened // {
         ExecStart = "${packages."kestrel-depcache"}/bin/kestrel-depcache";
         User = "kestrel-depcache";
         Group = "kestrel-depcache";
+        ReadWritePaths = [ "/var/cache/kestrel-depcache" ];
         Restart = "always";
         RestartSec = 2;
       };
@@ -202,7 +310,7 @@ in
         KESTREL_HOST_API_SOCKET = apiSocket;
         KESTREL_NEST_DOMAIN = "${cfg.slug}.${cfg.domain}";
       };
-      serviceConfig = {
+      serviceConfig = hardened // {
         ExecStart = "${packages."kestrel-ingress"}/bin/kestrel-ingress";
         User = "kestrel-ingress";
         Group = "kestrel-ingress";
@@ -216,8 +324,9 @@ in
     systemd.services.kestrel-nix-cache = {
       description = "Nest Nix binary cache (static, read-only)";
       wantedBy = [ "multi-user.target" ];
-      after = [ "systemd-networkd.service" ];
-      serviceConfig = {
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = hardened // {
         ExecStart = "${pkgs.python3}/bin/python3 -m http.server --bind ${hostAddress} --directory /var/cache/kestrel-nix 5000";
         DynamicUser = true;
         Restart = "always";
@@ -227,8 +336,16 @@ in
 
     services.caddy = {
       enable = true;
+      package = pkgs.caddy.withPlugins {
+        plugins = [ acmeDns.plugin ];
+        hash = acmeDns.hash;
+      };
+      environmentFile = cfg.acme.environmentFile;
       virtualHosts."*.${cfg.slug}.${cfg.domain}" = {
         extraConfig = ''
+          tls {
+            dns ${acmeDns.tls}
+          }
           reverse_proxy ${ingressListen}
         '';
       };
@@ -245,6 +362,11 @@ in
         denied-peer-ip=10.0.0.0-10.255.255.255
         denied-peer-ip=172.16.0.0-172.31.255.255
         denied-peer-ip=192.168.0.0-192.168.255.255
+        denied-peer-ip=100.64.0.0-100.127.255.255
+        denied-peer-ip=127.0.0.0-127.255.255.255
+        denied-peer-ip=::1-::1
+        denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+        denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
       '';
     };
   };
