@@ -3,10 +3,11 @@ import { Effect, Layer, Ref } from "effect"
 import type { BoxActivity, GpuState } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import { StateStore } from "../core/state"
+import { EventHub } from "../core/events"
 import { AgentHarness } from "../core/harness"
 import { DesktopManager } from "../desktop"
 import { startGuestLink, type GuestLink } from "./guest-link"
-import { GpuWishes } from "./gpu-wish"
+import { GpuWishes, withdrawWishesOnRunEnd } from "./gpu-wish"
 import { ActivityTracker } from "./tracker"
 import { BoxPlatform, PlatformError, type PlatformHardware, type PlatformHooks } from "./service"
 
@@ -61,10 +62,13 @@ export const NestPlatformLive = (socketPath: string) =>
       const store = yield* StateStore
       const tracker = yield* ActivityTracker
       const harness = yield* AgentHarness
+      const hub = yield* EventHub
 
       let link: GuestLink | null = null
       const gpuState = yield* Ref.make<GpuState>("none")
       const wishes = new GpuWishes()
+      // A run that ends without releasing the GPU (succeeded, failed or cancelled) withdraws its own wish.
+      withdrawWishesOnRunEnd(hub.subscribeAll, wishes, (wanted) => link?.setWanted(wanted))
 
       const activity = (): BoxActivity => {
         const snapshot = Effect.runSync(tracker.snapshot)
