@@ -9,7 +9,9 @@ let
 
   stateDir = "/var/lib/kestrel-host";
   secretsDir = "/etc/kestrel-host";
-  apiSocket = "/run/kestrel-host/api.sock";
+  configFile = "${secretsDir}/config.json";
+  runDir = "/run/kestrel-host";
+  apiSocket = "${runDir}/api.sock";
   depcacheListen = "169.254.0.1:3141";
   nixCacheListen = "169.254.0.1:5000";
   ingressListen = "127.0.0.1:8081";
@@ -59,6 +61,23 @@ let
 
   iommuParams =
     if cfg.cpuVendor == "intel" then [ "intel_iommu=on" ] else [ "amd_iommu=on" "iommu=pt" ];
+
+  # `/etc/kestrel-host/config.json`, the file `kestrel-host daemon` reads (src/config.ts `HostConfig`).
+  hostConfig = {
+    inherit (cfg) hostId slug controlUrl hostSecretFile meterUrl template capacity gpus egressMbit
+      idleSuspendAfterMs parkAfterMs backupIntervalMs meterIntervalMs volumeStore volumeKeyFile;
+    stateDir = stateDir;
+    runDir = runDir;
+    nestDomain = cfg.domain;
+    agentVersion = self.shortRev or self.dirtyShortRev or "unknown";
+    cloudHypervisor = "${pkgs.cloud-hypervisor}/bin/cloud-hypervisor";
+    volumeTool = "${packages."kestrel-volume"}/bin/kestrel-volume";
+    guestImageDir = "${cfg.guestImage}";
+    scope = "systemd-system";
+    depcacheUrl = "http://${depcacheListen}";
+    nixCacheUrl = "http://${nixCacheListen}";
+    nixCachePublicKey = cfg.nixCache.publicKey;
+  };
 in
 {
   options.services.kestrel-nest = {
@@ -69,6 +88,13 @@ in
       description = "This host's DNS label; boxes are served at `<boxId>.<slug>.<domain>`.";
     };
 
+    hostId = lib.mkOption {
+      type = lib.types.str;
+      default = cfg.slug;
+      defaultText = lib.literalExpression "config.services.kestrel-nest.slug";
+      description = "This host's id at the control plane (`hostId`).";
+    };
+
     domain = lib.mkOption {
       type = lib.types.str;
       description = "The Nest domain (`nestDomain`). Caddy serves `*.<slug>.<domain>`.";
@@ -76,7 +102,18 @@ in
 
     controlUrl = lib.mkOption {
       type = lib.types.str;
-      description = "Base URL of the control plane the host agent connects to.";
+      description = "Base URL of the control plane the host agent connects to (`ws://` or `wss://`).";
+    };
+
+    meterUrl = lib.mkOption {
+      type = lib.types.str;
+      description = "Control plane origin for meter batches (`https://`).";
+    };
+
+    hostSecretFile = lib.mkOption {
+      type = lib.types.str;
+      default = "${secretsDir}/host-secret";
+      description = "File holding the host secret the control plane issued to this host.";
     };
 
     uplink = lib.mkOption {
@@ -89,13 +126,86 @@ in
       description = "Selects the IOMMU kernel parameters for GPU passthrough.";
     };
 
-    gpu = {
-      vendorDevices = lib.mkOption {
-        type = lib.types.listOf (lib.types.strMatching "[0-9a-f]{4}:[0-9a-f]{4}");
-        default = [ ];
-        example = [ "10de:2684" ];
-        description = "vendor:device IDs of GPUs bound to vfio-pci at boot (for on-demand attach).";
+    capacity = {
+      vcpus = lib.mkOption {
+        type = lib.types.ints.positive;
+        description = "Logical CPUs the host gives to VMs.";
       };
+      memoryBytes = lib.mkOption {
+        type = lib.types.ints.positive;
+        description = "Memory the host gives to VMs, in bytes.";
+      };
+    };
+
+    template = {
+      maxVcpus = lib.mkOption {
+        type = lib.types.ints.positive;
+        description = "Largest vCPU count a box may be given on this host.";
+      };
+      maxMemoryBytes = lib.mkOption {
+        type = lib.types.ints.positive;
+        description = "Largest memory a box may be given on this host, in bytes (above the 1 GiB template boot memory).";
+      };
+    };
+
+    gpus = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          pciAddress = lib.mkOption { type = lib.types.str; example = "0000:01:00.0"; };
+          model = lib.mkOption { type = lib.types.str; example = "NVIDIA RTX A4000"; };
+          vramBytes = lib.mkOption { type = lib.types.ints.unsigned; };
+        };
+      });
+      default = [ ];
+      description = "GPUs the host can attach on demand (`pciAddress` is the function bound to vfio-pci).";
+    };
+
+    egressMbit = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 200;
+      description = "Per-VM egress limit in Mbit/s (`tc`).";
+    };
+
+    idleSuspendAfterMs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 10 * 60 * 1000;
+      description = "A running box idle this long is suspended.";
+    };
+
+    parkAfterMs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 7 * 24 * 60 * 60 * 1000;
+      description = "A suspended box this long is parked.";
+    };
+
+    backupIntervalMs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 60 * 60 * 1000;
+      description = "How often a running box's volume is backed up.";
+    };
+
+    meterIntervalMs = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 60 * 1000;
+      description = "How often meter batches are shipped to the control plane.";
+    };
+
+    volumeStore = lib.mkOption {
+      type = lib.types.str;
+      description = "Backing store for volumes and backups: `file:///dir` or `s3://bucket/prefix`.";
+    };
+
+    volumeKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "${secretsDir}/volume.key";
+      description = "Fleet key for `kestrel-volume --key-file`; null when the store is unencrypted.";
+    };
+
+    guestImage = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${system}.nest-guest;
+      defaultText = lib.literalExpression "self.packages.\${system}.nest-guest";
+      description = "The guest image (`manifest.json`, kernel, initrd, store, cmdline) new VMs are cloned from.";
     };
 
     acme = {
@@ -116,11 +226,13 @@ in
         example = "nest-host-1:0123abcd...=";
         description = "Public key (`name:base64`) of this host's signed Nix cache. The host agent sends it to guests at `configure`, and guests trust it.";
       };
-      secretKeyFile = lib.mkOption {
-        type = lib.types.str;
-        default = "${secretsDir}/nix-cache-secret-key";
-        description = "Signing key for the Nix cache, used when it is populated: `nix copy --to 'file:///var/cache/kestrel-nix?secret-key=<file>'`.";
-      };
+    };
+
+    gpu.vendorDevices = lib.mkOption {
+      type = lib.types.listOf (lib.types.strMatching "[0-9a-f]{4}:[0-9a-f]{4}");
+      default = [ ];
+      example = [ "10de:2684" ];
+      description = "vendor:device IDs of GPUs bound to vfio-pci at boot (for on-demand attach).";
     };
 
     turn.enable = lib.mkEnableOption "coturn on the host for WebRTC (used when no routed IPv6 prefix is available)";
@@ -154,6 +266,9 @@ in
       group = "kestrel-depcache";
       home = "/var/cache/kestrel-depcache";
     };
+
+    environment.etc."kestrel-host/config.json".source =
+      pkgs.writeText "kestrel-host-config.json" (builtins.toJSON hostConfig);
 
     systemd.tmpfiles.rules = [
       "d ${stateDir} 0700 root root -"
@@ -250,26 +365,10 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" "kestrel-depcache.service" "kestrel-nix-cache.service" ];
       wants = [ "network-online.target" ];
-      path = [ pkgs.cloud-hypervisor pkgs.iproute2 pkgs.nftables pkgs.xfsprogs packages."kestrel-volume" ];
-      environment = {
-        KESTREL_HOST_SLUG = cfg.slug;
-        KESTREL_NEST_DOMAIN = cfg.domain;
-        KESTREL_CONTROL_URL = cfg.controlUrl;
-        KESTREL_HOST_STATE_DIR = stateDir;
-        KESTREL_HOST_SECRETS_DIR = secretsDir;
-        KESTREL_HOST_API_SOCKET = apiSocket;
-        KESTREL_HOST_UPLINK = cfg.uplink;
-        KESTREL_VOLUME_BIN = "${packages."kestrel-volume"}/bin/kestrel-volume";
-        KESTREL_CLOUD_HYPERVISOR_BIN = "${pkgs.cloud-hypervisor}/bin/cloud-hypervisor";
-        KESTREL_GUEST_IMAGE_STORE = "${stateDir}/templates";
-        KESTREL_VM_SLICE = "kestrel-vms.slice";
-        KESTREL_DEPCACHE_URL = "http://${depcacheListen}";
-        KESTREL_NIX_CACHE_URL = "http://${nixCacheListen}";
-        KESTREL_NIX_CACHE_PUBLIC_KEY = cfg.nixCache.publicKey;
-        KESTREL_NIX_CACHE_SECRET_KEY_FILE = cfg.nixCache.secretKeyFile;
-      };
+      # The daemon shells out to `ip`, `tc`, `nft`, `systemd-run`, `cp` and the volume tool.
+      path = with pkgs; [ cloud-hypervisor iproute2 nftables xfsprogs systemd coreutils packages."kestrel-volume" ];
       serviceConfig = {
-        ExecStart = "${packages."kestrel-host"}/bin/kestrel-host";
+        ExecStart = "${packages."kestrel-host"}/bin/kestrel-host daemon --config ${configFile}";
         Restart = "always";
         RestartSec = 2;
         RuntimeDirectory = "kestrel-host";
@@ -287,12 +386,8 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = {
-        KESTREL_DEPCACHE_LISTEN = depcacheListen;
-        KESTREL_DEPCACHE_DIR = "/var/cache/kestrel-depcache";
-      };
       serviceConfig = hardened // {
-        ExecStart = "${packages."kestrel-depcache"}/bin/kestrel-depcache";
+        ExecStart = "${packages."kestrel-depcache"}/bin/kestrel-depcache --listen ${depcacheListen} --storage-dir /var/cache/kestrel-depcache --public-base-url http://${depcacheListen}";
         User = "kestrel-depcache";
         Group = "kestrel-depcache";
         ReadWritePaths = [ "/var/cache/kestrel-depcache" ];
@@ -305,13 +400,8 @@ in
       description = "Nest ingress (route, hold, wake)";
       wantedBy = [ "multi-user.target" ];
       after = [ "kestrel-host.service" ];
-      environment = {
-        KESTREL_INGRESS_LISTEN = ingressListen;
-        KESTREL_HOST_API_SOCKET = apiSocket;
-        KESTREL_NEST_DOMAIN = "${cfg.slug}.${cfg.domain}";
-      };
       serviceConfig = hardened // {
-        ExecStart = "${packages."kestrel-ingress"}/bin/kestrel-ingress";
+        ExecStart = "${packages."kestrel-ingress"}/bin/kestrel-ingress --listen ${ingressListen} --api-socket ${apiSocket} --domain-suffix ${cfg.slug}.${cfg.domain}";
         User = "kestrel-ingress";
         Group = "kestrel-ingress";
         Restart = "always";
