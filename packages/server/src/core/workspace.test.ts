@@ -228,6 +228,39 @@ describe("checkout git runs in the shadow", () => {
     expect(git(dir, ["rev-parse", "HEAD"])).toBe(start)
   })
 
+  test("a checkout has the remote's default branch and origin/HEAD, whatever git's init default", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    // A default branch no git init default names, so the mirror's initial HEAD is always wrong.
+    git(origin, ["branch", "-m", "main", "trunk"])
+    const mirrorPath = join(root, "mirrors", "origin.git")
+    const threadDir = join(root, "threads", "t1")
+    const dir = join(threadDir, "repo")
+    const head = await withWorkspace((ws) =>
+      Effect.gen(function* () {
+        const defaultBranch = yield* ws.syncMirror({ mirrorPath, url: origin })
+        const sha = yield* ws.resolveRef(mirrorPath, `refs/heads/${defaultBranch}`)
+        if (sha === null) return yield* Effect.die("mirror has no default branch")
+        yield* ws.createCheckout({
+          threadDir,
+          dir,
+          shadowPath: join(root, "shadows", "t1", "c1.git"),
+          mirrorPath,
+          url: origin,
+          branch: "cloudagents/t1",
+          startSha: sha,
+          baseSha: sha,
+          pinRef: checkoutPinRef("t1", "c1"),
+        })
+        return sha
+      }),
+    )
+
+    // What agents compare their branch against.
+    expect(git(dir, ["rev-parse", "trunk"])).toBe(head)
+    expect(git(dir, ["rev-parse", "origin/HEAD"])).toBe(head)
+  })
+
   test("a checkout whose .git points outside the thread workspace is refused", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)
