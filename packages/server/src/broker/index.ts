@@ -24,6 +24,7 @@ export const BROKER_UPSTREAMS: Record<BrokerProvider, { readonly base: string; r
   // Anthropic-compatible: Claude Code's `/v1/messages` is forwarded with `Authorization: Bearer`.
   openrouter: { base: "https://openrouter.ai/api", keyHeader: "bearer" },
   zai: { base: "https://api.z.ai/api/anthropic", keyHeader: "bearer" },
+  deepseek: { base: "https://api.deepseek.com/anthropic", keyHeader: "bearer" },
 }
 
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>

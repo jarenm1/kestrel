@@ -13,6 +13,7 @@ const commands = {
   openai: "codex app-server",
   openrouter: "claude -p",
   zai: "claude -p",
+  deepseek: "claude -p",
   opencode: `OPENCODE_CONFIG_CONTENT='{"share": "disabled", "update": "disable"}' opencode acp`,
   google: 'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry',
   omp: "omp acp",

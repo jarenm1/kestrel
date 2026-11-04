@@ -10,7 +10,7 @@ const BASE = "http://127.0.0.1:8787/broker/run-token"
 
 describe("broker provider mapping", () => {
   test("every brokered provider has an upstream and every model provider has a model", () => {
-    expect(BROKER_PROVIDERS).toEqual(["anthropic", "openai", "openrouter", "zai"])
+    expect(BROKER_PROVIDERS).toEqual(["anthropic", "openai", "openrouter", "zai", "deepseek"])
     for (const provider of BROKER_PROVIDERS) {
       expect(BROKER_UPSTREAMS[provider].base).toMatch(/^https:\/\//)
     }
@@ -28,7 +28,7 @@ describe("broker provider mapping", () => {
         OPENAI_API_KEY: "t",
       })
     }
-    for (const provider of ["openrouter", "zai"] as const) {
+    for (const provider of ["openrouter", "zai", "deepseek"] as const) {
       expect(brokerEnv(provider, BASE, "t")).toEqual({
         ANTHROPIC_BASE_URL: `${BASE}/${provider}`,
         ANTHROPIC_AUTH_TOKEN: "t",
