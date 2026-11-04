@@ -75,6 +75,18 @@ impl Tracker {
     fn lock(&self) -> MutexGuard<'_, HashMap<String, BoxActivity>> {
         self.boxes.lock().unwrap()
     }
+
+    /// Open connections the tracker holds for a box.
+    #[cfg(test)]
+    pub fn open_connections(&self, box_id: &str) -> usize {
+        self.lock().get(box_id).map_or(0, |entry| entry.open)
+    }
+
+    /// Boxes the tracker holds at all.
+    #[cfg(test)]
+    pub fn tracked(&self) -> usize {
+        self.lock().len()
+    }
 }
 
 /// Held for the life of one proxied request; dropping it releases the box's connection count.

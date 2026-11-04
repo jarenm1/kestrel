@@ -6,14 +6,22 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use tokio::sync::{watch, Semaphore};
 use tokio::time::timeout;
 
+use crate::activity::{ActivityGuard, Tracker};
 use crate::api::HostApi;
 
 /// How long a route to a running box stays cached. Short: a suspended VM stops answering at once, and a failed connect
 /// invalidates the entry anyway.
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(2);
+/// How long a host that is not a box (or a deleted one) stays known as missing, so repeated requests for it do not
+/// each call the host agent.
+const MISSING_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Most entries the route cache holds. Host names come from clients, so the cache must not grow without bound.
+const MAX_CACHED_ROUTES: usize = 4096;
+/// Most host API route lookups in flight. A request that finds them all busy gets 503 instead of queueing another call.
+const MAX_CONCURRENT_LOOKUPS: usize = 32;
 /// Longest a request waits for a suspended box to come up before it gets 503.
 pub const WAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound on a host API call that is not a wake.
@@ -54,12 +62,14 @@ pub fn box_id_from_host(host: &str, domain_suffix: &str) -> Option<String> {
 }
 
 /// `/mcp` and `/broker`, and everything under them, never reach a box through ingress. The check runs on the decoded,
-/// dot-resolved path, so `/%6dcp`, `//mcp` and `/x/../mcp` are caught too.
+/// dot-resolved path, so `/%6dcp`, `//mcp` and `/x/../mcp` are caught too. A matrix parameter (`/mcp;a=b`) belongs to
+/// its segment, so it does not hide the name.
 pub fn is_blocked_path(path: &str) -> bool {
     let decoded = percent_decode(path);
     let mut segments: Vec<&str> = Vec::new();
     for segment in decoded.split('/') {
-        match segment {
+        let name = segment.split(';').next().unwrap_or("");
+        match name {
             "" | "." => {}
             ".." => {
                 segments.pop();
@@ -99,11 +109,21 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Where a request for a box goes now.
+/// Where a request for a box goes now. `Upstream` carries the box's activity guard, which must live as long as the
+/// request does (the response body, or the upgraded connection).
 pub enum Resolved {
-    Upstream(String),
+    Upstream {
+        upstream: String,
+        guard: ActivityGuard,
+    },
     NotFound,
     Unavailable,
+}
+
+#[derive(Clone)]
+enum Cached {
+    Upstream(String),
+    Missing,
 }
 
 #[derive(Clone)]
@@ -115,24 +135,43 @@ enum WakeOutcome {
 
 pub struct Router {
     api: Arc<HostApi>,
-    routes: Mutex<HashMap<String, (String, Instant)>>,
+    activity: Arc<Tracker>,
+    /// Host name to what it resolved to, and when that answer stops being trusted.
+    routes: Mutex<HashMap<String, (Cached, Instant)>>,
+    lookups: Semaphore,
     wakes: Arc<WakeGate>,
 }
 
 impl Router {
-    pub fn new(api: Arc<HostApi>) -> Self {
+    pub fn new(api: Arc<HostApi>, activity: Arc<Tracker>) -> Self {
         Self {
             api,
+            activity,
             routes: Mutex::new(HashMap::new()),
+            lookups: Semaphore::new(MAX_CONCURRENT_LOOKUPS),
             wakes: Arc::new(WakeGate::default()),
         }
     }
 
+    /// Where a request for `box_id` goes. The box's activity is counted from the moment the host confirms the box
+    /// exists, so a request held while the box wakes keeps it awake. Unknown boxes never reach the tracker.
     pub async fn resolve(&self, box_id: &str) -> Resolved {
-        if let Some(upstream) = self.cached(box_id) {
-            return Resolved::Upstream(upstream);
+        match self.cached(box_id) {
+            Some(Cached::Upstream(upstream)) => {
+                return Resolved::Upstream {
+                    upstream,
+                    guard: self.activity.request_started(box_id),
+                };
+            }
+            Some(Cached::Missing) => return Resolved::NotFound,
+            None => {}
         }
-        let route = match timeout(API_TIMEOUT, self.api.route(box_id)).await {
+        let Ok(slot) = self.lookups.try_acquire() else {
+            return Resolved::Unavailable;
+        };
+        let answer = timeout(API_TIMEOUT, self.api.route(box_id)).await;
+        drop(slot);
+        let route = match answer {
             Ok(Ok(route)) => route,
             Ok(Err(e)) => {
                 eprintln!("kestrel-ingress: route {box_id}: {e}");
@@ -143,19 +182,24 @@ impl Router {
                 return Resolved::Unavailable;
             }
         };
-        let Some(route) = route else {
+        let Some(route) = route.filter(|route| route.state != "deleted") else {
+            self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
             return Resolved::NotFound;
         };
+        let guard = self.activity.request_started(box_id);
         match route.state.as_str() {
             "running" => match route.upstream {
-                Some(upstream) => {
-                    self.remember(box_id, &upstream);
-                    Resolved::Upstream(upstream)
-                }
+                Some(upstream) => self.routed(box_id, upstream, guard),
                 None => Resolved::Unavailable,
             },
-            "suspended" | "parked" => self.wake(box_id).await,
-            "deleted" => Resolved::NotFound,
+            "suspended" | "parked" => match self.wake(box_id).await {
+                WakeOutcome::Ready(upstream) => self.routed(box_id, upstream, guard),
+                WakeOutcome::NotFound => {
+                    self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
+                    Resolved::NotFound
+                }
+                WakeOutcome::Failed => Resolved::Unavailable,
+            },
             _ => Resolved::Unavailable,
         }
     }
@@ -165,11 +209,15 @@ impl Router {
         self.routes.lock().unwrap().remove(box_id);
     }
 
-    async fn wake(&self, box_id: &str) -> Resolved {
+    fn routed(&self, box_id: &str, upstream: String, guard: ActivityGuard) -> Resolved {
+        self.store(box_id, Cached::Upstream(upstream.clone()), ROUTE_CACHE_TTL);
+        Resolved::Upstream { upstream, guard }
+    }
+
+    async fn wake(&self, box_id: &str) -> WakeOutcome {
         let api = Arc::clone(&self.api);
         let key = box_id.to_owned();
-        let outcome = self
-            .wakes
+        self.wakes
             .run(box_id, move || async move {
                 match timeout(WAKE_TIMEOUT, api.wake(&key)).await {
                     Ok(Ok(Some(reply))) => WakeOutcome::Ready(reply.upstream),
@@ -184,22 +232,14 @@ impl Router {
                     }
                 }
             })
-            .await;
-        match outcome {
-            WakeOutcome::Ready(upstream) => {
-                self.remember(box_id, &upstream);
-                Resolved::Upstream(upstream)
-            }
-            WakeOutcome::NotFound => Resolved::NotFound,
-            WakeOutcome::Failed => Resolved::Unavailable,
-        }
+            .await
     }
 
-    fn cached(&self, box_id: &str) -> Option<String> {
+    fn cached(&self, box_id: &str) -> Option<Cached> {
         let mut routes = self.routes.lock().unwrap();
         let entry = routes.get(box_id).cloned();
         match entry {
-            Some((upstream, at)) if at.elapsed() < ROUTE_CACHE_TTL => Some(upstream),
+            Some((value, expires)) if Instant::now() < expires => Some(value),
             Some(_) => {
                 routes.remove(box_id);
                 None
@@ -208,11 +248,18 @@ impl Router {
         }
     }
 
-    fn remember(&self, box_id: &str, upstream: &str) {
-        self.routes
-            .lock()
-            .unwrap()
-            .insert(box_id.to_owned(), (upstream.to_owned(), Instant::now()));
+    /// Remembers an answer for `ttl`. Past the cap, expired entries are dropped first; if the cache is still full, the
+    /// answer is not kept and the next request asks the host again.
+    fn store(&self, box_id: &str, value: Cached, ttl: Duration) {
+        let mut routes = self.routes.lock().unwrap();
+        if routes.len() >= MAX_CACHED_ROUTES && !routes.contains_key(box_id) {
+            let now = Instant::now();
+            routes.retain(|_, (_, expires)| *expires > now);
+            if routes.len() >= MAX_CACHED_ROUTES {
+                return;
+            }
+        }
+        routes.insert(box_id.to_owned(), (value, Instant::now() + ttl));
     }
 }
 
@@ -260,7 +307,18 @@ impl WakeGate {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use bytes::Bytes;
+    use http::{Request, Response};
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::UnixListener;
 
     use super::*;
 
@@ -313,10 +371,21 @@ mod tests {
             "/%6dcp",
             "/x/../mcp",
             "/%2Fmcp",
+            "/mcp;a=1",
+            "/Broker;jsessionid=9/x",
+            "/mcp;/tools",
         ] {
             assert!(is_blocked_path(path), "{path} should be blocked");
         }
-        for path in ["/", "/api/health", "/mcpx", "/mc", "/x/mcp", "/brokerage"] {
+        for path in [
+            "/",
+            "/api/health",
+            "/mcpx",
+            "/mc",
+            "/x/mcp",
+            "/brokerage",
+            "/x;/mcp",
+        ] {
             assert!(!is_blocked_path(path), "{path} should pass");
         }
     }
@@ -369,5 +438,108 @@ mod tests {
         });
         assert!(answer(retried.await).is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    static SOCKETS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A host agent stand-in on a Unix socket. `answer(method, path)` gives the status and body of each reply; the
+    /// returned counter counts the requests it received.
+    async fn fake_host(
+        answer: fn(&str, &str) -> (u16, &'static str),
+    ) -> (PathBuf, Arc<AtomicUsize>) {
+        let n = SOCKETS.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "kestrel-ingress-test-{}-{n}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind fake host");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let counter = Arc::clone(&counter);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let counter = Arc::clone(&counter);
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            let (status, body) = answer(req.method().as_str(), req.uri().path());
+                            Ok::<_, Infallible>(
+                                Response::builder()
+                                    .status(status)
+                                    .body(Full::new(Bytes::from(body)))
+                                    .expect("response"),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (path, calls)
+    }
+
+    fn host_answer(method: &str, path: &str) -> (u16, &'static str) {
+        match (method, path) {
+            ("GET", "/v1/boxes/box1/route") => (
+                200,
+                r#"{"state":"running","upstream":"http://10.77.0.2:8787"}"#,
+            ),
+            ("GET", "/v1/boxes/asleep/route") => (200, r#"{"state":"suspended"}"#),
+            ("POST", "/v1/boxes/asleep/wake") => (200, r#"{"upstream":"http://10.77.0.3:8787"}"#),
+            _ => (404, "{}"),
+        }
+    }
+
+    fn router_for(socket: PathBuf, tracker: &Arc<Tracker>) -> Router {
+        Router::new(Arc::new(HostApi::new(socket)), Arc::clone(tracker))
+    }
+
+    #[tokio::test]
+    async fn an_unknown_box_is_looked_up_once_and_never_tracked() {
+        let (socket, calls) = fake_host(host_answer).await;
+        let tracker = Arc::new(Tracker::default());
+        let router = router_for(socket, &tracker);
+        for _ in 0..3 {
+            assert!(matches!(router.resolve("ghost").await, Resolved::NotFound));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.tracked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_running_box_is_routed_from_cache_and_counted_while_a_request_holds_it() {
+        let (socket, calls) = fake_host(host_answer).await;
+        let tracker = Arc::new(Tracker::default());
+        let router = router_for(socket, &tracker);
+        let Resolved::Upstream { upstream, guard } = router.resolve("box1").await else {
+            panic!("box1 should route");
+        };
+        assert_eq!(upstream, "http://10.77.0.2:8787");
+        assert_eq!(tracker.open_connections("box1"), 1);
+        drop(guard);
+        assert_eq!(tracker.open_connections("box1"), 0);
+
+        assert!(matches!(
+            router.resolve("box1").await,
+            Resolved::Upstream { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_request_that_wakes_a_suspended_box_counts_as_its_activity() {
+        let (socket, _calls) = fake_host(host_answer).await;
+        let tracker = Arc::new(Tracker::default());
+        let router = router_for(socket, &tracker);
+        let Resolved::Upstream { upstream, guard } = router.resolve("asleep").await else {
+            panic!("asleep should wake and route");
+        };
+        assert_eq!(upstream, "http://10.77.0.3:8787");
+        assert_eq!(tracker.open_connections("asleep"), 1);
+        drop(guard);
     }
 }

@@ -2,9 +2,9 @@
 //! upgrade needs; after `101` the two sockets are copied to each other (WebSocket and other upgrades).
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{CONNECTION, CONTENT_TYPE, UPGRADE};
@@ -22,8 +22,11 @@ use crate::activity::ActivityGuard;
 
 pub type Body = BoxBody<Bytes, hyper::Error>;
 
-const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+
+/// Longest a connect to a box's VM may take. A VM that just suspended or lost its tap never answers the SYN, so
+/// without this a stale route would hold the request for the kernel's connect timeout, minutes.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Headers that describe one hop, never the end-to-end exchange (RFC 9110 section 7.6.1).
 const HOP_BY_HOP: [&str; 8] = [
@@ -49,8 +52,10 @@ pub struct Proxy {
 
 impl Proxy {
     pub fn new() -> Self {
+        let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
         Self {
-            client: Client::builder(TokioExecutor::new()).build_http(),
+            client: Client::builder(TokioExecutor::new()).build(connector),
         }
     }
 
@@ -60,7 +65,6 @@ impl Proxy {
         &self,
         upstream: &str,
         mut req: Request<Incoming>,
-        peer: SocketAddr,
         guard: ActivityGuard,
     ) -> Result<Response<Body>, ForwardError> {
         let authority = upstream
@@ -80,10 +84,6 @@ impl Proxy {
         let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
         let (mut parts, body) = req.into_parts();
         strip_hop_by_hop(&mut parts.headers, upgrade);
-        parts.headers.append(
-            X_FORWARDED_FOR,
-            HeaderValue::from_str(&peer.ip().to_string()).map_err(|_| ForwardError::Failed)?,
-        );
         parts
             .headers
             .entry(X_FORWARDED_PROTO)

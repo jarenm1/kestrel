@@ -47,7 +47,6 @@ struct Args {
 struct AppState {
     domain_suffix: String,
     router: Router,
-    activity: Arc<Tracker>,
     proxy: Proxy,
 }
 
@@ -64,8 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AppState {
         domain_suffix,
-        router: Router::new(api),
-        activity,
+        router: Router::new(api, activity),
         proxy: Proxy::new(),
     });
     let listener = TcpListener::bind(args.listen).await?;
@@ -83,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = stream.set_nodelay(true);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let service = service_fn(move |req| handle(Arc::clone(&state), peer, req));
+            let service = service_fn(move |req| handle(Arc::clone(&state), req));
             if let Err(e) = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades()
@@ -97,7 +95,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle(
     state: Arc<AppState>,
-    peer: SocketAddr,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, Infallible> {
     if route::is_blocked_path(req.uri().path()) {
@@ -113,9 +110,8 @@ async fn handle(
     };
 
     let response = match state.router.resolve(&box_id).await {
-        Resolved::Upstream(upstream) => {
-            let guard = state.activity.request_started(&box_id);
-            match state.proxy.forward(&upstream, req, peer, guard).await {
+        Resolved::Upstream { upstream, guard } => {
+            match state.proxy.forward(&upstream, req, guard).await {
                 Ok(response) => response,
                 Err(ForwardError::Connect) => {
                     state.router.invalidate(&box_id);
