@@ -134,6 +134,9 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   return redirect(row.returnTo)
 }
 
+/** Serializes a value as a JS string literal safe to embed in an inline `<script>`. */
+export const scriptString = (value: string): string => JSON.stringify(value).replace(/</g, "\\u003c")
+
 /**
  * Hands a completed sign-in to a native client through its custom URL scheme.
  * The session id is only readable while holding the `HttpOnly` session cookie.
@@ -148,9 +151,10 @@ const nativeCallback = async (
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
   const login = id ? (await hub(env).session(id))?.login : null
   if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
-  const state = url.searchParams.get("state") ?? ""
+  const session = scriptString(id)
+  const nonce = scriptString(url.searchParams.get("state") ?? "")
   return new Response(
-    `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel ${client}...</p><script>window.location.href="${scheme}auth-callback?session=" + encodeURIComponent("${id}") + "&state=" + encodeURIComponent("${state}");</script></body></html>`,
+    `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel ${client}...</p><script>window.location.href="${scheme}auth-callback?session=" + encodeURIComponent(${session}) + "&state=" + encodeURIComponent(${nonce});</script></body></html>`,
     { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
   )
 }
