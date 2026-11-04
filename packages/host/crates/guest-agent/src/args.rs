@@ -22,8 +22,8 @@ kestrel-guest-agent [OPTIONS]
   --net-iface <name>                       guest NIC (default: first non-loopback interface)
   --resolv-conf <path>                     (default /etc/resolv.conf)
   --nix-store <path>                       the overlay mounted on the Nix store (default /nix/store)
-  --nix-lower <path>                       read-only lower of that overlay (default /nix/.ro-store)
-  --nix-tmp-upper <path>                   tmpfs upper of that overlay, moved to the volume (default /nix/.rw-store/upper)
+  --nix-lower <path>                       read-only lower of that overlay (default /nix/.ro-store/store)
+  --nix-tmp-upper <path>                   tmpfs upper of that overlay, moved to the volume (default /nix/.rw-store/store)
   --dry-run-system                         log mount/ip/systemctl/modprobe/clock/poweroff instead of running them
   -h, --help
 ";
@@ -96,8 +96,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     let mut net_iface = None;
     let mut resolv_conf = PathBuf::from("/etc/resolv.conf");
     let mut nix_store = PathBuf::from("/nix/store");
-    let mut nix_lower = PathBuf::from("/nix/.ro-store");
-    let mut nix_tmp_upper = PathBuf::from("/nix/.rw-store/upper");
+    let mut nix_lower = PathBuf::from("/nix/.ro-store/store");
+    let mut nix_tmp_upper = PathBuf::from("/nix/.rw-store/store");
     let mut dry_run = false;
 
     let mut it = args.into_iter();
