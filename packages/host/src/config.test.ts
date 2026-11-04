@@ -41,7 +41,6 @@ const writeConfig = (maxMemoryBytes: number): string => {
       depcacheUrl: null,
       nixCacheUrl: null,
       nixCachePublicKey: null,
-      dns: ["1.1.1.1"],
     }),
   )
   return path

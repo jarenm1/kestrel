@@ -22,6 +22,8 @@ export const CPU_PRESSURE_AVG10 = 20
 export const HOST_MEMORY_PRESSURE_AVG10 = 20
 /** Suspending a VM writes its memory to the disk; below this much free space, idle VMs are parked instead. */
 export const MIN_SNAPSHOT_FREE_BYTES = GIB
+/** A VM whose cgroup used more than this fraction of one CPU since the last sample counts as active. */
+export const CPU_ACTIVE_FRACTION = 0.05
 
 export interface GuestSample {
   readonly memTotalBytes: number
@@ -49,6 +51,13 @@ export const memoryTargetBytes = (sample: GuestSample, maxMemoryBytes: number): 
   const used = Math.max(0, sample.memTotalBytes - sample.memAvailableBytes)
   const wanted = Math.max(MIN_MEMORY_BYTES, used + memoryHeadroomBytes(used))
   const aligned = Math.ceil(wanted / MEMORY_STEP_BYTES) * MEMORY_STEP_BYTES
+  return Math.min(maxMemoryBytes, aligned)
+}
+
+/** Memory with no headroom: what the guest uses, rounded up to a plug step. Host memory pressure shrinks to this. */
+export const memoryFloorBytes = (sample: GuestSample, maxMemoryBytes: number): number => {
+  const used = Math.max(0, sample.memTotalBytes - sample.memAvailableBytes)
+  const aligned = Math.ceil(Math.max(MIN_MEMORY_BYTES, used) / MEMORY_STEP_BYTES) * MEMORY_STEP_BYTES
   return Math.min(maxMemoryBytes, aligned)
 }
 
@@ -84,15 +93,19 @@ export interface ActivityCounts {
   readonly recordings: number
 }
 
+/** True when a VM's cgroup used more than `CPU_ACTIVE_FRACTION` of one CPU over `elapsedMs`. */
+export const cpuActive = (opts: { readonly usecDelta: number; readonly elapsedMs: number }): boolean =>
+  opts.elapsedMs > 0 && opts.usecDelta > opts.elapsedMs * 1000 * CPU_ACTIVE_FRACTION
+
 /**
- * Last time the VM was used: the latest of its start, the guest's last activity, and the last ingress request. Ingress
- * requests come from the local API, so a VM with no guest activity still counts from when it last served traffic.
+ * Last time the VM was used, from what the host measures: its start, the last ingress request, and the last sample
+ * in which its cgroup was busy. The guest's own report does not count, so a guest cannot keep itself awake.
  */
 export const lastActiveAt = (opts: {
   readonly runningSince: number
-  readonly guestLastActivityAt: number | null
   readonly lastRequestAt: number | null
-}): number => Math.max(opts.runningSince, opts.guestLastActivityAt ?? 0, opts.lastRequestAt ?? 0)
+  readonly lastCpuActiveAt: number | null
+}): number => Math.max(opts.runningSince, opts.lastRequestAt ?? 0, opts.lastCpuActiveAt ?? 0)
 
 /**
  * Idle means nothing running, no viewers or recordings, no open ingress connections, and no activity for

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs"
+import { accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync, statfsSync } from "node:fs"
 import { join } from "node:path"
 import {
   GUEST_REPLY_TIMEOUT_MS,
@@ -20,9 +20,9 @@ import { launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./
 import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath } from "./fs-atomic"
-import { type NetCommand, allocateSlot, guestNetwork, networkForSlot, tapDownCommands, tapUpCommands } from "./network"
-import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
-import { cgroupDirOf, isProcessAlive, processIsVmm, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
+import { type NetCommand, TAP_ADDRS_CHECK, allocateSlot, guestNetwork, networkForSlot, tapDownCommands, tapUpCommands } from "./network"
+import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
+import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
 import { recoverPlan } from "./recovery"
 import { Meter } from "./meter"
 import { Outbox } from "./outbox"
@@ -59,6 +59,9 @@ const GPU_HOLD_MS = 5 * 60_000
 /** A guest status older than this is not used for policy decisions. */
 const STATUS_FRESH_MS = 3 * GUEST_STATUS_INTERVAL_MS
 
+/** A failed backup is retried after this long, doubling per failure, never later than the backup interval. */
+const BACKUP_RETRY_MS = 60_000
+
 type VmPathSet = ReturnType<typeof vmPaths>
 type Command<T extends NestHostCommand["_tag"]> = Extract<NestHostCommand, { readonly _tag: T }>
 
@@ -85,6 +88,12 @@ interface Runtime {
   cpuScale: ScaleState
   lastGpuAttachAt: number | null
   busy: boolean
+  /** The cgroup's CPU time at the last tick, and when it was read. */
+  cpuSample: { readonly usec: number; readonly at: number } | null
+  lastCpuActiveAt: number | null
+  /** Backup retries: the last attempt, and how many have failed in a row (reset by a success). */
+  backupAttemptAt: number | null
+  backupFailures: number
 }
 
 const newRuntime = (): Runtime => ({
@@ -96,6 +105,10 @@ const newRuntime = (): Runtime => ({
   cpuScale: NO_SCALE,
   lastGpuAttachAt: null,
   busy: false,
+  cpuSample: null,
+  lastCpuActiveAt: null,
+  backupAttemptAt: null,
+  backupFailures: 0,
 })
 
 const gpuDeviceId = (pciAddress: string): string => `gpu-${pciAddress}`
@@ -223,9 +236,17 @@ export class VmManager {
     this.meter = new Meter(config.hostId, (record) => this.outbox.append([record]))
   }
 
-  /** Loads the records, recovers every VM from its last state, builds the template and starts the timers. */
+  /**
+   * Checks the host module's nftables set, loads the records, recovers every VM from its last state, builds the template
+   * and starts the timers. Refuses to start when the set is missing: without it no guest could reach the network.
+   */
   async start(): Promise<void> {
     ensureStateDirs(this.layout)
+    try {
+      await runChecked("nft", [...TAP_ADDRS_CHECK])
+    } catch (error) {
+      throw new HostError(`nftables set inet kestrel tap_addrs is not loaded (the host module creates it): ${errorMessage(error)}`)
+    }
     for (const record of listVms(this.layout)) this.records.set(record.boxId, record)
     for (const record of [...this.records.values()]) await this.recover(record)
     await buildTemplate({
@@ -236,7 +257,7 @@ export class VmManager {
       helloTimeoutMs: TEMPLATE_HELLO_TIMEOUT_MS,
     })
     const keep = new Set<string>([this.image.imageId])
-    for (const vm of this.records.values()) if (vm.state === "running") keep.add(vm.imageId)
+    for (const vm of this.records.values()) if (vm.state === "running" || vm.state === "suspended") keep.add(vm.imageId)
     removeStaleTemplates(this.layout, keep)
     this.timers.push(setInterval(() => this.tick(), GUEST_STATUS_INTERVAL_MS))
     this.timers.push(setInterval(() => this.meterTick(), this.config.meterIntervalMs))
@@ -329,16 +350,23 @@ export class VmManager {
     const vm = this.records.get(boxId)
     if (vm === undefined || vm.state === "deleted") throw new UnknownBoxError(`unknown box ${boxId}`)
     if (vm.state === "running") return this.upstreamOf(vm)
+    let requested = false
     if (vm.state === "suspended" && Date.now() < this.leaseUntil) {
       void this.enqueue(boxId, () => this.resumeSuspendedBox(boxId))
     } else {
       this.events.wakeRequest(boxId)
+      requested = true
     }
     const deadline = Date.now() + WAKE_TIMEOUT_MS
     for (;;) {
       const current = this.records.get(boxId)
       if (current === undefined || current.state === "deleted") throw new UnknownBoxError(`box ${boxId} was deleted`)
       if (current.state === "running") return this.upstreamOf(current)
+      if (current.state === "parked" && !requested) {
+        // The lease resume left the box parked (it could not resume): ask the control plane once.
+        this.events.wakeRequest(boxId)
+        requested = true
+      }
       if (Date.now() >= deadline) throw new WakeTimeoutError(`box ${boxId} did not wake within ${WAKE_TIMEOUT_MS} ms`)
       await sleep(WAKE_POLL_MS)
     }
@@ -447,8 +475,15 @@ export class VmManager {
     }
   }
 
-  private restoreTarget(network: NestNetwork, p: VmPathSet): RestoreTarget {
-    return { tap: network.tap, cid: network.cid, vsockSocket: p.vsockSocket, consoleFile: p.console }
+  private restoreTarget(vm: VmRecord, network: NestNetwork, p: VmPathSet): RestoreTarget {
+    return {
+      tap: network.tap,
+      cid: network.cid,
+      vsockSocket: p.vsockSocket,
+      consoleFile: p.console,
+      volumePath: vm.volumeProcess?.device ?? p.volume,
+      swapPath: p.swap,
+    }
   }
 
   private launch(vm: VmRecord): ProcessRef {
@@ -661,6 +696,7 @@ export class VmManager {
         publicUrl: cmd.publicUrl,
         volumeRef: cmd.volumeRef,
         operation: null,
+        localDirty: false,
       })
     } else if (current.state === "running") {
       return
@@ -688,7 +724,9 @@ export class VmManager {
   private async resumeParked(vm: VmRecord): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "resume", "parked")
-    const usableLocal = existsSync(p.volume) && (cur.localDirty || cur.localRef === cur.volumeRef)
+    // Only a volume this host created for a box with no backup (both refs null) or one whose backup is the command's ref.
+    const hostCreated = cur.volumeRef === null && cur.localRef === null && cur.localDirty
+    const usableLocal = existsSync(p.volume) && (hostCreated || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
     if (!usableLocal) {
       if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
       rmSync(p.volume, { force: true })
@@ -736,7 +774,7 @@ export class VmManager {
     await prepareRestoreDir({
       sourceDir: p.snapshot(gen),
       restoreDir: p.restore,
-      target: this.restoreTarget(network, p),
+      target: this.restoreTarget(vm, network, p),
     })
     const identity = this.launch(vm)
     const started = this.commit({ ...vm, process: identity })
@@ -747,8 +785,7 @@ export class VmManager {
     const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
     this.attachLink(rt, link)
     await this.ask(rt, { _tag: "resumed", id: newRequestId(), wallClockMs: Date.now() }, GUEST_REPLY_TIMEOUT_MS.resumed)
-    rmSync(p.snapshot(gen), { recursive: true, force: true })
-    this.finish(started, "running", { snapshotGen: null, localRef: null, localDirty: true })
+    this.finish(started, "running", { localRef: null, localDirty: true })
   }
 
   /**
@@ -766,7 +803,7 @@ export class VmManager {
     await prepareRestoreDir({
       sourceDir: templateDir(this.layout, this.image.imageId),
       restoreDir: p.restore,
-      target: this.restoreTarget(network, p),
+      target: this.restoreTarget(vm, network, p),
     })
     createSparse(p.swap, SWAP_BYTES)
     const identity = this.launch(vm)
@@ -801,7 +838,6 @@ export class VmManager {
         publicUrl: vm.publicUrl,
         enrollToken,
         network: guestNetwork(network, {
-          dns: config.dns,
           depcacheUrl: config.depcacheUrl,
           nixCacheUrl: config.nixCacheUrl,
           nixCachePublicKey: config.nixCachePublicKey,
@@ -828,14 +864,21 @@ export class VmManager {
     await client.pause()
     const gen = (cur.snapshotGen ?? 0) + 1
     const dir = p.snapshot(gen)
+    // Written under a staging name and renamed once durable, so a torn snapshot is never taken for a memory image.
+    const staging = `${dir}.tmp`
+    rmSync(staging, { recursive: true, force: true })
+    mkdirSync(staging, { recursive: true, mode: 0o700 })
+    await client.snapshot(staging)
+    for (const name of [...SNAPSHOT_FILES, "config.json"]) fsyncPath(join(staging, name))
+    fsyncDir(staging)
     rmSync(dir, { recursive: true, force: true })
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
-    await client.snapshot(dir)
-    for (const name of [...SNAPSHOT_FILES, "config.json"]) fsyncPath(join(dir, name))
-    fsyncDir(dir)
+    renameSync(staging, dir)
+    fsyncDir(p.dir)
     this.closeLink(vm.boxId)
     await stopVmmProcess(cur.process, p.apiSocket, VMM_STOP_GRACE_MS)
     rmSync(p.restore, { recursive: true, force: true })
+    // The VMM that was restored from the previous generation has now exited, so that image is no longer read.
+    if (cur.snapshotGen !== null) rmSync(p.snapshot(cur.snapshotGen), { recursive: true, force: true })
     this.finish(cur, "suspended", { process: null, snapshotGen: gen, gpus: [], gpuAttachedAt: null })
   }
 
@@ -873,8 +916,8 @@ export class VmManager {
   private async evict(cmd: Command<"evict">): Promise<void> {
     const vm = this.records.get(cmd.boxId)
     if (vm === undefined || vm.state === "deleted") return
-    if (vm.ownerEpoch > cmd.ownerEpoch) {
-      throw new HostError(`evict epoch ${cmd.ownerEpoch} is older than this host's copy (${vm.ownerEpoch})`)
+    if (vm.ownerEpoch >= cmd.ownerEpoch) {
+      throw new HostError(`evict epoch ${cmd.ownerEpoch} is not newer than this host's copy (${vm.ownerEpoch})`)
     }
     let cur = this.begin(vm, "destroy", null)
     cur = await this.releaseVm(cur)
@@ -987,24 +1030,21 @@ export class VmManager {
     const rt = this.runtime(vm.boxId)
     return lastActiveAt({
       runningSince: vm.since,
-      guestLastActivityAt: rt.status?.activity?.lastActivityAt ?? null,
+      lastCpuActiveAt: rt.lastCpuActiveAt,
       lastRequestAt: rt.ingress.lastRequestAt,
     })
   }
 
-  /** Every policy tick: policy per running VM, backups when due, parking and cache eviction, host pressure. */
+  /** Every policy tick: CPU activity, one scheduled action per running box, parking and cache eviction, host pressure. */
   private tick(): void {
     const now = Date.now()
     const tight = this.isDiskTight()
     for (const vm of this.records.values()) {
       const boxId = vm.boxId
       if (vm.state === "running") {
+        this.sampleCpu(vm, now)
         if (this.runtime(boxId).busy) continue
-        if (now - (vm.backedUpAt ?? vm.since) >= this.config.backupIntervalMs) {
-          this.schedule(boxId, () => this.backupRunning(boxId))
-        } else {
-          this.schedule(boxId, () => this.policyRunning(boxId))
-        }
+        this.schedule(boxId, () => this.runningTick(boxId))
       } else if (vm.state === "suspended" && now - vm.since >= this.config.parkAfterMs) {
         this.schedule(boxId, () => this.parkWhere(boxId, ["suspended"]))
       } else if (vm.state === "parked" && tight && !vm.localDirty && vm.localRef !== null) {
@@ -1012,6 +1052,27 @@ export class VmManager {
       }
     }
     if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
+  }
+
+  /** Host-measured activity: a cgroup that used enough CPU since the previous sample counts as active now. */
+  private sampleCpu(vm: VmRecord, now: number): void {
+    if (vm.process === null) return
+    const dir = cgroupDirOf(vm.process.pid)
+    const usec = dir === null ? null : readCpuUsec(dir)
+    if (usec === null) return
+    const rt = this.runtime(vm.boxId)
+    const previous = rt.cpuSample
+    rt.cpuSample = { usec, at: now }
+    if (previous !== null && cpuActive({ usecDelta: usec - previous.usec, elapsedMs: now - previous.at })) rt.lastCpuActiveAt = now
+  }
+
+  /** The one scheduled action per running box: its policy, then its backup when due (the backup runs even if policy failed). */
+  private async runningTick(boxId: string): Promise<void> {
+    try {
+      await this.policyRunning(boxId)
+    } finally {
+      await this.backupIfDue(boxId)
+    }
   }
 
   private suspendLeastActive(): void {
@@ -1022,6 +1083,17 @@ export class VmManager {
     }
     const victim = pickSuspendVictim(candidates)
     if (victim !== null) this.schedule(victim, () => this.sleepRunning(victim))
+    // Every other running VM gives back memory down to what it uses now (shrink to target, no headroom).
+    for (const candidate of candidates) if (candidate.boxId !== victim) this.schedule(candidate.boxId, () => this.shrinkToFloor(candidate.boxId))
+  }
+
+  /** Under host memory pressure: shrinks a running VM to the memory its guest uses now, from a fresh guest sample. */
+  private async shrinkToFloor(boxId: string): Promise<void> {
+    const vm = this.running(boxId)
+    const status = this.runtime(boxId).status
+    if (vm === null || status === null || Date.now() - status.at > STATUS_FRESH_MS) return
+    const floor = memoryFloorBytes(status.pressure, vm.limits.maxMemoryBytes)
+    if (floor < vm.memoryBytes) await this.resizeVm(vm, { vcpus: vm.vcpus, memoryBytes: floor })
   }
 
   /** Suspends a running VM, or parks it when the disk is too tight to hold a memory image. */
@@ -1111,6 +1183,31 @@ export class VmManager {
     return vm
   }
 
+  /** Backs the volume up when the interval has passed and the volume may have changed. A failed backup is retried with backoff. */
+  private async backupIfDue(boxId: string): Promise<void> {
+    const vm = this.running(boxId)
+    if (vm === null) return
+    const rt = this.runtime(boxId)
+    const now = Date.now()
+    if (now - (vm.backedUpAt ?? vm.since) < this.config.backupIntervalMs) return
+    const backoffMs =
+      rt.backupFailures === 0 ? 0 : Math.min(BACKUP_RETRY_MS * 2 ** (rt.backupFailures - 1), this.config.backupIntervalMs)
+    if (rt.backupAttemptAt !== null && now - rt.backupAttemptAt < backoffMs) return
+    const p = this.paths(boxId)
+    const changed =
+      vm.volumeProcess !== null || vm.backedUpAt === null || (existsSync(p.volume) && statSync(p.volume).mtimeMs > vm.backedUpAt)
+    if (!changed) return
+    rt.backupAttemptAt = now
+    try {
+      await this.backupRunning(boxId)
+      rt.backupFailures = 0
+    } catch (error) {
+      rt.backupFailures += 1
+      const current = this.running(boxId)
+      if (current !== null) this.commit({ ...current, lastError: `backup failed: ${errorMessage(error)}` })
+    }
+  }
+
   private async backupRunning(boxId: string): Promise<void> {
     const vm = this.running(boxId)
     if (vm === null) return
@@ -1169,6 +1266,8 @@ export class VmManager {
   /** Decides what survives a restart. Live VMMs are re-adopted; anything else rolls back to a resumable state. */
   private async recover(record: VmRecord): Promise<void> {
     const p = this.paths(record.boxId)
+    // A snapshot still under its staging name was never complete, so it is not a memory image.
+    if (existsSync(p.dir)) for (const name of readdirSync(p.dir)) if (/^snapshot\.\d+\.tmp$/.test(name)) rmSync(join(p.dir, name), { recursive: true, force: true })
     const plan = recoverPlan(record, {
       vmmAlive: processIsVmm(record.process, p.apiSocket),
       volumeAlive: record.volumeProcess !== null && isProcessAlive(record.volumeProcess.process),

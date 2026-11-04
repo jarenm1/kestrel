@@ -5,8 +5,11 @@ import {
   NO_SCALE,
   SHRINK_AFTER_MS,
   SHRINK_INTERVAL_MS,
+  cpuActive,
   diskTight,
   isIdle,
+  lastActiveAt,
+  memoryFloorBytes,
   memoryTargetBytes,
   pickSuspendVictim,
   stepSize,
@@ -31,6 +34,18 @@ describe("memory target", () => {
 
   test("leaves headroom above what is in use", () => {
     expect(memoryTargetBytes(sample(3 * GIB), 8 * GIB)).toBeGreaterThan(3 * GIB)
+  })
+})
+
+describe("memory floor under host pressure", () => {
+  test("is what the guest uses, with no headroom, in whole plug steps", () => {
+    expect(memoryFloorBytes(sample(3 * GIB), 8 * GIB)).toBe(3 * GIB)
+    expect(memoryFloorBytes(sample(0), 8 * GIB)).toBe(MIN_MEMORY_BYTES)
+    expect(memoryFloorBytes(sample(6 * GIB), 4 * GIB)).toBe(4 * GIB)
+  })
+
+  test("is below the normal target, which keeps headroom", () => {
+    expect(memoryFloorBytes(sample(3 * GIB), 8 * GIB)).toBeLessThan(memoryTargetBytes(sample(3 * GIB), 8 * GIB))
   })
 })
 
@@ -64,6 +79,19 @@ describe("stepSize", () => {
     expect(size).toBe(3)
     step(SHRINK_AFTER_MS + SHRINK_INTERVAL_MS)
     expect(size).toBe(2)
+  })
+})
+
+describe("host-measured activity", () => {
+  test("a guest cannot keep a VM active: only the host's own measurements count", () => {
+    expect(lastActiveAt({ runningSince: 5, lastRequestAt: null, lastCpuActiveAt: null })).toBe(5)
+    expect(lastActiveAt({ runningSince: 5, lastRequestAt: 7, lastCpuActiveAt: 9 })).toBe(9)
+  })
+
+  test("a cgroup that used more than 5% of one CPU over the sample is active; less is not", () => {
+    expect(cpuActive({ usecDelta: 60_000, elapsedMs: 1_000 })).toBe(true)
+    expect(cpuActive({ usecDelta: 10_000, elapsedMs: 1_000 })).toBe(false)
+    expect(cpuActive({ usecDelta: 60_000, elapsedMs: 0 })).toBe(false)
   })
 })
 

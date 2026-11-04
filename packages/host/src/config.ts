@@ -56,7 +56,6 @@ export const HostConfig = Schema.Struct({
   depcacheUrl: Schema.NullOr(Schema.String),
   nixCacheUrl: Schema.NullOr(Schema.String),
   nixCachePublicKey: Schema.NullOr(Schema.String),
-  dns: Schema.Array(Schema.String).pipe(Schema.minItems(1)),
 })
 export type HostConfig = typeof HostConfig.Type
 

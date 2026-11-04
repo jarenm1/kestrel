@@ -87,3 +87,15 @@ export const readMemoryPressureAvg10 = (): number => {
   if (match === null) throw new HostError("/proc/pressure/memory has no `some avg10` line")
   return Number(match[1])
 }
+
+/** Total CPU time a cgroup has used, in microseconds, or null when it cannot be read (the VM is gone). */
+export const readCpuUsec = (cgroupDir: string): number | null => {
+  let text: string
+  try {
+    text = readFileSync(`${cgroupDir}/cpu.stat`, "utf8")
+  } catch {
+    return null
+  }
+  const match = /^usage_usec (\d+)/m.exec(text)
+  return match === null ? null : Number(match[1])
+}

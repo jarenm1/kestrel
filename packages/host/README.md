@@ -40,7 +40,6 @@ milliseconds. The host secret is read from `hostSecretFile` at start and is neve
 | `egressMbit` | Per-VM egress shaping |
 | `idleSuspendAfterMs`, `parkAfterMs`, `backupIntervalMs`, `meterIntervalMs` | Lifecycle and metering intervals |
 | `depcacheUrl`, `nixCacheUrl`, `nixCachePublicKey` | Dependency cache and Nix binary cache (or `null`) |
-| `dns` | Resolvers handed to guests (at least one) |
 
 ## State directory
 

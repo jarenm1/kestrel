@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto"
-import { chmodSync, mkdirSync, rmSync } from "node:fs"
+import { chmodSync, chownSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { dirname } from "node:path"
 import { Schema } from "effect"
-import { UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
+import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { STRICT } from "./schema"
 import type { VmManager } from "./vm-manager"
 
@@ -63,14 +63,29 @@ export const handleLocalRequest = async (manager: VmManager, request: Request): 
   }
 }
 
+/** The API socket is shared with kestrel-ingress through this group: the directory is 0750 and the socket 0660. */
+const INGRESS_GROUP = "kestrel-ingress"
+
+const groupGid = (name: string): number => {
+  const entry = readFileSync("/etc/group", "utf8").split("\n").find((line) => line.startsWith(`${name}:`))
+  const gid = entry === undefined ? Number.NaN : Number(entry.split(":")[2])
+  if (!Number.isInteger(gid)) throw new HostError(`group ${name} does not exist`)
+  return gid
+}
+
 /** Serves the local API on `socketPath`. Replaces a stale socket file; the socket is group-writable for ingress. */
 export const startLocalApi = (opts: { readonly socketPath: string; readonly manager: VmManager }): { stop(): void } => {
-  mkdirSync(dirname(opts.socketPath), { recursive: true, mode: 0o750 })
+  const gid = groupGid(INGRESS_GROUP)
+  const dir = dirname(opts.socketPath)
+  mkdirSync(dir, { recursive: true, mode: 0o750 })
+  chownSync(dir, -1, gid)
+  chmodSync(dir, 0o750)
   rmSync(opts.socketPath, { force: true })
   const server = Bun.serve({
     unix: opts.socketPath,
     fetch: (request) => handleLocalRequest(opts.manager, request),
   })
+  chownSync(opts.socketPath, -1, gid)
   chmodSync(opts.socketPath, 0o660)
   return {
     stop: () => {
