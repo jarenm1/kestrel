@@ -43,14 +43,14 @@ import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
 import { AgentHarness, agentCwd, type AgentChoice } from "./harness"
 import { formatHandoff, HANDOFF_HISTORY_LIMIT } from "./handoff"
-import { withUserContext } from "./user-context"
+import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type StoreState } from "./state"
@@ -281,7 +281,7 @@ export interface CoreShape {
   // only for the thread's owner: anyone else gets NotFound, never a hint it exists.
   /** Every thread of `user`, archived ones included, newest `updatedAt` first. */
   readonly listTasks: (user: string) => Effect.Effect<ReadonlyArray<Task>>
-  /** Creates a thread; with `checkout`, the repository is checked out before this returns. */
+  /** Creates a thread; with `checkout`, the repository is checked out before this returns; `pickedRepo` is left to its agent. */
   readonly createTask: (
     user: string,
     input: CreateTaskBody,
@@ -487,6 +487,11 @@ export interface CoreShape {
     query: string,
     variables: Readonly<Record<string, unknown>>,
   ) => Effect.Effect<GraphQLResponse, NotFound | BadRequest | InternalError>
+  /**
+   * Used by `gh api`: sends a read-only request (`readOnlyRefusal`) to the GitHub API with the thread owner's token,
+   * which stays host-side. Reads are not limited to the thread's checkouts, as `repo_checkout` is not.
+   */
+  readonly githubApi: (taskId: string, request: ApiRequest) => Effect.Effect<ApiResponse, NotFound | BadRequest | InternalError>
   /** Used by the `gh` shim: a pull request's diff or patch series in a checkout's GitHub repository. */
   readonly pullRequestDiff: (
     taskId: string,
@@ -1176,9 +1181,10 @@ export const CoreLive = Layer.effect(
         const title = input.title?.trim() || "Untitled task"
         const request = input.checkout
         if (request !== undefined) yield* parseCheckoutRequest(request)
+        const picked = input.pickedRepo === undefined ? null : yield* parseCheckoutRequest({ repo: input.pickedRepo })
         const id = newId()
         const now = nowIso()
-        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(delegation === undefined ? {} : { delegation }) }
+        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(picked === null ? {} : { pickedRepo: picked.repo }), ...(delegation === undefined ? {} : { delegation }) }
         yield* Effect.tryPromise({
           try: () => mkdir(threadDirOf(id), { recursive: true }),
           catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),
@@ -1211,13 +1217,22 @@ export const CoreLive = Layer.effect(
       return peerMessageText(from, typed)
     }
 
-    /** Box notes for a new run's preamble: while the thread is over its storage limit, the run is asked to clean up. */
-    const runNotes = (taskId: string): string[] => {
-      const over = overStorage(taskId)
-      if (over === null) return []
-      return [
-        `This thread's files (workspace, home and git data) take ${formatBytes(over)}, over the thread's ${formatBytes(config.taskDiskMax)} storage limit. Delete files you no longer need (build output, caches, downloads) before anything else. Uploads and new checkouts are refused until it is under the limit, and anything that keeps growing it is stopped.`,
-      ]
+    /**
+     * Box notes for a new run's preamble: until the user's picked repository is checked out, the run is told to pick
+     * what to check out; while the thread is over its storage limit, the run is asked to clean up.
+     */
+    const runNotes = (task: Task): string[] => {
+      const notes: string[] = []
+      if (task.pickedRepo !== undefined && !task.checkouts.some((c) => c.repo === task.pickedRepo)) {
+        notes.push(pickedRepoNote(task.pickedRepo))
+      }
+      const over = overStorage(task.id)
+      if (over !== null) {
+        notes.push(
+          `This thread's files (workspace, home and git data) take ${formatBytes(over)}, over the thread's ${formatBytes(config.taskDiskMax)} storage limit. Delete files you no longer need (build output, caches, downloads) before anything else. Uploads and new checkouts are refused until it is under the limit, and anything that keeps growing it is stopped.`,
+        )
+      }
+      return notes
     }
 
     /** A message to a thread: from its user (`from` null), or from the agent of another of the owner's threads. */
@@ -1368,6 +1383,7 @@ export const CoreLive = Layer.effect(
               exitCode: null,
               provider,
               ...(choice.model === undefined ? {} : { model: choice.model }),
+              effort: choice.effort ?? null,
             }
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
@@ -1392,7 +1408,7 @@ export const CoreLive = Layer.effect(
                 ? delivered
                 : `You asked the user: ${question}\nThe user answered: ${delivered}\nContinue the task from there.`
             const carried = formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, resumeFrom === undefined ? "full" : "delta")
-            const prompt = withUserContext(user, carried, runNotes(taskId))
+            const prompt = withUserContext(user, carried, runNotes(task))
             return Either.right({
               task: { ...task },
               message,
@@ -2456,6 +2472,13 @@ export const CoreLive = Layer.effect(
           const checkout = yield* pickCheckout(task, checkoutId)
           const { token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
           return yield* github.graphql(token, query, variables).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      githubApi: (taskId, request) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const token = yield* requiredGithubToken(task.owner)
+          return yield* github.readApi(token, request).pipe(Effect.mapError(fromGitHub))
         }),
 
       pullRequestDiff: (taskId, checkoutId, number, format) =>

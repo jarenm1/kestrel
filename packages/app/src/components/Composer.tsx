@@ -15,20 +15,24 @@ import { Schema } from "effect"
 import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
 import { Popover } from "radix-ui"
 import {
-  AgentEffort,
   AgentModel,
   EFFORT_LABELS,
+  EffortPick,
   GithubRepoSlug,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
   harnessCommandPrefix,
+  resolveAgentChoice,
+  type AgentEffort,
   type ContextUsage,
   type HarnessCommand,
   type Message,
   type ModelInfo,
   type ModelProvider,
   type ModelProviderInfo,
+  type Run,
   type SendMessageBody,
+  type SendMessageResponse,
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -81,19 +85,19 @@ const EFFORT_RING_FILL: Record<AgentEffort, number> = {
   max: 100,
 }
 
-/** A stepped thinking slider; Default leaves the provider's effort setting untouched. */
+/** A stepped slider containing only the selected model's supported thinking levels. */
 function ThinkingPicker({
   value,
   options,
   onChange,
 }: {
   value: AgentEffort | undefined
-  options: readonly { value: AgentEffort | undefined; label: string }[]
-  onChange: (value: AgentEffort | undefined) => void
+  options: readonly { value: AgentEffort; label: string }[]
+  onChange: (value: AgentEffort) => void
 }) {
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
   const selected = options[selectedIndex]!
-  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value]
+  const ringFill = EFFORT_RING_FILL[selected.value]
   // Keep the stops aligned with the native range's 2rem thumb, including at both ends.
   const offset = (index: number) => `calc(1rem + (100% - 2rem) * ${index / (options.length - 1)})`
   return (
@@ -121,7 +125,7 @@ function ThinkingPicker({
               />
             )}
           </svg>
-          {value === undefined ? "Thinking" : selected.label}
+          {selected.label}
         </Button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -376,7 +380,7 @@ function AskPanel({
 
 interface Props {
   /** Resolves once the message is accepted; the text and files are cleared only then. */
-  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
+  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<SendMessageResponse | void>
   pending: boolean
   error: unknown
   /**
@@ -391,6 +395,8 @@ interface Props {
   activeRunId?: string | undefined
   /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
   activeRunProvider?: ModelProvider | undefined
+  /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
+  lastRun?: Pick<Run, "model" | "effort"> | undefined
   placeholder?: string
   autoFocus?: boolean
   className?: string
@@ -433,6 +439,7 @@ export function Composer({
   taskId,
   activeRunId,
   activeRunProvider,
+  lastRun,
   placeholder,
   autoFocus,
   className,
@@ -465,8 +472,12 @@ export function Composer({
   const slashMenuId = useId()
   const referenceMenuId = useId()
   const openUsagePanel = useOpenUsagePanel()
-  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
-  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
+  const pickSuffix = taskId === undefined ? "" : `.${taskId}`
+  const [pickedModel, setPickedModel, clearPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel)
+  const [pickedEffort, setPickedEffort, clearPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick)
+  const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
+  const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
   const shown = useShownModels()
   // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
@@ -475,19 +486,16 @@ export function Composer({
   const soleCheckout = checkoutRepos.length === 1 ? checkoutRepos[0] : undefined
   const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
   useEffect(() => setPickedReferenceRepo(undefined), [repo])
+  const connected = connections.data ? connectedModelProviders(connections.data) : []
   const sections: readonly ModelSection[] | null = connections.data
-    ? connectedModelProviders(connections.data)
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((s) => s.models.length > 0)
+    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
     : null
-  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((s) => s.models) ?? []
-  const model = offered.find((m) => m.id === storedModel) ?? offered[0]
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined
-  const effortOptions: readonly { value: AgentEffort | undefined; label: string }[] = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ]
+  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
+  const effortOptions = (model?.efforts ?? []).map((e) => ({
+    value: e,
+    label: e === "none" ? "Off" : EFFORT_LABELS[e],
+  }))
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
@@ -632,12 +640,17 @@ export function Composer({
     if (empty || pending) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, effort }, files).then(
-      () => {
+      (sent) => {
         setText("")
         onElementsChange?.([])
         setFiles([])
         setFileError(undefined)
         setChoice(undefined)
+        // The new run now records these picks. A message joining a running turn keeps them for the next turn.
+        if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
+          clearPickedModel(pickedModel)
+          clearPickedEffort(pickedEffort)
+        }
       },
       () => {},
     )
@@ -876,9 +889,9 @@ export function Composer({
           >
             <Paperclip />
           </Button>
-          <ModelPicker sections={sections} value={model} onChange={setModel} />
+          <ModelPicker sections={sections} value={model} onChange={setPickedModel} />
           {model !== undefined && model.efforts.length > 0 && (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
           )}
           {onStop && empty ? (
             <Button

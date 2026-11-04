@@ -120,3 +120,62 @@ export const connectedModelProviders = (
  */
 export const shownModels = (provider: ModelProvider, chosen: ReadonlyArray<AgentModel> | null): readonly ModelInfo[] =>
   providerModels(provider).filter((m) => (chosen === null ? m.shownByDefault : chosen.includes(m.id)))
+
+/** A stored thinking-level pick. "default" is an explicit pick of the model's default level, unlike having no pick. */
+export const EffortPick = Schema.Union(AgentEffort, Schema.Literal("default"))
+export type EffortPick = typeof EffortPick.Type
+
+/**
+ * The run whose choice a thread's pickers restore, from its runs oldest first: the latest that recorded a model,
+ * skipping runs another thread or GitHub woke, which use the provider's default rather than the thread's choice. The
+ * first run counts whoever started it, since a delegated thread's assignment names its model. Only a run's first user
+ * message says who started it; a later one with `fromThread` is mail reaching a run already going.
+ */
+export const threadChoiceRun = <R extends { readonly id: string; readonly model?: AgentModel | undefined }>(
+  runs: readonly R[],
+  messages: ReadonlyArray<{
+    readonly role: string
+    readonly runId: string | null
+    readonly createdAt: string
+    readonly fromThread?: unknown
+  }>,
+): R | undefined => {
+  const prompts = new Map<string, (typeof messages)[number]>()
+  for (const message of [...messages].sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+    if (message.role === "user" && message.runId !== null) prompts.set(message.runId, message)
+  }
+  return runs
+    .filter((run, index) => {
+      const prompt = prompts.get(run.id)
+      return run.model !== undefined && (index === 0 || (prompt !== undefined && prompt.fromThread === undefined))
+    })
+    .at(-1)
+}
+
+/**
+ * What a composer's pickers show and its next message sends. An unsent pick wins while it is on offer; a thread then
+ * stays on what its last run used, even a model since hidden from the picker, as long as its provider is connected.
+ * The device's default covers the rest (the new-thread picks, or a thread whose runs recorded no model), and the
+ * first model on offer stands in last. Everything is undefined until `offered` has loaded.
+ */
+export const resolveAgentChoice = (input: {
+  readonly offered: readonly ModelInfo[]
+  readonly connected: readonly ModelProviderInfo[]
+  readonly pickedModel: AgentModel | undefined
+  readonly pickedEffort: EffortPick | undefined
+  readonly lastRun: { readonly model?: AgentModel | undefined; readonly effort?: AgentEffort | null | undefined } | undefined
+  readonly defaultModel: AgentModel | undefined
+  readonly defaultEffort: EffortPick | undefined
+}): { readonly model: ModelInfo | undefined; readonly effort: AgentEffort | undefined } => {
+  const { offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort } = input
+  const onOffer = (id: AgentModel | undefined) => offered.find((m) => m.id === id)
+  const lastModel = lastRun?.model === undefined ? undefined : modelInfo(lastRun.model)
+  const model =
+    onOffer(pickedModel) ??
+    (connected.some((p) => p.id === lastModel?.provider) ? lastModel : undefined) ??
+    onOffer(defaultModel) ??
+    offered[0]
+  const level = pickedEffort ?? (lastRun?.effort === null ? "default" : lastRun?.effort ?? defaultEffort)
+  const effort = level !== undefined && level !== "default" && model?.efforts.includes(level) ? level : model?.efforts[0]
+  return { model, effort }
+}

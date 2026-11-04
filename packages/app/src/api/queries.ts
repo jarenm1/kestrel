@@ -28,6 +28,8 @@ export const keys = {
   kestrelBox: ["kestrel-box"] as const,
   /** Kestrel's managed boxes, as operators see them (`Me.operator`). */
   fleetBoxes: ["fleet-boxes"] as const,
+  /** The most common tool and agent failures across Kestrel's boxes, as operators see them. */
+  fleetToolFailures: ["fleet-tool-failures"] as const,
   /** A pairing code's pending approval, read by the approval page. */
   pairing: (code: string) => ["pairing", code] as const,
   connections: ["connections"] as const,
@@ -130,6 +132,7 @@ export const queries = {
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
   fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
+  fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>
     queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),

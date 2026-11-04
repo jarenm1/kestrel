@@ -1,14 +1,15 @@
 /**
  * Command-line parsing with the semantics of spf13/pflag as the GitHub CLI configures it: flags may appear anywhere
  * among the arguments, `--` ends them, a long flag takes `--name=value` or `--name value` (the next argument even
- * when it starts with `-`), short flags combine (`-dw`, `-tTitle`, `-t=Title`), and string slices split on commas
- * (CSV quoting) and accumulate. Error texts are pflag's, byte for byte.
+ * when it starts with `-`), short flags combine (`-dw`, `-tTitle`, `-t=Title`), string slices split on commas
+ * (CSV quoting) and accumulate, and string arrays accumulate each value whole. Error texts are pflag's, byte for byte.
  */
 
 export type FlagKind =
   | { readonly type: "bool" }
   | { readonly type: "string" }
   | { readonly type: "stringSlice" }
+  | { readonly type: "stringArray" }
   | { readonly type: "int" }
   | { readonly type: "enum"; readonly values: ReadonlyArray<string> }
 
@@ -21,6 +22,7 @@ export interface FlagSpec {
 export const bool = (long: string, short?: string): FlagSpec => ({ long, short, kind: { type: "bool" } })
 export const str = (long: string, short?: string): FlagSpec => ({ long, short, kind: { type: "string" } })
 export const slice = (long: string, short?: string): FlagSpec => ({ long, short, kind: { type: "stringSlice" } })
+export const array = (long: string, short?: string): FlagSpec => ({ long, short, kind: { type: "stringArray" } })
 export const int = (long: string, short?: string): FlagSpec => ({ long, short, kind: { type: "int" } })
 export const oneOf = (long: string, short: string | undefined, values: ReadonlyArray<string>): FlagSpec => ({
   long,
@@ -105,6 +107,11 @@ export const parseFlags = (argv: ReadonlyArray<string>, specs: ReadonlyArray<Fla
       case "stringSlice": {
         const previous = changed.has(spec.long) ? (values.get(spec.long) as ReadonlyArray<string>) : []
         values.set(spec.long, [...previous, ...splitCsv(value)])
+        break
+      }
+      case "stringArray": {
+        const previous = changed.has(spec.long) ? (values.get(spec.long) as ReadonlyArray<string>) : []
+        values.set(spec.long, [...previous, value])
         break
       }
       case "int": {

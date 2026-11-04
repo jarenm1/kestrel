@@ -21,7 +21,7 @@ const sortKeysDeep = (value: unknown): unknown => {
 }
 
 /** `json.Marshal` of a decoded value: sorted keys and HTML-safe escapes, no trailing newline. */
-const marshal = (value: unknown): string =>
+export const marshal = (value: unknown): string =>
   escapeLineSeparators(JSON.stringify(sortKeysDeep(value)))
     .replace(/</g, "\\u003c")
     .replace(/>/g, "\\u003e")

@@ -478,6 +478,8 @@ const make: WorkspaceShape = {
       }
       const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(listed.stdout)
       if (match?.[1] === undefined) return yield* Effect.fail(new WorkspaceError({ message: `${url} has no default branch` }))
+      // Checkouts clone the mirror, so its HEAD decides their local default branch and `origin/HEAD`.
+      yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "symbolic-ref", "HEAD", `refs/heads/${match[1]}`])
       return match[1]
     }),
 

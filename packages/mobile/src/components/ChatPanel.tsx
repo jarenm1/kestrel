@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Linking, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AgentItem, ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol";
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
 import type { ActiveBox } from "@/api/client";
 import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
@@ -15,6 +15,7 @@ import { useNavigation } from "@/nav/navigation";
 import { colors, fonts, radius, spacing } from "@/theme";
 import { Composer } from "./Composer";
 import TranscriptDom from "./TranscriptDom";
+import type { SwipeDirection } from "@/lib/swipe";
 
 interface Props {
   taskId: string;
@@ -26,6 +27,8 @@ interface Props {
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined;
   context?: ContextUsage | null | undefined;
+  /** A horizontal swipe over the transcript, which the screen's own swipe gestures cannot see in the native app. */
+  onSwipe: (direction: SwipeDirection) => void;
 }
 
 const ELAPSED_TICK_MS = 1000;
@@ -72,12 +75,17 @@ function ArchivedNotice({ task }: { task: Task }) {
  * The thread's transcript (the desktop's own, in `TranscriptDom`) above the native composer. This side owns the data:
  * it reads the query cache that `useTaskState` keeps live and forwards changes across the DOM bridge.
  */
-export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTask, context }: Props) {
+export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTask, context, onSwipe }: Props) {
   const { api } = useApiClient();
   const nav = useNavigation();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const task = useQuery(queries.task(taskId));
+  // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo);
+  const referenceRepos = checkoutRepos.length === 0 && task.data?.pickedRepo
+    ? [task.data.pickedRepo]
+    : checkoutRepos;
   const files = useQuery({
     queryKey: [...boxKeys(api.boxScope).box, "file-access"],
     queryFn: () => api.fileAccess(),
@@ -129,6 +137,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
         onFileError={async () => void files.refetch()}
         openExternal={async (url) => void Linking.openURL(url)}
         openThread={async (id) => nav.push({ name: "thread", taskId: id, box })}
+        onSwipe={async (direction) => onSwipe(direction)}
         dom={{ style: styles.transcript, containerStyle: styles.flex }}
       />
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
@@ -137,12 +146,13 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
       ) : (
         <Composer
           key={taskId}
-          repos={(task.data?.checkouts ?? []).map((checkout) => checkout.repo)}
+          repos={referenceRepos}
           taskId={taskId}
           ask={pendingAsk}
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
+          lastRun={threadChoiceRun(sortedRuns, messages)}
           onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}

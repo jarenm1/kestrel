@@ -1,3 +1,4 @@
+import { api } from "./api"
 import { CommandError, SilentExit, type GhRun } from "./context"
 import { errorMessage, PR_COMMANDS, PR_UNAVAILABLE } from "./pr"
 import { GH_VERSION_TEXT } from "./usage"
@@ -9,6 +10,21 @@ export interface GhResult {
 }
 
 const SUPPORTED = ["checks", "close", "comment", "create", "diff", "edit", "list", "ready", "reopen", "review", "status", "view"]
+
+const GH_HELP = `Work with GitHub from this Kestrel thread.
+
+This gh behaves like GitHub CLI 2.87.3 for the commands below. It acts with the thread owner's GitHub
+connection; no token is visible inside the sandbox.
+
+USAGE
+  gh <command> <subcommand> [flags]
+
+COMMANDS
+  api:         Make a read-only GitHub API request (GET or HEAD, or a GraphQL query)
+  pr:          Work with pull requests in this thread's checkouts
+
+Run \`gh <command> --help\` for a command's flags.
+`
 
 const PR_HELP = `Work with GitHub pull requests in this Kestrel thread's checkouts.
 
@@ -40,7 +56,7 @@ Run \`gh pr <command> --help\` for a command's flags.
 `
 
 const unavailable = (what: string): string =>
-  `${what} is not available in Kestrel. Kestrel's gh supports gh pr ${SUPPORTED.join(", ")}; use the github_* tools for other GitHub work.`
+  `${what} is not available in Kestrel. Kestrel's gh supports gh api (read-only) and gh pr ${SUPPORTED.join(", ")}; use the github_* tools for other GitHub work.`
 
 /** Runs one `gh` command line for an agent and collects what it would print. */
 export const runGh = async (run: GhRun, argv: ReadonlyArray<string>): Promise<GhResult> => {
@@ -48,7 +64,7 @@ export const runGh = async (run: GhRun, argv: ReadonlyArray<string>): Promise<Gh
   try {
     const [command, ...rest] = argv
     if (command === undefined || command === "--help" || command === "help") {
-      run.stdout += PR_HELP
+      run.stdout += GH_HELP
       return result(0)
     }
     if (command === "--version" || command === "version") {
@@ -61,6 +77,10 @@ export const runGh = async (run: GhRun, argv: ReadonlyArray<string>): Promise<Gh
         return result(0)
       }
       throw new CommandError(unavailable(`gh auth ${rest[0] ?? ""}`.trimEnd()))
+    }
+    if (command === "api") {
+      await api(run, rest)
+      return result(0)
     }
     if (command !== "pr") throw new CommandError(unavailable(`gh ${command}`))
 

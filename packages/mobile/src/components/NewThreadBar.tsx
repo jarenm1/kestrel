@@ -14,9 +14,12 @@ import { colors, radius, spacing } from "@/theme";
 /** Key of Kestrel's box, whose id is `null`. */
 const KESTREL_BOX = "kestrel";
 
+/** Key of the branch sheet's option that leaves the choice to the agent; no branch has an empty name. */
+const AGENT_PICKS = "";
+
 /**
- * `repo`'s branches to start from, with a filter; `undefined` is the repository's default branch, which the box
- * resolves. Branch names a checkout cannot take (see `BranchName`) are left out.
+ * `repo`'s branches to start from, with a filter; `undefined` leaves the choice to the agent. Branch names a checkout
+ * cannot take (see `BranchName`) are left out.
  */
 function BranchPicker({
   repo,
@@ -33,16 +36,15 @@ function BranchPicker({
   const queries = useMemo(() => createQueries(api), [api]);
   const [open, setOpen] = useState(false);
   const branches = useQuery(queries.githubBranches(repo));
-  const listed = useQuery(queries.githubRepos()).data?.find((r) => r.fullName === repo)?.defaultBranch;
-  // The listing puts the default branch first; before it loads, the repository list knows it.
-  const defaultBranch = branches.data?.[0] ?? listed ?? "main";
+  // The listing puts the default branch first.
+  const defaultBranch = branches.data?.[0];
   const names = (branches.data ?? []).filter(Schema.is(BranchName));
   return (
     <>
       <BarButton
         icon={GitBranch}
-        label={value ?? defaultBranch}
-        accessibilityLabel={`Branch the thread starts from: ${value ?? defaultBranch}`}
+        label={value ?? "Agent picks"}
+        accessibilityLabel={value === undefined ? "The agent picks the branch to start from" : `Branch the thread starts from: ${value}`}
         onPress={() => setOpen(true)}
         disabled={disabled}
       />
@@ -50,9 +52,12 @@ function BranchPicker({
         open={open}
         onClose={() => setOpen(false)}
         title="Branch to start from"
-        options={names.map((name) => ({ key: name, label: name, detail: name === defaultBranch ? "default" : undefined }))}
-        selected={value ?? defaultBranch}
-        onSelect={(name) => onChange(name === defaultBranch ? undefined : name)}
+        options={[
+          { key: AGENT_PICKS, label: "Agent picks", detail: "The agent picks a branch or pull request" },
+          ...names.map((name) => ({ key: name, label: name, detail: name === defaultBranch ? "default" : undefined })),
+        ]}
+        selected={value ?? AGENT_PICKS}
+        onSelect={(name) => onChange(name === AGENT_PICKS ? undefined : name)}
         filter={{ placeholder: "Filter branches", empty: (q) => `No branch matches “${q}”.` }}
         message={branches.isPending ? "Loading branches…" : branches.isError ? errorText(branches.error) : undefined}
       />

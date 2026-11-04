@@ -44,7 +44,45 @@ export function Fleet() {
         </Card>
       )}
       <AddFleetBoxForm onCreated={setCreated} />
+      <ToolFailures />
     </>
+  )
+}
+
+/** What failed across Kestrel's boxes, most common first (the server's order). */
+function ToolFailures() {
+  const list = useQuery(queries.fleetToolFailures())
+
+  return (
+    <Card className="py-0">
+      <CardContent className="flex flex-col gap-3 px-5 py-4">
+        <div>
+          <span className="font-medium">Common failures</span>
+          <p className="text-muted-foreground">
+            Failed tools and agent turns{list.data && ` of the last ${list.data.days} days`}, most common first.
+          </p>
+        </div>
+        {list.error && <Alert>{errorText(list.error)}</Alert>}
+        {list.isPending && <div className="text-muted-foreground">Loading…</div>}
+        {list.data?.failures.length === 0 && <div className="text-muted-foreground">No failures reported.</div>}
+        {list.data && list.data.failures.length > 0 && (
+          <ol className="divide-y divide-white/[0.04]">
+            {list.data.failures.map((failure) => (
+              <li key={`${failure.tool}\n${failure.signature}`} className="flex items-start gap-4 py-2.5">
+                <span className="w-12 shrink-0 text-right font-medium tabular-nums">{failure.count}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span className="truncate font-mono text-xs">{failure.tool}</span>
+                  <span className="break-words text-muted-foreground">{failure.signature}</span>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {failure.firstSeen === failure.lastSeen ? failure.lastSeen : `${failure.firstSeen} to ${failure.lastSeen}`}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

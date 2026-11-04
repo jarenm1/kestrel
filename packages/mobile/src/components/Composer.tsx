@@ -13,20 +13,24 @@ import Svg, { Circle } from "react-native-svg";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import {
-  AgentEffort,
   AgentModel,
   GithubRepoSlug,
   EFFORT_LABELS,
+  EffortPick,
   connectedModelProviders,
   harnessCommandPrefix,
   Paths,
+  resolveAgentChoice,
+  type AgentEffort,
   type ContextUsage,
   type HarnessCommand,
   type Message,
   type ModelInfo,
   type ModelProvider,
   type ModelProviderInfo,
+  type Run,
   type SendMessageBody,
+  type SendMessageResponse,
 } from "@cloudagents/protocol";
 import { AttachmentImage } from "@/components/AttachmentImage";
 import { createQueries } from "@/api/queries";
@@ -67,14 +71,14 @@ function ThinkingPicker({
   onChange,
 }: {
   value: AgentEffort | undefined;
-  options: readonly { value: AgentEffort | undefined; label: string }[];
-  onChange: (value: AgentEffort | undefined) => void;
+  options: readonly { value: AgentEffort; label: string }[];
+  onChange: (value: AgentEffort) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(0);
   const index = Math.max(0, options.findIndex((option) => option.value === value));
   const selected = options[index]!;
-  const ringFill = selected.value === undefined ? 0 : EFFORT_RING_FILL[selected.value];
+  const ringFill = EFFORT_RING_FILL[selected.value];
   // Both input implementations reserve 16px at each end for the thumb.
   const offset = (stop: number) => 16 + Math.max(0, width - 32) * stop / (options.length - 1);
   return (
@@ -99,7 +103,7 @@ function ThinkingPicker({
             />
           ) : null}
         </Svg>
-        <Text style={styles.pillText}>{value === undefined ? "Thinking" : selected.label}</Text>
+        <Text style={styles.pillText}>{selected.label}</Text>
       </Button>
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
         <View style={styles.modalRoot}>
@@ -217,7 +221,7 @@ function ModelPicker({ sections, value, onChange, onManage }: ModelPickerProps) 
 }
 
 interface ComposerProps {
-  readonly onSend: (body: SendMessageBody) => Promise<unknown>;
+  readonly onSend: (body: SendMessageBody) => Promise<SendMessageResponse | void>;
   readonly pending: boolean;
   readonly error: unknown;
   /** Shown as a stop button while the composer is empty and a run is active. */
@@ -228,6 +232,8 @@ interface ComposerProps {
   readonly ask?: Message | undefined;
   readonly context?: ContextUsage | null | undefined;
   readonly activeRunId?: string;
+  /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
+  readonly lastRun?: Pick<Run, "model" | "effort"> | undefined;
   readonly activeRunProvider?: ModelProvider;
   readonly repo?: string;
   readonly onRepoChange?: (repo: string) => void;
@@ -307,6 +313,7 @@ export function Composer({
   context,
   activeRunId,
   activeRunProvider,
+  lastRun,
   below,
   repo,
   onRepoChange,
@@ -332,27 +339,30 @@ export function Composer({
   const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate));
   const referenceRepo = pickedRepo ?? repo ?? (checkoutRepos.length === 1 ? checkoutRepos[0] : undefined);
   useEffect(() => setPickedRepo(undefined), [repo]);
-  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel);
-  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort);
+  // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
+  const pickSuffix = taskId === undefined ? "" : `.${taskId}`;
+  const [pickedModel, setPickedModel, clearPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel);
+  const [pickedEffort, setPickedEffort, clearPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick);
+  const [defaultModel] = useStoredChoice("kestrel.model", AgentModel);
+  const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick);
   const [choice, setChoice] = useState<{ askId: string; index: number } | undefined>();
 
   const askOptions = ask?.options ?? [];
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined;
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex];
 
+  const connected = connections.data ? connectedModelProviders(connections.data) : [];
   const sections: readonly ModelSection[] | null = connections.data
-    ? connectedModelProviders(connections.data)
+    ? connected
         .map((provider) => ({ provider, models: shown[provider.id] }))
         .filter((section) => section.models.length > 0)
     : null;
-  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((section) => section.models) ?? [];
-  const model = offered.find((m) => m.id === storedModel) ?? offered[0];
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined;
-  const effortOptions = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ];
+  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort });
+  const effortOptions = (model?.efforts ?? []).map((e) => ({
+    value: e,
+    label: e === "none" ? "Off" : EFFORT_LABELS[e],
+  }));
 
   // Slash commands
   const visible = view.plain;
@@ -375,11 +385,12 @@ export function Composer({
   });
 
   const commandProvider = commandQuery.data?.provider ?? expectedProvider;
+  // Touching the native/web menu blurs the DOM editor before a Pressable's onPress can select a command.
+  // Like references, keep the active token available across that focus change.
   const slashMenuOpen =
     slashQuery !== undefined &&
     (trigger !== "$" || commandProvider === "openai") &&
-    !dismissed &&
-    focused;
+    !dismissed;
 
   // Codex lists its commands and skills on `/`, and only its skills on their native `$`.
   const commandMatches =
@@ -390,7 +401,7 @@ export function Composer({
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
         );
-
+  const selectedCommand = commandMatches[activeCommandIndex % commandMatches.length];
   const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret);
   // A repository sheet or a touch choice takes focus from the editor; keep the active token available until chosen.
   const referenceMenuOpen = referenceTrigger !== undefined && !dismissed;
@@ -441,8 +452,7 @@ export function Composer({
       if (key === "ArrowDown" || key === "ArrowUp") {
         setActiveCommandIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + commandMatches.length) % commandMatches.length);
       } else if (key === "Enter" || key === "Tab") {
-        const command = commandMatches[activeCommandIndex % commandMatches.length];
-        if (command !== undefined) chooseCommand(command);
+        if (selectedCommand !== undefined) chooseCommand(selectedCommand);
       }
     }
   }
@@ -454,10 +464,15 @@ export function Composer({
     const body = [chosenOption ?? "", next.markdown.trim()].filter(Boolean).join("\n\n");
     if (body === "" || pending) return;
     void onSend({ text: body, model: model?.id, effort }).then(
-      () => {
+      (sent) => {
         editor.current?.clear();
         setText("");
         setChoice(undefined);
+        // The new run now records these picks. A message joining a running turn keeps them for the next turn.
+        if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
+          void clearPickedModel(pickedModel);
+          void clearPickedEffort(pickedEffort);
+        }
       },
       () => undefined
     );
@@ -522,14 +537,22 @@ export function Composer({
           <ModelPicker
             sections={sections}
             value={model}
-            onChange={setModel}
+            onChange={setPickedModel}
             onManage={() => navigation.push({ name: "connections" })}
           />
           {model !== undefined && model.efforts.length > 0 ? (
-            <ThinkingPicker value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
           ) : null}
           <View style={styles.flex} />
-          {onStop && empty ? (
+          {slashMenuOpen && selectedCommand !== undefined ? (
+            <Button
+              icon={Check}
+              accessibilityLabel="Select command"
+              onPress={() => chooseCommand(selectedCommand)}
+            >
+              Select
+            </Button>
+          ) : onStop && empty ? (
             <Button size="icon" accessibilityLabel="Stop" disabled={stopping} onPress={onStop}>
               <Square size={14} color={colors.primaryForeground} fill={colors.primaryForeground} />
             </Button>

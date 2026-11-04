@@ -95,13 +95,21 @@ export const declinedCodexItem = (message: unknown, itemId: string): boolean => 
   return typeof item === "object" && item !== null && "id" in item && item.id === itemId && "status" in item && item.status === "declined"
 }
 
-/** Turn errors can contain provider or user data, so only report fixed categories. */
-export const agentFailure = (agent: "claude" | "codex", error: string | null): Omit<ToolFailureCount, "count"> => ({
-  tool: `agent:${agent}`,
-  signature: error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
-    ? "exited before turn finished"
-    : "turn failed",
-})
+/** Only retain a scrubbed error line from CLI diagnostics, never arbitrary output. */
+export const agentDiagnostic = (text: string): string | null => {
+  const signature = failureSignature("Bash", text)
+  return signature === "(no error line)" || signature === "(no output)" || signature === "(output too large)" ? null : signature
+}
+
+export const agentFailure = (agent: "claude" | "codex", error: string | null, diagnostic: string | null, exitCode: number | null, signal: string | null): Omit<ToolFailureCount, "count"> => {
+  const earlyExit = error === (agent === "claude" ? "Claude Code exited before its turn finished." : "Codex exited before its turn finished.")
+  const prefix = earlyExit ? "exited before turn finished" : "turn failed"
+  const termination = [exitCode === null ? null : `exit code ${exitCode}`, signal === null ? null : `signal ${signal}`].filter((part) => part !== null).map((part) => `: ${part}`).join("")
+  const detail = (error === null || earlyExit ? null : agentDiagnostic(`error: ${error}`)) ?? diagnostic
+  const available = Math.max(0, MAX_SIGNATURE - prefix.length - termination.length - 2)
+  const signature = `${prefix}${detail && available > 0 ? `: ${detail.slice(0, available).trimEnd()}` : ""}${termination}`.slice(0, MAX_SIGNATURE)
+  return { tool: `agent:${agent}`, signature }
+}
 
 export interface ToolFailureReporter {
   readonly record: (failure: Omit<ToolFailureCount, "count">) => void
