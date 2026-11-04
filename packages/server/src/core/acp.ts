@@ -40,12 +40,15 @@ export interface AcpDriverIo {
 const errorText = (error: unknown): string =>
   isRecord(error) && typeof error.message === "string" ? error.message : "the agent refused the request"
 
-/** The values a select config option offers, by option id; empty when the session does not have the option. */
-const optionValues = (configOptions: unknown, id: string): ReadonlyArray<string> => {
-  if (!Array.isArray(configOptions)) return []
-  const option = configOptions.find((o) => isRecord(o) && o.id === id)
-  if (!isRecord(option) || !Array.isArray(option.options)) return []
-  return option.options.flatMap((o) => (isRecord(o) && typeof o.value === "string" ? [o.value] : []))
+/**
+ * The session's thinking-level option: the select option in ACP's `thought_level` category, whatever the agent calls
+ * it (OpenCode `effort`, Antigravity CLI `thought_level`), with the values it offers; null when the model has none.
+ */
+const thoughtLevel = (configOptions: unknown): { readonly id: string; readonly values: ReadonlyArray<string> } | null => {
+  if (!Array.isArray(configOptions)) return null
+  const option = configOptions.find((o) => isRecord(o) && o.category === "thought_level")
+  if (!isRecord(option) || typeof option.id !== "string" || !Array.isArray(option.options)) return null
+  return { id: option.id, values: option.options.flatMap((o) => (isRecord(o) && typeof o.value === "string" ? [o.value] : [])) }
 }
 
 /**
@@ -111,14 +114,15 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
 
   /** The thinking level, when the session's model offers it; the catalog only offers levels the model has. */
   const setEffort = (configOptions: unknown) => {
-    if (input.effort === undefined || !optionValues(configOptions, "effort").includes(input.effort)) {
+    const option = thoughtLevel(configOptions)
+    if (input.effort === undefined || option === null || !option.values.includes(input.effort)) {
       prompt()
       return
     }
     request(
       "session/set_config_option",
-      { sessionId, configId: "effort", value: input.effort },
-      orFail("session/set_config_option effort", prompt),
+      { sessionId, configId: option.id, value: input.effort },
+      orFail(`session/set_config_option ${option.id}`, prompt),
     )
   }
 

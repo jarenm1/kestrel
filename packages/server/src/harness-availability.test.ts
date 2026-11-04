@@ -14,8 +14,11 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
   expect(availableHarnesses(box, probe({ opencode: "1.19.5" }))).toEqual([])
   // A binary that runs but does not say its version (a broken shim) cannot be trusted to be OpenCode 2.
   expect(availableHarnesses(box, probe({ opencode: "error: could not create process" }))).toEqual([])
+  expect(availableHarnesses(box, probe({ agy: "1.5.0" }))).toEqual(["google"])
+  // agy before 1.5 cannot sign in from a terminal.
+  expect(availableHarnesses(box, probe({ agy: "1.4.12" }))).toEqual([])
 })
 
 test("a fake-agent box plays every harness itself", () => {
-  expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual(["anthropic", "openai", "opencode"])
+  expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual(["anthropic", "openai", "opencode", "google"])
 })

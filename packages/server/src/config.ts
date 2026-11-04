@@ -45,6 +45,14 @@ const DEFAULT_OPENCODE_COMMAND = `OPENCODE_CONFIG_CONTENT=${shellQuote(
   JSON.stringify({ share: "disabled", update: "disable", mcp: { timeout: { execution: 2 ** 31 - 1 } } }),
 )} opencode acp`
 
+/**
+ * Antigravity CLI runs as an ACP server on stdio too. It keeps its sign-in and sessions under `--gemini-dir`: the
+ * user's login directory when they are signed in (`AGY_GEMINI_DIR`, see `AGENT_CLIS`), which a Google run needs, since
+ * its models are reached only through that sign-in. Kestrel's sandbox is the boundary, so it asks for no permissions.
+ */
+const DEFAULT_GOOGLE_COMMAND =
+  'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry'
+
 export interface ServerConfig {
   readonly port: number
   readonly host: string
@@ -141,11 +149,12 @@ export const loadConfig = (): ServerConfig => {
   const fakeAgent = process.env.CLOUDAGENTS_FAKE_AGENT === "1"
   const fakeCommand = `${shellQuote(process.execPath)} ${shellQuote(join(repoRoot, "packages/server/scripts/fake-agent.ts"))}`
   const agentCommands: Record<ModelProvider, string> = fakeAgent
-    ? { anthropic: fakeCommand, openai: fakeCommand, opencode: fakeCommand }
+    ? { anthropic: fakeCommand, openai: fakeCommand, opencode: fakeCommand, google: fakeCommand }
     : {
         anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
         openai: process.env.CLOUDAGENTS_OPENAI_COMMAND ?? DEFAULT_OPENAI_COMMAND,
         opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
+        google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
       }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)

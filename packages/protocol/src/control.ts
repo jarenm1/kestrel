@@ -54,7 +54,7 @@ export const ControlPaths = {
    * user, replacing any login already pending for them. Relayed to the box.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
-  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code Anthropic showed to the pending `claude` login. Relayed. */
+  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Relayed. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
   cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
@@ -187,7 +187,7 @@ export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.m
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
 /** Subscription logins of the official agent CLIs, held per user on the box. */
-export const CliProvider = Schema.Literal("claude-cli", "codex-cli")
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli")
 export type CliProvider = typeof CliProvider.Type
 
 /** One user's CLI login on the box, as reported by the box for `cliAuth`. Carries no secrets. */
@@ -260,6 +260,7 @@ export type UseBankedResetResult = typeof UseBankedResetResult.Type
  * A sign-in the box started with the unmodified CLI. The user finishes it on the provider's own page:
  * - claude-cli: open `url`, sign in, then send the code Anthropic shows to `cliLoginCode` (`needsCode`).
  * - codex-cli: open `url` and enter `userCode`; the box notices completion itself (poll `cliAuth`).
+ * - antigravity-cli: open `url`, sign in with Google, then send the code the page shows (or its URL) to `cliLoginCode`.
  */
 export const CliLoginStart = Schema.Struct({
   provider: CliProvider,

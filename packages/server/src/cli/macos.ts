@@ -77,6 +77,8 @@ const PROVISION = [
   // its capture helper.
   "apt-get install -y bubblewrap git curl ca-certificates nodejs npm weston xwayland openbox hsetroot xterm xdotool ffmpeg build-essential libx11-dev libxext-dev libxdamage-dev libxfixes-dev",
   "npm install -g @anthropic-ai/claude-code @openai/codex @opencode/cli",
+  // Antigravity CLI (`agy`) ships only through its own installer; system-wide, so the VM's user finds it.
+  "curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
   // Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; bubblewrap needs one. Give bwrap a profile
   // that allows them, only when the VM's user (this runs under sudo) cannot already make one.
   'if ! sudo -u "$SUDO_USER" bwrap --ro-bind / / true 2>/dev/null; then',

@@ -1,10 +1,10 @@
 import { Schema } from "effect"
 
 /**
- * Model families the box runs, each through its own agent CLI: Claude Code for Anthropic, codex for OpenAI, and
- * OpenCode (over the Agent Client Protocol) for OpenCode's own models.
+ * Model families the box runs, each through its own agent CLI: Claude Code for Anthropic, codex for OpenAI, OpenCode
+ * for OpenCode's own models, and Antigravity CLI for Google's (both over the Agent Client Protocol).
  */
-export const ModelProvider = Schema.Literal("anthropic", "openai", "opencode")
+export const ModelProvider = Schema.Literal("anthropic", "openai", "opencode", "google")
 export type ModelProvider = typeof ModelProvider.Type
 
 /**
@@ -24,8 +24,8 @@ export const EFFORT_LABELS: Record<AgentEffort, string> = {
 }
 
 /**
- * Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`, OpenCode's ACP
- * `model` config option, which names OpenCode's own provider first).
+ * Model id passed to the provider's CLI (`claude --model`, the Codex app-server thread's `model`, the ACP `model`
+ * config option of OpenCode, which names OpenCode's own provider first, and of Antigravity CLI).
  */
 export const AgentModel = Schema.Literal(
   "claude-fable-5-1",
@@ -56,6 +56,7 @@ export const AgentModel = Schema.Literal(
   "opencode/nemotron-3.5-lightning-free",
   "opencode/nemotron-3.5-super-vl-free",
   "opencode/pulse-alpha-free",
+  "gemini-3.8-flash",
 )
 export type AgentModel = typeof AgentModel.Type
 
@@ -111,6 +112,8 @@ export const AGENT_MODELS: readonly ModelInfo[] = [
   { id: "opencode/nemotron-3.5-lightning-free", provider: "opencode", name: "Nemotron 3.5 Lightning Free", efforts: [], shownByDefault: false },
   { id: "opencode/nemotron-3.5-super-vl-free", provider: "opencode", name: "Nemotron 3.5 Super VL Free", efforts: ["none", "low", "medium", "high", "xhigh"], shownByDefault: false },
   { id: "opencode/pulse-alpha-free", provider: "opencode", name: "Pulse Alpha Free", efforts: OC_LOW_HIGH_MAX, shownByDefault: false },
+  // What a signed-in Google account's Antigravity CLI offers, with its `thought_level` option.
+  { id: "gemini-3.8-flash", provider: "google", name: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"], shownByDefault: true },
 ]
 
 export interface ModelProviderInfo {
@@ -127,6 +130,7 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "anthropic", name: "Anthropic", connections: ["anthropic", "claude-cli"] },
   { id: "openai", name: "OpenAI", connections: ["openai", "codex-cli"] },
   { id: "opencode", name: "OpenCode", connections: [] },
+  { id: "google", name: "Google", connections: ["antigravity-cli"] },
 ]
 
 /** The provider a message without a model runs on: the box's default harness. */

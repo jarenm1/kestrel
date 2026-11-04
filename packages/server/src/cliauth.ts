@@ -302,15 +302,18 @@ export const CliAuthLive = Layer.effect(
         const cached = commandCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < COMMAND_CACHE_MS) return cached.commands
         const spec = AGENT_CLIS[provider]
+        const probe = spec.probe
+        // A CLI Kestrel does not probe offers no commands of its own here.
+        if (probe === null) return []
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, spec.probeArgs, { workspacePath: workspace, cwd: dir })
+        const inv = yield* invoke(user, spec.bin, probe.args, { workspacePath: workspace, cwd: dir })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
             if (running !== undefined) return running
             const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: dir }
-            const pending = limitDiscovery(() => spec.discoverCommands(launch))
+            const pending = limitDiscovery(() => probe.discoverCommands(launch))
               .then((commands) => {
                 commandCache.delete(key)
                 commandCache.set(key, { at: Date.now(), commands })
@@ -345,6 +348,8 @@ export const CliAuthLive = Layer.effect(
     const readUsage = (user: string, provider: CliProvider): Effect.Effect<ProviderUsage, BadRequest> =>
       Effect.gen(function* () {
         const spec = AGENT_CLIS[provider]
+        const probe = spec.probe
+        if (probe === null) return yield* Effect.fail(new InternalError({ message: `${spec.bin} reports no limits` }))
         const env = yield* cliEnv(user)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
@@ -358,13 +363,13 @@ export const CliAuthLive = Layer.effect(
         const cached = usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
         const epoch = usageEpochs.get(key) ?? 0
-        const inv = yield* invoke(user, spec.bin, spec.probeArgs)
+        const inv = yield* invoke(user, spec.bin, probe.args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         return yield* Effect.tryPromise({
           try: () => {
             const running = usageRuns.get(key)
             if (running !== undefined) return running
-            const pending = limitDiscovery(() => spec.probeUsage(launch))
+            const pending = limitDiscovery(() => probe.probeUsage(launch))
               .then((usage) => {
                 usageCache.delete(key)
                 const current = (usageEpochs.get(key) ?? 0) === epoch
@@ -390,24 +395,26 @@ export const CliAuthLive = Layer.effect(
         ),
       )
 
+    /** The limits of every CLI that reports them; a CLI Kestrel does not probe has none to show. */
     const providerUsage = (user: string) =>
       Effect.all(
-        CLI_PROVIDERS.map((provider) => readUsage(user, provider)),
+        CLI_PROVIDERS.filter((provider) => AGENT_CLIS[provider].probe !== null).map((provider) => readUsage(user, provider)),
         { concurrency: "unbounded" },
       )
 
     const useBankedReset = (user: string, provider: CliProvider, resetId: string) =>
       Effect.gen(function* () {
         const spec = AGENT_CLIS[provider]
-        const bankedReset = spec.useBankedReset
-        if (bankedReset === null) {
+        const probe = spec.probe
+        const bankedReset = probe?.useBankedReset ?? null
+        if (probe === null || bankedReset === null) {
           return yield* Effect.fail(new BadRequest({ message: `${spec.bin} has no banked resets` }))
         }
         const env = yield* cliEnv(user)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
         }
-        const inv = yield* invoke(user, spec.bin, spec.probeArgs)
+        const inv = yield* invoke(user, spec.bin, probe.args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         const key = keyOf(user, provider)
         return yield* Effect.tryPromise({
@@ -441,10 +448,16 @@ export const CliAuthLive = Layer.effect(
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         if (!present) return { provider, loggedIn: false, account: null }
-        const inv = yield* invoke(user, spec.bin, spec.status)
+        // A CLI without a status command is signed in while its token file exists.
+        if (spec.status.kind === "file") {
+          const token = join(dir, spec.status.path)
+          const signedIn = yield* Effect.promise(() => stat(token).then((s) => s.isFile(), () => false))
+          return { provider, loggedIn: signedIn, account: null }
+        }
+        const inv = yield* invoke(user, spec.bin, spec.status.args)
         const out = yield* runCli(inv, `${spec.bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
-        return yield* spec.parseStatus(out)
+        return yield* spec.status.parse(out)
       }).pipe(
         Effect.catchTag("InternalError", (e) =>
           Effect.succeed<CliAuthStatus>({ provider, loggedIn: false, account: null, error: e.message }),
@@ -464,7 +477,7 @@ export const CliAuthLive = Layer.effect(
         const key = keyOf(user, provider)
         const previous = pending.get(key)
         if (previous) killEntry(previous)
-        const inv = yield* invoke(user, spec.bin, spec.login)
+        const inv = yield* invoke(user, spec.bin, spec.login(yield* providerDir(user, provider)))
         const child = yield* Effect.try({
           try: () =>
             ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
@@ -571,8 +584,9 @@ export const CliAuthLive = Layer.effect(
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         // Revoke with the CLI when there is a login to revoke; a failed revoke still removes the local login.
-        if (present) {
-          const inv = yield* invoke(user, AGENT_CLIS[provider].bin, AGENT_CLIS[provider].logout)
+        const revoke = AGENT_CLIS[provider].logout
+        if (present && revoke !== null) {
+          const inv = yield* invoke(user, AGENT_CLIS[provider].bin, revoke)
           yield* runCli(inv, `${AGENT_CLIS[provider].bin} logout`).pipe(Effect.ignore)
         }
         yield* Effect.tryPromise({

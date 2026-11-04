@@ -42,20 +42,30 @@ export interface AgentCli {
   readonly configEnv: string
   /** The broker env the CLI reads for its model calls; a user's own login replaces it. */
   readonly brokerEnv: ReadonlyArray<string>
-  readonly status: ReadonlyArray<string>
-  readonly parseStatus: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError>
-  readonly login: ReadonlyArray<string>
-  readonly logout: ReadonlyArray<string>
+  /**
+   * Whether the user is signed in: what the CLI's status command prints, or, for a CLI without one, whether its token
+   * file exists (a path under the login directory).
+   */
+  readonly status:
+    | { readonly kind: "command"; readonly args: ReadonlyArray<string>; readonly parse: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError> }
+    | { readonly kind: "file"; readonly path: string }
+  /** Starts the sign-in; `dir` is the user's login directory (also `configEnv` in the CLI's environment). */
+  readonly login: (dir: string) => ReadonlyArray<string>
+  /** Revokes the login before its directory is removed; null when removing the directory is the whole sign-out. */
+  readonly logout: ReadonlyArray<string> | null
   /** The sign-in link (and device code, when the CLI uses one) in its output with ANSI codes removed; null until printed. */
   readonly parseLoginLink: (text: string) => { readonly url: string; readonly userCode: string | null } | null
   /** Sign-in ends with a code the user pastes back; otherwise it ends on the provider's page (a device code). */
   readonly needsCode: boolean
-  /** Starts the CLI's machine interface, which command discovery and the usage probe talk to. */
-  readonly probeArgs: ReadonlyArray<string>
-  readonly discoverCommands: (launch: DiscoveryLaunch) => Promise<ReadonlyArray<HarnessCommand>>
-  readonly probeUsage: (launch: DiscoveryLaunch) => Promise<ProviderUsage>
-  /** Spends a banked usage reset; null when the provider has none. */
-  readonly useBankedReset: ((launch: DiscoveryLaunch, resetId: string) => Promise<UseBankedResetResult>) | null
+  /** The CLI's machine interface for command discovery and limits; null when Kestrel asks it for neither. */
+  readonly probe: {
+    /** Starts the interface that command discovery and the usage probe talk to. */
+    readonly args: ReadonlyArray<string>
+    readonly discoverCommands: (launch: DiscoveryLaunch) => Promise<ReadonlyArray<HarnessCommand>>
+    readonly probeUsage: (launch: DiscoveryLaunch) => Promise<ProviderUsage>
+    /** Spends a banked usage reset; null when the provider has none. */
+    readonly useBankedReset: ((launch: DiscoveryLaunch, resetId: string) => Promise<UseBankedResetResult>) | null
+  } | null
 }
 
 const parseClaudeStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
@@ -96,9 +106,8 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
     dir: "claude",
     configEnv: "CLAUDE_CONFIG_DIR",
     brokerEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
-    status: ["auth", "status", "--json"],
-    parseStatus: parseClaudeStatus,
-    login: ["auth", "login"],
+    status: { kind: "command", args: ["auth", "status", "--json"], parse: parseClaudeStatus },
+    login: () => ["auth", "login"],
     logout: ["auth", "logout"],
     parseLoginLink: (text) => {
       // The line ends with the link, so a half-written link is not taken.
@@ -106,19 +115,15 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
       return url === undefined ? null : { url, userCode: null }
     },
     needsCode: true,
-    probeArgs: CLAUDE_DISCOVERY_ARGS,
-    discoverCommands: discoverClaudeCommands,
-    probeUsage: probeClaudeUsage,
-    useBankedReset: null,
+    probe: { args: CLAUDE_DISCOVERY_ARGS, discoverCommands: discoverClaudeCommands, probeUsage: probeClaudeUsage, useBankedReset: null },
   },
   "codex-cli": {
     bin: "codex",
     dir: "codex",
     configEnv: "CODEX_HOME",
     brokerEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
-    status: ["login", "status"],
-    parseStatus: parseCodexStatus,
-    login: ["login", "--device-auth"],
+    status: { kind: "command", args: ["login", "status"], parse: parseCodexStatus },
+    login: () => ["login", "--device-auth"],
     logout: ["logout"],
     parseLoginLink: (text) => {
       const lines = text.split(/\r?\n/).map((line) => line.trim())
@@ -129,10 +134,29 @@ export const AGENT_CLIS: Record<CliProvider, AgentCli> = {
       return { url, userCode }
     },
     needsCode: false,
-    probeArgs: CODEX_DISCOVERY_ARGS,
-    discoverCommands: discoverCodexCommands,
-    probeUsage: probeCodexUsage,
-    useBankedReset: useCodexBankedReset,
+    probe: { args: CODEX_DISCOVERY_ARGS, discoverCommands: discoverCodexCommands, probeUsage: probeCodexUsage, useBankedReset: useCodexBankedReset },
+  },
+  // Antigravity CLI keeps everything (its sign-in token, sessions, settings) under the directory `--gemini-dir`
+  // names; `AGY_GEMINI_DIR` is Kestrel's own variable for it, which the run command passes on. It has no status or
+  // sign-out command: a signed-in directory holds its token file, and removing the directory signs it out.
+  "antigravity-cli": {
+    bin: "agy",
+    dir: "antigravity",
+    configEnv: "AGY_GEMINI_DIR",
+    brokerEnv: [],
+    status: { kind: "file", path: "antigravity-cli/antigravity-oauth-token" },
+    // `acp --login` signs in and exits: it prints a Google link whose page shows a code, and takes the code (or that
+    // page's URL) on stdin.
+    login: (dir) => ["acp", "--login", "--gemini-dir", dir, "--disable-telemetry"],
+    logout: null,
+    parseLoginLink: (text) => {
+      // The line ends with the link, so a half-written link is not taken.
+      const url = /^\s*(https:\/\/accounts\.google\.com\/\S+)[ \t]*\r?\n/m.exec(text)?.[1]
+      return url === undefined ? null : { url, userCode: null }
+    },
+    needsCode: true,
+    // Its commands and limits only show inside an ACP session.
+    probe: null,
   },
 }
 
@@ -149,13 +173,15 @@ export interface Harness {
   readonly cli: CliProvider | null
   /** The executable the default command runs; the box offers the provider only where it finds it (`capabilities.ts`). */
   readonly bin: string
-  /** The oldest major version (`<bin> --version`) the harness works with; null when any will do. */
-  readonly minMajor: number | null
+  /** The oldest `[major, minor]` version (`<bin> --version`) the harness works with; null when any will do. */
+  readonly minVersion: readonly [number, number] | null
 }
 
 export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
-  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minMajor: null },
-  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minMajor: null },
+  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null },
+  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
-  opencode: { conversation: "acp", cli: null, bin: "opencode", minMajor: 2 },
+  opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0] },
+  // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
+  google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5] },
 }

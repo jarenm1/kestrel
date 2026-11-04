@@ -21,6 +21,7 @@ const CONNECTIONS_PATH = "/settings/connections"
 const PROVIDER_LABELS: Record<CliProvider, string> = {
   "claude-cli": "Claude Code",
   "codex-cli": "Codex",
+  "antigravity-cli": "Antigravity",
 }
 
 /** A banked reset the user asked to spend, and how that request is going. */

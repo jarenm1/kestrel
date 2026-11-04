@@ -71,7 +71,7 @@ const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
 
 /**
  * The model providers whose harness CLI the box can run, at startup: found where agent runs look, and at least the
- * major version the harness needs. A fake-agent box plays every harness itself.
+ * version the harness needs. A fake-agent box plays every harness itself.
  */
 export const availableHarnesses = (
   config: { readonly fakeAgent: boolean; readonly sandboxPath: string | null },
@@ -82,7 +82,10 @@ export const availableHarnesses = (
     const harness = MODEL_HARNESS[provider]
     const path = probe.which(harness.bin)
     if (path === null) return false
-    if (harness.minMajor === null) return true
-    const major = /(\d+)\.\d+/.exec(probe.version(path))?.[1]
-    return major !== undefined && Number(major) >= harness.minMajor
+    if (harness.minVersion === null) return true
+    const found = /(\d+)\.(\d+)/.exec(probe.version(path))
+    if (found === null) return false
+    const [major, minor] = [Number(found[1]), Number(found[2])]
+    const [needMajor, needMinor] = harness.minVersion
+    return major > needMajor || (major === needMajor && minor >= needMinor)
   })

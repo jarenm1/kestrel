@@ -45,6 +45,7 @@ const CLI_POLL_MS = 3000
 const CLI_INTRO: Record<CliProvider, string> = {
   "claude-cli": "Use your own Claude Pro or Max subscription.",
   "codex-cli": "Use your own ChatGPT subscription.",
+  "antigravity-cli": "Use your own Google account through Antigravity CLI.",
 }
 
 /** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */

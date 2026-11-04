@@ -101,6 +101,26 @@
             ${xtermStyle} "$@"
         '';
 
+        # Antigravity CLI 1.5 (nixpkgs has 1.4, before `agy acp --login` and `session/resume`): the same package on
+        # Google's 1.5.0 build, from the manifests its installer reads.
+        agy = pkgs.antigravity-cli.overrideAttrs (_: {
+          version = "1.5.0";
+          src = pkgs.fetchurl {
+            x86_64-linux = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/linux-x64/cli_linux_x64.tar.gz";
+              hash = "sha512-5gMfhQkpIQcF2MI5OlZluCuMOxloSm08VWyvox8m93rL8WTf7pbKhKWudnCsDMI4qXTJgcUXsmkZS9zP8nHL1Q==";
+            };
+            aarch64-linux = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/linux-arm/cli_linux_arm64.tar.gz";
+              hash = "sha512-UJUYsoIJRdsr6l4BPKQ6Sd9ceJJ8OsNBoRFSh9UmJzVuHpUGrA0gQPtGeRX7pN3pAGHQkf3b3fjdwhJjeuQBUA==";
+            };
+            aarch64-darwin = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/darwin-arm/cli_mac_arm64.tar.gz";
+              hash = "sha512-gzoKGKQY9wufuLKxpMTcVx8bFotRBKowN5RjaVlGzMAgHNSPnP0wIx62aK5tB+/htJphnMqhT37ihh+eBJ7ivg==";
+            };
+          }.${system};
+        });
+
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
         sandboxEnv = pkgs.buildEnv {
           name = "cloudagents-sandbox-env";
@@ -121,6 +141,7 @@
             claude-code
             codex
             opencode
+            agy
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];

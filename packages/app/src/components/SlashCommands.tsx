@@ -14,6 +14,7 @@ const PROVIDER_LABELS: Record<ModelProvider, string> = {
   anthropic: "Claude Code",
   openai: "Codex",
   opencode: "OpenCode",
+  google: "Antigravity",
 }
 
 function StateLine({ children }: { children: ReactNode }) {

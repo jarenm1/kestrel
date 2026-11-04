@@ -12,10 +12,12 @@ interface Sent {
   readonly error?: unknown
 }
 
-const effortOption = (values: readonly string[]) => ({
-  id: "effort",
+/** A thinking-level option in ACP's `thought_level` category, under the id the agent gives it. */
+const thoughtOption = (id: string, values: readonly string[]) => ({
+  id,
+  category: "thought_level",
   type: "select",
-  currentValue: "default",
+  currentValue: values[0],
   options: values.map((value) => ({ value, name: value })),
 })
 
@@ -78,15 +80,23 @@ describe("ACP driver", () => {
     expect(refused.outcomes).toEqual([{ status: "failed", error: "session/resume: session not found" }])
   })
 
-  test("the thinking level is set only when the session's model offers it", () => {
-    const offered = harness({ model: "opencode/glm-5.3-flash-free", effort: "high" })
-    offered.driver.start()
-    offered.reply({})
-    offered.reply({ sessionId: "s1" })
-    offered.reply({ configOptions: [effortOption(["low", "high", "max", "default"])] })
-    expect(offered.last()).toMatchObject({ method: "session/set_config_option", params: { configId: "effort", value: "high" } })
-    offered.reply({ configOptions: [] })
-    expect(offered.last().method).toBe("session/prompt")
+  test("the thinking level is set through whatever option the model's thought_level category names, only when offered", () => {
+    const opencode = harness({ model: "opencode/glm-5.3-flash-free", effort: "high" })
+    opencode.driver.start()
+    opencode.reply({})
+    opencode.reply({ sessionId: "s1" })
+    opencode.reply({ configOptions: [thoughtOption("effort", ["low", "high", "max", "default"])] })
+    expect(opencode.last()).toMatchObject({ method: "session/set_config_option", params: { configId: "effort", value: "high" } })
+    opencode.reply({ configOptions: [] })
+    expect(opencode.last().method).toBe("session/prompt")
+
+    // Antigravity CLI names its option `thought_level`.
+    const agy = harness({ model: "gemini-3.8-flash", effort: "low" })
+    agy.driver.start()
+    agy.reply({})
+    agy.reply({ sessionId: "s1" })
+    agy.reply({ configOptions: [{ id: "model", category: "model", options: [] }, thoughtOption("thought_level", ["low", "medium", "high"])] })
+    expect(agy.last()).toMatchObject({ method: "session/set_config_option", params: { configId: "thought_level", value: "low" } })
 
     const absent = harness({ model: "opencode/big-pickle", effort: "high" })
     absent.driver.start()
