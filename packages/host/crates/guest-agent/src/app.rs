@@ -41,6 +41,8 @@ pub struct App {
     pub sys: System,
     boot_id: String,
     op_lock: AsyncMutex<()>,
+    /// Serializes thaws, so a host `thawVolume` and the freeze timeout never both unfreeze the volume.
+    thaw_lock: AsyncMutex<()>,
     state: Mutex<State>,
 }
 
@@ -98,6 +100,7 @@ impl App {
             sys,
             boot_id,
             op_lock: AsyncMutex::new(()),
+            thaw_lock: AsyncMutex::new(()),
             state: Mutex::new(State {
                 next_link: 0,
                 configured,
@@ -292,9 +295,7 @@ fn dispatch_host(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, line:
         HostToGuest::FreezeVolume { .. } => {
             spawn_op(app, tx, id, |app| async move { freeze_volume(&app).await })
         }
-        HostToGuest::ThawVolume { .. } => {
-            spawn_op(app, tx, id, |app| async move { thaw_volume(&app).await })
-        }
+        HostToGuest::ThawVolume { .. } => spawn_thaw(app, tx, id),
         HostToGuest::GpuAttached { pci_address, .. } => {
             spawn_op(app, tx, id, move |app| async move {
                 gpu_attached(&app, pci_address).await
@@ -391,6 +392,16 @@ where
     });
 }
 
+/// Thaws without `op_lock`: a thaw must get through while another op is blocked on the frozen volume.
+fn spawn_thaw(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, id: String) {
+    let app = app.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = thaw_volume(&app).await;
+        send_host(&tx, reply(id, result)).await;
+    });
+}
+
 /// Acknowledges the shutdown, waits until the acknowledgement left the socket, then powers off.
 fn spawn_shutdown(app: Arc<App>, tx: mpsc::Sender<Outgoing<GuestToHost>>, id: String) {
     tokio::spawn(async move {
@@ -454,6 +465,9 @@ fn mount_arg(app: &App) -> Res<&str> {
 }
 
 async fn configure_op(app: &Arc<App>, args: ConfigureArgs) -> Res<()> {
+    if app.lock().frozen.is_some() {
+        return Err("volume frozen; thaw it before configure".into());
+    }
     configure::configure(&app.cfg, &app.sys, &args).await?;
     let mut st = app.lock();
     st.configured = true;
@@ -491,14 +505,16 @@ async fn freeze_volume(app: &Arc<App>) -> Res<()> {
         st.frozen = Some(st.freeze_seq);
         st.freeze_seq
     };
-    tokio::spawn(auto_thaw(app.clone(), seq));
+    tokio::spawn(auto_thaw(app.clone(), seq, FREEZE_TIMEOUT));
     Ok(())
 }
 
-/// A freeze the host never thawed is released after `FREEZE_TIMEOUT`, so a lost host cannot leave the box stuck.
-async fn auto_thaw(app: Arc<App>, seq: u64) {
-    sleep(FREEZE_TIMEOUT).await;
-    let _guard = app.op_lock.lock().await;
+/// A freeze the host never thawed is released after `after`, so a lost host cannot leave the box stuck. This takes
+/// `thaw_lock` only, never `op_lock`: an op blocked on the frozen volume holds `op_lock`, and waiting for it would keep
+/// the volume frozen for good.
+async fn auto_thaw(app: Arc<App>, seq: u64, after: Duration) {
+    sleep(after).await;
+    let _guard = app.thaw_lock.lock().await;
     if app.lock().frozen != Some(seq) {
         return;
     }
@@ -508,7 +524,9 @@ async fn auto_thaw(app: Arc<App>, seq: u64) {
     }
 }
 
+/// Thaws the volume if it is frozen. Takes `thaw_lock` only, so it runs while an op holds `op_lock`.
 async fn thaw_volume(app: &Arc<App>) -> Res<()> {
+    let _guard = app.thaw_lock.lock().await;
     if app.lock().frozen.is_none() {
         return Ok(());
     }
@@ -573,5 +591,103 @@ async fn gpu_detach(app: &Arc<App>) -> Res<()> {
             set_gpu(app, GpuState::Attached, pci_address);
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::path::PathBuf;
+
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::args::{parse, Parsed};
+    use crate::protocol::{ConfigureArgs, GuestNetwork};
+
+    /// An app whose volume is a fresh directory under the system temp dir, with no system side effects.
+    fn app_on_volume(name: &str) -> (Arc<App>, PathBuf) {
+        let volume =
+            env::temp_dir().join(format!("kestrel-guest-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&volume);
+        std::fs::create_dir_all(&volume).expect("create volume dir");
+        let args = [
+            "--dry-run-system",
+            "--volume-mount",
+            volume.to_str().expect("utf-8 path"),
+        ];
+        let cfg = match parse(args.map(str::to_string)).expect("valid args") {
+            Parsed::Run(cfg) => *cfg,
+            Parsed::Help => panic!("parse returned help"),
+        };
+        let app = App::new(cfg, System { dry_run: true }).expect("create app");
+        (app, volume)
+    }
+
+    /// A freeze whose thaw never comes is released even while an op holds `op_lock`: that op may be blocked on the
+    /// frozen volume, and waiting for it would keep the volume frozen for good.
+    #[tokio::test]
+    async fn auto_thaw_does_not_wait_for_a_blocked_op() {
+        let (app, _volume) = app_on_volume("auto-thaw");
+        app.lock().frozen = Some(7);
+        let _blocked_op = app.op_lock.lock().await;
+
+        timeout(
+            Duration::from_secs(5),
+            auto_thaw(app.clone(), 7, Duration::ZERO),
+        )
+        .await
+        .expect("auto thaw ran while an op held op_lock");
+        assert_eq!(app.lock().frozen, None);
+    }
+
+    /// A host thaw gets through while an op holds `op_lock`, so the host's thaw reply is never stuck behind it.
+    #[tokio::test]
+    async fn host_thaw_does_not_wait_for_a_blocked_op() {
+        let (app, _volume) = app_on_volume("host-thaw");
+        app.lock().frozen = Some(3);
+        let _blocked_op = app.op_lock.lock().await;
+
+        timeout(Duration::from_secs(5), thaw_volume(&app))
+            .await
+            .expect("thaw ran while an op held op_lock")
+            .expect("thaw succeeds");
+        assert_eq!(app.lock().frozen, None);
+    }
+
+    /// Configure writes the volume, so a frozen volume refuses it before anything is written.
+    #[tokio::test]
+    async fn configure_refuses_a_frozen_volume() {
+        let (app, volume) = app_on_volume("configure-frozen");
+        app.lock().frozen = Some(1);
+        let args = ConfigureArgs {
+            id: "req-1".into(),
+            host_id: "host-1".into(),
+            box_id: "box-1".into(),
+            vm_id: "vm-1".into(),
+            clone_id: "0123456789abcdef0123456789abcdef".into(),
+            wall_clock_ms: 0,
+            control_url: "https://control.example".into(),
+            public_url: "https://box.example".into(),
+            enroll_token: None,
+            network: GuestNetwork {
+                address: "10.77.0.5/32".into(),
+                gateway: "10.77.0.1".into(),
+                ipv6_address: None,
+                ipv6_gateway: None,
+                dns: vec![],
+                depcache_url: None,
+                nix_cache_url: None,
+                nix_cache_public_key: None,
+            },
+        };
+
+        let err = configure_op(&app, args)
+            .await
+            .expect_err("frozen volume refuses configure");
+        assert!(err.contains("volume frozen"), "unexpected error: {err}");
+        assert!(!volume.join("home").exists());
+        assert!(!volume.join("box.env").exists());
+        assert_eq!(app.lock().frozen, Some(1));
     }
 }

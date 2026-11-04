@@ -2,9 +2,13 @@
 //! applies the network, sets up swap and the user volume, stacks the Nix store overlay on the volume, writes the
 //! box's package configs and environment, then starts the box and waits for its health check.
 
-use std::fs;
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::{Path, PathBuf};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::args::Config;
@@ -12,7 +16,7 @@ use crate::http::wait_healthy;
 use crate::protocol::{ConfigureArgs, GuestNetwork, NEST_BOX_ENV, NEST_VOLUME_SERIAL};
 use crate::system::{
     ensure_dir, is_mount_point, log, lookup_user, mount_ext4, mountinfo, probe_fs_type,
-    remove_if_exists, top_mount_has_option, wait_for_path, write_file, Res, System,
+    top_mount_has_option, wait_for_path, write_file, Owner, Res, System,
 };
 
 const DISK_WAIT: Duration = Duration::from_secs(60);
@@ -51,7 +55,7 @@ pub async fn configure(cfg: &Config, sys: &System, args: &ConfigureArgs) -> Res<
     setup_swap(cfg, sys).await?;
     mount_volume(cfg, sys).await?;
     stack_nix_store(cfg, sys).await?;
-    write_box_files(cfg, sys, &args.network).await?;
+    write_box_files(cfg, box_owner(cfg, sys)?, &args.network)?;
     let changed = write_box_env(cfg, args)?;
     sys.run(
         "systemctl",
@@ -311,30 +315,170 @@ fn has_entries(dir: &Path) -> Res<bool> {
     }
 }
 
-async fn write_box_files(cfg: &Config, sys: &System, net: &GuestNetwork) -> Res<()> {
-    let owner = if sys.dry_run {
-        None
+/// The box user, who owns its home and data directory. A dry run has no box user, so nothing is owned.
+fn box_owner(cfg: &Config, sys: &System) -> Res<Option<Owner>> {
+    if sys.dry_run {
+        Ok(None)
     } else {
-        Some(lookup_user(&cfg.box_user)?)
-    };
+        lookup_user(&cfg.box_user).map(Some)
+    }
+}
+
+/// Writes the box's package configs under its home. The box owns that home and can plant links in it, so every write
+/// walks down from an fd opened with O_NOFOLLOW, and modes and owners are changed through fds, never through paths.
+/// `home` itself sits in the root-owned volume root, which the box cannot write to.
+fn write_box_files(cfg: &Config, owner: Option<Owner>, net: &GuestNetwork) -> Res<()> {
     let home = cfg.box_home();
     ensure_dir(&home, 0o750, owner)?;
     ensure_dir(&cfg.data_dir(), 0o750, owner)?;
+    let home_dir = File::open(&home).map_err(|e| format!("open {}: {e}", home.display()))?;
     for (rel, content) in package_configs(net) {
-        let mut dir: PathBuf = home.clone();
-        if let Some(parent) = Path::new(rel).parent() {
-            for component in parent.components() {
-                dir.push(component.as_os_str());
-                ensure_dir(&dir, 0o755, owner)?;
-            }
-        }
-        let path = home.join(rel);
+        let rel = Path::new(rel);
+        let name = rel
+            .file_name()
+            .ok_or_else(|| format!("{} has no file name", rel.display()))?;
+        let dir = open_box_parent(&home_dir, rel, owner)?;
         match content {
-            Some(content) => write_file(&path, &content, 0o644, owner)?,
-            None => remove_if_exists(&path)?,
+            Some(content) => write_file_at(&dir, name, &content, 0o644, owner)?,
+            None => remove_at(&dir, name)?,
         }
     }
     Ok(())
+}
+
+/// Opens the directory holding `rel` under `home`, making each level a real directory on the way down.
+fn open_box_parent(home: &File, rel: &Path, owner: Option<Owner>) -> Res<File> {
+    let mut dir = home.try_clone().map_err(|e| format!("dup box home: {e}"))?;
+    if let Some(parent) = rel.parent() {
+        for component in parent.components() {
+            dir = open_box_dir(&dir, component.as_os_str(), owner)?;
+        }
+    }
+    Ok(dir)
+}
+
+/// Opens `name` in `parent` as a real directory. A link or file the box left there is replaced by one.
+fn open_box_dir(parent: &File, name: &OsStr, owner: Option<Owner>) -> Res<File> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let dir = match openat(parent, name, flags, 0) {
+        Ok(dir) => dir,
+        Err(e) if is_replaceable(&e) => {
+            remove_at(parent, name)?;
+            mkdir_at(parent, name)?;
+            openat(parent, name, flags, 0)
+                .map_err(|e| format!("open {}: {e}", name.to_string_lossy()))?
+        }
+        Err(e) => return Err(format!("open {}: {e}", name.to_string_lossy())),
+    };
+    set_mode_and_owner(&dir, name, 0o755, owner)?;
+    Ok(dir)
+}
+
+fn is_replaceable(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP)
+    )
+}
+
+/// Writes `content` to `name` in `dir` through a temp file made with O_EXCL and O_NOFOLLOW, then renames it over `name`.
+fn write_file_at(
+    dir: &File,
+    name: &OsStr,
+    content: &str,
+    mode: u32,
+    owner: Option<Owner>,
+) -> Res<()> {
+    let mut tmp = OsString::from(".");
+    tmp.push(name);
+    tmp.push(".tmp");
+    remove_at(dir, &tmp)?;
+    let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let mut file = openat(dir, &tmp, flags, mode)
+        .map_err(|e| format!("create {}: {e}", name.to_string_lossy()))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("write {}: {e}", name.to_string_lossy()))?;
+    file.sync_all()
+        .map_err(|e| format!("sync {}: {e}", name.to_string_lossy()))?;
+    set_mode_and_owner(&file, name, mode, owner)?;
+    rename_at(dir, &tmp, name)
+}
+
+/// Applies owner and mode through an open fd, so a path swapped after open cannot redirect the change.
+/// Ownership is skipped in a dry run, which has no owner.
+fn set_mode_and_owner(file: &File, name: &OsStr, mode: u32, owner: Option<Owner>) -> Res<()> {
+    let fd = file.as_raw_fd();
+    if let Some(owner) = owner {
+        if unsafe { libc::fchown(fd, owner.uid, owner.gid) } != 0 {
+            return Err(format!(
+                "chown {}: {}",
+                name.to_string_lossy(),
+                io::Error::last_os_error()
+            ));
+        }
+    }
+    if unsafe { libc::fchmod(fd, mode) } != 0 {
+        return Err(format!(
+            "chmod {}: {}",
+            name.to_string_lossy(),
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn remove_at(dir: &File, name: &OsStr) -> Res<()> {
+    let name_c = c_name(name)?;
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name_c.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if e.kind() == ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(format!("remove {}: {e}", name.to_string_lossy()))
+    }
+}
+
+fn rename_at(dir: &File, from: &OsStr, to: &OsStr) -> Res<()> {
+    let (from_c, to_c) = (c_name(from)?, c_name(to)?);
+    let fd = dir.as_raw_fd();
+    if unsafe { libc::renameat(fd, from_c.as_ptr(), fd, to_c.as_ptr()) } == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "rename {}: {}",
+            to.to_string_lossy(),
+            io::Error::last_os_error()
+        ))
+    }
+}
+
+fn mkdir_at(parent: &File, name: &OsStr) -> Res<()> {
+    let name_c = c_name(name)?;
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o755) } == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "mkdir {}: {}",
+            name.to_string_lossy(),
+            io::Error::last_os_error()
+        ))
+    }
+}
+
+fn openat(dir: &File, name: &OsStr, flags: libc::c_int, mode: u32) -> io::Result<File> {
+    let name_c = c_name(name).map_err(io::Error::other)?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), name_c.as_ptr(), flags, mode) };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+fn c_name(name: &OsStr) -> Res<CString> {
+    CString::new(name.as_bytes()).map_err(|_| format!("{name:?} contains a NUL byte"))
 }
 
 /// Package-manager and Nix configs under the box home, pointing at the host's dependency cache and Nix cache.
@@ -402,10 +546,14 @@ fn path_str(path: &Path) -> Res<&str> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::env;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::PathBuf;
 
     use serde_json::Value;
 
     use super::*;
+    use crate::args::{parse, Parsed};
     use crate::protocol::HostToGuest;
 
     const FIXTURES: &str = include_str!("../tests/fixtures/guest-frames.json");
@@ -471,5 +619,113 @@ mod tests {
         expected.remove(token_name);
         let content = box_env_content(without, socket, data_dir);
         assert_eq!(written_names(&content), expected);
+    }
+
+    /// An empty scratch directory under the system temp dir.
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            env::temp_dir().join(format!("kestrel-guest-agent-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn dry_run_config(volume: &Path) -> Config {
+        let args = [
+            "--dry-run-system",
+            "--volume-mount",
+            volume.to_str().expect("utf-8 path"),
+        ];
+        match parse(args.map(str::to_string)).expect("valid args") {
+            Parsed::Run(cfg) => *cfg,
+            Parsed::Help => panic!("parse returned help"),
+        }
+    }
+
+    fn network(depcache: Option<&str>) -> GuestNetwork {
+        GuestNetwork {
+            address: "10.77.0.5/32".into(),
+            gateway: "10.77.0.1".into(),
+            ipv6_address: None,
+            ipv6_gateway: None,
+            dns: vec![],
+            depcache_url: depcache.map(str::to_string),
+            nix_cache_url: None,
+            nix_cache_public_key: None,
+        }
+    }
+
+    fn current_owner() -> Owner {
+        // SAFETY: getuid and getgid take no arguments and cannot fail.
+        Owner {
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        }
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).expect("stat").permissions().mode() & 0o777
+    }
+
+    /// The box owns its home and can plant links in it. Writing a config must not follow them out of the home, and
+    /// must not change the mode or owner of what they point at. The owner is the real one, so the chown path runs.
+    #[test]
+    fn box_files_never_write_through_a_link() {
+        let root = scratch("box-links");
+        let volume = root.join("volume");
+        let home = volume.join("home");
+        let outside = root.join("outside");
+        fs::create_dir_all(&home).expect("create home");
+        fs::create_dir_all(&outside).expect("create outside");
+        let victim = outside.join("victim");
+        fs::write(&victim, "keep").expect("write victim");
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).expect("chmod victim");
+        symlink(&outside, home.join(".cargo")).expect("plant dir link");
+        symlink(&outside, home.join(".config")).expect("plant nested dir link");
+        symlink(&victim, home.join(".npmrc")).expect("plant file link");
+        symlink(&victim, home.join("..npmrc.tmp")).expect("plant temp link");
+
+        let cfg = dry_run_config(&volume);
+        write_box_files(
+            &cfg,
+            Some(current_owner()),
+            &network(Some("https://depcache.example")),
+        )
+        .expect("write box files");
+
+        assert_eq!(fs::read_to_string(&victim).expect("read victim"), "keep");
+        assert_eq!(mode_of(&victim), 0o600);
+        assert!(!outside.join("config.toml").exists());
+        assert!(!outside.join("pip").exists());
+        assert!(fs::symlink_metadata(home.join(".cargo"))
+            .expect("stat .cargo")
+            .is_dir());
+        assert!(home.join(".cargo/config.toml").is_file());
+        assert!(home.join(".config/pip/pip.conf").is_file());
+        assert!(fs::symlink_metadata(home.join(".npmrc"))
+            .expect("stat .npmrc")
+            .file_type()
+            .is_file());
+    }
+
+    /// Dropping a config removes the link the box may have planted, never the file it points at.
+    #[test]
+    fn removing_a_config_removes_the_link_not_its_target() {
+        let root = scratch("box-remove");
+        let volume = root.join("volume");
+        let home = volume.join("home");
+        let outside = root.join("outside");
+        fs::create_dir_all(&home).expect("create home");
+        fs::create_dir_all(&outside).expect("create outside");
+        let victim = outside.join("victim");
+        fs::write(&victim, "keep").expect("write victim");
+        symlink(&victim, home.join(".npmrc")).expect("plant file link");
+
+        let cfg = dry_run_config(&volume);
+        write_box_files(&cfg, Some(current_owner()), &network(None)).expect("write box files");
+
+        let gone = fs::symlink_metadata(home.join(".npmrc")).expect_err("link removed");
+        assert_eq!(gone.kind(), ErrorKind::NotFound);
+        assert_eq!(fs::read_to_string(&victim).expect("read victim"), "keep");
     }
 }
