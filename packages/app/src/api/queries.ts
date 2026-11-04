@@ -1,4 +1,5 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
+import { Either, Schema } from "effect"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
@@ -18,6 +19,8 @@ export const keys = {
   me: ["me"] as const,
   /** The public site's view of the session on the app host (null when signed out). */
   publicMe: ["public-me"] as const,
+  /** Assets attached to the `desktop-latest` GitHub release, for the download page. */
+  desktopRelease: ["desktop-release"] as const,
   /** The user's boxes and which one is active. */
   boxes: ["boxes"] as const,
   /** Own health of one of the user's boxes, by its URL. */
@@ -127,9 +130,49 @@ export async function applyBoxList(client: QueryClient, list: BoxList): Promise<
   client.setQueryData(keys.boxes, list)
 }
 
+export interface DesktopAsset {
+  readonly name: string
+  readonly url: string
+  readonly size: number
+}
+
+export interface DesktopRelease {
+  readonly assets: readonly DesktopAsset[]
+}
+
+const GithubAsset = Schema.Struct({
+  name: Schema.String,
+  browser_download_url: Schema.String,
+  size: Schema.Number,
+})
+const GithubRelease = Schema.Struct({ assets: Schema.Array(GithubAsset) })
+const DESKTOP_RELEASE_URL = "https://api.github.com/repos/jarenm1/kestrel/releases/tags/desktop-latest"
+
+/** The `desktop-latest` release; an unpublished release is an empty list, not an error. */
+const fetchDesktopRelease = async (): Promise<DesktopRelease> => {
+  const response = await fetch(DESKTOP_RELEASE_URL, { headers: { accept: "application/vnd.github+json" } })
+  if (response.status === 404) return { assets: [] }
+  if (!response.ok) throw new Error(`GitHub release answered ${response.status}`)
+  const decoded = Schema.decodeUnknownEither(GithubRelease)((await response.json()) as unknown)
+  if (Either.isLeft(decoded)) throw new Error("GitHub release returned an unexpected shape")
+  return {
+    assets: decoded.right.assets.map((asset) => ({
+      name: asset.name,
+      url: asset.browser_download_url,
+      size: asset.size,
+    })),
+  }
+}
+
 export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
+  desktopRelease: () =>
+    queryOptions({
+      queryKey: keys.desktopRelease,
+      queryFn: fetchDesktopRelease,
+      staleTime: 5 * 60_000,
+    }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
   fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
   fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),

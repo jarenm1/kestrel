@@ -9,6 +9,7 @@ import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { PublicShell } from "@/components/PublicShell"
 import { Alert } from "@cloudagents/ui/alert"
 import { DesktopEmbedPage } from "@/pages/DesktopEmbedPage"
+import { DownloadPage } from "@/pages/DownloadPage"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
@@ -35,6 +36,7 @@ export function App() {
         <Route element={<PublicShell />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/download" element={<DownloadPage />} />
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>

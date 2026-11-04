@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { motion } from "framer-motion"
+import { Link } from "react-router-dom"
 import {
   ArrowRight,
   ArrowUp,
@@ -248,7 +249,29 @@ export function LandingPage() {
         </motion.div>
       </section>
 
-      <section className="relative z-10 px-8 pt-20 pb-28">
+      <section className="relative z-10 px-8 pt-16">
+        <motion.div
+          initial="hidden"
+          whileInView="visible"
+          viewport={{ once: true }}
+          variants={fadeInUp}
+          className="mx-auto flex max-w-4xl flex-col items-center justify-between gap-6 rounded-3xl bg-card/60 px-8 py-8 text-center shadow-soft sm:flex-row sm:text-left"
+        >
+          <div className="space-y-2">
+            <h2 className="text-2xl font-semibold tracking-tight text-foreground">Kestrel on your desktop</h2>
+            <p className="text-sm text-muted-foreground">
+              The same app in its own window. Installers for Debian, macOS and Windows.
+            </p>
+          </div>
+          <Button asChild size="lg">
+            <Link to="/download">
+              Download <ArrowRight />
+            </Link>
+          </Button>
+        </motion.div>
+      </section>
+
+      <section className="relative z-10 px-8 pt-10 pb-28">
         <motion.div
           initial="hidden"
           whileInView="visible"
