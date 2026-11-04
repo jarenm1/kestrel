@@ -102,6 +102,19 @@ describe("selected-box connections", () => {
     provider, label: provider, kind: "cli", connected, account: null, available: connected,
   })
 
+  test("unavailable connected keys and CLI logins are not offered, but another usable connection still works", () => {
+    const rows = [
+      { provider: "anthropic", connected: true, available: false },
+      { provider: "opencode-go", connected: true, available: false },
+      { provider: "openrouter", connected: true, available: true },
+    ]
+    expect(connectedModelProviders(rows, ["opencode"]).map((provider) => provider.id)).toEqual(["openrouter", "opencode"])
+    expect(connectedModelProviders([...rows, { provider: "claude-cli", connected: true, available: true }], [])
+      .map((provider) => provider.id)).toEqual(["anthropic", "openrouter"])
+    expect(connectedModelProviders([{ provider: "openai", connected: true }], [])
+      .map((provider) => provider.id)).toEqual(["openai"])
+  })
+
   test("the selected box's Go login and harnesses replace conflicting relay state across a box switch", () => {
     const relay = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
     const selected = connectionsForBox(relay, {

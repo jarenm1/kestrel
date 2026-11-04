@@ -47,4 +47,9 @@ export const ensureAutomationsTable = (sql: AutomationsSql): void => {
     .exec<{ name: string }>("SELECT name FROM pragma_table_info('automations') WHERE name = 'model'")
     .toArray()
   if (modelColumn.length === 0) sql.exec("ALTER TABLE automations ADD COLUMN model TEXT")
+  // Retired harness choices use the same box default as an automation with no explicit model.
+  sql.exec(`UPDATE automations SET model = NULL WHERE model IN (
+    'omp-deepseek-flash', 'omp-deepseek-pro', 'pi-deepseek-flash', 'pi-deepseek-pro',
+    'hermes-deepseek-flash', 'hermes-deepseek-pro'
+  )`)
 }

@@ -249,13 +249,13 @@ export const providerModels = (provider: ModelProvider): readonly ModelInfo[] =>
  * none of them).
  */
 export const connectedModelProviders = (
-  connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean }>,
+  connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean; readonly available?: boolean }>,
   harnesses: ReadonlyArray<ModelProvider> | undefined,
 ): readonly ModelProviderInfo[] =>
   MODEL_PROVIDERS.filter((p) =>
     p.connections.length === 0
       ? harnesses?.includes(p.id) === true
-      : connections.some((c) => c.connected && p.connections.includes(c.provider)),
+      : connections.some((c) => c.connected && c.available !== false && p.connections.includes(c.provider)),
   )
 
 /**

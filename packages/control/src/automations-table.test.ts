@@ -70,6 +70,30 @@ describe("ensureAutomationsTable", () => {
     expect(db.query("SELECT model FROM automations WHERE id = 'a1'").get()).toEqual({ model: "gpt-6.1-sol" })
   })
 
+  test("retired harness selections return to the box default without changing automation triggers", () => {
+    ensureAutomationsTable(sql)
+    const models = [
+      "omp-deepseek-flash", "omp-deepseek-pro", "pi-deepseek-flash", "pi-deepseek-pro",
+      "hermes-deepseek-flash", "hermes-deepseek-pro", "gpt-6.1-sol", "deepseek-v4-pro", null,
+    ]
+    for (const [index, model] of models.entries()) {
+      db.run(
+        `INSERT INTO automations (id, login, name, repo, prompt, model, enabled, trigger_json, next_run_at, created_at, updated_at)
+         VALUES (?, 'octo', 'Review', 'acme/app', 'Review changes', ?, ?, ?, ?, 'created', 'updated')`,
+        `a${index}`, model, index % 2,
+        index % 2 ? '{"_tag":"github"}' : '{"_tag":"schedule"}', 1700000000000 + index,
+      )
+    }
+    const before = db.query("SELECT * FROM automations ORDER BY id").all() as Array<Record<string, unknown>>
+
+    ensureAutomationsTable(sql)
+
+    const migrated = db.query("SELECT * FROM automations ORDER BY id").all()
+    expect(migrated).toEqual(before.map((row, index) => ({ ...row, model: index < 6 ? null : row.model })))
+    ensureAutomationsTable(sql)
+    expect(db.query("SELECT * FROM automations ORDER BY id").all()).toEqual(migrated)
+  })
+
   test("is a no-op once the table is current", () => {
     ensureAutomationsTable(sql)
     db.run(

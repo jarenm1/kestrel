@@ -123,6 +123,9 @@ validation. The migration is written atomically only after the remaining state v
 still rejects startup without overwriting the file. New requests continue to reject the retired identifiers.
 Claude Code session records carry the actual model provider, including third-party gateways, so switching to
 Anthropic cannot resume a gateway session and returning to that gateway can resume its own.
+The Hub also resets the six retired model selections in saved automations to `null` (the box default), preserving
+their prompts, schedules, GitHub triggers and enabled state. Model pickers exclude a connected account when it
+explicitly reports unavailable; another usable connection for the same provider can still offer its models.
 
 The desktop and mobile composers' thinking controls open a stepped slider in Kestrel's monochrome theme, with a flat track and a trigger ring that fills by level: Low 25%, Medium 50%, High 75%, Extra high 87.5%, Max 100%; Off leaves it empty. They offer only the selected model's supported effort levels, ordered lowest first, with `none` labeled Off. There is no Default stop: an absent or unsupported saved level selects and sends the model's lowest supported effort (Off where supported, otherwise Low). With no model or no effort support, the control is hidden and effort is unspecified. The choice survives thread changes and reloads. Desktop uses a popover; mobile web and Expo share a touch-sized bottom sheet. The web sliders use native range inputs for pointer/touch input, arrow keys, Home and End; Expo uses React Native touch responders and screen-reader increment/decrement actions.
 
