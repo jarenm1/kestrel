@@ -206,16 +206,18 @@ and does not carry forward.
 
 ### Changing shape
 
-The volume is separate from the VM, so changing shape means stopping the VM and starting a new one with the same volume.
+A shape is a set of limits, not a VM type. The host resizes a running VM inside its limits (vCPU hot-add and removal,
+virtio-mem memory) and lends it a GPU by hot-plugging one while it is needed, so changing shape needs no restart. The
+design is in [nest.md](nest.md#resource-policy-host-agent).
 
-- **Start with one box per user,** resized only when it is idle.
-- **If a thread needs a GPU while others are running,** ask the user to wait for the box to go idle, or start a second box
-  for that thread. The web app already merges threads from several boxes. Cross-box thread tools would come later.
+- **One box per user.** A thread that needs a GPU asks for one; the box restarts its desktop on the GPU renderer, and
+  agent runs, shells and files carry on.
 - **Threads stay pinned to their box.** They never move automatically while running.
 
 ### Host layer
 
-A new package (`packages/host`) runs on each host. It dials out to the control plane and handles no user secrets.
+A new package (`packages/host`) runs on each host. It dials out to the control plane and handles no user secrets. Parts,
+interfaces and flows: [nest.md](nest.md).
 
 ```mermaid
 flowchart LR
@@ -243,7 +245,7 @@ flowchart LR
 
 | Part | Job |
 |---|---|
-| Hypervisor | Runs VMs. Cloud Hypervisor is the first candidate because it supports both VFIO passthrough and snapshots. Firecracker has no GPU passthrough. |
+| Hypervisor | Cloud Hypervisor: VFIO hot-plug, vCPU and virtio-mem resizing, lazy (userfaultfd) snapshot restore and live migration. Firecracker has no GPU passthrough or resizing. |
 | VM image | NixOS built from the flake, so the Nest gets `strict` sandboxing and toolkits. The Nix store can be shared read-only between VMs. |
 | Volumes | Local NVMe while a VM runs, with snapshots in object storage so that a parked user can resume on another host. |
 | Ingress | Routes each box's HTTPS URL to its VM and starts the wake flow when a request reaches a suspended one. |
@@ -267,11 +269,11 @@ stateDiagram-v2
 - **Running:** the VM holds its CPU, memory and any GPU.
 - **Suspended:** the VM's memory is saved to the local disk, and it resumes quickly on the same host. Open apps survive on
   CPU shapes.
-- **Parked:** the volume is in object storage and only disk is held. It starts as a fresh boot, so open apps are gone but
-  everything on disk stays.
+- **Parked:** the volume is in object storage and only disk is held. It resumes as a clone of a booted template VM with
+  the volume attached, so open apps are gone but everything on disk stays.
 
-GPU state generally cannot be snapshotted through passthrough, so assume GPU VMs skip Suspended until tested. They stop the
-desktop, save what can be saved and park, which makes evidence matter more on that shape.
+A VM with a GPU attached cannot be snapshotted, so suspend detaches the GPU first: the desktop falls back to software
+rendering, and evidence matters more on GPU work.
 
 **When a VM is idle:** it has no agent run, no viewer, no recording and no recent input. The box's activity socket
 (`packages/server/src/activity.ts`) already reports runs and desktops, which is a good starting point. A guest that lies
