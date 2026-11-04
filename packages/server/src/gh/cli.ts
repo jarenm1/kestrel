@@ -20,7 +20,7 @@ USAGE
   gh <command> <subcommand> [flags]
 
 COMMANDS
-  api:         Make a read-only GitHub API request (GET or HEAD, or a GraphQL query)
+  api:         Make a GitHub API request: reads, and writes to issues, review threads and Actions re-runs
   pr:          Work with pull requests in this thread's checkouts
 
 Run \`gh <command> --help\` for a command's flags.
@@ -56,7 +56,7 @@ Run \`gh pr <command> --help\` for a command's flags.
 `
 
 const unavailable = (what: string): string =>
-  `${what} is not available in Kestrel. Kestrel's gh supports gh api (read-only) and gh pr ${SUPPORTED.join(", ")}; use the github_* tools for other GitHub work.`
+  `${what} is not available in Kestrel. Kestrel's gh supports gh api (reads and a few writes) and gh pr ${SUPPORTED.join(", ")}; use the github_* tools for other GitHub work.`
 
 /** Runs one `gh` command line for an agent and collects what it would print. */
 export const runGh = async (run: GhRun, argv: ReadonlyArray<string>): Promise<GhResult> => {

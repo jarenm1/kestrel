@@ -489,7 +489,7 @@ test("readReference keeps a pull request readable when GitHub will not report ch
   }
 })
 
-test("readApi sends only reads, and the token only to the API", async () => {
+test("gh api without checkouts sends only reads, and the token only to the API", async () => {
   const elsewhere = fakeGitHub(() => ({ json: {} }))
   const gh = fakeGitHub(() => ({ json: { ok: true } }))
   // The API redirecting off itself, as GitHub does for archives; the next hop must go without the token.
@@ -500,7 +500,7 @@ test("readApi sends only reads, and the token only to the API", async () => {
   const read = (url: string, request: Partial<ApiRequest>) =>
     runAgainst(
       url,
-      Effect.flatMap(GitHub, (github) => Effect.either(github.readApi("token", { method: "GET", path: "", headers: [], body: null, ...request }))),
+      Effect.flatMap(GitHub, (github) => Effect.either(github.api("token", { method: "GET", path: "", headers: [], body: null, ...request }, []))),
     )
   try {
     for (const write of [
@@ -528,6 +528,63 @@ test("readApi sends only reads, and the token only to the API", async () => {
     gh.stop()
     elsewhere.stop()
     redirecting.stop(true)
+  }
+})
+
+test("gh api writes only the allowlisted endpoints, on the thread's checkouts", async () => {
+  const gh = fakeGitHub(({ body }) => {
+    const request = body as { query?: string; variables?: { ids?: string[] } }
+    if (request?.query?.includes("nodes(ids:")) {
+      const inThread = request.variables?.ids?.[0] === "T_in"
+      return { json: { data: { nodes: [{ repository: { nameWithOwner: inThread ? "jarenm1/kestrel" : "other/repo" } }] } } }
+    }
+    return { json: { ok: true } }
+  })
+  const send = (request: Partial<ApiRequest>) =>
+    runAgainst(
+      gh.url,
+      Effect.flatMap(GitHub, (github) => Effect.either(github.api("token", { method: "POST", path: "", headers: [], body: null, ...request }, [repo]))),
+    )
+  const resolve = (threadId: string) =>
+    JSON.stringify({ query: "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }", variables: { id: threadId } })
+  try {
+    for (const refused of [
+      { path: "repos/other/repo/issues", body: '{"title":"x"}' },
+      { path: "repos/jarenm1/kestrel/issues/../../../other/repo/issues", body: '{"title":"x"}' },
+      { method: "PUT", path: "repos/jarenm1/kestrel/pulls/7/merge" },
+      { method: "PUT", path: "repos/jarenm1/kestrel/contents/README.md", body: '{"message":"x","content":""}' },
+      { method: "PATCH", path: "repos/jarenm1/kestrel/issues/7", body: '{"assignees":["octocat"]}' },
+      { path: "repos/jarenm1/kestrel/issues/7/comments?body=x", body: '{"body":"x"}' },
+      { path: "graphql", body: JSON.stringify({ query: 'mutation { mergePullRequest(input: {pullRequestId: "PR_1"}) { clientMutationId } }' }) },
+      { path: "graphql", body: JSON.stringify({ query: 'mutation { resolveReviewThread(input: {threadId: "T_in"}) { clientMutationId } addStar(input: {starrableId: "x"}) { clientMutationId } }' }) },
+    ]) {
+      expect((await send(refused))._tag).toBe("Left")
+    }
+    expect(gh.requests).toEqual([])
+
+    for (const allowed of [
+      { path: "repos/JarenM1/Kestrel/issues", body: '{"title":"Flaky test","labels":["bug"]}' },
+      { path: "repos/jarenm1/kestrel/pulls/7/comments/99/replies", body: '{"body":"Fixed."}' },
+      { method: "DELETE", path: "repos/jarenm1/kestrel/issues/7/labels/area%2Fui" },
+      { path: "repos/jarenm1/kestrel/actions/runs/5/rerun-failed-jobs" },
+      { path: "graphql", body: resolve("T_in") },
+    ]) {
+      expect((await send(allowed))._tag).toBe("Right")
+    }
+    // A review thread in another repository is looked up, then refused.
+    expect((await send({ path: "graphql", body: resolve("T_out") }))._tag).toBe("Left")
+    expect(gh.requests.map((r) => `${r.method} ${r.path}`)).toEqual([
+      "POST /repos/JarenM1/Kestrel/issues",
+      "POST /repos/jarenm1/kestrel/pulls/7/comments/99/replies",
+      "DELETE /repos/jarenm1/kestrel/issues/7/labels/area%2Fui",
+      "POST /repos/jarenm1/kestrel/actions/runs/5/rerun-failed-jobs",
+      "POST /graphql",
+      "POST /graphql",
+      "POST /graphql",
+    ])
+    expect(gh.requests.filter((r) => JSON.stringify(r.body ?? null).includes("resolveReviewThread")).map((r) => r.body)).toEqual([JSON.parse(resolve("T_in"))])
+  } finally {
+    gh.stop()
   }
 })
 

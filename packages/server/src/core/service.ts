@@ -488,8 +488,8 @@ export interface CoreShape {
     variables: Readonly<Record<string, unknown>>,
   ) => Effect.Effect<GraphQLResponse, NotFound | BadRequest | InternalError>
   /**
-   * Used by `gh api`: sends a read-only request (`readOnlyRefusal`) to the GitHub API with the thread owner's token,
-   * which stays host-side. Reads are not limited to the thread's checkouts, as `repo_checkout` is not.
+   * Used by `gh api`: sends a request `apiDecision` allows to the GitHub API with the thread owner's token, which stays
+   * host-side. Reads are not limited to the thread's checkouts, as `repo_checkout` is not; the allowed writes are.
    */
   readonly githubApi: (taskId: string, request: ApiRequest) => Effect.Effect<ApiResponse, NotFound | BadRequest | InternalError>
   /** Used by the `gh` shim: a pull request's diff or patch series in a checkout's GitHub repository. */
@@ -2478,7 +2478,8 @@ export const CoreLive = Layer.effect(
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const token = yield* requiredGithubToken(task.owner)
-          return yield* github.readApi(token, request).pipe(Effect.mapError(fromGitHub))
+          const repos = task.checkouts.flatMap((checkout) => parseRepoRef(checkout.repo)?.github ?? [])
+          return yield* github.api(token, request, repos).pipe(Effect.mapError(fromGitHub))
         }),
 
       pullRequestDiff: (taskId, checkoutId, number, format) =>

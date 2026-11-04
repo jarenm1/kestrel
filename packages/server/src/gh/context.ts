@@ -20,7 +20,7 @@ export interface GhBackend {
   readonly review: (input: NewReview & { readonly number: number; readonly checkoutId: string }) => Promise<PostedReview>
   readonly changeReviewers: (input: PullRequestTarget & ReviewerChange) => Promise<void>
   readonly changeLabels: (input: PullRequestTarget & LabelChange) => Promise<void>
-  /** `gh api`: one read-only request to the GitHub API, not tied to a checkout. */
+  /** `gh api`: one request to the GitHub API, as the box's policy (`apiDecision`) allows it. */
   readonly api: (request: ApiRequest) => Promise<ApiResponse>
 }
 

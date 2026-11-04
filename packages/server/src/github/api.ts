@@ -1,6 +1,6 @@
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { Config } from "../config"
-import { readOnlyRefusal } from "./read-only"
+import { apiDecision } from "./api-policy"
 
 /**
  * Host-side GitHub REST client. Tokens are passed per call and never stored, logged, or put in errors:
@@ -286,10 +286,11 @@ export interface GitHubShape {
   /** The pull request's diff (`diff`) or its commits as patches (`patch`), as GitHub renders them. Failures read like `graphql`'s. */
   readonly pullRequestDiff: (token: string, repo: RepoSlug, number: number, format: "diff" | "patch") => Effect.Effect<string, GitHubError>
   /**
-   * Sends a `gh api` request to the GitHub API if it only reads (`readOnlyRefusal`); a refused request or one for
-   * another host fails with a GitHubError saying why. Redirects are followed, the token only to the API itself.
+   * Sends a `gh api` request to the GitHub API if `apiDecision` allows it: reads anywhere, the allowlisted writes only
+   * on `repos` (the thread's checkouts; a review thread a mutation resolves is looked up first). A refused request or
+   * one for another host fails with a GitHubError saying why. Reads follow redirects, the token only to the API itself.
    */
-  readonly readApi: (token: string, request: ApiRequest) => Effect.Effect<ApiResponse, GitHubError>
+  readonly api: (token: string, request: ApiRequest, repos: ReadonlyArray<RepoSlug>) => Effect.Effect<ApiResponse, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
@@ -415,6 +416,17 @@ const summarizeChecks = (checks: Schema.Schema.Type<typeof CheckRunsBody>): Pull
   }
   return { total: checks.check_runs.length, passed, failing, pending }
 }
+
+/** `nodes(ids:)` for review threads: null for an id GitHub does not know, no repository for another node type. */
+const ThreadReposAnswer = Schema.Struct({
+  data: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        nodes: Schema.Array(Schema.NullOr(Schema.Struct({ repository: Schema.optional(Schema.Struct({ nameWithOwner: Schema.String })) }))),
+      }),
+    ),
+  ),
+})
 
 const GraphQLAnswer = Schema.Struct({
   data: Schema.optional(Schema.Unknown),
@@ -719,11 +731,15 @@ export const GitHubLive = Layer.effect(
       return onApi(url) ? url : null
     }
 
-    /** Sends the request, following redirects as Go's client does; a hop off the API goes without the token. */
+    /**
+     * Sends the request. A read follows redirects as Go's client does, a hop off the API without the token; a write
+     * goes only to the URL the policy checked.
+     */
     const exchange = async (token: string, request: ApiRequest, first: URL): Promise<ApiResponse> => {
       let url = first
       let method = request.method.toUpperCase()
       let body = request.body
+      const follows = method === "GET" || method === "HEAD"
       for (let hop = 0; ; hop++) {
         const headers = new Headers()
         for (const [name, value] of request.headers) {
@@ -735,7 +751,7 @@ export const GitHubLive = Layer.effect(
         if (!headers.has("accept-encoding")) headers.set("accept-encoding", "gzip")
         const response = await fetch(url, { method, headers, body: body ?? undefined, redirect: "manual", signal: AbortSignal.timeout(30_000) })
         const location = response.headers.get("location")
-        if (REDIRECT_STATUSES[response.status] && location !== null && hop < 10) {
+        if (follows && REDIRECT_STATUSES[response.status] && location !== null && hop < 10) {
           await response.body?.cancel()
           url = new URL(location, url)
           if (response.status === 303 || (method === "POST" && (response.status === 301 || response.status === 302))) {
@@ -749,6 +765,33 @@ export const GitHubLive = Layer.effect(
         return { status: response.status, headers: received, body: method === "HEAD" ? "" : await response.text() }
       }
     }
+
+    /** Fails unless every review thread belongs to one of `repos`. */
+    const checkThreads = (token: string, threads: ReadonlyArray<string>, repos: ReadonlyArray<RepoSlug>) =>
+      send(token, "POST", "/graphql", {
+        body: {
+          query: "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequestReviewThread { repository { nameWithOwner } } } }",
+          variables: { ids: threads },
+        },
+      }).pipe(
+        Effect.flatMap(({ status, text }) => {
+          if (status < 200 || status >= 300) return Effect.fail(cliFailure(status, text, "/graphql"))
+          return Effect.try({
+            try: () => JSON.parse(text) as unknown,
+            catch: () => new GitHubError({ message: "GitHub returned a non-JSON response" }),
+          }).pipe(Effect.flatMap(decode(ThreadReposAnswer, "review thread")))
+        }),
+        Effect.flatMap((answer) => {
+          const found = answer.data?.nodes ?? []
+          const outside = threads.find((_, i) => {
+            const slug = found[i]?.repository?.nameWithOwner.toLowerCase()
+            return !repos.some((repo) => `${repo.owner}/${repo.name}`.toLowerCase() === slug)
+          })
+          return outside === undefined
+            ? Effect.void
+            : Effect.fail(new GitHubError({ message: `review thread ${outside} is not in a repository checked out in this thread; gh api writes only to the thread's checkouts` }))
+        }),
+      )
 
     const service: GitHubShape = {
       findOpenPullRequest: (token, repo, head) =>
@@ -895,14 +938,15 @@ export const GitHubLive = Layer.effect(
           Effect.flatMap(({ status, text }) => (status === 200 ? Effect.succeed(text) : Effect.fail(cliFailure(status, text, path)))),
         )
       },
-      readApi: (token, request) =>
+      api: (token, request, repos) =>
         Effect.gen(function* () {
-          const refusal = readOnlyRefusal(request.method, request.path, request.headers, request.body)
-          if (refusal !== null) return yield* Effect.fail(new GitHubError({ message: refusal }))
           const url = apiUrl(request.path)
           if (url === null) {
             return yield* Effect.fail(new GitHubError({ message: `gh api in Kestrel only calls the GitHub API (${apiBase}), not ${request.path}` }))
           }
+          const decision = apiDecision({ method: request.method, url, apiRoot, headers: request.headers, body: request.body }, repos)
+          if ("refusal" in decision) return yield* Effect.fail(new GitHubError({ message: decision.refusal }))
+          if (decision.threads.length > 0) yield* checkThreads(token, decision.threads, repos)
           return yield* Effect.tryPromise({
             try: () => exchange(token, request, url),
             catch: () => new GitHubError({ message: "could not reach the GitHub API" }),

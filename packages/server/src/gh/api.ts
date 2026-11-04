@@ -1,7 +1,8 @@
 /**
  * `gh api`, reproducing GitHub CLI 2.87.3 with stdout not a terminal: the same flags, validation order, request
- * building (fields, placeholders, query strings, GraphQL variables, pagination) and output bytes. The box sends only
- * reads (`readOnlyRefusal`); Kestrel also has no `--template`, `--verbose` or hosts other than github.com.
+ * building (fields, placeholders, query strings, GraphQL variables, pagination) and output bytes. The box sends what
+ * `apiDecision` allows (reads, and a short list of writes on the thread's checkouts); Kestrel also has no
+ * `--template`, `--verbose` or hosts other than github.com.
  */
 import type { ApiResponse } from "../github/api"
 import { array, bool, FlagParseError, flagReader, parseFlags, slice, str } from "./argv"
