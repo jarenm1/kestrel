@@ -76,7 +76,7 @@ describe("serveAppPage", () => {
 
 describe("wrangler.jsonc run_worker_first", () => {
   // Paths that never are pages: the Worker's own routes.
-  const NON_PAGE: Record<string, true> = { "/api/*": true, "/auth/*": true, "/box/*": true, "/webhooks/*": true, "/_preview/*": true }
+  const NON_PAGE: Record<string, true> = { "/api/*": true, "/auth/*": true, "/box/*": true, "/nest/*": true, "/webhooks/*": true, "/_preview/*": true }
 
   async function workerFirst(): Promise<string[]> {
     const text = await Bun.file(new URL("../wrangler.jsonc", import.meta.url)).text()
@@ -93,6 +93,10 @@ describe("wrangler.jsonc run_worker_first", () => {
       expect(MOBILE_PAGE.test(path)).toBe(true)
       expect(patterns.some((pattern) => matches(pattern, path))).toBe(true)
     }
+  })
+
+  test("the Nest host socket runs the Worker first", async () => {
+    expect((await workerFirst()).some((pattern) => matches(pattern, "/nest/hosts/connect"))).toBe(true)
   })
 
   test("every Worker-first page route is a mobile page", async () => {

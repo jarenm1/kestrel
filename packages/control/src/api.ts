@@ -6,6 +6,8 @@ import {
   CliAuthStatus,
   ControlPaths,
   CreateBoxBody,
+  CreateNestBoxBody,
+  NestLimits,
   CreateFleetBoxBody,
   CreateMeterHostBody,
   GithubRepoSlug,
@@ -288,6 +290,9 @@ const USER_BOX_SECRET_PATH = /^\/api\/boxes\/([^/]+)\/secret$/
 const USER_BOX_TOKEN_PATH = /^\/api\/boxes\/([^/]+)\/token$/
 const PAIRING_PATH = /^\/api\/boxes\/pairings\/([^/]+)$/
 const PAIRING_APPROVE_PATH = /^\/api\/boxes\/pairings\/([^/]+)\/approve$/
+const NEST_BOX_RESUME_PATH = /^\/api\/nest\/boxes\/([^/]+)\/resume$/
+const NEST_BOX_SUSPEND_PATH = /^\/api\/nest\/boxes\/([^/]+)\/suspend$/
+const NEST_BOX_LIMITS_PATH = /^\/api\/nest\/boxes\/([^/]+)\/limits$/
 const FLEET_BOX_PATH = /^\/api\/fleet\/boxes\/([^/]+)$/
 const FLEET_BOX_SECRET_PATH = /^\/api\/fleet\/boxes\/([^/]+)\/secret$/
 
@@ -432,6 +437,44 @@ const handleMeter = async (request: Request, env: Env, url: URL): Promise<Respon
 }
 
 /**
+ * Nest boxes for their owners, and the Nest host list for operators. Every route answers 404 unless
+ * `KESTREL_NEST_DOMAIN` is set; the host list also answers 404 to anyone but an operator.
+ */
+const handleNest = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  if (!env.KESTREL_NEST_DOMAIN) return errorResponse(404, "NotFound", "no such route")
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+  const boxes = hub(env)
+  const path = url.pathname
+  const method = request.method
+  if (path === ControlPaths.nestHosts && method === "GET") {
+    if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+    return json(await boxes.nestHostList())
+  }
+  if (path === ControlPaths.nestBoxes && method === "POST") {
+    const body = await decodeBody(request, CreateNestBoxBody)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.createNestBox(sessionId, body), 201)
+  }
+  const resume = NEST_BOX_RESUME_PATH.exec(path)?.[1]
+  if (resume !== undefined && method === "POST") {
+    return answerBox(await boxes.resumeNestBox(sessionId, decodeURIComponent(resume)))
+  }
+  const suspend = NEST_BOX_SUSPEND_PATH.exec(path)?.[1]
+  if (suspend !== undefined && method === "POST") {
+    return answerBox(await boxes.suspendNestBox(sessionId, decodeURIComponent(suspend)))
+  }
+  const limits = NEST_BOX_LIMITS_PATH.exec(path)?.[1]
+  if (limits !== undefined && method === "PUT") {
+    const body = await decodeBody(request, NestLimits)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.setNestLimits(sessionId, decodeURIComponent(limits), body))
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
+/**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
  */
@@ -449,6 +492,9 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     return handleFleetBoxes(request, env, url)
   }
   if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
+  if (path === ControlPaths.nestHosts || path === ControlPaths.nestBoxes || path.startsWith(`${ControlPaths.nestBoxes}/`)) {
+    return handleNest(request, env, url)
+  }
   if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
@@ -478,7 +524,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)
     if (!user) return errorResponse(401, "Unauthorized", "unknown user")
-    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl, operator: isOperator(env, login) }
+    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl, operator: isOperator(env, login), nestEnabled: Boolean(env.KESTREL_NEST_DOMAIN) }
     return json(me)
   }
 

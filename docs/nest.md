@@ -303,14 +303,21 @@ cache.nixos.org.
 - A Nest box is a `UserBox` with a `nest` record (host, `ownerEpoch`, state, limits, `volumeRef`, image). Its URL is
   `https://<boxId>.<host slug>.<nest domain>` and changes when it moves hosts; the apps refetch the box list when a box
   stops answering.
-- **Create**: pick the connected host with the most free memory that fits `1 GiB + headroom` (and a free GPU when the
-  user asks for one at creation), insert the box with a fresh secret and an enroll token (hashed), epoch 1, send
+- **Create**: pick the connected host with the most free memory that has at least 1.5 GiB free memory (1 GiB boot plus
+  512 MiB headroom) and 1 GiB free disk (ties go to the lower host id; a free GPU when the user asks for one at creation
+  is not checked yet), insert the box with a fresh secret and an enroll token (hashed), epoch 1, send
   `create`. The box later calls `nestEnroll` and gets the secret; enrollment is idempotent until the box first
   authenticates, and a resent `create` carries a fresh token.
 - **Resume**: suspended → its host; parked → any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1);
   a host that is offline holds the box until it returns. `wakeRequest` from a host is treated as a resume request.
 - **Reconcile at `hello`**: results are applied, VMs with a stale epoch are evicted, and a VM the control plane does not
   know is logged and left alone.
+- **Limits at `hello`**: a VM whose reported limits differ from the box's gets `setLimits` with the box's limits.
+- **Control-side choices** (not in the contract): new boxes get `NEST_STANDARD_LIMITS` (4 vCPUs, 8 GiB, no GPU, 64 GiB
+  volume). Each command has a deadline (`resume`/`suspend` 10 min, `park`/`destroy` 15 min, `setLimits` 2 min,
+  `gpuAttach`/`gpuDetach` 5 min; `create` and `evict` none); an unanswered command is dropped at its deadline. A failed
+  `create` leaves the box `provisioning`; the owner can delete it. The control plane does not issue `park`, `gpuAttach`
+  or `gpuDetach`: the host parks on its own, and GPU requests come from the guest.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
 - Usage records keep flowing through `meterRecords`; the host agent emits them from cgroups.
 
