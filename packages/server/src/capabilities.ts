@@ -58,7 +58,7 @@ export interface HarnessProbe {
 }
 
 /** Agent runs get the toolchain's PATH under `strict` (`CLOUDAGENTS_SANDBOX_PATH`), the box's own otherwise. */
-const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
+export const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
   const PATH = sandboxPath ?? process.env.PATH ?? ""
   return {
     // A configured command may name a binary by path (`/opt/opencode/bin/opencode`); PATH lookup would miss it.

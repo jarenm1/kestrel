@@ -10,12 +10,13 @@ import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
 import { CredentialStore } from "../credentials"
+import { DesktopManager } from "../desktop"
 import { GitHub } from "../github/api"
 import { AgentHarness, AgentHarnessLive } from "./harness"
 import { EventHub, EventHubLive } from "./events"
 import { CoreLive, CoreService } from "./service"
 import { StateLive, StateStore } from "./state"
-import { WorkspaceLive } from "./workspace"
+import { WorkspaceLive, WorkspaceService } from "./workspace"
 
 /**
  * A harness whose Claude CLI is `cli`, with its state under `root`. `loggedInDirs` runs at every launch; `gateways`
@@ -611,7 +612,18 @@ createInterface({ input: process.stdin })
 `)
   // Gateways run the same Claude Code, so the fixture CLI is their harness too.
   const { config, layer: harness } = harnessLayer(root, cli, { gateways: ["openrouter"] })
-  const layer = CoreLive.pipe(Layer.provide(harness), Layer.provideMerge(harness))
+  const layer = CoreLive.pipe(
+    Layer.provide(Layer.mergeAll(
+      harness,
+      Layer.succeed(DesktopManager, {
+        watchStatus: () => Effect.void,
+        status: () => Effect.succeed({ state: "stopped", display: null }),
+        stopAll: () => Effect.void,
+      } as never),
+      Layer.succeed(WorkspaceService, {} as never),
+    )),
+    Layer.provideMerge(harness),
+  )
   try {
     await Effect.runPromise(Effect.gen(function* () {
       const store = yield* StateStore
