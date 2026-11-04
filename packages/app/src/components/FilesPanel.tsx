@@ -8,7 +8,7 @@ import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
-import { errorText, formatAgo } from "@/util"
+import { errorText, formatAgo, formatSize } from "@/util"
 
 /** A directory of the tree: subdirectories, then file names, each sorted by name. */
 interface DirNode {
@@ -56,18 +56,6 @@ const RECENT_LIMIT = 8
 const NO_PATHS: ReadonlySet<string> = new Set()
 
 const ROOT_LABEL = { workspace: "Workspace", home: "Home" } as const
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  const units = ["KB", "MB", "GB", "TB"]
-  let value = bytes / 1024
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit++
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
-}
 
 type StartDownload = (root: FileRoot, path: string) => void
 

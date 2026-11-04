@@ -31,6 +31,19 @@ export function formatElapsed(startMs: number, now: number): string {
   return `${s}s`;
 }
 
+/** Bytes in binary units with a decimal for small values: "512 B", "1.5 MB", "12 GB". */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
 /** Short name of a checkout's repository: "owner/name" → "name". */
 export function repoShortName(repo: string): string {
   return (repo.split("/").pop() ?? repo).replace(/\.git$/, "");

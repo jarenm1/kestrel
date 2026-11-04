@@ -2,6 +2,7 @@ import { useId, useState, type PointerEvent } from "react"
 import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
 import { useTaskStats } from "@/hooks/useTaskStats"
 import { cn } from "@/lib/utils"
+import { formatSize } from "@/util"
 
 /** Graph drawing units; the SVG stretches to the card, and strokes do not scale with it. */
 const W = 1000
@@ -147,17 +148,92 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
   )
 }
 
+/** One row of the applications list; `program` is false for the summed rows, and CPU is null for memory no process owns. */
+interface AppRow {
+  readonly name: string
+  readonly program: boolean
+  readonly detail: string | null
+  readonly ramUsed: number
+  readonly cpu: number | null
+}
+
+/**
+ * The latest sample's applications, most memory first, each with its RAM and its bar against the thread's RAM limit.
+ * Whatever the slice holds beyond the processes' own memory (page cache, kernel memory) is its own last row, so the
+ * rows add up to the RAM graph.
+ */
+function Applications({ sample }: { sample: TaskStatsSample }) {
+  const { apps, ramUsed, ramMax } = sample
+  if (apps === undefined || ramUsed === null || ramMax === null || ramMax <= 0) return null
+  const rows: AppRow[] = apps.map((a) => ({
+    name: a.name ?? "Other",
+    program: a.name !== null,
+    detail: a.processes > 1 ? `${a.processes} processes` : null,
+    ramUsed: a.ramUsed,
+    cpu: a.cpu,
+  }))
+  const cache = ramUsed - apps.reduce((n, a) => n + a.ramUsed, 0)
+  if (cache > 0) rows.push({ name: "Page cache & kernel", program: false, detail: null, ramUsed: cache, cpu: null })
+  return (
+    <div className="rounded-lg bg-card px-2.5 py-2 shadow-well">
+      <div className="flex items-baseline justify-between text-[11px] font-medium text-muted-foreground">
+        <span>Applications</span>
+        <span className="tabular-nums">
+          {formatSize(ramUsed)} of {formatSize(ramMax)}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="mt-1.5 text-xs text-muted-foreground">Nothing running</p>
+      ) : (
+        <ul className="mt-1.5 flex flex-col gap-1.5">
+          {rows.map((row) => (
+            <li key={`${row.program}:${row.name}`} className="text-xs">
+              <div className="flex items-baseline gap-2">
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate",
+                    row.program ? "font-mono text-foreground" : "text-muted-foreground",
+                  )}
+                  title={row.name}
+                >
+                  {row.name}
+                  {row.detail && <span className="ml-1.5 font-sans text-muted-foreground">{row.detail}</span>}
+                </span>
+                <span className="w-16 shrink-0 text-right text-muted-foreground tabular-nums">
+                  {formatSize(row.ramUsed)}
+                </span>
+                <span className="w-10 shrink-0 text-right text-muted-foreground tabular-nums">
+                  {row.cpu === null ? "" : percentText(row.cpu)}
+                </span>
+              </div>
+              <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className="h-full rounded-full bg-white/60"
+                  style={{ width: `${Math.min(100, (row.ramUsed / ramMax) * 100)}%` }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 /**
  * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
- * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer.
+ * (shared by every thread), then what each application in the thread uses now. Each graph spans 0-100%; hovering one
+ * shows the sample nearest the pointer.
  */
 export function ThreadGraphs({ taskId }: { taskId: string }) {
   const samples = useTaskStats(taskId)
+  const latest = samples.at(-1)
   return (
     <div className="flex flex-col gap-2">
       {GRAPHS.map((g) => (
         <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
       ))}
+      {latest && <Applications sample={latest} />}
     </div>
   )
 }

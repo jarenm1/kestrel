@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from "react-native";
 import Svg, { Defs, Line, LinearGradient, Path, Stop } from "react-native-svg";
 import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol";
 import { useTaskStats } from "@/hooks/useTaskStats";
+import { formatSize } from "@/lib/format";
 import { colors, fonts, radius, spacing } from "@/theme";
 
 const W = 300;
@@ -99,17 +100,76 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
   );
 }
 
+/** One row of the applications list; `program` is false for the summed rows, and CPU is null for memory no process owns. */
+interface AppRow {
+  readonly name: string;
+  readonly program: boolean;
+  readonly detail: string | null;
+  readonly ramUsed: number;
+  readonly cpu: number | null;
+}
+
 /**
- * The thread's RAM, CPU and storage against its limits over the last minute, plus GPU's shared VRAM.
+ * The latest sample's applications, most memory first, each with its RAM and its bar against the thread's RAM limit.
+ * Whatever the slice holds beyond the processes' own memory (page cache, kernel memory) is its own last row.
+ */
+function Applications({ sample }: { sample: TaskStatsSample }) {
+  const { apps, ramUsed, ramMax } = sample;
+  if (apps === undefined || ramUsed === null || ramMax === null || ramMax <= 0) return null;
+  const rows: AppRow[] = apps.map((a) => ({
+    name: a.name ?? "Other",
+    program: a.name !== null,
+    detail: a.processes > 1 ? `${a.processes} processes` : null,
+    ramUsed: a.ramUsed,
+    cpu: a.cpu,
+  }));
+  const cache = ramUsed - apps.reduce((n, a) => n + a.ramUsed, 0);
+  if (cache > 0) rows.push({ name: "Page cache & kernel", program: false, detail: null, ramUsed: cache, cpu: null });
+  return (
+    <View style={styles.apps}>
+      <View style={styles.appsHeader}>
+        <Text style={styles.label}>Applications</Text>
+        <Text style={styles.label}>
+          {formatSize(ramUsed)} of {formatSize(ramMax)}
+        </Text>
+      </View>
+      {rows.length === 0 ? (
+        <Text style={styles.appDetail}>Nothing running</Text>
+      ) : (
+        rows.map((row) => (
+          <View key={`${row.program}:${row.name}`} style={styles.appRow}>
+            <View style={styles.appLine}>
+              <Text style={styles.appName} numberOfLines={1}>
+                <Text style={row.program ? styles.appProgram : styles.appDetail}>{row.name}</Text>
+                {row.detail ? <Text style={styles.appDetail}>{`  ${row.detail}`}</Text> : null}
+              </Text>
+              <Text style={styles.appValue}>{formatSize(row.ramUsed)}</Text>
+              <Text style={[styles.appValue, styles.appCpu]}>{row.cpu === null ? "" : percentText(row.cpu)}</Text>
+            </View>
+            <View style={styles.barTrack}>
+              <View style={[styles.barFill, { width: `${Math.min(100, (row.ramUsed / ramMax) * 100)}%` }]} />
+            </View>
+          </View>
+        ))
+      )}
+    </View>
+  );
+}
+
+/**
+ * The thread's RAM, CPU and storage against its limits over the last minute, plus GPU's shared VRAM, then what each
+ * application in the thread uses now.
  */
 export function ThreadGraphs({ taskId }: { taskId: string }) {
   const samples = useTaskStats(taskId);
+  const latest = samples.at(-1);
 
   return (
     <View style={styles.container}>
       {GRAPHS.map((g) => (
         <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
       ))}
+      {latest ? <Applications sample={latest} /> : null}
     </View>
   );
 }
@@ -154,6 +214,60 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: H,
+  },
+  apps: {
+    borderRadius: radius.md,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 6,
+    gap: 6,
+  },
+  appsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  appRow: {
+    gap: 2,
+  },
+  appLine: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: spacing.sm,
+  },
+  appName: {
+    flex: 1,
+    fontSize: 12,
+  },
+  appProgram: {
+    fontFamily: fonts.mono,
+    color: colors.foreground,
+  },
+  appDetail: {
+    fontSize: 12,
+    color: colors.mutedForeground,
+  },
+  appValue: {
+    width: 64,
+    textAlign: "right",
+    fontSize: 12,
+    fontFamily: fonts.mono,
+    color: colors.mutedForeground,
+  },
+  appCpu: {
+    width: 40,
+  },
+  barTrack: {
+    height: 4,
+    borderRadius: 2,
+    overflow: "hidden",
+    backgroundColor: "rgba(255,255,255,0.05)",
+  },
+  barFill: {
+    height: "100%",
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.6)",
   },
 });
 
