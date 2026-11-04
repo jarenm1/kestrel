@@ -62,7 +62,9 @@ The shared composer also owns the app-command catalog and invocation rules (`src
 as `/usage` execute locally on suggestion selection or message submission; they never reach the harness and
 override same-named slash commands, but not `$skills`. Each host implements the exhaustive `AppCommandHandlers`
 map, so adding an action requires both desktop and mobile behavior. Desktop opens its Quotas dialog; mobile
-pushes the existing Quotas screen and persists the unconsumed draft before the editor unmounts.
+pushes the existing Quotas screen only after a live DOM snapshot's unconsumed draft is durably saved. Native
+menu picks request that snapshot over the same fire-and-forget bridge pattern as Send. Mobile draft storage
+serializes reads and writes per key across composer mounts, including pending SecureStore operations.
 
 Shared panels follow the same pattern: `packages/ui` holds the DOM component with plain JSON props, each app
 fetches the data with its own client, and the phone app renders the component through a `use dom` wrapper whose

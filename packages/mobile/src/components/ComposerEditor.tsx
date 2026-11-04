@@ -9,6 +9,7 @@ import {
   type ComposerEditorView,
 } from "@cloudagents/composer/editor"
 import type { GithubReference } from "@cloudagents/composer/reference"
+import type { AppCommand } from "@cloudagents/composer/commands"
 import { composerEditorStyles } from "./composerEditorStyles"
 import { domHostReset } from "./domHostReset"
 
@@ -25,6 +26,8 @@ export interface ComposerEditorDomRef {
   insertReference(reference: GithubReference, start: number, end: number): void
   /** Flushes the live editor content to the `onSubmit` native action; the native ref bridge cannot return it. */
   requestSubmit(): void
+  /** Reads live content for a menu pick, just as requestSubmit does for Send. */
+  requestAppCommand(name: AppCommand["name"]): void
   /** Empties the draft after a successful send without moving focus. */
   clear(): void
 }
@@ -47,6 +50,7 @@ export interface ComposerEditorDomProps {
   onChange: (view: ComposerEditorView) => Promise<void>
   /** Receives the live view when `requestSubmit` is called, so Send never reads a stale bridged value. */
   onSubmit: (view: ComposerEditorView) => Promise<void>
+  onAppCommand: (name: AppCommand["name"], view: ComposerEditorView) => Promise<void>
   onFocus: () => Promise<void>
   onBlur: () => Promise<void>
   onMenuKey: (key: string) => Promise<void>
@@ -74,6 +78,7 @@ export default function ComposerEditor({
   menuOpen,
   onChange,
   onSubmit,
+  onAppCommand,
   onFocus,
   onBlur,
   onMenuKey,
@@ -82,8 +87,8 @@ export default function ComposerEditor({
   const latest = useRef<ComposerEditorView>(composerViewOf(value))
   const menuOpenRef = useRef(menuOpen)
   menuOpenRef.current = menuOpen
-  const callbacks = useRef({ onChange, onSubmit })
-  callbacks.current = { onChange, onSubmit }
+  const callbacks = useRef({ onChange, onSubmit, onAppCommand })
+  callbacks.current = { onChange, onSubmit, onAppCommand }
 
   useDOMImperativeHandle(
     ref,
@@ -104,6 +109,10 @@ export default function ComposerEditor({
         // Read the DOM directly: the last `onChange` may still be on the bridge, and Send must send what is visible.
         const view = editor.current?.readView() ?? latest.current
         void callbacks.current.onSubmit(view)
+      },
+      requestAppCommand(name) {
+        const view = editor.current?.readView() ?? latest.current
+        void callbacks.current.onAppCommand(name as AppCommand["name"], view)
       },
       clear() {
         editor.current?.clear()

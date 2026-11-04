@@ -21,10 +21,13 @@ export function withAppCommands(commands: readonly HarnessCommand[], provider: M
   return [...APP_COMMANDS, ...commands.filter((command) => appCommandOf(command, provider) === undefined)]
 }
 
-/** Consume only a complete leading app-command token and its gap; leave the rest of the draft intact. */
-export function matchAppCommand(text: string): { command: AppCommand; consumed: number } | undefined {
-  const token = /^\s*\/([^\s]+)(?:\s+|$)/.exec(text)
+/** Consume the leading token and gap. A menu selection may complete a prefix, but must still match the live token. */
+export function matchAppCommand(text: string, selected?: AppCommand["name"]): { command: AppCommand; consumed: number } | undefined {
+  const token = /^\s*\/([^\s]*)(?:\s+|$)/.exec(text)
   if (token === null) return undefined
-  const command = APP_COMMANDS.find((candidate) => candidate.name === token[1]!.toLowerCase())
+  const name = token[1]!.toLowerCase()
+  const command = APP_COMMANDS.find((candidate) => selected === undefined
+    ? candidate.name === name
+    : candidate.name === selected && candidate.name.startsWith(name))
   return command === undefined ? undefined : { command, consumed: token[0].length }
 }

@@ -45,3 +45,21 @@ describe("submitted app commands", () => {
     }
   })
 })
+
+describe("live app-command selection", () => {
+  test("consumes a selected prefix while retaining newly typed text and reference Markdown", () => {
+    const remainder = "latest text [PR #7](https://github.com/acme/repo/pull/7)"
+    const liveDraft = `/u \n${remainder}`
+    const match = matchAppCommand(liveDraft, "usage")
+    expect(match?.command.name).toBe("usage")
+    expect(liveDraft.slice(match!.consumed)).toBe(remainder)
+    expect(matchAppCommand("/", "usage")?.consumed).toBe(1)
+    expect(matchAppCommand("/UsAgE", "usage")?.consumed).toBe(6)
+  })
+
+  test("does not consume a changed live token just because an old usage suggestion was tapped", () => {
+    for (const draft of ["/compact latest text", "/usage-report", "$usage", "ordinary text"]) {
+      expect(matchAppCommand(draft, "usage")).toBeUndefined()
+    }
+  })
+})

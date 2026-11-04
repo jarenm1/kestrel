@@ -21,6 +21,10 @@ agent. Sending a typed `/usage` does the same. It works in a new thread without 
 are loading. Only the command and its following whitespace leave the draft; Back returns to any remaining text
 and references.
 
+Both suggestion taps and Send read the live DOM editor rather than the last bridged change. Navigation waits for
+the remaining draft to reach storage. Reads and writes for each draft share an ordering queue across composer
+mounts, so returning immediately cannot restore the consumed command or race newer edits.
+
 The app-command catalog and invocation rules live in `@cloudagents/composer/commands`, shared with desktop.
 Add future local actions there and implement their `AppCommandHandlers` entry on both hosts; selection and
 submission use the same resolver, and app actions override same-named slash commands without hiding `$skills`.

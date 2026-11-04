@@ -360,6 +360,13 @@ export function Composer({
   };
   // The screen unmounts as an app action opens; a bridge change still in flight must not restore the consumed text.
   const handledAppCommand = useRef(false);
+  const [appCommandPending, setAppCommandPending] = useState(false);
+  const [appCommandError, setAppCommandError] = useState<unknown>();
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const askOptions = ask?.options ?? [];
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined;
@@ -439,25 +446,33 @@ export function Composer({
     setView(next);
   }
 
-  /**
-   * Runs an app action and keeps everything after its invocation. The DOM replacement is asynchronous and this screen
-   * unmounts as the action opens, so the trimmed draft is persisted here first; the stored write outlives the screen.
-   */
-  function runAppCommand(command: AppCommand, markdown: string, consumed: number) {
-    // A double tap or late Send can arrive before the screen swaps; the first run has already persisted everything.
+  /** Keep the live remainder durable before opening a screen that unmounts this editor. */
+  async function runAppCommand(command: AppCommand, markdown: string, consumed: number) {
     if (handledAppCommand.current) return;
     handledAppCommand.current = true;
-    setText(markdown.slice(consumed));
-    appCommandHandlers[command.name]();
+    setAppCommandPending(true);
+    setAppCommandError(undefined);
+    try {
+      await setText(markdown.slice(consumed));
+      if (mounted.current) appCommandHandlers[command.name]();
+    } catch (error) {
+      if (!mounted.current) return;
+      handledAppCommand.current = false;
+      setAppCommandPending(false);
+      setAppCommandError(error);
+    }
+  }
+
+  async function selectAppCommand(name: AppCommand["name"], next: ComposerEditorView) {
+    const match = matchAppCommand(next.markdown, name);
+    if (match !== undefined) await runAppCommand(match.command, next.markdown, match.consumed);
   }
 
   function chooseCommand(command: HarnessCommand) {
     // App actions run on selection instead of completing the draft; they win over a same-named harness command.
     const appCommand = appCommandOf(command, commandProvider);
     if (appCommand !== undefined) {
-      const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0;
-      // The leading token and gap sit before any reference, so their offsets match in visible text and Markdown.
-      runAppCommand(appCommand, view.markdown, commandTokenEnd + gap);
+      editor.current?.requestAppCommand(appCommand.name);
       return;
     }
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider);
@@ -508,7 +523,7 @@ export function Composer({
     if (chosenOption === undefined) {
       const appCommand = matchAppCommand(next.markdown);
       if (appCommand !== undefined) {
-        runAppCommand(appCommand.command, next.markdown, appCommand.consumed);
+        await runAppCommand(appCommand.command, next.markdown, appCommand.consumed);
         return;
       }
     }
@@ -541,6 +556,7 @@ export function Composer({
   return (
     <View style={styles.wrap}>
       {error ? <Alert>{errorText(error)}</Alert> : null}
+      {appCommandError ? <Alert>{errorText(appCommandError)}</Alert> : null}
       {referenceMenuOpen && referenceTrigger !== undefined ? (
         <GithubReferenceMenu
           number={referenceTrigger.number}
@@ -580,6 +596,7 @@ export function Composer({
             onBlur={async () => setFocused(false)}
             onMenuKey={menuKey}
             onSubmit={submit}
+            onAppCommand={selectAppCommand}
             // The DOM WebView defaults its container to flex: 1, which collapses inside this auto-height box.
             // Let matchContents supply the outer height, with the WebView filling that measured container.
             dom={{ matchContents: true, scrollEnabled: false, containerStyle: { flex: 0 }, style: { flex: 1 } }}
@@ -596,13 +613,13 @@ export function Composer({
             <ThinkingPicker value={effort} options={effortOptions} onChange={setPickedEffort} />
           ) : null}
           <View style={styles.flex} />
-          {onStop && empty ? (
+          {onStop && empty && !appCommandPending ? (
             <Button size="icon" accessibilityLabel="Stop" disabled={stopping} onPress={onStop}>
               <Square size={14} color={colors.primaryForeground} fill={colors.primaryForeground} />
             </Button>
           ) : (
-            <Button size="icon" accessibilityLabel="Send" disabled={pending || empty || !draftReady} onPress={() => editor.current?.requestSubmit()}>
-              {pending ? (
+            <Button size="icon" accessibilityLabel="Send" disabled={pending || appCommandPending || empty || !draftReady} onPress={() => editor.current?.requestSubmit()}>
+              {pending || appCommandPending ? (
                 <ActivityIndicator size="small" color={colors.primaryForeground} />
               ) : (
                 <ArrowUp size={16} color={colors.primaryForeground} />
