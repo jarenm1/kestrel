@@ -167,6 +167,9 @@ export type BoxResult = { ok: boolean; status: number; body: string }
 /** Outcome of starting a task for a run. `error` is null when the task started. */
 type RunOutcome = { taskId: string | null; error: string | null }
 
+/** A `user_boxes` row as SQL returns it; `nest` comes from elsewhere. */
+type UserBoxRow = Omit<UserBox, "nest">
+
 type AutomationRow = {
   id: string
   login: string
@@ -684,7 +687,7 @@ export class Hub extends DurableObject<Env> {
   private boxList(login: string): BoxList {
     const sql = this.ctx.storage.sql
     const boxes = sql
-      .exec<UserBox>(
+      .exec<UserBoxRow>(
         "SELECT id, name, url, created_at AS createdAt FROM user_boxes WHERE login = ? ORDER BY created_at, rowid",
         login,
       )
@@ -703,7 +706,7 @@ export class Hub extends DurableObject<Env> {
   /** The box if `login` owns it, with its secret; null otherwise. */
   private ownedBox(login: string, id: string): { box: UserBox; secret: string } | null {
     const row = this.ctx.storage.sql
-      .exec<UserBox & { secret: string }>(
+      .exec<UserBoxRow & { secret: string }>(
         "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ? AND login = ?",
         id,
         login,
@@ -888,7 +891,7 @@ export class Hub extends DurableObject<Env> {
     if (!row) return null
     if (row.boxId === null) return { status: "pending", expiresAt: new Date(row.expiresAt).toISOString() }
     const found = this.ctx.storage.sql
-      .exec<UserBox & { secret: string }>(
+      .exec<UserBoxRow & { secret: string }>(
         "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ?",
         row.boxId,
       )
