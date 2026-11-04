@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { HostError } from "./errors"
 
 /** Identity of a process: its pid plus the kernel start time, which changes if the pid is reused. */
 export interface ProcIdentity {
@@ -48,17 +49,41 @@ export const readCmdline = (pid: number): string | null => {
 }
 
 /**
- * True when the recorded process is alive and its command line names the VM (`-name kestrel-<vmId>`
- * in the launcher's QEMU invocation). Guards against a live unrelated process that inherited the pid.
+ * True when the recorded process is alive and was started with `--api-socket <apiSocket>`. Each VMM has its own
+ * API socket path under its VM directory, so this identifies the VMM and guards against a reused pid.
  */
-export const processBelongsToVm = (identity: ProcIdentity | null, vmName: string): boolean => {
+export const processIsVmm = (identity: ProcIdentity | null, apiSocket: string): boolean => {
   if (identity === null || !isProcessAlive(identity)) return false
   const cmdline = readCmdline(identity.pid)
-  return cmdline !== null && cmdline.includes(vmName)
+  return cmdline !== null && cmdline.includes(`--api-socket ${apiSocket}`)
+}
+
+/** The cgroup v2 directory of a process (`/sys/fs/cgroup/...`), or null when it has none. */
+export const cgroupDirOf = (pid: number): string | null => {
+  let text: string
+  try {
+    text = readFileSync(`/proc/${pid}/cgroup`, "utf8")
+  } catch {
+    return null
+  }
+  const line = text.split("\n").find((entry) => entry.startsWith("0::"))
+  if (line === undefined) return null
+  return `/sys/fs/cgroup${line.slice(3)}`
 }
 
 export const sleep = (ms: number): Promise<void> => {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, ms)
   return promise
+}
+
+/**
+ * The `some avg10` memory pressure: the share of the last 10 s in which some task stalled on memory, in percent.
+ * Throws when the kernel exposes no memory pressure stall information (PSI).
+ */
+export const readMemoryPressureAvg10 = (): number => {
+  const text = readFileSync("/proc/pressure/memory", "utf8")
+  const match = /^some avg10=([\d.]+)/m.exec(text)
+  if (match === null) throw new HostError("/proc/pressure/memory has no `some avg10` line")
+  return Number(match[1])
 }

@@ -19,6 +19,16 @@ export const fsyncDir = (dir: string): void => {
   }
 }
 
+/** fsync a file's contents to disk. */
+export const fsyncPath = (path: string): void => {
+  const fd = openSync(path, "r")
+  try {
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
+  }
+}
+
 /** Writes `data` to a fresh, fsynced temp file next to `path` and returns its name. */
 const writeTemp = (path: string, data: string): string => {
   const tmp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`)

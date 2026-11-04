@@ -1,0 +1,1202 @@
+import { randomBytes } from "node:crypto"
+import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, rmSync, statSync, statfsSync } from "node:fs"
+import { join } from "node:path"
+import {
+  GUEST_REPLY_TIMEOUT_MS,
+  GUEST_STATUS_INTERVAL_MS,
+  NEST_SWAP_SERIAL,
+  NEST_VOLUME_SERIAL,
+  type BoxActivity,
+  type GuestPressure,
+  type HostToGuest,
+  type NestHostCapacity,
+  type NestHostCommand,
+  type NestLimits,
+  type NestVmReport,
+  type NestVmState,
+} from "@cloudagents/protocol"
+import { ChClient, TEMPLATE_BOOT_MEMORY_BYTES, TEMPLATE_BOOT_VCPUS, type MemoryRestoreMode } from "./ch-api"
+import { launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
+import type { HostConfig } from "./config"
+import { HostError } from "./errors"
+import { fsyncDir, fsyncPath } from "./fs-atomic"
+import { type NetCommand, allocateSlot, guestNetwork, networkForSlot, tapDownCommands, tapUpCommands } from "./network"
+import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
+import { cgroupDirOf, isProcessAlive, processIsVmm, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
+import { recoverPlan } from "./recovery"
+import { Meter } from "./meter"
+import { Outbox } from "./outbox"
+import { type RestoreTarget, SNAPSHOT_FILES, prepareRestoreDir } from "./restore"
+import { type CommandOutcome, type NestNetwork, type Operation, type ProcessRef, type VmRecord } from "./schema"
+import { type StateLayout, ensureStateDirs, findCommand, listVms, markCommandsReported, pendingCommands, recordCommand, vmPaths, writeVm } from "./state-store"
+import { buildTemplate, readGuestImage, removeStaleTemplates, templateDir, type GuestImage } from "./template"
+import { runChecked, runTool } from "./tools"
+import { type VolumeTool, backupVolume, createVolume, deleteVolumeStore, startLazyVolume, terminateProcess } from "./volume"
+import { type GuestLink, connectGuest, newRequestId } from "./vsock"
+
+const GIB = 1024 * 1024 * 1024
+const MIB = 1024 * 1024
+/** Memory the VMM process may use beyond the VM's own memory limit (the design's `MemoryMax`). */
+const VMM_OVERHEAD_BYTES = 256 * MIB
+/**
+ * Size of each VM's sparse swap disk. The design does not fix it; the host uses this default.
+ */
+const SWAP_BYTES = 4 * GIB
+/** Port the box listens on inside the VM (`nest.md`, Networking). */
+const BOX_PORT = 8787
+const TEMPLATE_HELLO_TIMEOUT_MS = 120_000
+const API_TIMEOUT_MS = 10_000
+const CONNECT_TIMEOUT_MS = 60_000
+const LAZY_VOLUME_TIMEOUT_MS = 60_000
+const VMM_STOP_GRACE_MS = 5_000
+const VOLUME_STOP_GRACE_MS = 10_000
+/** How long a guest gets to power off after `shutdown` before the VMM is stopped. */
+const SHUTDOWN_WAIT_MS = 30_000
+const WAKE_TIMEOUT_MS = 60_000
+const WAKE_POLL_MS = 250
+const GPU_INTERVAL_MS = 5 * 60_000
+const GPU_HOLD_MS = 5 * 60_000
+/** A guest status older than this is not used for policy decisions. */
+const STATUS_FRESH_MS = 3 * GUEST_STATUS_INTERVAL_MS
+
+type VmPathSet = ReturnType<typeof vmPaths>
+type Command<T extends NestHostCommand["_tag"]> = Extract<NestHostCommand, { readonly _tag: T }>
+
+/** What the manager tells the control link. The control link owns the connection; the manager owns the VMs. */
+export interface VmEvents {
+  /** A VM changed: state, size, GPUs, disk, or backup. */
+  readonly vm: (report: NestVmReport) => void
+  /** A request reached ingress for a box this host may not wake by itself. */
+  readonly wakeRequest: (boxId: string) => void
+}
+
+export interface IngressActivity {
+  readonly boxId: string
+  readonly openConnections: number
+  readonly lastRequestAt: number | null
+}
+
+interface Runtime {
+  link: GuestLink | null
+  status: { readonly pressure: GuestPressure; readonly activity: BoxActivity | null; readonly at: number } | null
+  gpuWanted: boolean
+  ingress: { openConnections: number; lastRequestAt: number | null }
+  memoryScale: ScaleState
+  cpuScale: ScaleState
+  lastGpuAttachAt: number | null
+  busy: boolean
+}
+
+const newRuntime = (): Runtime => ({
+  link: null,
+  status: null,
+  gpuWanted: false,
+  ingress: { openConnections: 0, lastRequestAt: null },
+  memoryScale: NO_SCALE,
+  cpuScale: NO_SCALE,
+  lastGpuAttachAt: null,
+  busy: false,
+})
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+const gpuDeviceId = (pciAddress: string): string => `gpu-${pciAddress}`
+const gpuPath = (pciAddress: string): string => `/sys/bus/pci/devices/${pciAddress}`
+const newCloneId = (): string => randomBytes(16).toString("hex")
+
+const restoreMode = (): MemoryRestoreMode => (existsSync("/dev/userfaultfd") ? "OnDemand" : "Copy")
+
+const createSparse = (path: string, bytes: number): void => {
+  rmSync(path, { force: true })
+  const fd = openSync(path, "w", 0o600)
+  try {
+    ftruncateSync(fd, bytes)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Removes everything a VM left in its directory except `vm.json`, which stays as the tombstone. */
+const clearArtifacts = (dir: string): void => {
+  if (!existsSync(dir)) return
+  for (const name of readdirSync(dir)) {
+    if (name !== "vm.json") rmSync(join(dir, name), { recursive: true, force: true })
+  }
+}
+
+const allocatedBytes = (path: string): number => {
+  try {
+    return statSync(path).blocks * 512
+  } catch {
+    return 0
+  }
+}
+
+const waitForExit = async (identity: ProcIdentity, timeoutMs: number): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs
+  while (isProcessAlive(identity)) {
+    if (Date.now() >= deadline) return false
+    await sleep(50)
+  }
+  return true
+}
+
+const runNetCommands = async (commands: readonly NetCommand[]): Promise<void> => {
+  for (const command of commands) {
+    const [name, ...args] = command
+    if (name === undefined) throw new HostError("empty network command")
+    await runChecked(name, args)
+  }
+}
+
+/** Tears a tap down. Best effort: a tap that is already gone is not an error. */
+const tapDown = async (network: NestNetwork): Promise<void> => {
+  for (const command of tapDownCommands(network)) {
+    const [name, ...args] = command
+    if (name !== undefined) await runTool(name, args)
+  }
+}
+
+const createNewRecord = (fields: {
+  readonly boxId: string
+  readonly vmId: string
+  readonly userId: string
+  readonly ownerEpoch: number
+  readonly imageId: string
+  readonly publicUrl: string
+  readonly limits: NestLimits
+  readonly volumeRef: string | null
+  readonly localDirty: boolean
+  readonly state: NestVmState
+}): VmRecord => ({
+  schemaVersion: 1,
+  boxId: fields.boxId,
+  vmId: fields.vmId,
+  userId: fields.userId,
+  ownerEpoch: fields.ownerEpoch,
+  state: fields.state,
+  since: Date.now(),
+  imageId: fields.imageId,
+  publicUrl: fields.publicUrl,
+  limits: fields.limits,
+  vcpus: 0,
+  memoryBytes: 0,
+  gpus: [],
+  gpuAttachedAt: null,
+  volumeRef: fields.volumeRef,
+  backedUpAt: null,
+  localRef: null,
+  localDirty: fields.localDirty,
+  network: null,
+  process: null,
+  volumeProcess: null,
+  snapshotGen: null,
+  operation: null,
+  lastError: null,
+})
+
+export class VmManager {
+  readonly outbox: Outbox
+  private readonly meter: Meter
+  private readonly volume: VolumeTool
+  private readonly image: GuestImage
+  private readonly records = new Map<string, VmRecord>()
+  private readonly runtimes = new Map<string, Runtime>()
+  private readonly queues = new Map<string, Promise<void>>()
+  private readonly timers: ReturnType<typeof setInterval>[] = []
+  private leaseUntil = 0
+
+  constructor(
+    private readonly config: HostConfig,
+    private readonly layout: StateLayout,
+    private readonly events: VmEvents,
+  ) {
+    this.image = readGuestImage(config.guestImageDir)
+    this.volume = { tool: config.volumeTool, store: config.volumeStore, keyFile: config.volumeKeyFile }
+    this.outbox = new Outbox(layout.meterDir)
+    this.meter = new Meter(config.hostId, (record) => this.outbox.append([record]))
+  }
+
+  /** Loads the records, recovers every VM from its last state, builds the template and starts the timers. */
+  async start(): Promise<void> {
+    ensureStateDirs(this.layout)
+    for (const record of listVms(this.layout)) this.records.set(record.boxId, record)
+    for (const record of [...this.records.values()]) await this.recover(record)
+    await buildTemplate({
+      config: this.config,
+      layout: this.layout,
+      image: this.image,
+      scope: this.config.scope,
+      helloTimeoutMs: TEMPLATE_HELLO_TIMEOUT_MS,
+    })
+    const keep = new Set<string>([this.image.imageId])
+    for (const vm of this.records.values()) if (vm.state === "running") keep.add(vm.imageId)
+    removeStaleTemplates(this.layout, keep)
+    this.timers.push(setInterval(() => this.tick(), GUEST_STATUS_INTERVAL_MS))
+    this.timers.push(setInterval(() => this.meterTick(), this.config.meterIntervalMs))
+  }
+
+  stop(): void {
+    for (const timer of this.timers) clearInterval(timer)
+    this.timers.length = 0
+  }
+
+  /**
+   * Runs one control command for a box. A command already answered (same `commandId`) returns the stored outcome.
+   * The outcome is stored until the control plane confirms it (`markReported`).
+   */
+  execute(commandId: string, command: NestHostCommand): Promise<{ outcome: CommandOutcome; vm: NestVmReport | null }> {
+    return this.serial(command.boxId, async () => {
+      const stored = findCommand(this.layout, commandId)
+      if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
+      let outcome: CommandOutcome
+      try {
+        await this.apply(command)
+        outcome = { commandId, boxId: command.boxId, ok: true, reported: false }
+      } catch (error) {
+        await this.failOperation(command.boxId, error)
+        outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
+      }
+      recordCommand(this.layout, outcome)
+      return { outcome, vm: this.reportOf(command.boxId) }
+    })
+  }
+
+  pendingResults(): CommandOutcome[] {
+    return pendingCommands(this.layout)
+  }
+
+  markReported(commandIds: readonly string[]): void {
+    markCommandsReported(this.layout, commandIds)
+  }
+
+  /** Every VM this host holds, except destroyed or evicted ones. */
+  reports(): NestVmReport[] {
+    return [...this.records.values()].filter((vm) => vm.state !== "deleted").map((vm) => this.report(vm))
+  }
+
+  capacity(): NestHostCapacity {
+    const vms = [...this.records.values()].filter((vm) => vm.state !== "deleted")
+    const running = vms.filter((vm) => vm.state === "running")
+    const runningMemoryBytes = running.reduce((sum, vm) => sum + vm.memoryBytes, 0)
+    return {
+      vcpus: this.config.capacity.vcpus,
+      vcpusPlugged: running.reduce((sum, vm) => sum + vm.vcpus, 0),
+      memoryBytes: this.config.capacity.memoryBytes,
+      memoryPluggedBytes: runningMemoryBytes,
+      diskFreeBytes: diskFreeBytes({ availableBytes: this.availableDiskBytes(), runningMemoryBytes }),
+      diskReservedBytes: runningMemoryBytes,
+      gpus: this.config.gpus.map((gpu) => ({
+        pciAddress: gpu.pciAddress,
+        model: gpu.model,
+        vramBytes: gpu.vramBytes,
+        attachedTo: vms.find((vm) => vm.gpus.includes(gpu.pciAddress))?.boxId ?? null,
+      })),
+      running: running.length,
+      suspended: vms.filter((vm) => vm.state === "suspended").length,
+    }
+  }
+
+  setLease(validUntil: number): void {
+    this.leaseUntil = validUntil
+  }
+
+  reportActivity(boxes: readonly IngressActivity[]): void {
+    for (const box of boxes) {
+      if (!this.records.has(box.boxId)) continue
+      this.runtime(box.boxId).ingress = { openConnections: box.openConnections, lastRequestAt: box.lastRequestAt }
+    }
+  }
+
+  /** Where ingress sends a box's requests: its upstream while running, else null. */
+  route(boxId: string): { state: NestVmState; upstream: string | null } {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state === "deleted") throw new HostError(`unknown box ${boxId}`)
+    return { state: vm.state, upstream: vm.state === "running" ? this.upstreamOf(vm) : null }
+  }
+
+  /**
+   * Brings a box to `running` for an ingress request and answers with its upstream. A suspended box is resumed here
+   * while the control plane's lease is valid; otherwise the control plane is asked and this waits for its `resume`.
+   */
+  async wake(boxId: string): Promise<string> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state === "deleted") throw new HostError(`unknown box ${boxId}`)
+    if (vm.state === "running") return this.upstreamOf(vm)
+    if (vm.state === "suspended" && Date.now() < this.leaseUntil) {
+      void this.enqueue(boxId, () => this.resumeSuspendedBox(boxId))
+    } else {
+      this.events.wakeRequest(boxId)
+    }
+    const deadline = Date.now() + WAKE_TIMEOUT_MS
+    for (;;) {
+      const current = this.records.get(boxId)
+      if (current === undefined || current.state === "deleted") throw new HostError(`box ${boxId} was deleted`)
+      if (current.state === "running") return this.upstreamOf(current)
+      if (Date.now() >= deadline) throw new HostError(`box ${boxId} did not wake within ${WAKE_TIMEOUT_MS} ms`)
+      await sleep(WAKE_POLL_MS)
+    }
+  }
+
+  private paths(boxId: string): VmPathSet {
+    return vmPaths(this.layout, boxId)
+  }
+
+  private runtime(boxId: string): Runtime {
+    let rt = this.runtimes.get(boxId)
+    if (rt === undefined) {
+      rt = newRuntime()
+      this.runtimes.set(boxId, rt)
+    }
+    return rt
+  }
+
+  private commit(vm: VmRecord): VmRecord {
+    writeVm(this.layout, vm)
+    this.records.set(vm.boxId, vm)
+    if (vm.state !== "deleted") this.events.vm(this.report(vm))
+    return vm
+  }
+
+  private begin(vm: VmRecord, kind: Operation["kind"], from: Operation["from"]): VmRecord {
+    return this.commit({ ...vm, operation: { kind, from, startedAt: Date.now() } })
+  }
+
+  private finish(vm: VmRecord, state: NestVmState, patch: Partial<VmRecord>): VmRecord {
+    return this.commit({
+      ...vm,
+      lastError: null,
+      ...patch,
+      state,
+      since: state === vm.state ? vm.since : Date.now(),
+      operation: null,
+    })
+  }
+
+  private report(vm: VmRecord): NestVmReport {
+    const running = vm.state === "running"
+    return {
+      boxId: vm.boxId,
+      vmId: vm.vmId,
+      userId: vm.userId,
+      ownerEpoch: vm.ownerEpoch,
+      state: vm.state,
+      since: vm.since,
+      imageId: vm.imageId,
+      vcpus: running ? vm.vcpus : 0,
+      memoryBytes: running ? vm.memoryBytes : 0,
+      gpus: [...vm.gpus],
+      diskBytes: this.diskBytesOf(vm),
+      volumeRef: vm.volumeRef,
+      backedUpAt: vm.backedUpAt,
+      limits: vm.limits,
+    }
+  }
+
+  private reportOf(boxId: string): NestVmReport | null {
+    const vm = this.records.get(boxId)
+    return vm === undefined || vm.state === "deleted" ? null : this.report(vm)
+  }
+
+  private diskBytesOf(vm: VmRecord): number {
+    const p = this.paths(vm.boxId)
+    let bytes = allocatedBytes(p.volume) + allocatedBytes(p.swap)
+    if (vm.snapshotGen !== null) {
+      for (const name of SNAPSHOT_FILES) bytes += allocatedBytes(join(p.snapshot(vm.snapshotGen), name))
+    }
+    return bytes
+  }
+
+  private upstreamOf(vm: VmRecord): string {
+    if (vm.network === null) throw new HostError(`box ${vm.boxId} has no network`)
+    return `http://${vm.network.address}:${BOX_PORT}`
+  }
+
+  private availableDiskBytes(): number {
+    const stats = statfsSync(this.config.stateDir)
+    return Number(stats.bavail) * Number(stats.bsize)
+  }
+
+  private isDiskTight(): boolean {
+    const runningMemoryBytes = [...this.records.values()]
+      .filter((vm) => vm.state === "running")
+      .reduce((sum, vm) => sum + vm.memoryBytes, 0)
+    return diskTight(diskFreeBytes({ availableBytes: this.availableDiskBytes(), runningMemoryBytes }))
+  }
+
+  private usedSlots(): Set<number> {
+    const slots = new Set<number>()
+    for (const vm of this.records.values()) if (vm.network !== null) slots.add(vm.network.slot)
+    return slots
+  }
+
+  private validateLimits(limits: NestLimits): void {
+    if (limits.maxVcpus > this.config.template.maxVcpus) {
+      throw new HostError(`maxVcpus ${limits.maxVcpus} exceeds the template limit ${this.config.template.maxVcpus}`)
+    }
+    if (limits.maxMemoryBytes > this.config.template.maxMemoryBytes) {
+      throw new HostError(
+        `maxMemoryBytes ${limits.maxMemoryBytes} exceeds the template limit ${this.config.template.maxMemoryBytes}`,
+      )
+    }
+  }
+
+  private restoreTarget(network: NestNetwork, p: VmPathSet): RestoreTarget {
+    return { tap: network.tap, cid: network.cid, vsockSocket: p.vsockSocket, consoleFile: p.console }
+  }
+
+  private launch(vm: VmRecord): ProcessRef {
+    return launchVmm({
+      scope: this.config.scope,
+      unit: vmUnitName(vm.boxId),
+      chPath: this.config.cloudHypervisor,
+      apiSocket: this.paths(vm.boxId).apiSocket,
+      memoryMaxBytes: vm.limits.maxMemoryBytes + VMM_OVERHEAD_BYTES,
+      logPath: this.paths(vm.boxId).console,
+    })
+  }
+
+  private attachLink(rt: Runtime, link: GuestLink): void {
+    rt.link = link
+    link.onFrame((frame) => {
+      if (frame._tag === "status") {
+        rt.status = { pressure: frame.pressure, activity: frame.activity, at: Date.now() }
+      } else if (frame._tag === "gpuWanted") {
+        rt.gpuWanted = frame.wanted
+      }
+    })
+    link.onClose(() => {
+      if (rt.link !== link) return
+      rt.link = null
+      rt.status = null
+      rt.gpuWanted = false
+    })
+  }
+
+  private closeLink(boxId: string): void {
+    const rt = this.runtimes.get(boxId)
+    if (rt === undefined || rt.link === null) return
+    const link = rt.link
+    rt.link = null
+    link.close()
+  }
+
+  private async ask(rt: Runtime, frame: HostToGuest, timeoutMs: number): Promise<void> {
+    if (rt.link === null || rt.link.isClosed()) throw new HostError("guest agent is not connected")
+    const reply = await rt.link.request(frame, timeoutMs)
+    if (!reply.ok) throw new HostError(`guest refused ${frame._tag}: ${reply.error ?? "no reason given"}`)
+  }
+
+  private async tryAsk(rt: Runtime, frame: HostToGuest, timeoutMs: number): Promise<boolean> {
+    try {
+      await this.ask(rt, frame, timeoutMs)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Serializes work on one box: commands and the host's own policy actions run one at a time. */
+  private serial<T>(boxId: string, action: () => Promise<T>): Promise<T> {
+    const run = (this.queues.get(boxId) ?? Promise.resolve()).then(action)
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.queues.set(boxId, tail)
+    void tail.then(() => {
+      if (this.queues.get(boxId) === tail) this.queues.delete(boxId)
+    })
+    return run
+  }
+
+  /** Runs a host-initiated action for a box. A failure is recorded on the box, not thrown. */
+  private enqueue(boxId: string, action: () => Promise<void>): Promise<void> {
+    return this.serial(boxId, async () => {
+      try {
+        await action()
+      } catch (error) {
+        const vm = this.records.get(boxId)
+        if (vm?.operation) await this.failOperation(boxId, error)
+        else if (vm !== undefined) this.commit({ ...vm, lastError: errorMessage(error) })
+      }
+    })
+  }
+
+  /** Schedules a policy action unless the box already has one pending. */
+  private schedule(boxId: string, action: () => Promise<void>): void {
+    const rt = this.runtime(boxId)
+    if (rt.busy) return
+    rt.busy = true
+    void this.enqueue(boxId, action).finally(() => {
+      rt.busy = false
+    })
+  }
+
+  /** A command or action that fails mid-operation leaves the VM in the state it can be resumed from. */
+  private async failOperation(boxId: string, error: unknown): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state === "deleted" || vm.operation === null) return
+    await this.failTo(boxId, vm.operation.kind === "create" ? "deleted" : "parked", error)
+  }
+
+  private async failTo(boxId: string, state: "parked" | "deleted", error: unknown): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined) return
+    const released = await this.releaseVm(vm)
+    if (state === "deleted") {
+      clearArtifacts(this.paths(boxId).dir)
+      this.meter.forget(boxId)
+      this.finish(released, "deleted", {
+        volumeRef: null,
+        backedUpAt: null,
+        localRef: null,
+        localDirty: false,
+        lastError: errorMessage(error),
+      })
+      return
+    }
+    this.finish(released, "parked", { lastError: errorMessage(error) })
+  }
+
+  /** Stops everything a VM runs (VMM, volume service, tap, memory image). The record is returned, not committed. */
+  private async releaseVm(vm: VmRecord): Promise<VmRecord> {
+    const p = this.paths(vm.boxId)
+    this.closeLink(vm.boxId)
+    await stopVmmProcess(vm.process, p.apiSocket, VMM_STOP_GRACE_MS)
+    if (vm.volumeProcess !== null) await terminateProcess(vm.volumeProcess.process, VOLUME_STOP_GRACE_MS)
+    if (vm.network !== null) await tapDown(vm.network)
+    rmSync(p.restore, { recursive: true, force: true })
+    if (vm.snapshotGen !== null) rmSync(p.snapshot(vm.snapshotGen), { recursive: true, force: true })
+    return { ...vm, process: null, network: null, volumeProcess: null, snapshotGen: null, gpus: [], gpuAttachedAt: null }
+  }
+
+  private async apply(command: NestHostCommand): Promise<void> {
+    switch (command._tag) {
+      case "create":
+        return this.create(command)
+      case "resume":
+        return this.resumeCommand(command)
+      case "suspend":
+        return this.suspendCommand(command.boxId)
+      case "park":
+        return this.parkCommand(command.boxId)
+      case "setLimits":
+        return this.setLimitsCommand(command)
+      case "gpuAttach":
+        return this.gpuAttachCommand(command.boxId)
+      case "gpuDetach":
+        return this.gpuDetachCommand(command.boxId)
+      case "destroy":
+        return this.destroy(command.boxId)
+      case "evict":
+        return this.evict(command)
+    }
+  }
+
+  private async create(cmd: Command<"create">): Promise<void> {
+    const existing = this.records.get(cmd.boxId)
+    if (existing !== undefined && existing.state !== "deleted") {
+      if (cmd.ownerEpoch === existing.ownerEpoch) return
+      throw new HostError(`box ${cmd.boxId} lives on this host at epoch ${existing.ownerEpoch}`)
+    }
+    this.validateLimits(cmd.limits)
+    const network = networkForSlot(allocateSlot(this.usedSlots()))
+    const p = this.paths(cmd.boxId)
+    const fresh = createNewRecord({
+      boxId: cmd.boxId,
+      vmId: cmd.vmId,
+      userId: cmd.userId,
+      ownerEpoch: cmd.ownerEpoch,
+      imageId: this.image.imageId,
+      publicUrl: cmd.publicUrl,
+      limits: cmd.limits,
+      volumeRef: null,
+      localDirty: true,
+      state: "provisioning",
+    })
+    let vm = this.begin(fresh, "create", null)
+    vm = this.commit({ ...vm, network })
+    rmSync(p.volume, { force: true })
+    await createVolume(this.volume, p.volume, cmd.limits.volumeBytes)
+    await this.bootClone(vm, cmd.enrollToken)
+  }
+
+  private async resumeCommand(cmd: Command<"resume">): Promise<void> {
+    this.validateLimits(cmd.limits)
+    const current = this.records.get(cmd.boxId)
+    if (current !== undefined && current.state !== "deleted" && cmd.ownerEpoch < current.ownerEpoch) {
+      throw new HostError(`resume epoch ${cmd.ownerEpoch} is older than this host's copy (${current.ownerEpoch})`)
+    }
+    let vm: VmRecord
+    if (current === undefined || current.state === "deleted") {
+      vm = createNewRecord({
+        boxId: cmd.boxId,
+        vmId: cmd.vmId,
+        userId: cmd.userId,
+        ownerEpoch: cmd.ownerEpoch,
+        imageId: this.image.imageId,
+        publicUrl: cmd.publicUrl,
+        limits: cmd.limits,
+        volumeRef: cmd.volumeRef,
+        localDirty: false,
+        state: "parked",
+      })
+    } else if (cmd.ownerEpoch > current.ownerEpoch) {
+      const released = await this.releaseVm(current)
+      vm = this.commit({
+        ...released,
+        state: "parked",
+        since: Date.now(),
+        ownerEpoch: cmd.ownerEpoch,
+        vmId: cmd.vmId,
+        userId: cmd.userId,
+        limits: cmd.limits,
+        publicUrl: cmd.publicUrl,
+        volumeRef: cmd.volumeRef,
+        operation: null,
+      })
+    } else if (current.state === "running") {
+      return
+    } else {
+      vm = this.commit({
+        ...current,
+        vmId: cmd.vmId,
+        limits: cmd.limits,
+        publicUrl: cmd.publicUrl,
+        volumeRef: cmd.volumeRef,
+      })
+    }
+    if (vm.state === "suspended") {
+      await this.resumeSuspended(vm)
+      return
+    }
+    await this.resumeParked(vm)
+  }
+
+  private async resumeSuspendedBox(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm?.state === "suspended") await this.resumeSuspended(vm)
+  }
+
+  private async resumeParked(vm: VmRecord): Promise<void> {
+    const p = this.paths(vm.boxId)
+    let cur = this.begin(vm, "resume", "parked")
+    const usableLocal = existsSync(p.volume) && (cur.localDirty || cur.localRef === cur.volumeRef)
+    if (!usableLocal) {
+      if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
+      rmSync(p.volume, { force: true })
+      const lazy = await startLazyVolume(
+        this.volume,
+        { ref: cur.volumeRef, boxId: cur.boxId, dest: p.volume, logPath: join(p.dir, "volume.log") },
+        LAZY_VOLUME_TIMEOUT_MS,
+      )
+      cur = this.commit({ ...cur, volumeProcess: lazy })
+    } else if (cur.volumeProcess !== null) {
+      cur = this.commit({ ...cur, volumeProcess: null })
+    }
+    cur = this.commit({ ...cur, network: networkForSlot(allocateSlot(this.usedSlots())) })
+    await this.bootClone(cur, null)
+  }
+
+  /** Restores the memory image; if that fails, boots a template clone on the same volume. */
+  private async resumeSuspended(vm: VmRecord): Promise<void> {
+    const begun = this.begin(vm, "resume", "suspended")
+    try {
+      await this.restoreMemoryImage(begun)
+    } catch (restoreError) {
+      const p = this.paths(vm.boxId)
+      this.closeLink(vm.boxId)
+      const current = this.records.get(vm.boxId) ?? begun
+      if (current.process !== null) await stopVmmProcess(current.process, p.apiSocket, VMM_STOP_GRACE_MS)
+      rmSync(p.restore, { recursive: true, force: true })
+      if (current.snapshotGen !== null) rmSync(p.snapshot(current.snapshotGen), { recursive: true, force: true })
+      const fallback = this.commit({ ...current, process: null, snapshotGen: null })
+      try {
+        await this.bootClone(fallback, null)
+      } catch (cloneError) {
+        throw new HostError(
+          `restore failed (${errorMessage(restoreError)}); template clone failed (${errorMessage(cloneError)})`,
+        )
+      }
+    }
+  }
+
+  private async restoreMemoryImage(vm: VmRecord): Promise<void> {
+    const p = this.paths(vm.boxId)
+    const rt = this.runtime(vm.boxId)
+    const { network, snapshotGen: gen } = vm
+    if (network === null || gen === null) throw new HostError("suspended box has no memory image")
+    await prepareRestoreDir({
+      sourceDir: p.snapshot(gen),
+      restoreDir: p.restore,
+      target: this.restoreTarget(network, p),
+    })
+    const identity = this.launch(vm)
+    const started = this.commit({ ...vm, process: identity })
+    await waitForApi(p.apiSocket, identity, API_TIMEOUT_MS)
+    const client = new ChClient(p.apiSocket)
+    await client.restore(p.restore, restoreMode())
+    await client.resume()
+    const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
+    this.attachLink(rt, link)
+    await this.ask(rt, { _tag: "resumed", id: newRequestId(), wallClockMs: Date.now() }, GUEST_REPLY_TIMEOUT_MS.resumed)
+    rmSync(p.snapshot(gen), { recursive: true, force: true })
+    this.finish(started, "running", { snapshotGen: null, localRef: null, localDirty: true })
+  }
+
+  /**
+   * Boots a template clone on the VM's volume (local file or lazily served device), attaches the disks, and sends
+   * `configure`. The VM ends `running`.
+   */
+  private async bootClone(vm: VmRecord, enrollToken: string | null): Promise<void> {
+    const { config } = this
+    const p = this.paths(vm.boxId)
+    const rt = this.runtime(vm.boxId)
+    const { network } = vm
+    if (network === null) throw new HostError("VM has no network slot")
+    await tapDown(network)
+    await runNetCommands(tapUpCommands(network, config.egressMbit))
+    await prepareRestoreDir({
+      sourceDir: templateDir(this.layout, this.image.imageId),
+      restoreDir: p.restore,
+      target: this.restoreTarget(network, p),
+    })
+    createSparse(p.swap, SWAP_BYTES)
+    const identity = this.launch(vm)
+    const started = this.commit({ ...vm, process: identity })
+    await waitForApi(p.apiSocket, identity, API_TIMEOUT_MS)
+    const client = new ChClient(p.apiSocket)
+    await client.restore(p.restore, restoreMode())
+    await client.resume()
+    await client.addDisk({
+      path: vm.volumeProcess?.device ?? p.volume,
+      id: "volume",
+      serial: NEST_VOLUME_SERIAL,
+      readonly: false,
+      direct: true,
+      num_queues: vm.limits.maxVcpus,
+    })
+    await client.addDisk({ path: p.swap, id: "swap", serial: NEST_SWAP_SERIAL, readonly: false, direct: false, num_queues: 1 })
+    const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
+    this.attachLink(rt, link)
+    await this.ask(
+      rt,
+      {
+        _tag: "configure",
+        id: newRequestId(),
+        hostId: config.hostId,
+        boxId: vm.boxId,
+        vmId: vm.vmId,
+        cloneId: newCloneId(),
+        wallClockMs: Date.now(),
+        controlUrl: config.controlUrl,
+        publicUrl: vm.publicUrl,
+        enrollToken,
+        network: guestNetwork(network, {
+          dns: config.dns,
+          depcacheUrl: config.depcacheUrl,
+          nixCacheUrl: config.nixCacheUrl,
+          nixCachePublicKey: config.nixCachePublicKey,
+        }),
+      },
+      GUEST_REPLY_TIMEOUT_MS.configure,
+    )
+    this.finish(started, "running", {
+      vcpus: TEMPLATE_BOOT_VCPUS,
+      memoryBytes: TEMPLATE_BOOT_MEMORY_BYTES,
+      localRef: null,
+      localDirty: true,
+    })
+  }
+
+  /** Brings a running VM to `suspended`: detach GPUs, quiesce, pause, snapshot, stop the VMM. */
+  private async suspend(vm: VmRecord): Promise<void> {
+    const p = this.paths(vm.boxId)
+    const rt = this.runtime(vm.boxId)
+    let cur = this.begin(vm, "suspend", null)
+    cur = await this.detachGpus(cur)
+    await this.tryAsk(rt, { _tag: "prepareSuspend", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.prepareSuspend)
+    const client = new ChClient(p.apiSocket)
+    await client.pause()
+    const gen = (cur.snapshotGen ?? 0) + 1
+    const dir = p.snapshot(gen)
+    rmSync(dir, { recursive: true, force: true })
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    await client.snapshot(dir)
+    for (const name of [...SNAPSHOT_FILES, "config.json"]) fsyncPath(join(dir, name))
+    fsyncDir(dir)
+    this.closeLink(vm.boxId)
+    await stopVmmProcess(cur.process, p.apiSocket, VMM_STOP_GRACE_MS)
+    rmSync(p.restore, { recursive: true, force: true })
+    this.finish(cur, "suspended", { process: null, snapshotGen: gen, gpus: [], gpuAttachedAt: null })
+  }
+
+  /** Stops a running VM's guest, then releases its VMM and backs its volume up to object storage. */
+  private async park(vm: VmRecord): Promise<void> {
+    const p = this.paths(vm.boxId)
+    let cur = this.begin(vm, "park", null)
+    if (cur.state === "running") {
+      cur = await this.detachGpus(cur)
+      await this.tryAsk(this.runtime(vm.boxId), { _tag: "shutdown", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.shutdown)
+      if (cur.process !== null) await waitForExit(cur.process, SHUTDOWN_WAIT_MS)
+    }
+    cur = await this.releaseVm(cur)
+    const ref = await backupVolume(this.volume, { path: p.volume, boxId: vm.boxId })
+    this.finish(cur, "parked", {
+      volumeRef: ref.volumeRef,
+      backedUpAt: Date.now(),
+      localRef: ref.volumeRef,
+      localDirty: false,
+    })
+  }
+
+  private async destroy(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state === "deleted") return
+    let cur = this.begin(vm, "destroy", null)
+    cur = await this.releaseVm(cur)
+    if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, boxId)
+    clearArtifacts(this.paths(boxId).dir)
+    this.meter.forget(boxId)
+    this.finish(cur, "deleted", { volumeRef: null, backedUpAt: null, localRef: null, localDirty: false })
+  }
+
+  /** The box lives elsewhere now: drop local state, keep backups, and stop reporting it. */
+  private async evict(cmd: Command<"evict">): Promise<void> {
+    const vm = this.records.get(cmd.boxId)
+    if (vm === undefined || vm.state === "deleted") return
+    if (vm.ownerEpoch > cmd.ownerEpoch) {
+      throw new HostError(`evict epoch ${cmd.ownerEpoch} is older than this host's copy (${vm.ownerEpoch})`)
+    }
+    let cur = this.begin(vm, "destroy", null)
+    cur = await this.releaseVm(cur)
+    clearArtifacts(this.paths(cmd.boxId).dir)
+    this.meter.forget(cmd.boxId)
+    this.finish(cur, "deleted", { localRef: null, localDirty: false })
+  }
+
+  private async suspendCommand(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm?.state === "suspended") return
+    if (vm?.state !== "running") throw new HostError(`cannot suspend a ${vm?.state ?? "missing"} box`)
+    await this.suspend(vm)
+  }
+
+  private async parkCommand(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state === "deleted") throw new HostError(`no VM for box ${boxId}`)
+    if (vm.state === "parked") return
+    if (vm.state !== "running" && vm.state !== "suspended") throw new HostError(`cannot park a ${vm.state} box`)
+    await this.park(vm)
+  }
+
+  private async setLimitsCommand(cmd: Command<"setLimits">): Promise<void> {
+    this.validateLimits(cmd.limits)
+    const vm = this.records.get(cmd.boxId)
+    if (vm === undefined || vm.state === "deleted") throw new HostError(`no VM for box ${cmd.boxId}`)
+    let cur = this.commit({ ...vm, limits: cmd.limits })
+    if (cur.state !== "running") return
+    if (cmd.limits.gpu === "none") cur = await this.detachGpus(cur)
+    const vcpus = Math.min(cur.vcpus, cmd.limits.maxVcpus)
+    const memoryBytes = Math.min(cur.memoryBytes, cmd.limits.maxMemoryBytes)
+    if (vcpus !== cur.vcpus || memoryBytes !== cur.memoryBytes) await this.resizeVm(cur, { vcpus, memoryBytes })
+  }
+
+  private async gpuAttachCommand(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm?.state !== "running") throw new HostError(`cannot attach a GPU to a ${vm?.state ?? "missing"} box`)
+    if (vm.limits.gpu !== "on-demand") throw new HostError("this box's limits do not allow a GPU")
+    if (vm.gpus.length > 0) return
+    await this.attachGpu(vm)
+  }
+
+  private async gpuDetachCommand(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.gpus.length === 0) return
+    await this.detachGpus(vm)
+  }
+
+  private freeGpu(): string | null {
+    const used = new Set<string>()
+    for (const vm of this.records.values()) if (vm.state !== "deleted") for (const gpu of vm.gpus) used.add(gpu)
+    return this.config.gpus.find((gpu) => !used.has(gpu.pciAddress))?.pciAddress ?? null
+  }
+
+  /** Host memory a running VM commits: its plugged memory, or its whole limit while a GPU pins all of it. */
+  private committedMemory(exceptBoxId: string): number {
+    let total = 0
+    for (const vm of this.records.values()) {
+      if (vm.boxId === exceptBoxId || vm.state !== "running") continue
+      total += vm.gpus.length > 0 ? vm.limits.maxMemoryBytes : vm.memoryBytes
+    }
+    return total
+  }
+
+  private async attachGpu(vm: VmRecord): Promise<void> {
+    const pci = this.freeGpu()
+    if (pci === null) throw new HostError("no free GPU on this host")
+    if (this.committedMemory(vm.boxId) + vm.limits.maxMemoryBytes > this.config.capacity.memoryBytes) {
+      throw new HostError("not enough host memory to attach a GPU (an attached GPU pins the box's maximum memory)")
+    }
+    const rt = this.runtime(vm.boxId)
+    rt.lastGpuAttachAt = Date.now()
+    const cur = this.begin(vm, "gpuAttach", null)
+    const client = new ChClient(this.paths(vm.boxId).apiSocket)
+    try {
+      await client.addDevice(gpuPath(pci), gpuDeviceId(pci))
+      await this.ask(rt, { _tag: "gpuAttached", id: newRequestId(), pciAddress: pci }, GUEST_REPLY_TIMEOUT_MS.gpuAttached)
+    } catch (error) {
+      await client.removeDevice(gpuDeviceId(pci)).catch(() => undefined)
+      this.finish(cur, cur.state, { lastError: errorMessage(error) })
+      throw error
+    }
+    this.finish(cur, cur.state, { gpus: [pci], gpuAttachedAt: Date.now() })
+  }
+
+  private async detachGpus(vm: VmRecord): Promise<VmRecord> {
+    if (vm.gpus.length === 0) return vm
+    const rt = this.runtime(vm.boxId)
+    const client = new ChClient(this.paths(vm.boxId).apiSocket)
+    for (const pci of vm.gpus) {
+      await this.tryAsk(rt, { _tag: "gpuDetach", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.gpuDetach)
+      await client.removeDevice(gpuDeviceId(pci))
+    }
+    return this.commit({ ...vm, gpus: [], gpuAttachedAt: null })
+  }
+
+  private async resizeVm(vm: VmRecord, desired: { readonly vcpus: number; readonly memoryBytes: number }): Promise<VmRecord> {
+    const client = new ChClient(this.paths(vm.boxId).apiSocket)
+    await client.resize(desired)
+    return this.commit({ ...vm, vcpus: desired.vcpus, memoryBytes: desired.memoryBytes })
+  }
+
+  private running(boxId: string): VmRecord | null {
+    const vm = this.records.get(boxId)
+    return vm?.state === "running" ? vm : null
+  }
+
+  private lastActiveMs(vm: VmRecord): number {
+    const rt = this.runtime(vm.boxId)
+    return lastActiveAt({
+      runningSince: vm.since,
+      guestLastActivityAt: rt.status?.activity?.lastActivityAt ?? null,
+      lastRequestAt: rt.ingress.lastRequestAt,
+    })
+  }
+
+  /** Every policy tick: policy per running VM, backups when due, parking and cache eviction, host pressure. */
+  private tick(): void {
+    const now = Date.now()
+    const tight = this.isDiskTight()
+    for (const vm of this.records.values()) {
+      const boxId = vm.boxId
+      if (vm.state === "running") {
+        if (this.runtime(boxId).busy) continue
+        if (now - (vm.backedUpAt ?? vm.since) >= this.config.backupIntervalMs) {
+          this.schedule(boxId, () => this.backupRunning(boxId))
+        } else {
+          this.schedule(boxId, () => this.policyRunning(boxId))
+        }
+      } else if (vm.state === "suspended" && now - vm.since >= this.config.parkAfterMs) {
+        this.schedule(boxId, () => this.parkWhere(boxId, ["suspended"]))
+      } else if (vm.state === "parked" && tight && !vm.localDirty && vm.localRef !== null) {
+        this.schedule(boxId, () => this.evictCache(boxId))
+      }
+    }
+    if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
+  }
+
+  private suspendLeastActive(): void {
+    const candidates: { boxId: string; lastActiveMs: number }[] = []
+    for (const vm of this.records.values()) {
+      if (vm.state !== "running" || this.runtime(vm.boxId).busy) continue
+      candidates.push({ boxId: vm.boxId, lastActiveMs: this.lastActiveMs(vm) })
+    }
+    const victim = pickSuspendVictim(candidates)
+    if (victim !== null) this.schedule(victim, () => this.sleepRunning(victim))
+  }
+
+  /** Suspends a running VM, or parks it when the disk is too tight to hold a memory image. */
+  private async sleepRunning(boxId: string): Promise<void> {
+    const vm = this.running(boxId)
+    if (vm === null) return
+    if (this.isDiskTight()) await this.park(vm)
+    else await this.suspend(vm)
+  }
+
+  private async parkWhere(boxId: string, states: readonly NestVmState[]): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm !== undefined && states.includes(vm.state)) await this.park(vm)
+  }
+
+  private async evictCache(boxId: string): Promise<void> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || vm.state !== "parked" || vm.localDirty || vm.localRef === null) return
+    if (vm.volumeProcess !== null) return
+    rmSync(this.paths(boxId).volume, { force: true })
+    this.commit({ ...vm, localRef: null })
+  }
+
+  private async policyRunning(boxId: string): Promise<void> {
+    const rt = this.runtime(boxId)
+    const now = Date.now()
+    let vm = this.running(boxId)
+    if (vm === null) return
+    const status = rt.status
+    if (status === null || now - status.at > STATUS_FRESH_MS) return
+    vm = await this.scale(vm, rt, status.pressure, now)
+    vm = await this.gpuPolicy(vm, rt, now)
+    const idle = isIdle({
+      now,
+      activity: status.activity,
+      lastActiveMs: this.lastActiveMs(vm),
+      openConnections: rt.ingress.openConnections,
+      idleAfterMs: this.config.idleSuspendAfterMs,
+    })
+    if (!idle) return
+    if (this.isDiskTight()) await this.park(vm)
+    else await this.suspend(vm)
+  }
+
+  private async scale(vm: VmRecord, rt: Runtime, pressure: GuestPressure, now: number): Promise<VmRecord> {
+    const sample: GuestSample = {
+      memTotalBytes: pressure.memTotalBytes,
+      memAvailableBytes: pressure.memAvailableBytes,
+      memSomeAvg10: pressure.memSomeAvg10,
+      cpuSomeAvg10: pressure.cpuSomeAvg10,
+      loadAvg1: pressure.loadAvg1,
+    }
+    const used = Math.max(0, sample.memTotalBytes - sample.memAvailableBytes)
+    const memPressured =
+      sample.memAvailableBytes < memoryHeadroomBytes(used) / 2 || sample.memSomeAvg10 > MEMORY_PRESSURE_AVG10
+    const memory = stepSize({
+      now,
+      current: vm.memoryBytes,
+      target: memoryTargetBytes(sample, vm.limits.maxMemoryBytes),
+      pressured: memPressured,
+      shrinkStep: MEMORY_STEP_BYTES,
+      state: rt.memoryScale,
+    })
+    rt.memoryScale = memory.state
+    const cpu = stepSize({
+      now,
+      current: vm.vcpus,
+      target: vcpuTarget(sample, vm.limits.maxVcpus),
+      pressured: sample.cpuSomeAvg10 > CPU_PRESSURE_AVG10,
+      shrinkStep: 1,
+      state: rt.cpuScale,
+    })
+    rt.cpuScale = cpu.state
+    if (memory.next === vm.memoryBytes && cpu.next === vm.vcpus) return vm
+    return this.resizeVm(vm, { vcpus: cpu.next, memoryBytes: memory.next })
+  }
+
+  private async gpuPolicy(vm: VmRecord, rt: Runtime, now: number): Promise<VmRecord> {
+    if (vm.gpus.length > 0 && !rt.gpuWanted && vm.gpuAttachedAt !== null && now - vm.gpuAttachedAt >= GPU_HOLD_MS) {
+      return this.detachGpus(vm)
+    }
+    const attachAllowed = rt.lastGpuAttachAt === null || now - rt.lastGpuAttachAt >= GPU_INTERVAL_MS
+    if (rt.gpuWanted && vm.limits.gpu === "on-demand" && vm.gpus.length === 0 && attachAllowed) {
+      await this.attachGpu(vm)
+      return this.records.get(vm.boxId) ?? vm
+    }
+    return vm
+  }
+
+  private async backupRunning(boxId: string): Promise<void> {
+    const vm = this.running(boxId)
+    if (vm === null) return
+    const p = this.paths(boxId)
+    const rt = this.runtime(boxId)
+    const device = vm.volumeProcess?.device ?? null
+    const copy = join(p.dir, "backup.raw")
+    await this.ask(rt, { _tag: "freezeVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.freezeVolume)
+    let source: string
+    try {
+      if (device !== null) {
+        source = device
+      } else {
+        await runChecked("cp", ["--reflink=auto", p.volume, copy])
+        source = copy
+      }
+    } finally {
+      if (device === null) await this.tryAsk(rt, { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+    }
+    let ref: { readonly volumeRef: string }
+    try {
+      ref = await backupVolume(this.volume, { path: source, boxId })
+    } finally {
+      rmSync(copy, { force: true })
+      if (device !== null) await this.tryAsk(rt, { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+    }
+    const current = this.running(boxId)
+    if (current === null) return
+    this.commit({ ...current, volumeRef: ref.volumeRef, backedUpAt: Date.now() })
+  }
+
+  private meterTick(): void {
+    const now = Date.now()
+    for (const vm of this.records.values()) {
+      if (vm.state === "provisioning") continue
+      if (vm.state === "deleted") {
+        this.meter.forget(vm.boxId)
+        continue
+      }
+      const p = this.paths(vm.boxId)
+      this.meter.tick(
+        {
+          boxId: vm.boxId,
+          vmId: vm.vmId,
+          userId: vm.userId,
+          state: vm.state,
+          gpus: vm.gpus.length,
+          cgroupDir: vm.process === null ? null : cgroupDirOf(vm.process.pid),
+          volumePath: existsSync(p.volume) ? p.volume : null,
+        },
+        now,
+      )
+    }
+  }
+
+  /** Decides what survives a restart. Live VMMs are re-adopted; anything else rolls back to a resumable state. */
+  private async recover(record: VmRecord): Promise<void> {
+    const p = this.paths(record.boxId)
+    const plan = recoverPlan(record, {
+      vmmAlive: processIsVmm(record.process, p.apiSocket),
+      volumeAlive: record.volumeProcess !== null && isProcessAlive(record.volumeProcess.process),
+      snapshotExists: record.snapshotGen !== null && existsSync(join(p.snapshot(record.snapshotGen), "state.json")),
+    })
+    if (plan.killVmm) await stopVmmProcess(record.process, p.apiSocket, VMM_STOP_GRACE_MS)
+    if (plan.killVolume && record.volumeProcess !== null) {
+      await terminateProcess(record.volumeProcess.process, VOLUME_STOP_GRACE_MS)
+    }
+    if (plan.clearNetwork && record.network !== null) await tapDown(record.network)
+    if (plan.dropMemoryImages && record.snapshotGen !== null) {
+      rmSync(p.snapshot(record.snapshotGen), { recursive: true, force: true })
+    }
+    if (plan.deleteArtifacts) clearArtifacts(p.dir)
+    let next: VmRecord = {
+      ...record,
+      state: plan.state,
+      since: plan.state === record.state ? record.since : Date.now(),
+      process: plan.adoptVmm ? record.process : null,
+      network: plan.clearNetwork ? null : record.network,
+      volumeProcess: plan.killVolume ? null : record.volumeProcess,
+      snapshotGen: plan.dropMemoryImages ? null : record.snapshotGen,
+      gpus: plan.adoptVmm ? record.gpus : [],
+      gpuAttachedAt: plan.adoptVmm ? record.gpuAttachedAt : null,
+      operation: null,
+    }
+    if (plan.adoptVmm) {
+      try {
+        const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
+        this.attachLink(this.runtime(record.boxId), link)
+      } catch (error) {
+        next = await this.releaseVm({ ...next, state: "parked" })
+        next = { ...next, since: Date.now(), lastError: errorMessage(error) }
+      }
+    }
+    this.commit(next)
+  }
+}

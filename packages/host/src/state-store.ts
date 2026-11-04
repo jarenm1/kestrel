@@ -1,129 +1,136 @@
-import { randomUUID } from "node:crypto"
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
-import { homedir } from "node:os"
-import { isAbsolute, join } from "node:path"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { join } from "node:path"
 import { Schema } from "effect"
 import { HostError } from "./errors"
-import { createFileExclusive, writeFileAtomic } from "./fs-atomic"
-import { HostRecord, STRICT, Uuid, VmRecord } from "./schema"
+import { writeFileAtomic } from "./fs-atomic"
+import { CommandOutcome, STRICT, VmRecord } from "./schema"
+
+/** Commands remembered for dedupe; a resent command older than this is treated as new. */
+export const MAX_COMMAND_OUTCOMES = 512
 
 /**
- * On-disk layout (see README.md):
- *   <stateDir>/host.json
- *   <stateDir>/events.jsonl
- *   <stateDir>/vms/<vmId>/{vm.json,lock,os.raw,data.raw,console.sock,console.log,qmp.sock,launcher.log}
+ * On-disk layout under the state directory:
+ *
+ *   commands.json                 recent command outcomes (dedupe + unreported results)
+ *   templates/<imageId>/          clone source: config.json, state.json, memory-ranges
+ *   vms/<boxId>/vm.json           the VM record (a destroyed VM keeps a tombstone)
+ *   vms/<boxId>/volume.raw        local copy of the volume (sparse raw file)
+ *   vms/<boxId>/swap.raw          local swap disk, recreated per VM start, never backed up
+ *   vms/<boxId>/snapshot.<gen>/   memory image of a suspended VM
+ *   vms/<boxId>/restore/          per-restore working copy handed to Cloud Hypervisor
+ *   vms/<boxId>/api.sock          Cloud Hypervisor API socket
+ *   vms/<boxId>/vsock.sock        vsock socket (hybrid vsock to the guest agent)
+ *   vms/<boxId>/console.log       serial console output
+ *   meter/outbox.jsonl            meter records not yet accepted by the control plane
+ *   meter/rejected.jsonl          meter records the control plane refused permanently
+ *   meter/state.json              meter sampler state (survives restarts)
  */
-
-export const resolveStateDir = (env: NodeJS.ProcessEnv): string => {
-  if (env.KESTREL_HOST_HOME) return env.KESTREL_HOST_HOME
-  const xdg = env.XDG_STATE_HOME
-  const base = xdg !== undefined && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state")
-  return join(base, "kestrel-host")
+export interface StateLayout {
+  readonly root: string
+  readonly commandsPath: string
+  readonly templatesDir: string
+  readonly vmsDir: string
+  readonly meterDir: string
 }
 
-export interface VmPaths {
-  readonly dir: string
-  readonly vmJson: string
-  readonly lock: string
-  readonly osDisk: string
-  readonly dataDisk: string
-  readonly consoleSock: string
-  readonly consoleLog: string
-  readonly qmpSock: string
-  readonly launcherLog: string
-}
+export const stateLayout = (root: string): StateLayout => ({
+  root,
+  commandsPath: join(root, "commands.json"),
+  templatesDir: join(root, "templates"),
+  vmsDir: join(root, "vms"),
+  meterDir: join(root, "meter"),
+})
 
-export const eventsPath = (stateDir: string): string => join(stateDir, "events.jsonl")
+export const vmDir = (layout: StateLayout, boxId: string): string => join(layout.vmsDir, boxId)
 
-/** Throws HostError unless `vmId` is a UUID v4, so it is safe to use as a path component. */
-export const requireVmId = (vmId: string): string => {
-  if (!Schema.is(Uuid)(vmId)) throw new HostError(`invalid VM id: ${vmId}`)
-  return vmId
-}
-
-export const vmPaths = (stateDir: string, vmId: string): VmPaths => {
-  const dir = join(stateDir, "vms", requireVmId(vmId))
+export const vmPaths = (layout: StateLayout, boxId: string) => {
+  const dir = vmDir(layout, boxId)
   return {
     dir,
-    vmJson: join(dir, "vm.json"),
-    lock: join(dir, "lock"),
-    osDisk: join(dir, "os.raw"),
-    dataDisk: join(dir, "data.raw"),
-    consoleSock: join(dir, "console.sock"),
-    consoleLog: join(dir, "console.log"),
-    qmpSock: join(dir, "qmp.sock"),
-    launcherLog: join(dir, "launcher.log"),
+    record: join(dir, "vm.json"),
+    volume: join(dir, "volume.raw"),
+    swap: join(dir, "swap.raw"),
+    restore: join(dir, "restore"),
+    apiSocket: join(dir, "api.sock"),
+    vsockSocket: join(dir, "vsock.sock"),
+    console: join(dir, "console.log"),
+    snapshot: (gen: number) => join(dir, `snapshot.${gen}`),
   }
 }
 
-const decodeFile = <A, I>(schema: Schema.Schema<A, I>, path: string): A => {
-  let parsed: unknown
+export const ensureStateDirs = (layout: StateLayout): void => {
+  mkdirSync(layout.vmsDir, { recursive: true, mode: 0o700 })
+  mkdirSync(layout.templatesDir, { recursive: true, mode: 0o700 })
+  mkdirSync(layout.meterDir, { recursive: true, mode: 0o700 })
+}
+
+const decodeJsonFile = <A, I>(schema: Schema.Schema<A, I>, path: string): A => {
+  let json: unknown
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"))
+    json = JSON.parse(readFileSync(path, "utf8"))
   } catch (error) {
     throw new HostError(`cannot read ${path}: ${(error as Error).message}`)
   }
-  try {
-    return Schema.decodeUnknownSync(schema, STRICT)(parsed)
-  } catch (error) {
-    throw new HostError(`invalid ${path}: ${(error as Error).message}`)
+  const decoded = Schema.decodeUnknownEither(schema)(json, STRICT)
+  if (decoded._tag === "Left") throw new HostError(`invalid ${path}: ${String(decoded.left)}`)
+  return decoded.right
+}
+
+export const readVm = (layout: StateLayout, boxId: string): VmRecord | null => {
+  const path = vmPaths(layout, boxId).record
+  return existsSync(path) ? decodeJsonFile(VmRecord, path) : null
+}
+
+export const writeVm = (layout: StateLayout, record: VmRecord): void => {
+  const paths = vmPaths(layout, record.boxId)
+  mkdirSync(paths.dir, { recursive: true, mode: 0o700 })
+  writeFileAtomic(paths.record, `${JSON.stringify(record, null, 2)}\n`)
+}
+
+/** Every VM directory with a record, tombstones included. */
+export const listVms = (layout: StateLayout): VmRecord[] => {
+  if (!existsSync(layout.vmsDir)) return []
+  const records: VmRecord[] = []
+  for (const entry of readdirSync(layout.vmsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const record = readVm(layout, entry.name)
+    if (record !== null) records.push(record)
   }
+  return records
 }
 
-/** Creates the state directory layout if missing and returns host.json, generating the host id once. */
-export const initHost = (stateDir: string): HostRecord => {
-  mkdirSync(join(stateDir, "vms"), { recursive: true, mode: 0o700 })
-  const path = join(stateDir, "host.json")
-  const record: HostRecord = { schemaVersion: 1, hostId: randomUUID() }
-  createFileExclusive(path, `${JSON.stringify(record, null, 2)}\n`)
-  return decodeFile(HostRecord, path)
+export const removeVmDir = (layout: StateLayout, boxId: string): void => {
+  rmSync(vmDir(layout, boxId), { recursive: true, force: true })
 }
 
-export const readHost = (stateDir: string): HostRecord => decodeFile(HostRecord, join(stateDir, "host.json"))
-
-/** Returns the VM record, or null when the VM does not exist. */
-export const readVm = (stateDir: string, vmId: string): VmRecord | null => {
-  const path = vmPaths(stateDir, vmId).vmJson
-  if (!existsSync(path)) return null
-  const record = decodeFile(VmRecord, path)
-  if (record.vmId !== vmId) throw new HostError(`${path} records vmId ${record.vmId}`)
-  return record
+export const readCommands = (layout: StateLayout): CommandOutcome[] => {
+  if (!existsSync(layout.commandsPath)) return []
+  const decoded = decodeJsonFile(Schema.Array(CommandOutcome), layout.commandsPath)
+  return [...decoded]
 }
 
-/** Like readVm, but a missing VM is an operational error. */
-export const requireVm = (stateDir: string, vmId: string): VmRecord => {
-  const record = readVm(stateDir, vmId)
-  if (record === null) throw new HostError(`no such VM: ${vmId}`)
-  return record
+const writeCommands = (layout: StateLayout, outcomes: readonly CommandOutcome[]): void => {
+  writeFileAtomic(layout.commandsPath, `${JSON.stringify(outcomes, null, 2)}\n`)
 }
 
-/** Validates the record and atomically replaces vm.json. */
-export const writeVm = (stateDir: string, vm: VmRecord): void => {
-  const valid = Schema.decodeUnknownSync(VmRecord, STRICT)(vm)
-  writeFileAtomic(vmPaths(stateDir, valid.vmId).vmJson, `${JSON.stringify(valid, null, 2)}\n`)
+/** Records an outcome, replacing any earlier one for the same commandId, keeping the newest MAX_COMMAND_OUTCOMES. */
+export const recordCommand = (layout: StateLayout, outcome: CommandOutcome): void => {
+  const kept = readCommands(layout).filter((entry) => entry.commandId !== outcome.commandId)
+  kept.push(outcome)
+  writeCommands(layout, kept.slice(-MAX_COMMAND_OUTCOMES))
 }
 
-/** Sorted ids of the VM directories that hold a vm.json. Entries that are not VM ids are ignored. */
-export const listVmIds = (stateDir: string): string[] => {
-  const vmsDir = join(stateDir, "vms")
-  if (!existsSync(vmsDir)) return []
-  return readdirSync(vmsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && Schema.is(Uuid)(entry.name))
-    .map((entry) => entry.name)
-    .filter((name) => existsSync(join(vmsDir, name, "vm.json")))
-    .sort()
+export const findCommand = (layout: StateLayout, commandId: string): CommandOutcome | null =>
+  readCommands(layout).find((entry) => entry.commandId === commandId) ?? null
+
+/** Marks outcomes as delivered to the control plane. */
+export const markCommandsReported = (layout: StateLayout, commandIds: readonly string[]): void => {
+  const ids = new Set(commandIds)
+  writeCommands(
+    layout,
+    readCommands(layout).map((entry) => (ids.has(entry.commandId) ? { ...entry, reported: true } : entry)),
+  )
 }
 
-/**
- * Deletes everything in the VM directory except vm.json (the tombstone) and the lock file. Refuses unless
- * `<stateDir>/vms/<vmId>` is a real directory (not a symlink).
- */
-export const removeVmArtifacts = (stateDir: string, vmId: string): void => {
-  const paths = vmPaths(stateDir, vmId)
-  if (!existsSync(paths.dir)) return
-  if (!lstatSync(paths.dir).isDirectory()) throw new HostError(`refusing to clear non-directory ${paths.dir}`)
-  for (const name of readdirSync(paths.dir)) {
-    if (name === "vm.json" || name === "lock") continue
-    rmSync(join(paths.dir, name), { recursive: true, force: true })
-  }
-}
+export const pendingCommands = (layout: StateLayout): CommandOutcome[] =>
+  readCommands(layout).filter((entry) => !entry.reported)
