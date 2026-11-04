@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
-import { AgentModel } from "./models"
+import { AgentModel, AcpHarnessId } from "./models"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -47,6 +47,11 @@ export const ControlPaths = {
   box: "/api/box",
   /** GET -> CliAuthStatus[] for the signed-in user, served by the box (relayed); the Worker also merges it into connections. */
   cliAuth: "/api/cli-auth",
+  /**
+   * GET -> HarnessStatus[]: which standalone ACP harnesses this box can launch. Served by the box (relayed); the Worker
+   * also merges it into connections, where a harness the box does not have is reported unavailable.
+   */
+  harnessStatus: "/api/harness-status",
   /** GET -> ProviderUsage[]: the signed-in user's subscription limits, as each CLI reports them on the box. Relayed. */
   cliUsage: "/api/cli-auth/usage",
   /**
@@ -189,6 +194,19 @@ export type PutApiKeyBody = typeof PutApiKeyBody.Type
 /** Subscription logins of the official agent CLIs, held per user on the box. */
 export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli")
 export type CliProvider = typeof CliProvider.Type
+
+/**
+ * One standalone ACP harness as the box reports it: whether its CLI is installed where a run would start it. Carries no
+ * secrets and no login state; the harness reaches models through Kestrel's broker, so its own login is not required.
+ */
+export const HarnessStatus = Schema.Struct({
+  harness: AcpHarnessId,
+  /** True when a run on this box can start the harness's CLI. */
+  available: Schema.Boolean,
+  /** Why the box cannot launch it (not installed, or the fake agent is running); absent when it can. */
+  error: Schema.optional(Schema.String),
+})
+export type HarnessStatus = typeof HarnessStatus.Type
 
 /** One user's CLI login on the box, as reported by the box for `cliAuth`. Carries no secrets. */
 export const CliAuthStatus = Schema.Struct({

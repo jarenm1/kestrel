@@ -1,12 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import {
+  AcpHarnessId,
   CliProvider,
   ControlPaths,
   HARNESS_IDS,
   HARNESS_LABELS,
   MODEL_PROVIDERS,
   connectedModelProviders,
+  providerInfo,
   providerModels,
   providersForHarness,
   type CliAuthStatus,
@@ -53,7 +55,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
 }
 
 /** Which agent CLIs chats may use. Each thread keeps its own model and harness; disabling one only narrows the menu. */
-function HarnessCard() {
+function HarnessCard({ connections }: { connections: readonly Connection[] | undefined }) {
   const [enabled, , toggle] = useEnabledHarnesses()
 
   return (
@@ -70,6 +72,9 @@ function HarnessCard() {
           const providers = providersForHarness(id)
           const provider = providers[0]
           const active = enabled.includes(id)
+          // A standalone harness is only offered when the box reports it can launch that CLI at all.
+          const row = provider?.standalone === true ? connections?.find((c) => c.provider === id) : undefined
+          const missing = provider?.standalone === true && (row === undefined || row.available === false)
           return (
             <button
               key={id}
@@ -91,7 +96,9 @@ function HarnessCard() {
               </span>
               <span className="text-xs leading-relaxed text-muted-foreground">
                 {provider?.auth === "harness-login"
-                  ? `Own CLI login${provider.setup === undefined ? "" : ` — run ${provider.setup}`}`
+                  ? missing
+                    ? (row?.error ?? "Not installed on this box")
+                    : "Runs on the providers connected above"
                   : provider?.auth === "cli-login"
                     ? "API key or its CLI subscription"
                     : "API key from Connections"}
@@ -117,7 +124,7 @@ export function Connections() {
 
   return (
     <>
-      <HarnessCard />
+      <HarnessCard connections={connections.data} />
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
       {cliAuth.error && <Alert>{errorText(cliAuth.error)}</Alert>}
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
@@ -127,6 +134,8 @@ export function Connections() {
             {list.map((connection) =>
               connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                 <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
+              ) : connection.kind === "cli" && Schema.is(AcpHarnessId)(connection.provider) ? (
+                <HarnessConnectionRow key={connection.provider} connection={connection} harness={connection.provider} />
               ) : (
                 <ConnectionRow key={connection.provider} connection={connection} />
               ),
@@ -145,7 +154,8 @@ export function Connections() {
  */
 function withBoxCli(connections: readonly Connection[], cliAuth: readonly CliAuthStatus[] | undefined): Connection[] {
   return connections.map((connection) => {
-    if (connection.kind !== "cli") return connection
+    // A standalone ACP harness has no CLI login to merge: the relay already reports whether the box can launch it.
+    if (connection.kind !== "cli" || !Schema.is(CliProvider)(connection.provider)) return connection
     const status = cliAuth?.find((s) => s.provider === connection.provider)
     return {
       ...connection,
@@ -200,8 +210,8 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
           <span className="text-xs text-muted-foreground">
             {provider.connections.length === 0 ? "No sign-in needed: " : ""}
             {connected
-              ? "the box can launch this harness."
-              : `the box does not have this harness's CLI${provider.setup === undefined ? "" : ` (${provider.setup})`}.`}
+              ? "the box can launch this harness; it reaches models through Kestrel's broker."
+              : `Not offered: this box does not have ${provider.name}'s CLI${provider.setup === undefined ? "" : ` (${provider.setup})`}.`}
             {provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}
           </span>
         ) : (
@@ -238,6 +248,27 @@ function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; co
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </div>
+  )
+}
+
+/**
+ * A standalone ACP harness: the box reports whether its CLI is installed. It holds no credential of its own in a run —
+ * Kestrel routes the harness's model calls through its broker — so there is nothing to connect or disconnect here.
+ */
+function HarnessConnectionRow({ connection, harness }: { connection: Connection; harness: AcpHarnessId }) {
+  const provider = providerInfo(harness)
+  return (
+    <div className="flex flex-col gap-1 px-5 py-4">
+      <ConnectionHeader label={connection.label} connected={connection.available} />
+      <span className="text-xs text-muted-foreground">
+        {connection.available
+          ? `Installed on the box. Runs on the models you connected above.${provider.mcp ? " MCP tools are available." : " This adapter does not support MCP tools."}`
+          : `${connection.error ?? "its CLI is not installed on the box"}. Install ${provider.name} on the box to offer it in the model picker.`}
+      </span>
+      {connection.available && provider.setup !== undefined && (
+        <span className="text-xs text-muted-foreground">{provider.setup}</span>
+      )}
     </div>
   )
 }

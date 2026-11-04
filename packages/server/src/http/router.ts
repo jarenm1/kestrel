@@ -3,7 +3,7 @@ import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerRespo
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
-import type { BoxCapabilities } from "@cloudagents/protocol"
+import type { BoxCapabilities, HarnessStatus } from "@cloudagents/protocol"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
 import { dayFormat } from "../core/activity"
@@ -185,7 +185,12 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
+export const makeRouter = (
+  core: CoreShape,
+  cliAuth: CliAuthShape,
+  capabilities: BoxCapabilities,
+  harnessStatus: ReadonlyArray<HarnessStatus>,
+) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
@@ -200,6 +205,19 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
             user === null
               ? HttpServerResponse.unsafeJson({ _tag: "Unauthorized", message: "no signed-in user" }, { status: 401 })
               : HttpServerResponse.unsafeJson(capabilities),
+          ),
+        ),
+      ),
+    ),
+    // Standalone ACP harnesses this box can launch: Connections shows each, and the model picker offers it only here.
+    HttpRouter.get(
+      "/api/harness-status",
+      requestUser.pipe(
+        Effect.flatMap((user) =>
+          Effect.succeed(
+            user === null
+              ? HttpServerResponse.unsafeJson({ _tag: "Unauthorized", message: "no signed-in user" }, { status: 401 })
+              : HttpServerResponse.unsafeJson(harnessStatus),
           ),
         ),
       ),
@@ -436,9 +454,14 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
+export const makeWebHandler = (
+  core: CoreShape,
+  cliAuth: CliAuthShape,
+  capabilities: BoxCapabilities,
+  harnessStatus: ReadonlyArray<HarnessStatus>,
+) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities, harnessStatus))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

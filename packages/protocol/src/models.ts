@@ -30,6 +30,13 @@ export type HarnessId = typeof HarnessId.Type
 
 export const HARNESS_IDS: readonly HarnessId[] = ["claude", "codex", "google", "omp", "pi", "hermes"]
 
+/**
+ * Standalone ACP harnesses: their own CLI runs the model, so the box has to have that CLI before the harness can be
+ * offered. The box reports which of these it can launch (`HarnessStatus`), and only those reach the picker.
+ */
+export const AcpHarnessId = Schema.Literal("omp", "pi", "hermes")
+export type AcpHarnessId = typeof AcpHarnessId.Type
+
 export const HARNESS_LABELS: Record<HarnessId, string> = {
   claude: "Claude Code",
   codex: "Codex",
@@ -194,12 +201,12 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "anthropic", name: "Anthropic", harness: "claude", connections: ["anthropic", "claude-cli"], auth: "cli-login", mcp: true },
   { id: "openai", name: "OpenAI", harness: "codex", connections: ["openai", "codex-cli"], auth: "cli-login", mcp: true },
   // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
-  { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "install OpenCode 2 (npm i -g @opencode/cli)", auth: "harness-login", mcp: true },
+  { id: "opencode", name: "OpenCode", harness: "acp", connections: [], standalone: true, setup: "npm i -g @opencode/cli", auth: "harness-login", mcp: true },
   // Google's models reach Antigravity CLI only through the user's Google sign-in, a CLI login like Claude's or ChatGPT's.
   { id: "google", name: "Google", harness: "acp", connections: ["antigravity-cli"], auth: "cli-login", mcp: true, hint: "Sign in with your Google account above; Antigravity CLI has no key." },
-  { id: "omp", name: "OMP", harness: "acp", connections: [], standalone: true, setup: "omp login", auth: "harness-login", mcp: true },
-  { id: "pi", name: "Pi", harness: "acp", connections: [], standalone: true, setup: "pi  (then /login in Pi)", auth: "harness-login", mcp: false },
-  { id: "hermes", name: "Hermes", harness: "acp", connections: [], standalone: true, setup: "hermes setup", auth: "harness-login", mcp: true },
+  { id: "omp", name: "OMP", harness: "acp", connections: [], standalone: true, setup: "omp login, run in its harness home", auth: "harness-login", mcp: true },
+  { id: "pi", name: "Pi", harness: "acp", connections: [], standalone: true, setup: "pi, then /login, run in its harness home", auth: "harness-login", mcp: false },
+  { id: "hermes", name: "Hermes", harness: "acp", connections: [], standalone: true, setup: "hermes setup, run in its harness home", auth: "harness-login", mcp: true },
 ]
 
 /** The provider a message without a model runs on: the box's default harness. */
@@ -266,16 +273,25 @@ export const defaultModelOf = (provider: ModelProvider): ModelInfo | undefined =
 /**
  * Providers with at least one connected connection, in `MODEL_PROVIDERS` order. `enabledHarnesses` is the set the
  * user enabled in Connections (all when omitted); it can only narrow the result, never invent availability.
+ *
+ * A standalone ACP harness is a connection of its own (`Connection.provider` is the harness id): the box reports it
+ * only when that harness's CLI is present there, so a harness the box does not have is never offered by default.
  */
 export const connectedModelProviders = (
-  connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean; readonly enabled?: boolean }>,
+  connections: ReadonlyArray<{
+    readonly provider: string
+    readonly connected: boolean
+    readonly enabled?: boolean
+    readonly available?: boolean
+  }>,
   enabledHarnesses: readonly HarnessId[] = HARNESS_IDS,
 ): readonly ModelProviderInfo[] =>
   MODEL_PROVIDERS.filter(
     (p) =>
       enabledHarnesses.includes(harnessIdOfProvider(p.id)) &&
-      (p.standalone === true ||
-        connections.some((c) => c.connected && c.enabled !== false && p.connections.includes(c.provider))),
+      (p.standalone === true
+        ? connections.some((c) => c.provider === p.id && c.connected && c.enabled !== false && c.available !== false)
+        : connections.some((c) => c.connected && c.enabled !== false && p.connections.includes(c.provider))),
   )
 
 /**
@@ -385,6 +401,7 @@ const connectionFailure = (
   const info = providerInfo(model.provider)
   const harness = harnessIdOfProvider(model.provider)
   if (info.standalone === true) {
+    // The harness is its own connection: its row says whether the box has that CLI at all.
     const row = connections.find((c) => c.provider === model.provider)
     if (row?.enabled === false) {
       return {
@@ -393,11 +410,25 @@ const connectionFailure = (
         message: `${info.name} is disabled. Enable it in Settings › Connections.`,
       }
     }
-    if (row?.available === false) {
+    if (row === undefined) {
       return {
         ok: false,
         code: "connection-unavailable",
-        message: `${info.name} is unavailable${row.error === undefined ? "" : `: ${row.error}`}. Run ${info.setup ?? `${info.name} login`} on the box.`,
+        message: `Kestrel's box has not reported ${info.name} as available. Install its CLI on the box${info.setup === undefined ? "" : ` and set it up (${info.setup})`}, or connect another provider in Settings › Connections.`,
+      }
+    }
+    if (row.available === false) {
+      return {
+        ok: false,
+        code: "connection-unavailable",
+        message: `${info.name} is unavailable${row.error === undefined ? "" : `: ${row.error}`}. Install its CLI on the box${info.setup === undefined ? "" : ` and set it up (${info.setup})`}.`,
+      }
+    }
+    if (!row.connected) {
+      return {
+        ok: false,
+        code: "connection-unavailable",
+        message: `${info.name} is not set up on the box${info.setup === undefined ? "" : `; run ${info.setup}`}.`,
       }
     }
     return { ok: true, route: { harness, provider: model.provider, model, connectionId: model.provider, ...(model.acpModel === undefined ? {} : { acpModel: model.acpModel }) } }
