@@ -1,5 +1,6 @@
 import { Context, Data, Effect, Layer, Schema } from "effect"
 import { Config } from "../config"
+import { readOnlyRefusal } from "./read-only"
 
 /**
  * Host-side GitHub REST client. Tokens are passed per call and never stored, logged, or put in errors:
@@ -231,6 +232,21 @@ export interface GraphQLResponse {
   readonly errors: ReadonlyArray<GraphQLErrorItem>
 }
 
+/** One `gh api` request: `path` is the endpoint argument (an API path, an API URL, or `graphql`). */
+export interface ApiRequest {
+  readonly method: string
+  readonly path: string
+  readonly headers: ReadonlyArray<readonly [string, string]>
+  readonly body: string | null
+}
+
+/** GitHub's answer as received: header names lowercase, multiple values joined with ", ". */
+export interface ApiResponse {
+  readonly status: number
+  readonly headers: ReadonlyArray<readonly [string, string]>
+  readonly body: string
+}
+
 export interface GitHubShape {
   /** Open pull request whose head branch is `head` in `repo`, or null. */
   readonly findOpenPullRequest: (token: string, repo: RepoSlug, head: string) => Effect.Effect<PullRequest | null, GitHubError>
@@ -269,6 +285,11 @@ export interface GitHubShape {
   readonly graphql: (token: string, query: string, variables: Readonly<Record<string, unknown>>) => Effect.Effect<GraphQLResponse, GitHubError>
   /** The pull request's diff (`diff`) or its commits as patches (`patch`), as GitHub renders them. Failures read like `graphql`'s. */
   readonly pullRequestDiff: (token: string, repo: RepoSlug, number: number, format: "diff" | "patch") => Effect.Effect<string, GitHubError>
+  /**
+   * Sends a `gh api` request to the GitHub API if it only reads (`readOnlyRefusal`); a refused request or one for
+   * another host fails with a GitHubError saying why. Redirects are followed, the token only to the API itself.
+   */
+  readonly readApi: (token: string, request: ApiRequest) => Effect.Effect<ApiResponse, GitHubError>
 }
 
 export class GitHub extends Context.Tag("cloudagents/GitHub")<GitHub, GitHubShape>() {}
@@ -421,6 +442,11 @@ const reviewDecisionOf = (reviews: readonly { state: string; login: string }[]):
   if (states.includes("COMMENTED")) return "commented"
   return "none"
 }
+
+/** Headers of an agent's `gh api` request the box never forwards: it sets the credential and the framing itself. */
+const AGENT_DROPPED_HEADERS: Record<string, true> = { authorization: true, cookie: true, host: true, "content-length": true, connection: true, "transfer-encoding": true }
+
+const REDIRECT_STATUSES: Record<number, true> = { 301: true, 302: true, 303: true, 307: true, 308: true }
 
 export const GitHubLive = Layer.effect(
   GitHub,
@@ -676,6 +702,54 @@ export const GitHubLive = Layer.effect(
         }),
       )
 
+    const apiRoot = new URL(`${apiBase}/`)
+
+    /** Only the API itself ever gets the token: same origin, under the API's path, no credentials in the URL. */
+    const onApi = (url: URL): boolean =>
+      url.origin === apiRoot.origin && url.username === "" && url.password === "" && url.pathname.startsWith(apiRoot.pathname)
+
+    /** The URL `gh api` means by its endpoint argument (`ghinstance.RESTPrefix`/`GraphQLEndpoint`), or null off the API. */
+    const apiUrl = (path: string): URL | null => {
+      let url: URL
+      try {
+        url = new URL(path.includes("://") ? path : path === "graphql" ? `${apiBase}/graphql` : `${apiBase}/${path.replace(/^\//, "")}`)
+      } catch {
+        return null
+      }
+      return onApi(url) ? url : null
+    }
+
+    /** Sends the request, following redirects as Go's client does; a hop off the API goes without the token. */
+    const exchange = async (token: string, request: ApiRequest, first: URL): Promise<ApiResponse> => {
+      let url = first
+      let method = request.method.toUpperCase()
+      let body = request.body
+      for (let hop = 0; ; hop++) {
+        const headers = new Headers()
+        for (const [name, value] of request.headers) {
+          if (!AGENT_DROPPED_HEADERS[name.toLowerCase()]) headers.append(name, value)
+        }
+        if (onApi(url)) headers.set("authorization", `Bearer ${token}`)
+        if (!headers.has("user-agent")) headers.set("user-agent", "kestrel-gh")
+        // Go's client asks for gzip only and decodes it itself, dropping the encoding headers it consumed.
+        if (!headers.has("accept-encoding")) headers.set("accept-encoding", "gzip")
+        const response = await fetch(url, { method, headers, body: body ?? undefined, redirect: "manual", signal: AbortSignal.timeout(30_000) })
+        const location = response.headers.get("location")
+        if (REDIRECT_STATUSES[response.status] && location !== null && hop < 10) {
+          await response.body?.cancel()
+          url = new URL(location, url)
+          if (response.status === 303 || (method === "POST" && (response.status === 301 || response.status === 302))) {
+            method = "GET"
+            body = null
+          }
+          continue
+        }
+        const decoded = response.headers.get("content-encoding") === "gzip"
+        const received = [...response.headers].filter(([name]) => !decoded || (name !== "content-encoding" && name !== "content-length"))
+        return { status: response.status, headers: received, body: method === "HEAD" ? "" : await response.text() }
+      }
+    }
+
     const service: GitHubShape = {
       findOpenPullRequest: (token, repo, head) =>
         call(
@@ -821,6 +895,19 @@ export const GitHubLive = Layer.effect(
           Effect.flatMap(({ status, text }) => (status === 200 ? Effect.succeed(text) : Effect.fail(cliFailure(status, text, path)))),
         )
       },
+      readApi: (token, request) =>
+        Effect.gen(function* () {
+          const refusal = readOnlyRefusal(request.method, request.path, request.headers, request.body)
+          if (refusal !== null) return yield* Effect.fail(new GitHubError({ message: refusal }))
+          const url = apiUrl(request.path)
+          if (url === null) {
+            return yield* Effect.fail(new GitHubError({ message: `gh api in Kestrel only calls the GitHub API (${apiBase}), not ${request.path}` }))
+          }
+          return yield* Effect.tryPromise({
+            try: () => exchange(token, request, url),
+            catch: () => new GitHubError({ message: "could not reach the GitHub API" }),
+          })
+        }),
     }
     return service
   }),

@@ -1,7 +1,8 @@
 /**
  * The `gh` agents run inside the sandbox. It holds no GitHub credential: it sends the command line, the working
- * directory and any `--body-file` contents to the box with the run's broker token, then replays what the box says
- * the command printed and its exit code. Needs bash, curl and coreutils, which every sandbox level has.
+ * directory and the contents of the files the command reads (`--body-file`/`-F` for `gh pr`, `--input` and
+ * `-F key=@file` for `gh api`) to the box with the run's broker token, then replays what the box says the command
+ * printed and its exit code. Needs bash, curl and coreutils, which every sandbox level has.
  *
  * Request body (`kestrel-gh/1`): NUL-terminated fields `kestrel-gh/1`, cwd, argc, each argument, file count, then per
  * file its path and byte length (-1 when unreadable), then the file bytes back to back.
@@ -18,18 +19,37 @@ fi
 tmp="$(mktemp -d)" || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
-# Files named by --body-file/-F are read here, inside the sandbox, where their paths make sense.
+# Files the command reads are read here, inside the sandbox, where their paths make sense.
 files=()
-next=0
+next=""
+# gh api -F key=@path reads path ("-" is standard input).
+field_file() { local value="\${1#*=}"; if [ "$value" != "$1" ] && [ "\${value#@}" != "$value" ]; then files+=("\${value#@}"); fi; }
+mode=pr
+if [ "\${1:-}" = api ]; then mode=api; fi
 for arg in "$@"; do
-  if [ "$next" = 1 ]; then files+=("$arg"); next=0; continue; fi
-  case "$arg" in
-    --) break ;;
-    --body-file|-F) next=1 ;;
-    --body-file=*) files+=("\${arg#--body-file=}") ;;
-    -F=*) files+=("\${arg#-F=}") ;;
-    -F?*) files+=("\${arg#-F}") ;;
+  case "$next" in
+    file) files+=("$arg"); next=""; continue ;;
+    field) field_file "$arg"; next=""; continue ;;
   esac
+  if [ "$mode" = api ]; then
+    case "$arg" in
+      --) break ;;
+      --input) next=file ;;
+      --input=*) files+=("\${arg#--input=}") ;;
+      -F|--field) next=field ;;
+      --field=*) field_file "\${arg#--field=}" ;;
+      -F=*) field_file "\${arg#-F=}" ;;
+      -F?*) field_file "\${arg#-F}" ;;
+    esac
+  else
+    case "$arg" in
+      --) break ;;
+      --body-file|-F) next=file ;;
+      --body-file=*) files+=("\${arg#--body-file=}") ;;
+      -F=*) files+=("\${arg#-F=}") ;;
+      -F?*) files+=("\${arg#-F}") ;;
+    esac
+  fi
 done
 
 source_of() { if [ "$1" = "-" ]; then printf '%s' "$tmp/stdin"; else printf '%s' "$1"; fi; }

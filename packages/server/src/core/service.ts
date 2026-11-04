@@ -43,7 +43,7 @@ import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
-import { GitHub, GitHubError, commentMismatch, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
+import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
 import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
 import { EventHub } from "./events"
@@ -487,6 +487,11 @@ export interface CoreShape {
     query: string,
     variables: Readonly<Record<string, unknown>>,
   ) => Effect.Effect<GraphQLResponse, NotFound | BadRequest | InternalError>
+  /**
+   * Used by `gh api`: sends a read-only request (`readOnlyRefusal`) to the GitHub API with the thread owner's token,
+   * which stays host-side. Reads are not limited to the thread's checkouts, as `repo_checkout` is not.
+   */
+  readonly githubApi: (taskId: string, request: ApiRequest) => Effect.Effect<ApiResponse, NotFound | BadRequest | InternalError>
   /** Used by the `gh` shim: a pull request's diff or patch series in a checkout's GitHub repository. */
   readonly pullRequestDiff: (
     taskId: string,
@@ -2467,6 +2472,13 @@ export const CoreLive = Layer.effect(
           const checkout = yield* pickCheckout(task, checkoutId)
           const { token } = yield* githubAccess(task.owner, yield* checkoutRepoRef(checkout))
           return yield* github.graphql(token, query, variables).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      githubApi: (taskId, request) =>
+        Effect.gen(function* () {
+          const task = yield* requireTask(taskId)
+          const token = yield* requiredGithubToken(task.owner)
+          return yield* github.readApi(token, request).pipe(Effect.mapError(fromGitHub))
         }),
 
       pullRequestDiff: (taskId, checkoutId, number, format) =>

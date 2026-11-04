@@ -11,6 +11,7 @@ import {
   graphql,
   loadProjectItems,
   NotFoundError,
+  readBodyFile,
   resolveRepo,
   SilentExit,
   type GhRun,
@@ -125,13 +126,6 @@ const writeJson = async (run: GhRun, data: unknown, json: JsonOptions): Promise<
   const result = await evaluateJq(JSON.parse(encoded), json.filter)
   if (!result.ok) throw new CommandError(result.stderr.replace(/\n$/, ""))
   run.stdout += result.stdout
-}
-
-/** `cmdutil.ReadFile`: `-` is standard input; any other path was read by the shim inside the sandbox. */
-const readBodyFile = (run: GhRun, path: string): string => {
-  const content = run.files.get(path)
-  if (content === undefined || content === null) throw new CommandError(`open ${path}: no such file or directory`)
-  return content
 }
 
 const apiFailed = (error: unknown): CommandError => new CommandError(`API call failed: ${errorMessage(error)}`)

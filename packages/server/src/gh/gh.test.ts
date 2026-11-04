@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { OpenPullRequestInput } from "../core/service"
-import type { GraphQLResponse } from "../github/api"
+import type { ApiRequest, ApiResponse, GraphQLResponse } from "../github/api"
 import { parseFlags, bool, slice, str } from "./argv"
 import { runGh, type GhResult } from "./cli"
 import type { GhBackend } from "./context"
@@ -52,6 +52,7 @@ const backend = (answer: (query: string, variables: Readonly<Record<string, unkn
     changeLabels: async (input) => {
       recorded.mutations.push({ labels: input })
     },
+    api: reject,
   }
   return [fake, recorded]
 }
@@ -170,6 +171,58 @@ describe("gh pr checks", () => {
     expect(await gh(failing, ["pr", "checks", "7"])).toEqual({
       stdout: "test\tfail\t1m5s\thttps://ci/test\t\nbuild\tpass\t1m5s\thttps://ci/build\t\n",
       stderr: "",
+      exitCode: 1,
+    })
+  })
+})
+
+describe("gh api", () => {
+  const json = (body: unknown, status = 200, extra: Array<[string, string]> = []): ApiResponse => ({
+    status,
+    headers: [["content-type", "application/json; charset=utf-8"], ...extra],
+    body: JSON.stringify(body),
+  })
+  const apiBackend = (answer: (request: ApiRequest) => ApiResponse): [GhBackend, ApiRequest[]] => {
+    const [fake] = backend(() => null)
+    const sent: ApiRequest[] = []
+    return [{ ...fake, api: async (request) => (sent.push(request), answer(request)) }, sent]
+  }
+
+  test("fields become a sorted query string for GET and grouped variables for graphql", async () => {
+    const [fake, sent] = apiBackend(() => json({ data: {} }))
+    await gh(fake, ["api", "-X", "GET", "search/issues", "-f", "q=repo:acme/widget is:open", "-F", "per_page=5", "-F", "labels[]=bug", "-F", "draft=false"])
+    await gh(fake, ["api", "graphql", "-F", "owner={owner}", "-F", "n=7", "-f", "query=query($owner: String!, $n: Int!) { x }"])
+    expect(sent).toEqual([
+      { method: "GET", path: "search/issues?draft=false&labels%5B%5D=bug&per_page=5&q=repo%3Aacme%2Fwidget+is%3Aopen", headers: [["Accept", "*/*"]], body: null },
+      {
+        method: "POST",
+        path: "graphql",
+        headers: [["Content-Type", "application/json; charset=utf-8"], ["Accept", "*/*"]],
+        body: '{"query":"query($owner: String!, $n: Int!) { x }","variables":{"n":7,"owner":"acme"}}',
+      },
+    ])
+  })
+
+  test("--paginate follows the Link header and prints the pages as one array", async () => {
+    const next = "https://api.github.com/repositories/1/issues?per_page=100&page=2"
+    const [fake, sent] = apiBackend((request) =>
+      request.path === next ? json([{ n: 3 }]) : json([{ n: 1 }, { n: 2 }], 200, [["link", `<${next}>; rel="next", <${next}>; rel="last"`]]),
+    )
+    expect(await gh(fake, ["api", "--paginate", "repos/{owner}/{repo}/issues"])).toEqual({ stdout: '[{"n":1},{"n":2},{"n":3}]', stderr: "", exitCode: 0 })
+    expect(sent.map((r) => r.path)).toEqual(["repos/acme/widget/issues?per_page=100", next])
+  })
+
+  test("an error prints GitHub's body, then what went wrong, and exits 1", async () => {
+    const notFound = { message: "Not Found", documentation_url: "https://docs.github.com/rest", status: "404" }
+    const [missing] = apiBackend(() => json(notFound, 404))
+    expect(await gh(missing, ["api", "repos/acme/nope"])).toEqual({ stdout: JSON.stringify(notFound), stderr: "gh: Not Found (HTTP 404)\n", exitCode: 1 })
+
+    // GraphQL reports failures with HTTP 200; --jq is skipped so the errors stay visible.
+    const failed = { data: null, errors: [{ message: "Field 'nope' doesn't exist on type 'Query'" }, { message: "second" }] }
+    const [invalid] = apiBackend(() => json(failed))
+    expect(await gh(invalid, ["api", "graphql", "-f", "query={ nope }", "--jq", ".data"])).toEqual({
+      stdout: JSON.stringify(failed),
+      stderr: "gh: Field 'nope' doesn't exist on type 'Query'\nsecond\n",
       exitCode: 1,
     })
   })

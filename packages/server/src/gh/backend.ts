@@ -26,4 +26,5 @@ export const coreGhBackend = (core: CoreShape, taskId: string): GhBackend => ({
   review: (input) => call(core.reviewPullRequest(taskId, input)),
   changeReviewers: (input) => call(core.changeReviewers(taskId, input)),
   changeLabels: (input) => call(core.changeLabels(taskId, input)),
+  api: (request) => call(core.githubApi(taskId, request)),
 })

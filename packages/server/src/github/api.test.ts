@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Config, type ServerConfig } from "../config"
-import { GitHub, GitHubLive, type RepoSlug, commentMismatch } from "./api"
+import { GitHub, GitHubLive, type ApiRequest, type RepoSlug, commentMismatch } from "./api"
 
 const repo: RepoSlug = { owner: "jarenm1", name: "kestrel" }
 const prPath = "/repos/jarenm1/kestrel/pulls/7"
@@ -486,6 +486,48 @@ test("readReference keeps a pull request readable when GitHub will not report ch
     expect(reference).toMatchObject({ kind: "pr", number: 7, title: "Add references", body: "The `??` operator is broken.", checks: null })
   } finally {
     gh.stop()
+  }
+})
+
+test("readApi sends only reads, and the token only to the API", async () => {
+  const elsewhere = fakeGitHub(() => ({ json: {} }))
+  const gh = fakeGitHub(() => ({ json: { ok: true } }))
+  // The API redirecting off itself, as GitHub does for archives; the next hop must go without the token.
+  const redirecting = Bun.serve({
+    port: 0,
+    fetch: () => new Response(null, { status: 302, headers: { location: `${elsewhere.url}/archive` } }),
+  })
+  const read = (url: string, request: Partial<ApiRequest>) =>
+    runAgainst(
+      url,
+      Effect.flatMap(GitHub, (github) => Effect.either(github.readApi("token", { method: "GET", path: "", headers: [], body: null, ...request }))),
+    )
+  try {
+    for (const write of [
+      { method: "POST", path: "repos/jarenm1/kestrel/issues", body: '{"title":"x"}' },
+      { method: "DELETE", path: "repos/jarenm1/kestrel" },
+      { method: "GET", path: "repos/jarenm1/kestrel", headers: [["X-HTTP-Method-Override", "DELETE"] as const] },
+      { method: "POST", path: "graphql", body: JSON.stringify({ query: 'query A { viewer { login } } mutation B { addStar(input: {starrableId: "x"}) { clientMutationId } }' }) },
+      { method: "POST", path: "graphql", body: JSON.stringify([{ query: "query { viewer { login } }" }]) },
+      { method: "GET", path: `${elsewhere.url}/repos/jarenm1/kestrel` },
+    ]) {
+      expect((await read(gh.url, write))._tag).toBe("Left")
+    }
+    expect(gh.requests).toEqual([])
+    expect(elsewhere.requests).toEqual([])
+
+    expect((await read(gh.url, { path: "repos/jarenm1/kestrel" }))._tag).toBe("Right")
+    expect((await read(gh.url, { method: "POST", path: "graphql", body: JSON.stringify({ query: "{ viewer { login } }" }) }))._tag).toBe("Right")
+    expect(gh.requests.map((r) => `${r.method} ${r.path}`)).toEqual(["GET /repos/jarenm1/kestrel", "POST /graphql"])
+    expect(gh.auth).toEqual(["Bearer token", "Bearer token"])
+
+    expect((await read(`http://127.0.0.1:${redirecting.port}`, { path: "repos/jarenm1/kestrel/tarball" }))._tag).toBe("Right")
+    expect(elsewhere.requests.map((r) => r.path)).toEqual(["/archive"])
+    expect(elsewhere.auth).toEqual([null])
+  } finally {
+    gh.stop()
+    elsewhere.stop()
+    redirecting.stop(true)
   }
 })
 

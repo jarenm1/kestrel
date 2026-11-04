@@ -1,6 +1,6 @@
 import { relative, resolve as resolvePath, isAbsolute } from "node:path"
 import type { GhCheckout, LabelChange, OpenedPullRequest, OpenPullRequestInput, PullRequestTarget, ReviewerChange } from "../core/service"
-import type { GraphQLResponse, NewReview, PostedComment, PostedReview, PullRequest, PullRequestChanges } from "../github/api"
+import type { ApiRequest, ApiResponse, GraphQLResponse, NewReview, PostedComment, PostedReview, PullRequest, PullRequestChanges } from "../github/api"
 import { b, nodes, obj, pullRequestGraphQL, s, statusCheckRollupFields } from "./fields"
 
 type Raw = Record<string, unknown>
@@ -20,6 +20,8 @@ export interface GhBackend {
   readonly review: (input: NewReview & { readonly number: number; readonly checkoutId: string }) => Promise<PostedReview>
   readonly changeReviewers: (input: PullRequestTarget & ReviewerChange) => Promise<void>
   readonly changeLabels: (input: PullRequestTarget & LabelChange) => Promise<void>
+  /** `gh api`: one read-only request to the GitHub API, not tied to a checkout. */
+  readonly api: (request: ApiRequest) => Promise<ApiResponse>
 }
 
 /** A command failure: the message goes to stderr, followed by the command's usage for flag errors. */
@@ -62,6 +64,13 @@ export interface RepoTarget {
 }
 
 export const fullName = (repo: RepoTarget): string => `${repo.owner}/${repo.name}`
+
+/** `cmdutil.ReadFile`: `-` is standard input; any other path was read by the shim inside the sandbox. */
+export const readBodyFile = (run: GhRun, path: string): string => {
+  const content = run.files.get(path)
+  if (content === undefined || content === null) throw new CommandError(`open ${path}: no such file or directory`)
+  return content
+}
 
 /** `GraphQLError.Error()` of go-gh. */
 const graphQLMessage = (errors: GraphQLResponse["errors"]): string =>
