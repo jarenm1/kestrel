@@ -24,8 +24,8 @@ export const MAX_NEST_FRAME_BYTES = 256 * 1024
 /** A host sends `capacity` at least this often while connected (and on every change in between). */
 export const NEST_CAPACITY_INTERVAL_MS = 60_000
 
-/** An enrollment token is accepted for this long after the control plane issued it. */
-export const NEST_ENROLL_TOKEN_TTL_MS = 60 * 60 * 1000
+/** An enrollment token is accepted for this long after the control plane issued (or reissued) it. */
+export const NEST_ENROLL_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 
 /**
  * - `provisioning`: the host is creating the VM (template clone, volume, first configure).
@@ -65,15 +65,25 @@ export type NestLimits = typeof NestLimits.Type
 export const NestVolumeRef = Schema.String.pipe(Schema.minLength(1), Schema.maxLength(1024))
 export type NestVolumeRef = typeof NestVolumeRef.Type
 
+/**
+ * Which placement of a box is current. The control plane raises it every time it places the box (create, and resume
+ * from parked on any host). A host acts only on its highest epoch for a box, and evicts a local copy whose epoch is
+ * lower than one the control plane names, so two hosts never run the same box.
+ */
+const OwnerEpoch = NonNegativeInt
+
 /** One VM as its host reports it. */
 export const NestVmReport = Schema.Struct({
   boxId: Id,
   /** The VM incarnation; the same id that usage records carry. A VM cloned again after parking gets a new one. */
   vmId: Id,
   userId: Id,
+  ownerEpoch: OwnerEpoch,
   state: NestVmState,
   /** When the VM entered `state`. */
   since: EpochMs,
+  /** The guest image this VM was cloned from (`manifest.json` `imageId`). */
+  imageId: Schema.String,
   /** vCPUs and memory currently given to the guest; 0 unless running. */
   vcpus: NonNegativeInt,
   memoryBytes: Bytes,
@@ -81,8 +91,13 @@ export const NestVmReport = Schema.Struct({
   gpus: Schema.Array(Schema.String),
   /** Host disk the volume uses (allocated blocks), plus the saved memory image while suspended. */
   diskBytes: Bytes,
-  /** The latest completed backup, when there is one. */
+  /**
+   * The latest completed backup, when there is one. The host's local volume equals this backup only while the VM has
+   * not run since; a resume names the backup it expects, and the host uses its local copy only when they match.
+   */
   volumeRef: Schema.NullOr(NestVolumeRef),
+  /** When `volumeRef` was taken. Running VMs are backed up periodically, not only at park. */
+  backedUpAt: Schema.NullOr(EpochMs),
   limits: NestLimits,
 })
 export type NestVmReport = typeof NestVmReport.Type
@@ -93,7 +108,7 @@ export const NestHostGpu = Schema.Struct({
   model: Schema.String,
   vramBytes: Bytes,
   /** The box holding it, or null when free. */
-  attachedTo: Schema.NullOr(Schema.String),
+  attachedTo: Schema.NullOr(Id),
 })
 export type NestHostGpu = typeof NestHostGpu.Type
 
@@ -105,36 +120,48 @@ export const NestHostCapacity = Schema.Struct({
   /** Memory the host gives to VMs, and memory currently plugged into running VMs. */
   memoryBytes: Bytes,
   memoryPluggedBytes: Bytes,
-  /** Free space for volumes and memory images. */
+  /** Free space for volumes and memory images, after `diskReservedBytes`. */
   diskFreeBytes: Bytes,
+  /** Space held back so every running VM can still be suspended (its plugged memory) and every lazy volume finished. */
+  diskReservedBytes: Bytes,
   gpus: Schema.Array(NestHostGpu),
   running: NonNegativeInt,
   suspended: NonNegativeInt,
 })
 export type NestHostCapacity = typeof NestHostCapacity.Type
 
-/** Commands the control plane sends a host. Each is idempotent per `boxId`: a retry of a finished command succeeds. */
+/**
+ * Commands the control plane sends a host. The host deduplicates by `commandId` (a resent command gets the stored
+ * result) and runs commands and its own policy actions for one box one at a time. `create` and `resume` carry the
+ * placement's `ownerEpoch`; a command for a lower epoch than the host holds is refused.
+ */
 export const NestHostCommand = Schema.Union(
-  /** Create a new box's VM with an empty volume. The guest enrolls with `enrollToken` to get its secret. */
+  /**
+   * Create a new box's VM with an empty volume. The guest enrolls with `enrollToken` to get its secret. A resent
+   * `create` may carry a fresh token; the host passes the newest one on while the box has not enrolled.
+   */
   Schema.Struct({
     _tag: Schema.Literal("create"),
     boxId: Id,
     userId: Id,
     vmId: Id,
+    ownerEpoch: OwnerEpoch,
     limits: NestLimits,
     /** The box's public origin, `https://<boxId>.<host slug>.<nest domain>`. */
     publicUrl: Schema.String,
     enrollToken: Schema.String,
   }),
   /**
-   * Bring a box to `running`. From `suspended`: restore its memory image. From `parked`: clone the template and attach
-   * the volume, from local disk or, when the host does not have it, lazily from `volumeRef` (with a new `vmId`).
+   * Bring a box to `running`. From `suspended` (on this host, same epoch): restore its memory image. From `parked`:
+   * clone the template and attach the volume: the local copy only when its backup equals `volumeRef` (or both are
+   * null and this host created it), otherwise lazily from `volumeRef`; the clone gets the new `vmId`.
    */
   Schema.Struct({
     _tag: Schema.Literal("resume"),
     boxId: Id,
     userId: Id,
     vmId: Id,
+    ownerEpoch: OwnerEpoch,
     limits: NestLimits,
     publicUrl: Schema.String,
     volumeRef: Schema.NullOr(NestVolumeRef),
@@ -148,21 +175,35 @@ export const NestHostCommand = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("gpuDetach"), boxId: Id }),
   /** Stop the VM, wipe the volume and its backups, and report `deleted`. */
   Schema.Struct({ _tag: Schema.Literal("destroy"), boxId: Id }),
+  /**
+   * The box lives elsewhere now (epoch above `ownerEpoch` held here): drop the local VM, memory image and volume,
+   * keep the backups, and stop reporting it. Sent at `hello` for every VM the host reports that it no longer owns.
+   */
+  Schema.Struct({ _tag: Schema.Literal("evict"), boxId: Id, ownerEpoch: OwnerEpoch }),
 )
 export type NestHostCommand = typeof NestHostCommand.Type
 
 /** Frames a host sends on `ControlPaths.nestHostConnect`. */
 export const NestHostFrame = Schema.Union(
-  /** First frame on every connection: the full state, which the control plane reconciles against its records. */
+  /**
+   * First frame on every connection: the full state, which the control plane reconciles against its records, and the
+   * results of commands that finished while disconnected (so none is lost with the old socket).
+   */
   Schema.Struct({
     _tag: Schema.Literal("hello"),
-    protocol: Schema.Literal(NEST_HOST_PROTOCOL),
+    /** Compared after decoding, so a mismatch can be answered with `refused`. */
+    protocol: Schema.Number.pipe(Schema.int()),
     hostId: Id,
     agentVersion: Schema.String,
     /** DNS label under the Nest domain that routes to this host's ingress. */
     slug: Schema.String.pipe(Schema.pattern(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/)),
+    /** The guest image new VMs on this host are cloned from. */
+    imageId: Schema.String,
     capacity: NestHostCapacity,
     vms: Schema.Array(NestVmReport),
+    results: Schema.Array(
+      Schema.Struct({ commandId: Id, ok: Schema.Boolean, error: Schema.optional(Schema.String) }),
+    ),
   }),
   Schema.Struct({ _tag: Schema.Literal("capacity"), capacity: NestHostCapacity }),
   /** A VM changed state, size or GPUs, on a command or by the host's own policy (idle suspend, resize). */
@@ -175,22 +216,40 @@ export const NestHostFrame = Schema.Union(
     error: Schema.optional(Schema.String),
     vm: Schema.optional(NestVmReport),
   }),
+  /**
+   * A request reached ingress for a box this host may not wake by itself (parked, or suspended without a valid lease).
+   * The control plane answers with `resume` (to this host or, for a parked box, possibly another) or ignores it.
+   */
+  Schema.Struct({ _tag: Schema.Literal("wakeRequest"), boxId: Id }),
 )
 export type NestHostFrame = typeof NestHostFrame.Type
 
 /** Frames the control plane sends a host. */
 export const NestControlFrame = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("command"), commandId: Id, command: NestHostCommand }),
+  /**
+   * Sent after `hello` and every `capacity`. Until `validUntil` the host may wake a box it holds as `suspended` on an
+   * ingress request without asking. Past it (control plane unreachable), it wakes nothing; a `parked` box is only ever
+   * resumed by a `resume` command.
+   */
+  Schema.Struct({ _tag: Schema.Literal("lease"), validUntil: EpochMs }),
   /** Refusal of the connection (unknown host, protocol mismatch); the socket closes after it. */
   Schema.Struct({ _tag: Schema.Literal("refused"), reason: Schema.String }),
 )
 export type NestControlFrame = typeof NestControlFrame.Type
 
+/** How long a `lease` lasts; the control plane sends one at least every `NEST_CAPACITY_INTERVAL_MS`. */
+export const NEST_LEASE_MS = 5 * 60_000
+
 /** `POST ControlPaths.nestEnroll` body, sent by a new box from inside its VM. */
 export const NestEnrollBody = Schema.Struct({ boxId: Id, token: Schema.String.pipe(Schema.minLength(1)) })
 export type NestEnrollBody = typeof NestEnrollBody.Type
 
-/** The box's own secret. The token is spent; a second enrollment with it is refused. */
+/**
+ * The box's own secret. Enrollment is idempotent: the same token returns the same secret until the box first
+ * authenticates with it (`ControlPaths.boxSelf`), so a box that crashed before saving it can enroll again. After that,
+ * or once the token expires, it is refused.
+ */
 export const NestEnrollResult = Schema.Struct({ secret: Schema.String })
 export type NestEnrollResult = typeof NestEnrollResult.Type
 

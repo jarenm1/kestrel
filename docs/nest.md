@@ -67,13 +67,25 @@ Features the design depends on, and their constraints (from Cloud Hypervisor's `
 | `resize --cpus` | vCPUs follow load | Boot with `cpus boot=1,max=<template max>` |
 | `virtio-balloon` with free page reporting | Freed guest pages return to the host continuously | |
 | `add-device` / `remove-device` (VFIO) | GPU borrowed while needed | Pins all guest memory while attached; detach before suspend |
-| `add-disk` | Volume hot-plugged into a template clone | |
-| `restore` with `net_fds` | Each clone gets its own tap | |
+| `add-disk` | Volume and swap disk hot-plugged into a template clone, after it resumes | Fixed disk `id`s (`volume`, `swap`) |
+| `restore` with `net_fds` | Each clone gets its own tap | Applied only to a net device that was fd-backed when snapshotted: the template boots with `--net id=net0,fd=[N],mac=…` |
 | VM Generation ID | Clones of a template reseed the kernel RNG | Guest `CONFIG_VMGENID=y` |
 | `virtio-pmem` | Read-only Nix store image shared through the host page cache (DAX) | `discard_writes=on` |
 
 `copyonwrite` restore (page-cache sharing of the template's memory) is incompatible with virtio-mem, so it is not
 used; the default is `ondemand` + virtio-mem.
+
+**Restore sources.** A restore takes no path overrides (only `source_url`, `memory_restore_mode`, `net_fds` and a few
+others), and the vsock device refuses to bind a socket path that exists. So every restore (a template clone or a
+suspended VM) restores from a per-VM directory `vms/<boxId>/restore/`: `memory-ranges` and `state.json` reflinked (or
+hard-linked) from the source, and `config.json` rewritten with this VM's vsock socket, console path and disk paths.
+Upstream allows editing `config.json` between snapshot and restore.
+
+**Memory images stay valid while in use.** `ondemand` keeps reading the source file until every page has been
+touched, and poisons guest memory if it fails. So a snapshot is written to `snapshot.<gen>.tmp`, fsynced and renamed to
+`snapshot.<gen>`, and the previous generation is deleted only after the process restored from it has exited. A template
+is reference-counted the same way: it is deleted only when no live process was restored from it, and its guest image is
+a Nix GC root while any template or suspended VM references it.
 
 ## The guest image
 
@@ -98,16 +110,18 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
 /var/lib/kestrel-host/
   host.json                      { hostId, slug }
   templates/<imageId>/           snapshot of a booted, unconfigured guest (config.json, state.json, memory-ranges)
-  vms/<boxId>/vm.json            VM record (state machine below), atomic writes
-  vms/<boxId>/volume.raw         the volume (sparse raw file on XFS; reflink baseline volume.base for backups)
-  vms/<boxId>/snapshot/          memory image while suspended
+  vms/<boxId>/vm.json            VM record: state, ownerEpoch, volumeRef of the local copy, command results; atomic
+  vms/<boxId>/volume.raw         the volume (sparse raw file on XFS)
+  vms/<boxId>/swap.raw           swap disk (sparse, local only, recreated on every clone)
+  vms/<boxId>/snapshot.<gen>/    memory image while suspended (see "Memory images stay valid while in use")
+  vms/<boxId>/restore/           per-restore source with rewritten config.json
   vms/<boxId>/api.sock           cloud-hypervisor API
-  vms/<boxId>/vsock.sock         hybrid vsock
+  vms/<boxId>/vsock.sock         hybrid vsock (the host only connects; it never listens on vsock.sock_<port>)
 /run/kestrel-host/api.sock       host agent local API (ingress, operators)
 ```
 
-Host secrets (control plane host secret, object storage keys, volume encryption key) are files under
-`/etc/kestrel-host/` readable by root only, never in the repository.
+Host secrets (control plane host secret, object storage keys, the fleet volume key) are files under `/etc/kestrel-host/`
+readable by root only, never in the repository or the Nix store.
 
 ## Lifecycle
 
@@ -127,25 +141,49 @@ stateDiagram-v2
 
 **Template.** For each guest `imageId` the host boots the image once with no volume (`cpus boot=1,max=MAX_VCPUS`,
 `memory size=1G,hotplug_size=MAX_MEMORY-1G,hotplug_method=virtio-mem`, balloon with free page reporting, pmem store,
-one net device, vsock), waits for the guest agent's `hello`, sends nothing else, pauses and snapshots it. The template
-holds no secret and no identity.
+`net id=net0,fd=[tap]`, vsock), waits for the guest agent's `hello`, sends nothing else, pauses and snapshots it. The
+template holds no secret and no identity.
 
-**Create / resume from parked.** Restore the template (`ondemand`, `net_fds` = a new tap) → `add-disk` the volume with
-serial `kestrel-volume` (local file, or the `ublk` device `kestrel-volume restore-lazy` exposes) → resume → vsock
-`configure` (network, identity, `enrollToken` only on create) → the guest mounts the volume, writes the box env and
-starts the box → reply once the box answers `/api/health` → `running`.
+**Create / resume from parked.** Prepare `vms/<boxId>/restore/` from the template → restore (`ondemand`, `net_fds` =
+the VM's own tap) → `resume` → `add-disk` the volume (id `volume`, serial `kestrel-volume`: the local file, or the
+`ublk` device `kestrel-volume restore-lazy` exposes) and the swap disk (id `swap`, serial `kestrel-swap`) → vsock
+`configure` (clock, `cloneId`, network, identity, `enrollToken` only while not enrolled) → the guest waits for the
+disks, mounts the volume, writes the box env and starts the box → reply once the box answers `/api/health` →
+`running`. The local volume is used only when its recorded backup equals the command's `volumeRef`.
 
-**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs and drops caches) → `pause` →
-`snapshot` to `vms/<boxId>/snapshot` → stop the process → `suspended`. A memory image can always be discarded safely,
-because the volume was synced first.
+**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs and drops caches; 30 s, then the host
+goes on without it) → `pause` → `snapshot` to a new generation → stop the process → `suspended`. A memory image can
+always be discarded safely, because the volume was synced first.
 
-**Resume from suspended.** `restore` (`ondemand`) → `resume` → vsock `resumed` with the wall clock → `running`. A
-restore that fails falls back to a template clone with the same volume (the VM's processes are lost, its files are not).
+**Resume from suspended.** Prepare `restore/` from the latest generation (disk paths rewritten) → restore
+(`ondemand`; `copy` when `/dev/userfaultfd` is unavailable) → `resume` → vsock `resumed` with the wall clock; the
+guest replies once the box is healthy → `running`. A restore that fails falls back to a template clone with the same
+volume (the VM's processes are lost, its files are not).
 
-**Park.** From running: `shutdown` over vsock, wait for exit; from suspended: discard the memory image. Then
-`kestrel-volume backup` → `volumeRef` → `parked`. The local volume stays as a cache until the host needs the space.
+**Park.** From running: `shutdown` over vsock, wait for exit (power off after 30 s); from suspended: discard the
+memory image. Then `kestrel-volume backup` → `volumeRef` (recorded in `vm.json`) → `parked`. The local volume stays as
+a cache until the host needs the space or the control plane sends `evict`.
 
-**Destroy.** Stop, delete the volume, its backups and records → `deleted`.
+**Periodic backup of a running VM** (every `backupInterval`, default 1 h, when the volume changed): `freezeVolume` →
+reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflinked copy → report `volumeRef`, `backedUpAt`.
+
+**Destroy.** Stop, delete the volume, its backups and records → `deleted`. **Evict**: stop, delete local state only.
+
+### Ownership and recovery
+
+- **Epochs.** Every placement has an `ownerEpoch`. A host refuses commands for a lower epoch than it holds, and the
+  control plane sends `evict` at `hello` for every VM a host reports with an epoch below the box's current one. So a
+  host that was partitioned while its box moved cannot bring the old copy back.
+- **Leases.** The host may wake a `suspended` box from an ingress request by itself only while its last `lease` is
+  valid. A `parked` box, or any box without a lease, is woken only by `resume`: the host sends `wakeRequest` and holds
+  the request until the control plane answers.
+- **Commands.** One queue per box serializes commands and policy actions. Results are stored in `vm.json` by
+  `commandId`; a resent command gets the stored result, and results that finished while disconnected go in `hello`.
+- **Agent restart.** At startup the agent re-adopts live `kestrel-vm-*.scope` processes through their `api.sock` and
+  reconnects to their guests. A VM recorded as `running` whose process is gone becomes `parked` with its local volume
+  (memory lost, files kept), and is reported.
+- **Guest replies** time out per `GUEST_REPLY_TIMEOUT_MS`, and the host then acts without the guest. Lines longer than
+  `MAX_GUEST_FRAME_BYTES` drop the connection; replies to unknown ids are ignored.
 
 ## Resource policy (host agent)
 
@@ -158,24 +196,31 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
 - **Idle**: a VM is idle when the box reports no runs, desktops, viewers or recordings, the last activity is older than
   `idleSuspendAfter` (default 10 min), and ingress reports no open connection. Idle → suspend. Suspended longer than
   `parkAfter` (default 7 days) → park. Both are host config, and the control plane can override with commands.
-- **Host pressure** (host `/proc/pressure/memory` some avg10 > 20): suspend the idle-longest running VM first, then
-  shrink every VM to its target with no headroom.
-- **GPU**: `gpuWanted: true` from the guest, or `gpuAttach` from the control plane, attaches a free host GPU (bound to
-  `vfio-pci` at host boot) with `add-device`, then sends `gpuAttached`. No free GPU: the request fails and the box shows
-  it; moving to another host is a park and a resume there. `gpuWanted: false`, `gpuDetach`, or the desktop idle →
-  `gpuDetach` over vsock → `remove-device`. Suspend always detaches first.
+- **Host pressure** (host `/proc/pressure/memory` some avg10 > 20): suspend running VMs in order of least recent
+  activity as the host measured it (ingress requests, cgroup CPU), not as the guest reports it, then shrink every VM to
+  its target with no headroom.
+- **Disk**: capacity reserves room to suspend every running VM (its plugged memory). Below the reserve the host parks
+  instead of suspending, evicts cached volumes of parked boxes, and reports less free space so nothing new is placed.
+- **GPU**: `gpuWanted: true` from the guest (honoured only when `limits.gpu` is `on-demand`, at most one attach per
+  5 min, held at least 5 min), or `gpuAttach` from the control plane, attaches a free host GPU (bound to `vfio-pci` at
+  host boot) with `add-device` once the host has room for the VM's whole `maxMemoryBytes` (an attached device pins all
+  guest memory), then sends `gpuAttached`. No free GPU: the request fails and the box shows it; moving to another host
+  is a park and a resume there. `gpuWanted: false`, `gpuDetach`, or the desktop idle → `gpuDetach` over vsock →
+  `remove-device`. Suspend always detaches first. GPU time is billed from attach to detach.
 
 ## Storage
 
 - **Volumes**: sparse raw files on XFS (mirrored NVMe), `virtio-blk` with `num_queues` = max vCPUs, `direct=on`. The
   guest formats ext4 on first mount (`noatime,lazytime,discard`).
 - **Backups** (`kestrel-volume backup`): reflink `volume.raw` to a point-in-time copy, compare its extents with the
-  previous baseline (FIEMAP shared extents are unchanged), upload changed 4 MiB chunks, encrypted (AES-256-GCM, host
-  fleet key), keyed `boxes/<boxId>/chunks/<sha256>`, and a manifest `boxes/<boxId>/manifests/<n>.json`. Chunks are never
-  shared between boxes.
+  previous baseline (FIEMAP shared extents are unchanged), upload changed 4 MiB chunks encrypted with AES-256-GCM
+  under a per-box key `HKDF-SHA256(fleet key, boxId)` (random 96-bit nonce per chunk), named
+  `boxes/<boxId>/chunks/<HMAC-SHA256(box key, plaintext)>` so names reveal nothing about content, and a manifest
+  `boxes/<boxId>/manifests/<n>.json`. Chunks are never shared between boxes.
 - **Lazy restore** (`kestrel-volume restore-lazy`): a `ublk` block device backed by a local sparse file and a chunk
-  bitmap. A read of a missing chunk fetches it (peer host first, then object storage), writes it locally, then serves
-  it; a background task hydrates the rest. Once complete the VM switches to the plain file at its next restart.
+  bitmap. A read of a missing chunk fetches it from object storage, writes it locally, then serves it; a background
+  task hydrates the rest. Once complete the VM switches to the plain file at its next restore (the disk path is
+  rewritten in `restore/config.json`).
 
 ### `kestrel-volume` CLI
 
@@ -198,11 +243,13 @@ kestrel-volume delete  --box BOX --store URL
 - One tap per VM (`kn-<n>`), routed, no bridge: the host side has `169.254.0.1/32`, the guest gets a unique
   `10.77.x.y/32` with its default route on-link via `169.254.0.1`, and the host routes that /32 to the tap. Template
   clones share a MAC, which is harmless on point-to-point links.
-- nftables: guests reach the internet through masquerade; they cannot reach each other, the host, or private ranges,
-  except the host's dependency cache, Nix cache and DNS ports on `169.254.0.1`. Ingress reaches each VM's port 8787.
+- nftables: traffic from a tap is dropped unless its source is that VM's own addresses (anti-spoofing). Guests reach
+  the internet through masquerade; they cannot reach each other, the host, or private ranges, except the host's
+  dependency cache, Nix cache and DNS ports on `169.254.0.1`. Ingress reaches each VM's port 8787.
 - `tc` limits each tap's egress (default 200 Mbit/s).
-- WebRTC: each VM's public IPv6 address when the host has a routed prefix; otherwise coturn on the host as the TURN
-  server the box offers.
+- WebRTC: each VM's public IPv6 address when the host has a routed prefix; otherwise coturn on the host, with
+  short-lived credentials (TURN REST API secret held by the host agent, handed to the box per session) and
+  `denied-peer-ip` for `10.77.0.0/16`, `169.254.0.0/16`, the host's addresses and private ranges.
 
 ## Ingress
 
@@ -210,8 +257,9 @@ Caddy terminates TLS for `*.<slug>.<nest domain>` (DNS challenge) and proxies ev
 `127.0.0.1:8081`. `kestrel-ingress` takes the box id from the first DNS label, answers `/mcp` and `/broker` 404, and:
 
 - running → proxies to the VM (HTTP/1.1 and WebSocket upgrades);
-- suspended or parked here → holds the request, asks the host agent to wake the box, then proxies (wake timeout 60 s,
-  then 503 with `Retry-After`);
+- suspended here with a valid lease → holds the request, asks the host agent to wake the box, then proxies (wake
+  timeout 60 s, then 503 with `Retry-After`); parked, or no lease → the host agent sends `wakeRequest` and the request
+  waits the same way for the control plane's `resume`;
 - unknown → 404.
 
 It reports per-box open connections and the last request time to the host agent every 5 s.
@@ -238,21 +286,31 @@ it fetches from the origin itself over TLS and stores only what verifies.
 | `/pypi/simple/`, `/pypi/files/` | pypi.org, files.pythonhosted.org | the `sha256` in the index link |
 | `/crates/index/`, `/crates/dl/` | index.crates.io, static.crates.io | `cksum` in the sparse index |
 
-Metadata (packuments, indexes) is cached for 5 minutes; artifacts forever (content-addressed by hash). Requests with
-credentials are refused (private packages bypass the cache by going to the origin directly). Nix: `harmonia` serves the
-host's `/nix/store` on `169.254.0.1:5000`, signed with the host's key; guests trust that key and cache.nixos.org.
+Metadata (packuments, indexes) is cached for 5 minutes. Artifacts are stored by hash, but served only while metadata
+fetched within that window still lists them with the same hash, so a package the registry pulled stops being served.
+Requests with credentials are refused (private packages bypass the cache by going to the origin directly).
+
+Nix: the host keeps a static binary cache directory (`nix copy --to file:///var/cache/kestrel-nix`) holding only the
+guest image closure and a pinned package set, signed with the host's cache key, served read-only on
+`169.254.0.1:5000`. The host's own store (its services and configuration) is never exposed. Guests trust that key and
+cache.nixos.org.
 
 ## Control plane
 
 - Hosts are the existing meter host registrations (id and secret). A host dials `nestHostConnect`; the Hub accepts it
-  as a hibernatable WebSocket, sends `refused` and closes on a bad secret or protocol.
-- A Nest box is a `UserBox` with a `nest` record (host, state, limits, `volumeRef`). Its URL is
-  `https://<boxId>.<host slug>.<nest domain>` and changes when it moves hosts.
+  as a hibernatable WebSocket, sends `refused` and closes on a bad secret or protocol, and answers `hello` and every
+  `capacity` with a `lease`.
+- A Nest box is a `UserBox` with a `nest` record (host, `ownerEpoch`, state, limits, `volumeRef`, image). Its URL is
+  `https://<boxId>.<host slug>.<nest domain>` and changes when it moves hosts; the apps refetch the box list when a box
+  stops answering.
 - **Create**: pick the connected host with the most free memory that fits `1 GiB + headroom` (and a free GPU when the
-  user asks for one at creation), insert the box with a fresh secret hash and a one-time enroll token (hashed), send
-  `create`. The box later calls `nestEnroll` and gets the secret.
-- **Resume**: suspended → its host; parked → any host with room (`resume` with `volumeRef`, new `vmId`); a host that is
-  offline holds the box until it returns.
+  user asks for one at creation), insert the box with a fresh secret and an enroll token (hashed), epoch 1, send
+  `create`. The box later calls `nestEnroll` and gets the secret; enrollment is idempotent until the box first
+  authenticates, and a resent `create` carries a fresh token.
+- **Resume**: suspended → its host; parked → any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1);
+  a host that is offline holds the box until it returns. `wakeRequest` from a host is treated as a resume request.
+- **Reconcile at `hello`**: results are applied, VMs with a stale epoch are evicted, and a VM the control plane does not
+  know is logged and left alone.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
 - Usage records keep flowing through `meterRecords`; the host agent emits them from cgroups.
 
@@ -265,15 +323,31 @@ blocks of the volume and the memory image, GPU device-seconds while attached.
 ## Security
 
 - The VM is the boundary between users; bubblewrap stays the boundary between an agent and its box.
-- The host never holds a box secret: enrollment tokens are single-use and expire in an hour.
+- Hosts are trusted with the boxes they run: root on a host can read a VM's memory and volume. Enrollment tokens keep
+  box secrets out of the control plane's commands and logs; they do not protect a box from its own host.
+- The guest is untrusted input to the host: every reply has a deadline, frames are size-capped, GPU requests are gated
+  by limits and rate, and placement decisions under pressure use host-measured signals.
 - Cloud Hypervisor runs with its seccomp filter, as root only because taps, VFIO and ublk need it; each VM process is
   in its own cgroup with `MemoryMax` = its limit + 256 MiB of VMM overhead.
-- The dependency cache only stores what its origin served and its hash verified; VMs cannot write to it.
-- Backups are encrypted with the host fleet key and never deduplicated across boxes.
+- The dependency cache only serves what its origin served, its hash verified and current metadata still lists; VMs
+  cannot write to it. The Nix cache exposes only the guest closure and a pinned set.
+- Backups use a per-box key derived from the fleet key, content-hiding chunk names, and are never deduplicated across
+  boxes. (Later: per-box keys issued by the control plane, so a host holds keys only for boxes it runs.)
+- Ingress serves every box under `*.<slug>.<nest domain>`; the Nest domain must be on the Public Suffix List (or the
+  box must set only host-only `__Host-` cookies) so one box cannot set cookies for another.
+
+## Operations
+
+- DNS: at host registration the operator creates `*.<slug>.<nest domain>` A/AAAA records to the host. Certificates use
+  the DNS challenge through a CNAME from `_acme-challenge.<slug>` to a challenge zone, so a host's DNS token cannot
+  change other hosts' records.
+- Image rollout: hosts build a template for a new `imageId` and clone new VMs from it; boxes move to the new image when
+  they next park and resume. Reports carry `imageId`, so the control plane can drain old images.
 
 ## Testing
 
 `packages/host/nix/test.nix` is a NixOS VM test: a host VM (nested KVM) imports the host module, builds a template,
 creates a box against a fake control plane, waits for the box's health check through ingress, suspends it, wakes it
-with a request, resizes it under a memory load, parks and resumes it with a `file://` store. Run it with
-`nix build .#checks.x86_64-linux.nest`. GPU passthrough cannot be tested without a GPU host.
+with a request, resizes it under a memory load, parks and resumes it with a `file://` store, clones a second VM from the
+same template at the same time, and evicts. Run it with `nix build .#checks.x86_64-linux.nest`. GPU passthrough cannot
+be tested without a GPU host.

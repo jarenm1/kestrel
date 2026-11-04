@@ -199,10 +199,11 @@ A shape is a VM's resource class. The names and sizes will come from measurement
 | Standard CPU | Builds, tests and browser work | Software rendering, x264 |
 | GPU | Game, 3D and VFX work | Hardware rendering, NVENC |
 
-**GPU VMs start with a dedicated GPU through passthrough.** This is simple and isolates users fully, but it ties up a whole
-GPU, so GPU time is priced accordingly. Fractional GPUs (vGPU, MIG, SR-IOV or paravirtualized graphics) are a later cost
-optimization, and each needs testing with Blender and Godot before it is offered. Today's shared GPU was an MVP shortcut
-and does not carry forward.
+**GPUs are lent to VMs whole, through passthrough, while needed.** A VM hot-plugs a dedicated GPU when work needs one
+and returns it when done (see [nest.md](nest.md#resource-policy-host-agent)), so the GPU is tied up only while attached,
+and GPU time is priced from attach to detach. Fractional GPUs (vGPU, MIG, SR-IOV or paravirtualized graphics) are a
+later cost optimization, and each needs testing with Blender and Godot before it is offered. Today's shared GPU was an
+MVP shortcut and does not carry forward.
 
 ### Changing shape
 

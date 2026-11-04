@@ -17,9 +17,29 @@
  */
 import { Schema } from "effect"
 
+/** Version of the frames below; sent in the guest's `hello`. Unknown tags are ignored within a version. */
+export const GUEST_PROTOCOL = 1
 export const GUEST_AGENT_VSOCK_PORT = 1024
 export const GUEST_AGENT_BOX_SOCKET = "/run/kestrel-guest/box.sock"
+/** Longest line either side reads; a longer one drops the connection. */
 export const MAX_GUEST_FRAME_BYTES = 64 * 1024
+
+/**
+ * How long the host waits for each reply before it acts without the guest: a guest is user-controlled and may never
+ * answer. On timeout: `prepareSuspend` → snapshot anyway; `gpuDetach` → unplug anyway; `shutdown` → power off;
+ * `configure` and `resumed` → the VM is reported unhealthy and retried.
+ */
+export const GUEST_REPLY_TIMEOUT_MS = {
+  configure: 120_000,
+  prepareSuspend: 30_000,
+  resumed: 60_000,
+  gpuAttached: 60_000,
+  gpuDetach: 15_000,
+  freezeVolume: 30_000,
+  thawVolume: 10_000,
+  shutdown: 30_000,
+  ping: 5_000,
+} as const
 
 /** The guest sends `status` at this interval while the host is connected. */
 export const GUEST_STATUS_INTERVAL_MS = 2_000
@@ -29,6 +49,11 @@ export const BOX_ACTIVITY_INTERVAL_MS = 10_000
 
 /** Virtio serial of the user's volume. The guest finds it at `/dev/disk/by-id/virtio-kestrel-volume`. */
 export const NEST_VOLUME_SERIAL = "kestrel-volume"
+/**
+ * Virtio serial of the VM's swap disk: a host-local sparse file, never backed up, recreated empty on every clone. The
+ * guest runs `mkswap` on it each boot or clone and uses it behind zswap.
+ */
+export const NEST_SWAP_SERIAL = "kestrel-swap"
 /** Where the guest mounts the volume. Everything the box keeps (data dir, home, writable Nix layer) is under it. */
 export const NEST_VOLUME_MOUNT = "/var/lib/kestrel"
 /** Environment file the guest agent writes on `configure`, read by `kestrel-box.service`. Root-owned, 0600. */
@@ -87,6 +112,9 @@ export const GuestNetwork = Schema.Struct({
   /** IPv4 address with prefix, e.g. `10.77.0.5/32`. */
   address: Schema.String,
   gateway: Schema.String,
+  /** Public IPv6 address with prefix and its on-link gateway, when the host has a routed prefix. */
+  ipv6Address: Schema.NullOr(Schema.String),
+  ipv6Gateway: Schema.NullOr(Schema.String),
   dns: Schema.Array(Schema.String),
   /** Host-local dependency cache and Nix binary cache origins the guest's package managers use. */
   depcacheUrl: Schema.NullOr(Schema.String),
@@ -98,9 +126,12 @@ export type GuestNetwork = typeof GuestNetwork.Type
 // Host -> guest agent.
 export const HostToGuest = Schema.Union(
   /**
-   * Give a fresh clone its identity: set the network, mount the volume (hot-plugged with serial `NEST_VOLUME_SERIAL`,
-   * formatted on first use), write `NEST_BOX_ENV_FILE`, and start `kestrel-box`. Idempotent; reply when the box
-   * answers its health check. `enrollToken` is present only for a box that has no secret yet.
+   * Give a fresh clone its identity: step the clock to `wallClockMs`, regenerate `/etc/machine-id` from `cloneId` and
+   * the systemd random seed, set the network, `mkswap` and enable the swap disk, mount the volume (hot-plugged after
+   * resume with serial `NEST_VOLUME_SERIAL`; wait up to 60 s for it and the swap disk, else reply `ok: false`; format
+   * only a disk with no filesystem), write
+   * `NEST_BOX_ENV_FILE`, and start `kestrel-box`. Idempotent; reply when the box answers its health check.
+   * `enrollToken` is present only while the box has not enrolled; a newer one replaces the one in the env file.
    */
   Schema.Struct({
     _tag: Schema.Literal("configure"),
@@ -108,6 +139,9 @@ export const HostToGuest = Schema.Union(
     hostId: Schema.String,
     boxId: Schema.String,
     vmId: Schema.String,
+    /** 32 lowercase hex characters, unique per clone; becomes `/etc/machine-id`. */
+    cloneId: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{32}$/)),
+    wallClockMs: NonNegativeInt,
     controlUrl: Schema.String,
     publicUrl: Schema.String,
     enrollToken: Schema.NullOr(Schema.String),
@@ -118,8 +152,15 @@ export const HostToGuest = Schema.Union(
    * page cache, so the saved memory is small and the volume alone is consistent. Reply when done; the host pauses next.
    */
   Schema.Struct({ _tag: Schema.Literal("prepareSuspend"), id: RequestId }),
-  /** The VM was restored. Step the clock to `wallClockMs`, tell the box, reply. */
+  /** The VM was restored. Step the clock to `wallClockMs`, tell the box, and reply once the box answers its health check. */
   Schema.Struct({ _tag: Schema.Literal("resumed"), id: RequestId, wallClockMs: NonNegativeInt }),
+  /**
+   * Periodic backup of a running VM: quiesce the box, `sync`, then `fsfreeze --freeze` the volume and reply. The host
+   * reflinks the volume file and sends `thawVolume` at once (or the guest thaws by itself after
+   * `GUEST_REPLY_TIMEOUT_MS.freezeVolume`, so a lost host cannot leave it frozen).
+   */
+  Schema.Struct({ _tag: Schema.Literal("freezeVolume"), id: RequestId }),
+  Schema.Struct({ _tag: Schema.Literal("thawVolume"), id: RequestId }),
   /** A GPU was hot-plugged at `pciAddress`. Load its driver, tell the box, reply once the device is usable. */
   Schema.Struct({ _tag: Schema.Literal("gpuAttached"), id: RequestId, pciAddress: Schema.String }),
   /** The host wants the GPU back. Have the box release it, unbind the driver, reply; the host unplugs it next. */
@@ -135,8 +176,11 @@ export const GuestToHost = Schema.Union(
   /** First frame on every host connection. `bootId` changes on every boot, not on restore. */
   Schema.Struct({
     _tag: Schema.Literal("hello"),
+    protocol: Schema.Number.pipe(Schema.int()),
     agentVersion: Schema.String,
+    /** `bootId` changes on every boot, not on restore; `cloneId` is null until the first `configure`. */
     bootId: Schema.String,
+    cloneId: Schema.NullOr(Schema.String),
     configured: Schema.Boolean,
   }),
   /** Every `GUEST_STATUS_INTERVAL_MS`. `activity` is null while no box is connected. */
