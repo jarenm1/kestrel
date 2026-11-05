@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react"
+import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "framer-motion"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
 import { Archive, ChevronDown, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
@@ -136,20 +137,27 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   function railTab(task: Task) {
     return (
-      <NavLink
+      <motion.div
         key={task.id}
-        to={threadPath(task.id)}
-        aria-label={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
-        title={`${task.title || "Untitled thread"}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
-        className={(s) => cn(tabClass(s), "shrink-0 justify-center py-1.5")}
+        layout="position"
+        layoutId={`rail-${task.id}`}
+        {...FADE}
+        className="flex shrink-0 flex-col"
       >
-        <span className="relative inline-flex">
-          <ThreadAvatar task={task} />
-          <span className="absolute -right-1.5 -bottom-1.5 flex size-5 items-center justify-center rounded-full bg-[radial-gradient(closest-side,var(--secondary)_55%,transparent)]">
-            <StatusIcon status={task.status} className="[&>svg]:size-3" />
+        <NavLink
+          to={threadPath(task.id)}
+          aria-label={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
+          title={`${task.title || "Untitled thread"}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
+          className={(s) => cn(tabClass(s), "justify-center py-1.5")}
+        >
+          <span className="relative inline-flex">
+            <ThreadAvatar task={task} />
+            <span className="absolute -right-1.5 -bottom-1.5 flex size-5 items-center justify-center rounded-full bg-[radial-gradient(closest-side,var(--secondary)_55%,transparent)]">
+              <StatusIcon status={task.status} className="[&>svg]:size-3" />
+            </span>
           </span>
-        </span>
-      </NavLink>
+        </NavLink>
+      </motion.div>
     )
   }
 
@@ -168,116 +176,184 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   if (collapsed) {
     return (
-      <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
-        <HomeMark className="self-center py-0.5" />
-        <nav aria-label="Threads" className="flex min-h-0 flex-1 flex-col items-stretch gap-1 overflow-auto">
-          <NavLink
-            to={APP_HOME}
-            end
-            aria-label="New thread"
-            title="New thread"
-            className={(s) => cn(tabClass(s), "justify-center py-2")}
+      <SidebarMotion>
+        <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
+          <HomeMark className="self-center py-0.5" />
+          <motion.nav
+            layoutScroll
+            aria-label="Threads"
+            className="relative flex min-h-0 flex-1 flex-col items-stretch gap-1 overflow-auto"
           >
-            <SquarePen className="size-4" />
-          </NavLink>
-          <NavLink
-            to="/automations"
-            aria-label="Automations"
-            title="Automations"
-            className={(s) => cn(tabClass(s), "justify-center py-2")}
-          >
-            <Workflow className="size-4" />
-          </NavLink>
-          <NavLink
-            to="/archived"
-            aria-label="Archived"
-            title="Archived"
-            className={(s) => cn(tabClass(s), "justify-center py-2")}
-          >
-            <Archive className="size-4" />
-          </NavLink>
-          {threads.map(railTab)}
-        </nav>
-        {working.length > 0 && (
-          <nav
-            aria-label="Working threads"
-            className="mr-1 flex max-h-[40%] shrink-0 flex-col items-stretch gap-1 overflow-auto border-t border-border/60 pt-1"
-          >
-            {working.map(railTab)}
-          </nav>
-        )}
-        <AccountMenu compact />
-      </div>
+            <NavLink
+              to={APP_HOME}
+              end
+              aria-label="New thread"
+              title="New thread"
+              className={(s) => cn(tabClass(s), "justify-center py-2")}
+            >
+              <SquarePen className="size-4" />
+            </NavLink>
+            <NavLink
+              to="/automations"
+              aria-label="Automations"
+              title="Automations"
+              className={(s) => cn(tabClass(s), "justify-center py-2")}
+            >
+              <Workflow className="size-4" />
+            </NavLink>
+            <NavLink
+              to="/archived"
+              aria-label="Archived"
+              title="Archived"
+              className={(s) => cn(tabClass(s), "justify-center py-2")}
+            >
+              <Archive className="size-4" />
+            </NavLink>
+            <AnimatePresence initial={false} mode="popLayout">
+              {threads.map(railTab)}
+            </AnimatePresence>
+          </motion.nav>
+          <AnimatePresence initial={false}>
+            {working.length > 0 && (
+              <motion.nav
+                key="working"
+                layoutScroll
+                aria-label="Working threads"
+                {...REVEAL}
+                className="relative mr-1 flex max-h-[40%] shrink-0 flex-col items-stretch gap-1 overflow-auto border-t border-border/60 pt-1"
+              >
+                <AnimatePresence initial={false} mode="popLayout">
+                  {working.map(railTab)}
+                </AnimatePresence>
+              </motion.nav>
+            )}
+          </AnimatePresence>
+          <AccountMenu compact />
+        </div>
+      </SidebarMotion>
     )
   }
 
   return (
-    <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
-      <div className="flex items-center gap-2 pb-2 pl-1.5">
-        <HomeMark />
-        <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7"
-          aria-label="Collapse threads"
-          title="Collapse threads"
-          onClick={onCollapse}
-        >
-          <PanelLeftClose />
-        </Button>
-      </div>
-      <nav aria-label="Threads" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto">
-        <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-          <SquarePen className="size-4 shrink-0" />
-          New thread
-        </NavLink>
-        <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-          <Workflow className="size-4 shrink-0" />
-          Automations
-        </NavLink>
-        <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
-          <Archive className="size-4 shrink-0" />
-          Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
-        </NavLink>
-        {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
-        {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
-        {threads.length > 0 && (
-          <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
-        )}
-        {threads.map(threadTab)}
-      </nav>
-      {working.length > 0 && (
-        <section aria-label="Working threads" className="mt-2 flex max-h-[45%] shrink-0 flex-col border-t border-border/60 pt-1">
-          <button
-            type="button"
-            aria-expanded={!dockCollapsed}
-            aria-controls="working-dock"
-            onClick={() => setDockCollapsed((c) => !c)}
-            className="mr-3 flex items-center gap-1.5 rounded-[0.5rem] px-2.5 py-1.5 text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-white/[0.03] hover:text-foreground"
+    <SidebarMotion>
+      <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
+        <div className="flex items-center gap-2 pb-2 pl-1.5">
+          <HomeMark />
+          <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            aria-label="Collapse threads"
+            title="Collapse threads"
+            onClick={onCollapse}
           >
-            <StatusIcon status="running" className="[&>svg]:size-3.5" />
-            <span className="flex-1 text-left">Working</span>
-            <span className="tabular-nums">{working.length}</span>
-            <ChevronDown
-              aria-hidden="true"
-              className={cn("size-3.5 shrink-0 transition-transform", dockCollapsed && "-rotate-90")}
-            />
-          </button>
-          {/* Stays mounted while folded so the toggle's `aria-controls` always names an element. */}
-          <div id="working-dock" hidden={dockCollapsed} className="flex min-h-0 flex-col gap-0.5 overflow-auto">
-            {working.map(threadTab)}
-          </div>
-        </section>
-      )}
-      <div className="pt-2 pr-3">
-        <AccountMenu />
+            <PanelLeftClose />
+          </Button>
+        </div>
+        <motion.nav
+          layoutScroll
+          aria-label="Threads"
+          className="relative flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto"
+        >
+          <NavLink to={APP_HOME} end className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+            <SquarePen className="size-4 shrink-0" />
+            New thread
+          </NavLink>
+          <NavLink to="/automations" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+            <Workflow className="size-4 shrink-0" />
+            Automations
+          </NavLink>
+          <NavLink to="/archived" className={(s) => cn(tabClass(s), "items-center py-2 pr-3 pl-2.5")}>
+            <Archive className="size-4 shrink-0" />
+            Archived{archivedCount > 0 ? ` (${archivedCount})` : null}
+          </NavLink>
+          {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
+          {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
+          {threads.length > 0 && (
+            <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
+          )}
+          <AnimatePresence initial={false} mode="popLayout">
+            {threads.map(threadTab)}
+          </AnimatePresence>
+        </motion.nav>
+        <AnimatePresence initial={false}>
+          {working.length > 0 && (
+            <motion.section
+              key="working"
+              aria-label="Working threads"
+              {...REVEAL}
+              className="flex max-h-[45%] shrink-0 flex-col overflow-hidden border-t border-border/60"
+            >
+              <button
+                type="button"
+                aria-expanded={!dockCollapsed}
+                aria-controls="working-dock"
+                onClick={() => setDockCollapsed((c) => !c)}
+                className="mt-1 mr-3 flex items-center gap-1.5 rounded-[0.5rem] px-2.5 py-1.5 text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-white/[0.03] hover:text-foreground"
+              >
+                <StatusIcon status="running" className="[&>svg]:size-3.5" />
+                <span className="flex-1 text-left">Working</span>
+                <span className="tabular-nums">{working.length}</span>
+                <ChevronDown
+                  aria-hidden="true"
+                  className={cn("size-3.5 shrink-0 transition-transform", dockCollapsed && "-rotate-90")}
+                />
+              </button>
+              {/* Folds to zero height but stays mounted, so the toggle's `aria-controls` always names an element;
+                  `inert` takes the folded rows out of the tab order and the accessibility tree. */}
+              <motion.div
+                id="working-dock"
+                layoutScroll
+                inert={dockCollapsed}
+                initial={false}
+                animate={dockCollapsed ? { height: 0, opacity: 0 } : { height: "auto", opacity: 1 }}
+                className="relative flex min-h-0 flex-col gap-0.5 overflow-auto"
+              >
+                <AnimatePresence initial={false} mode="popLayout">
+                  {working.map(threadTab)}
+                </AnimatePresence>
+              </motion.div>
+            </motion.section>
+          )}
+        </AnimatePresence>
+        <div className="pt-2 pr-3">
+          <AccountMenu />
+        </div>
       </div>
-    </div>
+    </SidebarMotion>
+  )
+}
+
+/** Rows fade in and out as they join or leave a list; `layout` slides the rest into place. */
+const FADE = { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } } as const
+/**
+ * The working dock fades in at full height: growing it would move the row sliding into it after that row measured
+ * its destination, so the row would land short and snap. Leaving, nothing slides into it, so it folds away.
+ */
+const REVEAL = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  exit: { height: 0, opacity: 0 },
+} as const
+const SPRING = { type: "spring", bounce: 0, duration: 0.3 } as const
+
+/**
+ * Shares one `LayoutGroup` across the list, the dock and the rail, so a thread whose run starts or ends slides
+ * between them (rows carry a `layoutId`) instead of vanishing from one and appearing in the other. Users who ask
+ * for reduced motion get the end state at once.
+ */
+function SidebarMotion({ children }: { children: ReactNode }) {
+  const reduce = useReducedMotion()
+  return (
+    <MotionConfig transition={reduce ? { duration: 0 } : SPRING}>
+      <LayoutGroup>{children}</LayoutGroup>
+    </MotionConfig>
   )
 }
 
 interface ThreadTabProps {
+  ref?: Ref<HTMLDivElement>
   task: Task
   now: number
   isOpen: boolean
@@ -285,11 +361,20 @@ interface ThreadTabProps {
   onArchive: () => void
 }
 
-/** One thread in the expanded sidebar: repo and age, title, branch and status, with an archive button on hover. */
-function ThreadTab({ task, now, isOpen, archiving, onArchive }: ThreadTabProps) {
+/**
+ * One thread in the expanded sidebar: repo and age, title, branch and status, with an archive button on hover.
+ * Takes a `ref` because `AnimatePresence`'s `popLayout` measures the row it lifts out.
+ */
+function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabProps) {
   const [checkout, ...otherCheckouts] = task.checkouts
   return (
-    <div className="group/thread relative mt-0.5 flex min-w-0 shrink-0">
+    <motion.div
+      ref={ref}
+      layout="position"
+      layoutId={`thread-${task.id}`}
+      {...FADE}
+      className="group/thread relative mt-0.5 flex min-w-0 shrink-0"
+    >
       <NavLink
         to={threadPath(task.id)}
         title={[task.title, ...task.checkouts.map((c) => `${c.repo} · ${c.branch}`)].join("\n")}
@@ -345,7 +430,7 @@ function ThreadTab({ task, now, isOpen, archiving, onArchive }: ThreadTabProps) 
       >
         <ArchiveBoxIcon />
       </Button>
-    </div>
+    </motion.div>
   )
 }
 
