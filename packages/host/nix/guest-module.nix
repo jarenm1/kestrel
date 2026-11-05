@@ -2,6 +2,8 @@
 
 let
   volumeMount = "/var/lib/kestrel";
+  # The box's home: the guest agent writes its package-manager configs there (under the volume, owned by the box).
+  boxHome = "${volumeMount}/home";
   boxEnvFile = "${volumeMount}/box.env";
   guestSocketDir = "/run/kestrel-guest";
   kestrelUid = 990;
@@ -20,14 +22,13 @@ let
   # resume the store and database layers are already on the volume.
   volumeSetup = pkgs.writeShellApplication {
     name = "kestrel-volume-setup";
-    runtimeInputs = with pkgs; [ coreutils util-linux gnugrep systemd ];
+    runtimeInputs = with pkgs; [ coreutils util-linux gnugrep systemd nix ];
     text = ''
       vol=${volumeMount}
       mountpoint -q "$vol" || { echo "kestrel-volume-setup: $vol is not mounted" >&2; exit 1; }
-      install -d -o kestrel -g kestrel "$vol"
 
-      # The Nix database lives on the volume, so it belongs to this box and survives suspend. The store overlay is
-      # stacked by the guest agent before this runs (see --nix-lower and --nix-tmp-upper in the agent unit).
+      # The Nix database lives on the volume, so it belongs to this box and survives suspend. The guest agent stacks
+      # the store overlay before this runs; its defaults match this image's layout.
       systemctl stop nix-daemon.service
       if [ ! -d "$vol/.nix-var" ]; then
         mkdir -p "$vol/.nix-var"
@@ -36,6 +37,8 @@ let
       if ! mountpoint -q /nix/var; then
         mount --bind "$vol/.nix-var" /nix/var
       fi
+      # The bind hides the boot-time database kestrel-nix-db loaded, so register the image's paths in the volume's.
+      nix-store --load-db < ${imageRegistration}
       systemctl start nix-daemon.service
     '';
   };
@@ -79,7 +82,7 @@ in
   ];
   # `cbc` must load first: libnvdimm pulls in encrypted-keys, which needs cbc(aes) at init.
   boot.initrd.kernelModules = [ "cbc" "virtio_pmem" "nd_pmem" "erofs" "overlay" ];
-  boot.kernelModules = [ "vmw_vsock_virtio_transport" "ptp_kvm" ];
+  boot.kernelModules = [ "vmw_vsock_virtio_transport" "ptp_kvm" "tun" ];
   boot.blacklistedKernelModules = [ "nouveau" ];
   # NVIDIA open modules ship in the image and load on GPU hot-plug, never at boot.
   boot.extraModulePackages = [ config.boot.kernelPackages.nvidiaPackages.stable.open ];
@@ -141,7 +144,7 @@ in
     isSystemUser = true;
     uid = kestrelUid;
     group = "kestrel";
-    home = volumeMount;
+    home = boxHome;
     createHome = false;
     linger = true;
   };
@@ -191,7 +194,7 @@ in
     requires = [ "kestrel-volume.service" ];
     after = [ "kestrel-volume.service" "user@${toString kestrelUid}.service" ];
     unitConfig.ConditionPathExists = boxEnvFile;
-    path = systemDeps;
+    path = systemDeps ++ [ pkgs.nix ];
     environment = {
       XDG_RUNTIME_DIR = kestrelRuntimeDir;
       DBUS_SESSION_BUS_ADDRESS = "unix:path=${kestrelRuntimeDir}/bus";
