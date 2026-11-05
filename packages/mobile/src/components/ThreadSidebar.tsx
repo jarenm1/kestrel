@@ -307,17 +307,26 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   const dockOpen = working.length > 0;
   const reduceMotion = useReducedMotion();
 
-  const [dockCollapsed, setDockCollapsed] = useState(false);
+  const [dockCollapsed, setDockCollapsed] = useState(true);
+  // Folded until the saved preference is read: a restored fold must be the dock's first visible state, never an
+  // animated reveal of its rows that the user (or a keyboard) could touch on the way.
+  const fold = useSharedValue(0);
   const dockPreference = useRef({ loaded: false, toggled: false });
   useEffect(() => {
     let cancelled = false;
     void storage.getItem(DOCK_COLLAPSED_KEY).then((stored) => {
       if (cancelled || dockPreference.current.toggled) return;
       dockPreference.current.loaded = true;
-      if (stored === "1") setDockCollapsed(true);
+      const collapsed = stored === "1";
+      setDockCollapsed(collapsed);
+      // A restored preference is the dock's opening state, not a fold to animate.
+      fold.value = collapsed ? 0 : 1;
     }).catch(() => {
-      // A storage read that fails must not stop later choices from being saved.
+      // A failed read means "no saved preference": open at the default without animating, and keep saving choices.
+      if (cancelled || dockPreference.current.toggled) return;
       dockPreference.current.loaded = true;
+      setDockCollapsed(false);
+      fold.value = 1;
     });
     return () => {
       cancelled = true;
@@ -331,19 +340,18 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
   }, [dockCollapsed]);
   function toggleDock() {
     dockPreference.current.toggled = true;
-    setDockCollapsed((collapsed) => !collapsed);
+    const collapsed = !dockCollapsed;
+    setDockCollapsed(collapsed);
+    // Only a user's tap animates the fold; the persisted state is applied directly above.
+    fold.value = withTiming(collapsed ? 0 : 1, { duration: reduceMotion ? 0 : DOCK_ANIM_MS });
   }
 
   const presence = useSharedValue(dockOpen ? 1 : 0);
-  const fold = useSharedValue(dockCollapsed ? 0 : 1);
   const body = useSharedValue(0);
   const bodyMeasured = useRef(false);
   useEffect(() => {
     presence.value = withTiming(dockOpen ? 1 : 0, { duration: reduceMotion ? 0 : DOCK_ANIM_MS });
   }, [dockOpen, presence, reduceMotion]);
-  useEffect(() => {
-    fold.value = withTiming(dockCollapsed ? 0 : 1, { duration: reduceMotion ? 0 : DOCK_ANIM_MS });
-  }, [dockCollapsed, fold, reduceMotion]);
   useEffect(() => {
     // The first real measurement is the dock's opening size, not a change: growing it would make the drawer's
     // reveal stutter. Later row changes animate.
