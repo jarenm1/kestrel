@@ -239,6 +239,16 @@ export const nestBoxesOfUser = (sql: FleetSql, login: string): NestBoxRow[] =>
     .toArray()
     .map(toBoxRow)
 
+/** Boots a host is already committed to: a `create` in flight, or a parked box's `resume` sent to it. */
+export const nestBootsOnHost = (sql: FleetSql, hostId: string): number =>
+  sql
+    .exec<{ boots: number }>(
+      `SELECT COUNT(*) AS boots FROM nest_boxes WHERE host_id = ?
+       AND (pending_kind = 'create' OR (pending_kind = 'resume' AND state = 'parked'))`,
+      hostId,
+    )
+    .toArray()[0]?.boots ?? 0
+
 export const upsertNestHost = (sql: FleetSql, host: NestHostRow): void => {
   sql.exec(
     `INSERT INTO nest_hosts (id, slug, agent_version, image_id, capacity, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)

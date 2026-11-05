@@ -74,8 +74,8 @@ export const placeHost = (candidates: PlacementCandidate[]): PlacementCandidate 
 }
 
 /**
- * `capacity` once `boots` VMs planned on this host in one wake loop have taken their boot memory and their memory
- * image's disk. Placement inside the loop sees these as used, so the loop does not stack every box on the same host.
+ * `capacity` once `boots` VMs booting on this host (a create or resume in flight) have taken their boot memory and their
+ * memory image's disk. Placement sees these as used, so two placements never book the same space.
  */
 export const withPlannedBoots = (capacity: NestHostCapacity, boots: number): NestHostCapacity => ({
   ...capacity,

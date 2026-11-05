@@ -162,8 +162,11 @@ const newPairingCode = (): string =>
 const BOX_TAG = "box"
 const NEST_HOST_TAG = "nest-host"
 
-/** A Nest host socket's attachment: the host it belongs to, and whether its `hello` was accepted. */
-type NestAttachment = { hostId: string; hello: boolean }
+/** Longest an automation call waits for a Nest box to report `running`, and how often it checks. */
+const NEST_WAKE_TIMEOUT_MS = 60_000
+const NEST_WAKE_POLL_MS = 1_000
+/** A Nest host socket's attachment: the host, whether its `hello` was accepted, and whether a newer socket replaced it. */
+type NestAttachment = { hostId: string; hello: boolean; retired?: boolean }
 const nestAttachment = (ws: WebSocket): NestAttachment | null => ws.deserializeAttachment() as NestAttachment | null
 const HTTP_TIMEOUT_MS = 30_000
 /** Lifetime of a token the Hub signs for one call to a managed box. */
@@ -629,6 +632,9 @@ export class Hub extends DurableObject<Env> {
     if (!session) return UNAUTHENTICATED
     const owned = this.ownedBox(session.login, id)
     if (!owned) return NO_SUCH_BOX
+    if (changes.url !== undefined && changes.url !== owned.box.url && this.nest.isNestBox(id)) {
+      return { ok: false, status: 400, tag: "BadRequest", message: "a Nest box's URL is set by its host" }
+    }
     const box: UserBox = { ...owned.box, name: changes.name ?? owned.box.name, url: changes.url ?? owned.box.url }
     this.ctx.storage.sql.exec(
       "UPDATE user_boxes SET name = ?, url = ? WHERE id = ? AND login = ?",
@@ -720,12 +726,13 @@ export class Hub extends DurableObject<Env> {
     const limits = body.limits ?? NEST_STANDARD_LIMITS
     const shape = nestLimitsError(limits)
     if (shape !== null) return { ok: false, status: 400, tag: "BadRequest", message: shape }
+    const enroll = await this.nest.mintEnrollToken()
     const target = this.nest.placement()
     if (target === null) return NO_NEST_CAPACITY
     const id = crypto.randomUUID()
     const created = this.insertBox(session.login, { name: body.name, url: publicUrlFor(id, target.slug, domain) }, id)
     if (!created.ok) return created
-    await this.nest.createBox(id, session.login, target, limits)
+    this.nest.createBox(id, session.login, target, limits, enroll)
     await this.rearm()
     return this.userBoxView(session.login, id)
   }
@@ -1121,8 +1128,10 @@ export class Hub extends DurableObject<Env> {
   // -------------------------------------------------------------------------
 
   boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    const nestId = this.activeNestBox(login)
+    if (nestId !== null) return this.nestBoxCall(login, nestId, method, path, payload)
     const managed = managedBoxFor(this.ctx.storage.sql, login)
-    if (managed !== null) return this.managedBoxCall(managed, login, method, path, payload)
+    if (managed !== null) return this.directBoxCall(managed, login, method, path, payload)
     const box = this.ctx.getWebSockets(BOX_TAG)[0]
     if (!box) {
       return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
@@ -1143,11 +1152,43 @@ export class Hub extends DurableObject<Env> {
     return this.request(box, frame).then(async (res) => ({ ok: res.ok, status: res.status, body: await res.text() }))
   }
 
+  /** The user's active box when it is a Nest box they own; automation work for them goes there. */
+  private activeNestBox(login: string): string | null {
+    const id =
+      this.ctx.storage.sql.exec<{ id: string | null }>("SELECT active_box_id AS id FROM users WHERE login = ?", login).toArray()[0]?.id ?? null
+    return id !== null && this.nest.isNestBox(id) && this.ownedBox(login, id) !== null ? id : null
+  }
+
   /**
-   * One request straight to the user's managed box, with a short token for `login`. The box fetches the user's
+   * A call to a Nest box: the box is resumed and the call waits for it to report `running`. The URL and secret are read
+   * after the wake, since a wake can place the box on another host.
+   */
+  private async nestBoxCall(login: string, id: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    if (!(await this.wakeNestBox(login, id))) {
+      return { ok: false, status: 503, body: JSON.stringify({ message: "Nest box did not wake" }) }
+    }
+    const owned = this.ownedBox(login, id)
+    if (!owned) return { ok: false, status: 404, body: JSON.stringify({ message: "no such box" }) }
+    return this.directBoxCall({ id, url: owned.box.url, secret: owned.secret }, login, method, path, payload)
+  }
+
+  /** Resumes the box and polls until it reports `running`; false when that does not happen within NEST_WAKE_TIMEOUT_MS. */
+  private async wakeNestBox(login: string, id: string): Promise<boolean> {
+    if (!this.nest.resume(login, id).ok) return false
+    await this.rearm()
+    const deadline = Date.now() + NEST_WAKE_TIMEOUT_MS
+    while (!this.nest.isRunning(login, id)) {
+      if (Date.now() >= deadline) return false
+      await new Promise((resolve) => setTimeout(resolve, NEST_WAKE_POLL_MS))
+    }
+    return true
+  }
+
+  /**
+   * One request straight to a managed box or a Nest box, with a short token for `login`. The box fetches the user's
    * credentials itself (`ControlPaths.boxCredentials`), so the Hub sends none.
    */
-  private async managedBoxCall(
+  private async directBoxCall(
     box: ManagedBoxRow,
     login: string,
     method: "GET" | "POST",
@@ -1417,7 +1458,7 @@ export class Hub extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now()
-    await this.nest.expire(now)
+    this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
       .toArray()
@@ -1651,7 +1692,11 @@ export class Hub extends DurableObject<Env> {
     }
     // Latest connection wins: the previous socket for this host is dropped.
     for (const old of this.ctx.getWebSockets(NEST_HOST_TAG)) {
-      if (nestAttachment(old)?.hostId === hostId) closeQuietly(old, 4000, "replaced")
+      const attachment = nestAttachment(old)
+      if (attachment === null || attachment.hostId !== hostId) continue
+      // A retired socket takes no more frames: its host now talks over the new connection.
+      old.serializeAttachment({ ...attachment, retired: true })
+      closeQuietly(old, 4000, "replaced")
     }
     const pair = new WebSocketPair()
     const client = pair[0]
@@ -1670,7 +1715,7 @@ export class Hub extends DurableObject<Env> {
   private nestSocket(hostId: string): WebSocket | null {
     for (const ws of this.ctx.getWebSockets(NEST_HOST_TAG)) {
       const attachment = nestAttachment(ws)
-      if (attachment?.hostId === hostId && attachment.hello) return ws
+      if (attachment?.hostId === hostId && attachment.hello && !attachment.retired) return ws
     }
     return null
   }
@@ -1704,6 +1749,10 @@ export class Hub extends DurableObject<Env> {
       closeQuietly(ws, 1011, "no host")
       return
     }
+    if (attachment.retired) {
+      closeQuietly(ws, 4000, "replaced")
+      return
+    }
     if (typeof message !== "string") {
       closeQuietly(ws, 1003, "binary frames are not Nest frames")
       return
@@ -1733,7 +1782,7 @@ export class Hub extends DurableObject<Env> {
         this.refuseNestHost(ws, "hello sent twice")
         return
       case "capacity":
-        await this.nest.capacity(attachment.hostId, frame.capacity)
+        this.nest.capacity(attachment.hostId, frame.capacity)
         break
       case "vm":
         this.nest.vm(attachment.hostId, frame.vm)

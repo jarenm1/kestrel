@@ -78,10 +78,11 @@ const addBox = (login: string, boxId: string) => {
 
 const placeBox = async (login: string, boxId: string) => {
   addBox(login, boxId)
+  const enroll = await fleet.mintEnrollToken()
   const target = fleet.placement()
   if (target === null) throw new Error("no host to place the box on")
   db.run("UPDATE user_boxes SET url = ? WHERE id = ?", `https://${boxId}.${target.slug}.${DOMAIN}`, boxId)
-  await fleet.createBox(boxId, login, target, NEST_STANDARD_LIMITS)
+  fleet.createBox(boxId, login, target, NEST_STANDARD_LIMITS, enroll)
 }
 
 const commandsTo = (hostId: string): { commandId: string; command: NestHostCommand }[] =>
@@ -293,10 +294,10 @@ describe("VM reports and epochs", () => {
     expect(fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
     const first = lastCommand("host-a", "resume")
 
-    await fleet.expire(now + 10 * MINUTE)
+    fleet.expire(now + 10 * MINUTE)
     const second = lastCommand("host-a", "resume")
     expect(second.commandId).not.toBe(first.commandId)
-    expect(second.command).toMatchObject({ ownerEpoch: 3, volumeRef: "vol-1" })
+    expect(second.command).toMatchObject({ ownerEpoch: 2, vmId: first.command.vmId, volumeRef: "vol-1" })
   })
 
   test("parked boxes woken in one wake loop are spread, so a host is not booked past its room", async () => {

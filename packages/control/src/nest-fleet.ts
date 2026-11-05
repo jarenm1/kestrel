@@ -39,6 +39,7 @@ import {
   nestBoxesOfUser,
   nestBoxesOnHost,
   nestBoxesWanted,
+  nestBootsOnHost,
   nestHostRow,
   nestHostRows,
   nextNestDeadline,
@@ -57,10 +58,14 @@ export interface NestLink {
 /** Same shape as the Hub's `BoxOutcome` failure, so the Hub returns these unchanged. */
 export type NestOutcome<T> = { ok: true; value: T } | { ok: false; status: number; tag: string; message: string }
 
+/** An enrollment token and its stored hash, minted before the synchronous placement it goes with. */
+export type MintedToken = { token: string; hash: string }
+
 const failure = (status: number, tag: string, message: string): NestOutcome<never> => ({ ok: false, status, tag, message })
 
 const NO_SUCH_BOX = failure(404, "NoSuchBox", "no such box")
 const IN_FLIGHT = failure(409, "CommandInFlight", "a command for this box is already in flight")
+const HOST_OFFLINE = failure(409, "HostOffline", "the host holding this box is offline")
 const DONE: NestOutcome<null> = { ok: true, value: null }
 
 /** The fields of a `hello` frame the fleet needs; the Hub passes the decoded frame through. */
@@ -102,20 +107,19 @@ export class NestFleet {
       this.vm(frame.hostId, vm)
       this.reconcileLimits(frame.hostId, vm)
     }
-    for (const row of nestBoxesOnHost(this.sql, frame.hostId)) {
-      if (row.pendingId !== null) await this.resend(row)
-    }
+    const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
+    for (const row of inFlight) await this.resend(row.boxId)
     this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
-    await this.wakeWanted()
+    this.wakeWanted()
   }
 
   /** A capacity report: stored, the lease renewed, and boxes that were waiting for room placed. */
-  async capacity(hostId: string, capacity: NestHostCapacity): Promise<void> {
+  capacity(hostId: string, capacity: NestHostCapacity): void {
     const host = nestHostRow(this.sql, hostId)
     if (host === null) return
     upsertNestHost(this.sql, { ...host, capacity, lastSeenAt: new Date(this.clock()).toISOString() })
     this.link.send(hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
-    await this.wakeWanted()
+    this.wakeWanted()
   }
 
   /** A VM report from a host: the host's state is the truth for placement, state, size and GPUs. */
@@ -143,7 +147,9 @@ export class NestFleet {
     row.gpus = report.gpus.length
     row.volumeRef = report.volumeRef
     row.backedUpAt = report.backedUpAt
-    if (report.state === "parked") row.hostId = null
+    // A parked report with nothing in flight releases the box from this host. While a command is in flight the claim
+    // stays until that command's result settles, since the two frames may arrive in either order.
+    if (report.state === "parked" && row.pendingId === null) row.hostId = null
     saveNestBox(this.sql, row)
   }
 
@@ -159,7 +165,7 @@ export class NestFleet {
       this.forget(row)
       return
     }
-    // A parked box whose resume failed has no VM to fall back to; the next wake places it again.
+    // A parked box whose resume the host refused was never started there, so no host holds its claim.
     if (kind === "resume" && !ok && row.state === "parked") row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
@@ -186,10 +192,11 @@ export class NestFleet {
 
   /**
    * Drops in-flight markers whose deadline passed. The host's VM reports stay the truth: an expired `create` marks the
-   * box failed, so the owner can delete it; an expired `resume` is retried; other commands are the owner's to retry.
-   * A late `result` for an expired command finds no marker and is ignored.
+   * box failed, so the owner can delete it; an expired `resume` is retried on the same host while that host holds the
+   * box's claim; other commands are the owner's to retry. A late `result` for an expired command finds no marker and is
+   * ignored.
    */
-  async expire(now: number): Promise<void> {
+  expire(now: number): void {
     for (const row of nestBoxesDue(this.sql, now)) {
       console.warn(`nest: ${row.pendingKind} for ${row.boxId} timed out`)
       const kind = row.pendingKind
@@ -198,7 +205,7 @@ export class NestFleet {
       if (kind === "resume") row.wakeWanted = true
       saveNestBox(this.sql, row)
     }
-    await this.wakeWanted()
+    this.wakeWanted()
   }
 
   nextDeadline(): number | null {
@@ -230,14 +237,17 @@ export class NestFleet {
   // Owner actions
   // ---------------------------------------------------------------------------
 
-  /** The connected host a new box would go to, or null when none has room. `boots` counts boots planned in one wake loop. */
-  placement(boots: ReadonlyMap<string, number> = new Map()): PlacementCandidate | null {
+  /**
+   * The connected host a new box would go to, or null when none has room. Boots a host is already committed to count
+   * against its room, so two placements never book the same space.
+   */
+  placement(): PlacementCandidate | null {
     const candidates = nestHostRows(this.sql)
       .filter((host) => this.link.connected(host.id))
       .map((host) => ({
         hostId: host.id,
         slug: host.slug,
-        capacity: withPlannedBoots(host.capacity, boots.get(host.id) ?? 0),
+        capacity: withPlannedBoots(host.capacity, nestBootsOnHost(this.sql, host.id)),
       }))
     return placeHost(candidates)
   }
@@ -247,8 +257,17 @@ export class NestFleet {
     return nestBox(this.sql, boxId) !== null
   }
 
-  /** Places a new box on `target`: epoch 1, a fresh VM id, and a create with a new enrollment token. */
-  async createBox(boxId: string, login: string, target: PlacementCandidate, limits: NestLimits): Promise<void> {
+  /** A fresh enrollment token and its hash. Minted before placement, so nothing awaits between placing and recording a box. */
+  async mintEnrollToken(): Promise<MintedToken> {
+    const token = newEnrollToken()
+    return { token, hash: await enrollTokenHash(token) }
+  }
+
+  /**
+   * Records a new box on `target`, a host `placement()` just chose: epoch 1, a fresh VM id, and a create carrying the
+   * enrollment token. Synchronous on purpose: the placement and the box it reserves are recorded in one step.
+   */
+  createBox(boxId: string, login: string, target: PlacementCandidate, limits: NestLimits, enroll: MintedToken): void {
     const row: NestBoxRow = {
       boxId,
       login,
@@ -264,8 +283,8 @@ export class NestFleet {
       memoryBytes: 0,
       gpus: 0,
       wakeWanted: false,
-      enrollHash: null,
-      enrollExpiresAt: null,
+      enrollHash: enroll.hash,
+      enrollExpiresAt: this.clock() + NEST_ENROLL_TOKEN_TTL_MS,
       pendingId: null,
       pendingKind: null,
       pendingCommand: null,
@@ -273,7 +292,6 @@ export class NestFleet {
       createFailed: false,
     }
     insertNestBox(this.sql, row)
-    const token = await this.issueToken(row)
     const command: NestHostCommand = {
       _tag: "create",
       boxId,
@@ -282,10 +300,13 @@ export class NestFleet {
       ownerEpoch: row.ownerEpoch,
       limits,
       publicUrl: publicUrlFor(boxId, target.slug, this.domain),
-      enrollToken: token,
+      enrollToken: enroll.token,
     }
     // The stored copy carries no token: a resend mints a fresh one, and the plaintext is never kept.
-    this.dispatch(row, { ...command, enrollToken: "" }, command)
+    if (!this.dispatch(row, { ...command, enrollToken: "" }, command)) {
+      row.createFailed = true
+      saveNestBox(this.sql, row)
+    }
   }
 
   resume(login: string, boxId: string): NestOutcome<null> {
@@ -304,8 +325,7 @@ export class NestFleet {
     if (row === null) return NO_SUCH_BOX
     if (row.pendingId !== null) return IN_FLIGHT
     if (row.state !== "running" || row.hostId === null) return failure(409, "NotRunning", "only a running box can be suspended")
-    this.dispatch(row, { _tag: "suspend", boxId })
-    return DONE
+    return this.dispatch(row, { _tag: "suspend", boxId }) ? DONE : HOST_OFFLINE
   }
 
   /** Parks a running or suspended box: its host backs the volume up and releases the VM. The next wake places it. */
@@ -316,8 +336,7 @@ export class NestFleet {
     if ((row.state !== "running" && row.state !== "suspended") || row.hostId === null) {
       return failure(409, "NotRunning", "only a running or suspended box can be parked")
     }
-    this.dispatch(row, { _tag: "park", boxId })
-    return DONE
+    return this.dispatch(row, { _tag: "park", boxId }) ? DONE : HOST_OFFLINE
   }
 
   /** Hot-plugs or unplugs the box's GPU while it runs; only a box whose limits allow an on-demand GPU may. */
@@ -330,8 +349,7 @@ export class NestFleet {
     if (attach && row.gpus > 0) return failure(409, "GpuAttached", "this box already has its GPU")
     if (!attach && row.gpus === 0) return failure(409, "NoGpu", "this box has no GPU to detach")
     const command: NestHostCommand = attach ? { _tag: "gpuAttach", boxId } : { _tag: "gpuDetach", boxId }
-    this.dispatch(row, command)
-    return DONE
+    return this.dispatch(row, command) ? DONE : HOST_OFFLINE
   }
 
   setLimits(login: string, boxId: string, limits: NestLimits): NestOutcome<null> {
@@ -339,9 +357,11 @@ export class NestFleet {
     if (row === null) return NO_SUCH_BOX
     if (row.pendingId !== null) return IN_FLIGHT
     row.limits = limits
-    if (row.hostId === null) saveNestBox(this.sql, row)
-    else this.dispatch(row, { _tag: "setLimits", boxId, limits })
-    return DONE
+    if (row.hostId === null) {
+      saveNestBox(this.sql, row)
+      return DONE
+    }
+    return this.dispatch(row, { _tag: "setLimits", boxId, limits }) ? DONE : HOST_OFFLINE
   }
 
   /**
@@ -357,9 +377,12 @@ export class NestFleet {
       if (host === undefined) return failure(409, "NoHost", "no Nest host is connected to delete this box")
       row.hostId = host.id
     }
-    if (!this.link.connected(row.hostId)) return failure(409, "HostOffline", "the host holding this box is offline")
-    this.dispatch(row, { _tag: "destroy", boxId })
-    return DONE
+    return this.dispatch(row, { _tag: "destroy", boxId }) ? DONE : HOST_OFFLINE
+  }
+
+  /** Whether the owner's box is running now; the automation wake waits on this. */
+  isRunning(login: string, boxId: string): boolean {
+    return this.ownedRow(login, boxId)?.state === "running"
   }
 
   /** The owner's view of each Nest box, keyed by box id. */
@@ -397,9 +420,14 @@ export class NestFleet {
     this.link.send(hostId, { _tag: "command", commandId: crypto.randomUUID(), command })
   }
 
-  /** Records and sends a command, marking the box as having one in flight. */
-  private dispatch(row: NestBoxRow, stored: NestHostCommand, wire: NestHostCommand = stored): void {
+  /**
+   * Sends a command to the box's host and records it as in flight. When the socket refuses the frame nothing is
+   * recorded, so the caller reports the failure and the box never waits on a command no host received.
+   */
+  private dispatch(row: NestBoxRow, stored: NestHostCommand, wire: NestHostCommand = stored): boolean {
+    if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
+    if (!this.link.send(row.hostId, { _tag: "command", commandId, command: wire })) return false
     const timeout = commandTimeoutMs(stored._tag)
     row.pendingId = commandId
     row.pendingKind = stored._tag
@@ -407,27 +435,34 @@ export class NestFleet {
     row.pendingDeadline = timeout === null ? null : this.clock() + timeout
     row.wakeWanted = false
     saveNestBox(this.sql, row)
-    if (row.hostId !== null) this.link.send(row.hostId, { _tag: "command", commandId, command: wire })
+    return true
   }
 
-  /** Resends an in-flight command under its id; a create gets a fresh enrollment token. */
-  private async resend(row: NestBoxRow): Promise<void> {
-    if (row.pendingId === null || row.pendingCommand === null || row.hostId === null) return
-    const stored = row.pendingCommand
-    if (stored._tag !== "create") {
-      this.link.send(row.hostId, { _tag: "command", commandId: row.pendingId, command: stored })
+  /**
+   * Resends a box's in-flight command under its id, so the host answers it once. A create the box has not enrolled
+   * from gets a fresh enrollment token. The row is read again after the await: a result or enrollment that landed
+   * meanwhile must not be overwritten.
+   */
+  private async resend(boxId: string): Promise<void> {
+    const row = nestBox(this.sql, boxId)
+    if (row === null || row.pendingId === null || row.pendingCommand === null || row.hostId === null) return
+    const { pendingId, hostId, pendingCommand: stored } = row
+    if (stored._tag !== "create" || row.enrollHash === null) {
+      this.link.send(hostId, { _tag: "command", commandId: pendingId, command: stored })
       return
     }
-    const token = await this.issueToken(row)
-    saveNestBox(this.sql, row)
-    this.link.send(row.hostId, { _tag: "command", commandId: row.pendingId, command: { ...stored, enrollToken: token } })
-  }
-
-  private async issueToken(row: NestBoxRow): Promise<string> {
-    const token = newEnrollToken()
-    row.enrollHash = await enrollTokenHash(token)
-    row.enrollExpiresAt = this.clock() + NEST_ENROLL_TOKEN_TTL_MS
-    return token
+    const minted = await this.mintEnrollToken()
+    const current = nestBox(this.sql, boxId)
+    if (current === null || current.pendingId !== pendingId || current.hostId !== hostId) return
+    if (current.enrollHash === null) {
+      // Enrolled while the token was minted: the box has its secret, so the create goes out without one.
+      this.link.send(hostId, { _tag: "command", commandId: pendingId, command: stored })
+      return
+    }
+    current.enrollHash = minted.hash
+    current.enrollExpiresAt = this.clock() + NEST_ENROLL_TOKEN_TTL_MS
+    saveNestBox(this.sql, current)
+    this.link.send(hostId, { _tag: "command", commandId: pendingId, command: { ...stored, enrollToken: minted.token } })
   }
 
   private clearPending(row: NestBoxRow): void {
@@ -444,37 +479,48 @@ export class NestFleet {
     return host !== null && url === publicUrlFor(row.boxId, host.slug, this.domain)
   }
 
-  /** Brings a waiting box up: a suspended box on a connected host resumes there; a parked one is placed. */
-  private wake(row: NestBoxRow, boots: Map<string, number> = new Map()): void {
+  /**
+   * Brings a waiting box up. A box with a host to resume on (a suspended box, or a parked box whose resume claim is
+   * still held by a host) resumes there. Only a parked box with no claim is placed on a host with room.
+   */
+  private wake(row: NestBoxRow): void {
     if (row.pendingId !== null) return
-    if (row.state === "suspended" && row.hostId !== null) {
-      if (!this.link.connected(row.hostId)) {
-        row.wakeWanted = true
-        saveNestBox(this.sql, row)
-        return
-      }
-      this.dispatch(row, this.resumeCommand(row))
+    if (row.state === "suspended" || (row.state === "parked" && row.hostId !== null)) {
+      this.resumeOn(row)
       return
     }
     if (row.state !== "parked") return
-    const target = this.placement(boots)
+    const target = this.placement()
     if (target === null) {
-      row.wakeWanted = true
-      saveNestBox(this.sql, row)
+      this.holdWake(row)
       return
     }
-    boots.set(target.hostId, (boots.get(target.hostId) ?? 0) + 1)
     // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report.
     row.hostId = target.hostId
     row.ownerEpoch += 1
     row.vmId = crypto.randomUUID()
     this.sql.exec("UPDATE user_boxes SET url = ? WHERE id = ?", publicUrlFor(row.boxId, target.slug, this.domain), row.boxId)
-    this.dispatch(row, this.resumeCommand(row))
+    if (!this.dispatch(row, this.resumeCommand(row))) this.holdWake(row)
   }
 
-  private async wakeWanted(): Promise<void> {
-    const boots = new Map<string, number>()
-    for (const row of nestBoxesWanted(this.sql)) this.wake(row, boots)
+  /**
+   * A resume on the box's own host. A parked claim is held until that host answers or disconnects: a resume that timed
+   * out may still be running there, so the box never starts a second copy elsewhere. When the host is offline the box
+   * waits for it to return.
+   */
+  private resumeOn(row: NestBoxRow): void {
+    const hostId = row.hostId
+    if (hostId === null || !this.link.connected(hostId) || !this.dispatch(row, this.resumeCommand(row))) this.holdWake(row)
+  }
+
+  /** The box stays waiting; the wake loop tries it again on the next capacity report, hello, or expiry. */
+  private holdWake(row: NestBoxRow): void {
+    row.wakeWanted = true
+    saveNestBox(this.sql, row)
+  }
+
+  private wakeWanted(): void {
+    for (const row of nestBoxesWanted(this.sql)) this.wake(row)
   }
 
   private resumeCommand(row: NestBoxRow): NestHostCommand {
