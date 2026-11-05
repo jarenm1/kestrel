@@ -68,8 +68,9 @@ on the box; keep the task's CPU, RAM and storage limits, but do not treat them a
 2. The launched process leads a new process group. The coordinator records that group and asks the sandbox to give the
    process only render/compute nodes and drivers.
 3. On success, failure, timeout or interruption, it sends `SIGKILL` to the group, then waits (bounded, 5 seconds by
-   default) until no member remains before the lease is marked free. The next GPU job cannot start on a stale process
-   still holding the device open.
+   default) for no member to remain. The lease is marked free after that wait whether or not the group is gone. If a
+   member is still alive then, the coordinator logs a warning, and a later GPU job can share the device with that
+   process. A process stuck in the driver can outlive `SIGKILL`.
 4. Sandboxed launches run under bubblewrap with `--unshare-pid`, so the sandbox is PID 1 of its own PID namespace.
    Killing the sandbox kills everything it started, including a process that tried to detach. Under `strict`, the
    launch also joins the task's network namespace as usual; a headless GPU launch does not join the desktop's X socket
