@@ -307,13 +307,17 @@ rejected before any object is touched.
 - One tap per VM (`kn-<n>`), routed, no bridge: the host side has `169.254.0.1/32`, the guest gets a unique
   `10.77.x.y/32` with its default route on-link via `169.254.0.1`, and the host routes that /32 to the tap. Template
   clones share a MAC, which is harmless on point-to-point links.
-- nftables (`inet kestrel`): tap traffic is dropped unless its source is that VM's assigned address. The host agent
-  adds each tap to the `tap_addrs` set (`ifname . ipv4_addr`) when it creates the tap
-  (`nft add element inet kestrel tap_addrs { "kn-<n>" . <vm-ip> }`); the `tap_source` chain enforces the set on forward
-  and input. Guests reach public internet addresses only, through masquerade on the uplink, never private, CGNAT,
-  loopback or link-local ranges. They cannot reach each other or the host, except the host's dependency cache, Nix
-  cache and DNS on `169.254.0.1` (TCP 3141, 5000, 53; UDP 53). Everything else from a tap, including SSH and ping, is
-  dropped. Ingress reaches each VM's port 8787.
+- nftables (`inet kestrel`, `ip kestrel-nat`): the host NixOS module (`packages/host/nix/host-module.nix`) owns them.
+  It declares the tables, the chains, and the `tap_addrs` set (`ifname . ipv4_addr`). The host agent never creates,
+  flushes or reloads a table; it only adds and deletes `tap_addrs` elements. It adds a tap's element when the tap comes
+  up (`nft add element inet kestrel tap_addrs { "kn-<n>" . <vm-ip> }`) and deletes it when the tap goes. Every interval
+  it lists the set and re-adds the element of each live tap that is missing, because reloading or stopping
+  `nftables.service` flushes the set while VMs keep running. If the set is absent, the agent logs an error each interval
+  and does not create it; at startup it refuses to start. The `tap_source` chain drops tap traffic unless its source is
+  that VM's assigned address, on forward and input. Guests reach public internet addresses only, through masquerade on
+  the uplink, never private, CGNAT, loopback or link-local ranges. They cannot reach each other or the host, except the
+  host's dependency cache, Nix cache and DNS on `169.254.0.1` (TCP 3141, 5000, 53; UDP 53). Everything else from a tap,
+  including SSH and ping, is dropped. Ingress reaches each VM's port 8787.
 - DNS: `unbound` on `169.254.0.1:53` answers `10.77.0.0/16` and refuses everything else. The host agent sends
   `dns: ["169.254.0.1"]` in `configure`.
 - `tc` limits each tap's egress (default 200 Mbit/s).
