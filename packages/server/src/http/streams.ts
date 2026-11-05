@@ -246,8 +246,11 @@ const routeStream = (route: StreamRoute, user: string, socket: StreamSocket): Ef
 export const serveStream = (route: StreamRoute, user: string, rawSocket: StreamSocket): Effect.Effect<void, never, WsServices> =>
   Effect.gen(function* () {
     const tracker = yield* ActivityTracker
+    // Forwarded one by one: RelayStream's methods live on its prototype, where an object spread would drop them.
     const socket: StreamSocket = {
-      ...rawSocket,
+      sendText: (data) => rawSocket.sendText(data),
+      close: (code, reason) => rawSocket.close(code, reason),
+      onClose: (listener) => rawSocket.onClose(listener),
       onText: (listener) =>
         rawSocket.onText((data) => {
           Effect.runSync(tracker.touch)
