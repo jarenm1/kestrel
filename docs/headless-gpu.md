@@ -62,8 +62,9 @@ on the box; keep the task's CPU, RAM and storage limits, but do not treat them a
 
 `workspace_exec` GPU work is supervised by `GpuCoordinator` (`packages/server/src/core/gpu-coordinator.ts`):
 
-1. Before launching, it checks that the run may use the GPU: a standing `gpu_request` on an on-demand box, or a device
-   present on the host. A run without a grant fails closed.
+1. Before launching, it checks that the run may use the GPU. On an on-demand box that is the run's own standing
+   `gpu_request`, once the host has attached the GPU; a device present without that grant belongs to another run and
+   does not count. On a host with a static GPU it is a device present on the host. A run without a grant fails closed.
 2. The launched process leads a new process group. The coordinator records that group and asks the sandbox to give the
    process only render/compute nodes and drivers.
 3. On success, failure, timeout or interruption, it sends `SIGKILL` to the group, then waits (bounded, 5 seconds by

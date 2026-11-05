@@ -685,17 +685,16 @@ export const CoreLive = Layer.effect(
     const sandboxSettings = sandboxSettingsOf(config)
     const platform = yield* Effect.serviceOption(BoxPlatform)
     /**
-     * GPU work is allowed when this run holds an on-demand grant that is attached, or when the host has a GPU device
-     * right now. A box that offers neither fails closed instead of running the command on the CPU under a GPU request.
+     * GPU work is allowed when this run holds an attached on-demand grant, or when a box with a static GPU has a device
+     * right now. On an on-demand box a device present without this run's grant belongs to another run, and its release
+     * detaches it, so it does not count. A box that offers neither fails closed.
      */
     const gpu = makeGpuCoordinator({
       available: (runId) =>
         Option.match(platform, {
           onNone: () => Effect.sync(() => hasGpuDevice()),
           onSome: (p) =>
-            p.gpuOnDemand === null
-              ? Effect.sync(() => hasGpuDevice())
-              : p.gpuOnDemand.available(runId).pipe(Effect.map((granted) => granted || hasGpuDevice())),
+            p.gpuOnDemand === null ? Effect.sync(() => hasGpuDevice()) : p.gpuOnDemand.available(runId),
         }),
     })
     const textGenerator = makeTextGenerator({ config, cliAuth, broker })
