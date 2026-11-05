@@ -5,7 +5,7 @@
 //! manifest is the commit point: the baseline advances only after the manifest is stored.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::crypto::BoxKey;
 use crate::extents;
-use crate::files::{FileLock, write_file_atomic};
+use crate::files::{FileLock, suffixed, sync_parent, write_file_atomic};
 use crate::manifest::{
     CHUNK_SIZE, Manifest, check_ref, chunk_key, manifest_key, manifest_number, manifests_prefix,
     random_token,
@@ -45,24 +45,18 @@ pub struct DeleteOutput {
     pub deleted: u64,
 }
 
-/// Removes a path when dropped unless disarmed.
-pub struct Cleanup(Option<PathBuf>);
+/// Removes a path when dropped.
+pub struct Cleanup(PathBuf);
 
 impl Cleanup {
     pub fn new(path: PathBuf) -> Self {
-        Self(Some(path))
-    }
-
-    pub fn disarm(&mut self) {
-        self.0 = None;
+        Self(path)
     }
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            fs::remove_file(path).ok();
-        }
+        fs::remove_file(&self.0).ok();
     }
 }
 
@@ -271,8 +265,17 @@ pub fn restore(
         .ok_or_else(|| anyhow!("manifest {volume_ref} is missing"))?;
     let manifest = Manifest::open(&bytes, key, box_id, volume_ref)?;
 
-    let file = File::create_new(dest).with_context(|| format!("creating {}", dest.display()))?;
-    let mut guard = Cleanup::new(dest.to_path_buf());
+    ensure!(!dest.exists(), "{} already exists", dest.display());
+    // The image is built under a staging name and linked to `dest` only once complete, so `dest` never holds a partial
+    // restore. A crash leaves only the staging file, which the next attempt replaces.
+    let staging = suffixed(dest, ".partial");
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&staging)
+        .with_context(|| format!("creating {}", staging.display()))?;
+    let _staging = Cleanup::new(staging.clone());
     file.set_len(manifest.size_bytes)?;
     let work: Vec<(usize, String)> = manifest
         .chunks
@@ -287,7 +290,10 @@ pub fn restore(
         Ok(())
     })?;
     file.sync_all()?;
-    guard.disarm();
+    drop(file);
+    // `hard_link` fails if `dest` appeared meanwhile, so a restore never replaces an existing file.
+    fs::hard_link(&staging, dest).with_context(|| format!("creating {}", dest.display()))?;
+    sync_parent(dest)?;
     Ok(RestoreOutput {
         bytes: manifest.size_bytes,
     })
@@ -373,6 +379,20 @@ mod tests {
             !dest.exists(),
             "a failed restore must not leave a partial file"
         );
+        assert!(!dir.path().join("restored.raw.partial").exists());
+    }
+
+    #[test]
+    fn restore_never_replaces_an_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = volume(dir.path(), 1);
+        let out = backup(&path, BOX, dir.path(), &store, &key).unwrap();
+        let dest = dir.path().join("restored.raw");
+        fs::write(&dest, b"keep").unwrap();
+        assert!(restore(&out.volume_ref, BOX, &store, &key, &dest).is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"keep");
     }
 
     #[test]
