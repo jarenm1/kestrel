@@ -59,6 +59,8 @@ struct Lru {
     /// path -> (tick, size)
     by_path: HashMap<PathBuf, (u64, u64)>,
     by_tick: BTreeMap<u64, PathBuf>,
+    /// Cache key of the metadata fetch that wrote each link file. A link is served only for the fetch that owns it.
+    owners: HashMap<PathBuf, String>,
 }
 
 impl Lru {
@@ -80,11 +82,13 @@ impl Lru {
         self.by_tick.insert(self.tick, path.to_owned());
     }
 
-    fn contains(&self, path: &Path) -> bool {
-        self.by_path.contains_key(path)
+    /// Whether `path` is a link that the latest fetch of `owner` wrote. A link another fetch has since rewritten is not.
+    fn owned_by(&self, path: &Path, owner: &str) -> bool {
+        self.owners.get(path).is_some_and(|o| o.as_str() == owner)
     }
 
     fn remove(&mut self, path: &Path) {
+        self.owners.remove(path);
         if let Some((tick, size)) = self.by_path.remove(path) {
             self.by_tick.remove(&tick);
             self.bytes -= size;
@@ -187,11 +191,27 @@ impl Store {
         }
         found.sort_by_key(|(mtime, _, _)| *mtime);
         let mut lru = lock_index(&self.lru);
+        let links_dir = self.root.join("links");
         for (_, path, size) in found {
-            lru.insert(path, size);
+            let owner = if path.parent() == Some(links_dir.as_path()) {
+                Self::link_owner(&path)?
+            } else {
+                None
+            };
+            lru.insert(path.clone(), size);
+            if let Some(owner) = owner {
+                lru.owners.insert(path, owner);
+            }
         }
         self.evict(&mut lru, self.cap);
         Ok(())
+    }
+
+    /// The cache key of the metadata fetch that wrote a link file, or `None` when the file is not a readable link.
+    fn link_owner(path: &Path) -> io::Result<Option<String>> {
+        Ok(read_optional(path)?
+            .and_then(|bytes| serde_json::from_slice::<Link>(&bytes).ok())
+            .map(|link| link.source))
     }
 
     /// Deletes least recently used files until the index fits `limit`. A file leaves the index and the disk together.
@@ -333,7 +353,7 @@ impl Store {
             .collect();
         {
             let mut lru = lock_index(&self.lru);
-            if !link_paths.iter().all(|path| lru.contains(path)) {
+            if !link_paths.iter().all(|path| lru.owned_by(path, cache_key)) {
                 return Ok(None);
             }
             lru.touch(&head_path);
@@ -393,25 +413,37 @@ impl Store {
             .ok_or_else(|| Error::Busy("downloads hold the cache budget; retry".to_owned()))?;
         let mut staged = Vec::with_capacity(link_files.len() + 2);
         for (path, bytes) in link_files {
-            staged.push((path, self.stage(&bytes)?, bytes.len() as u64));
+            staged.push((
+                path,
+                self.stage(&bytes)?,
+                bytes.len() as u64,
+                Some(cache_key),
+            ));
         }
         staged.push((
             self.meta_path(cache_key, "body"),
             self.stage(&cached.body)?,
             cached.body.len() as u64,
+            None,
         ));
         staged.push((
             self.meta_path(cache_key, "head"),
             self.stage(&head)?,
             head.len() as u64,
+            None,
         ));
         {
             let mut lru = lock_index(&self.lru);
             lru.reserved -= reservation.release();
             let mut committed: io::Result<()> = Ok(());
-            for (path, tmp, size) in staged {
+            for (path, tmp, size, owner) in staged {
                 match tmp.persist(&path) {
-                    Ok(()) => lru.insert(path, size),
+                    Ok(()) => {
+                        lru.insert(path.clone(), size);
+                        if let Some(owner) = owner {
+                            lru.owners.insert(path, owner.to_owned());
+                        }
+                    }
                     Err(e) => {
                         committed = Err(e.error);
                         break;
@@ -682,5 +714,60 @@ mod tests {
             .commit_metadata("k", &[], &cached)
             .expect("commit once the downloads are done");
         assert!(store.read_fresh_meta("k").expect("read").is_some());
+    }
+
+    #[test]
+    fn a_listing_is_not_served_once_another_fetch_rewrote_its_links() {
+        let (_dir, store) = store(1 << 20);
+        let now = now_secs();
+        let link = |source: &str| Link {
+            upstream: "https://up.example/a.tgz".to_owned(),
+            expected: Expected {
+                algo: Algo::Sha256,
+                hex: hex::encode(Sha256::digest(b"tarball")),
+            },
+            source: source.to_owned(),
+            fetched_at: now,
+        };
+        let cached = |body: &str| Cached {
+            fetched_at: now,
+            content_type: "application/json".to_owned(),
+            body: body.as_bytes().to_vec(),
+        };
+        store
+            .commit_metadata(
+                "abbreviated",
+                &[("npm", "a".to_owned(), link("abbreviated"))],
+                &cached("short"),
+            )
+            .expect("commit abbreviated");
+        store
+            .commit_metadata(
+                "full",
+                &[("npm", "a".to_owned(), link("full"))],
+                &cached("full"),
+            )
+            .expect("commit full");
+
+        assert!(
+            store
+                .read_fresh_meta("abbreviated")
+                .expect("read")
+                .is_none(),
+            "its link now belongs to the full listing"
+        );
+        let served = store
+            .read_fresh_meta("full")
+            .expect("read")
+            .expect("full is fresh");
+        assert_eq!(served.body, b"full");
+        assert_eq!(
+            store
+                .current_link("npm", "a")
+                .expect("read")
+                .expect("current")
+                .source,
+            "full"
+        );
     }
 }
