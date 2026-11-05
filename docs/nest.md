@@ -169,7 +169,8 @@ stops, so no write can land between the sync and the backup. From suspended: dis
 needs the space or the control plane sends `evict`.
 
 **Periodic backup of a running VM** (every `backupInterval`, default 1 h, when the volume changed): `freezeVolume` →
-reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflinked copy → report `volumeRef`, `backedUpAt`.
+`kestrel-volume backup --state-dir` (its first step reflinks `volume.raw` to `<state>/<boxId>.snap`, the only step that
+needs the freeze) → `thawVolume` once that snapshot exists → report `volumeRef`, `backedUpAt`.
 
 **Destroy.** Stop, delete the volume, its backups and records → `deleted`. **Evict**: stop, delete local state only.
 
@@ -232,14 +233,21 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
 
 - **Volumes**: sparse raw files on XFS (mirrored NVMe), `virtio-blk` with `num_queues` = max vCPUs, `direct=on`. The
   guest formats ext4 on first mount (`noatime,lazytime,discard`).
-- **Backups** (`kestrel-volume backup`): reflink `volume.raw` to a point-in-time copy, compare its extents with the
-  previous baseline (FIEMAP shared extents are unchanged), and upload changed 4 MiB chunks. Each box has two keys, both
-  HKDF-SHA256 from the fleet key: a name key (`info = "kestrel-volume/name/<boxId>"`) names each chunk
-  `boxes/<boxId>/chunks/<HMAC-SHA256(name key, plaintext)>`, so names reveal only equality; a seal key
-  (`info = "kestrel-volume/seal/<boxId>"`) encrypts chunks and manifests with AES-256-GCM (random 96-bit nonce per
-  object, the object's key as AAD). The manifest `boxes/<boxId>/manifests/<n>.json` is sealed the same way, so a
-  tampered, renamed or replayed manifest fails to open. Chunks are never shared between boxes. Limitation: deleting the
-  newest manifest rolls a box back to an older one; the control plane's pinned `volumeRef` is what detects that.
+- **Backups** (`kestrel-volume backup --state-dir S`): reflink `volume.raw` to `S/<boxId>.snap` (FICLONE only; there is
+  no copy fallback, so the volume and `S` must be on a reflink filesystem), compare its extents with the baseline
+  `S/<boxId>.base` from the previous backup (FIEMAP shared extents are unchanged), and upload changed 4 MiB chunks. The
+  baseline advances only after the manifest is stored; `S/<boxId>.base.ref` names the manifest it describes, and a
+  missing or mismatched baseline makes the backup read every chunk. A `flock` on `S/<boxId>.lock` serializes backups of
+  one box on a host. Each box has two keys, both HKDF-SHA256 from the fleet key: a name key (`info =
+  "kestrel-volume/name/<boxId>"`) names each chunk `boxes/<boxId>/chunks/<HMAC-SHA256(name key, plaintext)>`, so names
+  reveal only equality; a seal key (`info = "kestrel-volume/seal/<boxId>"`) encrypts chunks and manifests with
+  AES-256-GCM (random 96-bit nonce per object, the object's key as AAD). The last chunk is zero-padded to 4 MiB before
+  it is named and sealed, so every stored chunk has the same size. Manifests are `boxes/<boxId>/manifests/<n>-<16 hex
+  random>.json`, sealed the same way, so a tampered, renamed or replayed manifest fails to open, and a key is never
+  reused after deletion: the `volumeRef` of a deleted manifest fails to restore. Chunks are never shared between boxes.
+  Limitations: deleting the newest manifest rolls a box back to an older one (the control plane's pinned `volumeRef` is
+  what detects that), and chunks uploaded by a backup whose manifest put failed are orphaned until a garbage collector
+  exists (none yet).
 - **Lazy restore** (`kestrel-volume restore-lazy`): a `ublk` block device backed by a local sparse file and a chunk
   bitmap. A read of a missing chunk fetches it from object storage, writes it locally, then serves it; a background
   task hydrates the rest. Once complete the VM switches to the plain file at its next restore (the disk path is
@@ -252,7 +260,7 @@ All output is one JSON object on stdout; errors exit non-zero with a message on 
 
 ```
 kestrel-volume create  --path P --size-bytes N
-kestrel-volume backup  --path P --box BOX --store URL [--key-file F]        -> { volumeRef, bytesUploaded, chunks }
+kestrel-volume backup  --path P --state-dir S --box BOX --store URL [--key-file F]  -> { volumeRef, bytesUploaded, chunks }
 kestrel-volume restore --ref REF --box BOX --store URL --dest P [--key-file F]  -> { bytes }
 kestrel-volume restore-lazy --ref REF --box BOX --store URL --dest P [--key-file F]
                                      -> prints { device: "/dev/ublkbN" } once ready, keeps serving until SIGTERM
@@ -261,6 +269,8 @@ kestrel-volume delete  --box BOX --store URL
 
 `URL` is `file:///dir` (tests, single host) or `s3://bucket/prefix` with `KESTREL_S3_ENDPOINT`,
 `KESTREL_S3_ACCESS_KEY_ID`, `KESTREL_S3_SECRET_ACCESS_KEY` (Cloudflare R2 in production).
+`BOX` must match `[A-Za-z0-9_-]{1,128}`; the control plane generates box IDs as UUIDs, which satisfy it. Other IDs are
+rejected before any object is touched.
 
 ## Networking
 
