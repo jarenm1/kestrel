@@ -23,6 +23,8 @@ export const GUEST_AGENT_VSOCK_PORT = 1024
 export const GUEST_AGENT_BOX_SOCKET = "/run/kestrel-guest/box.sock"
 /** Longest line either side reads; a longer one drops the connection. */
 export const MAX_GUEST_FRAME_BYTES = 64 * 1024
+/** Longest `error` a reply carries; the sender cuts a longer one. */
+export const GUEST_ERROR_MAX_CHARS = 1000
 
 /**
  * How long the host waits for each reply before it acts without the guest: a guest is user-controlled and may never
@@ -78,13 +80,17 @@ const NonNegativeInt = Schema.Number.pipe(Schema.int(), Schema.nonNegative())
 const Bytes = NonNegativeInt
 /** A PSI `avg10` percentage, 0 to 100. */
 const Psi = Schema.Number.pipe(Schema.finite(), Schema.between(0, 100))
+/** A 32-byte base64url enrollment token: the form `NestEnrollToken` in nest.ts enforces. */
+const EnrollToken = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9_-]{43}$/))
+/** A PCI address, e.g. `0000:01:00.0`. */
+const PciAddress = Schema.String.pipe(Schema.maxLength(32))
 
 /** Answer to a request on either link. */
 export const GuestReply = Schema.Struct({
   _tag: Schema.Literal("reply"),
   id: RequestId,
   ok: Schema.Boolean,
-  error: Schema.optional(Schema.String),
+  error: Schema.optional(Schema.String.pipe(Schema.maxLength(GUEST_ERROR_MAX_CHARS))),
 })
 export type GuestReply = typeof GuestReply.Type
 
@@ -158,7 +164,7 @@ export const HostToGuest = Schema.Union(
     wallClockMs: NonNegativeInt,
     controlUrl: Schema.String,
     publicUrl: Schema.String,
-    enrollToken: Schema.NullOr(Schema.String),
+    enrollToken: Schema.NullOr(EnrollToken),
     network: GuestNetwork,
   }),
   /**
@@ -176,7 +182,7 @@ export const HostToGuest = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("freezeVolume"), id: RequestId }),
   Schema.Struct({ _tag: Schema.Literal("thawVolume"), id: RequestId }),
   /** A GPU was hot-plugged at `pciAddress`. Load its driver, tell the box, reply once the device is usable. */
-  Schema.Struct({ _tag: Schema.Literal("gpuAttached"), id: RequestId, pciAddress: Schema.String }),
+  Schema.Struct({ _tag: Schema.Literal("gpuAttached"), id: RequestId, pciAddress: PciAddress }),
   /** The host wants the GPU back. Have the box release it, unbind the driver, reply; the host unplugs it next. */
   Schema.Struct({ _tag: Schema.Literal("gpuDetach"), id: RequestId }),
   /** Clean power-off (park, destroy). Reply, then shut down. */
