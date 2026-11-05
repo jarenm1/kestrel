@@ -306,10 +306,11 @@ function ModelPicker({
         style={{ height: menuHeight }}
       >
         {!searching && tabs.length > 0 && (
+          // A vertical take on the new thread page's inset bar: as tall as its harnesses, scrolling only on a short window.
           <div
             role="group"
             aria-label="Harnesses"
-            className="flex w-12 shrink-0 flex-col gap-1 overflow-y-auto border-r border-white/[0.06] p-1.5"
+            className="my-1.5 ml-1.5 flex max-h-[calc(100%-0.75rem)] shrink-0 flex-col gap-0.5 self-start overflow-y-auto rounded-xl bg-input p-1 shadow-well"
           >
             {tabs.map((candidate) => (
               <button
@@ -323,11 +324,11 @@ function ModelPicker({
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => setPickedHarness(candidate.harness.id)}
                 className={cn(
-                  "flex aspect-square w-full items-center justify-center rounded-xl text-foreground transition-colors hover:bg-white/[0.07]",
-                  candidate === tab && "bg-white/[0.1]",
+                  "flex size-8 shrink-0 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-white/[0.06]",
+                  candidate === tab && "bg-white/[0.1] hover:bg-white/[0.1]",
                 )}
               >
-                <HarnessLogo harness={candidate.harness} className="size-5" />
+                <HarnessLogo harness={candidate.harness} className="size-4" />
               </button>
             ))}
           </div>
