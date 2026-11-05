@@ -6,7 +6,7 @@ use serde::Serialize;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
 
-use crate::protocol::{ReplyBody, MAX_FRAME_BYTES};
+use crate::protocol::{ReplyBody, GUEST_ERROR_MAX_CHARS, MAX_FRAME_BYTES};
 use crate::system::Res;
 
 /// A frame queued for the writer of a session. `flushed` fires once the frame reached the peer's socket, so a
@@ -79,10 +79,6 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     wr.flush().await
 }
 
-/// Longest error text a reply carries. JSON escapes a control character to six bytes, so 8 KiB of error text is at most
-/// 48 KiB on the wire, inside `MAX_FRAME_BYTES`. Errors can be a command's whole stderr.
-const MAX_ERROR_BYTES: usize = 8 * 1024;
-
 pub fn reply(id: String, result: Res<()>) -> ReplyBody {
     match result {
         Ok(()) => ReplyBody {
@@ -98,16 +94,17 @@ pub fn reply(id: String, result: Res<()>) -> ReplyBody {
     }
 }
 
+/// Cuts an error to `GUEST_ERROR_MAX_CHARS` UTF-16 units, the length the schema checks, without splitting a character.
 fn truncate_error(mut error: String) -> String {
-    if error.len() <= MAX_ERROR_BYTES {
-        return error;
-    }
-    let mut end = MAX_ERROR_BYTES;
-    while !error.is_char_boundary(end) {
-        end -= 1;
-    }
+    let mut units = 0;
+    let end = error
+        .char_indices()
+        .find(|(_, c)| {
+            units += c.len_utf16();
+            units > GUEST_ERROR_MAX_CHARS
+        })
+        .map_or(error.len(), |(index, _)| index);
     error.truncate(end);
-    error.push_str(" [truncated]");
     error
 }
 
@@ -121,12 +118,28 @@ mod tests {
     fn an_error_reply_fits_one_frame() {
         // Control characters are the worst case: each one serializes to six bytes.
         let stderr = "\u{1}".repeat(100 * 1024);
-        let frame = GuestToHost::Reply(reply("req-1".into(), Err(stderr)));
-        let line = serde_json::to_vec(&frame).expect("frame serializes");
+        let body = reply("req-1".into(), Err(stderr));
+        let error = body.error.as_deref().expect("error reply carries its text");
+        assert!(error.encode_utf16().count() <= GUEST_ERROR_MAX_CHARS);
+        let line = serde_json::to_vec(&GuestToHost::Reply(body)).expect("frame serializes");
         assert!(
             line.len() <= MAX_FRAME_BYTES,
             "reply frame is {} bytes",
             line.len()
         );
+    }
+
+    /// The cap counts UTF-16 code units, as the schema's maxLength does: an astral character is two.
+    #[test]
+    fn error_is_cut_to_utf16_units_without_splitting_a_character() {
+        let error = format!("{}😀", "a".repeat(GUEST_ERROR_MAX_CHARS - 1));
+        let body = reply("req-1".into(), Err(error));
+        assert_eq!(body.error, Some("a".repeat(GUEST_ERROR_MAX_CHARS - 1)));
+    }
+
+    #[test]
+    fn error_within_the_cap_is_kept_whole() {
+        let error = "b".repeat(GUEST_ERROR_MAX_CHARS);
+        assert_eq!(reply("req-1".into(), Err(error.clone())).error, Some(error));
     }
 }

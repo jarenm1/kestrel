@@ -34,7 +34,8 @@ const RESUME_HEALTH_WAIT: Duration = Duration::from_secs(40);
 const RELEASE_WAIT: Duration = Duration::from_secs(10);
 /// How long a frozen volume stays frozen without a `thawVolume`.
 const FREEZE_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_FLUSH_WAIT: Duration = Duration::from_secs(5);
+/// Longest the volume sync may take in a freeze or suspend. The host's op timeouts also cover the quiesce wait.
+const SYNC_WAIT: Duration = Duration::from_secs(10);
 
 pub struct App {
     pub cfg: Config,
@@ -57,6 +58,8 @@ struct State {
     host: Option<HostLink>,
     host_task: Option<AbortHandle>,
     box_link: Option<Arc<BoxLink>>,
+    /// The box request (`gpuWanted`) the host has not answered yet; one at a time.
+    box_gpu_request: Option<String>,
 }
 
 #[derive(Clone)]
@@ -112,6 +115,7 @@ impl App {
                 host: None,
                 host_task: None,
                 box_link: None,
+                box_gpu_request: None,
             }),
         }))
     }
@@ -244,6 +248,7 @@ where
             .is_some_and(|current| Arc::ptr_eq(current, &link))
         {
             st.box_link = None;
+            st.box_gpu_request = None;
         }
     }
     // Dropping the waiters makes every pending request fail at once.
@@ -275,7 +280,7 @@ fn dispatch_host(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, line:
             let tx = tx.clone();
             tokio::spawn(async move { send_host(&tx, reply(id, Ok(()))).await });
         }
-        HostToGuest::Shutdown { .. } => spawn_shutdown(app.clone(), tx.clone(), id),
+        HostToGuest::GpuDecision { granted, error, .. } => gpu_decision(app, id, granted, error),
         HostToGuest::Configure(args) => spawn_op(app, tx, id, move |app| async move {
             configure_op(&app, *args).await
         }),
@@ -298,12 +303,16 @@ fn dispatch_host(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, line:
         HostToGuest::ThawVolume { .. } => spawn_thaw(app, tx, id),
         HostToGuest::GpuAttached { pci_address, .. } => {
             spawn_op(app, tx, id, move |app| async move {
-                gpu_attached(&app, pci_address).await
+                let result = gpu_attached(&app, pci_address).await;
+                answer_pending_gpu(&app, &result);
+                result
             })
         }
-        HostToGuest::GpuDetach { .. } => {
-            spawn_op(app, tx, id, |app| async move { gpu_detach(&app).await })
-        }
+        HostToGuest::GpuDetach { .. } => spawn_op(app, tx, id, |app| async move {
+            let result = gpu_detach(&app).await;
+            answer_pending_gpu(&app, &result);
+            result
+        }),
         HostToGuest::Unknown => {}
     }
 }
@@ -319,7 +328,8 @@ fn dispatch_box(app: &Arc<App>, link: &BoxLink, line: &[u8]) {
     match frame {
         BoxToGuest::Hello { box_version } => log(format!("box connected (version {box_version})")),
         BoxToGuest::Activity { activity } => *link.activity.lock().unwrap() = Some(activity),
-        BoxToGuest::GpuWanted { wanted } => send_to_host(app, GuestToHost::GpuWanted { wanted }),
+        BoxToGuest::GpuWanted { id, wanted } => request_gpu(app, id, wanted),
+        BoxToGuest::Enrolled => forget_enroll_token(app),
         BoxToGuest::Reply(body) => {
             let waiter = link.pending.lock().unwrap().remove(&body.id);
             match waiter {
@@ -363,15 +373,19 @@ async fn send_host(tx: &mpsc::Sender<Outgoing<GuestToHost>>, body: ReplyBody) {
     }
 }
 
-fn send_to_host(app: &App, frame: GuestToHost) {
+/// Sends `frame` to the connected host. `false` when no host is connected or its link refused the frame.
+fn send_to_host(app: &App, frame: GuestToHost) -> bool {
     let host = app.lock().host.clone();
-    match host {
-        Some(host) => {
-            if let Err(e) = host.tx.try_send(Outgoing::new(frame)) {
-                log(format!("host link unavailable: {e}"));
-            }
+    let Some(host) = host else {
+        log("no host connected; frame dropped");
+        return false;
+    };
+    match host.tx.try_send(Outgoing::new(frame)) {
+        Ok(()) => true,
+        Err(e) => {
+            log(format!("host link unavailable: {e}"));
+            false
         }
-        None => log("no host connected; frame dropped"),
     }
 }
 
@@ -399,26 +413,6 @@ fn spawn_thaw(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, id: Stri
     tokio::spawn(async move {
         let result = thaw_volume(&app).await;
         send_host(&tx, reply(id, result)).await;
-    });
-}
-
-/// Acknowledges the shutdown, waits until the acknowledgement left the socket, then powers off.
-fn spawn_shutdown(app: Arc<App>, tx: mpsc::Sender<Outgoing<GuestToHost>>, id: String) {
-    tokio::spawn(async move {
-        let _guard = app.op_lock.lock().await;
-        let (flushed_tx, flushed_rx) = oneshot::channel();
-        let ack = Outgoing {
-            frame: GuestToHost::Reply(reply(id, Ok(()))),
-            flushed: Some(flushed_tx),
-        };
-        if tx.send(ack).await.is_err() {
-            log("host link closed; powering off without an acknowledgement");
-        } else if timeout(SHUTDOWN_FLUSH_WAIT, flushed_rx).await.is_err() {
-            log("shutdown acknowledgement not flushed in time; powering off");
-        }
-        if let Err(e) = app.sys.run("systemctl", &["poweroff"]).await {
-            log(format!("poweroff failed: {e}"));
-        }
     });
 }
 
@@ -475,12 +469,23 @@ async fn configure_op(app: &Arc<App>, args: ConfigureArgs) -> Res<()> {
     Ok(())
 }
 
+/// Syncs the volume for at most `SYNC_WAIT`, so a freeze or suspend finishes inside the host's op timeout.
+async fn sync_volume() -> Res<()> {
+    match timeout(SYNC_WAIT, sync_all()).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "volume sync did not finish within {}s",
+            SYNC_WAIT.as_secs()
+        )),
+    }
+}
+
 async fn prepare_suspend(app: &Arc<App>) -> Res<()> {
     if app.lock().frozen.is_some() {
         return Err("volume frozen; thaw it before suspend".into());
     }
     ask_box(app, QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
-    sync_all().await?;
+    sync_volume().await?;
     app.sys.write_knob("/proc/sys/vm/drop_caches", "3")
 }
 
@@ -501,7 +506,7 @@ async fn freeze_volume(app: &Arc<App>) -> Res<()> {
         return Err("the volume is already frozen".into());
     }
     ask_box(app, FREEZE_QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
-    sync_all().await?;
+    sync_volume().await?;
     app.sys
         .run("fsfreeze", &["--freeze", mount_arg(app)?])
         .await?;
@@ -598,6 +603,93 @@ async fn gpu_detach(app: &Arc<App>) -> Res<()> {
             Err(e)
         }
     }
+}
+
+/// Forwards the box's GPU request to the host, which answers with `gpuDecision`. One request is open at a time: a second
+/// one is refused at once.
+fn request_gpu(app: &Arc<App>, id: String, wanted: bool) {
+    let busy = {
+        let mut st = app.lock();
+        let busy = st.box_gpu_request.is_some();
+        if !busy {
+            st.box_gpu_request = Some(id.clone());
+        }
+        busy
+    };
+    if busy {
+        answer_box(
+            app,
+            id,
+            Err("another GPU request is still in progress".into()),
+        );
+        return;
+    }
+    if !send_to_host(
+        app,
+        GuestToHost::GpuWanted {
+            id: id.clone(),
+            wanted,
+        },
+    ) {
+        app.lock().box_gpu_request = None;
+        answer_box(app, id, Err("the host is not connected".into()));
+    }
+}
+
+/// The host's answer to the box's GPU request `id`. A denial answers the box at once. A grant waits for the attach or
+/// detach the host sends next, which answers the box.
+fn gpu_decision(app: &Arc<App>, id: String, granted: bool, error: Option<String>) {
+    let open = app.lock().box_gpu_request.as_deref() == Some(id.as_str());
+    if !open {
+        log(format!("gpu decision for an unknown request {id}"));
+        return;
+    }
+    if granted {
+        return;
+    }
+    app.lock().box_gpu_request = None;
+    answer_box(
+        app,
+        id,
+        Err(error.unwrap_or_else(|| "the host denied the GPU".into())),
+    );
+}
+
+/// Answers the open GPU request, if any, with the result of the attach or detach that completes it.
+fn answer_pending_gpu(app: &Arc<App>, result: &Res<()>) {
+    let pending = app.lock().box_gpu_request.take();
+    if let Some(id) = pending {
+        answer_box(app, id, result.clone());
+    }
+}
+
+/// Replies to the box's request `id` on the box link. With no box connected nothing waits for the answer.
+fn answer_box(app: &App, id: String, result: Res<()>) {
+    let link = app.lock().box_link.clone();
+    let Some(link) = link else {
+        log("no box connected; GPU answer dropped");
+        return;
+    };
+    if link
+        .tx
+        .try_send(Outgoing::new(GuestToBox::Reply(reply(id, result))))
+        .is_err()
+    {
+        log("box link unavailable; GPU answer dropped");
+    }
+}
+
+/// The box enrolled and kept its secret: the enroll token leaves the env file on the volume. Queued behind any op.
+fn forget_enroll_token(app: &Arc<App>) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let _guard = app.op_lock.lock().await;
+        if let Err(e) = configure::drop_enroll_token(&app.cfg) {
+            log(format!(
+                "could not remove the enroll token from the box env: {e}"
+            ));
+        }
+    });
 }
 
 #[cfg(test)]

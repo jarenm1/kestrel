@@ -10,7 +10,7 @@
       "wallClockMs": 1767225600000,
       "controlUrl": "https://control.example.test",
       "publicUrl": "https://vm-1.example.test",
-      "enrollToken": "enroll-token-1",
+      "enrollToken": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
       "network": {
         "address": "10.77.0.5/32",
         "gateway": "10.77.0.1",
@@ -77,8 +77,16 @@
       "id": "req-8"
     },
     {
-      "_tag": "shutdown",
-      "id": "req-9"
+      "_tag": "gpuDecision",
+      "id": "req-9",
+      "granted": true,
+      "error": null
+    },
+    {
+      "_tag": "gpuDecision",
+      "id": "req-11",
+      "granted": false,
+      "error": "GPU is already attached to another box"
     },
     {
       "_tag": "ping",
@@ -138,6 +146,7 @@
     },
     {
       "_tag": "gpuWanted",
+      "id": "req-12",
       "wanted": true
     },
     {
@@ -179,7 +188,11 @@
     },
     {
       "_tag": "gpuWanted",
+      "id": "req-11",
       "wanted": false
+    },
+    {
+      "_tag": "enrolled"
     },
     {
       "_tag": "reply",
@@ -223,5 +236,6 @@
     "guestAgentSocket": "CLOUDAGENTS_GUEST_AGENT_SOCKET",
     "enrollToken": "CLOUDAGENTS_NEST_ENROLL_TOKEN",
     "dataDir": "CLOUDAGENTS_DATA_DIR"
-  }
+  },
+  "boxUser": "kestrel-box"
 }

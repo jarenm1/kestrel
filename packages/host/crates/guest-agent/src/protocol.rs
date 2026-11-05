@@ -9,12 +9,16 @@ pub const GUEST_PROTOCOL: u32 = 1;
 pub const GUEST_AGENT_VSOCK_PORT: u32 = 1024;
 /// `GUEST_AGENT_BOX_SOCKET` in guest.ts.
 pub const GUEST_AGENT_BOX_SOCKET: &str = "/run/kestrel-guest/box.sock";
+/// `NEST_BOX_USER` in guest.ts: the uid the box service runs as; the box socket accepts only this uid.
+pub const NEST_BOX_USER: &str = "kestrel-box";
 /// `GUEST_STATUS_INTERVAL_MS` in guest.ts.
 pub const STATUS_INTERVAL_MS: u64 = 2_000;
 /// `MAX_GUEST_FRAME_BYTES` in guest.ts: longest line either side reads; a longer one drops the connection.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// `RequestId` in guest.ts: 1 to 100 characters.
 pub const MAX_ID_LEN: usize = 100;
+/// `GUEST_ERROR_MAX_CHARS` in guest.ts: the longest `error` a reply carries; a longer one is cut to this length.
+pub const GUEST_ERROR_MAX_CHARS: usize = 1000;
 /// `NEST_VOLUME_MOUNT` in guest.ts.
 pub const NEST_VOLUME_MOUNT: &str = "/var/lib/kestrel";
 /// `NEST_VOLUME_SERIAL` in guest.ts; also the filesystem label the agent formats the volume with.
@@ -137,8 +141,10 @@ pub enum HostToGuest {
     GpuDetach {
         id: String,
     },
-    Shutdown {
+    GpuDecision {
         id: String,
+        granted: bool,
+        error: Option<String>,
     },
     Ping {
         id: String,
@@ -158,7 +164,7 @@ impl HostToGuest {
             | Self::ThawVolume { id }
             | Self::GpuAttached { id, .. }
             | Self::GpuDetach { id }
-            | Self::Shutdown { id }
+            | Self::GpuDecision { id, .. }
             | Self::Ping { id } => Some(id),
             Self::Unknown => None,
         }
@@ -186,6 +192,7 @@ pub enum GuestToHost {
         gpu: GpuState,
     },
     GpuWanted {
+        id: String,
         wanted: bool,
     },
     Reply(ReplyBody),
@@ -208,8 +215,10 @@ pub enum BoxToGuest {
         activity: BoxActivity,
     },
     GpuWanted {
+        id: String,
         wanted: bool,
     },
+    Enrolled,
     Reply(ReplyBody),
     #[serde(other)]
     Unknown,
@@ -307,5 +316,11 @@ mod contract_tests {
         assert_round_trip::<GuestToHost>(&fixtures["guestToHost"]);
         assert_round_trip::<BoxToGuest>(&fixtures["boxToGuest"]);
         assert_round_trip::<GuestToBox>(&fixtures["guestToBox"]);
+    }
+
+    #[test]
+    fn box_user_matches_the_contract() {
+        let fixtures: Value = serde_json::from_str(FIXTURES).expect("fixture file is JSON");
+        assert_eq!(fixtures["boxUser"], NEST_BOX_USER);
     }
 }

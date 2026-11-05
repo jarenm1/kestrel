@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Schema } from "effect"
-import { BoxToGuest, GuestToBox, GuestToHost, HostToGuest, NEST_BOX_ENV } from "../../../../protocol/src/guest"
+import { BoxToGuest, GuestToBox, GuestToHost, HostToGuest, NEST_BOX_ENV, NEST_BOX_USER } from "../../../../protocol/src/guest"
 
 const network = {
   address: "10.77.0.5/32",
@@ -52,7 +52,7 @@ const hostToGuest: ReadonlyArray<HostToGuest> = [
     wallClockMs: 1767225600000,
     controlUrl: "https://control.example.test",
     publicUrl: "https://vm-1.example.test",
-    enrollToken: "enroll-token-1",
+    enrollToken: "x".repeat(43),
     network,
   },
   {
@@ -74,7 +74,8 @@ const hostToGuest: ReadonlyArray<HostToGuest> = [
   { _tag: "thawVolume", id: "req-6" },
   { _tag: "gpuAttached", id: "req-7", pciAddress: "0000:01:00.0" },
   { _tag: "gpuDetach", id: "req-8" },
-  { _tag: "shutdown", id: "req-9" },
+  { _tag: "gpuDecision", id: "req-9", granted: true, error: null },
+  { _tag: "gpuDecision", id: "req-11", granted: false, error: "GPU is already attached to another box" },
   { _tag: "ping", id: "req-10" },
 ]
 
@@ -90,7 +91,7 @@ const guestToHost: ReadonlyArray<GuestToHost> = [
   },
   { _tag: "status", pressure, activity: null, gpu: "none" },
   { _tag: "status", pressure, activity, gpu: "attached" },
-  { _tag: "gpuWanted", wanted: true },
+  { _tag: "gpuWanted", id: "req-12", wanted: true },
   { _tag: "reply", id: "req-1", ok: true },
   { _tag: "reply", id: "req-2", ok: false, error: "volume did not appear within 60s" },
 ]
@@ -99,7 +100,8 @@ const boxToGuest: ReadonlyArray<BoxToGuest> = [
   { _tag: "hello", boxVersion: "2026.1.0" },
   { _tag: "activity", activity },
   { _tag: "activity", activity: { ...activity, lastActivityAt: null } },
-  { _tag: "gpuWanted", wanted: false },
+  { _tag: "gpuWanted", id: "req-11", wanted: false },
+  { _tag: "enrolled" },
   { _tag: "reply", id: "req-3", ok: true },
 ]
 
@@ -118,6 +120,7 @@ const fixtures = {
   boxToGuest: boxToGuest.map((frame) => Schema.encodeSync(BoxToGuest)(frame)),
   guestToBox: guestToBox.map((frame) => Schema.encodeSync(GuestToBox)(frame)),
   boxEnv: NEST_BOX_ENV,
+  boxUser: NEST_BOX_USER,
 }
 
 const here = dirname(fileURLToPath(import.meta.url))
