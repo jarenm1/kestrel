@@ -67,16 +67,18 @@ rather than a potentially delayed bridge update. No GitHub credentials enter the
 ## Settings
 
 Settings mirrors the web app's sections as a phone hub: Profile, Connections, Boxes and Billing rows, each opening its
-own page with a back control (`Threads` joins them from the Threads settings screen's own change). Sections keep the
-web URLs: `/settings` is the hub, `/settings/profile`, `/settings/boxes` and `/settings/billing` open a section
-directly, `/settings/connections` is the existing Connections screen, and `/settings/usage` is Quotas.
+own page with a back control. Sections keep the web URLs: `/settings` is the hub, `/settings/profile`,
+`/settings/boxes` and `/settings/billing` open a section directly, `/settings/connections` is the existing Connections
+screen, and `/settings/usage` is Quotas.
 
 - **Profile** shows the GitHub account (avatar, name, `@login`, link to the GitHub profile, sign-in badge), GitHub
-  access with Connect/Reconnect, and Sign out. GitHub access moved here from Connections, as on desktop; the OAuth
-  callback returns to `/settings/profile` (`ControlPaths.connectOAuth("github")?return=/settings/profile`) and the
-  repository picker's "connect GitHub" action opens this section. On the web build the browser holds the session, so
-  Connect leaves and returns to the page. A native app has no session in its external browser, so it shows the same
-  guidance as the old Connections row and opens the web profile to connect there.
+  access with Connect/Reconnect, and Sign out. GitHub access lives here rather than in Connections, as on desktop; the
+  OAuth callback returns to `/settings/profile` (`ControlPaths.connectOAuth("github")?return=/settings/profile`) and
+  the repository picker's "connect GitHub" action opens this section. On the web build the browser holds the session,
+  so Connect leaves and returns to the page. A native app has no session in its external browser, so it explains that
+  connecting happens in the web app and opens the web profile to connect there.
+- **Connections** keeps its own route and lists model access only (harnesses/subscriptions and API keys); the hub
+  links to it. There is no GitHub row here.
 - **Boxes** keeps the active-box switch (Kestrel's box or a BYOB box); boxes are still created and deleted on the web.
 - **Billing** keeps the plan, agent-hours usage and the Quotas link, and adds the web app's plan price, progress,
   period dates, plan list and payment/invoice rows.
