@@ -60,10 +60,12 @@ export function ThinkingPicker({
   value,
   options,
   onChange,
+  disabled = false,
 }: {
   value: AgentEffort | undefined;
   options: readonly { value: AgentEffort; label: string }[];
   onChange: (value: AgentEffort) => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [width, setWidth] = useState(0);
@@ -78,7 +80,10 @@ export function ThinkingPicker({
         variant="ghost"
         size="sm"
         active={open}
-        onPress={() => setOpen(true)}
+        disabled={disabled}
+        onPress={() => {
+          if (!disabled) setOpen(true);
+        }}
         accessibilityLabel={`Thinking level: ${selected.label}`}
       >
         <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" strokeWidth={3} accessibilityElementsHidden aria-hidden>
@@ -317,7 +322,7 @@ export function ModelPicker({
       <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
         <View style={styles.modalRoot}>
           {/* A sibling under the sheet, not its parent, so a drag through the list scrolls instead of closing it. */}
-          <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="Close model picker" accessibilityRole="button" />
+          <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="Dismiss model picker" accessibilityRole="button" />
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : undefined}
             pointerEvents="box-none"
@@ -375,6 +380,7 @@ export function ModelPicker({
                           accessibilityRole="tab"
                           accessibilityLabel={candidate.harness.name}
                           accessibilityState={{ selected: active }}
+                          aria-selected={active}
                           style={({ pressed }) => [
                             styles.railButton,
                             active && styles.railButtonActive,
@@ -415,6 +421,7 @@ export function ModelPicker({
                             onPress={() => choose(model)}
                             accessibilityRole="radio"
                             accessibilityState={{ checked: selected }}
+                            aria-checked={selected}
                             accessibilityLabel={`${model.name}, ${group.section.provider.name}${searching ? `, ${group.harness.name}` : ""}`}
                             style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
                           >
