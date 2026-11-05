@@ -15,6 +15,7 @@ const THREAD_PATH = /^\/c\/([^/]+)$/;
  */
 const SECTION_PATHS: Record<SettingsSection, string> = {
   profile: "/settings/profile",
+  threads: "/settings/threads",
   boxes: "/settings/boxes",
   billing: "/settings/billing",
 };

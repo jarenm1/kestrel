@@ -6,7 +6,7 @@ import type { ActiveBox } from "@/api/client";
  * `/settings` index instead opens Profile). Connections keeps its own route because the thread sidebar and composer
  * reach it directly; the hub lists it too.
  */
-export type SettingsSection = "profile" | "boxes" | "billing";
+export type SettingsSection = "profile" | "threads" | "boxes" | "billing";
 
 /** Every screen the signed-in app can show. The stack lives in MainNavigator. */
 export type Route =
