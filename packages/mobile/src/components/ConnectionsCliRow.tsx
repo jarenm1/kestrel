@@ -2,15 +2,17 @@ import React, { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
+import { MODEL_PROVIDERS, type CliLoginStart, type CliProvider, type Connection } from "@cloudagents/protocol";
 import { confirmDestructive } from "@/lib/confirm";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { ModelPicker } from "@/components/ConnectionsModelPicker";
 import {
   CLI_INTRO,
   ConnectionRowFrame,
   connectionStyles,
+  harnessForConnection,
   invalidateConnections,
 } from "@/components/ConnectionsShared";
 
@@ -29,6 +31,12 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   const [login, setLogin] = useState<CliLoginStart | null>(null);
   const [expired, setExpired] = useState(false);
   const [code, setCode] = useState("");
+  // The harness's own mark and the provider whose chat models this sign-in unlocks.
+  const harness = harnessForConnection(connection.provider);
+  const modelProvider = MODEL_PROVIDERS.find(
+    (candidate) =>
+      candidate.id === connection.provider || candidate.connections.includes(connection.provider)
+  );
 
   const openPage = useMutation({
     mutationFn: (url: string) => WebBrowser.openBrowserAsync(url),
@@ -87,6 +95,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   function cancel() {
     start.reset();
     submitCode.reset();
+    logout.reset();
     setLogin(null);
     setCode("");
   }
@@ -205,7 +214,13 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   }
 
   return (
-    <ConnectionRowFrame connection={connection} error={error}>
+    <ConnectionRowFrame
+      connection={connection}
+      error={error}
+      harness={harness}
+      showAccount={false}
+      headerExtra={modelProvider ? <ModelPicker provider={modelProvider} /> : undefined}
+    >
       {stepContent()}
     </ConnectionRowFrame>
   );

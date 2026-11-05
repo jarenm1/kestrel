@@ -19,36 +19,45 @@ import {
   keyCliProvider,
 } from "@/components/ConnectionsShared";
 import { ConnectionsCliRow } from "@/components/ConnectionsCliRow";
-import {
-  ConnectionsModels,
-  MODELS_CARD_PROVIDERS,
-  ModelPicker,
-} from "@/components/ConnectionsModels";
+import { ModelPicker } from "@/components/ConnectionsModelPicker";
 import { colors, spacing } from "@/theme";
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8;
 
+/**
+ * Body of Settings › Connections: **Harnesses/Subscriptions** groups subscription sign-ins and installed harnesses,
+ * each with its chat-model picker beside the name, and **API keys** keeps provider keys and key-based CLI logins with
+ * their model preferences. Desktop manages GitHub access from Profile; until the mobile Profile screen lands, the
+ * informational OAuth row stays here so that access is not lost.
+ */
 export function ConnectionsScreen() {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
-  const accounts = connections.data?.filter((connection) => !isApiKeyConnection(connection));
+  const harnesses = connections.data?.filter(
+    (connection) => connection.kind === "cli" && !isApiKeyConnection(connection)
+  );
+  const accounts = connections.data?.filter((connection) => connection.kind === "oauth");
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
       <View style={styles.heading}>
         <Text style={styles.title}>Connections</Text>
         <Text style={styles.description}>Accounts and keys Kestrel uses on your behalf.</Text>
       </View>
       {connections.error ? <ErrorLine error={connections.error} /> : null}
       {connections.isPending ? <Text style={connectionStyles.muted}>Loading…</Text> : null}
-      {accounts && accounts.length > 0 ? (
+      {harnesses ? (
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Accounts and subscriptions</Text>
+          <Text style={styles.sectionTitle}>Harnesses/Subscriptions</Text>
           <Card style={styles.card}>
             {/* A box switch remounts each row, so a sign-in still pending on the old box cannot finish here. */}
-            {accounts.map((connection, index) => (
+            {harnesses.map((connection, index) => (
               <View key={`${api.boxScope}:${connection.provider}`} style={index > 0 ? styles.divider : null}>
                 <ConnectionRow connection={connection} />
               </View>
@@ -56,16 +65,24 @@ export function ConnectionsScreen() {
           </Card>
         </View>
       ) : null}
-      {connections.data ? <ApiKeysCard connections={connections.data} /> : null}
-      {connections.data ? (
-        <ConnectionsModels connections={connections.data} />
+      {accounts && accounts.length > 0 ? (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Accounts</Text>
+          <Card style={styles.card}>
+            {accounts.map((connection, index) => (
+              <View key={`${api.boxScope}:${connection.provider}`} style={index > 0 ? styles.divider : null}>
+                <OAuthRow connection={connection} />
+              </View>
+            ))}
+          </Card>
+        </View>
       ) : null}
+      {connections.data ? <ApiKeysCard connections={connections.data} /> : null}
     </ScrollView>
   );
 }
 
 function ConnectionRow({ connection }: { connection: Connection }) {
-  if (connection.kind === "oauth") return <OAuthRow connection={connection} />;
   if (
     connection.kind === "cli" &&
     Schema.is(CliProvider)(connection.provider) &&
@@ -135,7 +152,9 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
             </View>
           ))}
         </Card>
-      ) : null}
+      ) : (
+        <Text style={styles.empty}>No api keys added</Text>
+      )}
     </View>
   );
 }
@@ -174,13 +193,13 @@ function ApiKeyRow({ connection, onRemove }: ApiKeyRowProps) {
 
   const busy = save.isPending || disconnect.isPending;
   const error = save.error ?? disconnect.error;
-  // The provider this key unlocks; its model list lives here instead of under Models.
+  // API-key access keeps its model preferences beside the key.
   const modelProvider = MODEL_PROVIDERS.find(
-    (provider) =>
-      !MODELS_CARD_PROVIDERS.includes(provider.id) &&
-      provider.connections.includes(connection.provider)
+    (provider) => provider.connections.includes(connection.provider)
   );
   const intro = keyProvider ? CLI_INTRO[keyProvider] : undefined;
+  const picker =
+    connection.connected && modelProvider ? <ModelPicker provider={modelProvider} /> : null;
 
   if (keyProvider && !connection.available) {
     return (
@@ -194,8 +213,8 @@ function ApiKeyRow({ connection, onRemove }: ApiKeyRowProps) {
           >
             Check again
           </Button>
+          {picker}
         </View>
-        {connection.connected && modelProvider ? <ModelPicker provider={modelProvider} /> : null}
       </ConnectionRowFrame>
     );
   }
@@ -228,16 +247,16 @@ function ApiKeyRow({ connection, onRemove }: ApiKeyRowProps) {
             Remove
           </Button>
         ) : null}
+        {picker}
       </View>
-      {connection.connected && modelProvider ? <ModelPicker provider={modelProvider} /> : null}
     </ConnectionRowFrame>
   );
 }
 
+/** OAuth access, e.g. GitHub, which desktop manages from Profile and mobile finishes in the web app. */
 function OAuthRow({ connection }: { connection: Connection }) {
-  // OAuth needs the signed-in session cookie, which the app cannot hand to an external browser.
   return (
-    <ConnectionRowFrame connection={connection}>
+    <ConnectionRowFrame connection={connection} expired={connection.expired}>
       <Text style={connectionStyles.muted}>
         {connection.available
           ? `${connection.connected ? "Reconnect" : "Connect"} ${connection.label} on the web app`
@@ -313,5 +332,12 @@ const styles = StyleSheet.create({
   keyInput: {
     flexGrow: 1,
     flexBasis: 200,
+  },
+  /** The web's centered muted paragraph when no key rows are visible. */
+  empty: {
+    color: colors.mutedForeground,
+    fontSize: 14,
+    textAlign: "center",
+    paddingVertical: spacing.lg,
   },
 });

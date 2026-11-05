@@ -6,7 +6,9 @@ import { CLI_SIGN_IN, CliProvider, type Connection } from "@cloudagents/protocol
 import { boxKeys, keys } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { HarnessLogo } from "@/components/HarnessLogo";
 import { colors, fonts } from "@/theme";
+import type { HarnessId } from "@cloudagents/ui/harness-logos";
 
 /** What each CLI's sign-in gets the user, keyed by provider. */
 export const CLI_INTRO: Record<CliProvider, string> = {
@@ -29,6 +31,21 @@ export function keyCliProvider(connection: Connection): CliProvider | null {
 /** Rows shown under API keys: provider keys, and key-based CLI logins that keep their box-local authentication. */
 export function isApiKeyConnection(connection: Connection): boolean {
   return connection.kind === "apikey" || keyCliProvider(connection) !== null;
+}
+
+/**
+ * The harness mark beside a subscription row, keyed by the connection it signs in. Only page sign-ins draw one, as on
+ * desktop; key-based CLI logins live with the API keys.
+ */
+const HARNESS_OF_CONNECTION: Partial<Record<string, HarnessId>> = {
+  "claude-cli": "claude",
+  "codex-cli": "codex",
+  "antigravity-cli": "antigravity",
+  opencode: "opencode",
+};
+
+export function harnessForConnection(provider: string): HarnessId | undefined {
+  return HARNESS_OF_CONNECTION[provider];
 }
 
 /**
@@ -77,6 +94,14 @@ export const connectionStyles = StyleSheet.create({
 interface FrameProps {
   connection: Connection;
   error?: unknown;
+  /** Harness mark in its own hanging column, for subscription rows. */
+  harness?: HarnessId;
+  /** Shown beside the name, e.g. the model-visibility picker. */
+  headerExtra?: ReactNode;
+  /** Shows an `expired` badge instead of the connected state, e.g. a refused OAuth token that needs reconnecting. */
+  expired?: boolean;
+  /** False for subscription rows, which state the signed-in account in their body instead. */
+  showAccount?: boolean;
   children: ReactNode;
 }
 
@@ -84,19 +109,39 @@ interface FrameProps {
  * One connection, the web `ConnectionHeader` plus the row's body and error: label, connected badge, account, then controls.
  * Subscription rows state their account in the body instead, as the web page does.
  */
-export function ConnectionRowFrame({ connection, error, children }: FrameProps) {
-  const showAccount = connection.connected && connection.account && connection.kind !== "cli";
+export function ConnectionRowFrame({
+  connection,
+  error,
+  harness,
+  headerExtra,
+  expired = false,
+  showAccount = true,
+  children,
+}: FrameProps) {
+  const account = showAccount && connection.connected ? connection.account : null;
   return (
     <View style={styles.row}>
-      <View style={styles.header}>
-        <Text style={styles.label}>{connection.label}</Text>
-        <Badge variant={connection.connected ? "success" : "neutral"}>
-          {connection.connected ? "connected" : "not connected"}
-        </Badge>
-        {showAccount ? <Text style={styles.account}>{connection.account}</Text> : null}
+      {harness ? (
+        <View style={styles.harness}>
+          <HarnessLogo harness={harness} size={24} />
+        </View>
+      ) : null}
+      <View style={styles.main}>
+        <View style={styles.header}>
+          <Text style={styles.label}>{connection.label}</Text>
+          {expired ? (
+            <Badge variant="warning">expired</Badge>
+          ) : (
+            <Badge variant={connection.connected ? "success" : "neutral"}>
+              {connection.connected ? "connected" : "not connected"}
+            </Badge>
+          )}
+          {account ? <Text style={styles.account}>{account}</Text> : null}
+          {headerExtra}
+        </View>
+        <View style={connectionStyles.body}>{children}</View>
+        {error ? <ErrorLine error={error} /> : null}
       </View>
-      <View style={connectionStyles.body}>{children}</View>
-      {error ? <ErrorLine error={error} /> : null}
     </View>
   );
 }
@@ -108,10 +153,14 @@ export function ErrorLine({ error }: { error: unknown }) {
 
 const styles = StyleSheet.create({
   row: {
+    flexDirection: "row",
+    alignItems: "flex-start",
     paddingHorizontal: 20,
     paddingVertical: 16,
-    gap: 10,
+    gap: 12,
   },
+  harness: { marginTop: 2 },
+  main: { flex: 1, gap: 10 },
   header: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -119,11 +168,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   label: {
+    flexShrink: 1,
     color: colors.foreground,
     fontSize: 14,
     fontWeight: "700",
   },
   account: {
+    flexShrink: 1,
     color: colors.mutedForeground,
     fontSize: 12,
     fontFamily: fonts.mono,
