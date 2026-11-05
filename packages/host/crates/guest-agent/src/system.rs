@@ -105,10 +105,15 @@ impl System {
     }
 }
 
-/// `sync(2)`: flush every filesystem. Harmless in a dry run, so it always runs.
-pub fn sync_all() {
-    // SAFETY: sync(2) takes no arguments and cannot fail.
-    unsafe { libc::sync() };
+/// `sync(2)`: flush every filesystem. It can block for a long time on a busy disk, so it runs on the blocking pool.
+/// Harmless in a dry run, so it always runs.
+pub async fn sync_all() -> Res<()> {
+    tokio::task::spawn_blocking(|| {
+        // SAFETY: sync(2) takes no arguments and cannot fail.
+        unsafe { libc::sync() }
+    })
+    .await
+    .map_err(|e| format!("sync: {e}"))
 }
 
 pub fn mountinfo() -> Res<Vec<MountEntry>> {
@@ -234,11 +239,12 @@ pub fn write_file(path: &Path, content: &str, mode: u32, owner: Option<Owner>) -
         .to_string_lossy()
         .into_owned();
     let tmp = path.with_file_name(format!(".{name}.tmp"));
+    // Remove whatever is there (a leftover or a planted link), then create exclusively: nothing is written through a link.
+    remove_if_exists(&tmp)?;
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(mode)
             .open(&tmp)
             .map_err(|e| format!("open {}: {e}", tmp.display()))?;

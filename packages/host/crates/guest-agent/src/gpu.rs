@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::system::{log, wait_for_path, Res, System};
 
-const DRIVER_MODULES: [&str; 3] = ["nvidia", "nvidia_uvm", "nvidia_drm"];
+/// Load order. `nvidia_modeset` is a dependency of `nvidia_drm`, so it must be listed (and so unloaded) too; `nvidia`
+/// cannot unload while it is in use.
+const DRIVER_MODULES: [&str; 4] = ["nvidia", "nvidia_uvm", "nvidia_modeset", "nvidia_drm"];
 const DEVICE_WAIT: Duration = Duration::from_secs(30);
 
 /// Load the driver and wait for `/dev/nvidia0` to be usable.

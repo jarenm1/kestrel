@@ -105,9 +105,18 @@ impl HostListener {
 /// replaced.
 fn bind_box_socket(cfg: &Config, sys: &System) -> Res<UnixListener> {
     let socket = cfg.box_socket.as_path();
+    let box_gid = if sys.dry_run {
+        None
+    } else {
+        Some(lookup_group(&cfg.box_group)?)
+    };
     if let Some(parent) = socket.parent() {
         if !parent.exists() {
             ensure_dir(parent, 0o750, None)?;
+        }
+        // The directory stays 0750 root-owned; the box group needs its execute bit to reach the socket.
+        if let Some(gid) = box_gid {
+            chown(parent, Owner { uid: u32::MAX, gid })?;
         }
     }
     remove_if_exists(socket)?;
@@ -115,12 +124,10 @@ fn bind_box_socket(cfg: &Config, sys: &System) -> Res<UnixListener> {
         UnixListener::bind(socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
     fs::set_permissions(socket, fs::Permissions::from_mode(0o660))
         .map_err(|e| format!("chmod {}: {e}", socket.display()))?;
-    if sys.dry_run {
-        log("[dry-run] not changing the box socket group");
-    } else {
-        let gid = lookup_group(&cfg.box_group)?;
+    match box_gid {
         // A uid of u32::MAX is `-1` to chown(2): the owner stays as it is.
-        chown(socket, Owner { uid: u32::MAX, gid })?;
+        Some(gid) => chown(socket, Owner { uid: u32::MAX, gid })?,
+        None => log("[dry-run] not changing the box socket group"),
     }
     Ok(listener)
 }

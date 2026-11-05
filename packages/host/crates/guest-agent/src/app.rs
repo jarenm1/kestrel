@@ -476,8 +476,11 @@ async fn configure_op(app: &Arc<App>, args: ConfigureArgs) -> Res<()> {
 }
 
 async fn prepare_suspend(app: &Arc<App>) -> Res<()> {
+    if app.lock().frozen.is_some() {
+        return Err("volume frozen; thaw it before suspend".into());
+    }
     ask_box(app, QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
-    sync_all();
+    sync_all().await?;
     app.sys.write_knob("/proc/sys/vm/drop_caches", "3")
 }
 
@@ -491,11 +494,14 @@ async fn resumed(app: &Arc<App>, wall_clock_ms: u64) -> Res<()> {
 }
 
 async fn freeze_volume(app: &Arc<App>) -> Res<()> {
+    // Held until the freeze completes or fails: a thaw that arrives meanwhile waits here, then really thaws, instead of
+    // finding nothing frozen and returning early.
+    let _thaw = app.thaw_lock.lock().await;
     if app.lock().frozen.is_some() {
         return Err("the volume is already frozen".into());
     }
     ask_box(app, FREEZE_QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
-    sync_all();
+    sync_all().await?;
     app.sys
         .run("fsfreeze", &["--freeze", mount_arg(app)?])
         .await?;
@@ -653,6 +659,44 @@ mod tests {
             .expect("thaw ran while an op held op_lock")
             .expect("thaw succeeds");
         assert_eq!(app.lock().frozen, None);
+    }
+
+    /// A thaw that arrives while a freeze is in progress waits for the freeze, then thaws what it froze. It must not
+    /// return early with the volume still frozen.
+    #[tokio::test]
+    async fn thaw_during_a_freeze_thaws_it() {
+        let (app, _volume) = app_on_volume("thaw-during-freeze");
+        // A freeze holds thaw_lock from its start until it completes.
+        let freezing = app.thaw_lock.lock().await;
+        let thaw = tokio::spawn({
+            let app = app.clone();
+            async move { thaw_volume(&app).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !thaw.is_finished(),
+            "thaw returned while the freeze held thaw_lock"
+        );
+        app.lock().frozen = Some(9);
+        drop(freezing);
+        timeout(Duration::from_secs(5), thaw)
+            .await
+            .expect("thaw finished after the freeze")
+            .expect("thaw task joined")
+            .expect("thaw succeeds");
+        assert_eq!(app.lock().frozen, None);
+    }
+
+    /// Suspend syncs and drops caches under the volume, so a frozen volume refuses it before it asks the box to quiesce.
+    #[tokio::test]
+    async fn prepare_suspend_refuses_a_frozen_volume() {
+        let (app, _volume) = app_on_volume("suspend-frozen");
+        app.lock().frozen = Some(1);
+        let err = prepare_suspend(&app)
+            .await
+            .expect_err("frozen volume refuses suspend");
+        assert!(err.contains("volume frozen"), "unexpected error: {err}");
+        assert_eq!(app.lock().frozen, Some(1));
     }
 
     /// Configure writes the volume, so a frozen volume refuses it before anything is written.
