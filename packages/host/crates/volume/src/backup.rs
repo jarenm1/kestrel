@@ -5,7 +5,7 @@
 //! manifest is the commit point: the baseline advances only after the manifest is stored.
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::crypto::BoxKey;
 use crate::extents;
-use crate::files::{FileLock, suffixed, sync_parent, write_file_atomic};
+use crate::files::{FileLock, create_unnamed, link_unnamed, suffixed, write_file_atomic};
 use crate::manifest::{
     CHUNK_SIZE, Manifest, check_ref, chunk_key, manifest_key, manifest_number, manifests_prefix,
     random_token,
@@ -265,20 +265,13 @@ pub fn restore(
         .ok_or_else(|| anyhow!("manifest {volume_ref} is missing"))?;
     let manifest = Manifest::open(&bytes, key, box_id, volume_ref)?;
 
-    // Held for the whole restore, so two restores of one destination cannot share `dest.partial`. The lock file stays
-    // beside `dest`, as the lazy volume's does.
+    // Held for the whole restore, so a concurrent restore or lazy open of `dest` is refused. The lock file stays beside
+    // `dest`, as the lazy volume's does.
     let _lock = FileLock::try_acquire(&suffixed(dest, ".lock"))?;
     ensure!(!dest.exists(), "{} already exists", dest.display());
-    // The image is built under a staging name and linked to `dest` only once complete, so `dest` never holds a partial
-    // restore. A crash leaves only the staging file, which the next attempt replaces.
-    let staging = suffixed(dest, ".partial");
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&staging)
-        .with_context(|| format!("creating {}", staging.display()))?;
-    let _staging = Cleanup::new(staging.clone());
+    // The image is written unnamed and linked to `dest` only once complete, so `dest` never holds a partial restore and
+    // a crash leaves nothing behind.
+    let file = create_unnamed(dest)?;
     file.set_len(manifest.size_bytes)?;
     let work: Vec<(usize, String)> = manifest
         .chunks
@@ -293,10 +286,8 @@ pub fn restore(
         Ok(())
     })?;
     file.sync_all()?;
-    drop(file);
-    // `hard_link` fails if `dest` appeared meanwhile, so a restore never replaces an existing file.
-    fs::hard_link(&staging, dest).with_context(|| format!("creating {}", dest.display()))?;
-    sync_parent(dest)?;
+    // Refuses to link if `dest` appeared meanwhile, so a restore never replaces an existing file.
+    link_unnamed(&file, dest)?;
     Ok(RestoreOutput {
         bytes: manifest.size_bytes,
     })
@@ -382,7 +373,6 @@ mod tests {
             !dest.exists(),
             "a failed restore must not leave a partial file"
         );
-        assert!(!dir.path().join("restored.raw.partial").exists());
     }
 
     #[test]
@@ -535,5 +525,20 @@ mod tests {
             Ok(i)
         });
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn a_file_at_the_old_staging_name_is_never_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = volume(dir.path(), 1);
+        let out = backup(&path, BOX, dir.path(), &store, &key).unwrap();
+        let dest = dir.path().join("restored.raw");
+        let other = dir.path().join("restored.raw.partial");
+        fs::write(&other, b"keep").unwrap();
+        restore(&out.volume_ref, BOX, &store, &key, &dest).unwrap();
+        assert_eq!(fs::read(&other).unwrap(), b"keep");
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&path).unwrap());
     }
 }

@@ -1,9 +1,12 @@
 //! Local state files: written whole, fsynced, renamed into place and the directory fsynced, so a crash leaves the old
 //! file or the new one.
 
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,15 +21,53 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     sync_parent(path)
 }
 
-/// Fsyncs the directory holding `path`, so a rename into it survives a crash.
+/// The directory holding `path`; `.` for a bare file name.
+fn parent_dir(path: &Path) -> Result<&Path> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Ok(Path::new(".")),
+        Some(parent) => Ok(parent),
+        None => Err(anyhow!("{} has no directory", path.display())),
+    }
+}
+
+/// Fsyncs the directory holding `path`, so a rename or link into it survives a crash.
 pub fn sync_parent(path: &Path) -> Result<()> {
-    let parent = match path.parent() {
-        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
-        Some(parent) => parent,
-        None => return Err(anyhow!("{} has no directory", path.display())),
-    };
-    File::open(parent)?.sync_all()?;
+    File::open(parent_dir(path)?)?.sync_all()?;
     Ok(())
+}
+
+/// Creates an unnamed file in the directory of `dest` (`O_TMPFILE`). It has no name until `link_unnamed` gives it one,
+/// so a crash leaves nothing behind and no existing file is ever opened or truncated.
+pub fn create_unnamed(dest: &Path) -> Result<File> {
+    let dir = parent_dir(dest)?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_TMPFILE)
+        .open(dir)
+        .with_context(|| format!("creating a file in {}", dir.display()))
+}
+
+/// Gives an unnamed file from `create_unnamed` the name `dest`, failing if `dest` exists, then fsyncs the directory.
+pub fn link_unnamed(file: &File, dest: &Path) -> Result<()> {
+    let source = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
+    let target = CString::new(dest.as_os_str().as_bytes())?;
+    // SAFETY: both arguments are NUL-terminated strings that live across the call. `AT_SYMLINK_FOLLOW` makes `linkat`
+    // follow the `/proc/self/fd` link to the unnamed inode.
+    let rc = unsafe {
+        libc::linkat(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::AT_SYMLINK_FOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("linking {}", dest.display()));
+    }
+    sync_parent(dest)
 }
 
 /// `path` with `suffix` appended to its file name.

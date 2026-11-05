@@ -256,8 +256,8 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
   skips a hydrating volume that round (`backedUpAt` unchanged), and park waits for hydration before its backup.
   A lock on `<dest>.lock` is held while the device is served. A second `restore-lazy` of the same `dest` fails at once, so
   two processes never serve one image from separate presence maps. `restore` (eager) holds the same `<dest>.lock` for the
-  whole restore, so concurrent restores of one `dest` cannot share `<dest>.partial`; it builds the image there and
-  hard-links it to `dest`, which fails if `dest` exists. The lock file is left beside `dest`.
+  whole restore. It writes the image as an unnamed file in `dest`'s directory (`O_TMPFILE`) and links it to `dest` with
+  `linkat`, which fails if `dest` exists, so no staging name is ever opened or truncated. The lock file is left beside `dest`.
 
 ### `kestrel-volume` CLI
 

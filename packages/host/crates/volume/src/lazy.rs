@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backup::{chunk_len, fetch_chunk};
 use crate::crypto::BoxKey;
-use crate::files::{FileLock, suffixed, sync_parent, write_file_atomic};
+use crate::files::{FileLock, create_unnamed, link_unnamed, suffixed, write_file_atomic};
 use crate::manifest::{CHUNK_SIZE, Manifest, check_ref};
 use crate::store::Store;
 
@@ -156,22 +156,13 @@ impl Volume {
             (file, present)
         } else {
             let present = Presence::new(chunks);
-            // The image is written and synced under a staging name, and its bitmap is durable before the rename makes
-            // `dest` appear. So `dest` existing implies a valid bitmap, and a crash leaves only a staging file to replace.
-            let staging = suffixed(dest, ".partial");
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&staging)
-                .with_context(|| format!("creating {}", staging.display()))?;
+            // The image is created unnamed and its bitmap is durable before it is linked to `dest`, so `dest` existing
+            // implies a valid bitmap. A crash leaves nothing behind.
+            let file = create_unnamed(dest)?;
             file.set_len(manifest.size_bytes)?;
             file.sync_all()?;
             write_file_atomic(&bitmap_path, &present.encode(&identity, None))?;
-            fs::rename(&staging, dest)
-                .with_context(|| format!("renaming into {}", dest.display()))?;
-            sync_parent(dest)?;
+            link_unnamed(&file, dest)?;
             (file, present)
         };
 
@@ -545,17 +536,17 @@ mod tests {
     }
 
     #[test]
-    fn an_interrupted_create_leaves_no_image_under_dest() {
+    fn a_file_at_the_old_staging_name_is_never_touched() {
         let dir = tempfile::tempdir().unwrap();
         let volume_ref = backed_up(dir.path(), 2);
         let dest = dir.path().join("dest.raw");
-        fs::write(
-            suffixed(&dest, ".partial"),
-            vec![7u8; 3 * CHUNK_SIZE as usize],
-        )
-        .unwrap();
+        let other = suffixed(&dest, ".partial");
+        fs::write(&other, vec![7u8; 3 * CHUNK_SIZE as usize]).unwrap();
         open(dir.path(), &volume_ref, &dest).unwrap();
         assert_eq!(fs::metadata(&dest).unwrap().len(), 2 * CHUNK_SIZE);
-        assert!(!suffixed(&dest, ".partial").exists());
+        assert_eq!(
+            fs::read(&other).unwrap(),
+            vec![7u8; 3 * CHUNK_SIZE as usize]
+        );
     }
 }
