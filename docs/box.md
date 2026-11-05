@@ -135,6 +135,8 @@ Each desktop's X server is a rootful Xwayland in a headless weston. On a host wi
 
 GPU access is not a tenant isolation boundary: desktop apps reach the host GPU driver and share its memory and scheduling. Keep the existing task CPU/RAM limits, but do not treat them as a VRAM quota.
 
+Headless GPU work uses the same devices without a desktop: `workspace_exec` with `gpu: true` gets render/compute nodes and drivers, but no `DISPLAY` and no X socket. See [headless-gpu.md](headless-gpu.md) for operator setup and the process cleanup contract.
+
 The box styles the desktop to match the app: `hsetroot` paints `desktop/wallpaper.png` (the logo on black) on the root window, openbox runs with the theme, fonts and bindings from `desktop/theme.ts`, and the flake's `xterm` wrapper uses the app's colors. Openbox gets an explicit set of bindings and an empty menu file, so nothing on the desktop runs a program outside the sandbox: its stock root menu launches programs as the box user. Right-clicking the desktop lists the open windows instead, which is also the way back to an iconified window.
 
 #### Desktop dependencies on Linux
