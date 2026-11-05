@@ -195,9 +195,10 @@ export class NestFleet {
       this.forget(row)
       return
     }
-    // A parked box with nothing in flight is held by no host. A refused resume never started there. A park result can
-    // arrive after the parked report, which kept the claim while the command was pending.
-    if (row.state === "parked" && row.pendingId === null) row.hostId = null
+    // A parked box with nothing in flight is held by no host. A park result that arrives after the parked report, and a
+    // refused resume (never started there), release the claim here. A result that carries a VM report is applied by
+    // `vm`, which releases the claim on a parked report and keeps it on a running one.
+    if (vm === undefined && row.state === "parked") row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
   }

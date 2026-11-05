@@ -465,6 +465,17 @@ describe("park and GPU", () => {
     expect(resume?.command).toMatchObject({ _tag: "resume", ownerEpoch: 2 })
   })
 
+  test("a resume that succeeds with a running VM keeps the claim for the VM report that follows", async () => {
+    const vmId = await runningBox()
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    const park = lastCommand("host-a", "park")
+    fleet.result("host-a", park.commandId, true, null, vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = lastCommand("host-a", "resume")
+    fleet.result("host-a", resume.commandId, true, null, vmReport("box-1", resume.command.vmId, 2, "running"))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: null })
+  })
+
   test("a box another user owns cannot be parked", async () => {
     await runningBox()
     expect(fleet.park("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
