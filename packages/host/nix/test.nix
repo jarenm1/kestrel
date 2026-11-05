@@ -183,7 +183,7 @@ pkgs.testers.runNixOSTest {
             "ownerEpoch": 1,
             "limits": box_limits(2 * GIB),
             "publicUrl": "https://" + box + "." + SLUG + "." + DOMAIN,
-            "enrollToken": "token-" + box,
+            "enrollToken": ("enroll-" + box).ljust(43, "x"),
         }
 
     def resume_body(box, ref, vm_id, epoch):
