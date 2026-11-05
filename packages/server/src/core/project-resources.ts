@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync, statSync } from "node:fs"
+import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from "node:path"
 import { Effect, Schema } from "effect"
 import { InternalError } from "@cloudagents/protocol"
@@ -17,6 +17,9 @@ type Grant = Schema.Schema.Type<typeof Grant>
 
 export const ENGINE_TARGET = "/kestrel-project-resources/engine"
 export const CACHE_TARGET = "/kestrel-project-resources/cache"
+const SHARED_CACHES = "shared-caches"
+/** Points Unreal's filesystem derived data cache at the mounted project cache, with no Zen server needed. */
+const cacheEnv = { KESTREL_PROJECT_CACHE: CACHE_TARGET, UE_LOCAL_DATA_CACHE_PATH: CACHE_TARGET }
 
 const overlaps = (a: string, b: string): boolean => {
   const r = relative(a, b)
@@ -70,18 +73,50 @@ export const loadProjectResources = (file: string, dataDir: string): readonly Gr
   return grants
 }
 
-export const projectResourcesFor = (grants: readonly Grant[], task: { owner: string; checkouts: readonly { repo: string }[] }) => Effect.try({
+/**
+ * Creates `<dataDir>/shared-caches/<taskOwner>/<repoOwner>/<repo>` one component at a time, so a symlink at any level
+ * is refused rather than followed. The components are validated first, so the path stays inside `dataDir`.
+ */
+const ensureSharedCache = (dataDir: string, taskOwner: string, repo: { owner: string; name: string }): string => {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskOwner)) throw new Error("invalid task owner for shared cache")
+  let dir = canonicalDataPath(resolve(dataDir))
+  mkdirSync(dir, { recursive: true })
+  for (const part of [SHARED_CACHES, taskOwner, repo.owner, repo.name]) {
+    dir = join(dir, part)
+    try {
+      mkdirSync(dir)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    }
+    if (!lstatSync(dir).isDirectory()) throw new Error("shared cache path is not a directory")
+  }
+  return dir
+}
+
+/**
+ * Resources for a launch. A manifest grant for the thread's repository supplies its engine and cache. Otherwise the
+ * first github.com checkout gets an automatic cache scoped to the task owner and that repository.
+ */
+export const projectResourcesFor = (grants: readonly Grant[], task: { owner: string; checkouts: readonly { repo: string }[] }, dataDir: string) => Effect.try({
   try: () => {
     const matches = grants.filter((grant) => grant.owner === task.owner && task.checkouts.some((checkout) => parseRepoRef(checkout.repo)?.repo === grant.repo))
     if (matches.length > 1) throw new Error("multiple project resource grants match this thread")
     const grant = matches[0]
-    if (!grant) return { env: {}, binds: [], roTargetBinds: [] }
-    // Recheck paths at launch so replacing a provisioned path with a symlink fails closed.
-    for (const dir of [grant.engineDir, grant.cacheDir]) if (realpathSync(dir) !== dir || !statSync(dir).isDirectory()) throw new Error("project resource directory changed")
+    if (grant) {
+      // Recheck paths at launch so replacing a provisioned path with a symlink fails closed.
+      for (const dir of [grant.engineDir, grant.cacheDir]) if (realpathSync(dir) !== dir || !statSync(dir).isDirectory()) throw new Error("project resource directory changed")
+      return {
+        env: { UE_ENGINE_DIR: ENGINE_TARGET, ...cacheEnv, ...(grant.zenDdcUrl === undefined ? {} : { UE_ZEN_DDC_URL: grant.zenDdcUrl }) },
+        binds: [{ host: grant.cacheDir, sandbox: CACHE_TARGET }],
+        roTargetBinds: [{ host: grant.engineDir, sandbox: ENGINE_TARGET }],
+      }
+    }
+    const repo = task.checkouts.flatMap((checkout) => parseRepoRef(checkout.repo)?.github ?? [])[0]
+    if (!repo) return { env: {}, binds: [], roTargetBinds: [] }
     return {
-      env: { UE_ENGINE_DIR: ENGINE_TARGET, ...(grant.zenDdcUrl === undefined ? {} : { UE_ZEN_DDC_URL: grant.zenDdcUrl }) },
-      binds: [{ host: grant.cacheDir, sandbox: CACHE_TARGET }],
-      roTargetBinds: [{ host: grant.engineDir, sandbox: ENGINE_TARGET }],
+      env: cacheEnv,
+      binds: [{ host: ensureSharedCache(dataDir, task.owner, repo), sandbox: CACHE_TARGET }],
+      roTargetBinds: [],
     }
   },
   catch: (error) => new InternalError({ message: `cannot resolve project resources: ${error instanceof Error ? error.message : String(error)}` }),

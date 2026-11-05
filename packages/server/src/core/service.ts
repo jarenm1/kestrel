@@ -702,7 +702,7 @@ export const CoreLive = Layer.effect(
           : yield* github.commitIdentity(task.owner, creds?.github).pipe(
               Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
             )
-        const resources = yield* projectResourcesFor(config.projectResources ?? [], task)
+        const resources = yield* projectResourcesFor(config.projectResources ?? [], task, config.dataDir)
         return yield* prepareLaunch({
           settings: sandboxSettings,
           taskId: task.id,

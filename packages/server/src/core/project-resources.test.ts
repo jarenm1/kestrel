@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -10,7 +10,9 @@ import { buildBwrapArgv } from "../sandbox"
 
 const root = mkdtempSync(join(tmpdir(), "project-resources-"))
 afterEach(() => rmSync(root, { recursive: true, force: true }))
-const projectResourcesFor = (...args: Parameters<typeof resourceEffect>) => Effect.runSync(resourceEffect(...args))
+const dataDir = join(root, "data")
+const projectResourcesFor = (grants: Parameters<typeof resourceEffect>[0], task: Parameters<typeof resourceEffect>[1]) =>
+  Effect.runSync(resourceEffect(grants, task, dataDir))
 const task = { owner: "alice", checkouts: [{ repo: "org/game" }] }
 const fixture = () => {
   for (const dir of ["engine", "cache", "data"]) mkdirSync(join(root, dir), { recursive: true })
@@ -21,6 +23,11 @@ const fixture = () => {
   }
   return { grant, write, load: (file = write()) => loadProjectResources(file, join(root, "data")) }
 }
+const automaticCache = (owner: string, repo: string) => ({
+  env: { KESTREL_PROJECT_CACHE: CACHE_TARGET, UE_LOCAL_DATA_CACHE_PATH: CACHE_TARGET },
+  binds: [{ host: join(dataDir, "shared-caches", owner, ...repo.split("/")), sandbox: CACHE_TARGET }],
+  roTargetBinds: [],
+})
 
 describe("project resources", () => {
   test("rejects manifests in writable caches or data, including an aliased data directory", () => {
@@ -46,7 +53,7 @@ describe("project resources", () => {
     const { grant, write, load } = fixture()
     expect(() => load(write(undefined, [grant, grant]))).toThrow("duplicate project resource grant")
     const grants = load(write(undefined, [grant, { ...grant, repo: "org/other" }]))
-    const result = Effect.runSync(Effect.either(resourceEffect(grants, { ...task, checkouts: [...task.checkouts, { repo: "org/other" }] })))
+    const result = Effect.runSync(Effect.either(resourceEffect(grants, { ...task, checkouts: [...task.checkouts, { repo: "org/other" }] }, dataDir)))
     expect(Either.isLeft(result)).toBe(true)
     if (Either.isLeft(result)) {
       expect(result.left).toBeInstanceOf(InternalError)
@@ -65,7 +72,7 @@ describe("project resources", () => {
     renameSync(grant.cacheDir, join(root, "moved-cache"))
     for (const swapped of [false, true]) {
       if (swapped) symlinkSync(join(root, "moved-cache"), grant.cacheDir)
-      const result = Effect.runSync(Effect.either(resourceEffect(grants, task)))
+      const result = Effect.runSync(Effect.either(resourceEffect(grants, task, dataDir)))
       expect(Either.isLeft(result)).toBe(true)
       if (Either.isLeft(result)) expect(result.left).toBeInstanceOf(InternalError)
     }
@@ -84,14 +91,50 @@ describe("project resources", () => {
     const resources = projectResourcesFor(grants, { owner: "alice", checkouts: [{ repo: "org/game" }] })
     expect(resources.roTargetBinds).toEqual([{ host: grant.engineDir, sandbox: ENGINE_TARGET }])
     expect(resources.binds).toEqual([{ host: grant.cacheDir, sandbox: CACHE_TARGET }])
-    expect(projectResourcesFor(grants, { owner: "bob", checkouts: [{ repo: "org/game" }] }).binds).toEqual([])
-    expect(projectResourcesFor(grants, { owner: "alice", checkouts: [{ repo: "org/other" }] }).binds).toEqual([])
+    expect(projectResourcesFor(grants, { owner: "bob", checkouts: [{ repo: "org/game" }] })).toEqual(automaticCache("bob", "org/game"))
+    expect(projectResourcesFor(grants, { owner: "alice", checkouts: [{ repo: "org/other" }] })).toEqual(automaticCache("alice", "org/other"))
     expect(() => load([grant, { ...grant, owner: "bob", trustGroup: "other" }])).toThrow()
     expect(load([grant, { ...grant, owner: "bob" }])).toHaveLength(2)
     expect(() => load([{ ...grant, cacheDir: grant.engineDir }])).toThrow()
     symlinkSync(grant.cacheDir, join(root, "link"))
     expect(() => load([{ ...grant, cacheDir: join(root, "link") }])).toThrow()
     expect(() => load([{ ...grant, zenDdcUrl: "https://user:secret@example.com" }])).toThrow()
+  })
+
+  test("provisions an automatic cache for a GitHub checkout without any manifest", () => {
+    const cache = join(dataDir, "shared-caches", "alice", "org", "game")
+    expect(existsSync(dataDir)).toBe(false)
+    expect(projectResourcesFor([], task)).toEqual(automaticCache("alice", "org/game"))
+    expect(statSync(cache).isDirectory()).toBe(true)
+    expect(projectResourcesFor([], { ...task, checkouts: [{ repo: "https://github.com/org/game.git" }] })).toEqual(automaticCache("alice", "org/game"))
+  })
+
+  test("isolates automatic caches by task owner and canonical repository", () => {
+    const cacheOf = (owner: string, repo: string) => projectResourcesFor([], { owner, checkouts: [{ repo }] }).binds[0]?.host
+    const hosts = [cacheOf("alice", "org/game"), cacheOf("bob", "org/game"), cacheOf("alice", "org/other"), cacheOf("alice", "other/game")]
+    expect(new Set(hosts).size).toBe(4)
+    expect(cacheOf("alice", "org/game")).toBe(cacheOf("alice", "https://github.com/org/game"))
+  })
+
+  test("gives no automatic cache to threads without a GitHub checkout", () => {
+    expect(projectResourcesFor([], { owner: "alice", checkouts: [] })).toEqual({ env: {}, binds: [], roTargetBinds: [] })
+    expect(projectResourcesFor([], { owner: "alice", checkouts: [{ repo: "https://git.example.com/org/game.git" }] })).toEqual({ env: {}, binds: [], roTargetBinds: [] })
+  })
+
+  test("a manifest grant replaces the automatic cache for its repository", () => {
+    const { grant, load } = fixture()
+    expect(projectResourcesFor(load(), task).binds).toEqual([{ host: grant.cacheDir, sandbox: CACHE_TARGET }])
+    expect(existsSync(join(root, "data", "shared-caches"))).toBe(false)
+  })
+
+  test("refuses an automatic cache path that is a symlink instead of following it", () => {
+    mkdirSync(join(dataDir, "shared-caches"), { recursive: true })
+    mkdirSync(join(root, "elsewhere"))
+    symlinkSync(join(root, "elsewhere"), join(dataDir, "shared-caches", "alice"))
+    const result = Effect.runSync(Effect.either(resourceEffect([], task, dataDir)))
+    expect(Either.isLeft(result)).toBe(true)
+    if (Either.isLeft(result)) expect(result.left.message).toContain("shared cache path is not a directory")
+    expect(readdirSync(join(root, "elsewhere"))).toEqual([])
   })
 })
 
