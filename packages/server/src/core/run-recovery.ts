@@ -1,4 +1,4 @@
-import { Cause, Effect, Either } from "effect"
+import { Cause, Effect, Either, Exit } from "effect"
 import {
   Conflict,
   DEFAULT_MODEL_PROVIDER,
@@ -172,7 +172,8 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
           stored.status !== "failed" ||
           stored.usageLimitResume !== undefined ||
           stored.autoRetry !== undefined ||
-          stored.delegation?.cancelledAt !== undefined ||
+          // A delegated child's result is what its parent sees; retrying would let the parent's notification race it.
+          stored.delegation !== undefined ||
           last?.id !== run.id
         ) {
           return Either.right(null)
@@ -187,17 +188,39 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       ),
     )
 
+  /**
+   * A retry that could not be started consumes its attempt, so the next tick cannot loop on the same past-due id. If
+   * attempts remain, the next one is armed after its backoff; otherwise the arm is dropped and the thread stays failed.
+   */
+  const advanceRetry = (taskId: string, runId: string, attempt: number) =>
+    deps.store.update((s) => {
+      const stored = s.tasks.find((t) => t.id === taskId)
+      if (stored?.autoRetry?.runId !== runId || stored.autoRetry.attempt !== attempt) return Either.right(null)
+      if (attempt >= AUTO_RETRY_LIMIT) delete stored.autoRetry
+      else
+        stored.autoRetry = {
+          runId,
+          attempt: attempt + 1,
+          nextAt: new Date(Date.now() + autoRetryDelay(attempt + 1)).toISOString(),
+        }
+      return Either.right({ ...stored })
+    }).pipe(Effect.tap((task) => (task === null ? Effect.void : Effect.sync(() => deps.publish(task)))))
+
   const retry = (task: Task, run: Run, arm: NonNullable<Task["autoRetry"]>) =>
     Effect.gen(function* () {
-      const delivered = yield* Effect.either(
+      // An exit, not an either: a defect (a model removed from the catalog, say) must not leave the past-due arm to
+      // fire on every sweep.
+      const delivered = yield* Effect.exit(
         deps.retry(task, run, `auto-retry:${task.id}:${run.id}:${arm.attempt}`, arm.attempt),
       )
-      if (Either.isLeft(delivered)) {
-        // The thread moved on while the sweep waited (a user reply, or a run that started meanwhile).
-        if (delivered.left instanceof Conflict) return yield* clearRetry(task.id, run.id, arm.attempt)
-        return yield* Effect.fail(delivered.left)
+      if (Exit.isSuccess(delivered)) return yield* clearRetry(task.id, run.id, arm.attempt)
+      const failure = Cause.failureOption(delivered.cause)
+      // The thread moved on while the sweep waited (a user reply, or a run that started meanwhile).
+      if (failure._tag === "Some" && failure.value instanceof Conflict) {
+        return yield* clearRetry(task.id, run.id, arm.attempt)
       }
-      yield* clearRetry(task.id, run.id, arm.attempt)
+      yield* advanceRetry(task.id, run.id, arm.attempt)
+      yield* Effect.logWarning(`task ${task.id}: auto-retry could not start: ${Cause.pretty(delivered.cause)}`)
     }).pipe(
       Effect.catchAllCause((cause) =>
         Effect.logWarning(`task ${task.id}: auto-retry failed: ${Cause.pretty(cause)}`),
@@ -224,6 +247,8 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
         return
       }
       examined.add(run.id)
+      // A delegated child's result is its parent's notification; auto-retry would race that delivery.
+      if (task.delegation !== undefined) return
       yield* scheduleRetry(task, run, Date.now())
     })
 

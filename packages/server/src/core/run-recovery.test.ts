@@ -413,3 +413,61 @@ test("an archived thread or a cancelled delegation is not retried", async () => 
   await Effect.runPromise(cancelled.recovery.sweep)
   expect(cancelled.state.tasks[0]!.autoRetry).toBeUndefined()
 })
+
+test("a retry that cannot start consumes its attempt instead of firing again on the next tick", async () => {
+  let calls = 0
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedWith()] }),
+    items: transportError,
+    retry: () => {
+      calls += 1
+      return Effect.fail(new Error("the model is no longer in the catalog"))
+    },
+  })
+  state.tasks[0]!.autoRetry = { runId: "run", attempt: 1, nextAt: new Date(Date.now() - 1).toISOString() }
+
+  await Effect.runPromise(recovery.sweep)
+  expect(calls).toBe(1)
+  const arm = state.tasks[0]!.autoRetry!
+  expect(arm.attempt).toBe(2)
+  expect(Date.parse(arm.nextAt)).toBeGreaterThan(Date.now())
+
+  // The next tick is still inside the new backoff, so it does not try again.
+  await Effect.runPromise(recovery.sweep)
+  expect(calls).toBe(1)
+})
+
+test("a retry that dies consumes the last attempt and stops", async () => {
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedWith({ autoRetryAttempt: AUTO_RETRY_LIMIT })] }),
+    items: transportError,
+    retry: () => Effect.die(new Error("modelInfo defect")),
+  })
+  state.tasks[0]!.autoRetry = { runId: "run", attempt: AUTO_RETRY_LIMIT, nextAt: new Date(Date.now() - 1).toISOString() }
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
+
+test("a delegated child's failure is not retried", async () => {
+  const { recovery, state } = setup({
+    state: stateWith({
+      tasks: [
+        task({
+          delegation: {
+            parentTaskId: "parent",
+            parentRunId: "parent-run",
+            requestId: "request",
+            fingerprint: "fingerprint",
+            runId: "run",
+          },
+        }),
+      ],
+      runs: [failedWith()],
+    }),
+    items: transportError,
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
