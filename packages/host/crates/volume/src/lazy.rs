@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backup::{chunk_len, fetch_chunk};
 use crate::crypto::BoxKey;
-use crate::files::{suffixed, sync_parent, write_file_atomic};
+use crate::files::{FileLock, suffixed, sync_parent, write_file_atomic};
 use crate::manifest::{CHUNK_SIZE, Manifest, check_ref};
 use crate::store::Store;
 
@@ -38,6 +38,8 @@ struct Volume {
     key: BoxKey,
     manifest: Manifest,
     file: File,
+    /// Held for the life of the volume. A second open of the same destination would have its own presence map.
+    _image_lock: FileLock,
     bitmap_path: PathBuf,
     identity: Vec<u8>,
     present: Presence,
@@ -134,6 +136,7 @@ impl Volume {
         let chunks = manifest.chunks.len();
         let identity = identity(box_id, volume_ref);
         let bitmap_path = suffixed(dest, BITMAP_SUFFIX);
+        let image_lock = FileLock::try_acquire(&suffixed(dest, ".lock"))?;
 
         let (file, present) = if dest.exists() {
             let bitmap = fs::read(&bitmap_path)
@@ -178,6 +181,7 @@ impl Volume {
             key,
             manifest,
             file,
+            _image_lock: image_lock,
             bitmap_path,
             identity,
             present,
@@ -462,6 +466,18 @@ mod tests {
         let mut buf = [0u8; 4];
         lazy.read(0, &mut buf).unwrap();
         assert_eq!(buf, [1; 4]);
+    }
+
+    #[test]
+    fn a_second_open_of_a_destination_is_refused_while_the_first_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 1);
+        let dest = dir.path().join("dest.raw");
+        let first = open(dir.path(), &volume_ref, &dest).unwrap();
+        let err = open(dir.path(), &volume_ref, &dest).err().unwrap();
+        assert!(format!("{err:#}").contains("held by another process"));
+        drop(first);
+        open(dir.path(), &volume_ref, &dest).unwrap();
     }
 
     #[test]

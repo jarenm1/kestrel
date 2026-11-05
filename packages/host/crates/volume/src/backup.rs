@@ -5,8 +5,7 @@
 //! manifest is the commit point: the baseline advances only after the manifest is stored.
 
 use std::collections::HashSet;
-use std::fs::{self, File, OpenOptions};
-use std::os::fd::AsRawFd;
+use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -17,7 +16,7 @@ use serde::Serialize;
 
 use crate::crypto::BoxKey;
 use crate::extents;
-use crate::files::write_file_atomic;
+use crate::files::{FileLock, write_file_atomic};
 use crate::manifest::{
     CHUNK_SIZE, Manifest, check_ref, chunk_key, manifest_key, manifest_number, manifests_prefix,
     random_token,
@@ -64,33 +63,6 @@ impl Drop for Cleanup {
         if let Some(path) = self.0.take() {
             fs::remove_file(path).ok();
         }
-    }
-}
-
-/// An exclusive lock on one box's backup state, held for a whole backup so two backups of the same box never race on
-/// its baseline. Released when dropped.
-struct BoxLock {
-    /// Held open so the `flock` lasts until this value is dropped.
-    _file: File,
-}
-
-impl BoxLock {
-    fn acquire(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        // SAFETY: `flock` takes a valid descriptor and an operation flag, and touches no memory.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        ensure!(
-            rc == 0,
-            "locking {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        );
-        Ok(Self { _file: file })
     }
 }
 
@@ -191,7 +163,7 @@ pub fn backup(
     store: &dyn Store,
     key: &BoxKey,
 ) -> Result<BackupOutput> {
-    let _lock = BoxLock::acquire(&state_dir.join(format!("{box_id}.lock")))?;
+    let _lock = FileLock::acquire(&state_dir.join(format!("{box_id}.lock")))?;
     let prev = latest_manifest(store, box_id, key)?;
     let snap_path = state_dir.join(format!("{box_id}.snap"));
     let base_path = state_dir.join(format!("{box_id}.base"));
@@ -485,13 +457,13 @@ mod tests {
     }
 
     #[test]
-    fn a_box_lock_blocks_a_second_backup_until_released() {
+    fn a_file_lock_blocks_a_second_acquire_until_released() {
         let dir = tempfile::tempdir().unwrap();
         let lock_path = dir.path().join("box-a.lock");
-        let held = BoxLock::acquire(&lock_path).unwrap();
+        let held = FileLock::acquire(&lock_path).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let contender = thread::spawn(move || {
-            let _again = BoxLock::acquire(&lock_path).unwrap();
+            let _again = FileLock::acquire(&lock_path).unwrap();
             tx.send(()).unwrap();
         });
         assert!(

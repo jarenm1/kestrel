@@ -254,6 +254,8 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
   task hydrates the rest. Once complete the VM switches to the plain file at its next restore (the disk path is
   rewritten in `restore/config.json`). A backup reads `volume.raw` only once hydration is complete: the periodic backup
   skips a hydrating volume that round (`backedUpAt` unchanged), and park waits for hydration before its backup.
+  A lock on `<dest>.lock` is held while the device is served. A second `restore-lazy` of the same `dest` fails at once, so
+  two processes never serve one image from separate presence maps.
 
 ### `kestrel-volume` CLI
 
