@@ -215,6 +215,8 @@ const MODEL_ROW_REM = 2
 const MODEL_MENU_CHROME_REM = 5.5
 /** Tallest the menu gets before its list scrolls; the window's room caps it further. */
 const MODEL_MENU_MAX_REM = 24
+/** Width of the harness rail: a 2rem button and its 0.25rem padding on each side. */
+const HARNESS_RAIL_PX = 40
 
 /**
  * Model menu: a rail of the connected harnesses, the picked harness's models grouped by the provider behind them (its
@@ -302,15 +304,23 @@ function ModelPicker({
       <DropdownMenuContent
         align="start"
         side="top"
-        className="flex w-80 max-w-(--radix-dropdown-menu-content-available-width) p-0"
+        // The rail hangs off the panel's left edge; this keeps the panel itself aligned with the button.
+        alignOffset={tabs.length > 0 ? -HARNESS_RAIL_PX : 0}
+        // The content is only the frame: the panel below carries the menu surface, so the rail can sit outside it.
+        className="flex max-w-(--radix-dropdown-menu-content-available-width) items-start overflow-visible bg-transparent p-0 shadow-none"
         style={{ height: menuHeight }}
       >
-        {!searching && tabs.length > 0 && (
-          // A vertical take on the new thread page's inset bar: as tall as its harnesses, scrolling only on a short window.
+        {tabs.length > 0 && (
+          // A vertical take on the new thread page's inset bar: it pokes out from behind the panel's left edge, as tall
+          // as its harnesses, scrolling only on a short window. Hidden, but still holding its place, while searching.
           <div
             role="group"
             aria-label="Harnesses"
-            className="my-1.5 ml-1.5 flex max-h-[calc(100%-0.75rem)] shrink-0 flex-col gap-0.5 self-start overflow-y-auto rounded-xl bg-input p-1 shadow-well"
+            aria-hidden={searching || undefined}
+            className={cn(
+              "mt-4 flex max-h-[calc(100%-2rem)] shrink-0 flex-col gap-0.5 overflow-y-auto rounded-l-xl bg-input p-1 shadow-well",
+              searching && "invisible",
+            )}
           >
             {tabs.map((candidate) => (
               <button
@@ -333,7 +343,7 @@ function ModelPicker({
             ))}
           </div>
         )}
-        <div className="flex min-w-0 flex-1 flex-col p-1.5">
+        <div className="flex h-full w-80 min-w-0 flex-col rounded-2xl bg-secondary p-1.5 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.85),inset_0_1px_0_0_rgb(255_255_255/0.05)]">
           {tabs.length > 0 && (
             <Input
               {...menu.inputProps}
