@@ -35,6 +35,8 @@ import {
   SendMessageBody,
   SendMessageResponse,
   Task,
+  TextGenerationSettings,
+  ThreadSettings,
   TriggerAutomationBody,
   UpdateAutomationBody,
   Usage,
@@ -166,6 +168,14 @@ export interface ApiClient {
   useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
   /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
   usageActivity(): Promise<UsageActivity>;
+  /** The signed-in user's generated-text preferences on this box. */
+  textGenerationSettings(): Promise<TextGenerationSettings>;
+  /** Replaces the generated-text preferences on this box; values are validated by the server before it saves. */
+  saveTextGenerationSettings(settings: TextGenerationSettings): Promise<TextGenerationSettings>;
+  /** The signed-in user's thread preferences on this box. */
+  threadSettings(): Promise<ThreadSettings>;
+  /** Replaces the thread preferences on this box. */
+  saveThreadSettings(settings: ThreadSettings): Promise<ThreadSettings>;
   commands(taskId: string, model: AgentModel): Promise<HarnessCommands>;
   previewSession(taskId: string): Promise<PreviewSession>;
 }
@@ -447,6 +457,11 @@ export function createApiClient(
     usage: () => boxRequest(Usage, "GET", Paths.usage),
     providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
     capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
+    textGenerationSettings: () => boxRequest(TextGenerationSettings, "GET", Paths.textGenerationSettings),
+    saveTextGenerationSettings: (settings) =>
+      boxRequest(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),
+    threadSettings: () => boxRequest(ThreadSettings, "GET", Paths.threadSettings),
+    saveThreadSettings: (settings) => boxRequest(ThreadSettings, "PUT", Paths.threadSettings, settings),
     useBankedReset: (provider, body) =>
       boxRequest(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
     usageActivity: () =>

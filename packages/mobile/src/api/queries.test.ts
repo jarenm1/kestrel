@@ -29,6 +29,8 @@ test("box clients isolate caches even for identical task and run IDs", () => {
     [a.runItems("run"), b.runItems("run")], [a.diff("same-id"), b.diff("same-id")],
     [a.desktop("same-id"), b.desktop("same-id")],
     [a.commands("same-id", undefined, undefined, undefined), b.commands("same-id", undefined, undefined, undefined)],
+    [a.textGenerationSettings, b.textGenerationSettings],
+    [a.threadSettings, b.threadSettings],
   ]) expect(left).not.toEqual(right);
 });
 
