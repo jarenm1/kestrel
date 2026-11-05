@@ -35,8 +35,8 @@ export interface GuestLinkOptions {
 
 export interface GuestLink {
   /**
-   * Asks the guest for the GPU (`true`) or releases it (`false`). The wish is kept across reconnects: it is sent again
-   * on every new connection while it holds.
+   * Asks the guest for the GPU (`true`) or releases it (`false`). The current wish, a release included, is sent again on
+   * every new connection once one has been stated, so a release made while disconnected still reaches the guest.
    */
   readonly setWanted: (wanted: boolean) => void
   /** Sends the current activity now, even when unchanged. */
@@ -58,6 +58,8 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   let socket: Socket | null = null
   let closed = false
   let wanted = false
+  // Once the box has stated a wish, every new connection replays it, a release (false) included.
+  let wishStated = false
   let delay = minMs
   let reconnectTimer: NodeJS.Timeout | undefined
   let lastSent: string | null = null
@@ -126,7 +128,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
     current.on("connect", () => {
       delay = minMs
       write({ _tag: "hello", boxVersion: options.boxVersion })
-      if (wanted) write({ _tag: "gpuWanted", wanted: true })
+      if (wishStated) write({ _tag: "gpuWanted", wanted })
       sendActivity(true)
     })
 
@@ -171,6 +173,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   return {
     setWanted: (value) => {
       wanted = value
+      wishStated = true
       write({ _tag: "gpuWanted", wanted: value })
     },
     sendActivityNow: () => sendActivity(true),

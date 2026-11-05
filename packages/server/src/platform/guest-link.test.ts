@@ -233,6 +233,23 @@ describe("guest link", () => {
     await guest.when(() => guest.received.some((r) => r.conn === 1 && r.frame._tag === "gpuWanted"))
   })
 
+  test("a release made while disconnected reaches the guest on reconnect", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    await guest.when(() => guest.connections() === 1)
+    link.setWanted(true)
+    await guest.when(() => guest.received.some((r) => r.conn === 0 && r.frame._tag === "gpuWanted"))
+
+    guest.dropLatest()
+    link.setWanted(false)
+    await guest.when(() => guest.connections() === 2)
+    await guest.when(() => guest.received.some((r) => r.conn === 1 && r.frame._tag === "gpuWanted"))
+    expect(guest.received.find((r) => r.conn === 1 && r.frame._tag === "gpuWanted")?.frame).toEqual({
+      _tag: "gpuWanted",
+      wanted: false,
+    })
+  })
+
   test("close stops the link: nothing reconnects afterwards", async () => {
     const guest = await fakeGuest()
     const { link } = startLink(guest)
