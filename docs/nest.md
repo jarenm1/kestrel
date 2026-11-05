@@ -169,8 +169,9 @@ stops, so no write can land between the sync and the backup. From suspended: dis
 needs the space or the control plane sends `evict`.
 
 **Periodic backup of a running VM** (every `backupInterval`, default 1 h, when the volume changed): `freezeVolume` →
-`kestrel-volume backup --state-dir` (its first step reflinks `volume.raw` to `<state>/<boxId>.snap`, the only step that
-needs the freeze) → `thawVolume` once that snapshot exists → report `volumeRef`, `backedUpAt`.
+host reflinks `volume.raw` to `<state>/<boxId>.frozen` → `thawVolume` → `kestrel-volume backup --path <state>/<boxId>.frozen
+--state-dir <state>` → delete the copy → report `volumeRef`, `backedUpAt`. The freeze covers only the reflink; the backup
+reads the copy, which the CLI reflinks again to its own snapshot.
 
 **Destroy.** Stop, delete the volume, its backups and records → `deleted`. **Evict**: stop, delete local state only.
 
