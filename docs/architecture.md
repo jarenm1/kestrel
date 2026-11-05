@@ -63,6 +63,7 @@ The repository picker sends users without a GitHub connection to Profile to set 
 Connections contains only model access: **Harnesses/Subscriptions** groups subscription sign-ins and installed
 harnesses, with each harness's model-visibility picker beside its name; **API keys** keeps key-based access and
 its model preferences together. These pickers change which models appear in chat, not the box's installed models.
+When no key rows are visible, API keys shows a centered “No api keys added” empty state.
 
 The shared composer also owns the app-command catalog and invocation rules (`src/commands.ts`). App actions such
 as `/usage` execute locally on suggestion selection or message submission; they never reach the harness and

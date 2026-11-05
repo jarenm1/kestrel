@@ -129,7 +129,7 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {visible.length > 0 && (
+      {visible.length > 0 ? (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
             {visible.map((connection) => (
@@ -141,6 +141,8 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
             ))}
           </CardContent>
         </Card>
+      ) : (
+        <p className="py-4 text-center text-muted-foreground">No api keys added</p>
       )}
     </div>
   )

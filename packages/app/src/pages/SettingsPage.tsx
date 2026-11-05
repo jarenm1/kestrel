@@ -146,9 +146,6 @@ export function ProfileSettings() {
           )}
         </CardContent>
       </Card>
-      <p className="text-xs text-muted-foreground">
-        Name and avatar update from GitHub each time you sign in.
-      </p>
       <div>
         <Button variant="soft" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
           <LogOut />
