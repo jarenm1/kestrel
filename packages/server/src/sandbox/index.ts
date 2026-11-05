@@ -152,6 +152,7 @@ export interface BwrapOptions {
   readonly command: string
   /** Extra host paths mounted read-only at the same location (fake agent only). */
   readonly roBinds?: ReadonlyArray<string>
+  readonly roTargetBinds?: ReadonlyArray<SandboxBind>
   /** Host dirs bound read-write inside the sandbox (a signed-in user's CLI logins). */
   readonly binds?: ReadonlyArray<SandboxBind>
   /** CA bundle (CLOUDAGENTS_SANDBOX_SSL) bound at the standard bundle paths in place of the host's /etc/ssl. */
@@ -204,6 +205,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     opts.mirrorDir,
   ]
   for (const bind of opts.binds ?? []) argv.push("--bind", bind.host, bind.sandbox)
+  for (const bind of opts.roTargetBinds ?? []) argv.push("--ro-bind", bind.host, bind.sandbox)
   for (const path of opts.roBinds ?? []) argv.push("--ro-bind", path, path)
   if (opts.level === "basic") argv.push(...(opts.homeToolArgs ?? []))
   // Basic binds all of /etc, which holds these files.
@@ -361,6 +363,7 @@ export interface LaunchRequest {
   readonly env: Readonly<Record<string, string>>
   readonly command: string
   readonly roBinds?: ReadonlyArray<string>
+  readonly roTargetBinds?: ReadonlyArray<SandboxBind>
   /** Host dirs bound read-write inside the sandbox (a signed-in user's CLI logins). */
   readonly binds?: ReadonlyArray<SandboxBind>
   /** Directories put first on PATH, as the launched process sees them (the run's `gh` shim). */
@@ -807,6 +810,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         env,
         command: req.command,
         roBinds: req.roBinds,
+        roTargetBinds: req.roTargetBinds,
         binds: req.binds,
         caBundle: settings.sslCertFile,
         homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],

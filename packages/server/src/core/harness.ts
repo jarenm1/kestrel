@@ -32,6 +32,7 @@ import { CredentialStore } from "../credentials"
 import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
+import { projectResourcesFor } from "./project-resources"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
 import { makeAcpDriver, type AcpRunInput } from "./acp"
@@ -827,6 +828,7 @@ export const AgentHarnessLive = Layer.effect(
               : yield* github.commitIdentity(task.owner, creds?.github).pipe(
                   Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
                 )
+            const resources = projectResourcesFor(config.projectResources ?? [], task)
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
@@ -838,6 +840,7 @@ export const AgentHarnessLive = Layer.effect(
               homeDir,
               display,
               env: {
+                ...resources.env,
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
                 ...(choice.model !== undefined && provider !== "anthropic" && MODEL_HARNESS[provider].conversation === "claude"
@@ -862,7 +865,8 @@ export const AgentHarnessLive = Layer.effect(
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
-              binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
+              binds: [...resources.binds, ...loginDirs.map((d) => ({ host: d.host, sandbox: d.inside }))],
+              roTargetBinds: resources.roTargetBinds,
               pathPrefix: [ghBinAgent],
             })
 
