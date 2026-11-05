@@ -52,6 +52,8 @@ struct State {
     gpu: GpuState,
     gpu_pci: Option<String>,
     frozen: bool,
+    /// Bumped by every `thawVolume`, under `thaw_lock`. A freeze queued before a thaw is refused: the host gave up on it.
+    thaw_epoch: u64,
     host: Option<HostLink>,
     host_task: Option<AbortHandle>,
     box_link: Option<Arc<BoxLink>>,
@@ -108,6 +110,7 @@ impl App {
                 gpu: GpuState::None,
                 gpu_pci: None,
                 frozen: false,
+                thaw_epoch: 0,
                 host: None,
                 host_task: None,
                 box_link: None,
@@ -281,12 +284,10 @@ fn dispatch_host(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, line:
             configure_op(&app, *args).await
         }),
         HostToGuest::PrepareSuspend { .. } => {
-            spawn_op(
-                app,
-                tx,
-                id,
-                |app| async move { prepare_suspend(&app).await },
-            )
+            let epoch = app.lock().thaw_epoch;
+            spawn_op(app, tx, id, move |app| async move {
+                prepare_suspend(&app, epoch).await
+            })
         }
         HostToGuest::Resumed { wall_clock_ms, .. } => {
             spawn_op(app, tx, id, move |app| async move {
@@ -294,7 +295,10 @@ fn dispatch_host(app: &Arc<App>, tx: &mpsc::Sender<Outgoing<GuestToHost>>, line:
             })
         }
         HostToGuest::FreezeVolume { .. } => {
-            spawn_op(app, tx, id, |app| async move { freeze_volume(&app).await })
+            let epoch = app.lock().thaw_epoch;
+            spawn_op(app, tx, id, move |app| async move {
+                freeze_volume(&app, epoch).await
+            })
         }
         HostToGuest::ThawVolume { .. } => spawn_thaw(app, tx, id),
         HostToGuest::GpuAttached { pci_address, .. } => {
@@ -476,9 +480,10 @@ async fn sync_volume() -> Res<()> {
     }
 }
 
-async fn prepare_suspend(app: &Arc<App>) -> Res<()> {
+async fn prepare_suspend(app: &Arc<App>, epoch: u64) -> Res<()> {
     // Held through the freeze, as in `freeze_volume`: a host thaw that arrives meanwhile waits, then thaws what this froze.
     let _thaw = app.thaw_lock.lock().await;
+    ensure_current(app, epoch)?;
     if app.lock().frozen {
         return Err("volume frozen; thaw it before suspend".into());
     }
@@ -499,10 +504,11 @@ async fn resumed(app: &Arc<App>, wall_clock_ms: u64) -> Res<()> {
     wait_healthy(&app.cfg.box_health_url, RESUME_HEALTH_WAIT).await
 }
 
-async fn freeze_volume(app: &Arc<App>) -> Res<()> {
+async fn freeze_volume(app: &Arc<App>, epoch: u64) -> Res<()> {
     // Held until the freeze completes or fails: a thaw that arrives meanwhile waits here, then really thaws, instead of
     // finding nothing frozen and returning early.
     let _thaw = app.thaw_lock.lock().await;
+    ensure_current(app, epoch)?;
     if app.lock().frozen {
         return Err("the volume is already frozen".into());
     }
@@ -521,9 +527,11 @@ async fn freeze_now(app: &Arc<App>) -> Res<()> {
     Ok(())
 }
 
-/// Thaws the volume if it is frozen. Takes `thaw_lock` only, so it runs while an op holds `op_lock`.
+/// Thaws the volume if it is frozen. Takes `thaw_lock` only, so it runs while an op holds `op_lock`. Every thaw bumps
+/// `thaw_epoch`, cancelling freezes queued before it.
 async fn thaw_volume(app: &Arc<App>) -> Res<()> {
     let _guard = app.thaw_lock.lock().await;
+    app.lock().thaw_epoch += 1;
     if !app.lock().frozen {
         return Ok(());
     }
@@ -531,6 +539,15 @@ async fn thaw_volume(app: &Arc<App>) -> Res<()> {
         .run("fsfreeze", &["--unfreeze", mount_arg(app)?])
         .await?;
     app.lock().frozen = false;
+    Ok(())
+}
+
+/// Refuses a freeze requested before a `thawVolume` that has since run. The host sent that thaw because it gave up on the
+/// freeze, so the freeze must not take effect now.
+fn ensure_current(app: &App, epoch: u64) -> Res<()> {
+    if app.lock().thaw_epoch != epoch {
+        return Err("thawed while queued; freeze cancelled".into());
+    }
     Ok(())
 }
 
@@ -726,7 +743,10 @@ mod tests {
     #[tokio::test]
     async fn prepare_suspend_leaves_the_volume_frozen_until_a_thaw() {
         let (app, _volume) = app_on_volume("suspend-freezes");
-        prepare_suspend(&app).await.expect("suspend prepares");
+        let epoch = app.lock().thaw_epoch;
+        prepare_suspend(&app, epoch)
+            .await
+            .expect("suspend prepares");
         assert!(app.lock().frozen);
         thaw_volume(&app).await.expect("thaw succeeds");
         assert!(!app.lock().frozen);
@@ -808,11 +828,32 @@ mod tests {
     async fn prepare_suspend_refuses_a_frozen_volume() {
         let (app, _volume) = app_on_volume("suspend-frozen");
         app.lock().frozen = true;
-        let err = prepare_suspend(&app)
+        let epoch = app.lock().thaw_epoch;
+        let err = prepare_suspend(&app, epoch)
             .await
             .expect_err("frozen volume refuses suspend");
         assert!(err.contains("volume frozen"), "unexpected error: {err}");
         assert!(app.lock().frozen);
+    }
+
+    /// The host sends `thawVolume` after it gives up on a freeze, and a thaw skips `op_lock`, so the thaw can run while the
+    /// freeze still waits behind another op. That freeze must be refused when it finally runs, or the volume stays frozen
+    /// with no timer left to release it.
+    #[tokio::test]
+    async fn a_freeze_queued_before_a_thaw_is_cancelled() {
+        let (app, _volume) = app_on_volume("queued-freeze");
+        let queued = app.lock().thaw_epoch;
+        thaw_volume(&app)
+            .await
+            .expect("thaw succeeds with nothing frozen");
+        let err = freeze_volume(&app, queued)
+            .await
+            .expect_err("freeze queued before the thaw is refused");
+        assert!(
+            err.contains("thawed while queued"),
+            "unexpected error: {err}"
+        );
+        assert!(!app.lock().frozen);
     }
 
     /// Configure writes the volume, so a frozen volume refuses it before anything is written.
