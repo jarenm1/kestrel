@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -225,6 +226,18 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [pickedHarness, setPickedHarness] = useState<string>();
+  // iOS keyboard overlays the modal instead of resizing the window; keep the sheet above it (Android adjustResize and
+  // phone web already shrink or omit the keyboard, and this listener is a no-op there).
+  const [keyboardInset, setKeyboardInset] = useState(0);
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+    const show = Keyboard.addListener("keyboardWillShow", (event) => setKeyboardInset(event.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardInset(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   const tabs: readonly HarnessTab[] = useMemo(
     () =>
@@ -268,6 +281,8 @@ export function ModelPicker({
   const listHeight = Math.max(LIST_MIN_HEIGHT, Math.min(LIST_MAX_HEIGHT, tallestTab));
   const sheetHeight = Math.min(
     windowHeight * 0.8,
+    // With the keyboard up, leave its overlay room plus the sheet's own bottom gap, so the header and search stay on screen.
+    windowHeight - keyboardInset - (keyboardInset > 0 ? spacing.sm : 0),
     SHEET_HEADER + SHEET_PADDING + listHeight + (tabs.length > 0 ? SHEET_SEARCH : 0) + (onManage ? SHEET_FOOTER : 0)
   );
 
