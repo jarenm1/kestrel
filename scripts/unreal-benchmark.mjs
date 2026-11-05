@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Runs only in operator-prepared disposable workspaces and caches. No shell is involved.
 import { spawn, spawnSync } from 'node:child_process';
-import { realpathSync, readdirSync, writeFileSync, openSync, closeSync } from 'node:fs';
+import { realpathSync, readdirSync, writeFileSync, writeSync, openSync, closeSync } from 'node:fs';
 import { relative, join } from 'node:path';
 
 const [configPath, ...flags] = process.argv.slice(2);
@@ -28,29 +28,108 @@ const revisions = [revision(paths.workspaceA), revision(paths.workspaceB)];
 if (revisions[0] !== revisions[1]) throw Error('workspace revisions differ');
 const expand = (arg, workspace, cache) => arg.replaceAll('{engine}', paths.engine).replaceAll('{workspace}', workspace).replaceAll('{localCache}', cache).replaceAll('{sharedCache}', paths.sharedCache).replaceAll('{zenUrl}', c.zenUrl);
 const runs = [['a-cold', paths.workspaceA, paths.localCacheA], ['a-warm', paths.workspaceA, paths.localCacheA], ['b-shared-warm', paths.workspaceB, paths.localCacheB]];
-const result = { version: 1, synthetic: c.synthetic === true, dryRun: dry, engineIdentity: c.engineIdentity, projectRevision: revisions[0], config: c, paths, cacheEvidence: 'unknown', runs: [] };
-for (const [name, workspace, cache] of runs) {
-  const argv = c.argv.map(x => expand(x, workspace, cache));
-  const entry = { name, argv, cwd: workspace, durationMs: null, exitCode: null, signal: null, timedOut: false, diskBytes: null, resourceMetrics: 'unavailable' };
-  result.runs.push(entry);
-  if (dry) continue;
-  const log = openSync(join(paths.output, `${name}.log`), 'wx');
-  const start = performance.now();
-  let timer;
-  try {
-    const child = spawn(argv[0], argv.slice(1), { cwd: workspace, detached: true, stdio: ['ignore', log, log], env: { ...process.env, UE_ENGINE_DIR: paths.engine, UE_ZEN_DDC_URL: c.zenUrl, 'UE-LocalDataCachePath': cache } });
-    const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
-    const interrupt = () => { stop(); process.exitCode = 1; };
-    process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt);
-    timer = setTimeout(() => { entry.timedOut = true; stop(); }, c.timeoutSeconds * 1000);
-    const outcome = await new Promise((done, reject) => { child.once('error', reject); child.once('exit', (code, signal) => done({ code, signal })); });
-    stop(); // Clean up any descendants left behind by a successful foreground command.
-    process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', interrupt);
-    entry.exitCode = outcome.code; entry.signal = outcome.signal;
-  } catch (error) { entry.error = String(error); } finally { clearTimeout(timer); closeSync(log); entry.durationMs = Math.round(performance.now() - start); }
-  const du = spawnSync('du', ['-sb', cache, paths.sharedCache], { encoding: 'utf8' });
-  if (du.status === 0) entry.diskBytes = du.stdout.trim().split('\n').map(line => Number(line.split(/\s/)[0]));
-  writeFileSync(join(paths.output, 'result.json'), JSON.stringify(result, null, 2) + '\n');
-  if (entry.exitCode !== 0) { process.exitCode = 1; break; }
+
+const coldCacheNote = 'The runner cannot inspect, reset or prove the state of the remote Zen service. a-cold is only a label: the operator must independently attest that the shared cache was cold before that phase and record the evidence separately. Disk sizes are local measurements and are not cold-cache evidence.';
+const diskNote = 'diskBytes is [localCache, sharedCache] in bytes from du after the phase. It measures storage on this host only; it is not evidence of remote Zen state or of cache hits.';
+const cacheAssumption = (name, index) => name === 'a-cold'
+  ? 'remote shared cache must be operator-attested as cold before this phase'
+  : index === 1
+    ? 'remote shared cache assumed populated by the preceding phase'
+    : 'remote shared cache assumed populated by earlier phases and the other workspace';
+
+const result = {
+  version: 1,
+  synthetic: c.synthetic === true,
+  dryRun: dry,
+  engineIdentity: c.engineIdentity,
+  projectRevision: revisions[0],
+  config: c,
+  paths,
+  cacheEvidence: 'unknown',
+  coldCache: { status: dry ? 'not-run' : 'operator-attested', note: coldCacheNote },
+  diskMeasurement: { measured: false, note: diskNote },
+  interrupted: false,
+  runs: []
+};
+
+let interrupted = false;
+let interruptSignal = null;
+let stopCurrent = null;
+const onSignal = signal => {
+  if (interrupted) return;
+  interrupted = true;
+  interruptSignal = signal;
+  result.interrupted = true;
+  result.interruptSignal = signal;
+  process.exitCode = 1;
+  stopCurrent?.();
+};
+const onSigint = () => onSignal('SIGINT');
+const onSigterm = () => onSignal('SIGTERM');
+process.on('SIGINT', onSigint);
+process.on('SIGTERM', onSigterm);
+try {
+  for (const [index, [name, workspace, cache]] of runs.entries()) {
+    if (interrupted) break;
+    const argv = c.argv.map(x => expand(x, workspace, cache));
+    const entry = {
+      name,
+      argv,
+      cwd: workspace,
+      cacheAssumption: cacheAssumption(name, index),
+      remoteCacheState: 'unverified',
+      durationMs: null,
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      interrupted: false,
+      diskBytes: null,
+      diskNote,
+      resourceMetrics: 'unavailable'
+    };
+    result.runs.push(entry);
+    if (dry) continue;
+    const log = openSync(join(paths.output, `${name}.log`), 'wx');
+    writeSync(log, `# ${name}: ${entry.cacheAssumption}. ${diskNote}\n`);
+    const start = performance.now();
+    let timer;
+    try {
+      // No await occurs before spawn, so a signal cannot interleave between this check and the launch.
+      if (interrupted) { entry.skipped = 'interrupted before start'; break; }
+      const child = spawn(argv[0], argv.slice(1), { cwd: workspace, detached: true, stdio: ['ignore', log, log], env: { ...process.env, UE_ENGINE_DIR: paths.engine, UE_ZEN_DDC_URL: c.zenUrl, 'UE-LocalDataCachePath': cache } });
+      const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
+      stopCurrent = stop;
+      timer = setTimeout(() => { entry.timedOut = true; stop(); }, c.timeoutSeconds * 1000);
+      const outcome = await new Promise((done, reject) => { child.once('error', reject); child.once('exit', (code, signal) => done({ code, signal })); });
+      stop(); // Clean up any descendants left behind by a successful foreground command.
+      entry.exitCode = outcome.code; entry.signal = outcome.signal;
+    } catch (error) {
+      entry.error = String(error);
+      interrupted = true; // A child launch failure also stops the sequence.
+    } finally {
+      clearTimeout(timer);
+      stopCurrent = null;
+      entry.interrupted = interrupted;
+      entry.durationMs = Math.round(performance.now() - start);
+      closeSync(log);
+    }
+    const du = spawnSync('du', ['-sb', cache, paths.sharedCache], { encoding: 'utf8' });
+    if (du.status === 0) {
+      entry.diskBytes = du.stdout.trim().split('\n').map(line => Number(line.split(/\s/)[0]));
+      result.diskMeasurement.measured = true;
+    }
+    writeFileSync(join(paths.output, 'result.json'), JSON.stringify(result, null, 2) + '\n');
+    if (entry.error || entry.timedOut || entry.exitCode !== 0 || interrupted) { process.exitCode = 1; break; }
+  }
+} finally {
+  process.removeListener('SIGINT', onSigint);
+  process.removeListener('SIGTERM', onSigterm);
+  result.interrupted = interrupted;
+  if (interruptSignal) result.interruptSignal = interruptSignal;
+  if (dry) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    if (result.runs.length) writeFileSync(join(paths.output, 'result.json'), JSON.stringify(result, null, 2) + '\n');
+    console.log(JSON.stringify({ output: paths.output, phases: result.runs.map(x => x.name), interrupted, cacheEvidence: result.cacheEvidence, coldCache: result.coldCache.status, diskMeasured: result.diskMeasurement.measured }));
+  }
 }
-if (dry) console.log(JSON.stringify(result, null, 2));
