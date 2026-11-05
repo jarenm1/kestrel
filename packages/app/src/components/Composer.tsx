@@ -147,7 +147,7 @@ function ThinkingPicker({
           sideOffset={8}
           collisionPadding={12}
           aria-label="Thinking level"
-          className="z-50 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl bg-popover p-4 text-popover-foreground shadow-soft outline-none"
+          className="z-50 w-72 max-w-[calc(100vw-1.5rem)] rounded-xl bg-popover p-4 text-popover-foreground shadow-soft outline-none data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
         >
           <div className="mb-3 flex items-center justify-between gap-3">
             <span className="text-xs font-medium text-muted-foreground">Thinking</span>
