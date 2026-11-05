@@ -723,7 +723,7 @@ export class Hub extends DurableObject<Env> {
     const shape = nestLimitsError(limits)
     if (shape !== null) return { ok: false, status: 400, tag: "BadRequest", message: shape }
     const enroll = await this.nest.mintEnrollToken()
-    const target = this.nest.placement()
+    const target = this.nest.placement(null)
     if (target === null) return NO_NEST_CAPACITY
     const id = crypto.randomUUID()
     const created = this.insertBox(session.login, { name: body.name, url: publicUrlFor(id, target.slug, domain) }, id)

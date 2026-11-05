@@ -81,7 +81,7 @@ const addBox = (login: string, boxId: string) => {
 const placeBox = async (login: string, boxId: string) => {
   addBox(login, boxId)
   const enroll = await fleet.mintEnrollToken()
-  const target = fleet.placement()
+  const target = fleet.placement(null)
   if (target === null) throw new Error("no host to place the box on")
   db.run("UPDATE user_boxes SET url = ? WHERE id = ?", `https://${boxId}.${target.slug}.${DOMAIN}`, boxId)
   fleet.createBox(boxId, login, target, NEST_STANDARD_LIMITS, enroll)
@@ -203,7 +203,7 @@ describe("creating a box", () => {
   test("a host with room for one boot has none left once a create is on its way", async () => {
     await hello("host-a", [], 2)
     await placeBox("alice", "box-1")
-    expect(fleet.placement()).toBeNull()
+    expect(fleet.placement(null)).toBeNull()
   })
 
   test("a create the host refuses leaves the box failed, and the owner can delete it", async () => {
@@ -246,6 +246,7 @@ describe("VM reports and epochs", () => {
   test("a copy left at an older epoch on another host is evicted when it reports", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-a", [], 1.25)
     await hello("host-b", [], 9)
     await fleet.wakeRequest("host-a", "box-1")
 
@@ -261,6 +262,7 @@ describe("VM reports and epochs", () => {
   test("inventory evicts a stale copy only once the host's last chunk arrives", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-a", [], 1.25)
     await hello("host-b", [], 9)
     await fleet.wakeRequest("host-a", "box-1")
 
@@ -327,6 +329,42 @@ describe("VM reports and epochs", () => {
 
     await fleet.wakeRequest("host-a", "box-1")
     expect(lastCommand("host-a", "resume").command).toMatchObject({ ownerEpoch: 2 })
+  })
+
+  test("a parked box resumes on the host its request reached while that host has room, even when another has more", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-b", [], 12)
+
+    await fleet.wakeRequest("host-a", "box-1")
+    expect(lastCommand("host-a", "resume").command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
+    expect(userBoxUrl("box-1")).toBe("https://box-1.slug-host-a.nest.example.com")
+  })
+
+  test("a parked box moves to another host only when the host its request reached lacks room", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-a", [], 1.25)
+    await hello("host-b", [], 9)
+
+    await fleet.wakeRequest("host-a", "box-1")
+    expect(lastCommand("host-b", "resume").command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
+    expect(userBoxUrl("box-1")).toBe("https://box-1.slug-host-b.nest.example.com")
+  })
+
+  test("a parked box's destroy that times out releases its host, so the retry goes to another connected host", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    disconnect("host-a")
+    await hello("host-b")
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-b", "destroy").command).toMatchObject({ ownerEpoch: 1 })
+
+    await fleet.expire(now + 20 * MINUTE)
+    disconnect("host-b")
+    await hello("host-c")
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-c", "destroy").command).toMatchObject({ ownerEpoch: 1 })
   })
 
   test("a resume the host never answers is sent again at its deadline, so the parked box is not left waiting", async () => {

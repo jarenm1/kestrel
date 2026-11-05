@@ -58,15 +58,19 @@ export type PlacementCandidate = { hostId: string; slug: string; capacity: NestH
 
 /**
  * The connected host with the most free memory that still fits a VM booting with `NEST_BOOT_MEMORY_BYTES` plus
- * headroom, and whose free disk holds the memory image a suspend of that VM would write. Ties go to the lower host
- * id, so placement is deterministic. Null when no host fits; the caller holds the box until one does.
+ * headroom, and whose free disk holds the memory image a suspend of that VM would write. `preferred` wins whenever it
+ * fits, whatever the others have free: a parked box goes back to the host its request reached when that host has room.
+ * Ties go to the lower host id, so placement is deterministic. Null when no host fits; the caller holds the box until
+ * one does.
  */
-export const placeHost = (candidates: PlacementCandidate[]): PlacementCandidate | null => {
-  const need = NEST_BOOT_MEMORY_BYTES + NEST_PLACEMENT_HEADROOM_BYTES
-  const fits = candidates.filter(
-    ({ capacity }) =>
-      capacity.memoryBytes - capacity.memoryPluggedBytes >= need && capacity.diskFreeBytes >= NEST_BOOT_MEMORY_BYTES,
-  )
+export const placeHost = (candidates: PlacementCandidate[], preferred: string | null = null): PlacementCandidate | null => {
+   const need = NEST_BOOT_MEMORY_BYTES + NEST_PLACEMENT_HEADROOM_BYTES
+   const fits = candidates.filter(
+     ({ capacity }) =>
+       capacity.memoryBytes - capacity.memoryPluggedBytes >= need && capacity.diskFreeBytes >= NEST_BOOT_MEMORY_BYTES,
+   )
+  const named = fits.find((candidate) => candidate.hostId === preferred)
+  if (named !== undefined) return named
   let best: PlacementCandidate | null = null
   for (const candidate of fits) {
     if (best === null) {

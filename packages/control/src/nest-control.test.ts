@@ -89,6 +89,15 @@ describe("placeHost", () => {
   test("returns null when no host is connected", () => {
     expect(placeHost([])).toBeNull()
   })
+
+  test("takes the preferred host whenever it has room, even with less free memory than another", () => {
+    expect(placeHost([host("a", 2), host("b", 6)], "a")?.hostId).toBe("a")
+  })
+
+  test("falls back to the most-free host when the preferred host lacks room or is not connected", () => {
+    expect(placeHost([host("a", 1.4), host("b", 3)], "a")?.hostId).toBe("b")
+    expect(placeHost([host("b", 3)], "a")?.hostId).toBe("b")
+  })
 })
 
 describe("decideVm", () => {

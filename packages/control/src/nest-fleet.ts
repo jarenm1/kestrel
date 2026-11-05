@@ -227,8 +227,8 @@ export class NestFleet {
   /**
    * Drops in-flight markers whose deadline passed. The host's VM reports stay the truth: an expired `create` marks the
    * box failed, so the owner can delete it; an expired `resume` is retried on the same host while that host holds the
-   * box's claim; other commands are the owner's to retry. A late `result` for an expired command finds no marker and is
-   * ignored.
+   * box's claim; a destroy of a parked box releases the claim it took, so a retry can go to any connected host; other
+   * commands are the owner's to retry. A late `result` for an expired command finds no marker and is ignored.
    */
   async expire(now: number): Promise<void> {
     for (const row of nestBoxesDue(this.sql, now)) {
@@ -237,6 +237,7 @@ export class NestFleet {
       this.clearPending(row)
       if (kind === "create") row.createFailed = true
       if (kind === "resume") row.wakeWanted = true
+      if (kind === "destroy" && row.state === "parked") row.hostId = null
       saveNestBox(this.sql, row)
     }
     await this.wakeWanted()
@@ -272,10 +273,10 @@ export class NestFleet {
   // ---------------------------------------------------------------------------
 
   /**
-   * The connected host a new box would go to, or null when none has room. Boots a host is already committed to count
-   * against its room, so two placements never book the same space.
+   * The connected host a new box would go to, or null when none has room. `preferred` is taken whenever it has room.
+   * Boots a host is already committed to count against its room, so two placements never book the same space.
    */
-  placement(): PlacementCandidate | null {
+  placement(preferred: string | null): PlacementCandidate | null {
     const candidates = nestHostRows(this.sql)
       .filter((host) => this.link.connected(host.id))
       .map((host) => ({
@@ -283,7 +284,7 @@ export class NestFleet {
         slug: host.slug,
         capacity: withPlannedBoots(host.capacity, nestBootsOnHost(this.sql, host.id)),
       }))
-    return placeHost(candidates)
+    return placeHost(candidates, preferred)
   }
 
   /** Whether a user_boxes row is a Nest box. */
@@ -511,10 +512,17 @@ export class NestFleet {
     return host !== null && url === publicUrlFor(row.boxId, host.slug, this.domain)
   }
 
+  /** The host whose slug the box's URL names: where its request reached, or where it last ran. */
+  private urlHost(row: NestBoxRow): string | null {
+    const url = this.boxUrl(row.boxId)
+    return nestHostRows(this.sql).find((host) => publicUrlFor(row.boxId, host.slug, this.domain) === url)?.id ?? null
+  }
+
   /**
    * Brings a waiting box up. A box with a host to resume on (a suspended box, or a parked box whose resume claim is
-   * still held by a host) resumes there. Only a parked box with no claim is placed on a host with room. The await mints
-   * an enrollment token for a box that has not enrolled; the row is read again after it.
+   * still held by a host) resumes there. A parked box with no claim goes to the host its URL names when that host has
+   * room, and to another connected host with room otherwise. The await mints an enrollment token for a box that has not
+   * enrolled; the row is read again after it.
    */
   private async wake(boxId: string): Promise<void> {
     const before = nestBox(this.sql, boxId)
@@ -528,7 +536,7 @@ export class NestFleet {
       return
     }
     if (row.state !== "parked") return
-    const target = this.placement()
+    const target = this.placement(this.urlHost(row))
     if (target === null) {
       this.holdWake(row)
       return
