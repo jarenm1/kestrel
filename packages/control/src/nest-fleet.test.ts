@@ -215,6 +215,14 @@ describe("creating a box", () => {
     expect(lastCommand("host-a", "destroy").command).toMatchObject({ boxId: "box-1" })
   })
 
+  test("a failed create whose VM report is still provisioning stays failed", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    fleet.result("host-a", create.commandId, false, "disk full", vmReport("box-1", create.command.vmId, 1, "provisioning"))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "provisioning", failed: true, pending: null })
+  })
+
   test("a create that never gets an answer is marked failed at its deadline, and the owner can delete it", async () => {
     await hello("host-a")
     await placeBox("alice", "box-1")

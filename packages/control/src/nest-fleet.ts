@@ -169,7 +169,8 @@ export class NestFleet {
       this.forget(row)
       return
     }
-    row.createFailed = false
+    // A failed create keeps its flag while its VM is still provisioning; a VM that is up clears it.
+    if (report.state !== "provisioning") row.createFailed = false
     row.state = report.state
     row.imageId = report.imageId
     row.vcpus = report.vcpus
@@ -190,7 +191,7 @@ export class NestFleet {
     const kind = row.pendingKind
     this.clearPending(row)
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
-    if (kind === "create" && !ok) row.createFailed = true
+    if (kind === "create") row.createFailed = !ok
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
