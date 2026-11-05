@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::io::{split, AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 use tokio::task::AbortHandle;
-use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
+use tokio::time::{interval, timeout, MissedTickBehavior};
 
 use crate::args::Config;
 use crate::configure::{self, read_clone_id};
@@ -32,8 +32,6 @@ const FREEZE_QUIESCE_WAIT: Duration = Duration::from_secs(10);
 const RESUME_WAIT: Duration = Duration::from_secs(10);
 const RESUME_HEALTH_WAIT: Duration = Duration::from_secs(40);
 const RELEASE_WAIT: Duration = Duration::from_secs(10);
-/// How long a frozen volume stays frozen without a `thawVolume`.
-const FREEZE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest the volume sync may take in a freeze or suspend. The host's op timeouts also cover the quiesce wait.
 const SYNC_WAIT: Duration = Duration::from_secs(10);
 
@@ -42,7 +40,7 @@ pub struct App {
     pub sys: System,
     boot_id: String,
     op_lock: AsyncMutex<()>,
-    /// Serializes thaws, so a host `thawVolume` and the freeze timeout never both unfreeze the volume.
+    /// Serializes thaws and freezes, so a host `thawVolume` never races a freeze in progress.
     thaw_lock: AsyncMutex<()>,
     state: Mutex<State>,
 }
@@ -53,8 +51,7 @@ struct State {
     clone_id: Option<String>,
     gpu: GpuState,
     gpu_pci: Option<String>,
-    freeze_seq: u64,
-    frozen: Option<u64>,
+    frozen: bool,
     host: Option<HostLink>,
     host_task: Option<AbortHandle>,
     box_link: Option<Arc<BoxLink>>,
@@ -110,8 +107,7 @@ impl App {
                 clone_id,
                 gpu: GpuState::None,
                 gpu_pci: None,
-                freeze_seq: 0,
-                frozen: None,
+                frozen: false,
                 host: None,
                 host_task: None,
                 box_link: None,
@@ -459,7 +455,7 @@ fn mount_arg(app: &App) -> Res<&str> {
 }
 
 async fn configure_op(app: &Arc<App>, args: ConfigureArgs) -> Res<()> {
-    if app.lock().frozen.is_some() {
+    if app.lock().frozen {
         return Err("volume frozen; thaw it before configure".into());
     }
     configure::configure(&app.cfg, &app.sys, &args).await?;
@@ -481,15 +477,20 @@ async fn sync_volume() -> Res<()> {
 }
 
 async fn prepare_suspend(app: &Arc<App>) -> Res<()> {
-    if app.lock().frozen.is_some() {
+    // Held through the freeze, as in `freeze_volume`: a host thaw that arrives meanwhile waits, then thaws what this froze.
+    let _thaw = app.thaw_lock.lock().await;
+    if app.lock().frozen {
         return Err("volume frozen; thaw it before suspend".into());
     }
     ask_box(app, QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
     sync_volume().await?;
-    app.sys.write_knob("/proc/sys/vm/drop_caches", "3")
+    app.sys.write_knob("/proc/sys/vm/drop_caches", "3")?;
+    freeze_now(app).await
 }
 
 async fn resumed(app: &Arc<App>, wall_clock_ms: u64) -> Res<()> {
+    // A suspend or park leaves the volume frozen in the saved image, so the restored VM thaws it before the box writes.
+    thaw_volume(app).await?;
     app.sys.set_realtime(wall_clock_ms)?;
     if let Err(e) = app.sys.run("chronyc", &["makestep"]).await {
         log(format!("chronyc makestep (ignored): {e}"));
@@ -502,53 +503,34 @@ async fn freeze_volume(app: &Arc<App>) -> Res<()> {
     // Held until the freeze completes or fails: a thaw that arrives meanwhile waits here, then really thaws, instead of
     // finding nothing frozen and returning early.
     let _thaw = app.thaw_lock.lock().await;
-    if app.lock().frozen.is_some() {
+    if app.lock().frozen {
         return Err("the volume is already frozen".into());
     }
     ask_box(app, FREEZE_QUIESCE_WAIT, |id| GuestToBox::Quiesce { id }).await?;
     sync_volume().await?;
+    freeze_now(app).await
+}
+
+/// Freezes the volume. It stays frozen until `thawVolume`, or `resumed` after a suspend: the guest never thaws it on its
+/// own, because the host owns every freeze and ends it (or stops the VM).
+async fn freeze_now(app: &Arc<App>) -> Res<()> {
     app.sys
         .run("fsfreeze", &["--freeze", mount_arg(app)?])
         .await?;
-    let seq = {
-        let mut st = app.lock();
-        st.freeze_seq += 1;
-        st.frozen = Some(st.freeze_seq);
-        st.freeze_seq
-    };
-    tokio::spawn(auto_thaw(app.clone(), seq, FREEZE_TIMEOUT));
+    app.lock().frozen = true;
     Ok(())
-}
-
-/// A freeze the host never thawed is released after `after`, so a lost host cannot leave the box stuck. This takes
-/// `thaw_lock` only, never `op_lock`: an op blocked on the frozen volume holds `op_lock`, and waiting for it would keep
-/// the volume frozen for good.
-async fn auto_thaw(app: Arc<App>, seq: u64, after: Duration) {
-    sleep(after).await;
-    let _guard = app.thaw_lock.lock().await;
-    if app.lock().frozen != Some(seq) {
-        return;
-    }
-    log("volume still frozen after its timeout; thawing");
-    if let Err(e) = thaw_now(&app).await {
-        log(format!("automatic thaw failed: {e}"));
-    }
 }
 
 /// Thaws the volume if it is frozen. Takes `thaw_lock` only, so it runs while an op holds `op_lock`.
 async fn thaw_volume(app: &Arc<App>) -> Res<()> {
     let _guard = app.thaw_lock.lock().await;
-    if app.lock().frozen.is_none() {
+    if !app.lock().frozen {
         return Ok(());
     }
-    thaw_now(app).await
-}
-
-async fn thaw_now(app: &Arc<App>) -> Res<()> {
     app.sys
         .run("fsfreeze", &["--unfreeze", mount_arg(app)?])
         .await?;
-    app.lock().frozen = None;
+    app.lock().frozen = false;
     Ok(())
 }
 
@@ -707,6 +689,8 @@ mod tests {
     use std::env;
     use std::path::PathBuf;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::time::timeout;
 
     use super::*;
@@ -715,16 +699,22 @@ mod tests {
 
     /// An app whose volume is a fresh directory under the system temp dir, with no system side effects.
     fn app_on_volume(name: &str) -> (Arc<App>, PathBuf) {
+        app_with_args(name, &[])
+    }
+
+    /// `app_on_volume`, started with extra command-line arguments.
+    fn app_with_args(name: &str, extra: &[&str]) -> (Arc<App>, PathBuf) {
         let volume =
             env::temp_dir().join(format!("kestrel-guest-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&volume);
         std::fs::create_dir_all(&volume).expect("create volume dir");
-        let args = [
-            "--dry-run-system",
-            "--volume-mount",
-            volume.to_str().expect("utf-8 path"),
+        let mut args = vec![
+            "--dry-run-system".to_string(),
+            "--volume-mount".to_string(),
+            volume.to_str().expect("utf-8 path").to_string(),
         ];
-        let cfg = match parse(args.map(str::to_string)).expect("valid args") {
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        let cfg = match parse(args).expect("valid args") {
             Parsed::Run(cfg) => *cfg,
             Parsed::Help => panic!("parse returned help"),
         };
@@ -732,35 +722,59 @@ mod tests {
         (app, volume)
     }
 
-    /// A freeze whose thaw never comes is released even while an op holds `op_lock`: that op may be blocked on the
-    /// frozen volume, and waiting for it would keep the volume frozen for good.
+    /// A suspend freezes the volume and leaves it frozen: only `thawVolume` or `resumed` thaws it.
     #[tokio::test]
-    async fn auto_thaw_does_not_wait_for_a_blocked_op() {
-        let (app, _volume) = app_on_volume("auto-thaw");
-        app.lock().frozen = Some(7);
-        let _blocked_op = app.op_lock.lock().await;
+    async fn prepare_suspend_leaves_the_volume_frozen_until_a_thaw() {
+        let (app, _volume) = app_on_volume("suspend-freezes");
+        prepare_suspend(&app).await.expect("suspend prepares");
+        assert!(app.lock().frozen);
+        thaw_volume(&app).await.expect("thaw succeeds");
+        assert!(!app.lock().frozen);
+    }
 
-        timeout(
-            Duration::from_secs(5),
-            auto_thaw(app.clone(), 7, Duration::ZERO),
-        )
-        .await
-        .expect("auto thaw ran while an op held op_lock");
-        assert_eq!(app.lock().frozen, None);
+    /// `resumed` thaws the volume a suspend froze, before the box is told it resumed.
+    #[tokio::test]
+    async fn resumed_thaws_a_suspended_volume() {
+        let health = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind health listener");
+        let port = health.local_addr().expect("health address").port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = health.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        let health_url = format!("http://127.0.0.1:{port}/api/health");
+        let (app, _volume) =
+            app_with_args("resume-thaws", &["--box-health-url", health_url.as_str()]);
+        app.lock().frozen = true;
+        timeout(Duration::from_secs(5), resumed(&app, 0))
+            .await
+            .expect("resume finished")
+            .expect("resume succeeds");
+        assert!(!app.lock().frozen);
     }
 
     /// A host thaw gets through while an op holds `op_lock`, so the host's thaw reply is never stuck behind it.
     #[tokio::test]
     async fn host_thaw_does_not_wait_for_a_blocked_op() {
         let (app, _volume) = app_on_volume("host-thaw");
-        app.lock().frozen = Some(3);
+        app.lock().frozen = true;
         let _blocked_op = app.op_lock.lock().await;
 
         timeout(Duration::from_secs(5), thaw_volume(&app))
             .await
             .expect("thaw ran while an op held op_lock")
             .expect("thaw succeeds");
-        assert_eq!(app.lock().frozen, None);
+        assert!(!app.lock().frozen);
     }
 
     /// A thaw that arrives while a freeze is in progress waits for the freeze, then thaws what it froze. It must not
@@ -779,33 +793,33 @@ mod tests {
             !thaw.is_finished(),
             "thaw returned while the freeze held thaw_lock"
         );
-        app.lock().frozen = Some(9);
+        app.lock().frozen = true;
         drop(freezing);
         timeout(Duration::from_secs(5), thaw)
             .await
             .expect("thaw finished after the freeze")
             .expect("thaw task joined")
             .expect("thaw succeeds");
-        assert_eq!(app.lock().frozen, None);
+        assert!(!app.lock().frozen);
     }
 
     /// Suspend syncs and drops caches under the volume, so a frozen volume refuses it before it asks the box to quiesce.
     #[tokio::test]
     async fn prepare_suspend_refuses_a_frozen_volume() {
         let (app, _volume) = app_on_volume("suspend-frozen");
-        app.lock().frozen = Some(1);
+        app.lock().frozen = true;
         let err = prepare_suspend(&app)
             .await
             .expect_err("frozen volume refuses suspend");
         assert!(err.contains("volume frozen"), "unexpected error: {err}");
-        assert_eq!(app.lock().frozen, Some(1));
+        assert!(app.lock().frozen);
     }
 
     /// Configure writes the volume, so a frozen volume refuses it before anything is written.
     #[tokio::test]
     async fn configure_refuses_a_frozen_volume() {
         let (app, volume) = app_on_volume("configure-frozen");
-        app.lock().frozen = Some(1);
+        app.lock().frozen = true;
         let args = ConfigureArgs {
             id: "req-1".into(),
             host_id: "host-1".into(),
@@ -834,6 +848,6 @@ mod tests {
         assert!(err.contains("volume frozen"), "unexpected error: {err}");
         assert!(!volume.join("home").exists());
         assert!(!volume.join("box.env").exists());
-        assert_eq!(app.lock().frozen, Some(1));
+        assert!(app.lock().frozen);
     }
 }
