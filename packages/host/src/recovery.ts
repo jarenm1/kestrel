@@ -40,6 +40,8 @@ export const recoverPlan = (record: VmRecord, facts: RecoveryFacts): RecoveryPla
     deleteArtifacts: false,
     ...extra,
   })
+  // A freeze ends only with thawVolume or a stop. A running VM found frozen is not trusted, so it is stopped.
+  if (record.frozen && record.state === "running") return stopAll("parked")
   const kind = record.operation?.kind ?? null
   if (kind === null) {
     switch (record.state) {

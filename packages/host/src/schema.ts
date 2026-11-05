@@ -77,6 +77,11 @@ export const VmRecord = Schema.Struct({
   localRef: Schema.NullOr(NestVolumeRef),
   /** True while the local volume may hold data no backup covers: it is then the only authoritative copy. */
   localDirty: Schema.Boolean,
+  /**
+   * True from before the host sends `prepareSuspend` or `freezeVolume` until it ends the freeze with `thawVolume`, or
+   * stops the VM. Recorded first, so a restart that finds it stops the VM rather than trusting the guest's state.
+   */
+  frozen: Schema.Boolean,
   network: Schema.NullOr(NestNetwork),
   process: Schema.NullOr(ProcessRef),
   volumeProcess: Schema.NullOr(VolumeProcess),
