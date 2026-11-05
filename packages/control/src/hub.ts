@@ -28,10 +28,12 @@ import {
   type FileToken,
   type CreateAutomationBody,
   type CreateBoxBody,
+  type BoxActivityReport,
   type CreateTaskBody,
   type CreateFleetBoxBody,
   type CreatedBox,
   type CreatedFleetBox,
+  type FleetActivity,
   type FleetBox,
   type FleetBoxList,
   type ToolFailureList,
@@ -101,6 +103,7 @@ import {
 } from "./meter-table"
 import { reconcileMeter } from "./meter-reconcile"
 import { commonToolFailures, ensureToolFailuresTable, recordToolFailures } from "./tool-failures-table"
+import { deleteBoxActivity, ensureBoxActivityTable, fleetActivity, recordBoxActivity } from "./activity-table"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -290,6 +293,7 @@ export class Hub extends DurableObject<Env> {
       ensureFleetTable(sql)
       ensureMeterTables(sql)
       ensureToolFailuresTable(sql)
+      ensureBoxActivityTable(sql)
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -752,9 +756,11 @@ export class Hub extends DurableObject<Env> {
     return updateFleetBox(this.ctx.storage.sql, id, changes)
   }
 
-  /** Removes a box and unassigns its users; false when it does not exist. */
+  /** Removes a box, its activity snapshot, and its users' assignments; false when it does not exist. */
   removeFleetBox(id: string): boolean {
-    return deleteFleetBox(this.ctx.storage.sql, id)
+    const removed = deleteFleetBox(this.ctx.storage.sql, id)
+    if (removed) deleteBoxActivity(this.ctx.storage.sql, id)
+    return removed
   }
 
   /** Replaces a box's secret and returns the new one; null when the box does not exist. */
@@ -781,6 +787,18 @@ export class Hub extends DurableObject<Env> {
 
   commonToolFailures(days: number): ToolFailureList {
     return { days, failures: commonToolFailures(this.ctx.storage.sql, days, new Date()) }
+  }
+
+  // -------------------------------------------------------------------------
+  // Active users per managed box: a full snapshot from each box, replaced on every report.
+  // -------------------------------------------------------------------------
+
+  recordBoxActivity(boxId: string, report: BoxActivityReport): void {
+    recordBoxActivity(this.ctx.storage.sql, boxId, report, new Date())
+  }
+
+  fleetActivity(): FleetActivity {
+    return fleetActivity(this.ctx.storage.sql, new Date())
   }
 
   // -------------------------------------------------------------------------

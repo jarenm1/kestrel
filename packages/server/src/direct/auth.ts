@@ -10,6 +10,7 @@ import {
 } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { CredentialStoreShape } from "../credentials"
+import type { BoxActivitySink } from "./box-activity"
 
 /**
  * The token is missing, malformed, expired, for another box, or for a user who does not own this box (for a managed
@@ -45,6 +46,8 @@ export const makeBoxAuth = (
   settings: DirectSettings,
   store: CredentialStoreShape,
   fetchFn: typeof fetch = fetch,
+  /** Told about each login whose request fully authenticated, so a managed box can report active users. */
+  activity?: BoxActivitySink,
 ): BoxAuth => {
   const base = controlBase(settings.controlUrl)
   // Per user: the credentials version last absorbed and when (seconds) its fetch started. A token refetches only when
@@ -123,6 +126,15 @@ export const makeBoxAuth = (
               ? error
               : new Unavailable({ message: "control plane unreachable" }),
         })
+      }
+      // Only a fully authenticated request counts as activity, and only on a managed box: a user's own box reports to
+      // nobody. The sink is synchronous and does no I/O, so it cannot delay or fail the authentication.
+      if (settings.managed) {
+        try {
+          activity?.record(claims.sub)
+        } catch {
+          // Telemetry is best effort.
+        }
       }
       return claims
     })

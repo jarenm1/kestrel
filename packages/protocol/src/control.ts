@@ -122,10 +122,22 @@ export const ControlPaths = {
   /** Operator-only: GET `?days=` (1-90, default 30) -> ToolFailureList, most common first. Everyone else gets 404. */
   fleetToolFailures: "/api/fleet/tool-failures",
   /**
+   * Operator-only: GET -> FleetActivity, every registered box including ones that never reported. Everyone else gets
+   * 404. A snapshot at least `ACTIVITY_STALE_AFTER_SECONDS` old keeps its `receivedAt` but carries no users.
+   */
+  fleetActivity: "/api/fleet/activity",
+  /**
    * Box-only, Kestrel's own boxes: POST ToolFailureReport -> 204. Authenticated like the automation routes below, but
    * names no user: the counts belong to no one. A user's own box never reports. Never reached from a browser.
    */
   boxToolFailures: "/box/telemetry/tool-failures",
+  /**
+   * Box-only, managed boxes: POST BoxActivityReport -> 204. Authenticated with `Authorization: Bearer <box secret>` and
+   * BOX_ID_HEADER; the relay token and user boxes are refused. The body is a full snapshot of the users with an
+   * authenticated direct request to the box in the last `ACTIVITY_WINDOW_SECONDS`, sent every 30 seconds, including an
+   * empty list. Never reached from a browser.
+   */
+  boxActivity: "/box/telemetry/activity",
   /**
    * Nest host only: POST MeterBatch -> MeterIngestResult, with `Authorization: Bearer <host secret>` and
    * METER_HOST_ID_HEADER. Stores each record once per host and eventId; a retry of identical records is acknowledged
@@ -522,6 +534,64 @@ export type ToolFailureSummary = typeof ToolFailureSummary.Type
 
 export const ToolFailureList = Schema.Struct({ days: Schema.Number, failures: Schema.Array(ToolFailureSummary) })
 export type ToolFailureList = typeof ToolFailureList.Type
+
+/** How far back a box activity report looks; a user with an authenticated request in this window is active. */
+export const ACTIVITY_WINDOW_SECONDS = 5 * 60
+
+/** After this long without a report, a box's snapshot is stale: its users are no longer counted as active. */
+export const ACTIVITY_STALE_AFTER_SECONDS = 90
+
+/** Users one box reports. A full snapshot beyond this is refused rather than stored. */
+export const MAX_BOX_ACTIVITY_USERS = 10_000
+
+/** Box clocks may run this far ahead of the receiver; timestamp further ahead is a future timestamp, refused. */
+export const MAX_ACTIVITY_CLOCK_SKEW_SECONDS = 30
+
+/** Largest body `ControlPaths.boxActivity` reads. A full 10,000-user snapshot is well under it. */
+export const MAX_BOX_ACTIVITY_BODY_BYTES = 2 * 1024 * 1024
+
+/** A UTC timestamp with milliseconds, as `Date.toISOString` writes it. */
+export const ActivityTimestamp = Schema.String.pipe(
+  Schema.pattern(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/),
+  Schema.filter((value) =>
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value ? true : "not a valid UTC timestamp",
+  ),
+)
+
+/**
+ * One user with an authenticated request to the box in the activity window. `lastActiveAt` is when the box last served
+ * such a request; it says nothing about human attention or a running agent.
+ */
+export const BoxActivityUser = Schema.Struct({
+  login: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100)),
+  lastActiveAt: ActivityTimestamp,
+})
+export type BoxActivityUser = typeof BoxActivityUser.Type
+
+/** A managed box's full activity snapshot. An empty `users` retires every user in the previous snapshot. */
+export const BoxActivityReport = Schema.Struct({
+  users: Schema.Array(BoxActivityUser).pipe(Schema.maxItems(MAX_BOX_ACTIVITY_USERS)),
+})
+export type BoxActivityReport = typeof BoxActivityReport.Type
+
+/** One registered managed box's latest snapshot; `receivedAt` is the control plane's clock, null if it never reported. */
+export const FleetActivityBox = Schema.Struct({
+  boxId: Schema.String,
+  receivedAt: Schema.NullOr(ActivityTimestamp),
+  users: Schema.Array(BoxActivityUser),
+})
+export type FleetActivityBox = typeof FleetActivityBox.Type
+
+/**
+ * Active users per registered managed box. A box whose snapshot is at least `staleAfterSeconds` old keeps its
+ * `receivedAt` but has no `users`, so a stale snapshot never reads as a current count.
+ */
+export const FleetActivity = Schema.Struct({
+  windowSeconds: Schema.Number,
+  staleAfterSeconds: Schema.Number,
+  boxes: Schema.Array(FleetActivityBox),
+})
+export type FleetActivity = typeof FleetActivity.Type
 
 /** How long a pairing code stays valid. */
 export const PAIRING_TTL_SECONDS = 10 * 60

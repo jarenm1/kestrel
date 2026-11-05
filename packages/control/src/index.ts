@@ -2,8 +2,11 @@ import {
   BOX_ID_HEADER,
   BOX_USER_HEADER,
   ControlPaths,
+  MAX_ACTIVITY_CLOCK_SKEW_SECONDS,
+  MAX_BOX_ACTIVITY_BODY_BYTES,
   METER_HOST_ID_HEADER,
   MAX_METER_BODY_BYTES,
+  BoxActivityReport,
   MeterBatch,
   PairingPollBody,
   PairingStartBody,
@@ -118,6 +121,31 @@ const boxToolFailures = async (request: Request, env: Env): Promise<Response> =>
   return new Response(null, { status: 204 })
 }
 
+/**
+ * A managed box reports which of its assigned users had an authenticated direct request in the last five minutes. It
+ * proves itself with its own secret and id; the legacy relay token and user boxes are refused. The report is a full
+ * snapshot, so an empty one clears the box. Timestamps beyond the clock-skew allowance are in the future and refused.
+ */
+const boxActivity = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const auth = request.headers.get("authorization") ?? ""
+  const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
+  const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
+  if (secret === "" || boxId === "" || !(await hub(env).managedBoxVerify(boxId, secret))) {
+    return errorResponse(401, "Unauthorized", "invalid box credentials")
+  }
+  const capped = await cappedRequest(request, MAX_BOX_ACTIVITY_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const body = await decodeBody(capped, BoxActivityReport)
+  if (body instanceof Response) return body
+  const ahead = Date.now() + MAX_ACTIVITY_CLOCK_SKEW_SECONDS * 1000
+  if (body.users.some((user) => Date.parse(user.lastActiveAt) > ahead)) {
+    return errorResponse(400, "BadRequest", "lastActiveAt is in the future")
+  }
+  await hub(env).recordBoxActivity(boxId, body)
+  return new Response(null, { status: 204 })
+}
+
 const isBoxAutomationPath = (pathname: string): boolean =>
   pathname === ControlPaths.boxAutomations || pathname.startsWith(`${ControlPaths.boxAutomations}/`)
 
@@ -186,6 +214,7 @@ export default {
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
       if (url.pathname === ControlPaths.boxToolFailures) return await boxToolFailures(request, env)
+      if (url.pathname === ControlPaths.boxActivity) return await boxActivity(request, env)
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }

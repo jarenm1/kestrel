@@ -25,6 +25,7 @@ import type { WsServices } from "./http/streams"
 import { runRelay } from "./relay/client"
 import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
+import { makeBoxActivityReporter, type BoxActivityReporter } from "./direct/box-activity"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
 
@@ -171,10 +172,14 @@ const program = Effect.gen(function* () {
   })
 
   let direct: DirectListener | null = null
+  /** Reports this managed box's active users; null on a user's own box, which reports to no fleet. */
+  let boxActivity: BoxActivityReporter | null = null
   if (config.direct !== null) {
     const store = yield* CredentialStore
+    boxActivity = config.direct.managed ? makeBoxActivityReporter(config.direct) : null
     direct = makeDirectListener({
-      auth: makeBoxAuth(config.direct, store),
+      auth: makeBoxAuth(config.direct, store, fetch, boxActivity ?? undefined),
+      activity: boxActivity ?? undefined,
       core,
       webHandler,
       runtime: yield* Effect.runtime<WsServices>(),
@@ -205,6 +210,9 @@ const program = Effect.gen(function* () {
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
   yield* Effect.logInfo(`sandbox listener on 127.0.0.1:${config.sandboxPort}`)
 
+  // Reports start only once the box actually serves; a managed box sends an empty snapshot first, then every 30 seconds.
+  boxActivity?.start()
+
   // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
   const activity = yield* openActivitySocket(
     join(config.dataDir, "box.sock"),
@@ -221,6 +229,7 @@ const program = Effect.gen(function* () {
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
+  boxActivity?.stop()
   if (activity !== null) yield* activity.close
   if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
   yield* cliAuth.shutdown()

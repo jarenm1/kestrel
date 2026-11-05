@@ -235,6 +235,27 @@ bunx wrangler secret put KESTREL_OPERATORS   # e.g. jarenm1,caayd
 
 Operators see Settings › Fleet and the `/api/fleet/boxes` routes (`Me.operator` is `true`). Everyone else gets 404 there.
 
+### Active-user telemetry
+
+Settings › Fleet separates **assigned users** (placement) from **active users**: unique assigned logins that made
+an authenticated request to that box within the last five minutes. Background polling counts; this is not a measure
+of human attention or running agents. HTTP requests and requests on an authenticated WebRTC API channel refresh
+activity. Opening a desktop or event stream counts, but traffic on an already-open stream does not; merely watching
+a desktop can therefore age out. Legacy relay traffic and user-owned boxes are not included.
+
+Managed boxes send a complete snapshot, including an empty snapshot when idle, every 30 seconds to
+`POST /box/telemetry/activity`, authenticated with their box id and secret. Collection is in memory and resets on
+box restart; reporting never blocks serving requests. The Hub stores only the latest snapshot per box: login,
+last-activity time, and receiver-side report time. It filters users against their current box assignment and retains
+no prompts, thread data or activity history. Snapshots are capped at 10,000 users, keeping the most recently active.
+Box clocks must be synchronized: timestamps more than 30 seconds ahead of the control plane are rejected; smaller
+positive skew is clamped to receiver time.
+
+Operators read `GET /api/fleet/activity`; signed-in non-operators get 404. Fleet refreshes it every ten seconds and
+shows usernames, last-seen times and the last report time. A box that has never reported shows telemetry unavailable;
+a report at least 90 seconds old shows telemetry stale, not a zero/current count. Box health is separate: an online
+box can have stale telemetry. Older boxes need the updated box code before activity is available.
+
 ### Assignment and states
 
 A user is assigned lazily, whenever the control plane builds their box list or needs their managed box:

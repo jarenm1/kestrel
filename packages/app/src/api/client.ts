@@ -31,6 +31,7 @@ import {
   HarnessCommands,
   FleetBox,
   FleetBoxList,
+  FleetActivity,
   Me,
   Message,
   type ModelProvider,
@@ -555,6 +556,7 @@ export const api = {
     adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
   /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
   fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
+  fleetActivity: () => run(request(FleetActivity, "GET", ControlPaths.fleetActivity)),
   createFleetBox: (body: CreateFleetBoxBody) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxes, body)),
   updateFleetBox: (id: string, body: UpdateFleetBoxBody) =>
     run(request(FleetBox, "PATCH", ControlPaths.fleetBox(id), body)),

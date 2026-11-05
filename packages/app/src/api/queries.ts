@@ -31,6 +31,7 @@ export const keys = {
   kestrelBox: ["kestrel-box"] as const,
   /** Kestrel's managed boxes, as operators see them (`Me.operator`). */
   fleetBoxes: ["fleet-boxes"] as const,
+  fleetActivity: ["fleet-activity"] as const,
   /** The most common tool and agent failures across Kestrel's boxes, as operators see them. */
   fleetToolFailures: ["fleet-tool-failures"] as const,
   /** A pairing code's pending approval, read by the approval page. */
@@ -179,6 +180,8 @@ export const queries = {
     }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
   fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
+  fleetActivity: () =>
+    queryOptions({ queryKey: keys.fleetActivity, queryFn: api.fleetActivity, refetchInterval: BOX_POLL_MS }),
   fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>

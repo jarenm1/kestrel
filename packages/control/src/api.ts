@@ -380,6 +380,18 @@ const handleToolFailures = async (request: Request, env: Env, url: URL): Promise
 }
 
 /**
+ * Active users per managed box, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes.
+ * The read includes every registered box, including one that never reported.
+ */
+const handleFleetActivity = async (request: Request, env: Env): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  return json(await hub(env).fleetActivity())
+}
+
+/**
  * Nest usage metering for operators (`KESTREL_OPERATORS`): host registration and the reconciled report.
  * Anyone else gets 404.
  */
@@ -425,6 +437,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   }
   if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
   if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
+  if (path === ControlPaths.fleetActivity) return handleFleetActivity(request, env)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)

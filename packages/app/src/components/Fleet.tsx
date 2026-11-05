@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CreateFleetBoxBody, type CreatedFleetBox, type FleetBox } from "@cloudagents/protocol"
+import { CreateFleetBoxBody, type CreatedFleetBox, type FleetBox, type FleetActivity } from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -25,12 +25,23 @@ function parseFleetForm(name: string, url: string): CreateFleetBoxBody | null {
 /** Settings › Fleet (operators only): Kestrel's managed boxes. Each one serves many users, reached directly at its URL. */
 export function Fleet() {
   const fleet = useQuery(queries.fleetBoxes())
+  const activity = useQuery(queries.fleetActivity())
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(timer)
+  }, [])
   const [created, setCreated] = useState<CreatedFleetBox | null>(null)
   const boxes = fleet.data?.boxes ?? []
 
   return (
     <>
       {fleet.error && <Alert>{errorText(fleet.error)}</Alert>}
+      {activity.error && <Alert>Activity telemetry unavailable: {errorText(activity.error)}</Alert>}
+      <p className="text-xs text-muted-foreground">
+        Active users made an authenticated box request in the last five minutes, including background polling.
+        Reports arrive every 30 seconds. Assigned users are shown separately.
+      </p>
       {fleet.isPending && <div className="text-muted-foreground">Loading…</div>}
       {created && <FleetSecretCard created={created} onDismiss={() => setCreated(null)} />}
       {fleet.data && (
@@ -38,7 +49,13 @@ export function Fleet() {
           <CardContent className="divide-y divide-white/[0.04] px-0">
             {boxes.length === 0 && <div className="px-5 py-4 text-muted-foreground">No managed boxes yet.</div>}
             {boxes.map((box) => (
-              <FleetBoxRow key={box.id} box={box} onSecret={setCreated} />
+              <FleetBoxRow
+                key={box.id}
+                box={box}
+                activity={activity.error ? undefined : activity.data}
+                now={now}
+                onSecret={setCreated}
+              />
             ))}
           </CardContent>
         </Card>
@@ -86,7 +103,12 @@ function ToolFailures() {
   )
 }
 
-function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: CreatedFleetBox) => void }) {
+function FleetBoxRow({ box, activity, now, onSecret }: {
+  box: FleetBox
+  activity: FleetActivity | undefined
+  now: number
+  onSecret: (created: CreatedFleetBox) => void
+}) {
   const queryClient = useQueryClient()
   const health = useQuery(queries.boxHealth(box.url))
   const invalidate = () => queryClient.invalidateQueries({ queryKey: keys.fleetBoxes })
@@ -105,6 +127,12 @@ function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: Cre
   const pending = setState.isPending || rotate.isPending || remove.isPending
   const error = setState.error ?? rotate.error ?? remove.error
   const variant = box.state === "active" ? "success" : box.state === "draining" ? "warning" : "neutral"
+  const report = activity?.boxes.find((entry) => entry.boxId === box.id)
+  const received = report?.receivedAt ? Date.parse(report.receivedAt) : null
+  const fresh = received !== null && now - received < (activity?.staleAfterSeconds ?? 90) * 1000
+  const users = fresh
+    ? report?.users.filter((user) => now - Date.parse(user.lastActiveAt) < (activity?.windowSeconds ?? 300) * 1000) ?? []
+    : []
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
@@ -117,7 +145,30 @@ function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: Cre
           </div>
           <span className="truncate font-mono text-xs text-muted-foreground">{box.url}</span>
         </div>
-        <span className="text-xs text-muted-foreground">{box.users === 1 ? "1 user" : `${box.users} users`}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{box.users} assigned</span>
+      </div>
+      <div className="flex flex-col gap-1 text-xs">
+        <span className={fresh ? "font-medium" : "text-muted-foreground"}>
+          {fresh
+            ? `${users.length} active ${users.length === 1 ? "user" : "users"} · last 5 minutes`
+            : received !== null ? "Activity telemetry stale" : "Activity telemetry unavailable"}
+        </span>
+        {received !== null && (
+          <span className="text-muted-foreground">
+            Last report: <time dateTime={new Date(received).toISOString()}>{new Date(received).toLocaleString()}</time>
+          </span>
+        )}
+        {users.length > 0 && (
+          <ul className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+            {users.map((user) => (
+              <li key={user.login}>
+                <span className="font-medium text-foreground">@{user.login}</span>
+                {" · last seen "}
+                <time dateTime={user.lastActiveAt}>{new Date(user.lastActiveAt).toLocaleTimeString()}</time>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">

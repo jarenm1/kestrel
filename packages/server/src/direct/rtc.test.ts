@@ -11,6 +11,7 @@ import {
   type RelayFrame,
 } from "@cloudagents/protocol"
 import type { WsServices } from "../http/streams"
+import type { BoxActivitySink } from "./box-activity"
 import { makeRtcServer } from "./rtc"
 
 /** Answers each request with the identity the channel carried, as the box's web handler sees it. */
@@ -23,6 +24,7 @@ const nowSeconds = (): number => Math.floor(Date.now() / 1000)
 class Browser {
   private readonly reassembler = new RtcReassembler()
   private readonly replies = new Map<number, (frame: RelayFrame) => void>()
+  private readonly pongs: Array<() => void> = []
   private nextId = 1
 
   constructor(readonly dc: RTCDataChannel) {
@@ -31,6 +33,14 @@ class Browser {
       if (message === null || typeof message.data !== "string") return
       const frame = decodeFrame(message.data)
       if (frame?.t === "http-res") this.replies.get(frame.id)?.(frame)
+      if (frame?.t === "pong") this.pongs.shift()?.()
+    }
+  }
+
+  private sendFrame(frame: RelayFrame): void {
+    const encoded = encodeFrame(frame)
+    for (const fragment of fragmentMessage({ text: true, data: encoded })) {
+      this.dc.send(Buffer.from(fragment.buffer, fragment.byteOffset, fragment.byteLength))
     }
   }
 
@@ -39,19 +49,24 @@ class Browser {
     const id = this.nextId++
     const { promise, resolve } = Promise.withResolvers<RelayFrame>()
     this.replies.set(id, resolve)
-    const frame = encodeFrame({ t: "http", id, method: "GET", path: "/whoami", headers: {} })
-    for (const fragment of fragmentMessage({ text: true, data: frame })) {
-      this.dc.send(Buffer.from(fragment.buffer, fragment.byteOffset, fragment.byteLength))
-    }
+    this.sendFrame({ t: "http", id, method: "GET", path: "/whoami", headers: {} })
+    return promise
+  }
+
+  /** Sends a keepalive and resolves with the box's pong. */
+  ping(): Promise<void> {
+    const { promise, resolve } = Promise.withResolvers<void>()
+    this.pongs.push(resolve)
+    this.sendFrame({ t: "ping" })
     return promise
   }
 }
 
 /** One browser connection with its channel; the box answers the offer for `expiresAt` (epoch seconds). */
-async function dial(expiresAt: number): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel }> {
+async function dial(expiresAt: number, activity?: BoxActivitySink): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel }> {
   // The channel's streams are never opened here, so the runtime's services are unused.
   const runtime = Runtime.defaultRuntime as Runtime.Runtime<WsServices>
-  const server = makeRtcServer({ webHandler, runtime })
+  const server = makeRtcServer({ webHandler, runtime, activity })
   const pc = new RTCPeerConnection({ iceServers: [] })
   const dc = pc.createDataChannel(RTC_CHANNEL_LABEL)
   await pc.setLocalDescription(await pc.createOffer())
@@ -81,6 +96,23 @@ describe("direct channel", () => {
     expect(reply.status).toBe(200)
     expect(JSON.parse(Buffer.from(reply.body ?? "", "base64").toString())).toEqual({ user: "alice" })
     await untilState(dc, "closed")
+    await pc.close()
+  })
+
+  test("each request on an open channel is activity, but a keepalive is not", async () => {
+    const logins: string[] = []
+    const { pc, dc } = await dial(nowSeconds() + 30, { record: (login) => void logins.push(login) })
+    await untilState(dc, "open")
+    const browser = new Browser(dc)
+
+    await browser.whoami()
+    expect(logins).toEqual(["alice"])
+
+    await browser.ping()
+    expect(logins).toEqual(["alice"])
+
+    await browser.whoami()
+    expect(logins).toEqual(["alice", "alice"])
     await pc.close()
   })
 })

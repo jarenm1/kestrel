@@ -15,11 +15,17 @@ import {
 import { CLOSE_NOT_FOUND, serveStream, streamRoute, type WsServices } from "../http/streams"
 import { RelayStream } from "../relay/stream"
 import { serveTunnelHttp, TUNNEL_ORIGIN, type TunnelIdentity } from "../tunnel"
+import type { BoxActivitySink } from "./box-activity"
 
 export interface RtcDeps {
   /** The box's web handler; tunnelled requests reach it with the channel's identity. */
   readonly webHandler: (request: Request) => Promise<Response>
   readonly runtime: Runtime.Runtime<WsServices>
+  /**
+   * Told about each request a browser makes over an authenticated channel. A channel lives until its token lapses, so
+   * the token's authentication alone (at channel open) would miss a user who keeps working through it.
+   */
+  readonly activity?: BoxActivitySink
 }
 
 export interface RtcServer {
@@ -59,9 +65,14 @@ const serveChannel = (
   const dispatch = (frame: RelayFrame): void => {
     switch (frame.t) {
       case "http":
+        // Every tunnelled HTTP request is a request the signed-in user made now, however old the channel is.
+        deps.activity?.record(identity.user)
         void serveTunnelHttp(frame, deps.webHandler, identity, (reply) => send(encodeFrame(reply)))
         return
       case "ws-open": {
+        // Opening a stream is a request too. Traffic on an already-open desktop or event stream is not counted: only
+        // its opening carries a request, and idle keepalives must not keep a user active.
+        deps.activity?.record(identity.user)
         const url = new URL(frame.path, TUNNEL_ORIGIN)
         const protocol = frame.headers["x-kestrel-preview-protocol"]?.split(",")[0]?.trim()
         const route = streamRoute(url.pathname, frame.path, protocol)

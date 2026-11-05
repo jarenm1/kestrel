@@ -4,6 +4,7 @@ import { BOX_ID_HEADER, BOX_USER_HEADER, type BoxTokenClaims, signBoxToken } fro
 import type { RelayCredentials } from "@cloudagents/protocol"
 import type { CredentialStoreShape } from "../credentials"
 import { type BoxAuth, makeBoxAuth, type DirectSettings } from "./auth"
+import type { BoxActivitySink } from "./box-activity"
 
 const CONTROL = "https://control.example"
 const BOX_ID = "box_fleet_1"
@@ -121,6 +122,71 @@ describe("managed box credentials", () => {
 
     await authenticate(auth, await tokenFor("alice", "2", now))
     expect(calls).toHaveLength(2)
+  })
+})
+
+describe("managed box activity", () => {
+  const activityLog = () => {
+    const logins: string[] = []
+    const activity: BoxActivitySink = { record: (login) => void logins.push(login) }
+    return { logins, activity }
+  }
+
+  test("each request that fully authenticated records its login", async () => {
+    const { fetchFn } = stubControl([{ status: 200, body: { owner: "alice", credentialsVersion: "1" } }])
+    const { logins, activity } = activityLog()
+    const auth = makeBoxAuth(managed, memoryStore(), fetchFn, activity)
+    const token = await tokenFor("alice", "1")
+
+    await authenticate(auth, token)
+    await authenticate(auth, token)
+
+    expect(logins).toEqual(["alice", "alice"])
+  })
+
+  test("a token the box refuses is not activity", async () => {
+    const { fetchFn, calls } = stubControl([{ status: 200, body: { owner: "alice", credentialsVersion: "1" } }])
+    const { logins, activity } = activityLog()
+    const auth = makeBoxAuth(managed, memoryStore(), fetchFn, activity)
+
+    const result = await authenticate(auth, "not-a-box-token")
+
+    expect(failureTag(result)).toBe("Unauthorized")
+    expect(calls).toHaveLength(0)
+    expect(logins).toEqual([])
+  })
+
+  test("a user not assigned to this box is not activity", async () => {
+    const { fetchFn } = stubControl([{ status: 403 }])
+    const { logins, activity } = activityLog()
+    const auth = makeBoxAuth(managed, memoryStore(), fetchFn, activity)
+
+    const result = await authenticate(auth, await tokenFor("mallory", "1"))
+
+    expect(failureTag(result)).toBe("Unauthorized")
+    expect(logins).toEqual([])
+  })
+
+  test("a request whose credentials could not be refreshed is not activity", async () => {
+    const { fetchFn } = stubControl([{ status: 500 }])
+    const { logins, activity } = activityLog()
+    const auth = makeBoxAuth(managed, memoryStore(), fetchFn, activity)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(failureTag(result)).toBe("Unavailable")
+    expect(logins).toEqual([])
+  })
+
+  test("a user's own box reports no activity", async () => {
+    const { fetchFn } = stubControl([{ status: 200, body: { owner: "alice", credentialsVersion: "1" } }])
+    const { logins, activity } = activityLog()
+    const auth = makeBoxAuth(byo, memoryStore(), fetchFn, activity)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(Either.isRight(result)).toBe(true)
+    expect(logins).toEqual([])
   })
 })
 
