@@ -13,6 +13,7 @@ let
   runDir = "/run/kestrel-host";
   apiSocket = "${runDir}/api.sock";
   depcacheListen = "169.254.0.1:3141";
+  casListen = "169.254.0.1:8585";
   nixCacheListen = "169.254.0.1:5000";
   ingressListen = "127.0.0.1:8081";
   hostAddress = "169.254.0.1";
@@ -267,6 +268,11 @@ in
       group = "kestrel-depcache";
       home = "/var/cache/kestrel-depcache";
     };
+    users.groups.kestrel-cas = { };
+    users.users.kestrel-cas = {
+      isSystemUser = true;
+      group = "kestrel-cas";
+    };
 
     environment.etc."kestrel-host/config.json".source =
       pkgs.writeText "kestrel-host-config.json" (builtins.toJSON hostConfig);
@@ -277,6 +283,7 @@ in
       "d ${stateDir}/vms 0700 root root -"
       "d ${secretsDir} 0700 root root -"
       "d /var/cache/kestrel-depcache 0750 kestrel-depcache kestrel-depcache -"
+      "d /var/cache/kestrel-cas 0750 kestrel-cas kestrel-cas -"
       "d /var/cache/kestrel-nix 0755 root root -"
     ];
 
@@ -413,6 +420,21 @@ ${lib.optionalString cfg.turn.enable "          udp dport ${toString config.serv
         User = "kestrel-depcache";
         Group = "kestrel-depcache";
         ReadWritePaths = [ "/var/cache/kestrel-depcache" ];
+        Restart = "always";
+        RestartSec = 2;
+      };
+    };
+
+    systemd.services.kestrel-cas = {
+      description = "Nest build cache (content-addressed blobs and refs)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
+      serviceConfig = hardened // {
+        ExecStart = "${packages."kestrel-cas"}/bin/kestrel-cas --listen ${casListen} --storage-dir /var/cache/kestrel-cas";
+        User = "kestrel-cas";
+        Group = "kestrel-cas";
+        ReadWritePaths = [ "/var/cache/kestrel-cas" ];
         Restart = "always";
         RestartSec = 2;
       };

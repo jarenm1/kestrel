@@ -1,5 +1,5 @@
 # Packages for the Nest: the Bun services (box, host agent) and the Rust crates (guest agent, volume, ingress,
-# depcache). Consumed by flake.nix (`packages.<system>.kestrel-*`) and guest.nix.
+# depcache, cas). Consumed by flake.nix (`packages.<system>.kestrel-*`) and guest.nix.
 { pkgs, lib, root }:
 
 let
@@ -108,4 +108,5 @@ in
   volume = crate { name = "volume"; bindgen = true; };
   ingress = crate { name = "ingress"; };
   depcache = crate { name = "depcache"; };
+  cas = crate { name = "cas"; };
 }

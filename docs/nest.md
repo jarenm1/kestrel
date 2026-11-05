@@ -16,6 +16,7 @@ capabilities (`gpu`, `suspend`), never through "is this the Nest" checks.
 | Volume tool `kestrel-volume` | `packages/host/crates/volume` | Rust | root, on each host |
 | Ingress `kestrel-ingress` | `packages/host/crates/ingress` | Rust | `kestrel-ingress` user, behind Caddy |
 | Dependency cache `kestrel-depcache` | `packages/host/crates/depcache` | Rust | `kestrel-depcache` user |
+| Build cache `kestrel-cas` | `packages/host/crates/cas` | Rust | `kestrel-cas` user |
 | Guest image, host NixOS module, VM test | `packages/host/nix` | Nix | |
 | Control plane side | `packages/control` | TypeScript | Worker + Hub |
 | Box side (platform service) | `packages/server` | TypeScript | the box, in the VM |
@@ -383,6 +384,30 @@ Populate and sign it with `nix copy --to 'file:///var/cache/kestrel-nix?secret-k
 is `services.kestrel-nest.nixCache.secretKeyFile` (default `/etc/kestrel-host/nix-cache-secret-key`); its public half
 is `nixCache.publicKey`, which the host agent sends to guests at `configure` as `nixCachePublicKey`. Guests trust that
 key and cache.nixos.org.
+
+## Build cache
+
+`kestrel-cas` listens on `169.254.0.1:8585` (reachable from every VM, from nothing else). It is shared by every VM on the
+host, so a build output one thread stores can be read by another thread on the same host. It is a plain HTTP object
+store, not an S3 API; a client that needs S3 needs an adapter.
+
+| Route | Meaning |
+|---|---|
+| `PUT /blobs/sha256/<hash>` | Stores the body. Refused (400) unless its SHA-256 is `<hash>`. 201 when new, 200 when present. |
+| `GET`, `HEAD /blobs/sha256/<hash>` | The bytes; `ETag` is the digest. 404 when absent or evicted. |
+| `PUT /refs/<namespace>/<key>` | Stores the body as a blob and points the key at it. 200. |
+| `GET`, `HEAD /refs/<namespace>/<key>` | The blob the key points at. 404 when the key or its blob is gone. |
+| `DELETE /refs/<namespace>/<key>` | Removes the key (the blob stays until eviction). 204, also when absent. |
+
+Blobs are stored by digest on disk under `/var/cache/kestrel-cas`, written to a staging file and renamed into place, so a
+blob is never visible half-written, and every PUT is checked against its name. Blobs are evicted least recently used
+when the total exceeds `--cache-bytes` (20 GiB by default); one blob may not exceed `--max-object-bytes` (4 GiB). Bodies
+stream to disk and are never held in memory. Namespaces and keys use `[A-Za-z0-9._-]` segments, with no `.` or `..`.
+
+Open: refs are not yet bound to the VM that wrote them. Any guest can write any namespace, so a guest could replace what
+another guest reads under the same key. Keys are ordinary build-action digests, so this is cache poisoning across VMs.
+Refs must be bound to an owner (by the guest's address, or a per-VM credential from `configure`) before a box uses this
+service. Until then the daemon is running but no box is configured to use it.
 
 ## Control plane
 

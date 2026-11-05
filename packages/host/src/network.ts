@@ -25,8 +25,8 @@ export const NFT_NAT_TABLE = "kestrel-nat"
 /** One `ifname . address` element per live tap: the only source a tap may send from. */
 export const TAP_ADDRS_SET = "tap_addrs"
 
-/** Ports of the host services a guest may reach on `HOST_GATEWAY`: the dependency cache, the Nix cache and DNS. */
-const GATEWAY_TCP_PORTS = [3141, 5000, 53]
+/** Ports of the host services a guest may reach on `HOST_GATEWAY`: the dependency cache, the Nix cache, the build cache and DNS. */
+const GATEWAY_TCP_PORTS = [3141, 5000, 8585, 53]
 const PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"]
 
 /**
