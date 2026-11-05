@@ -44,33 +44,27 @@ struct FiemapHeader {
 /// Physical mapping of one piece of a chunk, relative to the chunk start: `(offset in chunk, physical, length)`.
 pub type Piece = (u64, u64, u64);
 
-/// Creates `dst` as a copy of `src`, as a reflink when `allow_reflink` and the filesystem supports it. The fallback is
-/// `fs::copy`, which may itself share extents (e.g. btrfs `copy_file_range`); the change check only relies on physical
-/// mapping equality, so either outcome is correct. Returns whether the clone was a reflink.
-pub fn snapshot(src: &Path, dst: &Path, allow_reflink: bool) -> Result<bool> {
-    if allow_reflink && try_reflink(src, dst)? {
-        return Ok(true);
-    }
-    fs::copy(src, dst)
-        .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
-    Ok(false)
-}
-
-fn try_reflink(src: &Path, dst: &Path) -> Result<bool> {
+/// Creates `dst` as a reflink of `src`: a copy-on-write clone the filesystem makes atomically, so it is a point-in-time
+/// image even while the guest writes to `src`. A filesystem without reflinks is an error rather than a copy, because a
+/// copy of a live image can tear across concurrent writes.
+pub fn snapshot(src: &Path, dst: &Path) -> Result<()> {
     let src_file = File::open(src).with_context(|| format!("opening {}", src.display()))?;
     let dst_file = File::create(dst).with_context(|| format!("creating {}", dst.display()))?;
     // SAFETY: FICLONE takes a source file descriptor and no pointers.
     let rc = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE as _, src_file.as_raw_fd()) };
     if rc == 0 {
-        return Ok(true);
+        return Ok(());
     }
     let err = io::Error::last_os_error();
     drop(dst_file);
     fs::remove_file(dst).ok();
-    match err.raw_os_error() {
-        Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOTTY) => Ok(false),
-        _ => Err(err).with_context(|| format!("reflinking {} to {}", src.display(), dst.display())),
-    }
+    Err(err).with_context(|| {
+        format!(
+            "reflinking {} to {}: the volume and its state directory must be on one reflink filesystem (XFS or btrfs)",
+            src.display(),
+            dst.display()
+        )
+    })
 }
 
 /// Every physical extent of `file`, sorted by logical offset.
@@ -217,10 +211,7 @@ mod tests {
         let src = dir.path().join("src");
         fs::write(&src, vec![5u8; CHUNK_SIZE as usize]).unwrap();
         let cloned = dir.path().join("clone");
-        assert!(
-            snapshot(&src, &cloned, true).unwrap(),
-            "the filesystem did not reflink"
-        );
+        snapshot(&src, &cloned).unwrap();
         let src_sig = chunk_signatures(&File::open(&src).unwrap(), CHUNK_SIZE).unwrap();
         let clone_sig = chunk_signatures(&File::open(&cloned).unwrap(), CHUNK_SIZE).unwrap();
         assert_eq!(src_sig, clone_sig);
@@ -234,16 +225,5 @@ mod tests {
             vec![5u8; CHUNK_SIZE as usize],
             "a rewrite of the clone reached the source"
         );
-    }
-
-    #[test]
-    fn copy_fallback_matches_the_source() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src");
-        let data: Vec<u8> = (0..CHUNK_SIZE as usize + 17).map(|i| i as u8).collect();
-        fs::write(&src, &data).unwrap();
-        let copied = dir.path().join("copy");
-        assert!(!snapshot(&src, &copied, false).unwrap());
-        assert_eq!(fs::read(&copied).unwrap(), data);
     }
 }

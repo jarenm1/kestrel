@@ -159,7 +159,7 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
     let base_path = suffixed(path, ".base");
     let ref_path = suffixed(path, ".base.ref");
 
-    extents::snapshot(path, &snap_path, true)?;
+    extents::snapshot(path, &snap_path)?;
     let _snap_guard = Cleanup::new(snap_path.clone());
     let snap = File::open(&snap_path)
         .with_context(|| format!("opening snapshot {}", snap_path.display()))?;
