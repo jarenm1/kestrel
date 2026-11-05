@@ -1,6 +1,13 @@
 import { createContext, useContext } from "react";
 import type { ActiveBox } from "@/api/client";
 
+/**
+ * A settings page with its own screen. The settings route without one is the hub that lists them (the web app's
+ * `/settings` index instead opens Profile). Connections keeps its own route because the thread sidebar and composer
+ * reach it directly; the hub lists it too.
+ */
+export type SettingsSection = "profile" | "boxes" | "billing";
+
 /** Every screen the signed-in app can show. The stack lives in MainNavigator. */
 export type Route =
   | { name: "new-thread" }
@@ -8,7 +15,7 @@ export type Route =
   | { name: "archived" }
   | { name: "automations" }
   | { name: "connections" }
-  | { name: "settings" }
+  | { name: "settings"; section?: SettingsSection }
   | { name: "usage" };
 
 /** A screen a link opens. A thread link carries only its id, so the thread opens on the box the app is using. */

@@ -1,227 +1,131 @@
-import React, { useMemo } from "react";
-import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { CreditCard, LogOut, Monitor, Plug, User } from "lucide-react-native";
+import React from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ChevronRight, CreditCard, type LucideIcon, Plug, Server, User } from "lucide-react-native";
 import { CURRENT_PLAN, PLANS } from "@cloudagents/protocol";
-import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { ScreenHeader } from "@/components/ScreenHeader";
-import { Alert } from "@/components/ui/Alert";
-import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { useApiClient } from "@/hooks/useApiClient";
-import { errorText } from "@/lib/format";
-import { useNavigation } from "@/nav/navigation";
-import { colors, fonts, radius, spacing } from "@/theme";
+import { useNavigation, type SettingsSection } from "@/nav/navigation";
+import { BoxesScreen } from "@/screens/BoxesScreen";
+import { BillingScreen } from "@/screens/BillingScreen";
+import { ProfileScreen } from "@/screens/ProfileScreen";
+import { colors, spacing } from "@/theme";
 
-export function SettingsScreen() {
-  const { user, signOut, boxes, activeBoxId, setActiveBox } = useAuth();
+/**
+ * Each section's page component. `Record<SettingsSection, …>`: adding a section to the route type fails to compile
+ * until its page is here, so no section URL can open a blank screen.
+ */
+const SECTION_PAGES: Record<SettingsSection, React.ComponentType> = {
+  profile: ProfileScreen,
+  boxes: BoxesScreen,
+  billing: BillingScreen,
+};
+
+/**
+ * Settings, the phone shape of the web app's Settings layout: a hub that lists the sections, each opening its own page
+ * with a back control. Choosing a section pushes it, so back returns to the hub; a section URL opened directly lands on
+ * that page, and back leaves settings. Connections keeps its own route: the thread sidebar and composer open it
+ * directly, and the hub lists it too.
+ */
+export function SettingsScreen({ section }: { section?: SettingsSection }) {
+  if (section === undefined) return <SettingsHome />;
+  const Page = SECTION_PAGES[section];
+  return <Page />;
+}
+
+function SettingsHome() {
   const nav = useNavigation();
-  const { api } = useApiClient();
-  const queries = useMemo(() => createQueries(api), [api]);
-  const usageQuery = useQuery(queries.usage());
-  const usage = usageQuery.data;
-
-  const switchBox = useMutation({
-    mutationFn: (boxId: string | null) => setActiveBox(boxId),
-  });
-
-  const currentPlan = PLANS.find((p) => p.id === CURRENT_PLAN) ?? PLANS[0];
-  const hoursUsed = usage ? (usage.agentSeconds / 3600).toFixed(1) : "0";
+  const { user, boxes, activeBoxId } = useAuth();
+  const plan = PLANS.find((candidate) => candidate.id === CURRENT_PLAN) ?? PLANS[0];
+  const activeBox = activeBoxId === null ? null : boxes.find((box) => box.id === activeBoxId);
+  const boxName = activeBoxId === null ? "Kestrel's box" : (activeBox?.name ?? "Your own box");
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <ScreenHeader title="Settings" />
-
-      {/* Profile Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionTitleRow}>
-          <User size={16} color={colors.mutedForeground} />
-          <Text style={styles.sectionTitle}>Profile</Text>
-        </View>
-        <Card style={styles.card}>
-          <View style={styles.profileRow}>
-            {user?.avatarUrl ? (
-              <Image source={{ uri: user.avatarUrl }} style={styles.avatar} />
-            ) : (
-              <View style={[styles.avatar, styles.avatarPlaceholder]}>
-                <Text style={styles.avatarLetter}>{user?.login?.slice(0, 1) ?? "U"}</Text>
-              </View>
-            )}
-            <View style={styles.profileInfo}>
-              <Text style={styles.loginText}>{user?.login ?? "Signed in"}</Text>
-              <Text style={styles.subText}>GitHub Account</Text>
-            </View>
-            <Button
-              variant="ghost"
-              size="sm"
-              icon={LogOut}
-              onPress={() => void signOut()}
-              accessibilityLabel="Sign out"
-            >
-              Sign out
-            </Button>
-          </View>
-        </Card>
-      </View>
-      {/* Box Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionTitleRow}>
-          <Monitor size={16} color={colors.mutedForeground} />
-          <Text style={styles.sectionTitle}>Box</Text>
-        </View>
-        <Card style={styles.card}>
-          <BoxRow
-            name="Kestrel's box"
-            detail="Hosted by Kestrel"
-            active={activeBoxId === null}
-            disabled={switchBox.isPending}
-            onUse={() => switchBox.mutate(null)}
-          />
-          {boxes.map((box) => (
-            <BoxRow
-              key={box.id}
-              name={box.name}
-              detail={box.url}
-              active={activeBoxId === box.id}
-              disabled={switchBox.isPending}
-              onUse={() => switchBox.mutate(box.id)}
-            />
-          ))}
-          {switchBox.error ? <Alert variant="destructive">{errorText(switchBox.error)}</Alert> : null}
-          <Text style={styles.subText}>Boxes are created and deleted on the web app.</Text>
-        </Card>
-      </View>
-
-      {/* Billing & Usage Section */}
-      <View style={styles.section}>
-        <View style={styles.sectionTitleRow}>
-          <CreditCard size={16} color={colors.mutedForeground} />
-          <Text style={styles.sectionTitle}>Billing & Usage</Text>
-        </View>
-        <Card style={styles.card}>
-          <View style={styles.planHeader}>
-            <View>
-              <Text style={styles.planName}>{currentPlan?.name ?? "Hobby"} Plan</Text>
-              <Text style={styles.planDesc}>{currentPlan?.desc}</Text>
-            </View>
-            <Badge variant="neutral">Current</Badge>
-          </View>
-
-          <View style={styles.usageDivider} />
-
-          {usageQuery.isPending ? (
-            <ActivityIndicator size="small" color={colors.mutedForeground} />
-          ) : (
-            <View style={styles.usageGrid}>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber}>{hoursUsed}h</Text>
-                <Text style={styles.statLabel}>Agent hours</Text>
-              </View>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber}>{usage?.threads ?? 0}</Text>
-                <Text style={styles.statLabel}>Threads</Text>
-              </View>
-              <View style={styles.statBox}>
-                <Text style={styles.statNumber}>{usage?.runs ?? 0}</Text>
-                <Text style={styles.statLabel}>Runs executed</Text>
-              </View>
-            </View>
-          )}
-
-          <View style={styles.usageDivider} />
-
-          <View style={styles.connectionsRow}>
-            <View style={styles.connectionsInfo}>
-              <Text style={styles.cardTitle}>Quotas</Text>
-              <Text style={styles.subText}>Claude Code and Codex limits, banked resets and activity.</Text>
-            </View>
-            <Button variant="soft" size="sm" onPress={() => nav.push({ name: "usage" })}>
-              Open
-            </Button>
-          </View>
-        </Card>
-      </View>
-
-      {/* Connections Link */}
-      <View style={styles.section}>
-        <View style={styles.sectionTitleRow}>
-          <Plug size={16} color={colors.mutedForeground} />
-          <Text style={styles.sectionTitle}>Providers</Text>
-        </View>
-        <Card style={styles.card}>
-          <View style={styles.connectionsRow}>
-            <View style={styles.connectionsInfo}>
-              <Text style={styles.cardTitle}>Model & CLI Connections</Text>
-              <Text style={styles.subText}>Manage Anthropic, OpenAI, GitHub and devbox logins.</Text>
-            </View>
-            <Button variant="soft" size="sm" onPress={() => nav.navigate({ name: "connections" })}>
-              Open
-            </Button>
-          </View>
-        </Card>
-      </View>
+      <Card style={styles.card}>
+        <SettingsNavRow
+          icon={User}
+          label="Profile"
+          detail={user === null ? "GitHub account" : `@${user.login} · GitHub account`}
+          onPress={() => nav.push({ name: "settings", section: "profile" })}
+        />
+        <View style={styles.divider} />
+        <SettingsNavRow
+          icon={Plug}
+          label="Connections"
+          detail="Accounts, API keys and models"
+          onPress={() => nav.push({ name: "connections" })}
+        />
+        <View style={styles.divider} />
+        <SettingsNavRow
+          icon={Server}
+          label="Boxes"
+          detail={boxName}
+          onPress={() => nav.push({ name: "settings", section: "boxes" })}
+        />
+        <View style={styles.divider} />
+        <SettingsNavRow
+          icon={CreditCard}
+          label="Billing"
+          detail={`${plan.name} plan · ${plan.price} ${plan.period}`}
+          onPress={() => nav.push({ name: "settings", section: "billing" })}
+        />
+      </Card>
+      <Text style={styles.hint}>
+        The phone app's settings mirror the web app. Repository access and sign-out live under Profile.
+      </Text>
     </ScrollView>
   );
 }
 
-function BoxRow({
-  name,
+/** One hub entry: icon, label and a one-line summary, with the chevron that marks a page. */
+export function SettingsNavRow({
+  icon: Icon,
+  label,
   detail,
-  active,
-  disabled,
-  onUse,
+  onPress,
 }: {
-  name: string;
+  icon: LucideIcon;
+  label: string;
   detail: string;
-  active: boolean;
-  disabled: boolean;
-  onUse: () => void;
+  onPress: () => void;
 }) {
   return (
-    <View style={styles.connectionsRow}>
-      <View style={styles.connectionsInfo}>
-        <Text style={styles.cardTitle}>{name}</Text>
-        <Text style={styles.monoText} numberOfLines={1}>
+    <Pressable
+      style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={detail === "" ? label : `${label}, ${detail}`}
+    >
+      <Icon size={18} color={colors.mutedForeground} />
+      <View style={styles.rowText}>
+        <Text style={styles.rowLabel}>{label}</Text>
+        <Text style={styles.rowDetail} numberOfLines={1}>
           {detail}
         </Text>
       </View>
-      {active ? (
-        <Badge variant="success">Active</Badge>
-      ) : (
-        <Button variant="soft" size="sm" disabled={disabled} onPress={onUse}>
-          Use
-        </Button>
-      )}
-    </View>
+      <ChevronRight size={16} color={colors.mutedForeground} />
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
-  scroll: { flex: 1 },
-  container: { padding: spacing.md, gap: spacing.lg, paddingBottom: spacing.xxl },
-  section: { gap: spacing.sm },
-  sectionTitleRow: { flexDirection: "row", alignItems: "center", gap: spacing.xs, paddingHorizontal: 2 },
-  sectionTitle: { fontSize: 13, fontWeight: "600", color: colors.mutedForeground },
-  card: { padding: spacing.md, gap: spacing.md },
-  profileRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
-  avatar: { width: 44, height: 44, borderRadius: 22 },
-  avatarPlaceholder: { backgroundColor: colors.white12, alignItems: "center", justifyContent: "center" },
-  avatarLetter: { color: colors.foreground, fontSize: 18, fontWeight: "600" },
-  profileInfo: { flex: 1 },
-  loginText: { color: colors.foreground, fontSize: 16, fontWeight: "600" },
-  subText: { color: colors.mutedForeground, fontSize: 12, marginTop: 2 },
-  planHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  planName: { color: colors.foreground, fontSize: 16, fontWeight: "600" },
-  planDesc: { color: colors.mutedForeground, fontSize: 12, marginTop: 2, maxWidth: 220 },
-  usageDivider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
-  usageGrid: { flexDirection: "row", justifyContent: "space-between", gap: spacing.sm },
-  statBox: { flex: 1, alignItems: "center", padding: spacing.sm, backgroundColor: colors.white03, borderRadius: radius.md },
-  statNumber: { color: colors.foreground, fontSize: 18, fontWeight: "700", fontFamily: fonts.mono },
-  statLabel: { color: colors.mutedForeground, fontSize: 10, textAlign: "center", marginTop: 4 },
-  connectionsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },
-  connectionsInfo: { flex: 1 },
-  cardTitle: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
-  monoText: { color: colors.mutedForeground, fontSize: 12, fontFamily: fonts.mono, marginTop: 2 },
+  screen: { flex: 1, backgroundColor: colors.background },
+  content: { paddingBottom: spacing.xxl },
+  card: { marginHorizontal: spacing.lg, marginTop: spacing.lg, paddingVertical: 0, paddingHorizontal: 0, gap: 0 },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    minHeight: 56,
+  },
+  rowPressed: { backgroundColor: colors.white03 },
+  rowText: { flex: 1, minWidth: 0, gap: 2 },
+  rowLabel: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
+  rowDetail: { color: colors.mutedForeground, fontSize: 12 },
+  divider: { height: StyleSheet.hairlineWidth, backgroundColor: colors.border, marginLeft: spacing.lg + 18 + spacing.md },
+  hint: { color: colors.mutedForeground, fontSize: 12, paddingHorizontal: spacing.lg, paddingTop: spacing.md },
 });

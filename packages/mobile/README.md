@@ -64,6 +64,25 @@ Native typing stays inside the DOM: only the initial draft seeds the view, and S
 rather than a potentially delayed bridge update. No GitHub credentials enter the editor; the existing
 `github_reference_read` tool resolves the explicit repository/kind/number when the agent follows a reference.
 
+## Settings
+
+Settings mirrors the web app's sections as a phone hub: Profile, Connections, Boxes and Billing rows, each opening its
+own page with a back control (`Threads` joins them from the Threads settings screen's own change). Sections keep the
+web URLs: `/settings` is the hub, `/settings/profile`, `/settings/boxes` and `/settings/billing` open a section
+directly, `/settings/connections` is the existing Connections screen, and `/settings/usage` is Quotas.
+
+- **Profile** shows the GitHub account (avatar, name, `@login`, link to the GitHub profile, sign-in badge), GitHub
+  access with Connect/Reconnect, and Sign out. GitHub access moved here from Connections, as on desktop; the OAuth
+  callback returns to `/settings/profile` (`ControlPaths.connectOAuth("github")?return=/settings/profile`) and the
+  repository picker's "connect GitHub" action opens this section. On the web build the browser holds the session, so
+  Connect leaves and returns to the page. A native app has no session in its external browser, so it shows the same
+  guidance as the old Connections row and opens the web profile to connect there.
+- **Boxes** keeps the active-box switch (Kestrel's box or a BYOB box); boxes are still created and deleted on the web.
+- **Billing** keeps the plan, agent-hours usage and the Quotas link, and adds the web app's plan price, progress,
+  period dates, plan list and payment/invoice rows.
+- The desktop's browser-only turn-sound preference is not ported: the mobile app has no turn-sound playback or
+  notification to control, so the card would be a setting with no effect.
+
 ## Shared desktop components
 
 Some screens render the desktop's own components from `packages/ui` instead of a React Native copy, so a change to

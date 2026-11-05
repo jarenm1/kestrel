@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { FolderGit2, Lock, type LucideIcon, Plug } from "lucide-react-native";
+import { FolderGit2, Lock, type LucideIcon, User } from "lucide-react-native";
 import { ApiError } from "@/api/client";
 import { createQueries } from "@/api/queries";
 import { PickerSheet } from "@/components/PickerSheet";
@@ -56,9 +56,9 @@ export function BarButton({
 }
 
 /**
- * The GitHub repositories the user can read, with a filter; `undefined` leaves the choice to the agent. Without a
- * GitHub connection it points to Connections instead. With `allowNone` false (a reference must name a repository) the
- * sheet only lists repositories and the trigger prompts for one.
+ * GitHub repositories the user can read, with a filter; `undefined` leaves the choice to the agent. Without a
+ * GitHub connection it points to Profile instead (where GitHub access lives, as on the web). With `allowNone` false
+ * (a reference must name a repository) the sheet only lists repositories and the trigger prompts for one.
  */
 export function RepoPicker({
   value,
@@ -135,11 +135,11 @@ export function RepoPicker({
               accessibilityRole="button"
               onPress={() => {
                 setOpen(false);
-                nav.navigate({ name: "connections" });
+                nav.navigate({ name: "settings", section: "profile" });
               }}
             >
-              <Plug size={18} color={colors.foreground} />
-              <Text style={styles.footerText}>Connections</Text>
+              <User size={18} color={colors.foreground} />
+              <Text style={styles.footerText}>Profile</Text>
             </Pressable>
           ) : undefined
         }

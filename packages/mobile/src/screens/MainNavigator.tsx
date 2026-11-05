@@ -206,7 +206,7 @@ function pageFor(route: Exclude<Route, { name: "thread" }>): ReactNode {
     case "connections":
       return <ConnectionsScreen />;
     case "settings":
-      return <SettingsScreen />;
+      return <SettingsScreen section={route.section} />;
     case "usage":
       return <UsageScreen />;
   }

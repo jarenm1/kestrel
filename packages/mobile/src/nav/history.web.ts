@@ -1,4 +1,4 @@
-import type { LaunchRoute, Route } from "@/nav/navigation";
+import type { LaunchRoute, Route, SettingsSection } from "@/nav/navigation";
 
 /**
  * The web build's navigation glue. The stack stays in memory; the browser sees one extra "back" history entry while a
@@ -8,6 +8,24 @@ import type { LaunchRoute, Route } from "@/nav/navigation";
  */
 
 const THREAD_PATH = /^\/c\/([^/]+)$/;
+
+/**
+ * The web app's URL for each settings page. `Record<SettingsSection, string>`: adding a section to the route type
+ * makes this map and `pathFor` fail to compile until its URL is here too.
+ */
+const SECTION_PATHS: Record<SettingsSection, string> = {
+  profile: "/settings/profile",
+  boxes: "/settings/boxes",
+  billing: "/settings/billing",
+};
+
+/** The section whose web URL this path is, if any. */
+function sectionOf(path: string): SettingsSection | null {
+  return (
+    (Object.entries(SECTION_PATHS) as [SettingsSection, string][]).find(([, sectionPath]) => sectionPath === path)?.[0] ??
+    null
+  );
+}
 
 let handler: (() => boolean) | null = null;
 /** Whether the extra history entry is on top, so the next browser back is ours to handle. */
@@ -25,6 +43,8 @@ function launchRoute(): LaunchRoute | null {
   if (path === "/archived") return { name: "archived" };
   if (path === "/settings/connections") return { name: "connections" };
   if (path === "/settings/usage") return { name: "usage" };
+  const section = sectionOf(path);
+  if (section !== null) return { name: "settings", section };
   if (path === "/settings" || path.startsWith("/settings/")) return { name: "settings" };
   return null;
 }
@@ -40,7 +60,7 @@ function pathFor(route: Route): string {
     case "connections":
       return "/settings/connections";
     case "settings":
-      return "/settings";
+      return route.section === undefined ? "/settings" : SECTION_PATHS[route.section];
     case "usage":
       return "/settings/usage";
     case "new-thread":
