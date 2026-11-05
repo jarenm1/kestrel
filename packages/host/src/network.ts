@@ -18,11 +18,52 @@ const CID_BASE = 2
 /** Fixed NIC MAC for every VM. Taps are point-to-point, so VMs never share a segment. */
 export const GUEST_MAC = "52:54:00:4b:4e:01"
 
-/** The `inet kestrel` table and its `tap_addrs` set belong to the host module; the agent only adds and removes elements. */
+/** The agent owns the guest firewall: the `inet kestrel` table, and `ip kestrel-nat` for egress. */
 export const NFT_TABLE = "kestrel"
+export const NFT_NAT_TABLE = "kestrel-nat"
+/** One `ifname . address` element per live tap: the only source a tap may send from. */
 export const TAP_ADDRS_SET = "tap_addrs"
-/** Run once at startup: without the host module's set, no tap's source address is allowed and guests have no network. */
-export const TAP_ADDRS_CHECK = ["list", "set", "inet", NFT_TABLE, TAP_ADDRS_SET] as const
+
+/** Ports of the host services a guest may reach on `HOST_GATEWAY`: the dependency cache, the Nix cache and DNS. */
+const GATEWAY_TCP_PORTS = [3141, 5000, 53]
+const PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"]
+
+/**
+ * The whole guest firewall as one `nft -f` script. The script destroys and rebuilds both tables, which empties
+ * `tap_addrs`: the caller must re-add the element of every live tap afterwards. It is loaded before any tap is brought
+ * up, so a guest never has a tap without its anti-spoofing rule. Traffic not from a tap is not touched.
+ */
+export const firewallRuleset = (): string =>
+  [
+    `destroy table inet ${NFT_TABLE}`,
+    `table inet ${NFT_TABLE} {`,
+    `  set ${TAP_ADDRS_SET} {`,
+    "    type ifname . ipv4_addr",
+    "  }",
+    "  chain input {",
+    "    type filter hook input priority filter; policy accept;",
+    `    iifname "kn-*" ip daddr ${HOST_GATEWAY} tcp dport { ${GATEWAY_TCP_PORTS.join(", ")} } accept`,
+    `    iifname "kn-*" ip daddr ${HOST_GATEWAY} udp dport 53 accept`,
+    '    iifname "kn-*" drop',
+    "  }",
+    "  chain forward {",
+    "    type filter hook forward priority filter; policy accept;",
+    `    iifname "kn-*" iifname . ip saddr != @${TAP_ADDRS_SET} drop`,
+    '    iifname "kn-*" meta nfproto ipv6 drop',
+    `    iifname "kn-*" ip daddr { ${PRIVATE_RANGES.join(", ")} } drop`,
+    '    iifname "kn-*" oifname != "kn-*" accept',
+    '    iifname "kn-*" drop',
+    "  }",
+    "}",
+    `destroy table ip ${NFT_NAT_TABLE}`,
+    `table ip ${NFT_NAT_TABLE} {`,
+    "  chain postrouting {",
+    "    type nat hook postrouting priority srcnat; policy accept;",
+    `    ip saddr ${SUBNET_PREFIX}.0.0/16 oifname != "kn-*" masquerade`,
+    "  }",
+    "}",
+    "",
+  ].join("\n")
 
 export const slotAddress = (slot: number): string => `${SUBNET_PREFIX}.${Math.floor(slot / 256)}.${slot % 256}`
 
@@ -71,6 +112,17 @@ export type NetCommand = readonly string[]
 /** The set element that allows one tap to send only from its VM's address. */
 const tapAddrsElement = (network: NestNetwork): string => `{ "${network.tap}" . ${network.address} }`
 
+/** Adds the tap's element to `tap_addrs`; loaded again for every live tap after the ruleset is replaced. */
+export const tapAddrsAddCommand = (network: NestNetwork): NetCommand => [
+  "nft",
+  "add",
+  "element",
+  "inet",
+  NFT_TABLE,
+  TAP_ADDRS_SET,
+  tapAddrsElement(network),
+]
+
 /** Creates a tap, gives it the host side of the point-to-point link, and routes the guest address to it. */
 export const tapUpCommands = (network: NestNetwork, egressMbit: number): NetCommand[] => [
   ["ip", "tuntap", "add", "dev", network.tap, "mode", "tap"],
@@ -99,7 +151,7 @@ export const tapUpCommands = (network: NestNetwork, egressMbit: number): NetComm
     "conform-exceed",
     "drop",
   ],
-  ["nft", "add", "element", "inet", NFT_TABLE, TAP_ADDRS_SET, tapAddrsElement(network)],
+  tapAddrsAddCommand(network),
 ]
 
 export const tapDownCommands = (network: NestNetwork): NetCommand[] => [

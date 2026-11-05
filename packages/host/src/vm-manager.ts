@@ -19,8 +19,8 @@ import { ChClient, TEMPLATE_BOOT_MEMORY_BYTES, TEMPLATE_BOOT_VCPUS, type MemoryR
 import { launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
 import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
-import { fsyncDir, fsyncPath } from "./fs-atomic"
-import { type NetCommand, TAP_ADDRS_CHECK, allocateSlot, guestNetwork, networkForSlot, tapDownCommands, tapUpCommands } from "./network"
+import { fsyncDir, fsyncPath, writeFileAtomic } from "./fs-atomic"
+import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, networkForSlot, tapAddrsAddCommand, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
 import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
 import { recoverPlan } from "./recovery"
@@ -50,8 +50,6 @@ const CONNECT_TIMEOUT_MS = 60_000
 const LAZY_VOLUME_TIMEOUT_MS = 60_000
 const VMM_STOP_GRACE_MS = 5_000
 const VOLUME_STOP_GRACE_MS = 10_000
-/** How long a guest gets to power off after `shutdown` before the VMM is stopped. */
-const SHUTDOWN_WAIT_MS = 30_000
 const WAKE_TIMEOUT_MS = 60_000
 const WAKE_POLL_MS = 250
 const GPU_INTERVAL_MS = 5 * 60_000
@@ -71,6 +69,8 @@ export interface VmEvents {
   readonly vm: (report: NestVmReport) => void
   /** A request reached ingress for a box this host may not wake by itself. */
   readonly wakeRequest: (boxId: string) => void
+  /** A background task failed; the manager keeps running and retries on its next tick. */
+  readonly error: (message: string) => void
 }
 
 export interface IngressActivity {
@@ -151,15 +151,6 @@ const allocatedBytes = (path: string): number => {
   }
 }
 
-const waitForExit = async (identity: ProcIdentity, timeoutMs: number): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs
-  while (isProcessAlive(identity)) {
-    if (Date.now() >= deadline) return false
-    await sleep(50)
-  }
-  return true
-}
-
 const runNetCommands = async (commands: readonly NetCommand[]): Promise<void> => {
   for (const command of commands) {
     const [name, ...args] = command
@@ -237,17 +228,16 @@ export class VmManager {
   }
 
   /**
-   * Checks the host module's nftables set, loads the records, recovers every VM from its last state, builds the template
-   * and starts the timers. Refuses to start when the set is missing: without it no guest could reach the network.
+   * Loads the guest firewall and the records, recovers every VM from its last state, builds the template and starts the
+   * timers. Refuses to start when the firewall cannot be loaded or host memory pressure cannot be read: without the first
+   * no guest could have a safe network, and without the second the memory policy has no signal.
    */
   async start(): Promise<void> {
     ensureStateDirs(this.layout)
-    try {
-      await runChecked("nft", [...TAP_ADDRS_CHECK])
-    } catch (error) {
-      throw new HostError(`nftables set inet kestrel tap_addrs is not loaded (the host module creates it): ${errorMessage(error)}`)
-    }
-    for (const record of listVms(this.layout)) this.records.set(record.boxId, record)
+    const records = listVms(this.layout)
+    await this.loadFirewall(records)
+    readMemoryPressureAvg10()
+    for (const record of records) this.records.set(record.boxId, record)
     for (const record of [...this.records.values()]) await this.recover(record)
     await buildTemplate({
       config: this.config,
@@ -259,8 +249,30 @@ export class VmManager {
     const keep = new Set<string>([this.image.imageId])
     for (const vm of this.records.values()) if (vm.state === "running" || vm.state === "suspended") keep.add(vm.imageId)
     removeStaleTemplates(this.layout, keep)
-    this.timers.push(setInterval(() => this.tick(), GUEST_STATUS_INTERVAL_MS))
-    this.timers.push(setInterval(() => this.meterTick(), this.config.meterIntervalMs))
+    this.timers.push(setInterval(() => this.guarded("policy tick", () => this.tick()), GUEST_STATUS_INTERVAL_MS))
+    this.timers.push(setInterval(() => this.guarded("meter tick", () => this.meterTick()), this.config.meterIntervalMs))
+  }
+
+  /**
+   * Replaces the guest firewall with the agent's ruleset, then re-adds the element of every tap a record says is live.
+   * Replacing the ruleset empties `tap_addrs`, so this runs before recovery and before any tap is brought up.
+   */
+  private async loadFirewall(records: readonly VmRecord[]): Promise<void> {
+    const path = join(this.layout.root, "firewall.nft")
+    writeFileAtomic(path, firewallRuleset())
+    await runChecked("nft", ["-f", path])
+    for (const record of records) {
+      if (record.network !== null) await runNetCommands([tapAddrsAddCommand(record.network)])
+    }
+  }
+
+  /** A periodic task that throws must not stop its timer: the failure is reported and the next run tries again. */
+  private guarded(what: string, task: () => void): void {
+    try {
+      task()
+    } catch (error) {
+      this.events.error(`${what} failed: ${errorMessage(error)}`)
+    }
   }
 
   stop(): void {
@@ -386,10 +398,35 @@ export class VmManager {
   }
 
   private commit(vm: VmRecord): VmRecord {
+    const previous = this.records.get(vm.boxId)
+    const transition = previous === undefined || previous.state !== vm.state || previous.gpus.length !== vm.gpus.length
+    const now = Date.now()
+    // The old state is sampled just before it changes and the new one right after, so no meter interval mixes two states.
+    if (transition && previous !== undefined) this.meterSample(previous, now)
     writeVm(this.layout, vm)
     this.records.set(vm.boxId, vm)
     if (vm.state !== "deleted") this.events.vm(this.report(vm))
+    if (transition) this.meterSample(vm, now)
+    if (vm.state === "deleted") this.meter.forget(vm.boxId)
     return vm
+  }
+
+  /** Samples one VM for the meter. Provisioning is not metered; a deleted VM's final sample is its last lifecycle record. */
+  private meterSample(vm: VmRecord, nowMs: number): void {
+    if (vm.state === "provisioning") return
+    const p = this.paths(vm.boxId)
+    this.meter.tick(
+      {
+        boxId: vm.boxId,
+        vmId: vm.vmId,
+        userId: vm.userId,
+        state: vm.state,
+        gpus: vm.gpus.length,
+        cgroupDir: vm.process === null ? null : cgroupDirOf(vm.process.pid),
+        volumePath: existsSync(p.volume) ? p.volume : null,
+      },
+      nowMs,
+    )
   }
 
   private begin(vm: VmRecord, kind: Operation["kind"], from: Operation["from"]): VmRecord {
@@ -587,7 +624,6 @@ export class VmManager {
     const released = await this.releaseVm(vm)
     if (state === "deleted") {
       clearArtifacts(this.paths(boxId).dir)
-      this.meter.forget(boxId)
       this.finish(released, "deleted", {
         volumeRef: null,
         backedUpAt: null,
@@ -684,7 +720,9 @@ export class VmManager {
         state: "parked",
       })
     } else if (cmd.ownerEpoch > current.ownerEpoch) {
+      // The local volume is the previous owner's copy: the new owner's backup (cmd.volumeRef) is the only source.
       const released = await this.releaseVm(current)
+      rmSync(this.paths(cmd.boxId).volume, { force: true })
       vm = this.commit({
         ...released,
         state: "parked",
@@ -695,6 +733,7 @@ export class VmManager {
         limits: cmd.limits,
         publicUrl: cmd.publicUrl,
         volumeRef: cmd.volumeRef,
+        localRef: null,
         operation: null,
         localDirty: false,
       })
@@ -853,15 +892,29 @@ export class VmManager {
     })
   }
 
-  /** Brings a running VM to `suspended`: detach GPUs, quiesce, pause, snapshot, stop the VMM. */
+  /**
+   * Quiesces a running VM for a suspend or park: the guest syncs, then the VMM pauses. A refused or timed-out sync aborts
+   * the operation and the VM keeps running (the operation is cleared before the error propagates, so it is not rolled back).
+   */
+  private async quiesce(cur: VmRecord): Promise<void> {
+    try {
+      await this.ask(this.runtime(cur.boxId), { _tag: "prepareSuspend", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.prepareSuspend)
+      await new ChClient(this.paths(cur.boxId).apiSocket).pause()
+    } catch (error) {
+      // prepareSuspend leaves the volume frozen: an aborted operation thaws it, so the VM can write again.
+      await this.tryAsk(this.runtime(cur.boxId), { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+      this.finish(cur, "running", { lastError: `aborted: ${errorMessage(error)}` })
+      throw error
+    }
+  }
+
+  /** Brings a running VM to `suspended`: detach GPUs, quiesce, snapshot, stop the VMM. */
   private async suspend(vm: VmRecord): Promise<void> {
     const p = this.paths(vm.boxId)
-    const rt = this.runtime(vm.boxId)
     let cur = this.begin(vm, "suspend", null)
     cur = await this.detachGpus(cur)
-    await this.tryAsk(rt, { _tag: "prepareSuspend", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.prepareSuspend)
+    await this.quiesce(cur)
     const client = new ChClient(p.apiSocket)
-    await client.pause()
     const gen = (cur.snapshotGen ?? 0) + 1
     const dir = p.snapshot(gen)
     // Written under a staging name and renamed once durable, so a torn snapshot is never taken for a memory image.
@@ -882,17 +935,22 @@ export class VmManager {
     this.finish(cur, "suspended", { process: null, snapshotGen: gen, gpus: [], gpuAttachedAt: null })
   }
 
-  /** Stops a running VM's guest, then releases its VMM and backs its volume up to object storage. */
+  /**
+   * Quiesces a running VM as for suspend, stops its VMM, then backs its volume up and releases the rest. A lazy volume is
+   * copied from its device, before its service stops, so the backup holds what the guest wrote.
+   */
   private async park(vm: VmRecord): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "park", null)
     if (cur.state === "running") {
       cur = await this.detachGpus(cur)
-      await this.tryAsk(this.runtime(vm.boxId), { _tag: "shutdown", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.shutdown)
-      if (cur.process !== null) await waitForExit(cur.process, SHUTDOWN_WAIT_MS)
+      await this.quiesce(cur)
     }
+    this.closeLink(vm.boxId)
+    await stopVmmProcess(cur.process, p.apiSocket, VMM_STOP_GRACE_MS)
+    cur = { ...cur, process: null }
+    const ref = await backupVolume(this.volume, { path: cur.volumeProcess?.device ?? p.volume, boxId: vm.boxId })
     cur = await this.releaseVm(cur)
-    const ref = await backupVolume(this.volume, { path: p.volume, boxId: vm.boxId })
     this.finish(cur, "parked", {
       volumeRef: ref.volumeRef,
       backedUpAt: Date.now(),
@@ -903,12 +961,19 @@ export class VmManager {
 
   private async destroy(boxId: string): Promise<void> {
     const vm = this.records.get(boxId)
-    if (vm === undefined || vm.state === "deleted") return
+    if (vm === undefined) return
+    // A tombstone that still holds its backup ref was interrupted mid-destroy (recovery marks it deleted): finish the wipe.
+    if (vm.state === "deleted") {
+      if (vm.volumeRef !== null) {
+        await deleteVolumeStore(this.volume, boxId)
+        this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null })
+      }
+      return
+    }
     let cur = this.begin(vm, "destroy", null)
     cur = await this.releaseVm(cur)
     if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, boxId)
     clearArtifacts(this.paths(boxId).dir)
-    this.meter.forget(boxId)
     this.finish(cur, "deleted", { volumeRef: null, backedUpAt: null, localRef: null, localDirty: false })
   }
 
@@ -922,7 +987,6 @@ export class VmManager {
     let cur = this.begin(vm, "destroy", null)
     cur = await this.releaseVm(cur)
     clearArtifacts(this.paths(cmd.boxId).dir)
-    this.meter.forget(cmd.boxId)
     this.finish(cur, "deleted", { localRef: null, localDirty: false })
   }
 
@@ -1123,12 +1187,15 @@ export class VmManager {
     let vm = this.running(boxId)
     if (vm === null) return
     const status = rt.status
-    if (status === null || now - status.at > STATUS_FRESH_MS) return
-    vm = await this.scale(vm, rt, status.pressure, now)
-    vm = await this.gpuPolicy(vm, rt, now)
+    const fresh = status !== null && now - status.at <= STATUS_FRESH_MS ? status : null
+    // Scaling and GPU decisions need the guest's pressure report; idleness does not, so a silent guest is still parked.
+    if (fresh !== null) {
+      vm = await this.scale(vm, rt, fresh.pressure, now)
+      vm = await this.gpuPolicy(vm, rt, now)
+    }
     const idle = isIdle({
       now,
-      activity: status.activity,
+      activity: fresh?.activity ?? null,
       lastActiveMs: this.lastActiveMs(vm),
       openConnections: rt.ingress.openConnections,
       idleAfterMs: this.config.idleSuspendAfterMs,
@@ -1239,27 +1306,12 @@ export class VmManager {
     this.commit({ ...current, volumeRef: ref.volumeRef, backedUpAt: Date.now() })
   }
 
+  /** Periodic sample of every live VM; a deleted VM was already sampled by its final commit. */
   private meterTick(): void {
     const now = Date.now()
     for (const vm of this.records.values()) {
-      if (vm.state === "provisioning") continue
-      if (vm.state === "deleted") {
-        this.meter.forget(vm.boxId)
-        continue
-      }
-      const p = this.paths(vm.boxId)
-      this.meter.tick(
-        {
-          boxId: vm.boxId,
-          vmId: vm.vmId,
-          userId: vm.userId,
-          state: vm.state,
-          gpus: vm.gpus.length,
-          cgroupDir: vm.process === null ? null : cgroupDirOf(vm.process.pid),
-          volumePath: existsSync(p.volume) ? p.volume : null,
-        },
-        now,
-      )
+      if (vm.state === "deleted") continue
+      this.meterSample(vm, now)
     }
   }
 
@@ -1281,6 +1333,8 @@ export class VmManager {
     if (plan.dropMemoryImages && record.snapshotGen !== null) {
       rmSync(p.snapshot(record.snapshotGen), { recursive: true, force: true })
     }
+    // A suspend that died after renaming its next generation into place leaves an image nothing will adopt.
+    if (record.operation?.kind === "suspend") rmSync(p.snapshot((record.snapshotGen ?? 0) + 1), { recursive: true, force: true })
     if (plan.deleteArtifacts) clearArtifacts(p.dir)
     let next: VmRecord = {
       ...record,

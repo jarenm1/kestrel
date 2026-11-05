@@ -71,11 +71,8 @@ export const recoverPlan = (record: VmRecord, facts: RecoveryFacts): RecoveryPla
         return { ...stopAll("suspended"), killVolume: false, clearNetwork: false, dropMemoryImages: false }
       }
       return stopAll("parked")
+    // The disk moves on while a suspend quiesces, so the previous generation's memory image no longer matches it.
     case "suspend":
-      if (facts.snapshotExists && !volumeGone) {
-        return { ...stopAll("suspended"), killVolume: false, clearNetwork: false, dropMemoryImages: false }
-      }
-      return stopAll("parked")
     case "park":
     case "gpuAttach":
     case "gpuDetach":
