@@ -309,6 +309,13 @@ export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display
 export const pulseSocket = (display: number): string => `/tmp/.X11-unix/pulse-${display}`
 
 /**
+ * The device nodes a headless workload may use: DRM render nodes and NVIDIA's compute devices (nvidiactl, the uvm pair
+ * and the nvidia-caps directory). Everything else is left out, and so is every modeset-capable node: DRI card nodes and
+ * /dev/nvidia-modeset.
+ */
+const GPU_DEVICE_NODE = /^\/dev\/(dri\/renderD\d+|nvidia(\d+|ctl|-uvm|-uvm-tools|-caps))$/
+
+/**
  * Where the host GPU can be found. Separate from {@link gpuArgs} so tests can describe a synthetic host and so a
  * headless launch can check availability without reading /dev.
  */
@@ -328,7 +335,7 @@ export const hostGpuProbe: GpuProbe = {
       // no DRM devices
     }
     try {
-      for (const name of readdirSync("/dev")) if (name.startsWith("nvidia")) devices.push(`/dev/${name}`)
+      for (const name of readdirSync("/dev")) if (GPU_DEVICE_NODE.test(`/dev/${name}`)) devices.push(`/dev/${name}`)
     } catch {
       // no NVIDIA devices
     }
@@ -338,7 +345,8 @@ export const hostGpuProbe: GpuProbe = {
 }
 
 /** Whether the host has any GPU device a headless workload can use. */
-export const hasGpuDevice = (probe: GpuProbe = hostGpuProbe): boolean => probe.devices().length > 0
+export const hasGpuDevice = (probe: GpuProbe = hostGpuProbe): boolean =>
+  probe.devices().some((device) => GPU_DEVICE_NODE.test(device))
 
 /** The host's GL/Vulkan drivers and the sysfs entries Mesa uses to find a render node's driver. */
 const GPU_DRIVER_DIRS = ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run/opengl-driver-32"]
@@ -353,8 +361,8 @@ const GPU_DRIVER_DIRS = ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run
 export const gpuArgs = (probe: GpuProbe = hostGpuProbe): string[] => {
   const devices = probe
     .devices()
-    // Even a hand-written probe cannot make a modeset-capable card node visible. DRI card nodes always look like this.
-    .filter((device) => !/^\/dev\/dri\/card\d+$/.test(device))
+    // Even a hand-written probe cannot make a modeset-capable node visible: only the allow-listed nodes pass.
+    .filter((device) => GPU_DEVICE_NODE.test(device))
   if (devices.length === 0) return []
   const argv: string[] = []
   for (const device of devices) argv.push("--dev-bind", device, device)

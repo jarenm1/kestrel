@@ -80,6 +80,21 @@ describe("gpuArgs", () => {
     expect(gpuArgs(probe(["/dev/dri/card0"]))).toEqual([])
   })
 
+  test("never exposes NVIDIA's modeset node, only the compute devices", () => {
+    const argv = gpuArgs(
+      probe(["/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset", "/dev/nvidia-caps"]),
+    )
+    expect(hasBind(argv, "/dev/nvidia0", "/dev/nvidia0")).toBe(true)
+    expect(hasBind(argv, "/dev/nvidiactl", "/dev/nvidiactl")).toBe(true)
+    expect(hasBind(argv, "/dev/nvidia-uvm", "/dev/nvidia-uvm")).toBe(true)
+    expect(hasBind(argv, "/dev/nvidia-caps", "/dev/nvidia-caps")).toBe(true)
+    expect(argv.join(" ")).not.toContain("nvidia-modeset")
+  })
+
+  test("a host whose only NVIDIA node is modeset has no usable GPU", () => {
+    expect(hasGpuDevice(probe(["/dev/nvidia-modeset"]))).toBe(false)
+  })
+
   test("reports GPU availability from the device list", () => {
     expect(hasGpuDevice(probe(["/dev/dri/renderD128"]))).toBe(true)
     expect(hasGpuDevice(probe([]))).toBe(false)

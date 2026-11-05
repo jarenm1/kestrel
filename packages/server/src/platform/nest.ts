@@ -68,6 +68,8 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
       const enrolled = readStoredSecret(dataDir) !== null
 
       let link: GuestLink | null = null
+      // Whether the guest reports the GPU attached: a standing wish alone does not mean a device is there yet.
+      let gpuAttached = false
       const wishes = new GpuWishes()
       // A run that ends without releasing the GPU (succeeded, failed or cancelled) withdraws its own wish.
       withdrawWishesOnRunEnd(hub.subscribeAll, wishes, (wanted) => link?.setWanted(wanted))
@@ -85,6 +87,7 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
 
       const gpuChanged = (state: GpuState) =>
         Effect.gen(function* () {
+          gpuAttached = state === "attached"
           if (state === "attached") yield* desktop.attachHardwareRender
           else if (state === "none" || state === "detaching") yield* desktop.releaseHardwareRender
         })
@@ -122,7 +125,7 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
         gpuOnDemand: {
           request,
           release: drop,
-          available: (runId) => Effect.sync(() => link !== null && wishes.has(runId)),
+          available: (runId) => Effect.sync(() => link !== null && gpuAttached && wishes.has(runId)),
         },
         run: (hooks: PlatformHooks) =>
           Effect.async<void>(() => {
@@ -147,6 +150,7 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
             return Effect.sync(() => {
               current.close()
               link = null
+              gpuAttached = false
             })
           }),
       })
