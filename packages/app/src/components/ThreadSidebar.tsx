@@ -264,11 +264,10 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
               className={cn("size-3.5 shrink-0 transition-transform", dockCollapsed && "-rotate-90")}
             />
           </button>
-          {!dockCollapsed && (
-            <div id="working-dock" className="flex min-h-0 flex-col gap-0.5 overflow-auto">
-              {working.map(threadTab)}
-            </div>
-          )}
+          {/* Stays mounted while folded so the toggle's `aria-controls` always names an element. */}
+          <div id="working-dock" hidden={dockCollapsed} className="flex min-h-0 flex-col gap-0.5 overflow-auto">
+            {working.map(threadTab)}
+          </div>
         </section>
       )}
       <div className="pt-2 pr-3">
