@@ -2,7 +2,7 @@ import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
 import { BranchName } from "@cloudagents/protocol"
-import { ChevronDown, FolderGit2, GitBranch, Lock, Plug } from "lucide-react"
+import { ChevronDown, FolderGit2, GitBranch, Lock, User } from "lucide-react"
 import { ApiError } from "@/api/client"
 import { queries } from "@/api/queries"
 import { Button } from "@cloudagents/ui/button"
@@ -29,7 +29,7 @@ const FILTER_LIST_CLASS =
 
 /**
  * Menu of the GitHub repositories the user can read, with a filter box; `undefined` leaves the choice to the agent.
- * Without a GitHub connection it points to Connections instead.
+ * Without a GitHub connection it points to Profile instead.
  */
 export function RepoPicker({
   value,
@@ -65,9 +65,9 @@ export function RepoPicker({
           <>
             <DropdownMenuLabel>Connect GitHub to start in one of your repositories.</DropdownMenuLabel>
             <DropdownMenuItem asChild>
-              <Link to="/settings/connections">
-                <Plug />
-                Connections
+              <Link to="/settings/profile">
+                <User />
+                Profile
               </Link>
             </DropdownMenuItem>
           </>
