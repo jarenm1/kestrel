@@ -14,6 +14,6 @@ const LocalPlatformLive = Layer.succeed(BoxPlatform, {
 /** The Nest platform when the box runs in a Nest VM (its guest agent socket is configured), else the plain local one. */
 export const BoxPlatformLive = Layer.unwrapEffect(
   Effect.map(Config, (config) =>
-    config.nest === null ? LocalPlatformLive : NestPlatformLive(config.nest.guestSocket),
+    config.nest === null ? LocalPlatformLive : NestPlatformLive(config.nest.guestSocket, config.dataDir),
   ),
 )

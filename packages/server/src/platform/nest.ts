@@ -1,5 +1,5 @@
 import { readdir, readlink } from "node:fs/promises"
-import { Effect, Layer, Ref } from "effect"
+import { Effect, Layer } from "effect"
 import type { BoxActivity, GpuState } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import { StateStore } from "../core/state"
@@ -10,6 +10,7 @@ import { startGuestLink, type GuestLink } from "./guest-link"
 import { GpuWishes, withdrawWishesOnRunEnd } from "./gpu-wish"
 import { ActivityTracker } from "./tracker"
 import { BoxPlatform, PlatformError, type PlatformHardware, type PlatformHooks } from "./service"
+import { readStoredSecret } from "./secret"
 
 /** A Nest VM: the host lends it a GPU on demand and suspends it when idle (see the GPU and suspend rules in docs/nest.md). */
 export const NEST_HARDWARE: PlatformHardware = { gpu: "on-demand", suspend: true }
@@ -54,7 +55,7 @@ const waitForGpuRelease = Effect.gen(function* () {
  * The box's link to its Nest guest agent. The desktop renders on the GPU only while the guest reports it attached;
  * `request` asks the host for it, and `releaseGpu` stops the desktop's use before the host unplugs it.
  */
-export const NestPlatformLive = (socketPath: string) =>
+export const NestPlatformLive = (socketPath: string, dataDir: string) =>
   Layer.effect(
     BoxPlatform,
     Effect.gen(function* () {
@@ -63,9 +64,10 @@ export const NestPlatformLive = (socketPath: string) =>
       const tracker = yield* ActivityTracker
       const harness = yield* AgentHarness
       const hub = yield* EventHub
+      // A stored secret means the box enrolled; the guest is told so it drops the enrollment token from its env file.
+      const enrolled = readStoredSecret(dataDir) !== null
 
       let link: GuestLink | null = null
-      const gpuState = yield* Ref.make<GpuState>("none")
       const wishes = new GpuWishes()
       // A run that ends without releasing the GPU (succeeded, failed or cancelled) withdraws its own wish.
       withdrawWishesOnRunEnd(hub.subscribeAll, wishes, (wanted) => link?.setWanted(wanted))
@@ -83,7 +85,6 @@ export const NestPlatformLive = (socketPath: string) =>
 
       const gpuChanged = (state: GpuState) =>
         Effect.gen(function* () {
-          yield* Ref.set(gpuState, state)
           if (state === "attached") yield* desktop.attachHardwareRender
           else if (state === "none" || state === "detaching") yield* desktop.releaseHardwareRender
         })
@@ -100,15 +101,20 @@ export const NestPlatformLive = (socketPath: string) =>
           if (link === null) {
             return yield* Effect.fail(new PlatformError({ message: "the box is not connected to its guest agent" }))
           }
-          link.setWanted(wishes.add(runId))
-          if ((yield* Ref.get(gpuState)) === "attached") return
-          const deadline = Date.now() + GPU_ATTACH_TIMEOUT_MS
-          while ((yield* Ref.get(gpuState)) !== "attached") {
-            if (Date.now() >= deadline) {
-              return yield* Effect.fail(new PlatformError({ message: "the GPU did not attach within 120 s" }))
-            }
-            yield* Effect.sleep(GPU_POLL_MS)
-          }
+          // The guest answers the wish once the GPU is attached; a denial fails the request at once.
+          const answer = link.setWanted(wishes.add(runId))
+          yield* Effect.tryPromise({
+            try: () => answer,
+            catch: (error) =>
+              new PlatformError({
+                message: `the GPU was not granted: ${error instanceof Error ? error.message : String(error)}`,
+              }),
+          }).pipe(
+            Effect.timeoutFail({
+              duration: GPU_ATTACH_TIMEOUT_MS,
+              onTimeout: () => new PlatformError({ message: "the GPU did not attach within 120 s" }),
+            }),
+          )
         }).pipe(Effect.onError(() => drop(runId)))
 
       return BoxPlatform.of({
@@ -135,6 +141,7 @@ export const NestPlatformLive = (socketPath: string) =>
               },
             })
             link = current
+            if (enrolled) current.markEnrolled()
             if (wishes.wanted()) current.setWanted(true)
             return Effect.sync(() => {
               current.close()
