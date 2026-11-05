@@ -107,7 +107,7 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_CONTROL_URL`, `CLOUDAGENTS_GUEST_AGENT_SOCKET` (its presence marks a Nest VM),
   `CLOUDAGENTS_DATA_DIR` (`/var/lib/kestrel/box`), `CLOUDAGENTS_BOX_PUBLIC_URL`, and `CLOUDAGENTS_NEST_ENROLL_TOKEN`
   while the box is not enrolled. Enrollment needs `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_CONTROL_URL`; the box stores
-  its secret in its data dir and ignores the token afterward. The box never reads `CLOUDAGENTS_BOX_PUBLIC_URL` yet.
+  its secret in its data dir, ignores the token afterward, and sends `enrolled` on every connection once the secret is stored, so the guest drops the token from the file. The box never reads `CLOUDAGENTS_BOX_PUBLIC_URL` yet.
 
 ## Host layout
 
