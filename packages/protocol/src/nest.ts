@@ -150,7 +150,9 @@ export type NestHostCapacity = typeof NestHostCapacity.Type
 /**
  * Commands the control plane sends a host. The host deduplicates by `commandId` (a resent command gets the stored
  * result) and runs commands and its own policy actions for one box one at a time. Every box command carries the box's
- * current `ownerEpoch`; one lower than the host holds is refused, as is a command for a box the host does not hold.
+ * current `ownerEpoch`. A command with an epoch lower than the host holds is refused. So is a command for a box the host
+ * holds no record of, except `create` and `resume`, which create the record at the epoch they carry (a `resume` with a
+ * higher epoch replaces the record; the control plane sends it only after the old host is fenced or evicted).
  */
 export const NestHostCommand = Schema.Union(
   /**

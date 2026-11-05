@@ -175,14 +175,20 @@ reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflink
 
 ### Ownership and recovery
 
-- **Epochs.** Every placement has an `ownerEpoch`. A host refuses commands for a lower epoch than it holds, and the
-  control plane sends `evict` once the host's `inventory` is complete, for every VM it reports with an epoch below the
-  box's current one. So a host that was partitioned while its box moved cannot bring the old copy back.
+- **Epochs.** Every placement has an `ownerEpoch`. A host refuses commands for a lower epoch than it holds. A host with no
+  record of a box refuses every command except `create` and `resume`, which create it at the epoch they carry. The control
+  plane sends `evict` once the host's `inventory` is complete, for every VM it reports with an epoch below the box's
+  current one. So a host that was partitioned while its box moved cannot bring the old copy back.
 - **Leases.** The host may wake a `suspended` box from an ingress request by itself only while its last `lease` is
   valid. A `parked` box, or any box without a lease, is woken only by `resume`: the host sends `wakeRequest` and holds
-  the request until the control plane answers. Past its `validUntil` the host fences: it stops every running VM at once
+  the request until the control plane answers. Past `validUntil` the host fences: it stops every running VM at once
   without a sync and wakes nothing. The control plane moves a box off a host it cannot reach only after that host's last
   `validUntil` plus `NEST_FENCE_MARGIN_MS`.
+- **Fence watchdog.** The agent writes each lease's `validUntil` to `lease.json` in the host state dir before it acts on
+  the lease, and it starts no VM and wakes no box without a valid one. A separate systemd service (`kestrel-fence`, shipped
+  by the host module with `Restart=always`, not dependent on the agent) stops every `kestrel-vm-*.scope` once the clock
+  passes that `validUntil`; a missing or unreadable `lease.json` counts as expired. So a hung or dead agent cannot keep a
+  VM serving. The stop is the same fence: no sync.
 - **Commands.** One queue per box serializes commands and policy actions. Results are stored in `vm.json` by
   `commandId`; a resent command gets the stored result, and results that finished while disconnected follow `hello`,
   before the `inventory` chunks.
