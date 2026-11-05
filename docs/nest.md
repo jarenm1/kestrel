@@ -172,13 +172,16 @@ reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflink
 ### Ownership and recovery
 
 - **Epochs.** Every placement has an `ownerEpoch`. A host refuses commands for a lower epoch than it holds, and the
-  control plane sends `evict` at `hello` for every VM a host reports with an epoch below the box's current one. So a
-  host that was partitioned while its box moved cannot bring the old copy back.
+  control plane sends `evict` once the host's `inventory` is complete, for every VM it reports with an epoch below the
+  box's current one. So a host that was partitioned while its box moved cannot bring the old copy back.
 - **Leases.** The host may wake a `suspended` box from an ingress request by itself only while its last `lease` is
   valid. A `parked` box, or any box without a lease, is woken only by `resume`: the host sends `wakeRequest` and holds
-  the request until the control plane answers.
+  the request until the control plane answers. Past its `validUntil` the host fences: it stops every running VM at once
+  without a sync and wakes nothing. The control plane moves a box off a host it cannot reach only after that host's last
+  `validUntil` plus `NEST_FENCE_MARGIN_MS`.
 - **Commands.** One queue per box serializes commands and policy actions. Results are stored in `vm.json` by
-  `commandId`; a resent command gets the stored result, and results that finished while disconnected go in `hello`.
+  `commandId`; a resent command gets the stored result, and results that finished while disconnected follow `hello`,
+  before the `inventory` chunks.
 - **Agent restart.** At startup the agent re-adopts live `kestrel-vm-*.scope` processes through their `api.sock` and
   reconnects to their guests. A VM recorded as `running` whose process is gone becomes `parked` with its local volume
   (memory lost, files kept), and is reported.
@@ -309,8 +312,8 @@ cache.nixos.org.
   authenticates, and a resent `create` carries a fresh token.
 - **Resume**: suspended → its host; parked → any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1);
   a host that is offline holds the box until it returns. `wakeRequest` from a host is treated as a resume request.
-- **Reconcile at `hello`**: results are applied, VMs with a stale epoch are evicted, and a VM the control plane does not
-  know is logged and left alone.
+- **Reconcile**: `result` frames are applied as they arrive; when the last `inventory` chunk arrives, VMs with a stale
+  epoch are evicted, and a VM the control plane does not know is logged and left alone.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
 - Usage records keep flowing through `meterRecords`; the host agent emits them from cgroups.
 
