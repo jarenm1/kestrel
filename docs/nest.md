@@ -99,18 +99,20 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   root, and an overlay `/nix/store` (lower `/nix/.ro-store/store`, upper on tmpfs). `kestrel-nix-db` loads `registration`
   into the Nix database on every boot. On `configure` the guest agent mounts the volume at `NEST_VOLUME_MOUNT`, moves the
   overlay's upper layer to `NEST_VOLUME_MOUNT/.nix-rw/upper` (copied from the tmpfs layer on first use; the agent's
-  default lower and upper paths are this image's layout, so the unit passes no layout flags), and starts `kestrel-volume`, which binds the Nix
-  database to `NEST_VOLUME_MOUNT/.nix-var` (copied on first use), so packages a user installs persist.
+  default lower and upper paths are this image's layout, so the agent passes no layout flags), then starts `kestrel-box`,
+  whose `requires` starts `kestrel-volume`, which binds the Nix database to `NEST_VOLUME_MOUNT/.nix-var` (copied on first
+  use), registers the image's paths in it, and so packages a user installs persist.
 - Kernel: `VIRTIO_{PCI,BLK,NET,MEM,BALLOON,PMEM,VSOCKETS}`, `LIBNVDIMM`, `FS_DAX`, `EROFS_FS`, `OVERLAY_FS`, `VMGENID`,
   `HW_RANDOM_VIRTIO`, `PTP_1588_CLOCK_KVM`, `MEMORY_HOTPLUG`, `MEMORY_HOTREMOVE`, `HOTPLUG_PCI_ACPI`, `ZSWAP`, and
   `NO_HZ_IDLE` (stock nixpkgs sets `NO_HZ_FULL`; the image overrides it so an idle vCPU stops its tick).
 - Command line: `console=hvc0 memhp_default_state=online_movable zswap.enabled=1 zswap.compressor=zstd`.
 - Services: `kestrel-guest-agent` (root, started at boot), `kestrel-box` (user `kestrel`, started by the agent after
-  `configure` once `box.env` exists), `kestrel-volume` (started by the agent after it mounts the volume), chrony with the
+  `configure` once `box.env` exists), `kestrel-volume` (started through `kestrel-box`'s `requires`), chrony with the
   `ptp_kvm` reference clock, `systemd-oomd`, and zswap backed by the swap disk (`kestrel-swap`, virtio-blk serial
   `kestrel-swap`), which the agent formats and enables on every boot or clone. The NVIDIA open kernel modules ship in
   the image and load only when a GPU is hot-plugged; Mesa provides software rendering otherwise.
-- Package managers point at the host's dependency cache and Nix binary cache when `configure` names them.
+- Package managers point at the host's dependency cache and Nix binary cache when `configure` names them. The box's
+  home is `NEST_VOLUME_MOUNT/home`, where `configure` writes those configs.
 - Box environment: `configure` writes `/var/lib/kestrel/box.env` (root, 0600, read by `kestrel-box.service`) with
   `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_CONTROL_URL`, `CLOUDAGENTS_GUEST_AGENT_SOCKET` (its presence marks a Nest VM),
   `CLOUDAGENTS_DATA_DIR` (`/var/lib/kestrel/box`), `CLOUDAGENTS_BOX_PUBLIC_URL`, and `CLOUDAGENTS_NEST_ENROLL_TOKEN`
