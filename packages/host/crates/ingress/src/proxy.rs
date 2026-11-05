@@ -17,6 +17,7 @@ use hyper::upgrade::OnUpgrade;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::time::timeout;
 
 use crate::activity::ActivityGuard;
 
@@ -27,6 +28,10 @@ const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto
 /// Longest a connect to a box's VM may take. A VM that just suspended or lost its tap never answers the SYN, so
 /// without this a stale route would hold the request for the kernel's connect timeout, minutes.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Longest the upstream may take to send response headers. Past it the request fails with 504, so an upstream that
+/// accepts the connection and never answers cannot hold its box awake indefinitely.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Headers that describe one hop, never the end-to-end exchange (RFC 9110 section 7.6.1).
 const HOP_BY_HOP: [&str; 8] = [
@@ -41,13 +46,16 @@ const HOP_BY_HOP: [&str; 8] = [
 ];
 
 pub enum ForwardError {
-    /// The upstream refused or never answered the connection; its route is probably stale.
-    Connect,
+    /// Nothing was sent: the connect was refused or timed out, so the route is probably stale. The request comes back
+    /// when it had no body, the only kind that can be sent again.
+    Connect(Option<Box<Request<Incoming>>>),
+    /// The upstream sent no response headers within `RESPONSE_TIMEOUT`.
+    TimedOut,
     Failed,
 }
 
 pub struct Proxy {
-    client: Client<HttpConnector, Incoming>,
+    client: Client<HttpConnector, Body>,
 }
 
 impl Proxy {
@@ -81,29 +89,39 @@ impl Proxy {
             .map_err(|_| ForwardError::Failed)?;
 
         let upgrade = wants_upgrade(req.headers());
-        let client_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
-        let (mut parts, body) = req.into_parts();
-        strip_hop_by_hop(&mut parts.headers, upgrade);
-        parts
-            .headers
-            .entry(X_FORWARDED_PROTO)
-            .or_insert(HeaderValue::from_static("http"));
-        parts.uri = uri;
+        let mut head = Request::new(());
+        *head.method_mut() = req.method().clone();
+        *head.version_mut() = req.version();
+        *head.uri_mut() = uri;
+        *head.headers_mut() = req.headers().clone();
+        strip_hop_by_hop(head.headers_mut(), upgrade);
+        // Caddy terminates TLS for every box hostname, so the client's scheme is https. Set rather than default, so a
+        // client-supplied value is never passed on.
+        head.headers_mut()
+            .insert(X_FORWARDED_PROTO, HeaderValue::from_static("https"));
 
-        let mut response = self
-            .client
-            .request(Request::from_parts(parts, body))
-            .await
-            .map_err(|e| {
-                if e.is_connect() {
-                    ForwardError::Connect
-                } else {
-                    ForwardError::Failed
-                }
-            })?;
+        // A request without a body stays whole, so a refused connect can hand it back. A request with a body is
+        // consumed by the send and cannot be replayed.
+        let (sent, mut inbound, early_upgrade) = if req.body().is_end_stream() {
+            (head.map(|()| empty()), Some(req), None)
+        } else {
+            let early_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
+            (head.map(|()| req.into_body().boxed()), None, early_upgrade)
+        };
+
+        let mut response = match timeout(RESPONSE_TIMEOUT, self.client.request(sent)).await {
+            Err(_) => return Err(ForwardError::TimedOut),
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) if e.is_connect() => {
+                return Err(ForwardError::Connect(inbound.map(Box::new)))
+            }
+            Ok(Err(_)) => return Err(ForwardError::Failed),
+        };
 
         if response.status() == StatusCode::SWITCHING_PROTOCOLS {
-            let client_upgrade = client_upgrade.ok_or(ForwardError::Failed)?;
+            let client_upgrade = early_upgrade
+                .or_else(|| inbound.as_mut().filter(|_| upgrade).map(hyper::upgrade::on))
+                .ok_or(ForwardError::Failed)?;
             let upstream_upgrade = hyper::upgrade::on(&mut response);
             let (mut parts, _) = response.into_parts();
             strip_hop_by_hop(&mut parts.headers, true);

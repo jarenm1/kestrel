@@ -108,31 +108,60 @@ async fn handle(
     let Some(box_id) = box_id else {
         return Ok(proxy::plain(StatusCode::NOT_FOUND, "not found"));
     };
+    Ok(route_and_forward(&state, &box_id, req).await)
+}
 
-    let response = match state.router.resolve(&box_id).await {
-        Resolved::Upstream { upstream, guard } => {
-            match state.proxy.forward(&upstream, req, guard).await {
-                Ok(response) => response,
-                Err(ForwardError::Connect) => {
-                    state.router.invalidate(&box_id);
-                    proxy::plain(StatusCode::BAD_GATEWAY, "upstream unreachable")
-                }
-                Err(ForwardError::Failed) => {
-                    proxy::plain(StatusCode::BAD_GATEWAY, "upstream failed")
+/// Routes `req` to its box and forwards it. A refused connect means the cached route is stale: it is forgotten and the
+/// request is resolved again, which wakes a suspended box. Only a request without a body can be sent twice. One with a
+/// body was consumed by the failed send, so its client gets 503 and its retry takes the fresh route.
+async fn route_and_forward(
+    state: &AppState,
+    box_id: &str,
+    mut req: Request<Incoming>,
+) -> Response<Body> {
+    let mut retried = false;
+    loop {
+        match state.router.resolve(box_id).await {
+            Resolved::Upstream { upstream, guard } => {
+                match state.proxy.forward(&upstream, req, guard).await {
+                    Ok(response) => return response,
+                    Err(ForwardError::Connect(unsent)) => {
+                        state.router.invalidate(box_id);
+                        match unsent {
+                            Some(unsent) if !retried => {
+                                req = *unsent;
+                                retried = true;
+                            }
+                            Some(_) => {
+                                return proxy::plain(
+                                    StatusCode::BAD_GATEWAY,
+                                    "upstream unreachable",
+                                )
+                            }
+                            None => return retry_later(),
+                        }
+                    }
+                    Err(ForwardError::TimedOut) => {
+                        return proxy::plain(StatusCode::GATEWAY_TIMEOUT, "upstream timed out");
+                    }
+                    Err(ForwardError::Failed) => {
+                        return proxy::plain(StatusCode::BAD_GATEWAY, "upstream failed")
+                    }
                 }
             }
+            Resolved::NotFound => return proxy::plain(StatusCode::NOT_FOUND, "not found"),
+            Resolved::Unavailable => return retry_later(),
         }
-        Resolved::NotFound => proxy::plain(StatusCode::NOT_FOUND, "not found"),
-        Resolved::Unavailable => {
-            let mut response = proxy::plain(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "box is starting, retry shortly",
-            );
-            response
-                .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_SECS));
-            response
-        }
-    };
-    Ok(response)
+    }
+}
+
+fn retry_later() -> Response<Body> {
+    let mut response = proxy::plain(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "box is starting, retry shortly",
+    );
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_SECS));
+    response
 }
