@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import { Check, ChevronDown, Settings2, X } from "lucide-react-native";
 import Svg, { Circle } from "react-native-svg";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   EFFORT_LABELS,
   type AgentEffort,
@@ -229,6 +230,7 @@ export function ModelPicker({
   onManage?: () => void;
 }) {
   const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [pickedHarness, setPickedHarness] = useState<string>();
@@ -287,10 +289,12 @@ export function ModelPicker({
     )
   );
   const listHeight = Math.max(LIST_MIN_HEIGHT, Math.min(LIST_MAX_HEIGHT, tallestTab));
+  // With the keyboard up, keep the sheet's top edge below the status bar/Dynamic Island and its bottom above the
+  // keyboard, so the header and search stay on screen. Hidden keyboard keeps the normal content-bounded height.
+  const keyboardTopGap = keyboardInset > 0 ? insets.top + spacing.sm : 0;
   const sheetHeight = Math.min(
     windowHeight * 0.8,
-    // With the keyboard up, leave its overlay room plus the sheet's own bottom gap, so the header and search stay on screen.
-    windowHeight - keyboardInset - (keyboardInset > 0 ? spacing.sm : 0),
+    windowHeight - keyboardInset - keyboardTopGap,
     SHEET_HEADER + SHEET_PADDING + listHeight + (tabs.length > 0 ? SHEET_SEARCH : 0) + (onManage ? SHEET_FOOTER : 0)
   );
 
