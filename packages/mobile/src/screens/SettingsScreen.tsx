@@ -54,7 +54,7 @@ function SettingsHome() {
         <SettingsNavRow
           icon={Plug}
           label="Connections"
-          detail="Accounts, API keys and models"
+          detail="Subscriptions, API keys and models"
           onPress={() => nav.push({ name: "connections" })}
         />
         <View style={styles.divider} />
