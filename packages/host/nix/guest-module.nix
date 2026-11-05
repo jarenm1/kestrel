@@ -2,9 +2,10 @@
 
 let
   volumeMount = "/var/lib/kestrel";
-  # The box's home: the guest agent writes its package-manager configs there (under the volume, owned by the box).
-  boxHome = "${volumeMount}/home";
+  # The box's user: the guest agent accepts box-socket connections only from it (NEST_BOX_USER in protocol/src/guest.ts).
+  boxUser = "kestrel-box";
   boxEnvFile = "${volumeMount}/box.env";
+  boxHome = "${volumeMount}/home";
   guestSocketDir = "/run/kestrel-guest";
   kestrelUid = 990;
   kestrelRuntimeDir = "/run/user/${toString kestrelUid}";
@@ -138,12 +139,12 @@ in
   systemd.oomd.enable = true;
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
 
-  users.groups.kestrel = { };
+  users.groups.${boxUser} = { };
   # Lingering keeps the user manager running from boot: the box drives its per-task slices through `systemctl --user`.
-  users.users.kestrel = {
+  users.users.${boxUser} = {
     isSystemUser = true;
     uid = kestrelUid;
-    group = "kestrel";
+    group = boxUser;
     home = boxHome;
     createHome = false;
     linger = true;
@@ -205,8 +206,8 @@ in
       CLOUDAGENTS_HOST = "0.0.0.0";
     };
     serviceConfig = {
-      User = "kestrel";
-      Group = "kestrel";
+      User = boxUser;
+      Group = boxUser;
       EnvironmentFile = boxEnvFile;
       ExecStart = "${guest.box}/bin/kestrel-box";
       WorkingDirectory = volumeMount;

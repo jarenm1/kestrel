@@ -106,7 +106,7 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   `HW_RANDOM_VIRTIO`, `PTP_1588_CLOCK_KVM`, `MEMORY_HOTPLUG`, `MEMORY_HOTREMOVE`, `HOTPLUG_PCI_ACPI`, `ZSWAP`, and
   `NO_HZ_IDLE` (stock nixpkgs sets `NO_HZ_FULL`; the image overrides it so an idle vCPU stops its tick).
 - Command line: `console=hvc0 memhp_default_state=online_movable zswap.enabled=1 zswap.compressor=zstd`.
-- Services: `kestrel-guest-agent` (root, started at boot), `kestrel-box` (user `kestrel`, started by the agent after
+- Services: `kestrel-guest-agent` (root, started at boot), `kestrel-box` (user `kestrel-box`, started by the agent after
   `configure` once `box.env` exists), `kestrel-volume` (started through `kestrel-box`'s `requires`), chrony with the
   `ptp_kvm` reference clock, `systemd-oomd`, and zswap backed by the swap disk (`kestrel-swap`, virtio-blk serial
   `kestrel-swap`), which the agent formats and enables on every boot or clone. The NVIDIA open kernel modules ship in
