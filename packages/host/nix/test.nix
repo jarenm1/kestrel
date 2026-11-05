@@ -196,6 +196,7 @@ pkgs.testers.runNixOSTest {
             "limits": box_limits(2 * GIB),
             "publicUrl": "https://" + box + "." + SLUG + "." + DOMAIN,
             "volumeRef": ref,
+            "enrollToken": None,
         }
 
     start_all()
@@ -224,22 +225,22 @@ pkgs.testers.runNixOSTest {
     wait_for("b2 health", lambda: health("b2") == "200", 600)
 
     # 4. Idle suspend, then wake-on-request: a request to a suspended box resumes it and gets a 200.
-    expect_ok({"_tag": "suspend", "boxId": "b1"})
+    expect_ok({"_tag": "suspend", "boxId": "b1", "ownerEpoch": 1})
     assert show("b1")["state"] == "suspended", show("b1")
     wait_for("b1 wake-on-request health", lambda: health("b1") == "200", 300)
     assert show("b1")["state"] == "running", show("b1")
 
     # 5. Live resize down then up; the VMM's reported memory follows the limit.
-    expect_ok({"_tag": "setLimits", "boxId": "b1", "limits": box_limits(GIB, 1)})
+    expect_ok({"_tag": "setLimits", "boxId": "b1", "ownerEpoch": 1, "limits": box_limits(GIB, 1)})
     wait_for("b1 shrunk", lambda: show("b1")["limits"]["maxMemoryBytes"] == GIB, 60)
     assert health("b1") == "200", "b1 unhealthy after shrink"
-    expect_ok({"_tag": "setLimits", "boxId": "b1", "limits": box_limits(2 * GIB, 2)})
+    expect_ok({"_tag": "setLimits", "boxId": "b1", "ownerEpoch": 1, "limits": box_limits(2 * GIB, 2)})
     wait_for("b1 grown", lambda: show("b1")["limits"]["maxMemoryBytes"] == 2 * GIB, 60)
     assert health("b1") == "200", "b1 unhealthy after grow"
 
     # 6. Park b1: backed up to the store, then the local volume copy is removed (as on a host that never had it),
     #    so the resume below must restore from the backup rather than the local file.
-    parked = expect_ok({"_tag": "park", "boxId": "b1"})
+    parked = expect_ok({"_tag": "park", "boxId": "b1", "ownerEpoch": 1})
     ref = parked["vm"]["volumeRef"]
     assert ref, parked
     assert show("b1")["state"] == "parked", show("b1")
