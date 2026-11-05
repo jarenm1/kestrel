@@ -96,7 +96,7 @@ const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
   Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
 )
 
-/** The frozen provider catalog accepted by clients installed before OpenCode Go. */
+/** The frozen provider catalog accepted by clients installed before OpenCode Go and the Console login. */
 const legacyCliProviders: Readonly<Record<string, true>> = { "claude-cli": true, "codex-cli": true, "antigravity-cli": true }
 
 /** A client advertises the provider literals it can decode; omitting the query keeps the installed-client contract. */

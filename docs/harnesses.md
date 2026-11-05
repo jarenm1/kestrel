@@ -8,7 +8,8 @@ picker. OMP, Pi and Hermes are retired; see [the scope decision and historical-s
 
 - Claude Code and Codex use their connected API keys through Kestrel's credential broker, or the user's corresponding
   CLI login. Gateway runs use only their selected provider's broker route, not the user's Claude or ChatGPT login.
-- OpenCode's free models need no connection, Go key or vendor broker credential. Their sessions live in the thread home.
+- OpenCode's free models require an OpenCode Console sign-in. Its tokens and sessions live in the user's `opencode`
+  data directory on the box, not in the Hub or browser.
 - OpenCode Go uses its own saved key and credential/session directory. Only a Go run mounts that directory and receives
   its `XDG_DATA_HOME`; native vendor, Google and free OpenCode runs do not receive the Go login.
 - Free OpenCode, Go and Google runs receive MCP-only run tokens: no vendor broker environment and no vendor-authorized
@@ -54,12 +55,19 @@ Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit
 
 | Provider | Required CLI | Login/session storage | Command override |
 |---|---|---|---|
-| OpenCode free | OpenCode 2.0+ (`npm i -g @opencode/cli`) | thread home, no key | `CLOUDAGENTS_OPENCODE_COMMAND` |
+| OpenCode free | OpenCode 2.0.7+ (`npm i -g @opencode/cli`) | `<dataDir>/users/<login>/opencode`, isolated from Go | `CLOUDAGENTS_OPENCODE_COMMAND` |
 | OpenCode Go | OpenCode 2.1+ | `<dataDir>/users/<login>/opencode-go`, isolated from free models | `CLOUDAGENTS_OPENCODE_GO_COMMAND` |
 | Google | Antigravity CLI 1.5+ (`agy`, pinned by the flake) | `<dataDir>/users/<login>/antigravity` | `CLOUDAGENTS_GOOGLE_COMMAND` |
 
 `dataDir` is `CLOUDAGENTS_DATA_DIR`, or `.data` under the repository by default. `opencode-ai` and
 opencode.ai/install are OpenCode 1 and do not satisfy these requirements.
+
+Free models sign in through Settings › Connections › **OpenCode › Connect**. The box runs
+`opencode auth login opencode --method device --standalone`; open the displayed OpenCode link and enter its device
+code. Kestrel polls the box until authorization completes. Installation alone does not connect the models.
+Disconnect stops any pending sign-in before removing this login directory and its sessions, without touching the
+separate Go connection.
+See [OpenCode authentication](https://opencode.ai/v2/docs/cli/providers).
 
 Go signs in through Settings › Connections › **API keys**: choose **Add API key › OpenCode Go**.
 Its connected row supports replacing the key and choosing which Go models appear in chat; Go is not listed again
@@ -82,14 +90,15 @@ connection metadata with CLI logins and capabilities from the **selected box**. 
 managed/relay box's availability. Switching boxes resets or scopes connection caches; an unreachable box leaves
 stored accounts manageable while its CLI rows become unavailable.
 
-`GET /api/connections` retains native CLI-login state and free OpenCode availability for installed clients. Updated
-clients replace this legacy box state with selected-box data. Retired OMP/Pi/Hermes rows are not offered.
+`GET /api/connections` reports CLI-login state for installed clients, including the OpenCode account rather than
+installation-only availability. Updated clients replace this legacy box state with selected-box data.
+Retired OMP/Pi/Hermes rows are not offered.
 
 The status and usage arrays preserve installed clients' provider literals. With no `providers` query,
-`GET /api/cli-auth` and `GET /api/cli-auth/usage` return the pre-Go providers where supported, never Go—even when a Go
-key is configured. Updated clients advertise the catalog they can decode through
+`GET /api/cli-auth` and `GET /api/cli-auth/usage` return the original Claude, Codex and Antigravity providers where
+supported, never Go or OpenCode Console. Updated clients advertise the catalog they can decode through
 `ControlPaths.cliAuthFor(CliProvider.literals)` and `cliUsageFor(CliProvider.literals)`. The box returns only advertised
-providers, keeping Go status/quotas available without breaking an older decoder.
+providers, keeping new logins available without breaking an older decoder.
 
 - Capability probes use the configured `CLOUDAGENTS_*_COMMAND`, including native-binary overrides and minimum versions.
 - Each ACP launch rechecks only its selected provider's command/version, so a removed or downgraded CLI fails before launch.

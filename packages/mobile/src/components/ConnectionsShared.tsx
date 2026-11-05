@@ -13,6 +13,7 @@ export const CLI_INTRO: Record<CliProvider, string> = {
   "claude-cli": "Use your own Claude Pro or Max subscription.",
   "codex-cli": "Use your own ChatGPT subscription.",
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
+  "opencode": "Sign in with OpenCode Console to use free models. The login stays in OpenCode on your box.",
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 };
 

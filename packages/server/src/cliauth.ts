@@ -12,7 +12,7 @@ import {
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
-import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type AgentCli, type CliOutput } from "./agent-clis"
+import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type AgentCli, type CliOutput, type HarnessMinimum } from "./agent-clis"
 import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
 import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
@@ -229,8 +229,12 @@ export const CliAuthLive = Layer.effect(
         yield* ensureDir(yield* providerDir(user, provider))
       })
 
-    /** Environment for running a CLI as `user`: their HOME and config dirs, never the box user's login. */
-    const cliEnv = (user: string): Effect.Effect<Record<string, string>, BadRequest | InternalError> =>
+    /**
+     * Environment for running `provider`'s CLI as `user`: their HOME and config homes, never the box user's login. One
+     * variable names one home, and OpenCode's free and Go logins share `XDG_DATA_HOME`: each gets its own, and the
+     * other's is left out rather than letting whichever provider comes last decide what the CLI reads.
+     */
+    const cliEnv = (user: string, provider: CliProvider): Effect.Effect<Record<string, string>, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const root = yield* rootOf(user)
         const path = config.sandboxPath ?? (config.sandbox === "strict" ? null : (process.env.PATH ?? "/usr/bin:/bin"))
@@ -240,11 +244,18 @@ export const CliAuthLive = Layer.effect(
           )
         }
         const ssl = config.sandboxSslCertFile
+        const own = AGENT_CLIS[provider]
         return {
           ...(config.sandbox === "off" ? platformEnv() : {}),
           PATH: path,
           HOME: root,
-          ...Object.fromEntries(CLI_PROVIDERS.map((provider) => [AGENT_CLIS[provider].configEnv, join(root, AGENT_CLIS[provider].dir)])),
+          ...Object.fromEntries(
+            CLI_PROVIDERS.filter((candidate) => AGENT_CLIS[candidate].configEnv !== own.configEnv).map((candidate) => [
+              AGENT_CLIS[candidate].configEnv,
+              join(root, AGENT_CLIS[candidate].dir),
+            ]),
+          ),
+          [own.configEnv]: join(root, own.dir),
           BROWSER: "/bin/false",
           NO_COLOR: "1",
           ...(ssl === null ? {} : { SSL_CERT_FILE: ssl, NIX_SSL_CERT_FILE: ssl }),
@@ -252,19 +263,20 @@ export const CliAuthLive = Layer.effect(
       })
 
     /**
-     * How to run `bin args` for `user`: inside bwrap with only the user's dir writable, so it dies with the box and
-     * sees nothing else of the host; directly (or through POSIX sh for Windows `.cmd` shims) only when the sandbox
-     * is disabled (local debugging). Sign-in keeps the box network; discovery runs in its thread workspace with no
-     * network at all, so repo-controlled config cannot reach the box's loopback services.
+     * How to run `provider`'s CLI `args` for `user`: inside bwrap with only the user's dir writable, so it dies with
+     * the box and sees nothing else of the host; directly (or through POSIX sh for Windows `.cmd` shims) only when the
+     * sandbox is disabled (local debugging). Sign-in keeps the box network; discovery runs in its thread workspace with
+     * no network at all, so repo-controlled config cannot reach the box's loopback services.
      */
     const invoke = (
       user: string,
-      bin: string,
+      provider: CliProvider,
       args: ReadonlyArray<string>,
       discovery?: { readonly workspacePath: string; readonly cwd: string },
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
-        const env = yield* cliEnv(user)
+        const bin = AGENT_CLIS[provider].bin
+        const env = yield* cliEnv(user, provider)
         if (config.sandbox === "off") {
           // Windows installs the CLIs as `.cmd` shims, which spawn cannot launch directly; the repo's POSIX shell
           // runs them like agent commands do, with SystemRoot and the rest of the platform env in place.
@@ -343,7 +355,7 @@ export const CliAuthLive = Layer.effect(
         if (probe === null) return []
         // The CLI refuses to start without its config home; it is still the user's own empty home, never the box's.
         yield* ensureUserDirs(user, provider)
-        const inv = yield* invoke(user, spec.bin, probe.args, { workspacePath: workspace, cwd: dir })
+        const inv = yield* invoke(user, provider, probe.args, { workspacePath: workspace, cwd: dir })
         return yield* Effect.tryPromise({
           try: () => {
             const running = discoveryRuns.get(key)
@@ -386,7 +398,7 @@ export const CliAuthLive = Layer.effect(
         const spec = AGENT_CLIS[provider]
         const probe = spec.probe
         if (probe === null) return yield* Effect.fail(new InternalError({ message: `${spec.bin} reports no limits` }))
-        const env = yield* cliEnv(user)
+        const env = yield* cliEnv(user, provider)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
         }
@@ -399,7 +411,7 @@ export const CliAuthLive = Layer.effect(
         const cached = usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
         const epoch = usageEpochs.get(key) ?? 0
-        const inv = yield* invoke(user, spec.bin, probe.args)
+        const inv = yield* invoke(user, provider, probe.args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         return yield* Effect.tryPromise({
           try: () => {
@@ -446,11 +458,11 @@ export const CliAuthLive = Layer.effect(
         if (probe === null || bankedReset === null) {
           return yield* Effect.fail(new BadRequest({ message: `${spec.bin} has no banked resets` }))
         }
-        const env = yield* cliEnv(user)
+        const env = yield* cliEnv(user, provider)
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed on the box` }))
         }
-        const inv = yield* invoke(user, spec.bin, probe.args)
+        const inv = yield* invoke(user, provider, probe.args)
         const launch = { file: inv.file, args: inv.args, env: inv.env, cwd: yield* rootOf(user) }
         const key = keyOf(user, provider)
         return yield* Effect.tryPromise({
@@ -475,22 +487,27 @@ export const CliAuthLive = Layer.effect(
     const readStatus = (user: string, provider: CliProvider): Effect.Effect<CliAuthStatus, BadRequest> =>
       Effect.gen(function* () {
         const spec = AGENT_CLIS[provider]
-        const env = yield* cliEnv(user)
+        const env = yield* cliEnv(user, provider)
         // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
           return { provider, loggedIn: false, account: null, error: `${spec.bin} is not installed on the box (not on its PATH)` }
         }
-        // The Go plan signs in by importing its key, which OpenCode 2.1 adds: an older CLI reports why here, so the
-        // Connections page never offers a sign-in that cannot work.
-        const minimum = provider === "opencode-go" ? MODEL_HARNESS["opencode-go"].minVersion : null
+        // The Go plan signs in by importing its key, which OpenCode 2.1 adds, and the free models sign in through the
+        // Console device flow, which 2.0.7 adds: an older CLI reports why here, so the Connections page never offers a
+        // sign-in that cannot work.
+        let minimum: HarnessMinimum | null = null
+        if (provider === "opencode") minimum = MODEL_HARNESS.opencode.minVersion
+        if (provider === "opencode-go") minimum = MODEL_HARNESS["opencode-go"].minVersion
         if (minimum !== null) {
-          const printed = yield* runCli(yield* invoke(user, spec.bin, ["--version"]), `${spec.bin} --version`)
+          // The version probe runs in the user's own home, and a sandbox bind cannot name a home that does not exist yet.
+          yield* ensureDir(yield* rootOf(user))
+          const printed = yield* runCli(yield* invoke(user, provider, ["--version"]), `${spec.bin} --version`)
           if (!meetsMinimum(printed === null ? "" : printed.stdout + printed.stderr, minimum)) {
             return {
               provider,
               loggedIn: false,
               account: null,
-              error: `${spec.bin} must be version ${minimum[0]}.${minimum[1]} or newer for OpenCode Go`,
+              error: `${spec.bin} must be version ${minimum.join(".")} or newer${provider === "opencode-go" ? " for OpenCode Go" : " for the OpenCode Console sign-in"}`,
             }
           }
         }
@@ -507,7 +524,7 @@ export const CliAuthLive = Layer.effect(
           const account = yield* readAccountLabel(dir, spec.identity)
           return { provider, loggedIn: true, account }
         }
-        const inv = yield* invoke(user, spec.bin, spec.status.args)
+        const inv = yield* invoke(user, provider, spec.status.args)
         const out = yield* runCli(inv, `${spec.bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
         const parsed = yield* spec.status.parse(out)
@@ -536,8 +553,11 @@ export const CliAuthLive = Layer.effect(
         yield* ensureUserDirs(user, provider)
         const key = keyOf(user, provider)
         const previous = pending.get(key)
-        if (previous) killEntry(previous)
-        const inv = yield* invoke(user, spec.bin, signIn.args(yield* providerDir(user, provider)))
+        if (previous) {
+          killEntry(previous)
+          yield* Effect.promise(() => previous.done)
+        }
+        const inv = yield* invoke(user, provider, signIn.args(yield* providerDir(user, provider)))
         const child = yield* Effect.try({
           try: () =>
             ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
@@ -640,13 +660,17 @@ export const CliAuthLive = Layer.effect(
         yield* rootOf(user)
         usageCache.delete(keyOf(user, provider))
         const current = pending.get(keyOf(user, provider))
-        if (current) killEntry(current)
+        if (current) {
+          killEntry(current)
+          // The CLI owns an open credential database; wait for it to release its files before removing the directory.
+          yield* Effect.promise(() => current.done)
+        }
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         // Revoke with the CLI when there is a login to revoke; a failed revoke still removes the local login.
         const revoke = AGENT_CLIS[provider].logout
         if (present && revoke !== null) {
-          const inv = yield* invoke(user, AGENT_CLIS[provider].bin, revoke)
+          const inv = yield* invoke(user, provider, revoke)
           yield* runCli(inv, `${AGENT_CLIS[provider].bin} logout`).pipe(Effect.ignore)
         }
         yield* Effect.tryPromise({
@@ -670,10 +694,10 @@ export const CliAuthLive = Layer.effect(
         yield* ensureUserDirs(user, provider)
         // Import skips an existing credential ID, so remove just that credential, retaining the CLI's sessions.
         if (spec.logout !== null) {
-          const revoke = yield* invoke(user, spec.bin, spec.logout)
+          const revoke = yield* invoke(user, provider, spec.logout)
           yield* runCli(revoke, `${spec.bin} logout`)
         }
-        const inv = yield* invoke(user, spec.bin, signIn.args)
+        const inv = yield* invoke(user, provider, signIn.args)
         const stored = yield* runCli(inv, `${spec.bin} key import`, signIn.stdin(key), true)
         if (stored === null) return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed` }))
         usageCache.delete(keyOf(user, provider))

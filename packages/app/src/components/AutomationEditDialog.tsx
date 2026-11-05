@@ -56,9 +56,8 @@ export function AutomationEditDialog({ automation, onClose }: { automation: Auto
 function AutomationEditForm({ automation, onDone }: { automation: Automation; onDone: () => void }) {
   const queryClient = useQueryClient()
   const connections = useQuery(queries.connections())
-  const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
-  const providers = connectedModelProviders(connections.data ?? [], capabilities.data?.harnesses)
+  const providers = connectedModelProviders(connections.data ?? [])
   const [model, setModel] = useState<AgentModel | null>(automation.model)
   const selected = model === null ? null : modelInfo(model)
   const selectionListed = selected !== null && providers.some(

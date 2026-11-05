@@ -57,6 +57,44 @@ const antigravity = (statuses: ReadonlyArray<CliAuthStatus>) => {
   return status
 }
 
+describe("OpenCode status", () => {
+  test.skipIf(process.platform === "win32")("gives the Console and Go logins their own XDG_DATA_HOME", async () => {
+    const root = rootFor()
+    const opencode = join(root, "bin", "opencode")
+    writeFileSync(
+      opencode,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then',
+        '  case "$XDG_DATA_HOME" in',
+        `    */opencode-go) echo "2.1.0" ;;`,
+        `    *) echo "2.0.7" ;;`,
+        "  esac",
+        "  exit 0",
+        "fi",
+        'case "$XDG_DATA_HOME" in',
+        `  */opencode-go) echo '[{"id":"opencode-go","connections":[{"id":"go"}]}]' ;;`,
+        `  */opencode) echo '[{"id":"opencode","connections":[{"id":"free"}]}]' ;;`,
+        `  *) echo '[]' ;;`,
+        "esac",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(opencode, 0o755)
+    mkdirSync(join(root, "users", "alice", "opencode"), { recursive: true })
+    mkdirSync(join(root, "users", "alice", "opencode-go"), { recursive: true })
+
+    // Both CLIs read XDG_DATA_HOME: each status check must see its own login, not the one that happens to be last.
+    const statuses = await statusesFor(root)
+    expect(statuses.find((row) => row.provider === "opencode")).toEqual({ provider: "opencode", loggedIn: true, account: null })
+    expect(statuses.find((row) => row.provider === "opencode-go")).toEqual({
+      provider: "opencode-go",
+      loggedIn: true,
+      account: null,
+    })
+  })
+})
+
 describe("Antigravity account label", () => {
   test("reports the signed-in Google email from the user's own login without exposing the credential", async () => {
     const root = rootFor()

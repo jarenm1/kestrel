@@ -19,6 +19,7 @@ const handler = async (goConnected: boolean) => {
     { provider: "claude-cli", loggedIn: true, account: "Claude subscription" },
     { provider: "codex-cli", loggedIn: true, account: "ChatGPT subscription" },
     { provider: "antigravity-cli", loggedIn: false, account: null },
+    { provider: "opencode", loggedIn: true, account: null },
     { provider: "opencode-go", loggedIn: goConnected, account: null },
   ]
   const usage: readonly ProviderUsage[] = [
@@ -54,6 +55,7 @@ test("Go-aware clients explicitly request their provider catalog and retain Go q
   const query = `?providers=${encodeURIComponent(CliProvider.literals.join(","))}`
   const statuses = Schema.decodeUnknownSync(Schema.Array(CliAuthStatus))(await (await serve(request(ControlPaths.cliAuth + query))).json())
   expect(statuses.find((row) => row.provider === "opencode-go")?.loggedIn).toBe(true)
+  expect(statuses.find((row) => row.provider === "opencode")?.loggedIn).toBe(true)
   expect(statuses.find((row) => row.provider === "claude-cli")?.loggedIn).toBe(true)
   const usage = Schema.decodeUnknownSync(Schema.Array(ProviderUsage))(await (await serve(request(ControlPaths.cliUsage + query))).json())
   expect(usage.find((row) => row.provider === "opencode-go")?.windows[0]?.usedPercent).toBe(41)

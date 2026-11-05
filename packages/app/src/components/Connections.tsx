@@ -46,6 +46,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "claude-cli": "Use your own Claude Pro or Max subscription.",
   "codex-cli": "Use your own ChatGPT subscription.",
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
+  "opencode": "Sign in with OpenCode Console to use free models. The login stays in OpenCode on your box.",
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 }
 
@@ -72,8 +73,6 @@ export function Connections() {
               {list.filter((connection) => connection.kind === "cli" && !isApiKeyConnection(connection)).map((connection) =>
                 connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                   <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
-                ) : connection.kind === "cli" && connection.provider === "opencode" ? (
-                  <FreeOpenCodeRow key={connection.provider} connection={connection} />
                 ) : (
                   <ConnectionRow key={connection.provider} connection={connection} />
                 ),
@@ -239,19 +238,6 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-/** Free OpenCode has installation state, not a key or subscription to manage. */
-function FreeOpenCodeRow({ connection }: { connection: Connection }) {
-  return (
-    <HarnessRow connection={connection}>
-      <p className="text-muted-foreground">
-        {connection.available
-          ? "Use free models without signing in."
-          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to use free models.`}
-      </p>
-    </HarnessRow>
   )
 }
 
@@ -523,7 +509,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
               Open sign-in page
             </a>
           </Button>
-          <p className="text-muted-foreground">Enter this code on the OpenAI page:</p>
+          <p className="text-muted-foreground">Enter this code on the sign-in page:</p>
           <div className="flex items-center gap-2">
             <code className="font-mono text-lg font-semibold tracking-widest">{login.userCode}</code>
             <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(login.userCode ?? "")}>

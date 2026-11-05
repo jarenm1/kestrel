@@ -137,8 +137,8 @@ const OC_LOW_TO_MAX: readonly AgentEffort[] = ["low", "medium", "high", "xhigh",
  * Every model the box can run, in picker order (newest first within a provider). Effort support follows Claude
  * Code's model configuration docs, OpenAI's model pages, and each third-party provider's Claude Code guide.
  * Providers without a documented effort scale list none, so the picker offers no unsupported control. OpenCode's
- * efforts are what its ACP `effort` option offers per model; its free models need no sign-in, and OpenCode rotates
- * them, so the list follows its own. OpenCode Go's are the Go plan's models that no other provider here runs (its
+ * efforts are what its ACP `effort` option offers per model; OpenCode rotates its free models, so the list follows
+ * its own. OpenCode Go's are the Go plan's models that no other provider here runs (its
  * Claude, GPT and Gemini models are left to theirs), and none of its free or contributor ones.
  */
 export const AGENT_MODELS: readonly ModelInfo[] = [
@@ -220,8 +220,7 @@ export interface ModelProviderInfo {
   readonly id: ModelProvider
   readonly name: string
   /**
-   * `Connection.provider` ids that give the box access to this provider's models: an API key or a CLI login. Empty
-   * when the provider needs none: the box must report its harness in `BoxCapabilities.harnesses` instead.
+   * `Connection.provider` ids that give the box access to this provider's models: an API key or a CLI login.
    */
   readonly connections: readonly string[]
   /** Provider-specific setup note shown in Connections. */
@@ -236,8 +235,8 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   { id: "deepseek", name: "DeepSeek", connections: ["deepseek"] },
   { id: "minimax", name: "MiniMax", connections: ["minimax"] },
   { id: "moonshot", name: "Kimi (Moonshot AI)", connections: ["moonshot"], hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported." },
-  // OpenCode's free models need no connection: its own CLI runs them, so the box has to have it (OpenCode 2).
-  { id: "opencode", name: "OpenCode", connections: [] },
+  // Free models require an OpenCode Console account, separate from the Go plan's key.
+  { id: "opencode", name: "OpenCode", connections: ["opencode"] },
   // OpenCode Go runs on the same OpenCode CLI (2.1), but needs the Go plan's key.
   { id: "opencode-go", name: "OpenCode Go", connections: ["opencode-go"] },
   { id: "google", name: "Google", connections: ["antigravity-cli"] },
@@ -255,19 +254,12 @@ export const modelInfo = (id: AgentModel): ModelInfo => {
 export const providerModels = (provider: ModelProvider): readonly ModelInfo[] =>
   AGENT_MODELS.filter((m) => m.provider === provider)
 
-/**
- * Providers on offer, in `MODEL_PROVIDERS` order: those with a connected connection, and those needing none whose
- * harness the box has (`BoxCapabilities.harnesses`; a box that does not report it, or has not answered yet, offers
- * none of them).
- */
+/** Providers with an available, authenticated connection, in catalog order. */
 export const connectedModelProviders = (
   connections: ReadonlyArray<{ readonly provider: string; readonly connected: boolean; readonly available?: boolean }>,
-  harnesses: ReadonlyArray<ModelProvider> | undefined,
 ): readonly ModelProviderInfo[] =>
   MODEL_PROVIDERS.filter((p) =>
-    p.connections.length === 0
-      ? harnesses?.includes(p.id) === true
-      : connections.some((c) => c.connected && c.available !== false && p.connections.includes(c.provider)),
+    connections.some((c) => c.connected && c.available !== false && p.connections.includes(c.provider)),
   )
 
 /**

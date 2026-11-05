@@ -33,7 +33,6 @@ export function ConnectionsScreen() {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
-  const capabilities = useQuery(queries.capabilities());
   const accounts = connections.data?.filter((connection) => !isApiKeyConnection(connection));
 
   return (
@@ -59,7 +58,7 @@ export function ConnectionsScreen() {
       ) : null}
       {connections.data ? <ApiKeysCard connections={connections.data} /> : null}
       {connections.data ? (
-        <ConnectionsModels connections={connections.data} harnesses={capabilities.data?.harnesses} />
+        <ConnectionsModels connections={connections.data} />
       ) : null}
     </ScrollView>
   );
@@ -74,23 +73,7 @@ function ConnectionRow({ connection }: { connection: Connection }) {
   ) {
     return <ConnectionsCliRow connection={connection} provider={connection.provider} />;
   }
-  if (connection.kind === "cli" && connection.provider === "opencode") {
-    return <FreeOpenCodeRow connection={connection} />;
-  }
   return null;
-}
-
-/** Free OpenCode reports installation state and never asks for a Go key. */
-function FreeOpenCodeRow({ connection }: { connection: Connection }) {
-  return (
-    <ConnectionRowFrame connection={connection}>
-      <Text style={connectionStyles.muted}>
-        {connection.available
-          ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
-          : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
-      </Text>
-    </ConnectionRowFrame>
-  );
 }
 
 /** Provider keys and key-based CLI logins, including unavailable logins whose saved-key state is unknown. */

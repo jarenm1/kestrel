@@ -72,9 +72,8 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const [pickingModel, setPickingModel] = useState(false);
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
-  const capabilities = useQuery(queries.capabilities());
   const shown = useShownModels();
-  const providers = connectedModelProviders(connections.data ?? [], capabilities.data?.harnesses);
+  const providers = connectedModelProviders(connections.data ?? []);
   const models = providers.flatMap((provider) => shown[provider.id]);
   const selectedModel = model === null ? null : modelInfo(model);
   const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule");

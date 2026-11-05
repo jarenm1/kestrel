@@ -2,7 +2,6 @@ import { Schema } from "effect"
 import {
   ApprovePairingBody,
   BOX_TOKEN_QUERY,
-  BoxCapabilities,
   CREDENTIALS_HEADER,
   CliAuthStatus,
   CliProvider,
@@ -12,7 +11,6 @@ import {
   CreateMeterHostBody,
   GithubRepoSlug,
   MeterReportBody,
-  MODEL_PROVIDERS,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -23,8 +21,6 @@ import {
   type Connection,
   type GithubRepo,
   type Me,
-  type ModelProvider,
-  type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import {
   PROVIDERS,
@@ -89,25 +85,6 @@ const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthSt
   return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
 }
 
-/** The harnesses the box reports it can launch; none when the box is offline, too old, or answers badly. */
-const fetchHarnesses = async (login: string, env: Env): Promise<readonly ModelProvider[]> => {
-  const body = await boxJson(login, env, Paths.capabilities)
-  return Schema.is(BoxCapabilities)(body) ? body.harnesses ?? [] : []
-}
-
-/**
- * A provider that needs no connection, as a Connections row for installed clients. The row exists only when the box's
- * capabilities listed the harness, so it is always connected and available.
- */
-const freeView = (provider: ModelProviderInfo): Connection => ({
-  provider: provider.id,
-  label: provider.name,
-  kind: "cli",
-  connected: true,
-  account: null,
-  available: true,
-})
-
 /** True when the user has connected `provider` and the provider refuses the stored token. */
 const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: Env): Promise<boolean> => {
   const token = await hub(env).connectionSecret(login, provider.id)
@@ -116,10 +93,9 @@ const oauthTokenRejected = async (login: string, provider: OAuthProvider, env: E
 
 const listConnections = async (login: string, env: Env): Promise<Connection[]> => {
   const oauth = PROVIDERS.filter((p): p is OAuthProvider => p.kind === "oauth")
-  const [rows, cli, harnesses, rejected] = await Promise.all([
+  const [rows, cli, rejected] = await Promise.all([
     hub(env).connections(login),
     fetchCliAuth(login, env),
-    fetchHarnesses(login, env),
     Promise.all(oauth.map((p) => oauthTokenRejected(login, p, env))),
   ])
   const expired = new Set(oauth.filter((_, i) => rejected[i]).map((p) => p.id))
@@ -129,9 +105,7 @@ const listConnections = async (login: string, env: Env): Promise<Connection[]> =
       ? cliView(p, cli.find((status) => status.provider === p.id))
       : storedView(p, rows.find((r) => r.provider === p.id), env, expired.has(p.id)),
   )
-  // A provider that needs no connection is offered only when the box's capabilities list its harness.
-  const free = MODEL_PROVIDERS.filter((provider) => provider.connections.length === 0 && harnesses.includes(provider.id))
-  return [...stored, ...free.map(freeView)]
+  return stored
 }
 
 const putApiKey = async (request: Request, env: Env, login: string, provider: Provider): Promise<Response> => {

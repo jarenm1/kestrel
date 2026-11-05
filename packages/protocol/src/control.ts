@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug } from "./refs"
-import { AgentModel, MODEL_PROVIDERS, type ModelProvider } from "./models"
+import { AgentModel, type ModelProvider } from "./models"
 
 /**
  * Control-plane API served by the Worker itself (not relayed to the box).
@@ -197,8 +197,8 @@ export type Connection = typeof Connection.Type
 export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.minLength(8)) })
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
-/** Subscription logins of the official agent CLIs, held per user on the box. */
-export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go")
+/** Logins of the official agent CLIs, held per user on the box. */
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go", "opencode")
 export type CliProvider = typeof CliProvider.Type
 
 /**
@@ -210,6 +210,7 @@ export const CLI_SIGN_IN = {
   "codex-cli": "page",
   "antigravity-cli": "page",
   "opencode-go": "key",
+  opencode: "page",
 } as const satisfies Record<CliProvider, "page" | "key">
 export type CliSignIn = (typeof CLI_SIGN_IN)[CliProvider]
 
@@ -227,9 +228,8 @@ export type CliAuthStatus = typeof CliAuthStatus.Type
  * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state with
  * the selected box's CLI logins and the harnesses it reports, preserving stored account/key metadata.
  *
- * Harness rows are never carried over: a retired standalone harness (`omp`, `pi`, `hermes`) and the old `opencode` row
- * are dropped, and every provider that needs no connection is rebuilt from `BoxCapabilities.harnesses` alone. A stale
- * relay row therefore can neither offer a harness the selected box lacks nor hide one it has.
+ * CLI rows use only the selected box's authentication status, never a relay box's saved login or installation state.
+ * Retired standalone harness rows (`omp`, `pi`, `hermes`) are dropped.
  */
 export const connectionsForBox = (
   connections: readonly Connection[],
@@ -255,19 +255,7 @@ export const connectionsForBox = (
         ...(error === undefined ? {} : { error }),
       }
     })
-  const free = MODEL_PROVIDERS.filter((provider) => provider.connections.length === 0).map((provider): Connection => {
-    const available = box.harnesses?.includes(provider.id) === true
-    return {
-      provider: provider.id,
-      label: provider.name,
-      kind: "cli",
-      connected: available,
-      account: null,
-      available,
-      ...(available ? {} : { error: box.error ?? `${provider.name} is not available on the selected box.` }),
-    }
-  })
-  return [...stored, ...free]
+  return stored
 }
 
 /** One limit of a provider subscription, e.g. its 5-hour or weekly window. */

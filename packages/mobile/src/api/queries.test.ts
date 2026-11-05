@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { connectedModelProviders, type Connection, type ModelProvider, type Task } from "@cloudagents/protocol";
+import { connectedModelProviders, type Connection, type Task } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
 import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
 
@@ -79,16 +79,20 @@ test("independent HTTP snapshots from two boxes stay in their own query entries"
   }
 });
 
-test("Go availability follows the selected box and stays isolated in the connections cache", async () => {
+test("CLI availability follows the selected box and stays isolated in the connections cache", async () => {
   const first = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     fetch(request) {
       const url = new URL(request.url);
-      const path = url.pathname;
-      if (path === "/api/cli-auth") return Response.json(url.searchParams.get("providers")?.split(",").includes("opencode-go")
-        ? [{ provider: "opencode-go", loggedIn: true, account: null }] : []);
-      if (path === "/api/capabilities") return Response.json({
-        version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable", harnesses: ["opencode", "opencode-go"],
+      if (url.pathname === "/api/cli-auth") {
+        const providers = url.searchParams.get("providers")?.split(",") ?? [];
+        return Response.json(providers
+          .filter((provider) => provider === "opencode-go")
+          .map((provider) => ({ provider, loggedIn: true, account: null })));
+      }
+      // Capabilities no longer decide whether a provider is offered; every provider needs a signed-in connection.
+      if (url.pathname === "/api/capabilities") return Response.json({
+        version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable", harnesses: [],
       });
       return new Response(null, { status: 404 });
     },
@@ -97,10 +101,14 @@ test("Go availability follows the selected box and stays isolated in the connect
     hostname: "127.0.0.1", port: 0,
     fetch(request) {
       const url = new URL(request.url);
-      const path = url.pathname;
-      if (path === "/api/cli-auth") return Response.json(url.searchParams.get("providers")?.split(",").includes("opencode-go")
-        ? [{ provider: "opencode-go", loggedIn: false, account: null }] : []);
-      if (path === "/api/capabilities") return Response.json({
+      if (url.pathname === "/api/cli-auth") {
+        const providers = url.searchParams.get("providers")?.split(",") ?? [];
+        return Response.json(providers
+          .filter((provider) => provider === "opencode")
+          .map((provider) => ({ provider, loggedIn: true, account: null })));
+      }
+      // Capabilities no longer decide whether a provider is offered; every provider needs a signed-in connection.
+      if (url.pathname === "/api/capabilities") return Response.json({
         version: 1, platform: "linux", sandbox: "basic", desktop: "unavailable", harnesses: [],
       });
       return new Response(null, { status: 404 });
@@ -123,15 +131,11 @@ test("Go availability follows the selected box and stays isolated in the connect
     const secondQueries = createQueries(createApiClient(control.url.origin, "session", { id: "second", url: second.url.origin }));
     const a = firstQueries.connections();
     const b = secondQueries.connections();
-    const [aRows, bRows, aCapabilities, bCapabilities] = await Promise.all([
-      queryClient.fetchQuery(a), queryClient.fetchQuery(b),
-      queryClient.fetchQuery(firstQueries.capabilities()), queryClient.fetchQuery(secondQueries.capabilities()),
-    ]);
-    const offered = (rows: readonly Connection[], harnesses: readonly ModelProvider[] | undefined) =>
-      connectedModelProviders(rows, harnesses).map((provider) => provider.id);
-    expect(offered(aRows, aCapabilities.harnesses)).toEqual(["opencode", "opencode-go"]);
-    expect(offered(bRows, bCapabilities.harnesses)).toEqual([]);
-    expect(offered(queryClient.getQueryData<readonly Connection[]>(a.queryKey) ?? [], aCapabilities.harnesses)).toEqual(["opencode", "opencode-go"]);
+    const [aRows, bRows] = await Promise.all([queryClient.fetchQuery(a), queryClient.fetchQuery(b)]);
+    const offered = (rows: readonly Connection[]) => connectedModelProviders(rows).map((provider) => provider.id);
+    expect(offered(aRows)).toEqual(["opencode-go"]);
+    expect(offered(bRows)).toEqual(["opencode"]);
+    expect(offered(queryClient.getQueryData<readonly Connection[]>(a.queryKey) ?? [])).toEqual(["opencode-go"]);
   } finally {
     control.stop(true);
     first.stop(true);

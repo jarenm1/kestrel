@@ -22,13 +22,11 @@ export const MODELS_CARD_PROVIDERS: readonly ModelProvider[] = ["anthropic", "op
 
 interface Props {
   readonly connections: readonly Connection[];
-  /** `BoxCapabilities.harnesses` of the box; undefined until it answers. */
-  readonly harnesses: readonly ModelProvider[] | undefined;
 }
 
 /** Per provider, the models the chat's model picker offers; the rest stay out of the way. */
-export function ConnectionsModels({ connections, harnesses }: Props) {
-  const connected = new Set(connectedModelProviders(connections, harnesses).map((provider) => provider.id));
+export function ConnectionsModels({ connections }: Props) {
+  const connected = new Set(connectedModelProviders(connections).map((provider) => provider.id));
   // A provider whose access is an API key shows its model list in that key's row instead.
   const apiKeyProviders = new Set(connections.filter(isApiKeyConnection).map((connection) => connection.provider));
   const rows = MODEL_PROVIDERS.filter(
@@ -61,20 +59,12 @@ function ModelRow({ provider, connected, divided }: RowProps) {
     <View style={[styles.row, divided && styles.divided]}>
       <View style={styles.titleBlock}>
         <Text style={styles.label}>{provider.name}</Text>
-        {provider.connections.length === 0 ? (
-          <Badge variant="neutral">no sign-in needed</Badge>
-        ) : (
-          <Badge variant={connected ? "success" : "neutral"}>
-            {connected ? "connected" : "not connected"}
-          </Badge>
-        )}
+        <Badge variant={connected ? "success" : "neutral"}>
+          {connected ? "connected" : "not connected"}
+        </Badge>
       </View>
       {connected ? null : (
-        <Text style={styles.hint}>
-          {provider.connections.length === 0
-            ? `${provider.name} is not installed on this box.`
-            : "Connect a key or subscription above to use these."}
-        </Text>
+        <Text style={styles.hint}>Connect a key or subscription above to use these.</Text>
       )}
       <ModelPicker provider={provider} />
     </View>

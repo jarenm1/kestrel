@@ -126,35 +126,37 @@ describe("selected-box connections", () => {
       { provider: "opencode-go", connected: true, available: false },
       { provider: "openrouter", connected: true, available: true },
     ]
-    expect(connectedModelProviders(rows, ["opencode"]).map((provider) => provider.id)).toEqual(["openrouter", "opencode"])
-    expect(connectedModelProviders([...rows, { provider: "claude-cli", connected: true, available: true }], [])
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["openrouter"])
+    expect(connectedModelProviders([...rows, { provider: "claude-cli", connected: true, available: true }])
       .map((provider) => provider.id)).toEqual(["anthropic", "openrouter"])
-    expect(connectedModelProviders([{ provider: "openai", connected: true }], [])
+    expect(connectedModelProviders([{ provider: "openai", connected: true }])
       .map((provider) => provider.id)).toEqual(["openai"])
   })
 
-  test("the selected box's Go login and harnesses replace conflicting relay state across a box switch", () => {
+  test("the selected box's OpenCode logins replace conflicting relay state across a box switch", () => {
     const relay = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
     const selected = connectionsForBox(relay, {
-      cliAuth: [{ provider: "opencode-go", loggedIn: true, account: null }],
+      cliAuth: [
+        { provider: "opencode-go", loggedIn: true, account: null },
+        { provider: "opencode", loggedIn: true, account: null },
+      ],
       harnesses: ["opencode"],
     })
-    expect(connectedModelProviders(selected, ["opencode"]).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
+    expect(connectedModelProviders(selected).map((provider) => provider.id)).toEqual(["opencode", "opencode-go"])
     expect(selected.find((connection) => connection.provider === "opencode-go")?.error).toBeUndefined()
 
     const switched = connectionsForBox(selected, {
       cliAuth: [{ provider: "opencode-go", loggedIn: false, account: null }],
       harnesses: [],
     })
-    expect(connectedModelProviders(switched, []).map((provider) => provider.id)).toEqual([])
+    expect(connectedModelProviders(switched).map((provider) => provider.id)).toEqual([])
     expect(switched.find((connection) => connection.provider === "opencode")).toMatchObject({ connected: false, available: false })
   })
 
-  test("a stale free-OpenCode row does not outlive the selected box's capability", () => {
-    // A relay box offered OpenCode; the selected box has not said it can launch it, so nothing is offered.
-    const rows = connectionsForBox([cli("opencode", true)], { cliAuth: [], harnesses: undefined })
+  test("installation alone never authenticates free OpenCode models", () => {
+    const rows = connectionsForBox([cli("opencode", true)], { cliAuth: [], harnesses: ["opencode"] })
     expect(rows.find((connection) => connection.provider === "opencode")).toMatchObject({ connected: false, available: false })
-    expect(connectedModelProviders(rows, undefined).map((provider) => provider.id)).toEqual([])
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual([])
   })
 
   test("retired standalone harness rows never survive the merge", () => {
@@ -163,7 +165,7 @@ describe("selected-box connections", () => {
       harnesses: ["opencode"],
     })
     expect(rows.map((connection) => connection.provider)).toEqual(["opencode"])
-    expect(connectedModelProviders(rows, ["opencode"]).map((provider) => provider.id)).toEqual(["opencode"])
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual([])
   })
 
   test("an unreachable box clears stale CLI availability without discarding stored API keys", () => {
@@ -177,6 +179,6 @@ describe("selected-box connections", () => {
     expect(rows.find((connection) => connection.provider === "opencode-go")).toMatchObject({
       connected: false, available: false, error: "Selected box is offline",
     })
-    expect(connectedModelProviders(rows, undefined).map((provider) => provider.id)).toEqual(["anthropic"])
+    expect(connectedModelProviders(rows).map((provider) => provider.id)).toEqual(["anthropic"])
   })
 })

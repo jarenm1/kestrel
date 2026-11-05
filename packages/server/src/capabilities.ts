@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
 import { MODEL_PROVIDERS, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
-import { MODEL_HARNESS } from "./agent-clis"
+import { MODEL_HARNESS, type HarnessMinimum } from "./agent-clis"
 import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "./desktop/requirements"
 
 interface CapabilityProbe {
@@ -115,13 +115,17 @@ export interface HarnessConfig {
   readonly agentCommands?: Readonly<Partial<Record<ModelProvider, string>>>
 }
 
-export const meetsMinimum = (printed: string, minimum: readonly [number, number] | null): boolean => {
+export const meetsMinimum = (printed: string, minimum: HarnessMinimum | null): boolean => {
   if (minimum === null) return true
-  const found = /(\d+)\.(\d+)/.exec(printed)
+  const found = /(\d+)\.(\d+)(?:\.(\d+))?/.exec(printed)
   if (found === null) return false
-  const [major, minor] = [Number(found[1]), Number(found[2])]
+  const [major, minor, patch] = [Number(found[1]), Number(found[2]), Number(found[3] ?? 0)]
   const [needMajor, needMinor] = minimum
-  return major > needMajor || (major === needMajor && minor >= needMinor)
+  const needPatch = minimum.length === 3 ? minimum[2] : 0
+  return (
+    major > needMajor ||
+    (major === needMajor && (minor > needMinor || (minor === needMinor && patch >= needPatch)))
+  )
 }
 
 /**
@@ -151,7 +155,7 @@ export const harnessAvailability = (
   }
   const minimum = MODEL_HARNESS[provider].minVersion
   if (minimum !== null && !meetsMinimum(probe.version(path), minimum)) {
-    return { available: false, error: `its CLI (${binary}) must be version ${minimum[0]}.${minimum[1]} or newer` }
+    return { available: false, error: `its CLI (${binary}) must be version ${minimum.join(".")} or newer` }
   }
   return { available: true }
 }

@@ -38,6 +38,49 @@ describe("codex login status", () => {
   })
 })
 
+const openCodeStatus = (provider: "opencode" | "opencode-go", text: string) => {
+  const status = AGENT_CLIS[provider].status
+  if (status.kind !== "command") throw new Error(`${provider} status is not a command`)
+  return Effect.runSync(status.parse({ stdout: text, stderr: "" }))
+}
+
+const openCodeLink = (text: string) => {
+  const signIn = AGENT_CLIS.opencode.signIn
+  if (signIn.kind !== "page") throw new Error("opencode does not sign in on a page")
+  return signIn.parseLoginLink(text)
+}
+
+describe("OpenCode Console login", () => {
+  test("reads each OpenCode integration's own connection", () => {
+    const goOnly = JSON.stringify([{ id: "opencode-go", connections: [{ id: "cred" }] }])
+    expect(openCodeStatus("opencode", goOnly)).toEqual({ provider: "opencode", loggedIn: false, account: null })
+    expect(openCodeStatus("opencode-go", goOnly)).toEqual({ provider: "opencode-go", loggedIn: true, account: null })
+    const both = JSON.stringify([
+      { id: "opencode", connections: [{ id: "device" }] },
+      { id: "opencode-go", connections: [] },
+    ])
+    expect(openCodeStatus("opencode", both)).toEqual({ provider: "opencode", loggedIn: true, account: null })
+    expect(openCodeStatus("opencode-go", both)).toEqual({ provider: "opencode-go", loggedIn: false, account: null })
+  })
+
+  test("takes clack's decorated complete code and link lines", () => {
+    // The CLI prints a bare gutter, then each decorated line (2.0.7 observed).
+    const text = "|\n•  Enter code: KTNV-ZPLM\n|\n•  https://opencode.ai/console/device?user_code=KTNV-ZPLM&client_id=opencode-cli\n"
+    expect(openCodeLink(text)).toEqual({
+      url: "https://opencode.ai/console/device?user_code=KTNV-ZPLM&client_id=opencode-cli",
+      userCode: "KTNV-ZPLM",
+    })
+  })
+
+  test("does not take a half-written code or link, or one without the other", () => {
+    const url = "https://opencode.ai/console/device?user_code=KTNV-ZPLM&client_id=opencode-cli"
+    expect(openCodeLink(`•  Enter code: KTNV-ZPLM\n|\n•  ${url.slice(0, 32)}`)).toBeNull()
+    expect(openCodeLink(`•  Enter code: KTNV-ZPLM\n`)).toBeNull()
+    expect(openCodeLink(`|\n•  ${url}\n`)).toBeNull()
+    expect(openCodeLink(`•  Enter code: KTNV-ZPLM\n|\n•  http://opencode.ai/console/device\n`)).toBeNull()
+  })
+})
+
 describe("stored identities", () => {
   test("Codex reads the ChatGPT email from the stored ID token and no token material", () => {
     const account = identityParser("codex-cli")(

@@ -223,7 +223,7 @@ const isDeltaLine = (parsed: unknown): boolean => {
 
 /**
  * The CLI logins a run mounts. Anthropic/OpenAI keep the two vendor logins so either CLI may shell out to the other.
- * Go and Antigravity get only their own login; free OpenCode, gateways and standalone ACP harnesses get none.
+ * OpenCode's Console and Go logins and Antigravity get only their own; gateways and standalone ACP harnesses get none.
  */
 export const loginsForProvider = <T extends { readonly provider: CliProvider }>(
   provider: ModelProvider,

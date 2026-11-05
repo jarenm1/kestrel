@@ -202,25 +202,57 @@ const parseCodexStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
     return { provider: "codex-cli", loggedIn: true, account: null }
   })
 
-/** OpenCode's own id for the Go plan's integration, and for the one credential Kestrel keeps in it. */
+/** OpenCode's own ids for the Console (free models) and Go plan integrations, and the credential Kestrel keeps in Go. */
+const OPENCODE = "opencode"
 const OPENCODE_GO = "opencode-go"
 const OPENCODE_GO_CREDENTIAL = "cred_kestrel"
 
-/** `auth list --format json`: the integrations with their connections; Go is signed in while it has one. */
-const parseOpenCodeGoStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
-  Effect.gen(function* () {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(out.stdout)
-    } catch {
-      const detail = out.stderr.trim().split("\n")[0]?.slice(0, 200) || "no output"
-      return yield* Effect.fail(new InternalError({ message: `opencode auth list: unreadable output (${detail})` }))
+/** `auth list --format json`: the integrations with their connections; one is signed in while it has a connection. */
+const parseOpenCodeStatus =
+  (integrationID: string, provider: CliProvider) =>
+  (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
+    Effect.gen(function* () {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(out.stdout)
+      } catch {
+        const detail = out.stderr.trim().split("\n")[0]?.slice(0, 200) || "no output"
+        return yield* Effect.fail(new InternalError({ message: `opencode auth list: unreadable output (${detail})` }))
+      }
+      if (!Array.isArray(parsed)) return yield* Effect.fail(new InternalError({ message: "opencode auth list: unexpected output" }))
+      const integration: unknown = parsed.find((entry) => typeof entry === "object" && entry !== null && entry.id === integrationID)
+      const connections =
+        typeof integration === "object" && integration !== null && "connections" in integration ? integration.connections : null
+      return { provider, loggedIn: Array.isArray(connections) && connections.length > 0, account: null }
+    })
+
+/**
+ * `opencode auth login opencode --method device --standalone` prints clack's decorated `Enter code: …` line, then the
+ * Console's `verification_uri_complete` link, and polls Console until the user approves. It needs both complete lines:
+ * a half-written code or link is not a sign-in the user can finish. Each clack line carries a gutter (`│` or `|`) and a
+ * symbol (`●`, `•`, or `*` without Unicode); the split drops the last line, which may still be growing.
+ */
+const parseOpenCodeDeviceLoginLink = (text: string): { readonly url: string; readonly userCode: string } | null => {
+  let url: string | null = null
+  let userCode: string | null = null
+  for (const line of text.split(/\r?\n/).slice(0, -1)) {
+    const plain = line.trim().replace(/^[│|●•*]+/, "").trim()
+    if (url === null && /^https:\/\/\S+$/.test(plain)) {
+      try {
+        const link = new URL(plain)
+        if (link.protocol === "https:" && link.host !== "") {
+          url = plain
+          continue
+        }
+      } catch {
+        // Not a URL: keep looking.
+      }
     }
-    if (!Array.isArray(parsed)) return yield* Effect.fail(new InternalError({ message: "opencode auth list: unexpected output" }))
-    const go: unknown = parsed.find((entry) => typeof entry === "object" && entry !== null && entry.id === OPENCODE_GO)
-    const connections = typeof go === "object" && go !== null && "connections" in go ? go.connections : null
-    return { provider: "opencode-go", loggedIn: Array.isArray(connections) && connections.length > 0, account: null }
-  })
+    const code = /^Enter code:\s*([A-Za-z0-9][A-Za-z0-9-]{1,62}[A-Za-z0-9])$/.exec(plain)?.[1]
+    if (userCode === null && code !== undefined) userCode = code
+  }
+  return url === null || userCode === null ? null : { url, userCode }
+}
 
 export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIGN_IN)[P]> } = {
   "claude-cli": {
@@ -292,6 +324,28 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     // Its commands and limits only show inside an ACP session.
     probe: null,
   },
+  // OpenCode 2's Console account signs the user in to the free models through the CLI's device flow: it prints a code
+  // and link, then polls Console until the user approves. Credentials and sessions share the same OpenCode database as
+  // Go's but live under their own per-user XDG_DATA_HOME, so the two logins stay isolated. The device credential has no
+  // id Kestrel can name for `auth logout`, so removing the directory is the sign-out (nothing is revoked server-side).
+  opencode: {
+    bin: "opencode",
+    dir: "opencode",
+    configEnv: "XDG_DATA_HOME",
+    brokerEnv: [],
+    status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeStatus(OPENCODE, "opencode") },
+    identity: null,
+    signIn: {
+      kind: "page",
+      // The explicit integration and method are what let the CLI run without an interactive terminal.
+      args: () => ["auth", "login", OPENCODE, "--method", "device", "--standalone"],
+      parseLoginLink: parseOpenCodeDeviceLoginLink,
+      needsCode: false,
+    },
+    logout: null,
+    // No probe: the Console account reports no limits through the CLI, and OpenCode's slash commands do nothing over ACP.
+    probe: null,
+  },
   // OpenCode 2 keeps its credentials and its sessions in one database under `$XDG_DATA_HOME/opencode`; the user's Go
   // key goes in as one credential Kestrel names, which `auth import` (reading stdin, so the key is on no command line)
   // adds and `auth logout` removes. `--standalone` keeps each command off OpenCode's background service.
@@ -300,7 +354,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     dir: "opencode-go",
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
-    status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeGoStatus },
+    status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeStatus(OPENCODE_GO, "opencode-go") },
     identity: null,
     signIn: {
       kind: "key",
@@ -321,6 +375,12 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
 export const CLI_PROVIDERS: ReadonlyArray<CliProvider> = CliProvider.literals
 
 /**
+ * The oldest `<bin> --version` a harness works with: `[major, minor]`, or `[major, minor, patch]` when a feature
+ * landed inside a minor line.
+ */
+export type HarnessMinimum = readonly [number, number] | readonly [number, number, number]
+
+/**
  * How each model provider's runs work: the conversation the harness holds with its CLI, and the CLI whose login can
  * stand in for the broker, which also discovers the commands a thread can run. OpenCode offers no commands: its
  * `/init` and `/review` do nothing over ACP (2.0.6 answers `end_turn` at once).
@@ -330,8 +390,8 @@ export interface Harness {
   readonly cli: CliProvider | null
   /** The executable the default command runs; the box offers the provider only where it finds it (`capabilities.ts`). */
   readonly bin: string
-  /** The oldest `[major, minor]` version (`<bin> --version`) the harness works with; null when any will do. */
-  readonly minVersion: readonly [number, number] | null
+  /** The oldest version (`<bin> --version`) the harness works with; null when any will do. */
+  readonly minVersion: HarnessMinimum | null
   /**
    * Whether a run gets the broker's keys. A standalone harness reaches models through the broker like a vendor CLI;
    * OpenCode (free or Go) and Antigravity run their own provider's models, so the broker's keys would only offer them
@@ -350,7 +410,8 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   minimax: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
-  opencode: { conversation: "acp", cli: null, bin: "opencode", minVersion: [2, 0], broker: false },
+  // The free models' Console sign-in (device flow, `auth login opencode`) arrived in 2.0.7.
+  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 0, 7], broker: false },
   // The Go plan's sign-in is a key in OpenCode's credential store, which `auth import` fills from 2.1.
   "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.

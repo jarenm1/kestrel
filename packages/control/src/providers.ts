@@ -109,6 +109,7 @@ export const PROVIDERS: readonly Provider[] = [
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },
+  { id: "opencode", label: "OpenCode", kind: "cli" },
   { id: "opencode-go", label: "OpenCode Go", kind: "cli" },
 ]
 

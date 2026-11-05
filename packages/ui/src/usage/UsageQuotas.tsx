@@ -23,6 +23,7 @@ const PROVIDER_LABELS: Record<CliProvider, string> = {
   "codex-cli": "Codex",
   "antigravity-cli": "Antigravity",
   "opencode-go": "OpenCode Go",
+  opencode: "OpenCode",
 }
 
 /** A banked reset the user asked to spend, and how that request is going. */

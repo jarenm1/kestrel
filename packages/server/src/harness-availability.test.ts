@@ -8,7 +8,7 @@ const probe = (installed: Record<string, string>): HarnessProbe => ({
 
 const box = { fakeAgent: false, sandboxPath: null }
 
-test("a box offers only the harnesses it has, OpenCode only from version 2", () => {
+test("a box offers only the harnesses it has, OpenCode only once its Console sign-in exists", () => {
   // The Anthropic-compatible gateways run through Claude Code, so having `claude` offers them too.
   expect(availableHarnesses(box, probe({ claude: "2.1.318 (Claude Code)", codex: "codex-cli 0.166.0" }))).toEqual([
     "anthropic",
@@ -19,7 +19,9 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
     "minimax",
     "moonshot",
   ])
-  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.7" }))).toEqual(["opencode"])
+  // 2.0.6 has `auth login` but no `opencode` Console integration for the free models.
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual([])
   expect(availableHarnesses(box, probe({ opencode: "1.19.5" }))).toEqual([])
   // A binary that runs but does not say its version (a broken shim) cannot be trusted to be OpenCode 2.
   expect(availableHarnesses(box, probe({ opencode: "error: could not create process" }))).toEqual([])
@@ -30,8 +32,9 @@ test("a box offers only the harnesses it has, OpenCode only from version 2", () 
 
 test("OpenCode 2.1 adds the Go plan", () => {
   expect(availableHarnesses(box, probe({ opencode: "opencode v2.1.0" }))).toEqual(["opencode", "opencode-go"])
-  // The Go plan shares OpenCode's binary but needs 2.1; 2.0 offers only free OpenCode.
-  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual(["opencode"])
+  // The Go plan shares OpenCode's binary but needs 2.1; 2.0 offers only free OpenCode, once its Console sign-in exists.
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.7" }))).toEqual(["opencode"])
+  expect(availableHarnesses(box, probe({ opencode: "opencode v2.0.6" }))).toEqual([])
 })
 
 test("a configured command's own binary is what the box offers", () => {

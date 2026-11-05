@@ -179,7 +179,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
           >
             Open sign-in page
           </Button>
-          <Text style={connectionStyles.muted}>Enter this code on the OpenAI page:</Text>
+          <Text style={connectionStyles.muted}>Enter this code on the sign-in page:</Text>
           <View style={connectionStyles.actions}>
             {login.userCode ? (
               <Text selectable style={connectionStyles.code}>
