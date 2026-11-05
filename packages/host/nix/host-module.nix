@@ -390,6 +390,19 @@ ${lib.optionalString cfg.turn.enable "          udp dport ${toString config.serv
       };
     };
 
+    # The fence watchdog stops every VM once the control plane's lease lapses (docs/nest.md, Fence watchdog). It runs
+    # apart from kestrel-host, with no ordering or requirement on it: a hung or dead agent must not keep a VM serving.
+    systemd.services.kestrel-fence = {
+      description = "Nest fence watchdog (stops VMs past the lease in lease.json)";
+      wantedBy = [ "multi-user.target" ];
+      path = with pkgs; [ systemd coreutils ];
+      serviceConfig = {
+        ExecStart = "${packages."kestrel-host"}/bin/kestrel-host fence --config ${configFile}";
+        Restart = "always";
+        RestartSec = 2;
+      };
+    };
+
     systemd.services.kestrel-depcache = {
       description = "Nest dependency cache (read-only for VMs)";
       wantedBy = [ "multi-user.target" ];
