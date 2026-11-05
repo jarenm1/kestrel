@@ -84,8 +84,8 @@ pub async fn file(
         fetch_simple(&state, false, &project),
     )
     .await?;
-    let (file, len) = cache::artifact(&state, LINK_KIND, &rest, &link).await?;
-    Ok(cache::file_response(file, len))
+    let (file, len, pin) = cache::artifact(&state, LINK_KIND, &rest, &link).await?;
+    Ok(cache::file_response(file, len, pin))
 }
 
 /// The project a simple page describes, from its upstream URL `{pypi_index}/simple/<project>/`.

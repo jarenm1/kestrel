@@ -20,7 +20,7 @@ use tracing::{info, warn};
 
 use crate::digest::{Expected, Hasher};
 use crate::error::Error;
-use crate::store::{Cached, Link, Store};
+use crate::store::{new_generation, Cached, Link, Pin, Store};
 use crate::{AppState, Config};
 
 /// An artifact a metadata document lists, with the digest its bytes must have.
@@ -106,6 +106,7 @@ pub async fn metadata(
     let rewritten =
         rewrite(&state.config, upstream, &body, &content_type).map_err(Error::Upstream)?;
     let fetched_at = now_secs();
+    let generation = new_generation();
     info!(
         "fetched {cache_key}: {} artifacts listed",
         rewritten.links.len()
@@ -119,12 +120,14 @@ pub async fn metadata(
                 expected: artifact.expected,
                 source: cache_key.clone(),
                 fetched_at,
+                generation: generation.clone(),
             };
             (link_kind, link_key, link)
         })
         .collect();
     let cached = Cached {
         fetched_at,
+        generation,
         content_type: rewritten.content_type,
         body: rewritten.body,
     };
@@ -189,13 +192,13 @@ async fn current_link(
 }
 
 /// Opens the artifact a current link names, verified against the link's digest. Downloads it first when it is not
-/// stored or fails verification. Returns the file and its length.
+/// stored or fails verification. Returns the file, its length, and a pin that keeps it cached while it is read.
 pub async fn artifact(
     state: &Arc<AppState>,
     kind: &'static str,
     key: &str,
     link: &Link,
-) -> Result<(File, u64), Error> {
+) -> Result<(File, u64, Pin), Error> {
     let path = state.store.blob_path(&link.expected);
     let _flight = state
         .flights
@@ -217,9 +220,9 @@ fn verify_stored(
     store: &Store,
     path: &Path,
     expected: &Expected,
-) -> io::Result<Option<(File, u64)>> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
+) -> io::Result<Option<(File, u64, Pin)>> {
+    let (mut file, pin) = match store.open_blob(path) {
+        Ok(opened) => opened,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             store.forget_blob(path);
             return Ok(None);
@@ -245,8 +248,7 @@ fn verify_stored(
         return Ok(None);
     }
     file.seek(SeekFrom::Start(0))?;
-    store.touch_blob(path);
-    Ok(Some((file, len)))
+    Ok(Some((file, len, pin)))
 }
 
 /// Streams the artifact into a temporary file, hashing as it goes. Only bytes that match the digest are committed,
@@ -256,7 +258,7 @@ async fn download(
     kind: &'static str,
     key: &str,
     link: &Link,
-) -> Result<(File, u64), Error> {
+) -> Result<(File, u64, Pin), Error> {
     let response = state.client.get(&link.upstream).send().await?;
     let status = response.status();
     if !status.is_success() {
@@ -312,17 +314,21 @@ async fn download(
         )));
     }
     let expected = link.expected.clone();
-    let file = on_store(state, move |store| {
+    let (file, pin) = on_store(state, move |store| {
         Ok(store.commit_blob(tmp, &expected, size, reservation)?)
     })
     .await?;
     info!("stored {kind} {key}: {size} bytes, verified {algo}");
-    Ok((file, size))
+    Ok((file, size, pin))
 }
 
-/// Streams a verified artifact to the client.
-pub fn file_response(file: File, len: u64) -> Response {
-    let body = Body::from_stream(ReaderStream::new(tokio::fs::File::from_std(file)));
+/// Streams a verified artifact to the client. The pin is held until the body is dropped, so the file stays cached.
+pub fn file_response(file: File, len: u64, pin: Pin) -> Response {
+    let stream = ReaderStream::new(tokio::fs::File::from_std(file)).map(move |chunk| {
+        let _pinned = &pin;
+        chunk
+    });
+    let body = Body::from_stream(stream);
     let mut response = body.into_response();
     response
         .headers_mut()

@@ -64,8 +64,8 @@ pub async fn download(
         fetch_index_file(&state, &index_path(name)),
     )
     .await?;
-    let (file, len) = cache::artifact(&state, LINK_KIND, &key, &link).await?;
-    Ok(cache::file_response(file, len))
+    let (file, len, pin) = cache::artifact(&state, LINK_KIND, &key, &link).await?;
+    Ok(cache::file_response(file, len, pin))
 }
 
 async fn fetch_index_file(state: &Arc<AppState>, path: &str) -> Result<Cached, Error> {

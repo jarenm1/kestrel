@@ -38,8 +38,8 @@ pub async fn serve(
                 fetch_packument(&state, name, true),
             )
             .await?;
-            let (file, len) = cache::artifact(&state, LINK_KIND, &rest, &link).await?;
-            Ok(cache::file_response(file, len))
+            let (file, len, pin) = cache::artifact(&state, LINK_KIND, &rest, &link).await?;
+            Ok(cache::file_response(file, len, pin))
         }
         None => {
             let abbreviated = accept_header(&headers).contains(ABBREVIATED_TYPE);

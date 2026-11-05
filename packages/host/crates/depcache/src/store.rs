@@ -11,7 +11,7 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -33,11 +33,15 @@ pub struct Link {
     pub source: String,
     /// `fetched_at` of that fetch.
     pub fetched_at: u64,
+    /// Generation of that fetch. A link is served only while its source's latest fetch has the same generation.
+    pub generation: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct MetaHead {
     pub fetched_at: u64,
+    /// Generation of this fetch; links written by any other fetch of the same document are not served.
+    pub generation: String,
     pub content_type: String,
     /// Kind and key of every link this fetch wrote. The document is served only while all of them exist.
     pub links: Vec<(String, String)>,
@@ -45,6 +49,7 @@ pub struct MetaHead {
 
 pub struct Cached {
     pub fetched_at: u64,
+    pub generation: String,
     pub content_type: String,
     pub body: Vec<u8>,
 }
@@ -61,6 +66,8 @@ struct Lru {
     by_tick: BTreeMap<u64, PathBuf>,
     /// Cache key of the metadata fetch that wrote each link file. A link is served only for the fetch that owns it.
     owners: HashMap<PathBuf, String>,
+    /// Open readers of each blob. A pinned blob is never evicted, so a response still streaming it stays within the cap.
+    pins: HashMap<PathBuf, u64>,
 }
 
 impl Lru {
@@ -87,6 +94,29 @@ impl Lru {
         self.owners.get(path).is_some_and(|o| o.as_str() == owner)
     }
 
+    /// Counts one more open reader of `path`.
+    fn pin(&mut self, path: &Path) {
+        *self.pins.entry(path.to_owned()).or_default() += 1;
+    }
+
+    fn unpin(&mut self, path: &Path) {
+        if let Some(readers) = self.pins.get_mut(path) {
+            *readers -= 1;
+            if *readers == 0 {
+                self.pins.remove(path);
+            }
+        }
+    }
+
+    /// Bytes of indexed files that eviction cannot remove.
+    fn pinned_bytes(&self) -> u64 {
+        self.pins
+            .keys()
+            .filter_map(|path| self.by_path.get(path))
+            .map(|&(_, size)| size)
+            .sum()
+    }
+
     fn remove(&mut self, path: &Path) {
         self.owners.remove(path);
         if let Some((tick, size)) = self.by_path.remove(path) {
@@ -102,6 +132,9 @@ impl Lru {
         for path in self.by_tick.values() {
             if used <= limit {
                 break;
+            }
+            if self.pins.contains_key(path) {
+                continue;
             }
             used -= self.by_path[path].1;
             victims.push(path.clone());
@@ -139,6 +172,18 @@ impl Drop for Reservation {
         if bytes > 0 {
             lock_index(&self.lru).reserved -= bytes;
         }
+    }
+}
+
+/// Keeps a blob out of eviction until dropped. A response streaming a blob holds one.
+pub struct Pin {
+    lru: Arc<Mutex<Lru>>,
+    path: PathBuf,
+}
+
+impl Drop for Pin {
+    fn drop(&mut self) {
+        lock_index(&self.lru).unpin(&self.path);
     }
 }
 
@@ -236,10 +281,11 @@ impl Store {
     }
 
     /// Reserves `bytes` of the cap for a download, evicting least recently used files to make room. `None` when
-    /// downloads in flight already hold the room.
+    /// downloads in flight, or blobs being streamed, already hold the room.
     pub fn reserve(&self, bytes: u64) -> Option<Reservation> {
         let mut lru = lock_index(&self.lru);
-        if lru.reserved + bytes > self.cap {
+        // Pinned blobs cannot be evicted, so only the room beside them is available.
+        if lru.pinned_bytes() + lru.reserved + bytes > self.cap {
             return None;
         }
         lru.reserved += bytes;
@@ -251,27 +297,43 @@ impl Store {
     }
 
     /// Moves a verified download into place in place of its reservation, evicts least recently used files above the
-    /// cap, and returns the committed file positioned at its start.
+    /// cap, and returns the committed file positioned at its start. The file is pinned until the returned `Pin` drops.
     pub fn commit_blob(
         &self,
         tmp: NamedTempFile,
         expected: &Expected,
         size: u64,
         mut reservation: Reservation,
-    ) -> io::Result<File> {
+    ) -> io::Result<(File, Pin)> {
         let path = self.blob_path(expected);
         let mut lru = lock_index(&self.lru);
         let mut file = tmp.persist(&path).map_err(|e| e.error)?;
         lru.reserved -= reservation.release();
-        lru.insert(path, size);
+        lru.insert(path.clone(), size);
+        lru.pin(&path);
+        let pin = Pin {
+            lru: Arc::clone(&self.lru),
+            path,
+        };
         self.evict(&mut lru, self.cap);
         drop(lru);
         file.seek(SeekFrom::Start(0))?;
-        Ok(file)
+        Ok((file, pin))
     }
 
-    pub fn touch_blob(&self, path: &Path) {
-        lock_index(&self.lru).touch(path);
+    /// Opens a stored blob and pins it, so eviction skips it until the returned `Pin` is dropped.
+    pub fn open_blob(&self, path: &Path) -> io::Result<(File, Pin)> {
+        let mut lru = lock_index(&self.lru);
+        let file = File::open(path)?;
+        lru.touch(path);
+        lru.pin(path);
+        Ok((
+            file,
+            Pin {
+                lru: Arc::clone(&self.lru),
+                path: path.to_owned(),
+            },
+        ))
     }
 
     /// Drops a blob that is missing or failed verification.
@@ -312,7 +374,7 @@ impl Store {
 
     fn link_is_current(&self, link: &Link) -> io::Result<bool> {
         Ok(self.read_meta_head(&link.source)?.is_some_and(|head| {
-            head.fetched_at == link.fetched_at && self.is_fresh(head.fetched_at)
+            head.generation == link.generation && self.is_fresh(head.fetched_at)
         }))
     }
 
@@ -367,6 +429,7 @@ impl Store {
         };
         Ok(Some(Cached {
             fetched_at: head.fetched_at,
+            generation: head.generation,
             content_type: head.content_type,
             body,
         }))
@@ -384,6 +447,7 @@ impl Store {
     ) -> Result<(), Error> {
         let head = serde_json::to_vec(&MetaHead {
             fetched_at: cached.fetched_at,
+            generation: cached.generation.clone(),
             content_type: cached.content_type.clone(),
             links: links
                 .iter()
@@ -554,6 +618,20 @@ fn hashed(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
+/// A value no other fetch shares: the time, the process and a counter, so fetches of one document in the same second
+/// still differ.
+pub fn new_generation() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!(
+        "{nanos:x}-{:x}-{:x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};
@@ -571,6 +649,7 @@ mod tests {
         let (_dir, store) = store(1 << 20);
         let cached = Cached {
             fetched_at: now_secs() + 3600,
+            generation: "first".to_owned(),
             content_type: "text/plain".to_owned(),
             body: b"doc".to_vec(),
         };
@@ -646,9 +725,11 @@ mod tests {
             },
             source: "k".to_owned(),
             fetched_at: now_secs(),
+            generation: "g".to_owned(),
         };
         let cached = Cached {
             fetched_at: now_secs(),
+            generation: "g".to_owned(),
             content_type: "text/plain".to_owned(),
             body: b"doc".to_vec(),
         };
@@ -685,6 +766,7 @@ mod tests {
         let (_dir, store) = store(64);
         let cached = Cached {
             fetched_at: now_secs(),
+            generation: "g".to_owned(),
             content_type: "text/plain".to_owned(),
             body: vec![b'x'; 100],
         };
@@ -701,6 +783,7 @@ mod tests {
         let held = store.reserve(900).expect("reserve");
         let cached = Cached {
             fetched_at: now_secs(),
+            generation: "g".to_owned(),
             content_type: "text/plain".to_owned(),
             body: vec![b'x'; 200],
         };
@@ -728,9 +811,11 @@ mod tests {
             },
             source: source.to_owned(),
             fetched_at: now,
+            generation: source.to_owned(),
         };
         let cached = |body: &str| Cached {
             fetched_at: now,
+            generation: body.to_owned(),
             content_type: "application/json".to_owned(),
             body: body.as_bytes().to_vec(),
         };
@@ -769,5 +854,67 @@ mod tests {
                 .source,
             "full"
         );
+    }
+
+    #[test]
+    fn a_link_is_not_served_once_a_later_fetch_of_its_listing_drops_it() {
+        let (_dir, store) = store(1 << 20);
+        let now = now_secs();
+        let link = Link {
+            upstream: "https://up.example/a.tgz".to_owned(),
+            expected: Expected {
+                algo: Algo::Sha256,
+                hex: hex::encode(Sha256::digest(b"tarball")),
+            },
+            source: "k".to_owned(),
+            fetched_at: now,
+            generation: "first".to_owned(),
+        };
+        let cached = |generation: &str| Cached {
+            fetched_at: now,
+            generation: generation.to_owned(),
+            content_type: "text/plain".to_owned(),
+            body: b"doc".to_vec(),
+        };
+        store
+            .commit_metadata("k", &[("npm", "a".to_owned(), link)], &cached("first"))
+            .expect("commit");
+        assert!(store.current_link("npm", "a").expect("read").is_some());
+
+        // A second fetch in the same second that no longer lists the artifact.
+        store
+            .commit_metadata("k", &[], &cached("second"))
+            .expect("commit");
+        assert!(
+            store.current_link("npm", "a").expect("read").is_none(),
+            "the link belongs to a fetch the listing has since replaced"
+        );
+    }
+
+    #[test]
+    fn a_streamed_blob_is_not_evicted_and_keeps_its_room() {
+        let (_dir, store) = store(100);
+        let blob = vec![5u8; 60];
+        let expected = Expected {
+            algo: Algo::Sha256,
+            hex: hex::encode(Sha256::digest(&blob)),
+        };
+        let path = store.blob_path(&expected);
+        let reservation = store.reserve(60).expect("reserve");
+        let mut tmp = store.new_tmp().expect("tmp");
+        std::io::Write::write_all(&mut tmp, &blob).expect("write");
+        let (_file, pin) = store
+            .commit_blob(tmp, &expected, 60, reservation)
+            .expect("commit");
+
+        let _other = store.reserve(40).expect("the room beside the pinned blob");
+        assert!(
+            store.reserve(1).is_none(),
+            "the pinned blob keeps its 60 bytes"
+        );
+
+        drop(pin);
+        assert!(store.reserve(60).is_some(), "an unpinned blob makes room");
+        assert!(!path.exists(), "the blob was evicted once unpinned");
     }
 }
