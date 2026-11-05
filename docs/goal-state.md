@@ -1,7 +1,8 @@
 # Kestrel goal state
 
 Status: proposal, written November 2026. Nothing here is built unless it says so. For what runs today see
-[architecture.md](architecture.md) and [box.md](box.md).
+[architecture.md](architecture.md) and [box.md](box.md). What the Nest needs for paying users, including where we buy
+machines, costs, regions, load balancing and outage survival, is in [nest-production.md](nest-production.md).
 
 ## Product
 
@@ -9,9 +10,13 @@ Kestrel is two products:
 
 - **The interface:** web and mobile apps for directing agents and checking their work across every box a person has.
   It is built for work you have to see: game development, 3D modelling and VFX.
-- **The Nest:** Kestrel's slightly opinionated agent VMs, billed by use.
+- **The Nest:** Kestrel's slightly opinionated agent VMs, billed by use. Kestrel owns and operates it.
 
-**BYOB** (bring your own box) connects a person's own machines to the interface instead of, or alongside, the Nest.
+**BYOB** (bring your own box) connects a person's own compute to the interface instead of, or alongside, the Nest. That
+compute can be a single machine or a whole cluster.
+
+Kestrel's agents are the only consumers of this compute. There is no marketplace where third parties sell machines, and
+no public API for renting raw compute.
 
 Visual work is checked in two ways, and they do different jobs:
 
@@ -26,43 +31,60 @@ Visual work is checked in two ways, and they do different jobs:
 2. **BYOB and the Nest work the same way.** Both are the same box behind the same contract. The Nest is effectively
    Kestrel's first BYOB customer, plus provisioning and billing.
 3. **Nest billing follows real use.** People pay for what their VM uses, and an idle VM costs them close to nothing.
+4. **Modular by contract.** The apps depend only on the box contract and the pool contract. A new kind of compute is a new
+   pool, not a change to the apps.
+5. **A Kestrel outage doesn't stop running work.** Running boxes depend on the control plane for neither video, data nor
+   permission to keep running.
 
 ## System map
 
 ```mermaid
 flowchart TB
   APP["Interface<br/>web and mobile, every box in one view"]
-  CP["Control plane<br/>sign-in, box registry, tokens, signaling,<br/>placement, usage and billing<br/>no thread data or video"]
-  CONTRACT["Box contract<br/>API, auth, capabilities, conformance suite"]
+  CP["Control plane<br/>sign-in, box directory, tokens, credentials,<br/>pool selection, billing<br/>no thread data or video"]
+  BOXC["Box contract<br/>API, auth, capabilities, conformance suite"]
 
-  subgraph BYOB["BYOB"]
+  subgraph MACHINE["BYOB: one machine"]
     UB["kestrel-box<br/>Linux, WSL2 or Lima on macOS"]
   end
 
-  subgraph NEST["The Nest: one host, many users"]
-    HA["Host agent<br/>VM lifecycle, volumes, ingress, metering"]
+  subgraph CLUSTER["BYOB: a user's cluster"]
+    UC["Pool controller"]
+    UV["Boxes on their hosts"]
+    UC --> UV
+  end
+
+  subgraph NEST["The Nest: one pool per region"]
+    NC["Pool controller"]
+    HA["Hosts<br/>VM lifecycle, volumes, ingress, metering"]
     VM1["User A's VM, CPU shape<br/>kestrel-box"]
     VM2["User B's VM, GPU shape<br/>kestrel-box"]
+    NC --> HA
     HA --> VM1
     HA --> VM2
   end
 
   APP -->|"sign-in, tokens"| CP
-  APP ==>|"direct: threads, events, stream, evidence"| CONTRACT
-  CONTRACT ==> UB
-  CONTRACT ==> VM1
-  CONTRACT ==> VM2
-  UB -.->|"presence, signaling"| CP
-  VM1 -.->|"presence, signaling"| CP
-  HA -.->|"capacity, usage, lifecycle commands"| CP
+  APP ==>|"direct: threads, events, stream, evidence"| BOXC
+  BOXC ==> UB
+  BOXC ==> UV
+  BOXC ==> VM1
+  BOXC ==> VM2
+  UB -.->|"pool socket"| CP
+  UC -.->|"pool socket"| CP
+  NC -.->|"pool socket, usage"| CP
 ```
 
 ## Terms
 
 | Term | Meaning |
 |---|---|
-| Box | One running `kestrel-box` with one owner: a person's machine, or a Nest VM |
-| Host | A physical or rented machine in the Nest that runs many VMs for different users |
+| Box | One running `kestrel-box` with one owner: a person's machine, a VM on their cluster, or a Nest VM |
+| Pool | A group of compute managed as a unit: one machine, one user's cluster or one Nest region |
+| Pool controller | The program that schedules a pool's boxes across its hosts |
+| Pool socket | One outbound WebSocket from a pool to the control plane, for lifecycle commands and status |
+| Host | A machine in a pool that runs many VMs |
+| Region | A Nest pool whose hosts are close enough for one low-latency experience |
 | Shape | A VM's resource class, such as low-RAM CPU, standard CPU or GPU |
 | Volume | A Nest user's persistent disk: threads, workspaces, repo mirrors and CLI logins |
 | Evidence | A saved screenshot, clip or marked output file tied to a thread and run |
@@ -113,24 +135,89 @@ Gaps to close today:
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
   remove it: every box uses `/box/self`.
 
+## Pools
+
+The box contract says what any box can do. The pool contract says who creates, wakes, suspends and destroys boxes. Keep
+everything else internal, so that each kind of compute can work differently underneath.
+
+| Pool | Controller | Lifecycle | Volumes and keys | Usage sent to Kestrel |
+|---|---|---|---|---|
+| One machine | None: the box is its own pool | None | Local | None |
+| A user's cluster | On their infrastructure | What their driver supports | Theirs | None |
+| A Nest region | On Kestrel's infrastructure, outside Cloudflare | All | Kestrel's | Yes, for billing |
+
+A pool reports what it supports, and every lifecycle feature is optional. These fields are illustrative:
+
+```ts
+interface PoolCapabilities {
+  readonly lifecycle: {
+    readonly create: boolean
+    readonly suspend: boolean
+    readonly park: boolean
+    readonly resize: boolean
+  }
+  readonly gpu: "none" | "static" | "on-demand"
+  readonly workers: boolean
+}
+
+// Pool to Kestrel: hello, capacity summary, box state or URL changed
+// Kestrel to pool: create, wake, suspend, park, destroy, setLimits, gpu
+```
+
+Epochs, hosts and volumes stay private to the pool. `NestHostCommand` remains the internal protocol of Kestrel's
+`kestrel-host` driver, not the public contract.
+
+**Scheduling has two levels.** The control plane picks a pool when a thread starts, which is infrequent and cheap. The
+pool's controller picks a host. So a cluster's size doesn't change what it costs Kestrel, as requirement 1 needs: traffic
+through the pool socket follows lifecycle events, and never host count, agent activity or video.
+
+**Drivers.** Start with one machine and `kestrel-host`, which the Nest needs anyway. `kestrel-host` currently expects NixOS
+on bare metal with root, which many companies' clusters can't offer. A Kubernetes driver comes next if demand shows it,
+and the contract must not assume VMs. It would likely lose suspend and GPU hot-plug, and bubblewrap inside pods needs
+testing. A shared conformance suite covers every driver.
+
+**A pool socket that drops** doesn't affect running boxes, since nothing they do passes through it. Kestrel can't send
+wake-ups until it reconnects, and box tokens must come from the box's own refresh credential if the outage lasts
+([details](nest-production.md#when-cloudflare-goes-down)).
+
+**Policies between pools**
+
+- **Overflow** from a user's pool into the Nest is opt-in per pool, and can be restricted per repository. A company's code
+  may not be allowed to leave its cluster.
+- **Shared clusters:** root on a host can read its VMs, including a box's GitHub tokens and model keys. Before a user's
+  credentials reach a pool someone else operates, the app says so.
+- **Ownership:** each pool has one owner at first, and that field is designed to hold an organization later.
+
+Work needed in today's code:
+
+- [Placement considers every connected host](../packages/control/src/nest-fleet.ts), since hosts have no owner. A user's
+  host must not be connected until pools exist, or other users' boxes could land on it. Registration is operator-only today
+  and has to stay that way until then.
+- `NestFleet` takes its database and socket link as inputs, but it also touches `user_boxes` and `meter_hosts` directly.
+  Those go behind an interface, so that it can run outside the Hub.
+- `UserBox.nest` and the apps' checks on it become generic state with a list of available actions.
+- [A host on another protocol version is refused](../packages/protocol/src/nest.ts). Controllers run by users need a
+  version support window.
+
 ## Control plane
 
-The control plane handles short requests only: sign-in, the box registry, box tokens, credentials, placement, usage
-records and billing.
+The control plane handles short requests only: sign-in, the box directory, box tokens, credentials, pool selection,
+usage rollups and billing.
 
 **Cost guardrails**
 
 - No thread data, event streams, video or evidence for BYOB users.
-- Every box holds at most one low-traffic dial-out socket for presence, wake-ups and WebRTC signaling. Keep-alives use
-  Durable Object hibernation and auto-responses, so an idle box does not wake the Hub.
-- Usage arrives in batches, every few minutes, not per sample.
+- Each pool holds at most one low-traffic dial-out socket for presence, wake-ups and WebRTC signaling. Keep-alives use
+  Durable Object hibernation and auto-responses, so an idle pool does not wake the Hub.
+- Usage arrives as rollups, and only from the Nest. Raw records stay in object storage.
 - The legacy relay is deleted once its remaining users have moved.
 
 An active BYOB user costs on the order of a few thousand control requests a month, which is well under a cent at current
 Workers and Durable Objects pricing. Check the current price list before relying on the exact figure.
 
-**Scale:** the Hub is one Durable Object for all users. That is fine now, but presence sockets for many boxes make it the
-first thing to outgrow. Split per-user data into per-user objects before BYOB grows large.
+**Scale:** the Hub is one Durable Object for all users. Split per-user data into per-user objects before BYOB grows large,
+and move host sockets and Nest scheduling out into pool controllers. Meter records are the first limit to reach: they fill
+the Hub's 10 GB at around 80 running or suspended VMs ([details](nest-production.md#control-plane-scale)).
 
 ## BYOB
 
@@ -178,6 +265,10 @@ product copy should say so plainly.
 
 ## The Nest
 
+The Nest is a set of regional pools. The [production design](nest-production.md) covers suppliers, costs, regions, load
+balancing, outages, backups, billing, abuse and the launch checklist. The [host design](nest.md) covers how one host works.
+This section holds the product decisions.
+
 ### Per-user VMs on shared hosts
 
 Each user gets their own VM, and one host runs VMs for many users.
@@ -211,49 +302,13 @@ A shape is a set of limits, not a VM type. The host resizes a running VM inside 
 virtio-mem memory) and lends it a GPU by hot-plugging one while it is needed, so changing shape needs no restart. The
 design is in [nest.md](nest.md#resource-policy-host-agent).
 
-- **One box per user.** A thread that needs a GPU asks for one; the box restarts its desktop on the GPU renderer, and
-  agent runs, shells and files carry on.
+- **One primary box per user.** A thread that needs a GPU asks for one; the box restarts its desktop on the GPU renderer,
+  and agent runs, shells and files carry on.
+- **Agents can lease short-lived workers** beyond that box, within a budget the user sets
+  ([design](nest-production.md#agent-compute-leases)). A worker is an ordinary box with a parent and a time limit.
 - **Threads stay pinned to their box.** They never move automatically while running.
 
-### Host layer
-
-A new package (`packages/host`) runs on each host. It dials out to the control plane and handles no user secrets. Parts,
-interfaces and flows: [nest.md](nest.md).
-
-```mermaid
-flowchart LR
-  CP["Control plane<br/>placement, registry, billing"]
-  subgraph HOST["Host"]
-    HA["Host agent"]
-    HV["Hypervisor"]
-    ING["Ingress<br/>TLS, routing, wake on request"]
-    VOL["Volumes<br/>local NVMe, snapshots"]
-    MET["Meter<br/>host-side cgroups and devices"]
-    NET["Network<br/>per-VM limits and egress policy"]
-    VM["VMs running kestrel-box"]
-    HA --> HV --> VM
-    HA --> VOL
-    HA --> MET
-    HA --> NET
-    ING --> VM
-    MET -.-> VM
-  end
-  STORE[("Object storage<br/>parked volumes, Nest evidence")]
-  CP <-->|"commands, capacity, usage"| HA
-  VOL <--> STORE
-  APP["Interface"] -->|"https://box-id.nest…"| ING
-```
-
-| Part | Job |
-|---|---|
-| Hypervisor | Cloud Hypervisor: VFIO hot-plug, vCPU and virtio-mem resizing, lazy (userfaultfd) snapshot restore and live migration. Firecracker has no GPU passthrough or resizing. |
-| VM image | NixOS built from the flake, so the Nest gets `strict` sandboxing and toolkits. The Nix store can be shared read-only between VMs. |
-| Volumes | Local NVMe while a VM runs, with snapshots in object storage so that a parked user can resume on another host. |
-| Ingress | Routes each box's HTTPS URL to its VM and starts the wake flow when a request reaches a suspended one. |
-| Meter | Measures from the host, because the guest belongs to the user and cannot be trusted for billing. |
-| Network | Limits per-VM bandwidth, and applies egress policy and abuse controls. |
-
-**VM lifecycle**
+### VM lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -281,19 +336,15 @@ rendering, and evidence matters more on GPU work.
 about being busy only pays for its own time, so this signal can come from the guest.
 
 **Waking:** the interface, automations and PR watches can all wake a VM. A request that reaches ingress for a suspended VM
-triggers a resume, and the apps show that state. The Hub wakes a VM through its host agent before dispatching an
+triggers a resume, and the apps show that state. The control plane asks a box's pool to wake it before dispatching an
 automation.
 
-### Load balancing
+### Regions
 
-The control plane places VMs. Its inputs are capacity reports from host agents.
-
-- **Place at start and resume,** which are natural moments that interrupt nothing. Most balancing happens this way.
-- **Pack by CPU, memory and GPU.** CPU can overcommit, memory only cautiously with ballooning, and GPUs not at all.
-- **Move only idle VMs.** A VM parks and resumes elsewhere. Live migration is out of scope, and passthrough GPUs generally
-  cannot do it.
-- **Drain hosts for maintenance** by parking idle VMs and placing nothing new there.
-- **Keep a spare margin on every host,** so that a resume on the same host rarely has to wait.
+Each box has a home region, suggested from latency the app measures and changed only by the user. The app then connects
+directly to the box's host. Placement within a region is the load balancer, and running VMs move only to drain or recover
+a host. See [connecting people](nest-production.md#connecting-people-to-a-nearby-cluster) and
+[load balancing](nest-production.md#load-balancing).
 
 ### Billing
 
@@ -316,7 +367,8 @@ How the meters work:
 - **Disk and egress:** GB-months and GB.
 
 Rates must cover the unused capacity on a host. The margin comes from good packing and overcommit, not from charging for
-idle VMs.
+idle VMs. Proposed rates and the cost model are in [nest-production.md](nest-production.md#what-it-costs). BYOB pools send
+no usage and are never billed.
 
 **Protections against overcharging**
 
@@ -399,39 +451,58 @@ charges and frees the GPU for someone else.
 - The Nest needs per-VM bandwidth limits, abuse detection (mining and spam) and volume encryption, with volumes wiped when
   released.
 - Hosts are trusted by users' VMs. Encrypted volumes limit exposure on disk, but this does not protect against a
-  compromised host.
+  compromised host. This is why a third-party marketplace isn't part of the design, and why the app warns before a user's
+  credentials reach a pool someone else operates.
 
 ## Build order
 
-Each step is useful by itself, and the Nest work comes after the BYOB and evidence work it reuses.
+Two tracks can run side by side. The Nest track's steps are detailed in
+[nest-production.md](nest-production.md#build-order), and the two share the pool work.
 
-1. **Contract:** define capabilities, report them from the box, and build the conformance suite.
+**Contracts and BYOB**
+
+1. **Box contract:** define capabilities, report them from the box, and build the conformance suite.
 2. **BYOB reach:** split the sandbox listener and run the WebRTC spike.
 3. **Relay:** finish the cutover and delete it.
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.
 5. **Evidence:** explicit recording, clips and run summaries first, then the rolling buffer and desktop idle stop.
-6. **Parity:** automations and PR watches on BYOB through the dial-out socket, and multi-box support on mobile.
-7. **Host layer:** one host and one CPU shape, with suspend and resume, running the meter without charging.
-8. **Shapes:** low-RAM and GPU shapes, volumes in object storage, and parking.
-9. **Scheduler:** multiple hosts, placement at resume, and draining.
-10. **Billing:** rate setting from the metered data, spending caps, then charging.
+6. **Pools:** host ownership, the pool contract, generic box state in the apps, and one socket per pool.
+7. **Parity:** automations and PR watches on BYOB through the pool socket, and multi-box support on mobile.
+8. **BYOB clusters:** a self-hosted controller, using the same library as the Nest and `kestrel-host` on the user's metal.
+9. **Cross-pool placement:** overflow rules and worker leases.
+10. **Other drivers,** such as Kubernetes, when demand shows which ones.
 
-A short GPU test belongs alongside step 1, since its result affects what GPU shapes can cost: passthrough, suspend behaviour
-and one fractional GPU option, on one host.
+**The Nest**
+
+1. Stop the worst risks: long leases, soft fence and meter rollups.
+2. Provider acceptance, including the GPU test and contract terms.
+3. Backups: at suspend, every 15 minutes, in a second provider.
+4. Regional controller, on the pool contract.
+5. Placement, drain and failover.
+6. Abuse controls.
+7. Cloudflare independence.
+8. Regions.
+9. Billing, starting with at least 30 days of shadow billing.
+10. Closed beta, then paid launch.
 
 ## Protocol impact
 
 Each step needs a heads-up in its PR, because every package depends on `packages/protocol`. Expected additions:
-capabilities, evidence types and paths, signaling and presence frames, host commands and capacity reports, VM states on box
-records, and usage records. `PLANS` changes when billing arrives.
+capabilities, the pool contract and its version window, box-issued refresh credentials, evidence types and paths, signaling
+and presence frames, host commands and capacity reports, VM states on box records, regions, and usage rollups. `UserBox.nest`
+becomes generic. `PLANS` changes when billing arrives.
 
 ## Open questions
 
+- **Economics:** peak share and memory per running VM decide whether the rates work
+  ([model](nest-production.md#what-it-costs)).
+- **BYOB clusters:** what most users' clusters look like, and so how soon Kubernetes matters.
 - **Resume times:** what suspend and resume cost in practice decides how aggressive the idle timeout can be.
 - **Memory billing:** whether ballooning returns enough memory to bill close to real use.
 - **Fractional GPUs:** which option works with our apps, and whether it is worth its licensing and setup.
 - **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback). The desktop stream has no fallback, so its failure rate on real networks is the open question.
 - **Evidence in PRs:** what GitHub actually renders, and how long Nest evidence is retained.
 - **Free tier:** whether the Nest has one, given that a free VM has a real cost even when suspended.
-- **Teams:** whether a team shares boxes or each seat gets its own. Boxes are single-owner in this design.
+- **Teams:** whether a team shares a pool, and whether it shares boxes or each seat gets its own. Boxes are single-owner in
+  this design.
 - **Current managed boxes:** when they migrate to VMs. They keep running until the host layer can replace them.

@@ -1,7 +1,9 @@
 # Bring your own box, with Kestrel cloud overflow (design)
 
 Status: step 1 (direct mode for a user's own box) is implemented; the rest is a proposal. For Kestrel's compute (the
-Nest), hosts and billing, [goal-state.md](goal-state.md) is the current design.
+Nest), hosts and billing, [goal-state.md](goal-state.md) is the current design. A user's cluster plugs in as a
+[pool](goal-state.md#pools), which also replaces the per-box capacity reports and control-plane placement described below
+wherever a pool has its own controller.
 
 ## Goal
 

@@ -4,6 +4,10 @@ How Kestrel runs boxes in its own VMs. The product goals are in [goal-state.md](
 they are built. Wire formats live in `packages/protocol/src/nest.ts` (host and control plane) and
 `packages/protocol/src/guest.ts` (inside the VM); this document names every other interface between the parts.
 
+This describes the host layer as designed today. [nest-production.md](nest-production.md) is the target for paying users,
+and it changes parts of this: leases come from a regional controller instead of the Hub, leases are longer with a soft
+fence before expiry, placement considers more than memory, and backups run more often and go to a second provider.
+
 BYOB is unaffected: a user's own machine runs `kestrel-box` directly and none of this. The box adapts through
 capabilities (`gpu`, `suspend`), never through "is this the Nest" checks.
 
@@ -53,7 +57,7 @@ flowchart LR
 
 ## Hypervisor
 
-Cloud Hypervisor (pinned from nixpkgs, v54 or newer), driven only through its HTTP API on a Unix socket. Each VM is
+Cloud Hypervisor (pinned from nixpkgs, v54 or newer; Firecracker has no GPU passthrough or resizing), driven only through its HTTP API on a Unix socket. Each VM is
 one `cloud-hypervisor` process in its own systemd scope `kestrel-vm-<boxId>.scope` under `kestrel-vms.slice`, so its
 cgroup is the meter (CPU `cpu.stat usage_usec`, memory `memory.current`).
 
