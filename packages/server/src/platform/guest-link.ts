@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
 import { Either } from "effect"
 import {
@@ -35,17 +36,20 @@ export interface GuestLinkOptions {
 
 export interface GuestLink {
   /**
-   * Asks the guest for the GPU (`true`) or releases it (`false`). The current wish, a release included, is sent again on
-   * every new connection once one has been stated, so a release made while disconnected still reaches the guest.
+   * Asks the guest for the GPU (`true`) or releases it (`false`). Resolves when the guest answers this wish: ok once the
+   * GPU is attached (or released), rejects when it denies. The current wish is sent again, with the same id, on every new
+   * connection, so a wish or a release made while disconnected still reaches the guest.
    */
-  readonly setWanted: (wanted: boolean) => void
+  readonly setWanted: (wanted: boolean) => Promise<void>
+  /** The box enrolled and saved its secret: the guest drops the enrollment token from its env file. Sent on every connection. */
+  readonly markEnrolled: () => void
   /** Sends the current activity now, even when unchanged. */
   readonly sendActivityNow: () => void
   readonly close: () => void
 }
 
 /**
- * Keeps one connection to the guest agent: sends hello, activity and the GPU wish, and answers the guest's requests.
+ * Keeps one connection to the guest agent: sends hello, activity, the GPU wish and enrollment, and answers the guest's requests.
  * A frame longer than the contract allows, or a dropped connection, closes the link; it reconnects with backoff. A
  * frame that does not decode (unknown tags included) is ignored, so a newer guest cannot break an older box.
  */
@@ -56,10 +60,15 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   const heartbeatMs = options.heartbeatMs ?? BOX_ACTIVITY_INTERVAL_MS
 
   let socket: Socket | null = null
+  // True from the socket's connect until its close: a frame made while connecting is sent by the connect replay.
+  let connected = false
   let closed = false
-  let wanted = false
-  // Once the box has stated a wish, every new connection replays it, a release (false) included.
-  let wishStated = false
+  // The current GPU wish, with the id the guest answers it under. Replayed on every new connection.
+  let wish: { readonly id: string; readonly wanted: boolean } | null = null
+  // Wishes the guest has not answered yet, by id.
+  const awaiting = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
+  // Once enrolled, every new connection tells the guest, so it drops the enrollment token from the env file.
+  let enrolled = false
   let delay = minMs
   let reconnectTimer: NodeJS.Timeout | undefined
   let lastSent: string | null = null
@@ -67,7 +76,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   let inbox: Promise<void> = Promise.resolve()
 
   const write = (frame: BoxToGuest): boolean => {
-    if (socket === null || socket.destroyed || !socket.writable) return false
+    if (socket === null || !connected || socket.destroyed || !socket.writable) return false
     socket.write(`${JSON.stringify(frame)}\n`)
     return true
   }
@@ -107,8 +116,14 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
           options.warn(`guest gpuState ${frame.state} failed: ${error instanceof Error ? error.message : String(error)}`)
         }
         return
-      case "reply":
+      case "reply": {
+        const waiter = awaiting.get(frame.id)
+        if (waiter === undefined) return
+        awaiting.delete(frame.id)
+        if (frame.ok) waiter.resolve()
+        else waiter.reject(new Error(frame.error ?? "the guest refused the request"))
         return
+      }
     }
   }
 
@@ -126,9 +141,11 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
     let buffered: Buffer = Buffer.alloc(0)
 
     current.on("connect", () => {
+      connected = true
       delay = minMs
       write({ _tag: "hello", boxVersion: options.boxVersion })
-      if (wishStated) write({ _tag: "gpuWanted", wanted })
+      if (wish !== null) write({ _tag: "gpuWanted", id: wish.id, wanted: wish.wanted })
+      if (enrolled) write({ _tag: "enrolled" })
       sendActivity(true)
     })
 
@@ -159,6 +176,7 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
     })
 
     current.on("close", () => {
+      connected = false
       if (socket === current) socket = null
       if (closed) return
       const wait = delay
@@ -172,9 +190,24 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
 
   return {
     setWanted: (value) => {
-      wanted = value
-      wishStated = true
-      write({ _tag: "gpuWanted", wanted: value })
+      const next = { id: randomUUID(), wanted: value }
+      wish = next
+      const answer = new Promise<void>((resolve, reject) => {
+        if (closed) reject(new Error("the box is stopping"))
+        else awaiting.set(next.id, { resolve, reject })
+      })
+      // A caller that does not await the answer (a release, a withdrawn wish) still gets its failure logged.
+      answer.catch((error: unknown) =>
+        options.warn(
+          `guest GPU ${value ? "request" : "release"} failed: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      )
+      write({ _tag: "gpuWanted", id: next.id, wanted: value })
+      return answer
+    },
+    markEnrolled: () => {
+      enrolled = true
+      write({ _tag: "enrolled" })
     },
     sendActivityNow: () => sendActivity(true),
     close: () => {
@@ -183,6 +216,8 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
       clearTimeout(reconnectTimer)
       socket?.destroy()
       socket = null
+      for (const waiter of awaiting.values()) waiter.reject(new Error("the box is stopping"))
+      awaiting.clear()
     },
   }
 }

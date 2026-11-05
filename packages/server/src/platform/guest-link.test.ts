@@ -108,6 +108,9 @@ const repliesTo = (guest: Guest, id: string): BoxToGuest[] =>
 const activitiesWithRuns = (guest: Guest, runs: number): number =>
   guest.received.filter((r) => r.frame._tag === "activity" && r.frame.activity.runs === runs).length
 
+const wishIds = (guest: Guest): string[] =>
+  guest.received.flatMap((r) => (r.frame._tag === "gpuWanted" ? [r.frame.id] : []))
+
 describe("guest link", () => {
   test("hello and the activity come first on connect; the GPU wish follows once it holds", async () => {
     const guest = await fakeGuest()
@@ -119,7 +122,11 @@ describe("guest link", () => {
 
     link.setWanted(true)
     await guest.when(() => guest.received.some((r) => r.frame._tag === "gpuWanted"))
-    expect(guest.received.find((r) => r.frame._tag === "gpuWanted")?.frame).toEqual({ _tag: "gpuWanted", wanted: true })
+    expect(guest.received.find((r) => r.frame._tag === "gpuWanted")?.frame).toEqual({
+      _tag: "gpuWanted",
+      id: expect.any(String),
+      wanted: true,
+    })
   })
 
   test("a changed activity is sent by the poll; an unchanged one waits for the heartbeat or a forced send", async () => {
@@ -221,7 +228,7 @@ describe("guest link", () => {
     expect(warnings.some((message) => message.includes("frame limit"))).toBe(true)
   })
 
-  test("the GPU wish is sent again on every reconnect while it holds", async () => {
+  test("the GPU wish is sent again on every reconnect while it holds, under the same id", async () => {
     const guest = await fakeGuest()
     const { link } = startLink(guest)
     await guest.when(() => guest.connections() === 1)
@@ -231,6 +238,25 @@ describe("guest link", () => {
     guest.dropLatest()
     await guest.when(() => guest.connections() === 2)
     await guest.when(() => guest.received.some((r) => r.conn === 1 && r.frame._tag === "gpuWanted"))
+    const sent = guest.received.filter((r) => r.frame._tag === "gpuWanted").map((r) => r.frame)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toEqual(sent[0])
+  })
+
+  test("a wish resolves on the guest's ok reply and rejects on its refusal", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    await guest.when(() => guest.connections() === 1)
+
+    const granted = link.setWanted(true)
+    await guest.when(() => wishIds(guest).length === 1)
+    guest.send({ _tag: "reply", id: wishIds(guest)[0], ok: true })
+    await expect(granted).resolves.toBeUndefined()
+
+    const refused = link.setWanted(true)
+    await guest.when(() => wishIds(guest).length === 2)
+    guest.send({ _tag: "reply", id: wishIds(guest)[1], ok: false, error: "no GPU on this host" })
+    await expect(refused).rejects.toThrow("no GPU on this host")
   })
 
   test("a release made while disconnected reaches the guest on reconnect", async () => {
@@ -246,8 +272,30 @@ describe("guest link", () => {
     await guest.when(() => guest.received.some((r) => r.conn === 1 && r.frame._tag === "gpuWanted"))
     expect(guest.received.find((r) => r.conn === 1 && r.frame._tag === "gpuWanted")?.frame).toEqual({
       _tag: "gpuWanted",
+      id: expect.any(String),
       wanted: false,
     })
+  })
+
+  test("enrollment is announced on connect and again on every reconnect", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    await guest.when(() => guest.connections() === 1)
+    link.markEnrolled()
+    await guest.when(() => guest.received.some((r) => r.conn === 0 && r.frame._tag === "enrolled"))
+
+    guest.dropLatest()
+    await guest.when(() => guest.connections() === 2)
+    await guest.when(() => guest.received.some((r) => r.conn === 1 && r.frame._tag === "enrolled"))
+  })
+
+  test("closing the link rejects a wish the guest has not answered", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    await guest.when(() => guest.connections() === 1)
+    const pending = link.setWanted(true)
+    link.close()
+    await expect(pending).rejects.toThrow("the box is stopping")
   })
 
   test("close stops the link: nothing reconnects afterwards", async () => {
