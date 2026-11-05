@@ -255,7 +255,9 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
   rewritten in `restore/config.json`). A backup reads `volume.raw` only once hydration is complete: the periodic backup
   skips a hydrating volume that round (`backedUpAt` unchanged), and park waits for hydration before its backup.
   A lock on `<dest>.lock` is held while the device is served. A second `restore-lazy` of the same `dest` fails at once, so
-  two processes never serve one image from separate presence maps.
+  two processes never serve one image from separate presence maps. `restore` (eager) holds the same `<dest>.lock` for the
+  whole restore, so concurrent restores of one `dest` cannot share `<dest>.partial`; it builds the image there and
+  hard-links it to `dest`, which fails if `dest` exists. The lock file is left beside `dest`.
 
 ### `kestrel-volume` CLI
 

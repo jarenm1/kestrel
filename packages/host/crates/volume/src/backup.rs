@@ -265,6 +265,9 @@ pub fn restore(
         .ok_or_else(|| anyhow!("manifest {volume_ref} is missing"))?;
     let manifest = Manifest::open(&bytes, key, box_id, volume_ref)?;
 
+    // Held for the whole restore, so two restores of one destination cannot share `dest.partial`. The lock file stays
+    // beside `dest`, as the lazy volume's does.
+    let _lock = FileLock::try_acquire(&suffixed(dest, ".lock"))?;
     ensure!(!dest.exists(), "{} already exists", dest.display());
     // The image is built under a staging name and linked to `dest` only once complete, so `dest` never holds a partial
     // restore. A crash leaves only the staging file, which the next attempt replaces.
@@ -393,6 +396,26 @@ mod tests {
         fs::write(&dest, b"keep").unwrap();
         assert!(restore(&out.volume_ref, BOX, &store, &key, &dest).is_err());
         assert_eq!(fs::read(&dest).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn concurrent_restores_of_one_destination_leave_one_intact_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = volume(dir.path(), 4);
+        let out = backup(&path, BOX, dir.path(), &store, &key).unwrap();
+        let dest = dir.path().join("restored.raw");
+        let (first, second) = thread::scope(|scope| {
+            let a = scope.spawn(|| restore(&out.volume_ref, BOX, &store, &key, &dest));
+            let b = scope.spawn(|| restore(&out.volume_ref, BOX, &store, &key, &dest));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert!(
+            first.is_ok() != second.is_ok(),
+            "exactly one restore must succeed"
+        );
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&path).unwrap());
     }
 
     #[test]
