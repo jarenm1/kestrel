@@ -454,6 +454,8 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
           <Pressable
             onPress={toggleDock}
             disabled={!dockOpen}
+            focusable={dockOpen}
+            tabIndex={dockOpen ? 0 : -1}
             accessibilityRole="button"
             accessibilityLabel={`Working threads, ${working.length} running`}
             accessibilityHint={dockCollapsed ? "Shows the working threads" : "Folds the working threads"}
