@@ -144,6 +144,7 @@ function ThreadRow({
     <Pressable
       onPress={() => nav.navigate({ name: "thread", taskId: task.id, box: source.box })}
       focusable={interactive}
+      tabIndex={interactive ? 0 : -1}
       accessibilityRole="button"
       accessibilityLabel={[task.title || "Untitled thread", STATUS_LABEL[task.status], checkoutsLabel]
         .filter(Boolean)
@@ -194,6 +195,7 @@ function ThreadRow({
           accessibilityLabel="Archive thread"
           disabled={archiving}
           focusable={interactive}
+          tabIndex={interactive ? 0 : -1}
           onPress={onArchive}
           style={styles.archive}
         />
@@ -313,6 +315,9 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
       if (cancelled || dockPreference.current.toggled) return;
       dockPreference.current.loaded = true;
       if (stored === "1") setDockCollapsed(true);
+    }).catch(() => {
+      // A storage read that fails must not stop later choices from being saved.
+      dockPreference.current.loaded = true;
     });
     return () => {
       cancelled = true;

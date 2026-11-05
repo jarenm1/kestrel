@@ -9,6 +9,15 @@ The Expo app. Start Metro with `bun run dev:mobile` (from the repo root) and ope
 - The composer groups modern models by connected Anthropic/OpenAI provider. **Manage models** opens Connections: **Harnesses/Subscriptions** shows each installed harness with its model-visibility picker beside the name, and **API keys** keeps provider keys and key-based CLI logins together with their preferences. Each picker searches, toggles and resets the models offered in chat, and choices are saved on the device. Thinking opens a stepped slider sheet matching the desktop's monochrome track and effort ring. It offers Default plus only levels supported by the selected model, falls back to Default for unsupported saved levels, and disappears for models without thinking controls. Tap or drag to select; Expo also exposes screen-reader increment/decrement actions, and mobile web uses a native range input with arrow keys, Home and End.
 - The composer's editable area stays transparent and shadow-free, including while focused, so it sits flush inside the outer box. The outer box retains its depth and focus border.
 
+## Thread sidebar
+
+The drawer lists every box's threads newest first. Running threads leave the list and appear once in a **working dock** above the account row; idle, done, failed and needs-input threads stay in the list, and archived threads are only counted on the Archived row. Rows keep their box in their key, navigation and archive call, so two boxes with the same thread id never merge.
+
+- The dock header shows the running count and folds the body; the folded state is remembered in `kestrel.workingDockCollapsed` (SecureStore natively, localStorage on phone web, the same key the web app uses), and the dock disappears when the last run ends or is archived. Its body is capped at 45% of the sidebar and scrolls, so many concurrent runs stay reachable above the account row.
+- Folded dock contents are hidden from screen readers (`aria-hidden`, `importantForAccessibility="no-hide-descendants"`), ignore touches, and their rows and archive buttons leave the keyboard tab order (`focusable={false}`); the header keeps `aria-expanded` and describes the fold action.
+- Reordering and list↔dock transfers animate with React Native Reanimated (`LinearTransition`, `FadeIn`/`FadeOut`, directional `Keyframe` entries, and a timed height fold). The presets and the fold timing honor the OS reduce-motion setting. Opening the drawer does not replay entry animations.
+- Thread rows are rendered without `FlatList` virtualization so rows stay mounted for layout and exit animations; this matches the desktop sidebar, which also renders its full thread list. The list and dock remain ordinary vertical `ScrollView`s, so the drawer's horizontal swipe and per-list scrolling are unchanged.
+
 ## Commands
 
 Type `/` to browse commands, or `$` in a Codex thread to browse its skills. Tap a harness suggestion to fill the
