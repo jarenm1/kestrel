@@ -2,7 +2,9 @@ import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   CreateFleetBoxBody,
+  CreateMeterHostBody,
   type CreatedFleetBox,
+  type CreatedMeterHost,
   type FleetBox,
   type FleetActivity,
   type NestHostStatus,
@@ -27,6 +29,14 @@ function parseFleetForm(name: string, url: string): CreateFleetBoxBody | null {
   })
   return Either.isRight(result) ? result.right : null
 }
+
+/** Validates a Nest host's name the way the server does. */
+function parseNestHostForm(name: string): CreateMeterHostBody | null {
+  const result = Schema.decodeUnknownEither(CreateMeterHostBody)({ name: name.trim() })
+  return Either.isRight(result) ? result.right : null
+}
+
+const NEST_HOST_FORM_ERROR = "Name must be 1–64 characters."
 
 /** Settings › Fleet (operators only): Kestrel's managed boxes. Each one serves many users, reached directly at its URL. */
 export function Fleet() {
@@ -74,14 +84,16 @@ export function Fleet() {
   )
 }
 
-/** Nest hosts and what each one has free. Shown wherever Nest boxes are offered. */
+/** Nest hosts and what each one has free, and registration of new ones. Shown wherever Nest boxes are offered. */
 function NestHosts() {
   const hosts = useQuery({ ...queries.nestHosts(), refetchInterval: 5_000 })
+  const [registered, setRegistered] = useState<CreatedMeterHost | null>(null)
 
   return (
     <>
       {hosts.error && <Alert>{errorText(hosts.error)}</Alert>}
       {hosts.isPending && <div className="text-muted-foreground">Loading…</div>}
+      {registered && <NestHostSecretCard created={registered} onDismiss={() => setRegistered(null)} />}
       {hosts.data && (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
@@ -92,6 +104,7 @@ function NestHosts() {
           </CardContent>
         </Card>
       )}
+      <RegisterNestHostForm onCreated={setRegistered} />
     </>
   )
 }
@@ -360,6 +373,92 @@ function FleetSecretCard({ created, onDismiss }: { created: CreatedFleetBox; onD
         <div className="flex gap-2">
           <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(command)}>
             Copy command
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onDismiss}>
+            Done
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Registers a Nest host. Its secret is returned once and shown by `NestHostSecretCard`; the host list is refetched. */
+function RegisterNestHostForm({ onCreated }: { onCreated: (created: CreatedMeterHost) => void }) {
+  const queryClient = useQueryClient()
+  const [name, setName] = useState("")
+  const [invalid, setInvalid] = useState(false)
+  const create = useMutation({
+    mutationFn: (body: CreateMeterHostBody) => api.createMeterHost(body),
+    onSuccess: (next) => {
+      setName("")
+      void queryClient.invalidateQueries({ queryKey: keys.nestHosts })
+      onCreated(next)
+    },
+  })
+
+  function submit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const body = parseNestHostForm(name)
+    setInvalid(body === null)
+    if (body) create.mutate(body)
+  }
+
+  return (
+    <Card className="py-0">
+      <CardContent className="flex flex-col gap-3 px-5 py-4">
+        <form onSubmit={submit} className="flex flex-col gap-3">
+          <div>
+            <span className="font-medium">Register a Nest host</span>
+            <p className="text-muted-foreground">
+              Registering creates the host's id and secret. The secret is shown once, so copy it then.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Input
+              aria-label="Host name"
+              placeholder="Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="sm:w-48"
+            />
+            <Button type="submit" disabled={create.isPending}>
+              Register host
+            </Button>
+          </div>
+        </form>
+        {invalid && <Alert>{NEST_HOST_FORM_ERROR}</Alert>}
+        {create.error && <Alert>{errorText(create.error)}</Alert>}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Shown once after a Nest host is registered: the host runs with these values. */
+function NestHostSecretCard({ created, onDismiss }: { created: CreatedMeterHost; onDismiss: () => void }) {
+  const { host, secret } = created
+  return (
+    <Card className="py-0">
+      <CardContent className="flex flex-col gap-3 px-5 py-5">
+        <span className="font-medium">Secret for {host.name}</span>
+        <p className="text-muted-foreground">
+          Shown once. On the host, set <code className="font-mono text-xs">services.kestrel-nest.hostId</code> to the id
+          and write the secret to <code className="font-mono text-xs">/etc/kestrel-host/host-secret</code> (root only).
+        </p>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Host id</span>
+          <code className="break-all rounded-lg bg-white/[0.06] p-3 font-mono text-xs">{host.id}</code>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Host secret</span>
+          <code className="break-all rounded-lg bg-white/[0.06] p-3 font-mono text-xs">{secret}</code>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(host.id)}>
+            Copy id
+          </Button>
+          <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(secret)}>
+            Copy secret
           </Button>
           <Button variant="ghost" size="sm" onClick={onDismiss}>
             Done

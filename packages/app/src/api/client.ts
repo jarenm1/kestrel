@@ -18,7 +18,9 @@ import {
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
+  CreateMeterHostBody,
   CreateNestBoxBody,
+  CreatedMeterHost,
   CreatedBox,
   CreatedFleetBox,
   CreateTaskBody,
@@ -566,6 +568,8 @@ export const api = {
   detachNestGpu: (id: string) => nestAction(id, ControlPaths.nestBoxGpuDetach(id)),
   /** Operator-only: Nest hosts and their capacity, as the fleet page lists them. */
   nestHosts: () => run(request(NestHostList, "GET", ControlPaths.nestHosts)),
+  /** Operator-only: registers a Nest host. Its secret is returned once, so the caller must show it then. */
+  createMeterHost: (body: CreateMeterHostBody) => run(request(CreatedMeterHost, "POST", ControlPaths.meterHosts, body)),
   setActiveBox: async (boxId: string | null): Promise<BoxList> => {
     const body: SetActiveBoxBody = { boxId }
     return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
