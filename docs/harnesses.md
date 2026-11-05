@@ -17,6 +17,10 @@ picker. OMP, Pi and Hermes are retired; see [the scope decision and historical-s
 - Google runs use the user's Antigravity login, not a Google API key. Its directory contains the sign-in token and sessions.
 - Session records retain their actual model provider, even when multiple providers run Claude Code. Switching providers
   cannot resume another provider's session; returning to a provider can resume its own usable session.
+- CLI login directories carry a persistent `.kestrel-session-generation` marker. Native sessions are resumed only
+  within that directory generation. Disconnect deletes the marker with the database; reconnecting at the same path
+  starts a fresh native session with the thread's saved conversation, rather than resuming a deleted session ID.
+  Older unversioned CLI-login records also replay the saved conversation once.
 
 ## Third-party model coverage
 

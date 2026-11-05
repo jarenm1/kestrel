@@ -41,6 +41,7 @@ import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type Transcript } from "./transcript"
 import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { writeAtomic } from "./atomic"
 
 export interface AgentHarnessShape {
   /**
@@ -101,10 +102,28 @@ export interface AgentChoice {
 
 /**
  * Where a provider's CLI keeps a run's native sessions: `task-home` under the thread's own home (the run uses the
- * broker's keys), `cli-login` in the user's CLI login directory (`AgentCli.configEnv`, e.g. `CLAUDE_CONFIG_DIR`).
- * A session kept in one is not found from the other, so a run resumes only a session kept where it keeps its own.
+ * broker's keys), or the generation of the user's CLI login directory. Deleting that directory invalidates its
+ * generation even if the user reconnects before their next run.
  */
-export type SessionContinuation = "task-home" | "cli-login"
+export type SessionContinuation = "task-home" | `cli-login:${string}`
+
+/** A marker survives restarts, but not logout's deletion of the CLI's session database. */
+const loginContinuation = (dir: string): Effect.Effect<SessionContinuation, InternalError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const path = join(dir, ".kestrel-session-generation")
+      let generation: string
+      try {
+        generation = await readFile(path, "utf8")
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
+        generation = newId()
+        await writeAtomic(path, generation)
+      }
+      return `cli-login:${generation}` as const
+    },
+    catch: () => new InternalError({ message: "cannot read the CLI session generation" }),
+  })
 
 /** What a run's agent session starts from (see Core.sendMessage). */
 export interface RunStart {
@@ -260,6 +279,8 @@ export const AgentHarnessLive = Layer.effect(
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
     const cliAuth = yield* CliAuth
+    // First runs sharing a login must observe one completely persisted directory generation.
+    const sessionGeneration = yield* Effect.makeSemaphore(1)
     const credentials = yield* CredentialStore
     const github = yield* GitHub
     const settings = sandboxSettingsOf(config)
@@ -787,12 +808,12 @@ export const AgentHarnessLive = Layer.effect(
             const loginEnv = Object.fromEntries(loginDirs.map((d) => [AGENT_CLIS[d.provider].configEnv, d.inside]))
             const workspacePath = join(config.threadsDir, task.id)
             const cwd = agentCwd(workspacePath, task)
-            // The user's login moves the CLI's sessions out of the thread's home. A session kept on the other side of a
-            // login or logout cannot be found, so resuming it would fail the run: start fresh with the conversation.
+            // A native session is usable only in the same surviving session store, not merely the same path.
             const harness = MODEL_HARNESS[provider]
-            const continuation: SessionContinuation = logins.some((login) => login.provider === harness.cli)
-              ? "cli-login"
-              : "task-home"
+            const login = logins.find((candidate) => candidate.provider === harness.cli)
+            const continuation: SessionContinuation = login === undefined
+              ? "task-home"
+              : yield* sessionGeneration.withPermits(1)(loginContinuation(login.dir))
             const resumed = start.resume?.continuation === continuation ? start.resume : null
             const resumeSession = resumed?.sessionId ?? null
             const prompt = resumed?.prompt ?? start.fresh

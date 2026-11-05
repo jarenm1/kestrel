@@ -580,10 +580,23 @@ createInterface({ input: process.stdin })
         expect(yield* runWith("home-to-login-gone", "cli-login")).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "task-home" })
         loggedIn = true
         // The user signed in: the CLI now looks for sessions in their login directory, where the earlier one is not.
-        expect(yield* runWith("login-from-home", "task-home")).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "cli-login" })
-        expect(yield* runWith("login-to-login", "cli-login")).toEqual({ answer: "resume=earlier prompt=delta", recorded: "cli-login" })
-        // A session recorded before its place was may sit on either side of a login change: start fresh, logged in or out.
-        expect(yield* runWith("legacy-logged-in", undefined)).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "cli-login" })
+        const connected = yield* runWith("login-from-home", "task-home")
+        expect(connected.answer).toBe("resume=none prompt=whole conversation")
+        expect(yield* runWith("login-to-login", connected.recorded)).toEqual({
+          answer: "resume=earlier prompt=delta", recorded: connected.recorded,
+        })
+        // Disconnect deletes the native database. Reconnecting at the same path must not resume its deleted session.
+        yield* Effect.promise(() => rm(login.dir, { recursive: true, force: true }))
+        yield* Effect.promise(() => mkdir(login.dir, { recursive: true }))
+        const reconnected = yield* runWith("reconnected", connected.recorded)
+        expect(reconnected.answer).toBe("resume=none prompt=whole conversation")
+        expect(reconnected.recorded).not.toBe(connected.recorded)
+        expect(yield* runWith("after-reconnect", reconnected.recorded)).toEqual({
+          answer: "resume=earlier prompt=delta", recorded: reconnected.recorded,
+        })
+        // A legacy login record has no generation: safely replay the conversation once.
+        expect((yield* runWith("legacy-login", "cli-login")).answer).toBe("resume=none prompt=whole conversation")
+        expect((yield* runWith("legacy-logged-in", undefined)).answer).toBe("resume=none prompt=whole conversation")
         loggedIn = false
         expect(yield* runWith("legacy-logged-out", undefined)).toEqual({ answer: "resume=none prompt=whole conversation", recorded: "task-home" })
       } finally {

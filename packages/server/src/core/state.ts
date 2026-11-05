@@ -53,8 +53,8 @@ export interface RunSession {
   readonly sessionId: string
   readonly provider: ModelProvider
   /**
-   * Where the provider's CLI kept the session (`SessionContinuation` in `harness.ts`). Only a run that keeps its sessions
-   * in the same place can resume it. Absent for sessions recorded before this existed, which are not resumed.
+   * The session store and its lifetime (`SessionContinuation` in `harness.ts`). Only a run using the same surviving
+   * store can resume it. Absent or legacy unversioned CLI-login records are not resumed.
    */
   readonly continuation?: string | undefined
 }
