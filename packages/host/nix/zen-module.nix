@@ -14,7 +14,17 @@ let
   inSystemRoot = root:
     (dataDir == root || lib.hasPrefix "${root}/" dataDir)
     && !(root == "/var" && lib.hasPrefix "/var/lib/" dataDir);
-  rejectedNetworks = [ "" "0.0.0.0/0" "::/0" ];
+  # A CIDR must have an explicit prefix no broader than /8 (IPv4) or /16 (IPv6), so 0.0.0.0/0,
+  # ::/0 and 10.0.0.0/0 are rejected: systemd masks host bits, so a /0 admits every address.
+  validNetwork = n:
+    let
+      parts = lib.splitString "/" n;
+      len = lib.last parts;
+      isV6 = lib.hasInfix ":" n;
+    in
+      builtins.length parts == 2
+      && builtins.match "[0-9]+" len != null
+      && lib.toInt len >= (if isV6 then 16 else 8);
 in {
   options.services.kestrelZenDdc = {
     enable = lib.mkEnableOption "isolated operator-supplied Zen DDC";
@@ -30,7 +40,7 @@ in {
       { assertion = cfg.allowedNetworks != []; message = "Zen requires an explicit trusted private network ACL."; }
       { assertion = lib.all (p: lib.hasPrefix "/" p) [ cfg.executable cfg.configFile cfg.dataDir ]; message = "Zen paths must be absolute."; }
       { assertion = builtins.length dataDirParts >= 2 && !hasParentTraversal && !lib.any inSystemRoot systemRoots; message = "Zen dataDir must be a dedicated directory at least one level below a top-level directory, must not contain '..', and must stay outside system roots such as /etc, /var (except /var/lib), /run, /usr, /boot, /nix, /home or /root (for example /srv/zen-data)."; }
-      { assertion = lib.all (n: !(builtins.elem n rejectedNetworks)) cfg.allowedNetworks; message = "Zen allowedNetworks must not contain empty entries, 0.0.0.0/0 or ::/0; list explicit private or trusted CIDRs only."; }
+      { assertion = lib.all validNetwork cfg.allowedNetworks; message = "Zen allowedNetworks must be explicit CIDRs with a prefix no broader than /8 (IPv4) or /16 (IPv6), for example 10.20.0.0/16 or fd00:20::/48; 0.0.0.0/0, ::/0 and bare addresses are rejected."; }
     ];
     users.groups.kestrel-zen = {};
     users.users.kestrel-zen = { isSystemUser = true; group = "kestrel-zen"; };

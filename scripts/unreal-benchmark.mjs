@@ -46,7 +46,7 @@ const result = {
   config: c,
   paths,
   cacheEvidence: 'unknown',
-  coldCache: { status: dry ? 'not-run' : 'operator-attested', note: coldCacheNote },
+  coldCache: { status: dry ? 'not-run' : 'not-attested', note: coldCacheNote },
   diskMeasurement: { measured: false, note: diskNote },
   interrupted: false,
   runs: []

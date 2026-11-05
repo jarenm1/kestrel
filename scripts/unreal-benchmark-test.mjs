@@ -58,7 +58,7 @@ try {
   assert.deepEqual(result.runs.map(x => x.exitCode), [0, 0, 0]);
   assert.equal(result.cacheEvidence, 'unknown');
   assert.equal(result.synthetic, true);
-  assert.equal(result.coldCache.status, 'operator-attested');
+  assert.equal(result.coldCache.status, 'not-attested');
   assert.equal(result.diskMeasurement.measured, true);
   assert.ok(result.runs.every(x => x.remoteCacheState === 'unverified'));
   assert.ok(result.runs.every(x => Array.isArray(x.diskBytes) && x.diskBytes.length === 2));
