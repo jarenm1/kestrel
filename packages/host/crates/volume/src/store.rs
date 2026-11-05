@@ -248,7 +248,9 @@ impl Store for S3Store {
             return Ok(None);
         }
         let resp = expect_success(resp, &format!("get {key}"))?;
-        let bytes = resp.bytes().with_context(|| format!("reading {key}"))?;
+        let bytes = resp
+            .bytes()
+            .map_err(|e| anyhow!("reading {key}: {}", e.without_url()))?;
         Ok(Some(bytes.to_vec()))
     }
 
@@ -283,7 +285,7 @@ impl Store for S3Store {
             })?;
             let text = expect_success(resp, &format!("list {prefix}"))?
                 .text()
-                .with_context(|| format!("reading listing of {prefix}"))?;
+                .map_err(|e| anyhow!("reading listing of {prefix}: {}", e.without_url()))?;
             let page = ListObjectsV2::parse_response(&text)
                 .map_err(|e| anyhow!("parsing listing of {prefix}: {e}"))?;
             for object in page.contents {
