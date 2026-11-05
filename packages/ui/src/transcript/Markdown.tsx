@@ -34,6 +34,48 @@ const COMPONENTS: Components = { a: Link }
 // Single newlines stay line breaks: run output that falls back to raw stdout/stderr is line-oriented.
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
 
+/** A code fence opener: up to three spaces of indent, then a run of backticks or tildes. */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/
+/** A code fence closer: its run alone on the line, at least as long as the opener's. */
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/
+/** A line that begins a drawing: an `<svg>` tag, indented or not, at the start of the line. */
+const DRAWING_OPEN = /^\s*<svg\b/i
+const DRAWING_CLOSE = /<\/svg\s*>/i
+
+/**
+ * Markdown ends a raw HTML block at a blank line, so a drawing whose elements are indented in blank-line-separated
+ * groups falls apart: the first group renders, and the rest arrives as an indented code sample. Blank lines inside a
+ * drawing are dropped to keep it in one block; fenced code samples keep theirs.
+ */
+function keepDrawingsWhole(text: string): string {
+  if (!DRAWING_CLOSE.test(text)) return text
+  const lines: string[] = []
+  let fence: string | undefined
+  let drawing = false
+  for (const line of text.split("\n")) {
+    if (drawing) {
+      if (line.trim().length > 0) lines.push(line)
+      if (DRAWING_CLOSE.test(line)) drawing = false
+      continue
+    }
+    const opener = FENCE_OPEN.exec(line)?.[1]
+    const closer = FENCE_CLOSE.exec(line)?.[1]
+    if (fence !== undefined) {
+      lines.push(line)
+      if (closer !== undefined && closer[0] === fence[0] && closer.length >= fence.length) fence = undefined
+      continue
+    }
+    if (opener !== undefined) {
+      fence = opener
+      lines.push(line)
+      continue
+    }
+    if (DRAWING_OPEN.test(line) && !DRAWING_CLOSE.test(line)) drawing = true
+    lines.push(line)
+  }
+  return lines.join("\n")
+}
+
 /**
  * Agent output as GitHub-flavoured markdown. Raw HTML and inline SVG render in place, through the allowlist in
  * `AGENT_HTML_SCHEMA`; ids are prefixed per message so two drawings with the same gradient id don't collide.
@@ -59,7 +101,7 @@ export function Markdown({ text, className }: { text: string; className?: string
       )}
     >
       <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} components={COMPONENTS}>
-        {text}
+        {keepDrawingsWhole(text)}
       </ReactMarkdown>
     </div>
   )
