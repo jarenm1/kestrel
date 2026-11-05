@@ -122,6 +122,7 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
         gpuOnDemand: {
           request,
           release: drop,
+          available: (runId) => Effect.sync(() => link !== null && wishes.has(runId)),
         },
         run: (hooks: PlatformHooks) =>
           Effect.async<void>(() => {

@@ -1,4 +1,4 @@
-import { Cause, Context, Data, Deferred, Effect, Either, Layer, Schedule } from "effect"
+import { Cause, Context, Data, Deferred, Effect, Either, Layer, Option, Schedule } from "effect"
 import { createHash, randomUUID } from "node:crypto"
 import Ajv from "ajv"
 import { copyFile, mkdir, readdir, readFile, rm, writeFile, type FileHandle } from "node:fs/promises"
@@ -48,8 +48,10 @@ import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { GitHub, GitHubError, commentMismatch, type ApiRequest, type ApiResponse, type CommentKind, type GitHubReference, type GraphQLResponse, type NewReview, type PostedComment, type PostedReview, type PullRequest, type PullRequestChanges, type PullRequestStatus, type ReferenceKind, type RepoSlug, type ReviewerRequest } from "../github/api"
-import { agentHome, desktopNamespace, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
+import { agentHome, desktopNamespace, hasGpuDevice, openTaskPreviewSocket, prepareLaunch, removeTask, runProcess, sandboxSettingsOf, stopAllTaskHolders, stopTaskHolder, taskPreviewFetch, type LaunchKind, type ProcessResult, type TaskPreviewSocket } from "../sandbox"
 import { type ToolkitName, installToolkit } from "../sandbox/toolkits"
+import { BoxPlatform } from "../platform"
+import { makeGpuCoordinator } from "./gpu-coordinator"
 import { EventHub } from "./events"
 import { FileRefused, listFolder, openInside } from "./folder"
 import { AgentHarness, agentCwd, type AgentChoice, type RunStart } from "./harness"
@@ -444,7 +446,12 @@ export interface CoreShape {
   /** Used by the MCP handler to authorize a run token: the run with this id, if it exists. */
   readonly runFor: (runId: string) => Effect.Effect<Run | null>
   /** Used by the MCP handler: runs a shell command at the thread workspace root. */
-  readonly execInTask: (taskId: string, command: string, timeoutMs: number) => Effect.Effect<ProcessResult, NotFound | InternalError>
+  readonly execInTask: (
+    taskId: string,
+    command: string,
+    timeoutMs: number,
+    options?: { readonly gpu?: boolean; readonly runId?: string },
+  ) => Effect.Effect<ProcessResult, NotFound | InternalError>
   /** Used by the MCP handler: starts a sandboxed app on the task's live desktop and returns its id. */
   readonly desktopLaunch: (taskId: string, command: string) => Effect.Effect<string, NotFound | InternalError>
   /** Used by the MCP handler (`toolkit_install`, only with a flake): builds a toolkit and puts its executables on the task's PATH; returns their names. */
@@ -676,6 +683,19 @@ export const CoreLive = Layer.effect(
     const cliAuth = yield* CliAuth
     const broker = yield* CredentialBroker
     const sandboxSettings = sandboxSettingsOf(config)
+    const platform = yield* Effect.serviceOption(BoxPlatform)
+    /**
+     * GPU work is allowed when this run holds an on-demand grant, or when the host has a GPU statically. A box that
+     * offers neither fails closed instead of running the command on the CPU under a GPU request.
+     */
+    const gpu = makeGpuCoordinator({
+      available: (runId) =>
+        Option.match(platform, {
+          onNone: () => Effect.sync(() => hasGpuDevice()),
+          onSome: (p) =>
+            p.gpuOnDemand === null ? Effect.sync(() => hasGpuDevice()) : p.gpuOnDemand.available(runId),
+        }),
+    })
     const textGenerator = makeTextGenerator({ config, cliAuth, broker })
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
@@ -693,7 +713,7 @@ export const CoreLive = Layer.effect(
     }
 
     /** Every agent-controlled process goes through here: bubblewrap inside the task's systemd slice. */
-    const launchFor = (task: Task, kind: LaunchKind, display: string | null, command: string) =>
+    const launchFor = (task: Task, kind: LaunchKind, display: string | null, command: string, gpuWork = false) =>
       Effect.gen(function* () {
         const creds = yield* credentials.get(task.owner)
         const gitIdentity = creds?.dev
@@ -710,6 +730,7 @@ export const CoreLive = Layer.effect(
           mirrorDir: join(config.mirrorsDir, task.owner),
           homeDir: join(config.homesDir, task.id),
           display,
+          gpu: gpuWork,
           env: { CLOUDAGENTS_TASK_ID: task.id },
           command,
         })
@@ -2505,18 +2526,39 @@ export const CoreLive = Layer.effect(
         return run ? { ...run } : null
       }),
 
-      execInTask: (taskId, command, timeoutMs) =>
+      execInTask: (taskId, command, timeoutMs, options) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
-          const desktopNow = yield* desktop.status(taskId)
-          const launch = yield* launchFor(task, "exec", desktopNow.display, command).pipe(
-            Effect.mapError(toInternal("exec")),
+          const gpuWork = options?.gpu === true
+          if (!gpuWork) {
+            const desktopNow = yield* desktop.status(taskId)
+            const launch = yield* launchFor(task, "exec", desktopNow.display, command).pipe(
+              Effect.mapError(toInternal("exec")),
+            )
+            return yield* runProcess(launch.file, launch.args, {
+              cwd: launch.cwd,
+              env: launch.env,
+              timeoutMs,
+            }).pipe(Effect.mapError(toInternal("exec")))
+          }
+          const runId = options?.runId
+          if (runId === undefined) {
+            return yield* Effect.fail(new InternalError({ message: "GPU work needs the run that requested the GPU" }))
+          }
+          return yield* gpu.run({ taskId, runId }, (workload) =>
+            Effect.gen(function* () {
+              // GPU work is headless even when a desktop is running: no DISPLAY and no X socket, only the GPU.
+              const launch = yield* launchFor(task, "exec", null, command, true).pipe(
+                Effect.mapError(toInternal("exec")),
+              )
+              return yield* runProcess(launch.file, launch.args, {
+                cwd: launch.cwd,
+                env: launch.env,
+                timeoutMs,
+                onSpawn: workload.trackGroup,
+              }).pipe(Effect.mapError(toInternal("exec")))
+            }),
           )
-          return yield* runProcess(launch.file, launch.args, {
-            cwd: launch.cwd,
-            env: launch.env,
-            timeoutMs,
-          }).pipe(Effect.mapError(toInternal("exec")))
         }),
 
       desktopLaunch: (taskId, command) =>
