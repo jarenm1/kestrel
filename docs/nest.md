@@ -312,7 +312,9 @@ Caddy terminates TLS for `*.<slug>.<nest domain>` (DNS challenge) and proxies ev
   counting; suspended, parked or otherwise not running → 503 `{ "ok": false, "state": "<state>" }` with `Retry-After`;
   unknown → 404. A box that is running but refuses the connection answers 503 with `"state": "unreachable"`.
 
-It reports per-box open connections and the last request time to the host agent every 5 s.
+It reports per-box open connections and the last request time to the host agent every 5 s. `GET /api/health` is a
+background poll, not use: ingress leaves it out of the last request time, and it never wakes a suspended box for it
+(a suspended box answers 503 to it). The box does the same in its own activity (`lastActivityAt`).
 
 ### Host agent local API
 

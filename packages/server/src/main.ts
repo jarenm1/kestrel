@@ -2,7 +2,7 @@ import { availableHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer, Ref } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError, Paths } from "@cloudagents/protocol"
 import { ConfigLive, Config, dataDirFromEnv } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -135,9 +135,10 @@ const program = Effect.gen(function* () {
   // The box's startup snapshot: which harness CLIs it found.
   const capabilities = { ...boxCapabilities(config.sandbox, undefined, platform.hardware), harnesses: availableHarnesses(config) }
   const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
-  // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it.
+  // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
+  // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.
   const handle = (request: Request) => {
-    Effect.runSync(tracker.touch)
+    if (new URL(request.url).pathname !== Paths.health) Effect.runSync(tracker.touch)
     return webHandler(request)
   }
 
