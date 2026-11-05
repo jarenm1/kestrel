@@ -1,6 +1,6 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { ChevronRight, CreditCard, type LucideIcon, Plug, Server, User } from "lucide-react-native";
+import { ChevronRight, CreditCard, type LucideIcon, MessagesSquare, Plug, Server, User } from "lucide-react-native";
 import { CURRENT_PLAN, PLANS } from "@cloudagents/protocol";
 import { useAuth } from "@/auth/AuthContext";
 import { ScreenHeader } from "@/components/ScreenHeader";
@@ -9,6 +9,7 @@ import { useNavigation, type SettingsSection } from "@/nav/navigation";
 import { BoxesScreen } from "@/screens/BoxesScreen";
 import { BillingScreen } from "@/screens/BillingScreen";
 import { ProfileScreen } from "@/screens/ProfileScreen";
+import { ThreadsSettingsScreen } from "@/screens/ThreadsSettingsScreen";
 import { colors, spacing } from "@/theme";
 
 /**
@@ -17,6 +18,7 @@ import { colors, spacing } from "@/theme";
  */
 const SECTION_PAGES: Record<SettingsSection, React.ComponentType> = {
   profile: ProfileScreen,
+  threads: ThreadsSettingsScreen,
   boxes: BoxesScreen,
   billing: BillingScreen,
 };
@@ -56,6 +58,13 @@ function SettingsHome() {
           label="Connections"
           detail="Subscriptions, API keys and models"
           onPress={() => nav.push({ name: "connections" })}
+        />
+        <View style={styles.divider} />
+        <SettingsNavRow
+          icon={MessagesSquare}
+          label="Threads"
+          detail="Titles, streaming and usage limits"
+          onPress={() => nav.push({ name: "settings", section: "threads" })}
         />
         <View style={styles.divider} />
         <SettingsNavRow
