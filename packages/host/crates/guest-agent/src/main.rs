@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use crate::app::{serve_box, serve_host, App};
 use crate::args::{parse, Config, HostListen, Parsed, USAGE};
 use crate::protocol::GUEST_PROTOCOL;
-use crate::system::{chown, ensure_dir, log, lookup_group, remove_if_exists, Owner, Res, System};
+use crate::system::{chown, ensure_dir, log, lookup_user, remove_if_exists, Owner, Res, System};
 use crate::vsock::VsockListener;
 
 #[tokio::main]
@@ -44,7 +44,8 @@ async fn run() -> Res<()> {
     let sys = System {
         dry_run: cfg.dry_run,
     };
-    let box_listener = bind_box_socket(&cfg, &sys)?;
+    let box_uid = lookup_user(&cfg.box_user)?.uid;
+    let box_listener = bind_box_socket(&cfg, &sys, box_uid)?;
     let host = HostListener::bind(&cfg.host_listen)?;
     let app = App::new(cfg, sys)?;
     log(format!("ready (protocol {GUEST_PROTOCOL})"));
@@ -53,7 +54,11 @@ async fn run() -> Res<()> {
     tokio::spawn(async move {
         loop {
             match box_listener.accept().await {
-                Ok((stream, _)) => serve_box(&box_app, stream),
+                Ok((stream, _)) => match stream.peer_cred() {
+                    Ok(cred) if cred.uid() == box_uid => serve_box(&box_app, stream),
+                    Ok(cred) => log(format!("refused a box connection from uid {}", cred.uid())),
+                    Err(e) => log(format!("box socket: peer credentials: {e}")),
+                },
                 Err(e) => {
                     log(format!("box socket: {e}"));
                     sleep(Duration::from_millis(100)).await;
@@ -101,33 +106,30 @@ impl HostListener {
     }
 }
 
-/// The box socket is group-accessible to `--box-group` and nobody else. A stale socket from a previous run is
-/// replaced.
-fn bind_box_socket(cfg: &Config, sys: &System) -> Res<UnixListener> {
+/// The box socket is owned by the box user and mode 0600, so only that uid can connect; the accept loop checks the peer's
+/// uid as well. Its directory is root-owned and 0711: the box user reaches the socket, nobody can list it. A stale socket
+/// from a previous run is replaced.
+fn bind_box_socket(cfg: &Config, sys: &System, box_uid: u32) -> Res<UnixListener> {
     let socket = cfg.box_socket.as_path();
-    let box_gid = if sys.dry_run {
-        None
-    } else {
-        Some(lookup_group(&cfg.box_group)?)
-    };
     if let Some(parent) = socket.parent() {
-        if !parent.exists() {
-            ensure_dir(parent, 0o750, None)?;
-        }
-        // The directory stays 0750 root-owned; the box group needs its execute bit to reach the socket.
-        if let Some(gid) = box_gid {
-            chown(parent, Owner { uid: u32::MAX, gid })?;
-        }
+        ensure_dir(parent, 0o711, None)?;
     }
     remove_if_exists(socket)?;
     let listener =
         UnixListener::bind(socket).map_err(|e| format!("bind {}: {e}", socket.display()))?;
-    fs::set_permissions(socket, fs::Permissions::from_mode(0o660))
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("chmod {}: {e}", socket.display()))?;
-    match box_gid {
-        // A uid of u32::MAX is `-1` to chown(2): the owner stays as it is.
-        Some(gid) => chown(socket, Owner { uid: u32::MAX, gid })?,
-        None => log("[dry-run] not changing the box socket group"),
+    if sys.dry_run {
+        log("[dry-run] not changing the box socket owner");
+    } else {
+        // A gid of u32::MAX is `-1` to chown(2): the group stays as it is.
+        chown(
+            socket,
+            Owner {
+                uid: box_uid,
+                gid: u32::MAX,
+            },
+        )?;
     }
     Ok(listener)
 }

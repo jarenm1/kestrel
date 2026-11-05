@@ -295,14 +295,3 @@ pub fn lookup_user(name: &str) -> Res<Owner> {
     let (uid, gid) = unsafe { ((*entry).pw_uid, (*entry).pw_gid) };
     Ok(Owner { uid, gid })
 }
-
-pub fn lookup_group(name: &str) -> Res<u32> {
-    let c = CString::new(name).map_err(|_| format!("group {name:?} has a NUL byte"))?;
-    // SAFETY: getgrnam returns a pointer into static storage; we copy the gid out immediately.
-    let entry = unsafe { libc::getgrnam(c.as_ptr()) };
-    if entry.is_null() {
-        return Err(format!("no such group {name}"));
-    }
-    // SAFETY: non-null per the check above.
-    Ok(unsafe { (*entry).gr_gid })
-}

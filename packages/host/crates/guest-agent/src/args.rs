@@ -3,15 +3,16 @@
 
 use std::path::PathBuf;
 
-use crate::protocol::{GUEST_AGENT_BOX_SOCKET, GUEST_AGENT_VSOCK_PORT, NEST_VOLUME_MOUNT};
+use crate::protocol::{
+    GUEST_AGENT_BOX_SOCKET, GUEST_AGENT_VSOCK_PORT, NEST_BOX_USER, NEST_VOLUME_MOUNT,
+};
 
 pub const USAGE: &str = "\
 kestrel-guest-agent [OPTIONS]
 
   --host-listen vsock:<port>|unix:<path>   host link (default vsock:1024)
   --box-socket <path>                      box link Unix socket (default /run/kestrel-guest/box.sock)
-  --box-group <name>                       group that may connect to the box socket (default kestrel)
-  --box-user <name>                        user the box runs as; owns its home and data (default kestrel)
+  --box-user <name>                        user the box runs as: owns its home and data, and alone may connect to the box socket (default kestrel-box)
   --box-unit <name>                        systemd unit of the box (default kestrel-box.service)
   --box-health-url <url>                   http:// URL polled by configure (default http://127.0.0.1:8787/api/health)
   --volume-device <path>                   user volume (default /dev/disk/by-id/virtio-kestrel-volume)
@@ -38,7 +39,6 @@ pub enum HostListen {
 pub struct Config {
     pub host_listen: HostListen,
     pub box_socket: PathBuf,
-    pub box_group: String,
     pub box_user: String,
     pub box_unit: String,
     pub box_health_url: String,
@@ -84,8 +84,7 @@ pub enum Parsed {
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> {
     let mut host_listen = HostListen::Vsock(GUEST_AGENT_VSOCK_PORT);
     let mut box_socket = PathBuf::from(GUEST_AGENT_BOX_SOCKET);
-    let mut box_group = "kestrel".to_string();
-    let mut box_user = "kestrel".to_string();
+    let mut box_user = NEST_BOX_USER.to_string();
     let mut box_unit = "kestrel-box.service".to_string();
     let mut box_health_url = "http://127.0.0.1:8787/api/health".to_string();
     let mut volume_device = PathBuf::from("/dev/disk/by-id/virtio-kestrel-volume");
@@ -117,7 +116,6 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
             "--dry-run-system" => dry_run = true,
             "--host-listen" => host_listen = parse_listen(&value("--host-listen")?)?,
             "--box-socket" => box_socket = PathBuf::from(value("--box-socket")?),
-            "--box-group" => box_group = value("--box-group")?,
             "--box-user" => box_user = value("--box-user")?,
             "--box-unit" => box_unit = value("--box-unit")?,
             "--box-health-url" => box_health_url = value("--box-health-url")?,
@@ -141,7 +139,6 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Parsed, String> 
     Ok(Parsed::Run(Box::new(Config {
         host_listen,
         box_socket,
-        box_group,
         box_user,
         box_unit,
         box_health_url,
