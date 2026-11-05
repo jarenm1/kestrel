@@ -1202,20 +1202,31 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         }
       })
 
-    // The GPU arrived: restart each desktop whose renderer is stale. A failed desktop that still has viewers is retried,
-    // since they are waiting on it; one that fails again stays failed and the others still restart.
+    // Whether the desktop renders on a renderer other than the one the GPU state now allows.
+    const stale = (s: Session) =>
+      (s.state === "starting" || s.state === "running") && s.renderer !== null && s.renderer !== desiredRenderer()
+    const liveApps = (s: Session) => [...s.apps.values()].some((app) => app.exit === null)
+
+    // Restarts the task's desktop, attaching the viewers that are still watching it.
+    const restart = (taskId: string) =>
+      Effect.flatMap(snapshotAndStop(taskId), relaunch).pipe(
+        Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
+      )
+
+    // Restarts a desktop onto the current renderer once none of its apps is running. A restart stops the desktop's
+    // processes, so apps keep the renderer they started on until they exit (the exit hook in launch retries this).
+    const restartIdle = (s: Session) =>
+      sessions.get(s.taskId) === s && stale(s) && !liveApps(s) ? restart(s.taskId) : Effect.void
+
+    // The GPU arrived: restart each desktop whose renderer is stale and has no running app. A failed desktop that still
+    // has viewers is retried, since they are waiting on it; one that fails again stays failed and the others still restart.
     const attachHardware = Effect.gen(function* () {
       hardwareRender = true
       for (const taskId of [...sessions.keys()]) {
         const s = sessions.get(taskId)
         if (s === undefined) continue
-        const stale =
-          (s.state === "starting" || s.state === "running") && s.renderer !== null && s.renderer !== desiredRenderer()
-        const retry = s.state === "failed" && s.sinks.size > 0
-        if (!stale && !retry) continue
-        yield* Effect.flatMap(snapshotAndStop(taskId), relaunch).pipe(
-          Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
-        )
+        if (s.state === "failed" && s.sinks.size > 0) yield* restart(taskId)
+        else yield* restartIdle(s)
       }
     })
 
@@ -1323,6 +1334,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const app: AppRecord = { id: `app-${s.apps.size + 1}`, command, child, output, exit: null }
           child.once("exit", (code, signal) => {
             app.exit = { code, signal }
+            // A renderer change that waited on this app can now restart the desktop.
+            Effect.runFork(restartIdle(s))
           })
           s.apps.set(app.id, app)
           return appView(app)
