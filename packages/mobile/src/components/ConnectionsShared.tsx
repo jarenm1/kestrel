@@ -98,8 +98,6 @@ interface FrameProps {
   harness?: HarnessId;
   /** Shown beside the name, e.g. the model-visibility picker. */
   headerExtra?: ReactNode;
-  /** Shows an `expired` badge instead of the connected state, e.g. a refused OAuth token that needs reconnecting. */
-  expired?: boolean;
   /** False for subscription rows, which state the signed-in account in their body instead. */
   showAccount?: boolean;
   children: ReactNode;
@@ -114,7 +112,6 @@ export function ConnectionRowFrame({
   error,
   harness,
   headerExtra,
-  expired = false,
   showAccount = true,
   children,
 }: FrameProps) {
@@ -129,13 +126,9 @@ export function ConnectionRowFrame({
       <View style={styles.main}>
         <View style={styles.header}>
           <Text style={styles.label}>{connection.label}</Text>
-          {expired ? (
-            <Badge variant="warning">expired</Badge>
-          ) : (
-            <Badge variant={connection.connected ? "success" : "neutral"}>
-              {connection.connected ? "connected" : "not connected"}
-            </Badge>
-          )}
+          <Badge variant={connection.connected ? "success" : "neutral"}>
+            {connection.connected ? "connected" : "not connected"}
+          </Badge>
           {account ? <Text style={styles.account}>{account}</Text> : null}
           {headerExtra}
         </View>

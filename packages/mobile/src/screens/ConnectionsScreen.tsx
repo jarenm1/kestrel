@@ -28,8 +28,7 @@ const MIN_API_KEY_LENGTH = 8;
 /**
  * Body of Settings › Connections: **Harnesses/Subscriptions** groups subscription sign-ins and installed harnesses,
  * each with its chat-model picker beside the name, and **API keys** keeps provider keys and key-based CLI logins with
- * their model preferences. Desktop manages GitHub access from Profile; until the mobile Profile screen lands, the
- * informational OAuth row stays here so that access is not lost.
+ * their model preferences. GitHub access lives in Profile; this page carries only model access, as on desktop.
  */
 export function ConnectionsScreen() {
   const { api } = useApiClient();
@@ -38,7 +37,6 @@ export function ConnectionsScreen() {
   const harnesses = connections.data?.filter(
     (connection) => connection.kind === "cli" && !isApiKeyConnection(connection)
   );
-  const accounts = connections.data?.filter((connection) => connection.kind === "oauth");
 
   return (
     <ScrollView
@@ -60,18 +58,6 @@ export function ConnectionsScreen() {
             {harnesses.map((connection, index) => (
               <View key={`${api.boxScope}:${connection.provider}`} style={index > 0 ? styles.divider : null}>
                 <ConnectionRow connection={connection} />
-              </View>
-            ))}
-          </Card>
-        </View>
-      ) : null}
-      {accounts && accounts.length > 0 ? (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Accounts</Text>
-          <Card style={styles.card}>
-            {accounts.map((connection, index) => (
-              <View key={`${api.boxScope}:${connection.provider}`} style={index > 0 ? styles.divider : null}>
-                <OAuthRow connection={connection} />
               </View>
             ))}
           </Card>
@@ -249,19 +235,6 @@ function ApiKeyRow({ connection, onRemove }: ApiKeyRowProps) {
         ) : null}
         {picker}
       </View>
-    </ConnectionRowFrame>
-  );
-}
-
-/** OAuth access, e.g. GitHub, which desktop manages from Profile and mobile finishes in the web app. */
-function OAuthRow({ connection }: { connection: Connection }) {
-  return (
-    <ConnectionRowFrame connection={connection} expired={connection.expired}>
-      <Text style={connectionStyles.muted}>
-        {connection.available
-          ? `${connection.connected ? "Reconnect" : "Connect"} ${connection.label} on the web app`
-          : "needs server config"}
-      </Text>
     </ConnectionRowFrame>
   );
 }
