@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::backup::{chunk_len, fetch_chunk};
 use crate::crypto::BoxKey;
-use crate::files::{suffixed, write_file_atomic};
+use crate::files::{suffixed, sync_parent, write_file_atomic};
 use crate::manifest::{CHUNK_SIZE, Manifest, check_ref};
 use crate::store::Store;
 
@@ -85,13 +85,17 @@ impl Presence {
         }
     }
 
-    fn encode(&self, identity: &[u8]) -> Vec<u8> {
+    /// The bitmap bytes, with chunk `extra` also marked present when given.
+    fn encode(&self, identity: &[u8], extra: Option<usize>) -> Vec<u8> {
         let mut bytes = identity.to_vec();
-        bytes.extend(
-            (0..self.chunks.div_ceil(8)).map(|byte| {
-                (self.words[byte / 8].load(Ordering::Acquire) >> (8 * (byte % 8))) as u8
-            }),
-        );
+        bytes.extend((0..self.chunks.div_ceil(8)).map(|byte| {
+            let mut value =
+                (self.words[byte / 8].load(Ordering::Acquire) >> (8 * (byte % 8))) as u8;
+            if let Some(index) = extra.filter(|index| index / 8 == byte) {
+                value |= 1 << (index % 8);
+            }
+            value
+        }));
         bytes
     }
 
@@ -149,14 +153,22 @@ impl Volume {
             (file, present)
         } else {
             let present = Presence::new(chunks);
-            write_file_atomic(&bitmap_path, &present.encode(&identity))?;
+            // The image is written and synced under a staging name, and its bitmap is durable before the rename makes
+            // `dest` appear. So `dest` existing implies a valid bitmap, and a crash leaves only a staging file to replace.
+            let staging = suffixed(dest, ".partial");
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
-                .create_new(true)
-                .open(dest)
-                .with_context(|| format!("creating {}", dest.display()))?;
+                .create(true)
+                .truncate(true)
+                .open(&staging)
+                .with_context(|| format!("creating {}", staging.display()))?;
             file.set_len(manifest.size_bytes)?;
+            file.sync_all()?;
+            write_file_atomic(&bitmap_path, &present.encode(&identity, None))?;
+            fs::rename(&staging, dest)
+                .with_context(|| format!("renaming into {}", dest.display()))?;
+            sync_parent(dest)?;
             (file, present)
         };
 
@@ -179,7 +191,7 @@ impl Volume {
     }
 
     /// Makes chunk `index` present in `dest`, fetching and authenticating it on first use.
-    /// A null chunk is zeros, which the sparse file already holds. The bit is set only after the data is durable.
+    /// A null chunk is zeros, which the sparse file already holds. The bit is published only once the bitmap is durable.
     fn ensure(&self, index: usize) -> Result<()> {
         if self.present.get(index) {
             return Ok(());
@@ -195,15 +207,20 @@ impl Volume {
                 .write_all_at(&plaintext, index as u64 * CHUNK_SIZE)?;
             self.file.sync_data()?;
         }
-        self.present.set(index, true);
-        self.persist()
-            .inspect_err(|_| self.present.set(index, false))
+        self.publish(index)
     }
 
-    /// Writes the bitmap. Writes are serialized, so the last one on disk includes every bit set before it.
-    fn persist(&self) -> Result<()> {
+    /// Marks chunk `index` present. The bitmap on disk is written with the bit before the bit is visible to other I/O,
+    /// so a write acknowledged from this chunk is never in a chunk the bitmap calls absent. If the bitmap write fails,
+    /// the chunk stays absent and is fetched again.
+    fn publish(&self, index: usize) -> Result<()> {
         let _writing = lock(&self.persist_lock);
-        write_file_atomic(&self.bitmap_path, &self.present.encode(&self.identity))
+        write_file_atomic(
+            &self.bitmap_path,
+            &self.present.encode(&self.identity, Some(index)),
+        )?;
+        self.present.set(index, true);
+        Ok(())
     }
 
     fn ensure_range(&self, offset: u64, len: usize) -> Result<()> {
@@ -392,7 +409,7 @@ mod tests {
         present.set(69, true);
         present.set(8, true);
         present.set(8, false);
-        let bytes = present.encode(&id);
+        let bytes = present.encode(&id, None);
         let decoded = Presence::decode(&bytes, &id, 70).unwrap();
         let bits: Vec<usize> = (0..70).filter(|i| decoded.get(*i)).collect();
         assert_eq!(bits, vec![0, 69]);
@@ -487,5 +504,38 @@ mod tests {
         let second = backup(&path, BOX, &store, &key).unwrap().volume_ref;
         assert_ne!(first, second);
         assert!(open(dir.path(), &second, &dest).is_err());
+    }
+
+    #[test]
+    fn a_failed_bitmap_write_leaves_the_chunk_absent_until_it_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 1);
+        let dest = dir.path().join("dest.raw");
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        // A directory where the bitmap's temp file goes makes every bitmap write fail.
+        let blocker = suffixed(&lazy.bitmap_path, ".tmp");
+        fs::create_dir(&blocker).unwrap();
+        let mut buf = [0u8; 4];
+        assert!(lazy.read(0, &mut buf).is_err());
+        assert!(!lazy.present.get(0));
+        fs::remove_dir(&blocker).unwrap();
+        lazy.read(0, &mut buf).unwrap();
+        assert_eq!(buf, [1; 4]);
+        assert!(lazy.present.get(0));
+    }
+
+    #[test]
+    fn an_interrupted_create_leaves_no_image_under_dest() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 2);
+        let dest = dir.path().join("dest.raw");
+        fs::write(
+            suffixed(&dest, ".partial"),
+            vec![7u8; 3 * CHUNK_SIZE as usize],
+        )
+        .unwrap();
+        open(dir.path(), &volume_ref, &dest).unwrap();
+        assert_eq!(fs::metadata(&dest).unwrap().len(), 2 * CHUNK_SIZE);
+        assert!(!suffixed(&dest, ".partial").exists());
     }
 }
