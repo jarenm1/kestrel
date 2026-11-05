@@ -533,12 +533,20 @@ export class NestFleet {
       this.holdWake(row)
       return
     }
-    // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report.
+    // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report. The
+    // claim is kept only once the resume is sent; if it is not, the box stays unplaced for the next wake.
+    const previous = { hostId: row.hostId, ownerEpoch: row.ownerEpoch, vmId: row.vmId }
+    const url = publicUrlFor(row.boxId, target.slug, this.domain)
     row.hostId = target.hostId
     row.ownerEpoch += 1
     row.vmId = crypto.randomUUID()
-    this.sql.exec("UPDATE user_boxes SET url = ? WHERE id = ?", publicUrlFor(row.boxId, target.slug, this.domain), row.boxId)
-    this.resumeOn(row, minted)
+    const enrollToken = this.adoptToken(row, minted)
+    if (!this.dispatch(row, this.resumeCommand(row, enrollToken, url))) {
+      Object.assign(row, previous)
+      this.holdWake(row)
+      return
+    }
+    this.sql.exec("UPDATE user_boxes SET url = ? WHERE id = ?", url, row.boxId)
   }
 
   /** A fresh enrollment token for a box that has not enrolled yet; null once it has. The caller adopts it at its send. */
@@ -568,7 +576,7 @@ export class NestFleet {
       return
     }
     const enrollToken = this.adoptToken(row, minted)
-    if (!this.dispatch(row, this.resumeCommand(row, enrollToken))) this.holdWake(row)
+    if (!this.dispatch(row, this.resumeCommand(row, enrollToken, this.boxUrl(row.boxId)))) this.holdWake(row)
   }
 
   /** The box stays waiting; the wake loop tries it again on the next capacity report, hello, or expiry. */
@@ -581,8 +589,12 @@ export class NestFleet {
     for (const row of nestBoxesWanted(this.sql)) await this.wake(row.boxId)
   }
 
-  private resumeCommand(row: NestBoxRow, enrollToken: string | null): NestHostCommand {
-    const url = this.sql.exec<{ url: string }>("SELECT url FROM user_boxes WHERE id = ?", row.boxId).toArray()[0]?.url ?? ""
+  /** The URL a box is served at now. */
+  private boxUrl(boxId: string): string {
+    return this.sql.exec<{ url: string }>("SELECT url FROM user_boxes WHERE id = ?", boxId).toArray()[0]?.url ?? ""
+  }
+
+  private resumeCommand(row: NestBoxRow, enrollToken: string | null, url: string): NestHostCommand {
     return {
       _tag: "resume",
       boxId: row.boxId,

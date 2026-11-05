@@ -22,6 +22,7 @@ let sql: FleetSql
 let now: number
 let sent: { hostId: string; frame: NestControlFrame }[]
 let connected: Set<string>
+let closing: Set<string>
 let fleet: NestFleet
 
 const sqlOver = (database: Database): FleetSql => ({
@@ -33,7 +34,7 @@ const sqlOver = (database: Database): FleetSql => ({
 
 const link: NestLink = {
   send(hostId, frame) {
-    if (!connected.has(hostId)) return false
+    if (!connected.has(hostId) || closing.has(hostId)) return false
     sent.push({ hostId, frame })
     return true
   },
@@ -146,6 +147,7 @@ beforeEach(() => {
   now = Date.UTC(2025, 0, 1)
   sent = []
   connected = new Set()
+  closing = new Set()
   fleet = new NestFleet(sql, link, DOMAIN, () => now)
   addUser("alice")
   addUser("bob")
@@ -482,6 +484,19 @@ describe("park and GPU", () => {
     const resume = lastCommand("host-a", "resume")
     fleet.result("host-a", resume.commandId, true, null, vmReport("box-1", resume.command.vmId, 2, "running"))
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: null })
+  })
+
+  test("a placement whose resume cannot be sent is not kept, so the next wake places the box elsewhere", async () => {
+    const vmId = await runningBox()
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    const park = lastCommand("host-a", "park")
+    fleet.result("host-a", park.commandId, true, null, vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    closing.add("host-a")
+    await fleet.wakeRequest("host-a", "box-1")
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: null })
+    disconnect("host-a")
+    await hello("host-b")
+    expect(lastCommand("host-b", "resume").command).toMatchObject({ ownerEpoch: 2 })
   })
 
   test("a box another user owns cannot be parked", async () => {
