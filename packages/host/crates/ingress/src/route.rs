@@ -16,12 +16,17 @@ use crate::api::HostApi;
 /// invalidates the entry anyway.
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(2);
 /// How long a host that is not a box (or a deleted one) stays known as missing, so repeated requests for it do not
-/// each call the host agent.
-const MISSING_CACHE_TTL: Duration = Duration::from_secs(5);
+/// each call the host agent. Short: a box the host has only just learned of must not answer 404 for long.
+const MISSING_CACHE_TTL: Duration = Duration::from_secs(1);
 /// Most entries the route cache holds. Host names come from clients, so the cache must not grow without bound.
 const MAX_CACHED_ROUTES: usize = 4096;
 /// Most host API route lookups in flight. A request that finds them all busy gets 503 instead of queueing another call.
 const MAX_CONCURRENT_LOOKUPS: usize = 32;
+/// Most wakes in flight at once. A wake past this fails fast with 503, so a burst across many suspended boxes cannot
+/// pile up host calls.
+const MAX_CONCURRENT_WAKES: usize = 32;
+/// Most requests held waiting on a wake at once. Past this a request gets 503 instead of holding a connection open.
+const MAX_HELD_REQUESTS: usize = 256;
 /// Longest a request waits for a suspended box to come up before it gets 503.
 pub const WAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound on a host API call that is not a wake.
@@ -61,17 +66,22 @@ pub fn box_id_from_host(host: &str, domain_suffix: &str) -> Option<String> {
     is_dns_label(box_id).then(|| box_id.to_owned())
 }
 
-/// `/mcp` and `/broker`, and everything under them, never reach a box through ingress. The check runs on the decoded,
-/// dot-resolved path, so `/%6dcp`, `//mcp` and `/x/../mcp` are caught too. A matrix parameter (`/mcp;a=b`) belongs to
-/// its segment, so it does not hide the name.
+/// `/mcp` and `/broker`, and everything under them, never reach a box through ingress. A box may match the path as
+/// sent or after resolving its dot segments, so both spellings are checked, on the decoded path: `/%6dcp`, `//mcp`,
+/// `/mcp/../..` and `/x/../mcp` are all caught. A matrix parameter (`/mcp;a=b`) belongs to its segment, so it does
+/// not hide the name.
 pub fn is_blocked_path(path: &str) -> bool {
     let decoded = percent_decode(path);
+    blocked_first_segment(&decoded, false) || blocked_first_segment(&decoded, true)
+}
+
+fn blocked_first_segment(decoded: &str, resolve_dots: bool) -> bool {
     let mut segments: Vec<&str> = Vec::new();
     for segment in decoded.split('/') {
         let name = segment.split(';').next().unwrap_or("");
         match name {
             "" | "." => {}
-            ".." => {
+            ".." if resolve_dots => {
                 segments.pop();
             }
             other => segments.push(other),
@@ -140,6 +150,8 @@ pub struct Router {
     routes: Mutex<HashMap<String, (Cached, Instant)>>,
     lookups: Semaphore,
     wakes: Arc<WakeGate>,
+    wake_slots: Arc<Semaphore>,
+    held: Semaphore,
 }
 
 impl Router {
@@ -150,6 +162,8 @@ impl Router {
             routes: Mutex::new(HashMap::new()),
             lookups: Semaphore::new(MAX_CONCURRENT_LOOKUPS),
             wakes: Arc::new(WakeGate::default()),
+            wake_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_WAKES)),
+            held: Semaphore::new(MAX_HELD_REQUESTS),
         }
     }
 
@@ -192,14 +206,19 @@ impl Router {
                 Some(upstream) => self.routed(box_id, upstream, guard),
                 None => Resolved::Unavailable,
             },
-            "suspended" | "parked" => match self.wake(box_id).await {
-                WakeOutcome::Ready(upstream) => self.routed(box_id, upstream, guard),
-                WakeOutcome::NotFound => {
-                    self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
-                    Resolved::NotFound
+            "suspended" | "parked" => {
+                let Ok(_held) = self.held.try_acquire() else {
+                    return Resolved::Unavailable;
+                };
+                match self.wake(box_id).await {
+                    WakeOutcome::Ready(upstream) => self.routed(box_id, upstream, guard),
+                    WakeOutcome::NotFound => {
+                        self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
+                        Resolved::NotFound
+                    }
+                    WakeOutcome::Failed => Resolved::Unavailable,
                 }
-                WakeOutcome::Failed => Resolved::Unavailable,
-            },
+            }
             _ => Resolved::Unavailable,
         }
     }
@@ -217,8 +236,13 @@ impl Router {
     async fn wake(&self, box_id: &str) -> WakeOutcome {
         let api = Arc::clone(&self.api);
         let key = box_id.to_owned();
+        let slots = Arc::clone(&self.wake_slots);
         self.wakes
             .run(box_id, move || async move {
+                let Ok(_slot) = slots.try_acquire_owned() else {
+                    eprintln!("kestrel-ingress: wake {key}: too many wakes in flight");
+                    return WakeOutcome::Failed;
+                };
                 match timeout(WAKE_TIMEOUT, api.wake(&key)).await {
                     Ok(Ok(Some(reply))) => WakeOutcome::Ready(reply.upstream),
                     Ok(Ok(None)) => WakeOutcome::NotFound,
@@ -374,6 +398,8 @@ mod tests {
             "/mcp;a=1",
             "/Broker;jsessionid=9/x",
             "/mcp;/tools",
+            "/mcp/x/../..",
+            "/a/../../mcp",
         ] {
             assert!(is_blocked_path(path), "{path} should be blocked");
         }
