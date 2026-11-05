@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { MeterRecord } from "@cloudagents/protocol"
 import { ControlPaths, MAX_METER_BATCH, METER_HOST_ID_HEADER } from "@cloudagents/protocol"
+import { HostError } from "./errors"
 import { appendLineDurable, writeFileAtomic } from "./fs-atomic"
 
 /** Most records kept while the control plane is unreachable; the oldest go first. */
@@ -49,17 +50,27 @@ export class Outbox {
     return readLines(this.path).slice(0, limit)
   }
 
-  /** Removes the first `count` records, which the control plane has taken. */
-  drop(count: number): void {
-    const kept = readLines(this.path).slice(count)
-    writeFileAtomic(this.path, joinLines(kept))
-    this.count = kept.length
+  /** Removes the acknowledged lines, one occurrence each. Matching by content stays correct when `append` trimmed the head during a shipment. */
+  acknowledge(lines: readonly string[]): void {
+    this.remove(lines)
   }
 
   reject(lines: readonly string[]): void {
-    for (const line of lines) {
-      appendLineDurable(this.rejectedPath, line)
+    for (const line of lines) appendLineDurable(this.rejectedPath, line)
+    this.remove(lines)
+  }
+
+  private remove(lines: readonly string[]): void {
+    const owed = new Map<string, number>()
+    for (const line of lines) owed.set(line, (owed.get(line) ?? 0) + 1)
+    const kept: string[] = []
+    for (const line of readLines(this.path)) {
+      const pending = owed.get(line) ?? 0
+      if (pending > 0) owed.set(line, pending - 1)
+      else kept.push(line)
     }
+    writeFileAtomic(this.path, joinLines(kept))
+    this.count = kept.length
   }
 }
 
@@ -70,8 +81,9 @@ export interface ShipResult {
 
 /**
  * Posts queued records in batches until the outbox is empty or the control plane refuses for now. A 2xx acknowledges
- * a batch. A 4xx other than 408 and 429 means the batch can never be accepted, so it is moved aside. Anything else
- * (network failure, 5xx, throttling) leaves the batch queued for the next attempt.
+ * a batch. A 4xx other than 401, 403, 408 and 429 means the batch can never be accepted, so it is moved aside. 401 and
+ * 403 mean the host's credentials are refused: the batch stays queued and the error is thrown for the daemon to log.
+ * 408, 429, 5xx and network failures leave the batch queued for the next attempt.
  */
 export const shipMeterRecords = async (opts: {
   readonly outbox: Outbox
@@ -100,16 +112,16 @@ export const shipMeterRecords = async (opts: {
     } catch {
       return { accepted, rejected }
     }
-    const retryable = response.status >= 500 || response.status === 408 || response.status === 429
     if (response.ok) {
-      opts.outbox.drop(lines.length)
+      opts.outbox.acknowledge(lines)
       accepted += lines.length
-    } else if (!retryable) {
-      opts.outbox.reject(lines)
-      opts.outbox.drop(lines.length)
-      rejected += lines.length
-    } else {
+    } else if (response.status === 401 || response.status === 403) {
+      throw new HostError(`control plane refused the meter credentials (HTTP ${response.status}); records stay queued`)
+    } else if (response.status >= 500 || response.status === 408 || response.status === 429) {
       return { accepted, rejected }
+    } else {
+      opts.outbox.reject(lines)
+      rejected += lines.length
     }
   }
 }

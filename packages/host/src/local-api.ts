@@ -92,6 +92,11 @@ const groupGid = (name: string): number => {
   return gid
 }
 
+/** The two sockets the host serves. */
+export interface LocalApi {
+  stop(): void
+}
+
 /**
  * Serves both local sockets in `runDir`. The directory is 0750 and group `ingressGroup`; `api.sock` is 0660 in that group
  * so kestrel-ingress can reach it. `operator.sock` is 0600 and owned by the agent's user, so the group cannot reach it.
@@ -101,7 +106,7 @@ export const startLocalApi = (opts: {
   readonly runDir: string
   readonly ingressGroup: string
   readonly manager: VmManager
-}): { stop(): void } => {
+}): LocalApi => {
   const gid = groupGid(opts.ingressGroup)
   mkdirSync(opts.runDir, { recursive: true, mode: 0o750 })
   chownSync(opts.runDir, -1, gid)
