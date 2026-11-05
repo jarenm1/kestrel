@@ -378,8 +378,9 @@ export function ModelPicker({
                   returnKeyType="search"
                   onKeyPress={onSearchKeyPress}
                   onSubmitEditing={() => {
-                    const first = matched[0];
-                    if (first !== undefined) choose(first.model);
+                    // Enter chooses the first row the user can see: search results, or the open tab's list.
+                    const first = groups[0]?.models[0];
+                    if (first !== undefined) choose(first);
                   }}
                   style={styles.search}
                 />
