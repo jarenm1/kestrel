@@ -10,7 +10,7 @@ import {
 } from "@cloudagents/protocol"
 import type { FleetSql } from "./fleet-table"
 import { NEST_STANDARD_LIMITS } from "./nest-control"
-import { NestFleet, type NestHello, type NestLink } from "./nest-fleet"
+import { NestFleet, type NestLink } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 
 const GiB = 1024 * 1024 * 1024
@@ -52,9 +52,10 @@ const capacityOf = (freeGiB: number): NestHostCapacity => ({
   suspended: 0,
 })
 
-const hello = async (hostId: string, vms: NestVmReport[] = [], results: NestHello["results"] = [], freeGiB = 8) => {
+const hello = async (hostId: string, vms: NestVmReport[] = [], freeGiB = 8) => {
   connected.add(hostId)
-  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId: "image-1", capacity: capacityOf(freeGiB), vms, results })
+  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId: "image-1", capacity: capacityOf(freeGiB) })
+  if (vms.length > 0) fleet.inventory(hostId, vms, true)
 }
 
 const disconnect = (hostId: string) => {
@@ -156,7 +157,7 @@ describe("creating a box", () => {
     await placeBox("alice", "box-1")
     const { command } = lastCommand("host-a", "create")
     expect(command.publicUrl).toBe("https://box-1.slug-host-a.nest.example.com")
-    expect(command.enrollToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(command.enrollToken).toMatch(/^[A-Za-z0-9_-]{43}$/)
 
     expect(await fleet.enroll({ boxId: "box-1", token: command.enrollToken })).toEqual({ secret: "box-1-secret" })
     expect(await fleet.enroll({ boxId: "box-1", token: command.enrollToken })).toEqual({ secret: "box-1-secret" })
@@ -168,7 +169,7 @@ describe("creating a box", () => {
     await hello("host-a")
     await placeBox("alice", "box-1")
     const { command } = lastCommand("host-a", "create")
-    expect(await fleet.enroll({ boxId: "box-1", token: "0".repeat(64) })).toBeNull()
+    expect(await fleet.enroll({ boxId: "box-1", token: "0".repeat(43) })).toBeNull()
     now += NEST_ENROLL_TOKEN_TTL_MS
     expect(await fleet.enroll({ boxId: "box-1", token: command.enrollToken })).toBeNull()
   })
@@ -183,6 +184,24 @@ describe("creating a box", () => {
     expect(resent.command.enrollToken).not.toBe(first.command.enrollToken)
     expect(await fleet.enroll({ boxId: "box-1", token: first.command.enrollToken })).toBeNull()
     expect(await fleet.enroll({ boxId: "box-1", token: resent.command.enrollToken })).toEqual({ secret: "box-1-secret" })
+  })
+
+  test("a create resent after the box enrolled carries a token that enrolls nothing", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const first = lastCommand("host-a", "create")
+    expect(await fleet.enroll({ boxId: "box-1", token: first.command.enrollToken })).toEqual({ secret: "box-1-secret" })
+    fleet.markEnrolled("box-1")
+    await hello("host-a")
+    const resent = lastCommand("host-a", "create")
+    expect(resent.commandId).toBe(first.commandId)
+    expect(await fleet.enroll({ boxId: "box-1", token: resent.command.enrollToken })).toBeNull()
+  })
+
+  test("a host with room for one boot has none left once a create is on its way", async () => {
+    await hello("host-a", [], 2)
+    await placeBox("alice", "box-1")
+    expect(fleet.placement()).toBeNull()
   })
 
   test("a create the host refuses leaves the box failed, and the owner can delete it", async () => {
@@ -217,8 +236,8 @@ describe("VM reports and epochs", () => {
   test("a copy left at an older epoch on another host is evicted when it reports", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
-    await hello("host-b", [], [], 9)
-    fleet.wakeRequest("host-a", "box-1")
+    await hello("host-b", [], 9)
+    await fleet.wakeRequest("host-a", "box-1")
 
     const resume = lastCommand("host-b", "resume")
     expect(resume.command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
@@ -229,13 +248,25 @@ describe("VM reports and epochs", () => {
     expect(lastCommand("host-a", "evict").command).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 1 })
   })
 
+  test("inventory evicts a stale copy only once the host's last chunk arrives", async () => {
+    const firstVm = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-b", [], 9)
+    await fleet.wakeRequest("host-a", "box-1")
+
+    fleet.inventory("host-a", [vmReport("box-1", firstVm, 1, "running")], false)
+    expect(commandsTo("host-a").some((entry) => entry.command._tag === "evict")).toBe(false)
+    fleet.inventory("host-a", [], true)
+    expect(lastCommand("host-a", "evict").command).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 1 })
+  })
+
   test("a suspended box resumes on the same host with the same epoch and VM id", async () => {
     const vmId = await runningBox()
     fleet.suspend("alice", "box-1")
     const suspend = lastCommand("host-a", "suspend")
     fleet.result("host-a", suspend.commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
 
-    expect(fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(await fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "resume").command).toMatchObject({ ownerEpoch: 1, vmId })
   })
 
@@ -246,7 +277,7 @@ describe("VM reports and epochs", () => {
     fleet.result("host-a", suspend.commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
 
     disconnect("host-a")
-    fleet.resume("alice", "box-1")
+    await fleet.resume("alice", "box-1")
     expect(commandsTo("host-a").some((entry) => entry.command._tag === "resume")).toBe(false)
 
     await hello("host-a")
@@ -261,7 +292,7 @@ describe("VM reports and epochs", () => {
     await hello("host-b")
 
     const before = sent.length
-    fleet.wakeRequest("host-b", "box-1")
+    await fleet.wakeRequest("host-b", "box-1")
     expect(sent.length).toBe(before)
   })
 
@@ -269,7 +300,7 @@ describe("VM reports and epochs", () => {
     const vmId = await runningBox()
     fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
     disconnect("host-a")
-    fleet.wakeRequest("host-a", "box-1")
+    await fleet.wakeRequest("host-a", "box-1")
     expect(sent.some((entry) => entry.frame._tag === "command" && entry.frame.command._tag === "resume")).toBe(false)
 
     await hello("host-c")
@@ -281,20 +312,20 @@ describe("VM reports and epochs", () => {
     fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
     await hello("host-b")
 
-    fleet.wakeRequest("host-b", "box-1")
+    await fleet.wakeRequest("host-b", "box-1")
     expect(sent.some((entry) => entry.frame._tag === "command" && entry.frame.command._tag === "resume")).toBe(false)
 
-    fleet.wakeRequest("host-a", "box-1")
+    await fleet.wakeRequest("host-a", "box-1")
     expect(lastCommand("host-a", "resume").command).toMatchObject({ ownerEpoch: 2 })
   })
 
   test("a resume the host never answers is sent again at its deadline, so the parked box is not left waiting", async () => {
     const vmId = await runningBox()
     fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
-    expect(fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(await fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
     const first = lastCommand("host-a", "resume")
 
-    fleet.expire(now + 10 * MINUTE)
+    await fleet.expire(now + 10 * MINUTE)
     const second = lastCommand("host-a", "resume")
     expect(second.commandId).not.toBe(first.commandId)
     expect(second.command).toMatchObject({ ownerEpoch: 2, vmId: first.command.vmId, volumeRef: "vol-1" })
@@ -307,11 +338,11 @@ describe("VM reports and epochs", () => {
     const create = lastCommand("host-a", "create")
     fleet.result("host-a", create.commandId, true, null, vmReport("box-2", create.command.vmId, 1, "parked", { volumeRef: "vol-2", backedUpAt: now }))
     disconnect("host-a")
-    fleet.wakeRequest("host-a", "box-1")
-    fleet.wakeRequest("host-a", "box-2")
+    await fleet.wakeRequest("host-a", "box-1")
+    await fleet.wakeRequest("host-a", "box-2")
 
     // Host-b has 2 GiB free: room for one boot (1 GiB plus 512 MiB headroom), not for two.
-    await hello("host-b", [], [], 2)
+    await hello("host-b", [], 2)
     expect(commandsTo("host-b").filter((entry) => entry.command._tag === "resume")).toHaveLength(1)
     expect([...fleet.statusesOf("alice").values()].filter((status) => status.pending === "resume")).toHaveLength(1)
   })
@@ -325,7 +356,7 @@ describe("VM reports and epochs", () => {
     expect(fleet.setLimits("alice", "box-1", bigger)).toEqual({ ok: true, value: null })
     expect(commandsTo("host-a").length).toBe(before)
 
-    fleet.wakeRequest("host-a", "box-1")
+    await fleet.wakeRequest("host-a", "box-1")
     expect(lastCommand("host-a", "resume").command).toMatchObject({ limits: bigger })
   })
 
@@ -339,9 +370,16 @@ describe("VM reports and epochs", () => {
 describe("owner commands", () => {
   test("a box another user owns is not found", async () => {
     await runningBox()
-    expect(fleet.resume("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
+    expect(await fleet.resume("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
     expect(fleet.suspend("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
     expect(fleet.destroy("bob", "box-1")).toMatchObject({ ok: false, status: 404 })
+  })
+
+  test("a command for a box whose host is offline is refused, and nothing is left in flight", async () => {
+    await runningBox()
+    disconnect("host-a")
+    expect(fleet.suspend("alice", "box-1")).toMatchObject({ ok: false, status: 409, tag: "HostOffline" })
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ pending: null })
   })
 
   test("a second command while one is in flight is refused", async () => {
@@ -410,6 +448,16 @@ describe("park and GPU", () => {
     const park = lastCommand("host-a", "park")
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: "park" })
     fleet.result("host-a", park.commandId, true, null, vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: null })
+  })
+
+  test("a park report that arrives before its result keeps the command in flight until the result", async () => {
+    const vmId = await runningBox()
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    const park = lastCommand("host-a", "park")
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: "park" })
+    fleet.result("host-a", park.commandId, true, null, undefined)
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: null })
   })
 

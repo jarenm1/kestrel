@@ -69,7 +69,7 @@ export type NestBoxRow = {
   enrollExpiresAt: number | null
   pendingId: string | null
   pendingKind: NestHostCommand["_tag"] | null
-  pendingCommand: NestHostCommand | null
+  pendingCommand: StoredNestCommand | null
   pendingDeadline: number | null
   /** The create command failed or timed out: the box has no VM and needs the owner to delete it. */
   createFailed: boolean
@@ -116,7 +116,14 @@ const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vm
   pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed`
 
 const decodeLimits = Schema.decodeUnknownSync(NestLimits)
-const decodeCommand = Schema.decodeUnknownSync(Schema.parseJson(NestHostCommand))
+/**
+ * A pending command as stored. A create keeps no enrollment token: a resend mints a fresh one, so the plaintext is
+ * never written to the database.
+ */
+const StoredCreate = NestHostCommand.members[0].pipe(Schema.omit("enrollToken"))
+export const StoredNestCommand = Schema.Union(StoredCreate, ...NestHostCommand.members.slice(1))
+export type StoredNestCommand = typeof StoredNestCommand.Type
+const decodeCommand = Schema.decodeUnknownSync(Schema.parseJson(StoredNestCommand))
 const decodeCapacity = Schema.decodeUnknownSync(Schema.parseJson(NestHostCapacity))
 
 const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({

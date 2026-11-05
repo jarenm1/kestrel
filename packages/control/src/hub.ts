@@ -116,7 +116,7 @@ import { commonToolFailures, ensureToolFailuresTable, recordToolFailures } from 
 import { deleteBoxActivity, ensureBoxActivityTable, fleetActivity, recordBoxActivity } from "./activity-table"
 import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
-import { NEST_STANDARD_LIMITS, nestLimitsError, publicUrlFor } from "./nest-control"
+import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -135,10 +135,6 @@ const INVALID_METER_HOST: BoxFailure = {
 }
 const NEST_DISABLED: BoxFailure = { ok: false, status: 404, tag: "NotFound", message: "Nest is not enabled" }
 const NO_NEST_CAPACITY: BoxFailure = { ok: false, status: 503, tag: "NoCapacity", message: "no Nest host has room for a new box" }
-
-/** 32 random bytes, base64url: a box secret, or the id a pairing is polled with. */
-const newSecret = (): string =>
-  toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 
 /** Pairing codes: 8 characters from 32 symbols with no 0, O, 1 or I. 32 divides 256, so each byte is unbiased. */
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -774,11 +770,11 @@ export class Hub extends DurableObject<Env> {
   private async nestAction(
     sessionId: string,
     id: string,
-    act: (login: string) => NestOutcome<null>,
+    act: (login: string) => NestOutcome<null> | Promise<NestOutcome<null>>,
   ): Promise<BoxOutcome<UserBox>> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
-    const outcome = act(session.login)
+    const outcome = await act(session.login)
     if (!outcome.ok) return outcome
     await this.rearm()
     return this.userBoxView(session.login, id)
@@ -1174,7 +1170,7 @@ export class Hub extends DurableObject<Env> {
 
   /** Resumes the box and polls until it reports `running`; false when that does not happen within NEST_WAKE_TIMEOUT_MS. */
   private async wakeNestBox(login: string, id: string): Promise<boolean> {
-    if (!this.nest.resume(login, id).ok) return false
+    if (!(await this.nest.resume(login, id)).ok) return false
     await this.rearm()
     const deadline = Date.now() + NEST_WAKE_TIMEOUT_MS
     while (!this.nest.isRunning(login, id)) {
@@ -1458,7 +1454,7 @@ export class Hub extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now()
-    this.nest.expire(now)
+    await this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
       .toArray()
@@ -1782,7 +1778,7 @@ export class Hub extends DurableObject<Env> {
         this.refuseNestHost(ws, "hello sent twice")
         return
       case "capacity":
-        this.nest.capacity(attachment.hostId, frame.capacity)
+        await this.nest.capacity(attachment.hostId, frame.capacity)
         break
       case "vm":
         this.nest.vm(attachment.hostId, frame.vm)
@@ -1790,8 +1786,11 @@ export class Hub extends DurableObject<Env> {
       case "result":
         this.nest.result(attachment.hostId, frame.commandId, frame.ok, frame.error ?? null, frame.vm)
         break
+      case "inventory":
+        this.nest.inventory(attachment.hostId, frame.vms, frame.last)
+        break
       case "wakeRequest":
-        this.nest.wakeRequest(attachment.hostId, frame.boxId)
+        await this.nest.wakeRequest(attachment.hostId, frame.boxId)
         break
     }
     await this.rearm()

@@ -3,9 +3,9 @@ import type { NestHostCapacity, NestVmReport } from "@cloudagents/protocol"
 import {
   decideVm,
   enrollTokenHash,
-  newEnrollToken,
   nestLimitsError,
   nestStatusOf,
+  newSecret,
   placeHost,
   publicUrlFor,
   type PlacementCandidate,
@@ -156,14 +156,14 @@ describe("publicUrlFor", () => {
 })
 
 describe("enrollment tokens", () => {
-  test("are 64 hex characters and differ on every call", () => {
-    const first = newEnrollToken()
-    expect(first).toMatch(/^[0-9a-f]{64}$/)
-    expect(newEnrollToken()).not.toBe(first)
+  test("are 43 base64url characters and differ on every call", () => {
+    const first = newSecret()
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(newSecret()).not.toBe(first)
   })
 
   test("hash deterministically, and the hash is not the token", async () => {
-    const token = newEnrollToken()
+    const token = newSecret()
     const hash = await enrollTokenHash(token)
     expect(hash).toMatch(/^[0-9a-f]{64}$/)
     expect(hash).not.toBe(token)

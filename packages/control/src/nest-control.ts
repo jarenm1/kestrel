@@ -2,7 +2,14 @@
  * Pure Nest control-plane rules: placement, the epoch decision for a reported VM, command deadlines, enrollment
  * tokens and the status a box shows its owner. The Hub's Nest code (`nest-fleet.ts`) applies them to SQLite.
  */
-import type { NestBoxStatus, NestHostCapacity, NestHostCommand, NestLimits, NestVmReport } from "@cloudagents/protocol"
+import {
+  type NestBoxStatus,
+  type NestHostCapacity,
+  type NestHostCommand,
+  type NestLimits,
+  type NestVmReport,
+  toBase64,
+} from "@cloudagents/protocol"
 import type { NestBoxRow } from "./nest-table"
 
 const GiB = 1024 * 1024 * 1024
@@ -99,9 +106,9 @@ export const decideVm = (row: NestBoxRow | null, hostId: string, report: NestVmR
   return { _tag: "apply" }
 }
 
-/** Enrollment tokens are 32 random bytes in hex. Only their SHA-256 is stored. */
-export const newEnrollToken = (): string =>
-  Array.from(crypto.getRandomValues(new Uint8Array(32)), (byte) => byte.toString(16).padStart(2, "0")).join("")
+/** 32 random bytes, base64url: a box secret, or an enrollment token (the form `NestEnrollToken` accepts). */
+export const newSecret = (): string =>
+  toBase64(crypto.getRandomValues(new Uint8Array(32))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
 
 export const enrollTokenHash = async (token: string): Promise<string> => {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))
