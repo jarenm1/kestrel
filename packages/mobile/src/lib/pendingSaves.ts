@@ -8,10 +8,22 @@ const pending = new Map<string, Promise<void>>();
 
 /** Registers a queue's current work under `key`; the entry clears when the queue goes quiet. */
 export function trackSaveQueue(key: string, queue: Pick<SaveQueue<unknown>, "idle">): void {
-  const settled = queue.idle().then(
-    () => undefined,
-    () => undefined
-  );
+  track(key, queue.idle());
+}
+
+/** Registers one write (a mutation that is not a queue) under `key`. */
+export function trackSave(key: string, work: Promise<unknown>): void {
+  track(key, work);
+}
+
+function track(key: string, work: Promise<unknown>): void {
+  const previous = pending.get(key);
+  const settled = (previous ?? Promise.resolve())
+    .then(() => work)
+    .then(
+      () => undefined,
+      () => undefined
+    );
   pending.set(key, settled);
   void settled.finally(() => {
     if (pending.get(key) === settled) pending.delete(key);

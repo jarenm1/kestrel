@@ -21,7 +21,7 @@ import { Textarea } from "@/components/ui/Input";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { errorText } from "@/lib/format";
-import { pendingSaves, trackSaveQueue } from "@/lib/pendingSaves";
+import { pendingSaves, trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
 import { colors, radius, spacing } from "@/theme";
 
@@ -333,7 +333,12 @@ function UsageLimitsCard({ api }: { api: ApiClient }) {
   const settings = useQuery(queries.threadSettings());
   const cacheKey = queries.threadSettings().queryKey;
   const save = useMutation({
-    mutationFn: (next: ThreadSettings) => api.saveThreadSettings(next),
+    mutationFn: (next: ThreadSettings) => {
+      const saving = api.saveThreadSettings(next);
+      // A reopened screen's thread-settings GET must wait for this write, like the text-generation queue's.
+      trackSave(api.boxScope, saving);
+      return saving;
+    },
     onMutate: async (next) => {
       await client.cancelQueries({ queryKey: cacheKey });
       const previous = client.getQueryData<ThreadSettings>(cacheKey);

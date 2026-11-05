@@ -3,7 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { connectedModelProviders, type Connection, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
 import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
-import { trackSaveQueue } from "@/lib/pendingSaves";
+import { trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
 
 const task = (title: string): Task => ({
@@ -202,4 +202,23 @@ test("settings reads wait for a closed form's save so a reopened form cannot hyd
   await Promise.all([text, threads]);
   expect(calls).toEqual(["text", "threads"]);
   await queue.idle();
+});
+
+test("thread settings reads wait for a usage-limit mutation write", async () => {
+  const calls: string[] = [];
+  const { promise, resolve } = Promise.withResolvers<void>();
+  trackSave("usage-box", promise);
+  const api = {
+    boxScope: "usage-box",
+    threadSettings: async () => {
+      calls.push("threads");
+      return { autoResumeAfterUsageLimits: true };
+    },
+  } as unknown as Parameters<typeof createQueries>[0];
+  const threads = queryClient.fetchQuery(createQueries(api).threadSettings());
+  await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+  expect(calls).toEqual([]);
+  resolve();
+  await threads;
+  expect(calls).toEqual(["threads"]);
 });
