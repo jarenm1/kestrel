@@ -94,8 +94,8 @@ try {
     const start = performance.now();
     let timer;
     try {
-      // No await occurs before spawn, so a signal cannot interleave between this check and the launch.
-      if (interrupted) { entry.skipped = 'interrupted before start'; break; }
+      // Launch and setting stopCurrent are synchronous, so a signal handler cannot run
+      // before stopCurrent exists; it runs once this function awaits the child.
       const child = spawn(argv[0], argv.slice(1), { cwd: workspace, detached: true, stdio: ['ignore', log, log], env: { ...process.env, UE_ENGINE_DIR: paths.engine, UE_ZEN_DDC_URL: c.zenUrl, 'UE-LocalDataCachePath': cache } });
       const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
       stopCurrent = stop;
