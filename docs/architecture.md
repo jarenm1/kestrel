@@ -77,6 +77,15 @@ rejected actions and failed saves unlock. Pending storage and navigation therefo
 Mobile draft storage serializes reads and writes per key across composer mounts, including pending SecureStore
 operations.
 
+Typing `@` at a word boundary in the desktop or phone composer opens model suggestions in the command-menu style.
+Suggestions use the same connected, visible models as the model picker, search names and routing identities, and
+show the harness logo with a provider-qualified slug identifying whose connection/usage the model uses. Selecting
+one inserts an atomic logo/name chip; it does not change the answering model or automatically launch a child.
+The prompt and saved draft retain a readable Markdown mention with the exact model id, provider and harness, so
+the agent can use that identity with `delegate_task` or `delegate_batch`. Model and GitHub-reference chips can
+coexist; both are masked from autocomplete triggers. Shared parsing and provider-to-harness identity live in
+`packages/composer/src/models.ts`; the native editor bridge uses the same insertion and persistence contract.
+
 Shared panels follow the same pattern: `packages/ui` holds the DOM component with plain JSON props, each app
 fetches the data with its own client, and the phone app renders the component through a `use dom` wrapper whose
 Tailwind comes from `@cloudagents/ui/dom.css` (Metro runs `@tailwindcss/postcss`). See

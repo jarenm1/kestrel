@@ -10,18 +10,33 @@ import {
   type KeyboardEvent,
 } from "react"
 import {
+  modelMentionMarkdown,
+  modelMentionOf,
+  modelMentionTypedText,
+  parseComposerDraft,
+  parseModelMentionMarkdown,
+} from "../models"
+import {
   githubReferenceLabel,
   githubReferenceMarkdown,
   githubReferenceTypedText,
-  parseGithubReferenceDraft,
   parseGithubReferenceMarkdown,
   type GithubReference,
   type GithubReferenceKind,
 } from "../reference/githubReference"
 import { COMPOSER_CHIP_PLACEHOLDER, composerViewOf, type ComposerEditorView } from "../view"
 import { cn } from "../lib/cn"
+import type { ModelInfo, ModelProvider } from "@cloudagents/protocol"
 
 export { composerViewOf, type ComposerEditorView } from "../view"
+
+/** A harness logo for a mention chip: the same asset the model picker draws for the provider. */
+export interface ComposerModelLogo {
+  readonly src: string
+  readonly monochrome: boolean
+}
+
+export type ComposerModelLogos = Partial<Record<ModelProvider, ComposerModelLogo>>
 
 export interface ComposerEditorHandle {
   focus(): void
@@ -31,6 +46,8 @@ export interface ComposerEditorHandle {
   replaceRange(start: number, end: number, replacement: string): void
   /** Replaces visible characters `[start, end)` with a reference chip. */
   insertReference(reference: GithubReference, start: number, end: number): void
+  /** Replaces visible characters `[start, end)` with a model-mention chip; the message does not switch models. */
+  insertModelMention(model: ModelInfo, start: number, end: number): void
   /** Reads the editor as it is now, including edits the parent has not received yet. */
   readView(): ComposerEditorView
   /** Synchronously blocks edits before an asynchronous action captures the draft. */
@@ -45,6 +62,9 @@ interface Props {
   placeholder: string
   autoFocus?: boolean
   className?: string
+  /** Harness logos for model-mention chips, by the mentioned model's provider. Hosts pass every provider they know,
+   * so a mention restored from a draft keeps its icon even if that provider is no longer connected. */
+  modelLogos?: ComposerModelLogos
   onChange: (view: ComposerEditorView) => void
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void
   onPaste?: (event: ClipboardEvent<HTMLDivElement>) => void
@@ -64,13 +84,25 @@ const PLACEHOLDER = COMPOSER_CHIP_PLACEHOLDER
 
 const labelOf = (token: HTMLElement): string => token.dataset.referenceLabel ?? token.textContent ?? ""
 
+/** What a chip turns back into when the caret deletes into it: the `#number` or `@model-id` it was picked from. */
+function typedTextOf(token: HTMLElement): string {
+  if (token.dataset.githubReference !== undefined) return githubReferenceTypedText(labelOf(token))
+  const markdown = token.dataset.modelMention
+  const model = markdown === undefined ? undefined : parseModelMentionMarkdown(markdown)
+  return model === undefined ? labelOf(token) : modelMentionTypedText(model.mention)
+}
+
+/** A chip's serialized Markdown: model mentions and GitHub references share the chip plumbing. */
+const chipMarkdownOf = (element: HTMLElement): string | undefined =>
+  element.dataset.githubReference ?? element.dataset.modelMention
+
 /** The token's Markdown is authoritative; its visible label is what the user sees. */
 function serializeNode(node: Node, mode: Mode): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? ""
   if (node.nodeType === Node.ELEMENT_NODE) {
     const element = node as HTMLElement
     if (element.dataset?.composerPlaceholder !== undefined) return ""
-    const token = element.dataset?.githubReference
+    const token = chipMarkdownOf(element)
     if (token !== undefined) {
       if (mode === "markdown") return token
       const label = labelOf(element)
@@ -146,7 +178,7 @@ function collectLeaves(parent: Node, at: number, leaves: Leaf[]): number {
     if (child.nodeType !== Node.ELEMENT_NODE) continue
     const element = child as HTMLElement
     if (element.dataset?.composerPlaceholder !== undefined) continue
-    if (element.dataset?.githubReference !== undefined) {
+    if (chipMarkdownOf(element) !== undefined) {
       const length = labelOf(element).length
       leaves.push({ node: element, start: at, length, token: true })
       at += length
@@ -171,7 +203,7 @@ function normalizeChipCaret(root: HTMLElement): void {
   const selection = window.getSelection()
   if (selection === null || !selection.isCollapsed || selection.anchorNode === null) return
   const anchor = selection.anchorNode instanceof Element ? selection.anchorNode : selection.anchorNode.parentElement
-  const token = anchor?.closest("[data-github-reference]")
+  const token = anchor?.closest("[data-github-reference],[data-model-mention]")
   if (token !== null && token !== undefined && token.parentNode !== null && root.contains(token)) {
     setSelection(selection, token.parentNode, childIndex(token) + 1)
   }
@@ -253,7 +285,51 @@ function createReferenceToken(reference: GithubReference): HTMLSpanElement {
   return token
 }
 
-function isIntactChip(token: HTMLElement, label: string): boolean {
+/** A model mention reads like the picker's selected model: harness logo then name, same compact size and spacing. */
+const MODEL_CHIP_CLASS =
+  "mx-px inline-flex items-center gap-1.5 whitespace-nowrap align-middle text-xs font-medium text-foreground"
+
+/** The provider's harness logo, drawn as a mask when the asset is monochrome, exactly as the model picker draws it. */
+function createModelLogo(model: ModelInfo, logos: ComposerModelLogos | undefined): HTMLElement | undefined {
+  const logo = logos?.[model.provider]
+  if (logo === undefined) return undefined
+  if (logo.monochrome) {
+    const mask = document.createElement("span")
+    mask.dataset.harnessLogo = "true"
+    mask.setAttribute("aria-hidden", "true")
+    mask.className = "size-4 shrink-0 self-center bg-current"
+    mask.style.mask = `url("${logo.src}") center / contain no-repeat`
+    return mask
+  }
+  const image = document.createElement("img")
+  image.dataset.harnessLogo = "true"
+  image.src = logo.src
+  image.alt = ""
+  image.draggable = false
+  image.className = "size-4 shrink-0 self-center object-contain"
+  return image
+}
+
+/** The logo a chip currently draws, kept off the DOM so large data-URI logo sources are not serialized with the draft. */
+const drawnModelLogos = new WeakMap<HTMLElement, ComposerModelLogo | null>()
+
+/** A model mention chip: atomic like a reference, but styled like the model picker's selected model control. */
+function createModelMentionToken(model: ModelInfo, logos: ComposerModelLogos | undefined): HTMLSpanElement {
+  const mention = modelMentionOf(model)
+  const token = document.createElement("span")
+  token.dataset.modelMention = modelMentionMarkdown(model)
+  token.dataset.referenceLabel = mention.name
+  token.contentEditable = "false"
+  token.className = MODEL_CHIP_CLASS
+  token.title = `${mention.slug} · ${mention.harnessName}`
+  drawnModelLogos.set(token, logos?.[model.provider] ?? null)
+  const icon = createModelLogo(model, logos)
+  if (icon !== undefined) token.append(icon)
+  token.append(document.createTextNode(mention.name))
+  return token
+}
+
+function isIntactReferenceChip(token: HTMLElement, label: string): boolean {
   return (
     token.contentEditable === "false" &&
     token.className === CHIP_CLASS &&
@@ -264,6 +340,39 @@ function isIntactChip(token: HTMLElement, label: string): boolean {
   )
 }
 
+/** Whether a model chip still has WebKit-invisible structure: the catalog name, and at most one harness logo. */
+function isIntactModelChip(token: HTMLElement, model: ModelInfo): boolean {
+  if (token.contentEditable !== "false" || token.className !== MODEL_CHIP_CLASS) return false
+  const label = token.lastChild
+  if (label?.nodeType !== Node.TEXT_NODE || label.textContent !== modelMentionOf(model).name) return false
+  if (token.childNodes.length === 1) return true
+  return (
+    token.childNodes.length === 2 &&
+    token.firstChild?.nodeType === Node.ELEMENT_NODE &&
+    (token.firstChild as HTMLElement).dataset.harnessLogo === "true"
+  )
+}
+
+/** Adds or replaces a chip's harness logo in place, so a late logo map fills restored mentions without a re-render. */
+function syncModelMentionIcons(root: HTMLElement, logos: ComposerModelLogos | undefined): void {
+  for (const token of root.querySelectorAll<HTMLElement>("[data-model-mention]")) {
+    const markdown = token.dataset.modelMention
+    const parsed = markdown === undefined ? undefined : parseModelMentionMarkdown(markdown)
+    if (parsed === undefined || !isIntactModelChip(token, parsed.model)) continue
+    const logo = logos?.[parsed.model.provider] ?? null
+    const drawn = drawnModelLogos.get(token)
+    const same =
+      drawn !== undefined &&
+      (drawn === logo ||
+        (drawn !== null && logo !== null && drawn.src === logo.src && drawn.monochrome === logo.monochrome))
+    if (same) continue
+    drawnModelLogos.set(token, logo)
+    token.querySelector("[data-harness-logo]")?.remove()
+    const icon = createModelLogo(parsed.model, logos)
+    if (icon !== undefined) token.prepend(icon)
+  }
+}
+
 function isFlat(root: HTMLElement): boolean {
   for (const child of root.childNodes) {
     if (child.nodeType !== Node.ELEMENT_NODE) continue
@@ -271,8 +380,13 @@ function isFlat(root: HTMLElement): boolean {
     if (element.tagName === "BR") continue
     const markdown = element.dataset.githubReference
     const parsed = markdown === undefined ? undefined : parseGithubReferenceMarkdown(markdown)
-    if (parsed === undefined) return false
-    if (!isIntactChip(element, githubReferenceLabel(parsed.reference.kind, parsed.reference.number))) return false
+    if (parsed !== undefined) {
+      if (!isIntactReferenceChip(element, githubReferenceLabel(parsed.reference.kind, parsed.reference.number))) return false
+      continue
+    }
+    const modelMarkdown = element.dataset.modelMention
+    const model = modelMarkdown === undefined ? undefined : parseModelMentionMarkdown(modelMarkdown)
+    if (model === undefined || !isIntactModelChip(element, model.model)) return false
   }
   return true
 }
@@ -281,9 +395,9 @@ function isFlat(root: HTMLElement): boolean {
  * The draft is flat: text, breaks and intact chips directly under the root. WebKit (Safari, iOS) breaks that while
  * typing: it wraps text typed beside a chip in elements copying the chip's bold/underline, can type into the chip, and
  * can delete characters out of its label. Wrappers are unwrapped, text typed into a chip moves beside it, and a chip
- * whose label lost characters goes back to the `#number` text it was typed as. The caret stays on the same text.
+ * whose label lost characters goes back to the text it was typed as. The caret stays on the same text.
  */
-function flattenDraft(root: HTMLElement): void {
+function flattenDraft(root: HTMLElement, modelLogos?: ComposerModelLogos): void {
   if (isFlat(root)) return
   const selection = window.getSelection()
   const anchor =
@@ -294,6 +408,17 @@ function flattenDraft(root: HTMLElement): void {
   let caret: { node: Node; offset: number } | null = anchor?.node.nodeType === Node.TEXT_NODE ? anchor : null
   const caretIn = (element: Element) => anchor !== null && element.contains(anchor.node)
 
+  // A caret that was in the broken chip continues after whatever replaced it.
+  const replaceChip = (element: HTMLElement, replacement: Node[]): void => {
+    const last = replacement[replacement.length - 1]!
+    element.replaceWith(...replacement)
+    if (caretIn(element)) {
+      caret = last.nodeType === Node.TEXT_NODE
+        ? { node: last, offset: last.textContent?.length ?? 0 }
+        : { node: last.parentNode ?? root, offset: childIndex(last) + 1 }
+    }
+  }
+
   const flatten = (parent: Node) => {
     for (const child of Array.from(parent.childNodes)) {
       if (child.nodeType !== Node.ELEMENT_NODE) continue
@@ -303,7 +428,7 @@ function flattenDraft(root: HTMLElement): void {
       const parsed = markdown === undefined ? undefined : parseGithubReferenceMarkdown(markdown)
       if (parsed !== undefined) {
         const label = githubReferenceLabel(parsed.reference.kind, parsed.reference.number)
-        if (isIntactChip(element, label)) continue
+        if (isIntactReferenceChip(element, label)) continue
         const text = element.textContent ?? ""
         const at = text.indexOf(label)
         const replacement: Node[] = []
@@ -314,14 +439,26 @@ function flattenDraft(root: HTMLElement): void {
           replacement.push(createReferenceToken(parsed.reference))
           if (at + label.length < text.length) replacement.push(document.createTextNode(text.slice(at + label.length)))
         }
-        const last = replacement[replacement.length - 1]!
-        element.replaceWith(...replacement)
-        // A caret that was in the chip continues after whatever replaced it.
-        if (caretIn(element)) {
-          caret = last.nodeType === Node.TEXT_NODE
-            ? { node: last, offset: last.textContent?.length ?? 0 }
-            : { node: last.parentNode ?? root, offset: childIndex(last) + 1 }
+        replaceChip(element, replacement)
+        continue
+      }
+      const modelMarkdown = element.dataset.modelMention
+      const model = modelMarkdown === undefined ? undefined : parseModelMentionMarkdown(modelMarkdown)
+      if (model !== undefined) {
+        if (isIntactModelChip(element, model.model)) continue
+        const text = element.textContent ?? ""
+        const at = text.indexOf(model.mention.name)
+        const replacement: Node[] = []
+        if (at === -1) {
+          replacement.push(document.createTextNode(text === "" ? modelMentionTypedText(model.mention) : text))
+        } else {
+          if (at > 0) replacement.push(document.createTextNode(text.slice(0, at)))
+          replacement.push(createModelMentionToken(model.model, modelLogos))
+          if (at + model.mention.name.length < text.length) {
+            replacement.push(document.createTextNode(text.slice(at + model.mention.name.length)))
+          }
         }
+        replaceChip(element, replacement)
         continue
       }
       // A block WebKit started for a new line keeps that line break.
@@ -343,11 +480,12 @@ function flattenDraft(root: HTMLElement): void {
   }
 }
 
-function renderDraft(root: HTMLElement, markdown: string): void {
+function renderDraft(root: HTMLElement, markdown: string, modelLogos?: ComposerModelLogos): void {
   root.replaceChildren()
-  for (const segment of parseGithubReferenceDraft(markdown)) {
+  for (const segment of parseComposerDraft(markdown)) {
     if (segment.type === "text") root.append(document.createTextNode(segment.text))
-    else root.append(createReferenceToken(segment.reference))
+    else if (segment.type === "reference") root.append(createReferenceToken(segment.reference))
+    else root.append(createModelMentionToken(segment.model, modelLogos))
   }
 }
 
@@ -362,6 +500,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     placeholder,
     autoFocus,
     className,
+    modelLogos,
     onChange,
     onKeyDown,
     onPaste,
@@ -377,6 +516,8 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   const root = useRef<HTMLDivElement>(null)
   const composing = useRef(false)
   const initialized = useRef(false)
+  const logosRef = useRef(modelLogos)
+  logosRef.current = modelLogos
   // The last Markdown this editor produced. Any other `value` is an external write (a loaded draft or send-clear).
   const lastSerialized = useRef<string | null>(null)
   const [empty, setEmpty] = useState(() => composerViewOf(value).plain === "")
@@ -389,7 +530,9 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
   function readView(): ComposerEditorView {
     const element = root.current
     if (element === null) return composerViewOf(value)
-    flattenDraft(element)
+    flattenDraft(element, logosRef.current)
+    // Undo/redo restores nodes the WeakMap never saw; repair their logos on every read, not only React renders.
+    syncModelMentionIcons(element, logosRef.current)
     normalizeChipCaret(element)
     syncTrailingBreak(element)
     return {
@@ -480,7 +623,30 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
         selection.addRange(range)
         const token = createReferenceToken(reference)
         document.execCommand("insertHTML", false, token.outerHTML + (spaced ? "\u00A0" : ""))
-        flattenDraft(element)
+        flattenDraft(element, logosRef.current)
+        const point = pointAt(element, Math.min(start, end) + labelOf(token).length + (spaced ? 1 : 0), true)
+        setSelection(selection, point.node, point.offset)
+        notify()
+      },
+      insertModelMention(model, start, end) {
+        if (readOnlyRef.current) return
+        const element = root.current
+        if (element === null) return
+        // Same trailing-space rule as a reference: at a line end the caret lands in plain text, so typing next to a
+        // chip neither joins its label nor inherits its styling on WebKit.
+        const next = readText(element, "plain").charAt(Math.max(start, end))
+        const spaced = next === "" || next === "\n"
+        const range = rangeForVisible(element, start, end)
+        const selection = window.getSelection()
+        if (selection === null) return
+        element.focus()
+        selection.removeAllRanges()
+        selection.addRange(range)
+        // Build the token without its logo: the data URI would otherwise be serialized into the edit's undo HTML.
+        // `notify` reads the view synchronously and paints the logo from the current map before anything renders.
+        const token = createModelMentionToken(model, undefined)
+        document.execCommand("insertHTML", false, token.outerHTML + (spaced ? "\u00A0" : ""))
+        flattenDraft(element, logosRef.current)
         const point = pointAt(element, Math.min(start, end) + labelOf(token).length + (spaced ? 1 : 0), true)
         setSelection(selection, point.node, point.offset)
         notify()
@@ -502,7 +668,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       clear() {
         const element = root.current
         if (element === null) return
-        renderDraft(element, "")
+        renderDraft(element, "", logosRef.current)
         if (document.activeElement === element) {
           const selection = window.getSelection()
           if (selection !== null) setSelection(selection, element, 0)
@@ -518,7 +684,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     if (element === null) return
     // Drafts and external writes replace the children; edits from the user already match and keep their caret.
     if (!initialized.current || value !== lastSerialized.current) {
-      renderDraft(element, value)
+      renderDraft(element, value, logosRef.current)
       if (autoFocus || document.activeElement === element) {
         const selection = window.getSelection()
         if (selection !== null) {
@@ -530,6 +696,12 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     }
     initialized.current = true
   }, [value])
+
+  // Connections may arrive after a restored draft; fill its chips' logos in place without resetting the caret.
+  useLayoutEffect(() => {
+    const element = root.current
+    if (element !== null) syncModelMentionIcons(element, logosRef.current)
+  })
 
   useEffect(() => {
     if (autoFocus) root.current?.focus()
@@ -557,8 +729,8 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
     return () => document.removeEventListener("selectionchange", onSelectionChange)
   }, [])
 
-  // Backspace into a chip turns it back into the `#number` it was typed as, minus its last digit: deleting the number
-  // edits the reference instead of removing it whole, and the menu reopens for what is left.
+  // Backspace into a chip turns it back into the text it was typed as, minus its last character: deleting a reference
+  // edits its number and deleting a mention edits its model token, so the menu reopens for what is left.
   useEffect(() => {
     const element = root.current
     if (element === null) return
@@ -577,13 +749,13 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, Props>(function C
       const chip = leaves.find((leaf) => leaf.token && leaf.start + leaf.length === caret)
       if (chip === undefined) return
       event.preventDefault()
-      const typed = githubReferenceTypedText(labelOf(chip.node as HTMLElement))
+      const typed = typedTextOf(chip.node as HTMLElement)
       const text = typed.length > 1 ? typed.slice(0, -1) : typed
       selection.removeAllRanges()
       selection.addRange(rangeForVisible(element, chip.start, caret))
       // A native command keeps undo; the flattening in `notify` removes any style WebKit carries over from the chip.
       document.execCommand("insertText", false, text)
-      flattenDraft(element)
+      flattenDraft(element, logosRef.current)
       const point = pointAt(element, chip.start + text.length, true)
       setSelection(selection, point.node, point.offset)
       notify()

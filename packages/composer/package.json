@@ -7,7 +7,8 @@
     "./reference": "./src/reference/index.ts",
     "./view": "./src/view.ts",
     "./commands": "./src/commands.ts",
-    "./editor": "./src/editor/ComposerEditor.tsx"
+    "./editor": "./src/editor/ComposerEditor.tsx",
+    "./models": "./src/models.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

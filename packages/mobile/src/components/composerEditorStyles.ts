@@ -67,6 +67,35 @@ export const composerEditorStyles = `
     stroke-linejoin: round;
   }
 
+  /* A model mention reads like the picker's selected model: harness mark then name, with no chrome of its own. */
+  [data-composer-editor] [data-model-mention] {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 1px;
+    vertical-align: middle;
+    white-space: nowrap;
+    color: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  [data-composer-editor] [data-harness-logo] {
+    flex-shrink: 0;
+    align-self: center;
+    width: 16px;
+    height: 16px;
+  }
+
+  /* A monochrome logo keeps its inline mask style and takes the text color, as on desktop. */
+  [data-composer-editor] span[data-harness-logo] {
+    background-color: currentColor;
+  }
+
+  [data-composer-editor] img[data-harness-logo] {
+    object-fit: contain;
+  }
+
   [data-composer-placeholder-layer] {
     position: absolute;
     inset: 0;

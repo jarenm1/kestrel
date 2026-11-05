@@ -16,6 +16,7 @@ import {
   type AppCommand,
   type AppCommandHandlers,
 } from "@cloudagents/composer/commands";
+import { filterMentionModels, findModelMentionTrigger } from "@cloudagents/composer/models";
 import Svg, { Circle } from "react-native-svg";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -51,6 +52,8 @@ import { colors, fonts, radius, shadows, spacing } from "@/theme";
 import { ContextBar } from "./ContextBar";
 import { Markdown } from "./Markdown";
 import { SlashCommands } from "./SlashCommands";
+import { ModelMentions } from "./ModelMentions";
+import { MODEL_LOGOS } from "./harnessLogos";
 import ComposerEditor, { type DOMRef } from "./ComposerEditor";
 import { GithubReferenceMenu } from "./GithubReferenceMenu";
 import { ThinkingSlider } from "./ThinkingSlider";
@@ -343,6 +346,7 @@ export function Composer({
   const [dismissed, setDismissed] = useState(false);
   const [activeReferenceIndex, setActiveReferenceIndex] = useState(0);
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
+  const [activeModelIndex, setActiveModelIndex] = useState(0);
   const [pickedRepo, setPickedRepo] = useState<string>();
   const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate));
   const referenceRepo = pickedRepo ?? repo ?? (checkoutRepos.length === 1 ? checkoutRepos[0] : undefined);
@@ -431,13 +435,21 @@ export function Composer({
     (taskId !== undefined || commandMatches.length > 0) &&
     !dismissed;
   const selectedCommand = commandMatches[activeCommandIndex % commandMatches.length];
+  const mentionTrigger = findModelMentionTrigger(view.referenceText, view.caret);
+  const mentionMatches = mentionTrigger === undefined ? [] : filterMentionModels(offered, mentionTrigger.query);
+  const selectedMentionIndex =
+    mentionMatches.length === 0 ? -1 : Math.min(activeModelIndex, mentionMatches.length - 1);
+  const selectedMentionModel = selectedMentionIndex === -1 ? undefined : mentionMatches[selectedMentionIndex];
+  // The leading command owns the menu; a model mention only opens in ordinary text. The reference menu comes last.
+  const modelMenuOpen = mentionTrigger !== undefined && !slashMenuOpen && !dismissed;
   const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret);
   // A repository sheet or a touch choice takes focus from the editor; keep the active token available until chosen.
-  const referenceMenuOpen = referenceTrigger !== undefined && !dismissed;
-  const menuOpen = referenceMenuOpen || slashMenuOpen;
+  const referenceMenuOpen = referenceTrigger !== undefined && !slashMenuOpen && !modelMenuOpen && !dismissed;
+  const menuOpen = slashMenuOpen || modelMenuOpen || referenceMenuOpen;
 
   useEffect(() => setActiveReferenceIndex(0), [referenceTrigger?.start, referenceTrigger?.number]);
   useEffect(() => setActiveCommandIndex(0), [slashQuery, taskId, model?.id, activeRunId]);
+  useEffect(() => setActiveModelIndex(0), [mentionTrigger?.start, mentionTrigger?.query]);
 
   function edit(next: ComposerEditorView) {
     // An app action has already persisted the remainder and is opening its screen; ignore echoes of the old draft.
@@ -494,6 +506,13 @@ export function Composer({
     setDismissed(true);
   }
 
+  /** Inserts the model chip only: the composer's answering model stays whatever the picker holds. */
+  function chooseMentionModel(mentionModel: ModelInfo) {
+    if (mentionTrigger === undefined) return;
+    editor.current?.insertModelMention(mentionModel, mentionTrigger.start, mentionTrigger.end);
+    setDismissed(true);
+  }
+
   function chooseRepo(next: string) {
     setPickedRepo(next);
     onRepoChange?.(next);
@@ -503,17 +522,23 @@ export function Composer({
   async function menuKey(key: string) {
     if (key === "Escape") {
       setDismissed(true);
-    } else if (referenceMenuOpen) {
-      if (key === "ArrowDown" || key === "ArrowUp") {
-        setActiveReferenceIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + 2) % 2);
-      } else if (key === "Enter" || key === "Tab") {
-        chooseReference(activeReferenceIndex === 0 ? "pr" : "issue");
-      }
     } else if (slashMenuOpen && commandMatches.length > 0) {
       if (key === "ArrowDown" || key === "ArrowUp") {
         setActiveCommandIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + commandMatches.length) % commandMatches.length);
       } else if (key === "Enter" || key === "Tab") {
         if (selectedCommand !== undefined) chooseCommand(selectedCommand);
+      }
+    } else if (modelMenuOpen && mentionMatches.length > 0) {
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        setActiveModelIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + mentionMatches.length) % mentionMatches.length);
+      } else if (key === "Enter" || key === "Tab") {
+        if (selectedMentionModel !== undefined) chooseMentionModel(selectedMentionModel);
+      }
+    } else if (referenceMenuOpen) {
+      if (key === "ArrowDown" || key === "ArrowUp") {
+        setActiveReferenceIndex((index) => (index + (key === "ArrowDown" ? 1 : -1) + 2) % 2);
+      } else if (key === "Enter" || key === "Tab") {
+        chooseReference(activeReferenceIndex === 0 ? "pr" : "issue");
       }
     }
   }
@@ -561,7 +586,24 @@ export function Composer({
     <View style={styles.wrap}>
       {error ? <Alert>{errorText(error)}</Alert> : null}
       {appCommandError ? <Alert>{errorText(appCommandError)}</Alert> : null}
-      {referenceMenuOpen && referenceTrigger !== undefined ? (
+      {slashMenuOpen ? (
+        <SlashCommands
+          matches={commandMatches}
+          provider={commandProvider}
+          pending={commandQuery.isPending}
+          onSelect={chooseCommand}
+          activeIndex={activeCommandIndex}
+        />
+      ) : modelMenuOpen && mentionTrigger !== undefined ? (
+        <ModelMentions
+          matches={mentionMatches}
+          query={mentionTrigger.query}
+          pending={connections.isPending || capabilities.isPending}
+          failed={connections.isError || capabilities.isError}
+          activeIndex={selectedMentionIndex}
+          onSelect={chooseMentionModel}
+        />
+      ) : referenceMenuOpen && referenceTrigger !== undefined ? (
         <GithubReferenceMenu
           number={referenceTrigger.number}
           repo={referenceRepo}
@@ -569,14 +611,6 @@ export function Composer({
           onSelect={chooseReference}
           activeIndex={activeReferenceIndex}
           onActiveIndexChange={setActiveReferenceIndex}
-        />
-      ) : slashMenuOpen ? (
-        <SlashCommands
-          matches={commandMatches}
-          provider={commandProvider}
-          pending={commandQuery.isPending}
-          onSelect={chooseCommand}
-          activeIndex={activeCommandIndex}
         />
       ) : null}
       <View style={[styles.box, focused && styles.boxFocused]}>
@@ -595,6 +629,7 @@ export function Composer({
             placeholder={computedPlaceholder}
             ariaExpanded={menuOpen}
             menuOpen={menuOpen}
+            modelLogos={MODEL_LOGOS}
             onChange={async (next) => edit(next)}
             onFocus={async () => setFocused(true)}
             onBlur={async () => setFocused(false)}

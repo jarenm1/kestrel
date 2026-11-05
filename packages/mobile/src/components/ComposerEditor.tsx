@@ -6,9 +6,11 @@ import {
   ComposerEditor as SharedComposerEditor,
   type ComposerEditorHandle,
   type ComposerEditorView,
+  type ComposerModelLogos,
 } from "@cloudagents/composer/editor"
 import type { GithubReference } from "@cloudagents/composer/reference"
 import type { AppCommand } from "@cloudagents/composer/commands"
+import type { ModelInfo } from "@cloudagents/protocol"
 import { composerEditorStyles } from "./composerEditorStyles"
 import { domHostReset } from "./domHostReset"
 
@@ -23,6 +25,8 @@ export interface ComposerEditorDomRef {
   focusAt(offset: number): void
   replaceRange(start: number, end: number, replacement: string): void
   insertReference(reference: GithubReference, start: number, end: number): void
+  /** Replaces visible characters `[start, end)` with an atomic model chip; the model keeps its exact catalog id. */
+  insertModelMention(model: ModelInfo, start: number, end: number): void
   /** Flushes the live editor content to the `onSubmit` native action; the native ref bridge cannot return it. */
   requestSubmit(): void
   /** Reads live content for a menu pick, just as requestSubmit does for Send. */
@@ -44,8 +48,10 @@ export interface ComposerEditorDomProps {
   value: string
   placeholder: string
   ariaExpanded: boolean
-  /** The native reference/slash menu owns the arrow, Enter, Tab and Escape keys while it is open. */
+  /** The native reference, model or slash menu owns the arrow, Enter, Tab and Escape keys while it is open. */
   menuOpen: boolean
+  /** Harness marks for model chips, by provider: the DOM has no access to the app's bundled logo assets. */
+  modelLogos?: ComposerModelLogos
   onChange: (view: ComposerEditorView) => Promise<void>
   /** Receives the live view when `requestSubmit` is called, so Send never reads a stale bridged value. */
   onSubmit: (view: ComposerEditorView) => Promise<void>
@@ -76,6 +82,7 @@ export default function ComposerEditor({
   placeholder,
   ariaExpanded,
   menuOpen,
+  modelLogos,
   onChange,
   onSubmit,
   onAppCommand,
@@ -121,6 +128,10 @@ export default function ComposerEditor({
       insertReference(reference, start, end) {
         editor.current?.insertReference(reference as GithubReference, Number(start), Number(end))
       },
+      insertModelMention(model, start, end) {
+        // The ref bridge delivers the model as plain JSON; it is a ModelInfo again on this side.
+        editor.current?.insertModelMention(model as ModelInfo, Number(start), Number(end))
+      },
       requestSubmit() {
         if (snapshotPending.current || editor.current === null) return
         // Ordinary messages keep focus/the keyboard. App submissions request a separate locked snapshot if needed.
@@ -145,6 +156,7 @@ export default function ComposerEditor({
         placeholder={placeholder}
         enterInsertsNewline
         ariaExpanded={ariaExpanded}
+        modelLogos={modelLogos}
         onChange={(view) => {
           void callbacks.current.onChange(view)
         }}

@@ -32,6 +32,18 @@ The app-command catalog and invocation rules live in `@cloudagents/composer/comm
 Add future local actions there and implement their `AppCommandHandlers` entry on both hosts; selection and
 submission use the same resolver, and app actions override same-named slash commands without hiding `$skills`.
 
+## Model mentions
+
+Type `@` at a word boundary to search the same connected models the chat picker offers. Each suggestion shows the
+harness's mark, the model's name and its smaller, provider-qualified slug; tap one, or use arrows and Enter/Tab on a
+hardware keyboard, and Escape dismisses the menu. The leading `/` or `$` command menu wins over it, and the GitHub
+reference menu comes last.
+
+Picking a mention inserts an atomic chip, never changes the composer's answering model, and leaves the next Send's
+model exactly as the picker had it. The chip serializes to the exact catalog model id, provider and harness, so the
+agent can delegate to it. Drafts restored from another box still draw the chip's harness logo: the native menu and
+the DOM editor both use the catalog-wide logo map derived from the shared provider-to-harness mapping.
+
 ## GitHub references
 
 Type `#` followed by a positive issue/PR number at a word boundary to choose **PR #N** or **Issue #N** above the

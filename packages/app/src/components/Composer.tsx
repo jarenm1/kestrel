@@ -18,6 +18,7 @@ import {
   AgentModel,
   EFFORT_LABELS,
   EffortPick,
+  ModelProvider,
   GithubRepoSlug,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
@@ -28,7 +29,6 @@ import {
   type HarnessCommand,
   type Message,
   type ModelInfo,
-  type ModelProvider,
   type ModelProviderInfo,
   type Run,
   type SendMessageBody,
@@ -63,6 +63,8 @@ import {
   type ComposerEditorHandle,
   type ComposerEditorView,
 } from "@cloudagents/composer/editor"
+import { findModelMentionTrigger, filterMentionModels } from "@cloudagents/composer/models"
+import { ModelMentions } from "@/components/ModelMentions"
 import { GithubReferenceMenu } from "@/components/GithubReferenceMenu"
 import { useOpenUsagePanel } from "@/components/UsagePanel"
 import {
@@ -86,6 +88,11 @@ interface ModelSection {
   readonly provider: ModelProviderInfo
   readonly models: readonly ModelInfo[]
 }
+
+const MODEL_LOGOS = Object.fromEntries(ModelProvider.literals.map((provider) => {
+  const harness = harnessOf(provider)
+  return [provider, { src: harness.logo, monochrome: harness.monochrome }]
+}))
 
 // Keep each level's visual weight consistent across models with different supported levels.
 const EFFORT_RING_FILL: Record<AgentEffort, number> = {
@@ -606,6 +613,7 @@ export function Composer({
   const [autocompleteDismissed, setAutocompleteDismissed] = useState(false)
   const [activeCommandIndex, setActiveCommandIndex] = useState(0)
   const [activeReferenceIndex, setActiveReferenceIndex] = useState(0)
+  const [activeModelIndex, setActiveModelIndex] = useState(0)
   const [referenceMenuEngaged, setReferenceMenuEngaged] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const editor = useRef<ComposerEditorHandle>(null)
@@ -616,6 +624,7 @@ export function Composer({
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex]
   const slashMenuId = useId()
   const referenceMenuId = useId()
+  const modelMenuId = useId()
   const openUsagePanel = useOpenUsagePanel()
   // The shared catalog decides what appears and matches; every app action needs its local implementation here.
   const appCommandHandlers: AppCommandHandlers = { usage: openUsagePanel }
@@ -694,11 +703,17 @@ export function Composer({
   const selectedCommandIndex =
     commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
   const selectedCommand = selectedCommandIndex === -1 ? undefined : commandMatches[selectedCommandIndex]
+  const modelTrigger = findModelMentionTrigger(view.referenceText, view.caret)
+  const modelMatches = modelTrigger === undefined ? [] : filterMentionModels(offered, modelTrigger.query)
+  const modelMenuOpen = modelTrigger !== undefined && !slashMenuOpen && composerFocused && !autocompleteDismissed
+  const selectedModelIndex = modelMatches.length === 0 ? -1 : Math.min(activeModelIndex, modelMatches.length - 1)
+  const selectedMentionModel = modelMatches[selectedModelIndex]
   // A `#123` token anywhere opens the same menu. `referenceText` masks existing chips, so their labels never reopen it.
   const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret)
   const referenceMenuOpen =
     referenceTrigger !== undefined &&
     !slashMenuOpen &&
+    !modelMenuOpen &&
     !autocompleteDismissed &&
     (composerFocused || referenceMenuEngaged)
   const selectedReferenceIndex = Math.min(activeReferenceIndex, 1)
@@ -712,6 +727,9 @@ export function Composer({
     setActiveReferenceIndex(0)
   }, [referenceTrigger?.start, referenceTrigger?.number])
 
+  useEffect(() => {
+    setActiveModelIndex(0)
+  }, [modelTrigger?.start, modelTrigger?.query])
   // Once the menu is gone, a picker interaction must not keep a later menu open without focus.
   useEffect(() => {
     if (!referenceMenuOpen) setReferenceMenuEngaged(false)
@@ -736,6 +754,13 @@ export function Composer({
     // Replace the token and the whitespace after it; anything typed after (including reference chips) stays.
     const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0
     editor.current?.replaceRange(0, commandTokenEnd + gap, `${prefix}${command.name} `)
+    setAutocompleteDismissed(true)
+    editor.current?.focus()
+  }
+
+  function chooseMentionModel(mentionModel: ModelInfo) {
+    if (modelTrigger === undefined) return
+    editor.current?.insertModelMention(mentionModel, modelTrigger.start, modelTrigger.end)
     setAutocompleteDismissed(true)
     editor.current?.focus()
   }
@@ -832,6 +857,31 @@ export function Composer({
         return
       }
     }
+    if (!composing && modelMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setAutocompleteDismissed(true)
+        return
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault()
+        if (modelMatches.length > 0) {
+          const delta = e.key === "ArrowDown" ? 1 : -1
+          setActiveModelIndex((Math.max(0, selectedModelIndex) + delta + modelMatches.length) % modelMatches.length)
+        }
+        return
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        if (selectedMentionModel !== undefined) chooseMentionModel(selectedMentionModel)
+        return
+      }
+      if (e.key === "Tab" && !e.shiftKey && selectedMentionModel !== undefined) {
+        e.preventDefault()
+        chooseMentionModel(selectedMentionModel)
+        return
+      }
+    }
     if (!composing && referenceMenuOpen) {
       if (e.key === "Escape") {
         e.preventDefault()
@@ -866,7 +916,7 @@ export function Composer({
       return
     }
     if (
-      !composing && !slashMenuOpen && !referenceMenuOpen && !ask &&
+      !composing && !slashMenuOpen && !referenceMenuOpen && !modelMenuOpen && !ask &&
       !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
       (e.key === "ArrowUp" || e.key === "ArrowDown")
     ) {
@@ -937,13 +987,17 @@ export function Composer({
       : undefined
     : referenceMenuOpen
       ? slashListboxId(referenceMenuId)
-      : undefined
+      : modelMenuOpen
+        ? slashListboxId(modelMenuId)
+        : undefined
   const activeOptionId =
     slashMenuOpen && selectedCommand !== undefined
       ? slashOptionId(slashMenuId, selectedCommandIndex)
       : referenceMenuOpen
         ? slashOptionId(referenceMenuId, selectedReferenceIndex)
-        : undefined
+        : modelMenuOpen && selectedMentionModel !== undefined
+          ? slashOptionId(modelMenuId, selectedModelIndex)
+          : undefined
 
   return (
     <div className={cn("w-full max-w-3xl", className)}>
@@ -1005,7 +1059,8 @@ export function Composer({
             }
             autoFocus={autoFocus}
             className="max-h-56 min-h-12 bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
-            ariaExpanded={slashMenuOpen || referenceMenuOpen}
+            modelLogos={MODEL_LOGOS}
+            ariaExpanded={slashMenuOpen || referenceMenuOpen || modelMenuOpen}
             ariaControls={activeListboxId}
             ariaActiveDescendant={activeOptionId}
             onChange={(next) => {
@@ -1037,6 +1092,18 @@ export function Composer({
               activeIndex={selectedCommandIndex}
               onActiveIndexChange={setActiveCommandIndex}
               onSelect={chooseCommand}
+            />
+          )}
+          {modelMenuOpen && modelTrigger !== undefined && (
+            <ModelMentions
+              id={modelMenuId}
+              matches={modelMatches}
+              query={modelTrigger.query}
+              pending={connections.isPending}
+              failed={connections.isError}
+              activeIndex={selectedModelIndex}
+              onActiveIndexChange={setActiveModelIndex}
+              onSelect={chooseMentionModel}
             />
           )}
           {referenceMenuOpen && referenceTrigger !== undefined && (

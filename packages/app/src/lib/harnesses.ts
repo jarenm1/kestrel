@@ -1,4 +1,5 @@
 import type { ModelProvider } from "@cloudagents/protocol"
+import { modelHarnessOf } from "@cloudagents/composer/models"
 import claudeLogo from "@/assets/claude.svg"
 import openaiLogo from "@/assets/openai.svg"
 import antigravityLogo from "@/assets/antigravity.svg"
@@ -25,19 +26,6 @@ export const HARNESSES: readonly Harness[] = [
   { id: "antigravity", name: "Antigravity", logo: antigravityLogo, monochrome: false, connection: "antigravity-cli" },
 ]
 
-/** Which harness runs each provider's models: the box's `MODEL_HARNESS` (Anthropic-compatible gateways run in Claude Code). */
-const PROVIDER_HARNESS: Record<ModelProvider, HarnessId> = {
-  anthropic: "claude",
-  openai: "codex",
-  openrouter: "claude",
-  zai: "claude",
-  deepseek: "claude",
-  minimax: "claude",
-  moonshot: "claude",
-  opencode: "opencode",
-  "opencode-go": "opencode",
-  google: "antigravity",
-}
 
 export const harnessOf = (provider: ModelProvider): Harness =>
-  HARNESSES.find((harness) => harness.id === PROVIDER_HARNESS[provider])!
+  HARNESSES.find((harness) => harness.id === modelHarnessOf(provider).harness)!
