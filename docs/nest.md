@@ -151,19 +151,22 @@ the VM's own tap) → `resume` → `add-disk` the volume (id `volume`, serial `k
 disks, mounts the volume, writes the box env and starts the box → reply once the box answers `/api/health` →
 `running`. The local volume is used only when its recorded backup equals the command's `volumeRef`.
 
-**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs and drops caches; 30 s; a timeout
-aborts the suspend and the VM keeps running) → `pause` → `snapshot` to a new generation → stop the process → `suspended`.
-A memory image can always be discarded safely, because the volume was synced first; an unsynced disk is never snapshotted.
+**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs, drops caches and freezes the volume; 30 s;
+a timeout aborts the suspend: the host sends `thawVolume` and the VM keeps running) → `pause` → `snapshot` to a new generation
+→ stop the process → `suspended`. The volume stays frozen in the image; `resumed` thaws it. A memory image can always be
+discarded safely, because the volume was synced and frozen before it: no write lands after the sync, so an unsynced disk is
+never snapshotted.
 
 **Resume from suspended.** Prepare `restore/` from the latest generation (disk paths rewritten) → restore
 (`ondemand`; `copy` when `/dev/userfaultfd` is unavailable) → `resume` → vsock `resumed` with the wall clock; the
 guest replies once the box is healthy → `running`. A restore that fails falls back to a template clone with the same
 volume (the VM's processes are lost, its files are not).
 
-**Park.** From running: `prepareSuspend` (as for suspend; a timeout or failure aborts the park and the VM keeps running)
-→ `pause` → stop the process, discarding its memory. From suspended: discard the memory image. Then `kestrel-volume backup`
-→ `volumeRef` (recorded in `vm.json`) → `parked`. The local volume stays as a cache until the host needs the space or the
-control plane sends `evict`.
+**Park.** From running: `prepareSuspend` (as for suspend; a timeout or failure aborts the park with `thawVolume` and the VM
+keeps running) → `pause` → stop the process, discarding its memory. The volume is frozen from the sync until the process
+stops, so no write can land between the sync and the backup. From suspended: discard the memory image. Then
+`kestrel-volume backup` → `volumeRef` (recorded in `vm.json`) → `parked`. The local volume stays as a cache until the host
+needs the space or the control plane sends `evict`.
 
 **Periodic backup of a running VM** (every `backupInterval`, default 1 h, when the volume changed): `freezeVolume` →
 reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflinked copy → report `volumeRef`, `backedUpAt`.

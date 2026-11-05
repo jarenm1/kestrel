@@ -32,8 +32,8 @@ const EnvValue = Schema.String.pipe(Schema.maxLength(2048), Schema.pattern(/^[A-
 
 /**
  * How long the host waits for each reply before it acts without the guest: a guest is user-controlled and may never
- * answer. On timeout: `prepareSuspend` → the suspend or park is aborted and the VM keeps running; `gpuDetach` → unplug
- * anyway; `configure` and `resumed` → the VM is reported unhealthy and retried.
+ * answer. On timeout: `prepareSuspend` → the suspend or park is aborted (the host sends `thawVolume`) and the VM keeps
+ * running; `gpuDetach` → unplug anyway; `configure` and `resumed` → the VM is reported unhealthy and retried.
  */
 export const GUEST_REPLY_TIMEOUT_MS = {
   configure: 120_000,
@@ -174,11 +174,14 @@ export const HostToGuest = Schema.Union(
     network: GuestNetwork,
   }),
   /**
-   * The host is about to snapshot (suspend) or stop (park) the VM. Quiesce the box, `sync` every filesystem and drop the
-   * page cache, so the saved memory is small and the volume alone is consistent. Reply when done; the host pauses next.
+   * The host is about to snapshot (suspend) or stop (park) the VM. Quiesce the box, `sync` every filesystem, drop the
+   * page cache, then `fsfreeze --freeze` the volume and reply. The volume stays frozen (writes block) until the host
+   * sends `thawVolume` (the suspend or park was aborted) or `resumed`, or until `GUEST_REPLY_TIMEOUT_MS.freezeVolume`
+   * passes with neither, so a lost host cannot leave it frozen. Park stops the VM with the volume frozen, so no write
+   * can land between the sync and the backup.
    */
   Schema.Struct({ _tag: Schema.Literal("prepareSuspend"), id: RequestId }),
-  /** The VM was restored. Step the clock to `wallClockMs`, tell the box, and reply once the box answers its health check. */
+  /** The VM was restored. Thaw a volume that `prepareSuspend` left frozen, step the clock to `wallClockMs`, tell the box, and reply once the box answers its health check. */
   Schema.Struct({ _tag: Schema.Literal("resumed"), id: RequestId, wallClockMs: NonNegativeInt }),
   /**
    * Periodic backup of a running VM: quiesce the box, `sync`, then `fsfreeze --freeze` the volume and reply. The host
