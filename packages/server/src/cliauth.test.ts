@@ -1,0 +1,106 @@
+import { afterEach, describe, expect, test } from "bun:test"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
+import { Effect, Layer } from "effect"
+import type { CliAuthStatus } from "@cloudagents/protocol"
+import type { ServerConfig } from "./config"
+import { Config } from "./config"
+import { CliAuth, CliAuthLive } from "./cliauth"
+
+const roots: string[] = []
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+const rootFor = (): string => {
+  const root = mkdtempSync(join(tmpdir(), "kestrel-cliauth-"))
+  roots.push(root)
+  const bin = join(root, "bin")
+  mkdirSync(bin, { recursive: true })
+  // The status check only needs to find the binary: Antigravity's is a file check, not a spawned command.
+  if (process.platform !== "win32") {
+    const agy = join(bin, "agy")
+    writeFileSync(agy, "#!/bin/sh\nexit 0\n")
+    chmodSync(agy, 0o755)
+  }
+  return root
+}
+
+const tokenPath = (root: string): string =>
+  join(root, "users", "alice", "antigravity", "antigravity-cli", "antigravity-oauth-token")
+
+const writeCredential = (root: string, credential: string): void => {
+  const path = tokenPath(root)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, credential)
+}
+
+const statusesFor = async (root: string) => {
+  const config = { dataDir: root, sandbox: "off", sandboxPath: join(root, "bin"), sandboxSslCertFile: null } as unknown as ServerConfig
+  const layer = CliAuthLive.pipe(Layer.provide(Layer.succeed(Config, config)))
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const auth = yield* CliAuth
+      return yield* auth.status("alice")
+    }).pipe(Effect.provide(layer)),
+  )
+}
+
+const jwt = (claims: Record<string, unknown>): string =>
+  `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.not-a-real-signature`
+
+const antigravity = (statuses: ReadonlyArray<CliAuthStatus>) => {
+  const status = statuses.find((row) => row.provider === "antigravity-cli")
+  if (status === undefined) throw new Error("antigravity status is missing")
+  return status
+}
+
+describe("Antigravity account label", () => {
+  test("reports the signed-in Google email from the user's own login without exposing the credential", async () => {
+    const root = rootFor()
+    writeCredential(
+      root,
+      JSON.stringify({
+        token: {
+          access_token: "secret-access-token",
+          token_type: "Bearer",
+          refresh_token: "secret-refresh-token",
+          expiry: "2030-01-01T00:00:00Z",
+        },
+        auth_method: "consumer",
+        id_token: jwt({ email: "google-user@example.com", sub: "1234567890" }),
+      }),
+    )
+
+    const statuses = await statusesFor(root)
+    expect(antigravity(statuses)).toEqual({
+      provider: "antigravity-cli",
+      loggedIn: true,
+      account: "google-user@example.com",
+    })
+    expect(JSON.stringify(statuses)).not.toContain("secret-access-token")
+    expect(JSON.stringify(statuses)).not.toContain("secret-refresh-token")
+  })
+
+  test("stays signed in with no account when the token has no usable identity", async () => {
+    const root = rootFor()
+    for (const credential of [
+      JSON.stringify({ token: { access_token: "secret-access-token" }, auth_method: "consumer" }),
+      JSON.stringify({ token: { access_token: "secret-access-token" }, id_token: "not.a.jwt" }),
+      "{not json",
+    ]) {
+      writeCredential(root, credential)
+      const status = antigravity(await statusesFor(root))
+      expect(status.loggedIn).toBe(true)
+      expect(status.account).toBeNull()
+      expect(JSON.stringify(status)).not.toContain("secret-access-token")
+    }
+  })
+
+  test("reports signed out when the user has no token file", async () => {
+    const root = rootFor()
+    expect(antigravity(await statusesFor(root))).toEqual({ provider: "antigravity-cli", loggedIn: false, account: null })
+  })
+})

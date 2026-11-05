@@ -73,6 +73,7 @@ in **Add API key**.
 
 Google signs in through Settings › Connections: the box runs `agy acp --login --gemini-dir <dir>`, and the user sends
 back the code shown by Google (or that page's URL). Antigravity 1.5 is required for terminal sign-in and `session/resume`.
+The Connections row shows the signed-in Google email when agy's stored token carries one; otherwise it stays blank.
 
 ## Selected-box availability and installed clients
 

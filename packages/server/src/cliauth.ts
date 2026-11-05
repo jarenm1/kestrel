@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect"
 import { execFile, spawn, type ChildProcess } from "node:child_process"
-import { chmod, mkdir, rm, stat } from "node:fs/promises"
+import { chmod, lstat, mkdir, readFile, rm, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import {
   BadRequest,
@@ -12,7 +12,7 @@ import {
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
-import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type CliOutput } from "./agent-clis"
+import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type AgentCli, type CliOutput } from "./agent-clis"
 import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
 import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
@@ -42,6 +42,35 @@ const CODE_MAX = 512
  */
 const CODE_REJECTED = /\b(Invalid code|OAuth error)\b/i
 const MESSAGE_MAX = 200
+/** A CLI's stored login is small; anything larger is not an identity file and is not read. */
+const ACCOUNT_FILE_MAX = 64 * 1024
+
+/**
+ * The email in a CLI's own stored login, or null when the file is absent, unreadable, malformed, oversized or names no
+ * account. The file is under the user's login directory and is read as a regular file (not a link); its contents, which
+ * may include tokens, are parsed in memory and never returned or logged.
+ */
+const readAccountLabel = (dir: string, identity: AgentCli["identity"]): Effect.Effect<string | null> =>
+  Effect.gen(function* () {
+    if (identity === null) return null
+    const text = yield* Effect.promise(async () => {
+      try {
+        const path = join(dir, identity.path)
+        const info = await lstat(path)
+        if (!info.isFile() || info.size > ACCOUNT_FILE_MAX) return null
+        return await readFile(path, "utf8")
+      } catch {
+        return null
+      }
+    })
+    if (text === null) return null
+    try {
+      const label = identity.parse(text)
+      return label === null || label === "" ? null : label
+    } catch {
+      return null
+    }
+  })
 
 /** A provider the user is logged in to, with the host directory holding that login. */
 export interface CliLoginDir {
@@ -469,16 +498,24 @@ export const CliAuthLive = Layer.effect(
         const dir = yield* providerDir(user, provider)
         const present = yield* Effect.promise(() => stat(dir).then((s) => s.isDirectory(), () => false))
         if (!present) return { provider, loggedIn: false, account: null }
-        // A CLI without a status command is signed in while its token file exists.
+        // A CLI without a status command is signed in while its token file exists; its stored login may also name the
+        // signed-in account.
         if (spec.status.kind === "file") {
           const token = join(dir, spec.status.path)
           const signedIn = yield* Effect.promise(() => stat(token).then((s) => s.isFile(), () => false))
-          return { provider, loggedIn: signedIn, account: null }
+          if (!signedIn) return { provider, loggedIn: false, account: null }
+          const account = yield* readAccountLabel(dir, spec.identity)
+          return { provider, loggedIn: true, account }
         }
         const inv = yield* invoke(user, spec.bin, spec.status.args)
         const out = yield* runCli(inv, `${spec.bin} status`)
         if (out === null) return { provider, loggedIn: false, account: null }
-        return yield* spec.status.parse(out)
+        const parsed = yield* spec.status.parse(out)
+        // Status commands report how the CLI signed in, not who; the CLI's own stored login names the user, when it has
+        // one. The account label is an email, never a method or token; null when no stored identity names one.
+        if (!parsed.loggedIn) return { ...parsed, account: null }
+        const account = yield* readAccountLabel(dir, spec.identity)
+        return { ...parsed, account: account ?? parsed.account }
       }).pipe(
         Effect.catchTag("InternalError", (e) =>
           Effect.succeed<CliAuthStatus>({ provider, loggedIn: false, account: null, error: e.message }),

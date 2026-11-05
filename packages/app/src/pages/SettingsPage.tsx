@@ -117,31 +117,32 @@ export function ProfileSettings() {
         </CardContent>
       </Card>
       <Card className="py-0">
-        <CardContent className="flex flex-col gap-3 px-5 py-4">
-          <div>
-            <h3 className="font-semibold">GitHub access</h3>
-            <p className="text-muted-foreground">Let Kestrel work with your GitHub repositories.</p>
-          </div>
-          {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-          {connections.isPending && <p className="text-muted-foreground">Loading GitHub access…</p>}
-          {github && (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={github.expired ? "warning" : github.connected ? "success" : "neutral"}>
-                  {github.expired ? "expired" : github.connected ? "connected" : "not connected"}
-                </Badge>
-                {github.account && <span className="font-mono text-xs text-muted-foreground">{github.account}</span>}
-              </div>
-              {github.available ? (
-                <Button asChild variant="soft" className="w-fit">
-                  <a href={SERVER_URL + ControlPaths.connectOAuth(github.provider) + "?return=/settings/profile"}>
-                    {github.connected ? "Reconnect GitHub" : "Connect GitHub"}
-                  </a>
-                </Button>
-              ) : (
-                <p className="text-muted-foreground">GitHub access needs server configuration.</p>
+        <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="font-semibold">GitHub access</h3>
+              {github && (
+                <>
+                  <Badge variant={github.expired ? "warning" : github.connected ? "success" : "neutral"}>
+                    {github.expired ? "expired" : github.connected ? "connected" : "not connected"}
+                  </Badge>
+                  {github.account && <span className="font-mono text-xs text-muted-foreground">{github.account}</span>}
+                </>
               )}
-            </>
+            </div>
+            <p className="text-muted-foreground">Let Kestrel work with your GitHub repositories.</p>
+            {connections.error && <Alert>{errorText(connections.error)}</Alert>}
+            {connections.isPending && <p className="text-muted-foreground">Loading GitHub access…</p>}
+            {github && !github.available && (
+              <p className="text-muted-foreground">GitHub access needs server configuration.</p>
+            )}
+          </div>
+          {github?.available && (
+            <Button asChild variant="soft" className="shrink-0">
+              <a href={SERVER_URL + ControlPaths.connectOAuth(github.provider) + "?return=/settings/profile"}>
+                {github.connected ? "Reconnect GitHub" : "Connect GitHub"}
+              </a>
+            </Button>
           )}
         </CardContent>
       </Card>

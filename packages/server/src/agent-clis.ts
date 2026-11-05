@@ -10,6 +10,7 @@ import {
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
+import { isRecord } from "./core/transcript"
 import {
   CLAUDE_DISCOVERY_ARGS,
   CODEX_DISCOVERY_ARGS,
@@ -29,6 +30,84 @@ export type ConversationKind = "claude" | "codex" | "acp"
 export interface CliOutput {
   readonly stdout: string
   readonly stderr: string
+}
+
+/** Longest account label Kestrel shows; an email, never a token or sign-in method. */
+const ACCOUNT_MAX = 254
+/** An ID token payload larger than this is not a login identity. */
+const JWT_PAYLOAD_MAX = 16 * 1024
+
+/** The identity in a CLI's stored login: an email, or null when it stores none. */
+const accountEmail = (value: unknown): string | null => {
+  if (typeof value !== "string") return null
+  const email = value.trim()
+  if (email === "" || email.length > ACCOUNT_MAX) return null
+  if (/[\u0000-\u001f\u007f]/.test(email)) return null
+  return /^[^\s@]+@[^\s@]+$/.test(email) ? email : null
+}
+
+/**
+ * Claims from an ID token the CLI stored in its own login. The signature is not verified: the token is read back from
+ * the CLI's login directory, and only the email is taken, never any token material.
+ */
+const jwtClaims = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== "string") return null
+  const parts = value.split(".")
+  const payload = parts[1]
+  if (parts.length !== 3 || payload === undefined || payload === "" || payload.length > JWT_PAYLOAD_MAX) return null
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const jwtEmail = (value: unknown): string | null => {
+  const claims = jwtClaims(value)
+  if (claims === null) return null
+  const direct = accountEmail(claims.email)
+  if (direct !== null) return direct
+  const profile = claims["https://api.openai.com/profile"]
+  return isRecord(profile) ? accountEmail(profile.email) : null
+}
+
+const agentIdentityEmail = (value: unknown): string | null => {
+  if (typeof value === "string") return jwtEmail(value)
+  return isRecord(value) ? accountEmail(value.email) : null
+}
+
+/**
+ * `$CODEX_HOME/auth.json`: `tokens.id_token` for a ChatGPT login, or `agent_identity` for a registered agent identity.
+ * An API-key-only login has no account identity, and a stale token under another auth mode is not the signed-in user.
+ */
+const codexAccount = (text: string): string | null => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!isRecord(parsed)) return null
+  const mode = typeof parsed.auth_mode === "string" ? parsed.auth_mode : null
+  if (mode !== null && mode !== "chatgpt" && mode !== "chatgptAuthTokens" && mode !== "agentIdentity") return null
+  if (mode === "agentIdentity") return agentIdentityEmail(parsed.agent_identity)
+  // Without an auth mode, a stored API key means the key is the login, even if old ChatGPT tokens remain beside it.
+  if (mode === null && typeof parsed.OPENAI_API_KEY === "string" && parsed.OPENAI_API_KEY !== "") return null
+  const tokens = parsed.tokens
+  const email = isRecord(tokens) ? jwtEmail(tokens.id_token) : null
+  return email ?? agentIdentityEmail(parsed.agent_identity)
+}
+
+/** Antigravity's credential document (`id_token` is an OIDC JWT for consumer and enterprise Google logins). */
+const antigravityAccount = (text: string): string | null => {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  return isRecord(parsed) ? jwtEmail(parsed.id_token) : null
 }
 
 /** The CLI's own sign-in, which the user finishes on the provider's page. */
@@ -71,6 +150,11 @@ export interface AgentCli<K extends CliSignIn = CliSignIn> {
   readonly status:
     | { readonly kind: "command"; readonly args: ReadonlyArray<string>; readonly parse: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError> }
     | { readonly kind: "file"; readonly path: string }
+  /**
+   * The signed-in account's email in the CLI's own stored login (a file under the login directory), read only once
+   * `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or method.
+   */
+  readonly identity: { readonly path: string; readonly parse: (text: string) => string | null } | null
   readonly signIn: K extends "page" ? PageSignIn : KeySignIn
   /** Revokes the login before its directory is removed; null when removing the directory is the whole sign-out. */
   readonly logout: ReadonlyArray<string> | null
@@ -110,11 +194,12 @@ const parseCodexStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
   Effect.gen(function* () {
     const text = `${out.stdout}\n${out.stderr}`
     if (/^Not logged in/m.test(text)) return { provider: "codex-cli", loggedIn: false, account: null }
-    // e.g. "Logged in using ChatGPT", "Logged in using an API key - sk-…": the part after " - " is
-    // a key fragment and is dropped.
-    const match = /^Logged in using (?:an? )?(.+?)(?: - .*)?$/m.exec(text)
-    if (!match) return yield* Effect.fail(new InternalError({ message: "codex login status: unexpected output" }))
-    return { provider: "codex-cli", loggedIn: true, account: match[1] ?? null }
+    // The status line says only how the CLI signed in ("Logged in using ChatGPT", "API key configured") and may
+    // include a key fragment; the signed-in email comes from auth.json under the user's CODEX_HOME instead.
+    if (!/^(?:Logged in using .+|API key configured\b)/m.test(text)) {
+      return yield* Effect.fail(new InternalError({ message: "codex login status: unexpected output" }))
+    }
+    return { provider: "codex-cli", loggedIn: true, account: null }
   })
 
 /** OpenCode's own id for the Go plan's integration, and for the one credential Kestrel keeps in it. */
@@ -144,6 +229,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "CLAUDE_CONFIG_DIR",
     brokerEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
     status: { kind: "command", args: ["auth", "status", "--json"], parse: parseClaudeStatus },
+    identity: null,
     signIn: {
       kind: "page",
       args: () => ["auth", "login"],
@@ -163,6 +249,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "CODEX_HOME",
     brokerEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
     status: { kind: "command", args: ["login", "status"], parse: parseCodexStatus },
+    identity: { path: "auth.json", parse: codexAccount },
     signIn: {
       kind: "page",
       args: () => ["login", "--device-auth"],
@@ -188,6 +275,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "AGY_GEMINI_DIR",
     brokerEnv: [],
     status: { kind: "file", path: "antigravity-cli/antigravity-oauth-token" },
+    identity: { path: "antigravity-cli/antigravity-oauth-token", parse: antigravityAccount },
     signIn: {
       kind: "page",
       // `acp --login` signs in and exits: it prints a Google link whose page shows a code, and takes the code (or that
@@ -213,6 +301,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
     status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeGoStatus },
+    identity: null,
     signIn: {
       kind: "key",
       args: ["auth", "import", "--standalone"],
