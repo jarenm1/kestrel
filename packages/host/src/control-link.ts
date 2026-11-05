@@ -4,6 +4,7 @@ import {
   NEST_CAPACITY_INTERVAL_MS,
   NEST_HOST_ID_HEADER,
   NEST_HOST_PROTOCOL,
+  NEST_INVENTORY_CHUNK_VMS,
   decodeNestControlFrame,
   type NestHostCommand,
   type NestHostFrame,
@@ -92,7 +93,6 @@ export class ControlLink {
   private onOpen(socket: WebSocket): void {
     if (socket !== this.socket) return
     this.backoffMs = BACKOFF_MIN_MS
-    const results = this.opts.manager.pendingResults()
     const sent = this.send({
       _tag: "hello",
       protocol: NEST_HOST_PROTOCOL,
@@ -101,19 +101,38 @@ export class ControlLink {
       slug: this.opts.slug,
       imageId: this.opts.imageId,
       capacity: this.opts.manager.capacity(),
-      vms: this.opts.manager.reports(),
-      results: results.map((result) => ({
-        commandId: result.commandId,
-        ok: result.ok,
-        ...(result.error !== undefined ? { error: result.error } : {}),
-      })),
     })
     if (!sent) return
-    this.opts.manager.markReported(results.map((result) => result.commandId))
+    this.sendPendingResults()
+    this.sendInventory()
     this.capacityTimer = setInterval(
       () => this.send({ _tag: "capacity", capacity: this.opts.manager.capacity() }),
       NEST_CAPACITY_INTERVAL_MS,
     )
+  }
+
+  /** Results of commands that finished while disconnected. Each one stays stored until a frame carrying it is sent. */
+  private sendPendingResults(): void {
+    for (const result of this.opts.manager.pendingResults()) {
+      const sent = this.send({
+        _tag: "result",
+        commandId: result.commandId,
+        ok: result.ok,
+        ...(result.error !== undefined ? { error: result.error } : {}),
+      })
+      if (sent) this.opts.manager.markReported([result.commandId])
+    }
+  }
+
+  /** The host's VMs in chunks; the last chunk is marked, and the control plane evicts stale copies only after it. */
+  private sendInventory(): void {
+    const vms = this.opts.manager.reports()
+    let offset = 0
+    do {
+      const chunk = vms.slice(offset, offset + NEST_INVENTORY_CHUNK_VMS)
+      offset += NEST_INVENTORY_CHUNK_VMS
+      if (!this.send({ _tag: "inventory", vms: chunk, last: offset >= vms.length })) return
+    } while (offset < vms.length)
   }
 
   private onMessage(socket: WebSocket, data: RawData, isBinary: boolean): void {
