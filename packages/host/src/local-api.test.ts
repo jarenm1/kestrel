@@ -10,6 +10,7 @@ const fakeManager = (refuse = false) => {
   const commands: NestHostCommand[] = []
   const manager = {
     reports: (): NestVmReport[] => [],
+    epochOf: (boxId: string) => (boxId === BOX ? 3 : null),
     route: (boxId: string) => ({ state: "running", upstream: `http://10.77.0.2:8787#${boxId}` }),
     wake: async (boxId: string) => `http://10.77.0.2:8787#${boxId}`,
     reportActivity: () => undefined,
@@ -64,7 +65,14 @@ describe("operator surface", () => {
     const { manager, commands } = fakeManager()
     const response = await handleOperatorRequest(manager, post(`/v1/boxes/${BOX}/${action}`))
     expect(response.status).toBe(200)
-    expect(commands).toEqual([{ _tag: action, boxId: BOX }])
+    expect(commands).toEqual([{ _tag: action, boxId: BOX, ownerEpoch: 3 }])
+  })
+
+  test("an operator command for a box this host does not hold answers 404 without running", async () => {
+    const { manager, commands } = fakeManager()
+    const response = await handleOperatorRequest(manager, post("/v1/boxes/box-2/park"))
+    expect(response.status).toBe(404)
+    expect(commands).toEqual([])
   })
 
   test("a refused command answers 409 with the error", async () => {

@@ -41,6 +41,10 @@ export const stateLayout = (root: string): StateLayout => ({
   meterDir: join(root, "meter"),
 })
 
+/** A box id names a directory under `vms/`; anything else is refused before a path is built. */
+const BOX_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+export const isBoxId = (boxId: string): boolean => BOX_ID_PATTERN.test(boxId)
+
 export const vmDir = (layout: StateLayout, boxId: string): string => join(layout.vmsDir, boxId)
 
 export const vmPaths = (layout: StateLayout, boxId: string) => {

@@ -28,7 +28,7 @@ import { Meter } from "./meter"
 import { Outbox } from "./outbox"
 import { type RestoreTarget, SNAPSHOT_FILES, prepareRestoreDir } from "./restore"
 import { type CommandOutcome, type NestNetwork, type Operation, type ProcessRef, type VmRecord } from "./schema"
-import { type StateLayout, ensureStateDirs, findCommand, listVms, markCommandsReported, pendingCommands, recordCommand, vmPaths, writeVm } from "./state-store"
+import { type StateLayout, ensureStateDirs, findCommand, isBoxId, listVms, markCommandsReported, pendingCommands, recordCommand, vmPaths, writeVm } from "./state-store"
 import { buildTemplate, readGuestImage, removeStaleTemplates, templateDir, type GuestImage } from "./template"
 import { runChecked, runTool } from "./tools"
 import { type VolumeTool, backupVolume, createVolume, deleteVolumeStore, startLazyVolume, terminateProcess } from "./volume"
@@ -201,6 +201,7 @@ const createNewRecord = (fields: {
   process: null,
   volumeProcess: null,
   snapshotGen: null,
+  cloneId: null,
   operation: null,
   lastError: null,
 })
@@ -288,6 +289,11 @@ export class VmManager {
     return this.serial(command.boxId, async () => {
       const stored = findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
+      if (!isBoxId(command.boxId)) {
+        const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
+        recordCommand(this.layout, outcome)
+        return { outcome, vm: null }
+      }
       let outcome: CommandOutcome
       try {
         await this.apply(command)
@@ -467,6 +473,12 @@ export class VmManager {
   private reportOf(boxId: string): NestVmReport | null {
     const vm = this.records.get(boxId)
     return vm === undefined || vm.state === "deleted" ? null : this.report(vm)
+  }
+
+  /** The owner epoch this host holds for a box, or null when it holds none. */
+  epochOf(boxId: string): number | null {
+    const vm = this.records.get(boxId)
+    return vm === undefined || vm.state === "deleted" ? null : vm.ownerEpoch
   }
 
   private diskBytesOf(vm: VmRecord): number {
@@ -655,17 +667,17 @@ export class VmManager {
       case "resume":
         return this.resumeCommand(command)
       case "suspend":
-        return this.suspendCommand(command.boxId)
+        return this.suspendCommand(command)
       case "park":
-        return this.parkCommand(command.boxId)
+        return this.parkCommand(command)
       case "setLimits":
         return this.setLimitsCommand(command)
       case "gpuAttach":
-        return this.gpuAttachCommand(command.boxId)
+        return this.gpuAttachCommand(command)
       case "gpuDetach":
-        return this.gpuDetachCommand(command.boxId)
+        return this.gpuDetachCommand(command)
       case "destroy":
-        return this.destroy(command.boxId)
+        return this.destroy(command)
       case "evict":
         return this.evict(command)
     }
@@ -674,8 +686,12 @@ export class VmManager {
   private async create(cmd: Command<"create">): Promise<void> {
     const existing = this.records.get(cmd.boxId)
     if (existing !== undefined && existing.state !== "deleted") {
-      if (cmd.ownerEpoch === existing.ownerEpoch) return
-      throw new HostError(`box ${cmd.boxId} lives on this host at epoch ${existing.ownerEpoch}`)
+      if (cmd.ownerEpoch !== existing.ownerEpoch) {
+        throw new HostError(`box ${cmd.boxId} lives on this host at epoch ${existing.ownerEpoch}`)
+      }
+      // A resent create carries the newest enrollment token: a running guest takes it now; any other box takes it on resume.
+      if (existing.state === "running") await this.configureGuest(existing, cmd.enrollToken)
+      return
     }
     this.validateLimits(cmd.limits)
     const network = networkForSlot(allocateSlot(this.usedSlots()))
@@ -738,6 +754,7 @@ export class VmManager {
         localDirty: false,
       })
     } else if (current.state === "running") {
+      if (cmd.enrollToken !== null) await this.configureGuest(current, cmd.enrollToken)
       return
     } else {
       vm = this.commit({
@@ -749,18 +766,18 @@ export class VmManager {
       })
     }
     if (vm.state === "suspended") {
-      await this.resumeSuspended(vm)
+      await this.resumeSuspended(vm, cmd.enrollToken)
       return
     }
-    await this.resumeParked(vm)
+    await this.resumeParked(vm, cmd.enrollToken)
   }
 
   private async resumeSuspendedBox(boxId: string): Promise<void> {
     const vm = this.records.get(boxId)
-    if (vm?.state === "suspended") await this.resumeSuspended(vm)
+    if (vm?.state === "suspended") await this.resumeSuspended(vm, null)
   }
 
-  private async resumeParked(vm: VmRecord): Promise<void> {
+  private async resumeParked(vm: VmRecord, enrollToken: string | null): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "resume", "parked")
     // Only a volume this host created for a box with no backup (both refs null) or one whose backup is the command's ref.
@@ -779,11 +796,14 @@ export class VmManager {
       cur = this.commit({ ...cur, volumeProcess: null })
     }
     cur = this.commit({ ...cur, network: networkForSlot(allocateSlot(this.usedSlots())) })
-    await this.bootClone(cur, null)
+    await this.bootClone(cur, enrollToken)
   }
 
-  /** Restores the memory image; if that fails, boots a template clone on the same volume. */
-  private async resumeSuspended(vm: VmRecord): Promise<void> {
+  /**
+   * Restores the memory image, then hands the box its newest enrollment token. If the restore fails, boots a template
+   * clone on the same volume with that token.
+   */
+  private async resumeSuspended(vm: VmRecord, enrollToken: string | null): Promise<void> {
     const begun = this.begin(vm, "resume", "suspended")
     try {
       await this.restoreMemoryImage(begun)
@@ -796,13 +816,16 @@ export class VmManager {
       if (current.snapshotGen !== null) rmSync(p.snapshot(current.snapshotGen), { recursive: true, force: true })
       const fallback = this.commit({ ...current, process: null, snapshotGen: null })
       try {
-        await this.bootClone(fallback, null)
+        await this.bootClone(fallback, enrollToken)
       } catch (cloneError) {
         throw new HostError(
-          `restore failed (${errorMessage(restoreError)}); template clone failed (${errorMessage(cloneError)})`,
+          `restore failed (${errorMessage(restoreError)}); clone fallback failed (${errorMessage(cloneError)})`,
         )
       }
+      return
     }
+    const restored = this.running(vm.boxId)
+    if (enrollToken !== null && restored !== null) await this.configureGuest(restored, enrollToken)
   }
 
   private async restoreMemoryImage(vm: VmRecord): Promise<void> {
@@ -846,7 +869,7 @@ export class VmManager {
     })
     createSparse(p.swap, SWAP_BYTES)
     const identity = this.launch(vm)
-    const started = this.commit({ ...vm, process: identity })
+    const started = this.commit({ ...vm, process: identity, cloneId: newCloneId() })
     await waitForApi(p.apiSocket, identity, API_TIMEOUT_MS)
     const client = new ChClient(p.apiSocket)
     await client.restore(p.restore, restoreMode())
@@ -863,15 +886,31 @@ export class VmManager {
     await client.addDisk({ path: p.swap, id: "swap", serial: NEST_SWAP_SERIAL, readonly: false, direct: false, num_queues: 1, image_type: "Raw" })
     const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
     this.attachLink(rt, link)
+    await this.configureGuest(started, enrollToken)
+    this.finish(started, "running", {
+      vcpus: TEMPLATE_BOOT_VCPUS,
+      memoryBytes: TEMPLATE_BOOT_MEMORY_BYTES,
+      localRef: null,
+      localDirty: true,
+    })
+  }
+
+  /**
+   * Sends `configure` to a running VM's guest. Idempotent: a token replaces the one in the guest's env file.
+   */
+  private async configureGuest(vm: VmRecord, enrollToken: string | null): Promise<void> {
+    const { config } = this
+    const { network, cloneId } = vm
+    if (network === null || cloneId === null) throw new HostError(`box ${vm.boxId} has no clone to configure`)
     await this.ask(
-      rt,
+      this.runtime(vm.boxId),
       {
         _tag: "configure",
         id: newRequestId(),
         hostId: config.hostId,
         boxId: vm.boxId,
         vmId: vm.vmId,
-        cloneId: newCloneId(),
+        cloneId,
         wallClockMs: Date.now(),
         controlUrl: config.controlUrl,
         publicUrl: vm.publicUrl,
@@ -884,12 +923,6 @@ export class VmManager {
       },
       GUEST_REPLY_TIMEOUT_MS.configure,
     )
-    this.finish(started, "running", {
-      vcpus: TEMPLATE_BOOT_VCPUS,
-      memoryBytes: TEMPLATE_BOOT_MEMORY_BYTES,
-      localRef: null,
-      localDirty: true,
-    })
   }
 
   /**
@@ -959,21 +992,24 @@ export class VmManager {
     })
   }
 
-  private async destroy(boxId: string): Promise<void> {
-    const vm = this.records.get(boxId)
+  private async destroy(cmd: Command<"destroy">): Promise<void> {
+    const vm = this.records.get(cmd.boxId)
     if (vm === undefined) return
     // A tombstone that still holds its backup ref was interrupted mid-destroy (recovery marks it deleted): finish the wipe.
     if (vm.state === "deleted") {
       if (vm.volumeRef !== null) {
-        await deleteVolumeStore(this.volume, boxId)
+        await deleteVolumeStore(this.volume, cmd.boxId)
         this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null })
       }
       return
     }
+    if (vm.ownerEpoch !== cmd.ownerEpoch) {
+      throw new HostError(`box ${cmd.boxId} is at epoch ${vm.ownerEpoch}, not ${cmd.ownerEpoch}`)
+    }
     let cur = this.begin(vm, "destroy", null)
     cur = await this.releaseVm(cur)
-    if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, boxId)
-    clearArtifacts(this.paths(boxId).dir)
+    if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, cmd.boxId)
+    clearArtifacts(this.paths(cmd.boxId).dir)
     this.finish(cur, "deleted", { volumeRef: null, backedUpAt: null, localRef: null, localDirty: false })
   }
 
@@ -990,16 +1026,25 @@ export class VmManager {
     this.finish(cur, "deleted", { localRef: null, localDirty: false })
   }
 
-  private async suspendCommand(boxId: string): Promise<void> {
+  /** The VM this host holds for a box at exactly the command's owner epoch; a command for any other epoch is refused. */
+  private heldAt(boxId: string, ownerEpoch: number): VmRecord {
     const vm = this.records.get(boxId)
-    if (vm?.state === "suspended") return
-    if (vm?.state !== "running") throw new HostError(`cannot suspend a ${vm?.state ?? "missing"} box`)
+    if (vm === undefined || vm.state === "deleted") throw new HostError(`no VM for box ${boxId}`)
+    if (vm.ownerEpoch !== ownerEpoch) {
+      throw new HostError(`box ${boxId} is at epoch ${vm.ownerEpoch}, not ${ownerEpoch}`)
+    }
+    return vm
+  }
+
+  private async suspendCommand(cmd: Command<"suspend">): Promise<void> {
+    const vm = this.heldAt(cmd.boxId, cmd.ownerEpoch)
+    if (vm.state === "suspended") return
+    if (vm.state !== "running") throw new HostError(`cannot suspend a ${vm.state} box`)
     await this.suspend(vm)
   }
 
-  private async parkCommand(boxId: string): Promise<void> {
-    const vm = this.records.get(boxId)
-    if (vm === undefined || vm.state === "deleted") throw new HostError(`no VM for box ${boxId}`)
+  private async parkCommand(cmd: Command<"park">): Promise<void> {
+    const vm = this.heldAt(cmd.boxId, cmd.ownerEpoch)
     if (vm.state === "parked") return
     if (vm.state !== "running" && vm.state !== "suspended") throw new HostError(`cannot park a ${vm.state} box`)
     await this.park(vm)
@@ -1007,9 +1052,7 @@ export class VmManager {
 
   private async setLimitsCommand(cmd: Command<"setLimits">): Promise<void> {
     this.validateLimits(cmd.limits)
-    const vm = this.records.get(cmd.boxId)
-    if (vm === undefined || vm.state === "deleted") throw new HostError(`no VM for box ${cmd.boxId}`)
-    let cur = this.commit({ ...vm, limits: cmd.limits })
+    let cur = this.commit({ ...this.heldAt(cmd.boxId, cmd.ownerEpoch), limits: cmd.limits })
     if (cur.state !== "running") return
     if (cmd.limits.gpu === "none") cur = await this.detachGpus(cur)
     const vcpus = Math.min(cur.vcpus, cmd.limits.maxVcpus)
@@ -1017,17 +1060,17 @@ export class VmManager {
     if (vcpus !== cur.vcpus || memoryBytes !== cur.memoryBytes) await this.resizeVm(cur, { vcpus, memoryBytes })
   }
 
-  private async gpuAttachCommand(boxId: string): Promise<void> {
-    const vm = this.records.get(boxId)
-    if (vm?.state !== "running") throw new HostError(`cannot attach a GPU to a ${vm?.state ?? "missing"} box`)
+  private async gpuAttachCommand(cmd: Command<"gpuAttach">): Promise<void> {
+    const vm = this.heldAt(cmd.boxId, cmd.ownerEpoch)
+    if (vm.state !== "running") throw new HostError(`cannot attach a GPU to a ${vm.state} box`)
     if (vm.limits.gpu !== "on-demand") throw new HostError("this box's limits do not allow a GPU")
     if (vm.gpus.length > 0) return
     await this.attachGpu(vm)
   }
 
-  private async gpuDetachCommand(boxId: string): Promise<void> {
-    const vm = this.records.get(boxId)
-    if (vm === undefined || vm.gpus.length === 0) return
+  private async gpuDetachCommand(cmd: Command<"gpuDetach">): Promise<void> {
+    const vm = this.heldAt(cmd.boxId, cmd.ownerEpoch)
+    if (vm.gpus.length === 0) return
     await this.detachGpus(vm)
   }
 
@@ -1099,13 +1142,29 @@ export class VmManager {
     })
   }
 
+  /**
+   * Past the control plane's lease the host fences: a running VM stops at once, without a sync, and is held parked on
+   * its local volume. Nothing is woken.
+   */
+  private async fence(boxId: string): Promise<void> {
+    const vm = this.running(boxId)
+    if (vm === null || Date.now() < this.leaseUntil) return
+    const released = await this.releaseVm(vm)
+    this.finish(released, "parked", { lastError: "fenced: control plane lease lapsed" })
+  }
+
   /** Every policy tick: CPU activity, one scheduled action per running box, parking and cache eviction, host pressure. */
   private tick(): void {
     const now = Date.now()
+    const lapsed = now >= this.leaseUntil
     const tight = this.isDiskTight()
     for (const vm of this.records.values()) {
       const boxId = vm.boxId
       if (vm.state === "running") {
+        if (lapsed) {
+          if (!this.runtime(boxId).busy) this.schedule(boxId, () => this.fence(boxId))
+          continue
+        }
         this.sampleCpu(vm, now)
         if (this.runtime(boxId).busy) continue
         this.schedule(boxId, () => this.runningTick(boxId))

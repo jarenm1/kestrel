@@ -82,6 +82,8 @@ export const VmRecord = Schema.Struct({
   volumeProcess: Schema.NullOr(VolumeProcess),
   /** Generation of the memory image under `snapshot.<gen>/`, or null when there is none. */
   snapshotGen: Schema.NullOr(NonNeg),
+  /** The clone id the running guest was configured with; a resent `create` reconfigures that guest with it. */
+  cloneId: Schema.NullOr(Schema.String),
   operation: Schema.NullOr(Operation),
   lastError: Schema.NullOr(Schema.String),
 })
