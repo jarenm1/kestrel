@@ -85,17 +85,18 @@ fn validate(args: &ConfigureArgs) -> Res<()> {
     if !is_clone_id(&args.clone_id) {
         return Err("cloneId must be 32 lowercase hex characters".into());
     }
+    for (name, value) in [("hostId", &args.host_id), ("vmId", &args.vm_id)] {
+        env_value(name, value)?;
+    }
     for (name, value) in [
-        ("hostId", &args.host_id),
         ("boxId", &args.box_id),
-        ("vmId", &args.vm_id),
         ("controlUrl", &args.control_url),
         ("publicUrl", &args.public_url),
     ] {
-        env_value(name, value)?;
+        env_file_value(name, value)?;
     }
     if let Some(token) = &args.enroll_token {
-        env_value("enrollToken", token)?;
+        enroll_token(token)?;
     }
     let net = &args.network;
     cidr_v4(&net.address)?;
@@ -135,6 +136,28 @@ fn env_value(name: &str, value: &str) -> Res<()> {
         });
     if bad {
         return Err(format!("{name} is empty or contains a forbidden character"));
+    }
+    Ok(())
+}
+
+/// The contract's `EnvValue`: 1 to 2048 visible ASCII characters without quotes, backslashes, or spaces. These land
+/// unquoted in the box env file, so nothing else may be there.
+fn env_file_value(name: &str, value: &str) -> Res<()> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || "._~:/?#@!$&()*+,;=%[]-".contains(c);
+    if value.is_empty() || value.len() > 2048 || !value.chars().all(allowed) {
+        return Err(format!("{name} is not a valid environment value"));
+    }
+    Ok(())
+}
+
+/// The contract's `EnrollToken`: 43 base64url characters.
+fn enroll_token(value: &str) -> Res<()> {
+    let valid = value.len() == 43
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err("enrollToken must be 43 base64url characters".into());
     }
     Ok(())
 }
@@ -602,6 +625,23 @@ fn write_box_env(cfg: &Config, args: &ConfigureArgs) -> Res<bool> {
     Ok(changed)
 }
 
+/// The box enrolled and kept its secret: `enrollToken` leaves the env file, so the token is not kept on the volume.
+/// Only that line changes. A missing file, or one without the token, is left as it is.
+pub fn drop_enroll_token(cfg: &Config) -> Res<()> {
+    let Ok(content) = fs::read_to_string(&cfg.box_env_file) else {
+        return Ok(());
+    };
+    let prefix = format!("{}=", NEST_BOX_ENV.enroll_token);
+    if !content.lines().any(|line| line.starts_with(&prefix)) {
+        return Ok(());
+    }
+    let kept: String = content
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with(&prefix))
+        .collect();
+    write_file(&cfg.box_env_file, &kept, 0o600, None)
+}
+
 fn path_str(path: &Path) -> Res<&str> {
     path.to_str()
         .ok_or_else(|| format!("{} is not valid UTF-8", path.display()))
@@ -613,7 +653,7 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::PathBuf;
 
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     use super::*;
     use crate::args::{parse, Parsed};
@@ -649,6 +689,24 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// The first `configure` frame of the fixtures, with one JSON field replaced.
+    fn configure_with(name: &str, value: Value) -> ConfigureArgs {
+        let fixtures = fixtures();
+        let mut frame = fixtures["hostToGuest"]
+            .as_array()
+            .expect("hostToGuest is an array")
+            .iter()
+            .find(|frame| frame["_tag"] == "configure")
+            .expect("a configure frame")
+            .clone();
+        frame[name] = value;
+        let decoded: HostToGuest = serde_json::from_value(frame).expect("configure frame decodes");
+        match decoded {
+            HostToGuest::Configure(args) => *args,
+            other => panic!("not a configure frame: {other:?}"),
+        }
     }
 
     #[test]
@@ -815,5 +873,63 @@ mod tests {
         let gone = fs::symlink_metadata(home.join(".npmrc")).expect_err("link removed");
         assert_eq!(gone.kind(), ErrorKind::NotFound);
         assert_eq!(fs::read_to_string(&victim).expect("read victim"), "keep");
+    }
+
+    /// `EnvValue` values land unquoted in the env file: visible ASCII without quotes, backslashes, or spaces. `$`, `&`
+    /// and `;` are in the contract's set.
+    #[test]
+    fn env_values_follow_the_contract() {
+        let fine = configure_with("controlUrl", json!("https://ctl.example:8443/a?b=c&d=$e;f"));
+        assert!(validate(&fine).is_ok());
+        for value in ["https://box example", "box'id", "box\"id", "a\\b", ""] {
+            assert!(
+                validate(&configure_with("publicUrl", json!(value))).is_err(),
+                "{value:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn enroll_token_is_exactly_43_base64url_characters() {
+        assert!(validate(&configure_with("enrollToken", json!("x".repeat(43)))).is_ok());
+        assert!(validate(&configure_with("enrollToken", json!("x".repeat(42)))).is_err());
+        assert!(validate(&configure_with(
+            "enrollToken",
+            json!(format!("{}+", "x".repeat(42)))
+        ))
+        .is_err());
+    }
+
+    /// `enrolled` removes the token line and nothing else, so the secret is no longer kept on the volume.
+    #[test]
+    fn enrolled_drops_the_token_line_only() {
+        let root = scratch("enrolled");
+        let volume = root.join("volume");
+        fs::create_dir_all(&volume).expect("create volume");
+        let cfg = dry_run_config(&volume);
+        let token_name = fixtures()["boxEnv"]["enrollToken"]
+            .as_str()
+            .expect("enrollToken name")
+            .to_string();
+        let with_token = configure_with("enrollToken", json!("x".repeat(43)));
+        let token = with_token.enroll_token.clone().expect("token");
+        let content = box_env_content(
+            &with_token,
+            "/run/kestrel-guest/box.sock",
+            "/var/lib/kestrel/box",
+        );
+        fs::write(&cfg.box_env_file, &content).expect("write env");
+
+        drop_enroll_token(&cfg).expect("drop token");
+
+        let kept = fs::read_to_string(&cfg.box_env_file).expect("read env");
+        let prefix = format!("{token_name}=");
+        let expected: String = content
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with(&prefix))
+            .collect();
+        assert_eq!(kept, expected);
+        assert!(!kept.contains(&token));
+        let _ = fs::remove_dir_all(&root);
     }
 }
