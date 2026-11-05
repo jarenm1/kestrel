@@ -53,7 +53,7 @@ import { ContextBar } from "./ContextBar";
 import { Markdown } from "./Markdown";
 import { SlashCommands } from "./SlashCommands";
 import { ModelMentions } from "./ModelMentions";
-import { MODEL_LOGOS } from "./harnessLogos";
+import { MODEL_LOGOS } from "@cloudagents/ui/harness-logos";
 import ComposerEditor, { type DOMRef } from "./ComposerEditor";
 import { GithubReferenceMenu } from "./GithubReferenceMenu";
 import { ThinkingSlider } from "./ThinkingSlider";
@@ -629,6 +629,7 @@ export function Composer({
             placeholder={computedPlaceholder}
             ariaExpanded={menuOpen}
             menuOpen={menuOpen}
+            menuCanSelect={slashMenuOpen || referenceMenuOpen || selectedMentionModel !== undefined}
             modelLogos={MODEL_LOGOS}
             onChange={async (next) => edit(next)}
             onFocus={async () => setFocused(true)}

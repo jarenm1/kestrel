@@ -1,6 +1,8 @@
 import { Fragment, useLayoutEffect, useRef, type ReactNode } from "react"
 import { transcriptSegments, type AgentItem, type Message, type Run } from "@cloudagents/protocol"
-import { githubReferenceLabel, githubReferenceUrl, parseGithubReferenceDraft } from "@cloudagents/composer/reference"
+import { githubReferenceLabel, githubReferenceUrl } from "@cloudagents/composer/reference"
+import { parseComposerDraft } from "@cloudagents/composer/models"
+import { MODEL_LOGOS } from "../harness-logos"
 import { CircleDot, GitPullRequest } from "lucide-react"
 import { cn } from "../cn"
 import { externalClick, isPlainClick, threadHref, useTranscriptHost } from "./host"
@@ -26,15 +28,34 @@ function MessageTime({ iso }: { iso: string }) {
   return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
 }
 
-/** A sent message keeps its text as written; only exact reference Markdown becomes the same inline chip the editor showed. */
+/** Sent messages preserve plain text while displaying both reference and model tokens as their composed chips. */
 function UserMessageText({ text }: { text: string }) {
   const host = useTranscriptHost()
-  const segments = parseGithubReferenceDraft(text)
-  if (!segments.some((segment) => segment.type === "reference")) return <>{text}</>
+  const segments = parseComposerDraft(text)
+  if (segments.every((segment) => segment.type === "text")) return <>{text}</>
   return (
     <>
       {segments.map((segment, index) => {
         if (segment.type === "text") return <Fragment key={index}>{segment.text}</Fragment>
+        if (segment.type === "model") {
+          const mention = segment.mention
+          const logo = MODEL_LOGOS[mention.provider]
+          return (
+            <span
+              key={index}
+              title={`${mention.slug} · ${mention.harnessName}`}
+              aria-label={`${mention.name}, ${mention.harnessName}, ${mention.slug}`}
+              className="mx-px inline-flex items-center gap-1.5 whitespace-nowrap align-middle text-xs font-medium text-foreground"
+            >
+              {logo && (logo.monochrome ? (
+                <span aria-hidden="true" className="size-4 shrink-0 bg-current" style={{ mask: `url("${logo.src}") center / contain no-repeat` }} />
+              ) : (
+                <img src={logo.src} alt="" className="size-4 shrink-0 object-contain" />
+              ))}
+              {mention.name}
+            </span>
+          )
+        }
         const href = githubReferenceUrl(segment.reference)
         return (
           <a

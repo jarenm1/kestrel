@@ -85,6 +85,9 @@ The prompt and saved draft retain a readable Markdown mention with the exact mod
 the agent can use that identity with `delegate_task` or `delegate_batch`. Model and GitHub-reference chips can
 coexist; both are masked from autocomplete triggers. Shared parsing and provider-to-harness identity live in
 `packages/composer/src/models.ts`; the native editor bridge uses the same insertion and persistence contract.
+The shared user transcript renders those mentions as logo/name chips too, while keeping ordinary or malformed
+mention text literal. An empty model-suggestion list does not own Enter or Tab: desktop Enter submits the message,
+and phone Enter retains its normal newline behavior; the phone's Send button submits as usual.
 
 Shared panels follow the same pattern: `packages/ui` holds the DOM component with plain JSON props, each app
 fetches the data with its own client, and the phone app renders the component through a `use dom` wrapper whose

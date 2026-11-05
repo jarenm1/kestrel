@@ -11,6 +11,7 @@
     "./transcript/host": "./src/transcript/host.tsx",
     "./markdown": "./src/transcript/Markdown.tsx",
     "./message-attachments": "./src/transcript/MessageAttachments.tsx",
+    "./harness-logos": "./src/harness-logos.ts",
     "./theme.css": "./src/theme.css",
     "./dom.css": "./src/dom.css"
   },

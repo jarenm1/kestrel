@@ -871,9 +871,9 @@ export function Composer({
         }
         return
       }
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey && selectedMentionModel !== undefined) {
         e.preventDefault()
-        if (selectedMentionModel !== undefined) chooseMentionModel(selectedMentionModel)
+        chooseMentionModel(selectedMentionModel)
         return
       }
       if (e.key === "Tab" && !e.shiftKey && selectedMentionModel !== undefined) {

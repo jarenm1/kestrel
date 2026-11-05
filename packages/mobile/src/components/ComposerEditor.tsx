@@ -50,6 +50,8 @@ export interface ComposerEditorDomProps {
   ariaExpanded: boolean
   /** The native reference, model or slash menu owns the arrow, Enter, Tab and Escape keys while it is open. */
   menuOpen: boolean
+  /** Empty model suggestions leave Enter/newline and Tab/focus traversal to the editor. */
+  menuCanSelect: boolean
   /** Harness marks for model chips, by provider: the DOM has no access to the app's bundled logo assets. */
   modelLogos?: ComposerModelLogos
   onChange: (view: ComposerEditorView) => Promise<void>
@@ -82,6 +84,7 @@ export default function ComposerEditor({
   placeholder,
   ariaExpanded,
   menuOpen,
+  menuCanSelect,
   modelLogos,
   onChange,
   onSubmit,
@@ -94,6 +97,8 @@ export default function ComposerEditor({
   const snapshotPending = useRef(false)
   const menuOpenRef = useRef(menuOpen)
   menuOpenRef.current = menuOpen
+  const menuCanSelectRef = useRef(menuCanSelect)
+  menuCanSelectRef.current = menuCanSelect
   const callbacks = useRef({ onChange, onSubmit, onAppCommand })
   callbacks.current = { onChange, onSubmit, onAppCommand }
 
@@ -172,6 +177,7 @@ export default function ComposerEditor({
           // Shift+Enter stays a newline and Shift+Tab stays native focus traversal, even with the menu open.
           if (event.shiftKey && (event.key === "Enter" || event.key === "Tab")) return
           if (!menuOpenRef.current || MENU_KEYS[event.key] !== true) return
+          if ((event.key === "Enter" || event.key === "Tab") && !menuCanSelectRef.current) return
           // The native menu is the only UI that knows the selection; prevent the DOM from also moving the caret.
           event.preventDefault()
           void onMenuKey(event.key)

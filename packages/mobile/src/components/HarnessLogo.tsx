@@ -1,7 +1,7 @@
 import React from "react";
 import { SvgXml } from "react-native-svg";
 import { colors } from "@/theme";
-import { HARNESS_LOGOS, type HarnessId } from "./harnessLogos";
+import { HARNESS_LOGOS, type HarnessId } from "@cloudagents/ui/harness-logos";
 
 /** The harness's own mark, sized for a menu row. Monochrome logos take the text color, as on the web. */
 export const HarnessLogo = React.memo(function HarnessLogo({
