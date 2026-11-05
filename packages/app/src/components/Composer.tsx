@@ -311,15 +311,15 @@ function ModelPicker({
         style={{ height: menuHeight }}
       >
         {tabs.length > 0 && (
-          // A vertical take on the new thread page's inset bar: it pokes out from behind the panel's left edge, as tall
-          // as its harnesses, scrolling only on a short window. Hidden, but still holding its place, while searching. The
-          // translucent input tint sits on the page background so the transcript behind the menu never shows through.
+          // A separate piece poking out from behind the panel's left edge: darker than the panel and raised with the
+          // same drop shadow, as tall as its harnesses, scrolling only on a short window. Opaque, so the transcript behind
+          // the menu never shows through. Hidden, but still holding its place, while searching.
           <div
             role="group"
             aria-label="Harnesses"
             aria-hidden={searching || undefined}
             className={cn(
-              "mt-4 flex max-h-[calc(100%-2rem)] shrink-0 flex-col gap-0.5 overflow-y-auto rounded-l-xl bg-background bg-[image:linear-gradient(var(--color-input),var(--color-input))] p-1 shadow-well",
+              "mt-4 flex max-h-[calc(100%-2rem)] shrink-0 flex-col gap-0.5 overflow-y-auto rounded-l-xl bg-popover p-1 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.85),inset_0_1px_0_0_rgb(255_255_255/0.05)]",
               searching && "invisible",
             )}
           >
