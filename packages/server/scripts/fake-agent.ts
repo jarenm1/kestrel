@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -20,6 +21,16 @@ const effort = process.env.CLOUDAGENTS_EFFORT
 const choice = [model === undefined ? null : `model: ${model}`, effort === undefined ? null : `effort: ${effort}`]
   .filter((part): part is string => part !== null)
   .join(", ")
+
+// Isolated text generation (thread titles): no MCP session, no thread files. The prompt is the whole stdin, and the
+// answer is one line, so the smoke test exercises the real spawn, credential and cleanup path without a model key.
+if (process.env.CLOUDAGENTS_TEXT_GENERATION === "1") {
+  const input = readFileSync(0, "utf8")
+  const source = /The user's first message:\s*"""\n([\s\S]*?)\n"""/.exec(input)?.[1] ?? ""
+  const title = source.replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ")
+  console.log(title === "" ? "Fake generated title" : title)
+  process.exit(0)
+}
 
 if (!mcpUrl || !mcpToken) {
   console.error("fake-agent: CLOUDAGENTS_MCP_URL or CLOUDAGENTS_MCP_TOKEN is not set")

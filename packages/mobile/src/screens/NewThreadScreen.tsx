@@ -48,7 +48,7 @@ export function NewThreadScreen() {
         throw new Error("That box is offline. Pick another box or start it first.");
       } else {
         const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } };
-        task = await api.createTask({ title: threadTitle(body.text), ...target });
+        task = await api.createTask({ title: threadTitle(body.text), generateTitle: true, ...target });
       }
       created.current = { task, repo, branch, scope: api.boxScope };
       // The thread exists from here on, even if sending the first message fails.

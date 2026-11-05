@@ -65,6 +65,20 @@ harnesses, with each harness's model-visibility picker beside its name; **API ke
 its model preferences together. These pickers change which models appear in chat, not the box's installed models.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
 
+Settings › Text generation stores each user's preferences on the active box (`GET`/`PUT /api/settings/text-generation`).
+The model and thinking controls are shared with the composer. “Conversation model” inherits that conversation's model
+and thinking level; an explicitly selected model uses its own supported default until a level is selected. Custom
+thread-title instructions are appended to the title prompt. Response streaming either reveals completed paragraphs
+and fenced code blocks or waits for the assistant's full response; tools and thinking remain live.
+
+New desktop and mobile threads opt into automatic naming with `CreateTaskBody.generateTitle`. The first accepted
+user message starts a separate, non-resuming text-generation request in a temporary sandbox workspace, using the
+owner's existing provider credentials without the thread's MCP tools. It never enters the conversation history or
+changes its model/session. The provisional prompt-derived title remains on failure; generated titles cannot overwrite
+an archived, deleted or renamed thread. Explicitly named automations and delegated threads keep their titles.
+The settings and initial-title flow are inspired by [T3 Code](https://github.com/pingdotgg/t3code); Kestrel uses its own
+prompt, provider integration and UI components.
+
 The shared composer also owns the app-command catalog and invocation rules (`src/commands.ts`). App actions such
 as `/usage` execute locally on suggestion selection or message submission; they never reach the harness and
 override same-named slash commands, but not `$skills`. Each host implements the exhaustive `AppCommandHandlers`

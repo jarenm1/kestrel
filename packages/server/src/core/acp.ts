@@ -28,6 +28,9 @@ export interface AcpRunInput {
   readonly mcpServers: ReadonlyArray<AcpMcpServer>
 }
 
+/** What the driver does with an agent's permission request: run tools (the sandbox is the boundary) or refuse them. */
+export type AcpPermissionPolicy = "allow" | "deny"
+
 export interface AcpDriverIo {
   /** Writes one JSON-RPC message to the CLI's stdin. */
   readonly send: (message: unknown) => void
@@ -35,6 +38,8 @@ export interface AcpDriverIo {
   readonly onSession: (sessionId: string) => void
   /** The run's turn is over (or never started); the process can be let go. Called once. */
   readonly onDone: (outcome: RunOutcome) => void
+  /** Permission requests are approved for real runs; isolated text generation refuses them. Defaults to allow. */
+  readonly permission?: AcpPermissionPolicy
 }
 
 const errorText = (error: unknown): string =>
@@ -60,6 +65,14 @@ const allowOption = (options: unknown): string | null => {
   const ids = (kind: string) =>
     options.flatMap((o) => (isRecord(o) && o.kind === kind && typeof o.optionId === "string" ? [o.optionId] : []))
   return ids("allow_always")[0] ?? ids("allow_once")[0] ?? null
+}
+
+/** The permission option that refuses a request, when the agent offers one. */
+const denyOption = (options: unknown): string | null => {
+  if (!Array.isArray(options)) return null
+  const ids = (kind: string) =>
+    options.flatMap((o) => (isRecord(o) && o.kind === kind && typeof o.optionId === "string" ? [o.optionId] : []))
+  return ids("reject_always")[0] ?? ids("reject_once")[0] ?? null
 }
 
 export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver => {
@@ -170,7 +183,7 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
   const answerAgentRequest = (message: Record<string, unknown>) => {
     if (message.method === "session/request_permission") {
       const params = isRecord(message.params) ? message.params : {}
-      const optionId = allowOption(params.options)
+      const optionId = (io.permission === "deny" ? denyOption : allowOption)(params.options)
       io.send(
         optionId === null
           ? { jsonrpc: "2.0", id: message.id, result: { outcome: { outcome: "cancelled" } } }

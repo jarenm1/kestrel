@@ -1,8 +1,24 @@
-import { useQuery } from "@tanstack/react-query"
-import { ControlPaths, CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
+import { useEffect, useId, useRef, useState } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  ControlPaths,
+  CURRENT_PLAN,
+  DEFAULT_TEXT_GENERATION_SETTINGS,
+  PLANS,
+  connectedModelProviders,
+  modelInfo,
+  type AgentEffort,
+  type AgentModel,
+  type BoxList,
+  type Plan,
+  type TextGenerationSettings as TextGenerationConfig,
+  type Usage,
+} from "@cloudagents/protocol"
+import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, RotateCcw, Server, Sparkles, User } from "lucide-react"
 import { Navigate, NavLink, Outlet } from "react-router-dom"
-import { queries } from "@/api/queries"
+import { api } from "@/api/client"
+import { keys, queries } from "@/api/queries"
+import { ModelPicker, ThinkingPicker, effortOptions } from "@/components/AgentPickers"
 import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
 import { Fleet } from "@/components/Fleet"
@@ -10,7 +26,9 @@ import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { Textarea } from "@/components/ui/textarea"
 import { SERVER_URL } from "@/config"
+import { useShownModels } from "@/hooks/useShownModels"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
@@ -18,6 +36,7 @@ import { errorText } from "@/util"
 const sections = [
   { to: "profile", label: "Profile", icon: User },
   { to: "connections", label: "Connections", icon: Plug },
+  { to: "text-generation", label: "Text generation", icon: Sparkles },
   { to: "boxes", label: "Boxes", icon: Server },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
@@ -161,6 +180,303 @@ export function ConnectionsSettings() {
     <>
       <h2 className="text-lg font-semibold tracking-tight">Connections</h2>
       <Connections />
+    </>
+  )
+}
+
+const STREAMING_OPTIONS = [
+  {
+    value: "paragraph",
+    label: "Show finished paragraphs",
+    desc: "Each paragraph or code block appears as soon as it is complete.",
+  },
+  {
+    value: "turn",
+    label: "Wait for the full response",
+    desc: "Text appears once the agent finishes its turn.",
+  },
+] as const
+
+const TEXT_GENERATION_DESC =
+  "Choose how short generated text is written, how new threads are titled, and how assistant prose is buffered."
+
+/**
+ * The active box's route. A box switch remounts the form, so no state from another box can survive it. When Kestrel's
+ * box is active (`activeBoxId === null`), `targetBoxId` names the managed box itself so a write can be pinned to it;
+ * null stays only for the legacy relay, which has no box id to pin.
+ */
+function activeBoxRoute(list: BoxList): { key: string; targetBoxId: string | null } {
+  const active = list.activeBoxId
+  const box =
+    active === null || active === list.managedBox?.id
+      ? list.managedBox
+      : list.boxes.find((candidate) => candidate.id === active)
+  return {
+    key: JSON.stringify([active, box?.id ?? null, box?.url ?? null]),
+    targetBoxId: active ?? box?.id ?? null,
+  }
+}
+
+/**
+ * Generated-text preferences of the signed-in user on the active box: the model and thinking level used for short
+ * generated text, the instructions that shape automatic thread titles, and how assistant prose is buffered.
+ */
+export function TextGenerationSettings() {
+  const boxes = useQuery(queries.boxes())
+  if (!boxes.data) {
+    return (
+      <>
+        <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+        {boxes.error && <Alert>{errorText(boxes.error)}</Alert>}
+        {boxes.isPending && <div className="text-muted-foreground">Loading settings…</div>}
+      </>
+    )
+  }
+  const route = activeBoxRoute(boxes.data)
+  // Keyed by the box route: switching boxes unmounts the old form synchronously; its writes stay pinned to that box.
+  return <TextGenerationSettingsForBox key={route.key} boxKey={route.key} boxId={route.targetBoxId} />
+}
+
+/**
+ * Model, thinking level and streaming save immediately; title instructions save on blur. Writes are queued so one PUT
+ * is in flight at a time, and the queue is pinned to the box it was opened for. Unmounting only suppresses form state
+ * updates: every accepted change still reaches that box and updates its cache, so navigating away cannot lose a pick.
+ */
+function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId: string | null }) {
+  const queryClient = useQueryClient()
+  const connections = useQuery(queries.connections())
+  const settings = useQuery(queries.textGenerationSettings(boxKey, boxId))
+  const shown = useShownModels()
+  const instructionsId = useId()
+  const [form, setForm] = useState<TextGenerationConfig>()
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [saveError, setSaveError] = useState<unknown>()
+  const savedInstructions = useRef("")
+  const queued = useRef<TextGenerationConfig | undefined>(undefined)
+  const draining = useRef(false)
+  const hydrated = useRef(false)
+  const disposed = useRef(false)
+
+  // Hydrate once from the snapshot the mount's own GET settled on, never from cached data a fresh GET may still be
+  // replacing. After that, later cache changes (including our own successful saves) must not overwrite user edits.
+  useEffect(() => {
+    if (hydrated.current || settings.data === undefined || !settings.isFetchedAfterMount) return
+    hydrated.current = true
+    setForm(settings.data)
+    savedInstructions.current = settings.data.threadTitleInstructions
+  }, [settings.data, settings.isFetchedAfterMount])
+
+  // Navigating away stops form updates but lets the queue keep draining to the box it was captured for.
+  useEffect(() => {
+    disposed.current = false
+    return () => {
+      disposed.current = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (saveState !== "saved") return
+    const timer = setTimeout(() => setSaveState("idle"), 2000)
+    return () => clearTimeout(timer)
+  }, [saveState])
+
+  function drainSave() {
+    if (draining.current) return
+    draining.current = true
+    void (async () => {
+      try {
+        // The queue keeps draining after unmount: its writes are pinned to `boxId`, so leaving the page cannot
+        // discard a pick the user already made.
+        while (queued.current !== undefined) {
+          const next = queued.current
+          queued.current = undefined
+          if (!disposed.current) {
+            setSaveError(undefined)
+            setSaveState("saving")
+          }
+          try {
+            const saved = await api.saveTextGenerationSettings(next, boxId)
+            // The box accepted this snapshot, so the next visit may start from it even if this view is gone.
+            queryClient.setQueryData(keys.textGenerationSettings(boxKey), saved)
+            if (!disposed.current) {
+              savedInstructions.current = next.threadTitleInstructions
+              setSaveState(queued.current === undefined ? "saved" : "saving")
+            }
+          } catch (error) {
+            if (!disposed.current) {
+              setSaveError(error)
+              setSaveState("error")
+            }
+          }
+        }
+      } finally {
+        draining.current = false
+        if (queued.current !== undefined) drainSave()
+      }
+    })()
+  }
+
+  function persist(next: TextGenerationConfig) {
+    if (!disposed.current) setForm(next)
+    queued.current = next
+    drainSave()
+  }
+
+  if (!form) {
+    return (
+      <>
+        <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+        {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+        {(settings.isPending || settings.isFetching) && (
+          <div className="text-muted-foreground">Loading settings…</div>
+        )}
+      </>
+    )
+  }
+
+  const connected = connections.data ? connectedModelProviders(connections.data) : []
+  const modelSections = connections.data
+    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((section) => section.models.length > 0)
+    : null
+  const model = form.model === null ? undefined : modelInfo(form.model)
+  const effort = form.effort ?? model?.defaultEffort ?? model?.efforts[0]
+
+  function update(patch: Partial<TextGenerationConfig>) {
+    if (!form) return
+    persist({ ...form, ...patch })
+  }
+
+  function saveInstructions() {
+    if (!form) return
+    const value = form.threadTitleInstructions.trim()
+    if (value !== savedInstructions.current) persist({ ...form, threadTitleInstructions: value })
+  }
+
+  return (
+    <>
+      <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+      {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+      {connections.error && <Alert>{errorText(connections.error)}</Alert>}
+      <Card className="py-0">
+        <CardContent className="divide-y divide-white/[0.04] px-0">
+          <Row label="Model">
+            <ModelPicker
+              sections={modelSections}
+              value={model}
+              onChange={(id: AgentModel) => {
+                const next = modelInfo(id)
+                update({
+                  model: id,
+                  effort: form.effort !== null && next.efforts.includes(form.effort) ? form.effort : null,
+                })
+              }}
+              defaultLabel="Conversation model"
+              onReset={() => update({ model: null, effort: null })}
+            />
+            {model !== undefined && model.efforts.length > 0 && (
+              <ThinkingPicker
+                value={effort}
+                options={effortOptions(model)}
+                onChange={(level: AgentEffort) => update({ effort: level })}
+              />
+            )}
+            {form.model !== null && (
+              <Button type="button" variant="ghost" size="sm" onClick={() => update({ model: null, effort: null })}>
+                <RotateCcw />
+                Reset
+              </Button>
+            )}
+          </Row>
+        </CardContent>
+      </Card>
+
+      <Card className="py-0">
+        <CardContent className="flex flex-col gap-2 px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label htmlFor={instructionsId} className="font-medium">
+              Thread title instructions
+            </label>
+            {form.threadTitleInstructions !== "" && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => persist({ ...form, threadTitleInstructions: "" })}
+              >
+                <RotateCcw />
+                Reset
+              </Button>
+            )}
+          </div>
+          <Textarea
+            id={instructionsId}
+            rows={3}
+            value={form.threadTitleInstructions}
+            placeholder="Keep titles to a few words. Lead with the main subject."
+            onChange={(event) => setForm({ ...form, threadTitleInstructions: event.target.value })}
+            onBlur={saveInstructions}
+          />
+          <p className="text-xs text-muted-foreground">
+            Added to Kestrel's prompt when it automatically names a new thread. Leave blank to use the default
+            instructions. Changes save when you leave the field.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card className="py-0">
+        <CardContent className="px-5 py-4">
+          <div className="flex flex-col gap-3">
+            <div>
+              <h3 className="font-medium">Response streaming</h3>
+              <p className="text-xs text-muted-foreground">
+                How assistant prose is buffered before it reaches the transcript.
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {STREAMING_OPTIONS.map((option) => {
+                const active = form.responseStreamingMode === option.value
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => update({ responseStreamingMode: option.value })}
+                    className={cn(
+                      "rounded-xl border px-4 py-3 text-left transition-colors duration-200",
+                      active
+                        ? "border-primary/40 bg-white/[0.06] shadow-soft"
+                        : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]",
+                    )}
+                  >
+                    <span className="flex items-center justify-between gap-2 text-sm font-medium">
+                      {option.label}
+                      {active && <Check className="size-4 text-primary" />}
+                    </span>
+                    <span className="mt-1 block text-xs text-muted-foreground">{option.desc}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {saveState === "error" && <Alert>{errorText(saveError)}</Alert>}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-muted-foreground" role="status">
+          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
+        </span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="ml-auto"
+          onClick={() => persist({ ...DEFAULT_TEXT_GENERATION_SETTINGS })}
+        >
+          <RotateCcw />
+          Reset to defaults
+        </Button>
+      </div>
     </>
   )
 }

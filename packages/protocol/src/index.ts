@@ -98,6 +98,8 @@ export const Task = Schema.Struct({
   /** GitHub login of the user who started the thread. Only they can see or change it. */
   owner: Schema.String,
   title: Schema.String,
+  /** Generate a title from the first accepted message; cleared when generation starts or the user renames it. */
+  generateTitle: Schema.optional(Schema.Boolean),
   status: TaskStatus,
   createdAt: Schema.String,
   updatedAt: Schema.String,
@@ -460,8 +462,34 @@ export const CheckoutRequest = Schema.Struct({
 })
 export type CheckoutRequest = typeof CheckoutRequest.Type
 
+/** Per-user, per-box preferences for short generated text and assistant response presentation. */
+export const TextGenerationSettings = Schema.Struct({
+  /** Null uses the conversation's model. */
+  model: Schema.NullOr(AgentModel),
+  effort: Schema.NullOr(AgentEffort),
+  threadTitleInstructions: Schema.String,
+  responseStreamingMode: Schema.Literal("turn", "paragraph"),
+}).pipe(
+  Schema.filter((settings) =>
+    settings.model === null ||
+    settings.effort === null ||
+    modelInfo(settings.model).efforts.includes(settings.effort) ||
+    "The selected model does not support that thinking level",
+  ),
+)
+export type TextGenerationSettings = typeof TextGenerationSettings.Type
+
+export const DEFAULT_TEXT_GENERATION_SETTINGS: TextGenerationSettings = {
+  model: null,
+  effort: null,
+  threadTitleInstructions: "",
+  responseStreamingMode: "paragraph",
+}
+
 export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
+  /** Opt into an agent-generated title; an explicit title remains the provisional label until it arrives. */
+  generateTitle: Schema.optional(Schema.Boolean),
   /** Check this repository out before the first message, e.g. for an automation on a pull request. */
   checkout: Schema.optional(CheckoutRequest),
   /** Point the agent at this repository and let it pick the branch or pull request to check out (`Task.pickedRepo`). */
@@ -738,6 +766,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 export const Paths = {
   health: "/api/health",
   capabilities: "/api/capabilities",
+  /** GET / PUT TextGenerationSettings: the signed-in user's preferences on this box. */
+  textGenerationSettings: "/api/settings/text-generation",
   /** POST a browser's `WebRtcOffer` (box token) -> `WebRtcAnswer`: opens the direct data channel of a user box. */
   webrtcOffer: "/api/webrtc/offer",
   /** GET -> Usage of the signed-in user in the current billing period. */

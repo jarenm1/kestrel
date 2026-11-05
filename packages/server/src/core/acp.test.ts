@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { makeAcpDriver, type AcpRunInput } from "./acp"
+import { makeAcpDriver, type AcpDriverIo, type AcpRunInput } from "./acp"
 import type { RunOutcome } from "./run-driver"
 import { makeTranscript } from "./transcript"
 
@@ -22,7 +22,7 @@ const thoughtOption = (id: string, values: readonly string[]) => ({
 })
 
 /** A driver wired to a recording ACP agent: `sent` is what the driver wrote, `reply` answers its last request. */
-const harness = (overrides: Partial<AcpRunInput> = {}) => {
+const harness = (overrides: Partial<AcpRunInput> = {}, io: Pick<AcpDriverIo, "permission"> = {}) => {
   const sent: Sent[] = []
   const sessions: string[] = []
   const outcomes: RunOutcome[] = []
@@ -34,7 +34,7 @@ const harness = (overrides: Partial<AcpRunInput> = {}) => {
       mcpServers: [{ type: "http", name: "cloudagents", url: "http://box/mcp/t1", headers: [{ name: "Authorization", value: "Bearer tok" }] }],
       ...overrides,
     },
-    { send: (m) => sent.push(m as Sent), onSession: (id) => sessions.push(id), onDone: (o) => outcomes.push(o) },
+    { send: (m) => sent.push(m as Sent), onSession: (id) => sessions.push(id), onDone: (o) => outcomes.push(o), ...io },
   )
   const last = () => sent.at(-1) as Sent
   const reply = (result: unknown) => driver.receive({ jsonrpc: "2.0", id: last().id, result })
@@ -136,6 +136,32 @@ describe("ACP driver", () => {
     h.driver.receive({ jsonrpc: "2.0", id: prompt.id, result: { stopReason: "cancelled" } })
     expect(h.outcomes).toEqual([{ status: "interrupted" }])
     expect(h.driver.interrupt()).toBe(false)
+  })
+
+  test("text generation's deny policy refuses a tool request with the agent's reject option", () => {
+    const h = harness({}, { permission: "deny" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1" })
+    h.driver.receive({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "session/request_permission",
+      params: {
+        sessionId: "s1",
+        toolCall: { toolCallId: "c1", title: "Run the test suite", kind: "execute", status: "pending", rawInput: { command: "bun test" } },
+        options: [{ optionId: "no", kind: "reject_once" }, { optionId: "yes", kind: "allow_once" }, { optionId: "always", kind: "allow_always" }],
+      },
+    })
+    expect(h.last()).toEqual({ jsonrpc: "2.0", id: 11, result: { outcome: { outcome: "selected", optionId: "no" } } })
+    // Without a reject option the request is cancelled rather than approved.
+    h.driver.receive({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "session/request_permission",
+      params: { sessionId: "s1", toolCall: { toolCallId: "c2", title: "Write a file", kind: "edit", status: "pending" }, options: [{ optionId: "yes", kind: "allow_once" }] },
+    })
+    expect(h.last()).toEqual({ jsonrpc: "2.0", id: 12, result: { outcome: { outcome: "cancelled" } } })
   })
 
   test("an agent that exits mid-turn fails the run", () => {

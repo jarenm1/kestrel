@@ -8,6 +8,7 @@ import { Config, type ServerConfig } from "../config"
 import { DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
+import { CredentialBroker } from "../broker"
 import { GitHub } from "../github/api"
 import { AgentHarness, type AgentChoice, type RunStart } from "./harness"
 import { EventHubLive } from "./events"
@@ -47,7 +48,7 @@ const withCore = async (
     configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
-    Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
+    Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never), Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, {
       spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
         Effect.sync(() => {

@@ -49,6 +49,7 @@ import {
   SetActiveBoxBody,
   type SetDesktopQualityBody,
   Task,
+  TextGenerationSettings,
   ToolFailureList,
   UpdateAutomationBody,
   UpdateBoxBody,
@@ -329,6 +330,23 @@ function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: strin
   return activeTarget().then((target) => run(boxCall(target, schema, method, path, body)))
 }
 
+/**
+ * A box call pinned to a box from the last box list read, so a later active-box switch cannot retarget it. `null` is
+ * the legacy relay (no managed box); callers with a managed box pass its id instead.
+ */
+function onBox<A, I>(
+  boxId: string | null,
+  schema: Schema.Schema<A, I>,
+  method: Method,
+  path: string,
+  body?: unknown,
+): Promise<A> {
+  const target = routeOf(boxId)
+  return target === undefined
+    ? Promise.reject(new ApiError(404, "That box is no longer in your box list"))
+    : run(boxCall(target, schema, method, path, body))
+}
+
 /** What `connectionsForBox` needs from one box: its CLI logins and the harnesses it can launch. */
 type BoxConnectionSource = {
   readonly cliAuth: readonly CliAuthStatus[] | undefined
@@ -599,6 +617,19 @@ export const api = {
   providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
   /** What the active box can run, as it found at startup. */
   capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
+  /**
+   * The signed-in user's generated-text preferences. `boxId` pins the read to the box a settings form was opened for;
+   * omitted, it reads the active box.
+   */
+  textGenerationSettings: (boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(TextGenerationSettings, "GET", Paths.textGenerationSettings)
+      : onBox(boxId, TextGenerationSettings, "GET", Paths.textGenerationSettings),
+  /** Replaces the signed-in user's generated-text preferences, on the same box `textGenerationSettings` read. */
+  saveTextGenerationSettings: (settings: TextGenerationSettings, boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings)
+      : onBox(boxId, TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),

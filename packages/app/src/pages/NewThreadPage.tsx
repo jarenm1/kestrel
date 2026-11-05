@@ -48,10 +48,9 @@ export function NewThreadPage() {
     boxId: string | null | undefined
   } | null>(null)
 
-  // TODO: let the agent name the thread from the conversation instead of the first line of the prompt.
   const start = useMutation({
     mutationFn: async ({ body, files }: { body: SendMessageBody; files: readonly File[] }) => {
-      // A message of only files is titled after the first one.
+      // The first line is the provisional title; the box replaces it once the first message is accepted.
       const titleText = parseGithubReferenceDraft(body.text)
         .map((segment) => segment.type === "text" ? segment.text : githubReferenceLabel(segment.reference.kind, segment.reference.number))
         .join("")
@@ -64,7 +63,7 @@ export function NewThreadPage() {
         throw new Error("That box is offline. Pick another box or start it first.")
       } else {
         const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } }
-        task = await api.createTask({ title, ...target }, boxId)
+        task = await api.createTask({ title, generateTitle: true, ...target }, boxId)
       }
       created.current = { task, repo, branch, boxId }
       // The thread exists from here on, even if the message below fails.

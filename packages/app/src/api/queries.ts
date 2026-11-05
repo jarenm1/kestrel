@@ -49,6 +49,8 @@ export const keys = {
   cliAuth: ["cli-auth"] as const,
   /** What the active box can run (`BoxCapabilities`): which harnesses it has. */
   capabilities: ["capabilities"] as const,
+  /** The signed-in user's generated-text preferences, keyed by the box route they were read from. */
+  textGenerationSettings: (boxKey: string) => ["text-generation-settings", boxKey] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
@@ -73,9 +75,9 @@ export const keys = {
 }
 
 /**
- * Roots of the queries read from the active box: box status and usage. Threads are read from the box each one lives
- * on, so they are not here. These are reset when the active box changes, so no figure of the previous box stays on
- * screen.
+ * Roots of the queries read from the active box: box status, usage and per-box settings. Threads are read from the box
+ * each one lives on, so they are not here. These are reset when the active box changes, so no figure or preference of
+ * the previous box stays on screen.
  */
 const ACTIVE_BOX_ROOTS: Record<string, true> = {
   connections: true,
@@ -84,6 +86,7 @@ const ACTIVE_BOX_ROOTS: Record<string, true> = {
   usageActivity: true,
   "cli-auth": true,
   capabilities: true,
+  "text-generation-settings": true,
   box: true,
 }
 
@@ -202,6 +205,8 @@ export const queries = {
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
   capabilities: () => queryOptions({ queryKey: keys.capabilities, queryFn: api.capabilities }),
+  textGenerationSettings: (boxKey: string, boxId: string | null) =>
+    queryOptions({ queryKey: keys.textGenerationSettings(boxKey), queryFn: () => api.textGenerationSettings(boxId) }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
   task: (taskId: string) =>
     queryOptions({

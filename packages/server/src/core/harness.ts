@@ -39,7 +39,7 @@ import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
-import { makeTranscript, type Transcript } from "./transcript"
+import { makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
 import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
 import { writeAtomic } from "./atomic"
 
@@ -135,6 +135,8 @@ export interface RunStart {
    * otherwise (an unrecorded place included, since it may be either), or when this is null, it starts fresh.
    */
   readonly resume: { readonly sessionId: string; readonly continuation: string | undefined; readonly prompt: string } | null
+  /** How this run's assistant prose should appear live; null keeps the transcript's token streaming. */
+  readonly responseStreamingMode?: ResponseStreamingMode | null
 }
 
 interface ActiveRun {
@@ -181,6 +183,8 @@ interface RunSession {
   readonly continuation: SessionContinuation | null
   /** The queue item the run showed while it waited for a slot; it seeds the run's items. Null when it got one at once. */
   readonly queued: AgentItem | null
+  /** How assistant prose becomes visible in the run's items. */
+  readonly streaming: ResponseStreamingMode | null
 }
 
 /** A run's slot: `queued` is the queue item it showed while it waited, null when it got a slot at once. */
@@ -613,7 +617,7 @@ export const AgentHarnessLive = Layer.effect(
               published: new Map(),
               held: new Map(),
               heldTimer: null,
-              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType)),
+              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType), session.streaming),
               context: session.seed,
               sessionId: null,
               continuation: session.continuation,
@@ -881,6 +885,7 @@ export const AgentHarnessLive = Layer.effect(
                 provider,
                 continuation,
                 queued: admission.queued,
+                streaming: start.responseStreamingMode ?? null,
                 conversation: ({
                   codex: () => ({
                     kind: "codex",
@@ -958,7 +963,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, provider: run.provider ?? DEFAULT_MODEL_PROVIDER, conversation: null, continuation: null, queued: null },
+            { seed: null, provider: run.provider ?? DEFAULT_MODEL_PROVIDER, conversation: null, continuation: null, queued: null, streaming: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)

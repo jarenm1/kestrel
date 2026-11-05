@@ -8,6 +8,7 @@ import { Config, type ServerConfig } from "../config"
 import { DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
+import { CredentialBroker } from "../broker"
 import { GitHub } from "../github/api"
 import { AgentHarness } from "./harness"
 import { EventHub, EventHubLive } from "./events"
@@ -38,6 +39,7 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
     configLayer, stateLayer, EventHubLive, workspaceLayer,
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, {} as never), Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
+    Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, {
       // Zero still identifies a message joining an existing run, not a new run's prompt.
       itemCount: (runId: string) => (runId === "run" ? initialItems : 0),

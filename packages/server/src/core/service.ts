@@ -36,9 +36,12 @@ import {
   modelInfo,
   type FileRoot,
   providerModels,
+  DEFAULT_TEXT_GENERATION_SETTINGS,
+  type TextGenerationSettings,
 } from "@cloudagents/protocol"
 import { MODEL_HARNESS } from "../agent-clis"
 import { CliAuth } from "../cliauth"
+import { CredentialBroker } from "../broker"
 import { dailyActivity } from "./activity"
 import { Config } from "../config"
 import { DesktopError, DesktopManager } from "../desktop"
@@ -59,6 +62,8 @@ import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
+import { readTextGenerationSettings, writeTextGenerationSettings } from "./text-generation-settings"
+import { makeTextGenerator, mayReplaceTitle, pendingTitleRequest } from "./text-generation"
 
 const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
   const prefix = location.pathname.match(/^\\/_preview\\/[^/]+\\/[^/]+/)[0];
@@ -276,6 +281,13 @@ type AskOutcome = { readonly _tag: "answered"; readonly text: string } | { reado
 
 export interface CoreShape {
   readonly health: () => Effect.Effect<void>
+  /** The signed-in user's text-generation preferences on this box. */
+  readonly getTextGenerationSettings: (user: string) => Effect.Effect<TextGenerationSettings, InternalError>
+  /** Saves and returns the preferences as stored. */
+  readonly setTextGenerationSettings: (
+    user: string,
+    settings: TextGenerationSettings,
+  ) => Effect.Effect<TextGenerationSettings, InternalError>
 
   // Every browser-facing operation takes the signed-in `user`. A thread and its runs, checkouts and desktop exist
   // only for the thread's owner: anyone else gets NotFound, never a hint it exists.
@@ -642,7 +654,9 @@ export const CoreLive = Layer.effect(
     const credentials = yield* CredentialStore
     const github = yield* GitHub
     const cliAuth = yield* CliAuth
+    const broker = yield* CredentialBroker
     const sandboxSettings = sandboxSettingsOf(config)
+    const textGenerator = makeTextGenerator({ config, cliAuth, broker })
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
     const delegationLock = yield* Effect.makeSemaphore(1)
@@ -721,6 +735,22 @@ export const CoreLive = Layer.effect(
       })
 
     const publishMessage = (message: Message) => hub.publish({ _tag: "message.created", message })
+
+    /**
+     * Writes a generated title only while the thread still exists, is not archived, and still has the provisional
+     * title it had when the first message was accepted. A rename, archive, or delete since then wins.
+     */
+    const applyGeneratedTitle = (user: string, taskId: string, baseline: string, title: string) =>
+      Effect.gen(function* () {
+        const updated = yield* store.update((s): Either.Either<Task | null, never> => {
+          const task = s.tasks.find((t) => t.id === taskId)
+          if (task === undefined || !mayReplaceTitle(task, user, baseline)) return Either.right(null)
+          task.title = title
+          task.updatedAt = nowIso()
+          return Either.right({ ...task })
+        })
+        if (updated !== null) hub.publish({ _tag: "task.updated", task: updated })
+      })
 
     /** The owner's GitHub token, or undefined when they have not connected GitHub. It never reaches a sandbox. */
     const githubTokenOf = (owner: string): Effect.Effect<string | undefined> =>
@@ -1193,7 +1223,7 @@ export const CoreLive = Layer.effect(
         const picked = input.pickedRepo === undefined ? null : yield* parseCheckoutRequest({ repo: input.pickedRepo })
         const id = newId()
         const now = nowIso()
-        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(picked === null ? {} : { pickedRepo: picked.repo }), ...(delegation === undefined ? {} : { delegation }) }
+        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(input.generateTitle === true ? { generateTitle: true } : {}), ...(picked === null ? {} : { pickedRepo: picked.repo }), ...(delegation === undefined ? {} : { delegation }) }
         yield* Effect.tryPromise({
           try: () => mkdir(threadDirOf(id), { recursive: true }),
           catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),
@@ -1257,6 +1287,14 @@ export const CoreLive = Layer.effect(
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
+        // A preference read that fails must not stop the message: the defaults are the shipped behavior.
+        const textSettings = yield* readTextGenerationSettings(config.dataDir, user).pipe(
+          Effect.catchAll((e) =>
+            Effect.logWarning(`task ${taskId}: cannot read text generation settings: ${e.message}`).pipe(
+              Effect.as(DEFAULT_TEXT_GENERATION_SETTINGS),
+            ),
+          ),
+        )
         const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
         if (text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
@@ -1296,6 +1334,7 @@ export const CoreLive = Layer.effect(
               start: RunStart | null
               delivered: string
               duplicate: boolean
+              title: { readonly baseline: string; readonly source: string } | null
             },
             NotFound | Conflict | BadRequest
           > => {
@@ -1305,7 +1344,7 @@ export const CoreLive = Layer.effect(
             const previous = deliveryId === undefined ? undefined : s.messages.find((m) => m.taskId === taskId && m.id === deliveryId)
             if (previous) {
               const run = s.runs.find((r) => r.id === previous.runId)
-              if (run) return Either.right({ task: { ...task }, message: { ...previous }, run: { ...run }, answer: null, delivered: "", start: null, duplicate: true })
+              if (run) return Either.right({ task: { ...task }, message: { ...previous }, run: { ...run }, answer: null, delivered: "", start: null, duplicate: true, title: null })
             }
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
@@ -1324,6 +1363,10 @@ export const CoreLive = Layer.effect(
             const delivered = deliveredText(taskId, { id: messageId, text, attachments, ...sent })
             const attached = attachments.length === 0 ? {} : { attachments }
             const now = nowIso()
+            // An opt-in title is spent by the first accepted message. The provisional title at this moment is the
+            // baseline a generated title may still replace; any later rename wins over it.
+            const titleRequest = pendingTitleRequest(task, from, !s.messages.some((m) => m.taskId === taskId), text, attachments)
+            if (from === null) delete task.generateTitle
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
             // run is gone. Another agent's message leaves the question to the user.
             const ask = from === null ? (s.pendingAsks.find((a) => a.taskId === taskId) ?? null) : null
@@ -1352,7 +1395,7 @@ export const CoreLive = Layer.effect(
               if (task.status === "needs_input" && from === null) task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
-              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false })
+              return Either.right({ task: { ...task }, message, run: { ...running }, answer, delivered, start: null, duplicate: false, title: titleRequest })
             }
             // No run is going. The new run continues the native session of the newest run this provider's CLI
             // recorded, so the agent keeps the thread's context without replaying it. Runs that happened since (the
@@ -1427,6 +1470,7 @@ export const CoreLive = Layer.effect(
                     continuation: resumeSession.continuation,
                     prompt: withUserContext(user, formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, "delta"), notes),
                   },
+              responseStreamingMode: textSettings.responseStreamingMode,
             }
             return Either.right({
               task: { ...task },
@@ -1436,11 +1480,35 @@ export const CoreLive = Layer.effect(
               delivered,
               duplicate: false,
               start,
+              title: titleRequest,
             })
           },
         )
         if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
         hub.publish({ _tag: "task.updated", task: reserved.task })
+        // A title is generated beside the run, never in front of it: a slow or failed provider cannot hold up or
+        // break the message. The write itself re-checks that the thread still has its provisional title.
+        if (reserved.title !== null && reserved.title.source !== "") {
+          const requested = reserved.title
+          const conversationModel = reserved.run.model ?? choice.model
+          const conversationEffort = reserved.run.effort ?? choice.effort ?? undefined
+          yield* Effect.forkDaemon(
+            textGenerator
+              .threadTitle({
+                user,
+                source: requested.source,
+                settings: textSettings,
+                ...(conversationModel === undefined ? {} : { conversationModel }),
+                ...(conversationEffort === undefined ? {} : { conversationEffort }),
+              })
+              .pipe(
+                Effect.flatMap((title) =>
+                  title === null ? Effect.void : applyGeneratedTitle(user, taskId, requested.baseline, title),
+                ),
+                Effect.catchAll((e) => Effect.logWarning(`task ${taskId}: could not generate a title: ${e.message}`)),
+              ),
+          )
+        }
         if (reserved.start === null) {
           // Mid-run. The run kept emitting items while the message was stored, so its position is taken again in the
           // step that hands it to the agent: items emitted before that reached the agent before the message did. A run
@@ -1929,6 +1997,8 @@ export const CoreLive = Layer.effect(
       runImage,
       upload,
       health: () => Effect.void,
+      getTextGenerationSettings: (user) => readTextGenerationSettings(config.dataDir, user),
+      setTextGenerationSettings: (user, settings) => writeTextGenerationSettings(config.dataDir, user, settings),
 
       listTasks: (user) =>
         Effect.map(store.read, (state) =>

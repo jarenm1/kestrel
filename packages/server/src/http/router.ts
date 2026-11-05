@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { Paths, TextGenerationSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -214,6 +215,16 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
           ),
         ),
       ),
+    ),
+    HttpRouter.get(
+      Paths.textGenerationSettings,
+      respond(signedIn((user) => core.getTextGenerationSettings(user))),
+    ),
+    HttpRouter.put(
+      Paths.textGenerationSettings,
+      respond(signedIn((user) =>
+        Effect.flatMap(jsonBody(TextGenerationSettings), (settings) => core.setTextGenerationSettings(user, settings)),
+      )),
     ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
     HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user).pipe(Effect.flatMap(cliArray))))),

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect, Either, Layer } from "effect"
 import { CliAuth } from "../cliauth"
+import { CredentialBroker } from "../broker"
 import { Config, type ServerConfig } from "../config"
 import { CredentialStore } from "../credentials"
 import { DesktopManager } from "../desktop"
@@ -108,6 +109,7 @@ const withCore = async <A>(
       findOpenPullRequest: () => Effect.succeed(null),
     } as never),
     Layer.succeed(CliAuth, {} as never),
+    Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, { stopAll: () => Effect.void, items: () => Effect.succeed([]) } as never),
   )
   return Effect.runPromise(

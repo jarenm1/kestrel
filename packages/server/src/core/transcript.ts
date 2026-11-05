@@ -98,12 +98,64 @@ const claudeWindow = (modelUsage: unknown, model: string | null): number | null 
   return window !== null && window > 0 ? window : null
 }
 
+/** How assistant prose reaches the app: at the end of a turn, or once each paragraph or code block is complete. */
+export type ResponseStreamingMode = "turn" | "paragraph"
+
+/**
+ * The part of `text` whose paragraphs and fenced code blocks have ended. A blank line ends a paragraph only outside a
+ * fence; a fence ends at its closing marker's newline. Nothing is complete until the text says so, which keeps an
+ * unfinished code block from showing half-written.
+ */
+export const completedProsePrefix = (text: string): string => {
+  let inFence = false
+  let fence = ""
+  let complete = 0
+  let hasContent = false
+  let pos = 0
+  while (pos < text.length) {
+    const newline = text.indexOf("\n", pos)
+    const end = newline === -1 ? text.length : newline
+    const line = text.slice(pos, end)
+    const trimmed = line.trimStart()
+    const marker = trimmed.startsWith("```") ? "```" : trimmed.startsWith("~~~") ? "~~~" : null
+    if (marker !== null) {
+      if (!inFence) {
+        inFence = true
+        fence = marker
+        hasContent = true
+      } else if (marker === fence && newline !== -1) {
+        inFence = false
+        fence = ""
+        complete = newline + 1
+        hasContent = false
+      }
+    } else if (inFence) {
+      // A blank line inside a fence is code, not the end of prose.
+    } else if (line.trim() === "") {
+      if (hasContent && newline !== -1) {
+        complete = newline + 1
+        hasContent = false
+      }
+    } else {
+      hasContent = true
+    }
+    if (newline === -1) break
+    pos = newline + 1
+  }
+  return text.slice(0, complete)
+}
+
 /**
  * `seed` is the context the thread's session last reported; a run that resumes the same session on the same model
  * reuses its window, so its context updates from the first model call rather than only at the result. `saveImage`
- * keeps the images tool results return; without it they stay `[image]` lines in the output.
+ * keeps the images tool results return; without it they stay `[image]` lines in the output. `streaming` changes only
+ * when main-agent prose becomes visible; tool, thinking and subagent items are untouched.
  */
-export const makeTranscript = (seed: ContextUsage | null = null, saveImage: SaveImage | null = null): Transcript => {
+export const makeTranscript = (
+  seed: ContextUsage | null = null,
+  saveImage: SaveImage | null = null,
+  streaming: ResponseStreamingMode | null = null,
+): Transcript => {
   /**
    * Ids for items the harness does not name. Unique per run: the same id later means
    * "replace that item", so counter ids are never reused.
@@ -766,21 +818,104 @@ export const makeTranscript = (seed: ContextUsage | null = null, saveImage: Save
     return items
   }
 
-  return {
-    push: (line) => {
-      if (!isRecord(line)) return []
-      const type = asString(line.type)
-      if (type !== null && CLAUDE_LINE_TYPES[type] === true) return claude(line)
-      // ACP speaks JSON-RPC 2.0 with its `jsonrpc` field: the agent's work in `session/update`, a turn's end in the
-      // `session/prompt` response.
-      if (line.jsonrpc === "2.0") {
-        if (line.method === "session/update" && isRecord(line.params)) return acpUpdate(line.params)
-        return isRecord(line.result) ? acpResult(line.result) : []
+  const parse = (line: unknown): ReadonlyArray<AgentItem> => {
+    if (!isRecord(line)) return []
+    const type = asString(line.type)
+    if (type !== null && CLAUDE_LINE_TYPES[type] === true) return claude(line)
+    // ACP speaks JSON-RPC 2.0 with its `jsonrpc` field: the agent's work in `session/update`, a turn's end in the
+    // `session/prompt` response.
+    if (line.jsonrpc === "2.0") {
+      if (line.method === "session/update" && isRecord(line.params)) return acpUpdate(line.params)
+      return isRecord(line.result) ? acpResult(line.result) : []
+    }
+    // Codex app-server speaks JSON-RPC 2.0 without the `jsonrpc` field: `method` and/or `id`.
+    if (typeof line.method === "string" || line.id !== undefined) return codex(line)
+    return []
+  }
+
+  if (streaming === null) {
+    return {
+      push: parse,
+      finalText: () => finalTextValue,
+      context: () => contextValue,
+      takeContext: () => {
+        if (!contextChanged) return undefined
+        contextChanged = false
+        return contextValue
+      },
+    }
+  }
+
+  /**
+   * Main-agent prose waiting for its moment. In `turn` mode one text item is held for the whole turn; in `paragraph`
+   * mode each text item is shown up to its last completed paragraph or fence. A turn's `turn` item flushes both.
+   */
+  const turnProse = new Map<string, string>()
+  const turnOrder: string[] = []
+  const paragraphs = new Map<string, { text: string; shown: number }>()
+  const paragraphOrder: string[] = []
+  const flushProse = (): AgentItem[] => {
+    const items: AgentItem[] = []
+    if (streaming === "turn") {
+      // A final assistant line replaces the deltas of the same message, so the last text for an id wins.
+      const parts = turnOrder
+        .map((id) => turnProse.get(id)?.trim() ?? "")
+        .filter((text) => text !== "")
+      const text = parts.join("\n\n")
+      const id = turnOrder.at(-1)
+      if (text !== "" && id !== undefined) items.push({ _tag: "text", id, parentToolId: null, text })
+      turnProse.clear()
+      turnOrder.length = 0
+      return items
+    }
+    for (const id of paragraphOrder) {
+      const prose = paragraphs.get(id)
+      if (prose === undefined) continue
+      const text = prose.text.trim()
+      if (text !== "" && prose.shown < prose.text.length) items.push({ _tag: "text", id, parentToolId: null, text: prose.text })
+    }
+    paragraphs.clear()
+    paragraphOrder.length = 0
+    return items
+  }
+  const visible = (line: unknown): ReadonlyArray<AgentItem> => {
+    // A finished assistant message is a complete paragraph even without a blank line after it. Only streamed deltas
+    // wait for a paragraph or fence boundary.
+    const finishedMessage =
+      isRecord(line) &&
+      (line.type === "assistant" ||
+        (line.method === "item/completed" &&
+          isRecord(line.params) &&
+          isRecord(line.params.item) &&
+          line.params.item.type === "agentMessage"))
+    const items: AgentItem[] = []
+    for (const item of parse(line)) {
+      if (item._tag === "text" && item.parentToolId === null) {
+        if (streaming === "turn") {
+          if (!turnProse.has(item.id)) turnOrder.push(item.id)
+          turnProse.set(item.id, item.text)
+          continue
+        }
+        const prose = paragraphs.get(item.id) ?? { text: "", shown: 0 }
+        if (!paragraphs.has(item.id)) paragraphOrder.push(item.id)
+        prose.text = item.text
+        paragraphs.set(item.id, prose)
+        const complete = finishedMessage ? item.text : completedProsePrefix(item.text)
+        if (complete.length > prose.shown) {
+          prose.shown = complete.length
+          const text = complete.trimEnd()
+          if (text !== "") items.push({ ...item, text })
+        }
+        continue
       }
-      // Codex app-server speaks JSON-RPC 2.0 without the `jsonrpc` field: `method` and/or `id`.
-      if (typeof line.method === "string" || line.id !== undefined) return codex(line)
-      return []
-    },
+      if (item._tag === "turn") items.push(...flushProse())
+      items.push(item)
+    }
+    return items
+  }
+
+  return {
+    push: visible,
     finalText: () => finalTextValue,
     context: () => contextValue,
     takeContext: () => {
