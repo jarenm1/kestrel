@@ -11,6 +11,7 @@ import { formatElapsed } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer, type ElementContext } from "./Composer"
 import { StatusIcon } from "./StatusIcon"
+import { UsageLimitNotice } from "./UsageLimitNotice"
 
 interface Props {
   taskId: string
@@ -126,6 +127,11 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <DelegatedTasks taskId={taskId} />
+      {task.data?.usageLimitResume !== undefined && (
+        <div className="px-5 pt-10">
+          <UsageLimitNotice task={task.data} />
+        </div>
+      )}
       {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
       <Transcript
         taskId={taskId}

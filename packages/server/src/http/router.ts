@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
-import { Paths, TextGenerationSettings } from "@cloudagents/protocol"
+import { Paths, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -226,6 +226,16 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
         Effect.flatMap(jsonBody(TextGenerationSettings), (settings) => core.setTextGenerationSettings(user, settings)),
       )),
     ),
+    HttpRouter.get(
+      Paths.threadSettings,
+      respond(signedIn((user) => core.getThreadSettings(user))),
+    ),
+    HttpRouter.put(
+      Paths.threadSettings,
+      respond(signedIn((user) =>
+        Effect.flatMap(jsonBody(ThreadSettings), (settings) => core.setThreadSettings(user, settings)),
+      )),
+    ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
     HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user).pipe(Effect.flatMap(cliArray))))),
     HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user).pipe(Effect.flatMap(cliArray))))),
@@ -305,6 +315,18 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
       Effect.flatMap(HttpRouter.params, (p) => respond(signedIn((user) =>
         Effect.zipRight(core.getTask(user, p.id ?? ""), core.cancelDelegation(p.id ?? "", p.childId ?? "")).pipe(Effect.map((status) => status.task)),
       ))),
+    ),
+    HttpRouter.put(
+      "/api/tasks/:id/usage-limit",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(SetUsageLimitAutoResumeBody), (body) =>
+              core.setUsageLimitAutoResume(user, id, body.autoResume),
+            ),
+          ),
+        ),
+      ),
     ),
     // Real commands of the harness the thread's next message runs on, discovered in the thread workspace.
     HttpRouter.get(

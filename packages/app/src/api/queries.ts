@@ -51,6 +51,8 @@ export const keys = {
   capabilities: ["capabilities"] as const,
   /** The signed-in user's generated-text preferences, keyed by the box route they were read from. */
   textGenerationSettings: (boxKey: string) => ["text-generation-settings", boxKey] as const,
+  /** The signed-in user's thread preferences, keyed by the box route they were read from. */
+  threadSettings: (boxKey: string) => ["thread-settings", boxKey] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
@@ -87,6 +89,7 @@ const ACTIVE_BOX_ROOTS: Record<string, true> = {
   "cli-auth": true,
   capabilities: true,
   "text-generation-settings": true,
+  "thread-settings": true,
   box: true,
 }
 
@@ -207,6 +210,8 @@ export const queries = {
   capabilities: () => queryOptions({ queryKey: keys.capabilities, queryFn: api.capabilities }),
   textGenerationSettings: (boxKey: string, boxId: string | null) =>
     queryOptions({ queryKey: keys.textGenerationSettings(boxKey), queryFn: () => api.textGenerationSettings(boxId) }),
+  threadSettings: (boxKey: string, boxId: string | null) =>
+    queryOptions({ queryKey: keys.threadSettings(boxKey), queryFn: () => api.threadSettings(boxId) }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
   task: (taskId: string) =>
     queryOptions({

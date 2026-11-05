@@ -103,8 +103,11 @@ export interface CliAuthShape {
     workspacePath: string,
     cwd: string,
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
-  /** The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact. */
-  readonly providerUsage: (user: string) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
+  /**
+   * The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact.
+   * `fresh` skips the short cache: a just-failed run needs the window it exhausted, not a read from before it.
+   */
+  readonly providerUsage: (user: string, fresh?: boolean) => Effect.Effect<ReadonlyArray<ProviderUsage>, BadRequest>
   /** Spends banked reset `resetId` of `user`'s `provider` (Codex only); the next usage read asks the CLI afresh. */
   readonly useBankedReset: (
     user: string,
@@ -393,7 +396,7 @@ export const CliAuthLive = Layer.effect(
      * Asks the provider's CLI for `user`'s limits. It runs like a status check, in the user's own home with no thread
      * workspace, because the provider must be reachable. A signed-out answer is not cached: a sign-in shows at once.
      */
-    const readUsage = (user: string, provider: CliProvider): Effect.Effect<ProviderUsage, BadRequest> =>
+    const readUsage = (user: string, provider: CliProvider, fresh = false): Effect.Effect<ProviderUsage, BadRequest> =>
       Effect.gen(function* () {
         const spec = AGENT_CLIS[provider]
         const probe = spec.probe
@@ -408,7 +411,7 @@ export const CliAuthLive = Layer.effect(
         )
         if (!present) return signedOut
         const key = keyOf(user, provider)
-        const cached = usageCache.get(key)
+        const cached = fresh ? undefined : usageCache.get(key)
         if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) return cached.usage
         const epoch = usageEpochs.get(key) ?? 0
         const inv = yield* invoke(user, provider, probe.args)
@@ -444,9 +447,11 @@ export const CliAuthLive = Layer.effect(
       )
 
     /** The limits of every CLI that reports them; a CLI Kestrel does not probe has none to show. */
-    const providerUsage = (user: string) =>
+    const providerUsage = (user: string, fresh = false) =>
       Effect.all(
-        CLI_PROVIDERS.filter((provider) => AGENT_CLIS[provider].probe !== null).map((provider) => readUsage(user, provider)),
+        CLI_PROVIDERS.filter((provider) => AGENT_CLIS[provider].probe !== null).map((provider) =>
+          readUsage(user, provider, fresh),
+        ),
         { concurrency: "unbounded" },
       )
 

@@ -38,6 +38,7 @@ import {
   providerModels,
   DEFAULT_TEXT_GENERATION_SETTINGS,
   type TextGenerationSettings,
+  type ThreadSettings,
 } from "@cloudagents/protocol"
 import { MODEL_HARNESS } from "../agent-clis"
 import { CliAuth } from "../cliauth"
@@ -63,6 +64,9 @@ import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 import { readTextGenerationSettings, writeTextGenerationSettings } from "./text-generation-settings"
+import { readThreadSettings, writeThreadSettings } from "./thread-settings"
+import { makeUsageLimitRecovery, USAGE_LIMIT_SWEEP } from "./usage-limit-recovery"
+import { USAGE_LIMIT_RESUME_MESSAGE } from "./usage-limits"
 import { makeTextGenerator, mayReplaceTitle, pendingTitleRequest } from "./text-generation"
 
 const PREVIEW_SELECTOR_SCRIPT = `<script>(() => {
@@ -288,6 +292,13 @@ export interface CoreShape {
     user: string,
     settings: TextGenerationSettings,
   ) => Effect.Effect<TextGenerationSettings, InternalError>
+  /** The signed-in user's thread preferences on this box. */
+  readonly getThreadSettings: (user: string) => Effect.Effect<ThreadSettings, InternalError>
+  /** Saves and returns the thread preferences as stored. */
+  readonly setThreadSettings: (
+    user: string,
+    settings: ThreadSettings,
+  ) => Effect.Effect<ThreadSettings, InternalError>
 
   // Every browser-facing operation takes the signed-in `user`. A thread and its runs, checkouts and desktop exist
   // only for the thread's owner: anyone else gets NotFound, never a hint it exists.
@@ -341,6 +352,15 @@ export interface CoreShape {
     attachmentIds: ReadonlyArray<string>,
     dev: boolean,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
+  /**
+   * Turns a thread's armed usage-limit auto-resume on or off. Off keeps the thread's notice (reset time and all) so the
+   * user can turn it back on; a thread with no arm is a Conflict.
+   */
+  readonly setUsageLimitAutoResume: (
+    user: string,
+    taskId: string,
+    autoResume: boolean,
+  ) => Effect.Effect<Task, NotFound | Conflict | InternalError>
   /**
    * Used by the MCP handler (`thread_send`): delivers an agent's message to another thread of the same owner. It joins
    * that thread's running run (read with task_inbox) or starts a run that resumes the thread's agent session. It never
@@ -1572,6 +1592,29 @@ export const CoreLive = Layer.effect(
     const sendMessage: CoreShape["sendMessage"] = (user, taskId, text, choice, attachmentIds, dev) =>
       deliverMessage(user, taskId, text, choice, attachmentIds, dev, null)
 
+    const setUsageLimitAutoResume: CoreShape["setUsageLimitAutoResume"] = (user, taskId, autoResume) =>
+      Effect.gen(function* () {
+        yield* ownedTask(user, taskId)
+        const updated = yield* store.update((s): Either.Either<Task, NotFound | Conflict> => {
+          const found = findTask(s, taskId)
+          if (Either.isLeft(found)) return Either.left(found.left)
+          const task = found.right
+          const arm = task.usageLimitResume
+          if (arm === undefined) {
+            return Either.left(new Conflict({ message: "this thread is not waiting on a usage limit" }))
+          }
+          if (autoResume) {
+            // The thread's own toggle overrides the user's later choice for this one failure.
+            task.usageLimitResume = { runId: arm.runId, provider: arm.provider, resetsAt: arm.resetsAt }
+          } else if (arm.cancelledAt === undefined) {
+            task.usageLimitResume = { ...arm, cancelledAt: nowIso() }
+          }
+          return Either.right({ ...task })
+        })
+        hub.publish({ _tag: "task.updated", task: updated })
+        return updated
+      })
+
     /**
      * The choice a run started by another agent's message runs with: the provider of the thread's latest session,
      * or of its latest run when that run never named a session (a failed launch still says which CLI the thread
@@ -1587,6 +1630,37 @@ export const CoreLive = Layer.effect(
       const model = providerModels(provider).find((m) => m.shownByDefault)?.id
       return model === undefined ? {} : { model }
     }
+
+    const usageLimitRecovery = makeUsageLimitRecovery({
+      store,
+      publish: (task) => hub.publish({ _tag: "task.updated", task }),
+      settings: (user) => readThreadSettings(config.dataDir, user),
+      items: (runId) => harness.items(runId),
+      providerUsage: (user, fresh) => cliAuth.providerUsage(user, fresh),
+      deliver: (task, run, deliveryId) =>
+        Effect.asVoid(
+          deliverMessage(
+            task.owner,
+            task.id,
+            USAGE_LIMIT_RESUME_MESSAGE,
+            {
+              ...(run.model === undefined ? {} : { model: run.model }),
+              ...(run.effort === null || run.effort === undefined ? {} : { effort: run.effort }),
+            },
+            [],
+            false,
+            null,
+            deliveryId,
+          ),
+        ),
+    })
+
+    yield* Effect.forkDaemon(
+      usageLimitRecovery.sweep.pipe(
+        Effect.catchAllCause((cause) => Effect.logWarning(`usage-limit sweep failed: ${Cause.pretty(cause)}`)),
+        Effect.repeat(Schedule.spaced(USAGE_LIMIT_SWEEP)),
+      ),
+    )
 
     const sendToThread: CoreShape["sendToThread"] = (fromTaskId, toTaskId, text) =>
       Effect.gen(function* () {
@@ -2002,6 +2076,8 @@ export const CoreLive = Layer.effect(
       health: () => Effect.void,
       getTextGenerationSettings: (user) => readTextGenerationSettings(config.dataDir, user),
       setTextGenerationSettings: (user, settings) => writeTextGenerationSettings(config.dataDir, user, settings),
+      getThreadSettings: (user) => readThreadSettings(config.dataDir, user),
+      setThreadSettings: (user, settings) => writeThreadSettings(config.dataDir, user, settings),
 
       listTasks: (user) =>
         Effect.map(store.read, (state) =>
@@ -2119,6 +2195,7 @@ export const CoreLive = Layer.effect(
         }),
 
       sendMessage,
+      setUsageLimitAutoResume,
       githubActivity,
       sendToThread,
 

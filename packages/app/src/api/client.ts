@@ -50,6 +50,7 @@ import {
   type SetDesktopQualityBody,
   Task,
   TextGenerationSettings,
+  ThreadSettings,
   ToolFailureList,
   UpdateAutomationBody,
   UpdateBoxBody,
@@ -630,6 +631,16 @@ export const api = {
     boxId === undefined
       ? onActive(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings)
       : onBox(boxId, TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),
+  /** The signed-in user's thread preferences, read from the active box or the one a settings form was pinned to. */
+  threadSettings: (boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(ThreadSettings, "GET", Paths.threadSettings)
+      : onBox(boxId, ThreadSettings, "GET", Paths.threadSettings),
+  /** Replaces the signed-in user's thread preferences, on the same box `threadSettings` read. */
+  saveThreadSettings: (settings: ThreadSettings, boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(ThreadSettings, "PUT", Paths.threadSettings, settings)
+      : onBox(boxId, ThreadSettings, "PUT", Paths.threadSettings, settings),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
@@ -707,6 +718,9 @@ export const api = {
   runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
   cancelDelegation: (taskId: string, childId: string) => onTask(taskId, Task, "POST", Paths.taskDelegationCancel(taskId, childId)),
+  /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */
+  setUsageLimitAutoResume: (taskId: string, autoResume: boolean) =>
+    onTask(taskId, Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),

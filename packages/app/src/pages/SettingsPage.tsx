@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ControlPaths,
   CURRENT_PLAN,
@@ -11,6 +11,7 @@ import {
   type BoxList,
   type Plan,
   type TextGenerationSettings as TextGenerationConfig,
+  type ThreadSettings as ThreadConfig,
   type Usage,
 } from "@cloudagents/protocol"
 import { Check, CreditCard, ExternalLink, Layers, LogOut, MessagesSquare, Plug, RotateCcw, Server, User } from "lucide-react"
@@ -223,6 +224,10 @@ export function ThreadsSettings() {
       <h2 className="text-lg font-semibold tracking-tight">Threads</h2>
       <section aria-label="Text generation" className="flex min-w-0 flex-col gap-6">
         <TextGenerationSettings />
+      </section>
+      <section aria-label="Usage limits" className="flex min-w-0 flex-col gap-3">
+        <h3 className="font-semibold">Usage limits</h3>
+        <UsageLimitSettings />
       </section>
     </>
   )
@@ -499,6 +504,71 @@ function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId
           {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
         </span>
       </div>
+    </>
+  )
+}
+
+/**
+ * The active box's preferences for how threads run. Reads and writes are pinned to the box the form was opened for,
+ * like text generation: switching boxes remounts the form.
+ */
+function UsageLimitSettings() {
+  const boxes = useQuery(queries.boxes())
+  if (!boxes.data) {
+    return (
+      <>
+        {boxes.error && <Alert>{errorText(boxes.error)}</Alert>}
+        {boxes.isPending && <div className="text-muted-foreground">Loading settings…</div>}
+      </>
+    )
+  }
+  const route = activeBoxRoute(boxes.data)
+  return <UsageLimitSettingsForBox key={route.key} boxKey={route.key} boxId={route.targetBoxId} />
+}
+
+function UsageLimitSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId: string | null }) {
+  const queryClient = useQueryClient()
+  const settings = useQuery(queries.threadSettings(boxKey, boxId))
+  const save = useMutation({
+    mutationFn: (next: ThreadConfig) => api.saveThreadSettings(next, boxId),
+    onMutate: async (next) => {
+      const key = keys.threadSettings(boxKey)
+      await queryClient.cancelQueries({ queryKey: key })
+      const previous = queryClient.getQueryData<ThreadConfig>(key)
+      queryClient.setQueryData(key, next)
+      return { previous }
+    },
+    onError: (_error, _next, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(keys.threadSettings(boxKey), context.previous)
+      }
+    },
+    onSuccess: (saved) => queryClient.setQueryData(keys.threadSettings(boxKey), saved),
+  })
+  const enabled = settings.data?.autoResumeAfterUsageLimits ?? false
+
+  return (
+    <>
+      <Card className="py-0">
+        <CardContent className="flex items-center justify-between gap-4 px-5 py-4">
+          <div className="min-w-0">
+            <div className="font-medium">Resume after usage limits</div>
+            <p className="text-xs text-muted-foreground">
+              Automatically resume threads when their usage limits reset. You can cancel auto-resume in each thread.
+            </p>
+          </div>
+          <Switch
+            aria-label="Resume after usage limits"
+            checked={enabled}
+            disabled={settings.data === undefined || save.isPending}
+            onCheckedChange={(next) => {
+              if (settings.data !== undefined) save.mutate({ ...settings.data, autoResumeAfterUsageLimits: next })
+            }}
+          />
+        </CardContent>
+      </Card>
+      {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+      {save.error && <Alert>{errorText(save.error)}</Alert>}
     </>
   )
 }
