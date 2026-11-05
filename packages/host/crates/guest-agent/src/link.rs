@@ -79,6 +79,10 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: Serialize>(
     wr.flush().await
 }
 
+/// Longest error text a reply carries. JSON escapes a control character to six bytes, so 8 KiB of error text is at most
+/// 48 KiB on the wire, inside `MAX_FRAME_BYTES`. Errors can be a command's whole stderr.
+const MAX_ERROR_BYTES: usize = 8 * 1024;
+
 pub fn reply(id: String, result: Res<()>) -> ReplyBody {
     match result {
         Ok(()) => ReplyBody {
@@ -89,7 +93,40 @@ pub fn reply(id: String, result: Res<()>) -> ReplyBody {
         Err(error) => ReplyBody {
             id,
             ok: false,
-            error: Some(error),
+            error: Some(truncate_error(error)),
         },
+    }
+}
+
+fn truncate_error(mut error: String) -> String {
+    if error.len() <= MAX_ERROR_BYTES {
+        return error;
+    }
+    let mut end = MAX_ERROR_BYTES;
+    while !error.is_char_boundary(end) {
+        end -= 1;
+    }
+    error.truncate(end);
+    error.push_str(" [truncated]");
+    error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::GuestToHost;
+
+    /// A reply must fit one frame however large its error text is.
+    #[test]
+    fn an_error_reply_fits_one_frame() {
+        // Control characters are the worst case: each one serializes to six bytes.
+        let stderr = "\u{1}".repeat(100 * 1024);
+        let frame = GuestToHost::Reply(reply("req-1".into(), Err(stderr)));
+        let line = serde_json::to_vec(&frame).expect("frame serializes");
+        assert!(
+            line.len() <= MAX_FRAME_BYTES,
+            "reply frame is {} bytes",
+            line.len()
+        );
     }
 }
