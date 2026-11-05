@@ -84,12 +84,12 @@ export const NestPlatformLive = (socketPath: string) =>
       const gpuChanged = (state: GpuState) =>
         Effect.gen(function* () {
           yield* Ref.set(gpuState, state)
-          if (state === "attached") yield* desktop.setHardwareRender(true)
-          else if (state === "none" || state === "detaching") yield* desktop.setHardwareRender(false)
+          if (state === "attached") yield* desktop.attachHardwareRender
+          else if (state === "none" || state === "detaching") yield* desktop.releaseHardwareRender
         })
 
       const releaseGpu = Effect.gen(function* () {
-        yield* desktop.setHardwareRender(false)
+        yield* desktop.releaseHardwareRender
         yield* waitForGpuRelease
       })
 

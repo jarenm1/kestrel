@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
-import { Context, Data, Deferred, Effect, Layer } from "effect"
+import { Context, Data, Deferred, Effect, Fiber, Layer } from "effect"
 import { hasRenderNode } from "./requirements"
 import {
   DEFAULT_DESKTOP_QUALITY,
@@ -120,11 +120,10 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly refreshProfile: (taskId: string) => Effect.Effect<void>
     /** Desktops that are starting or running (a failed desktop has already had its processes terminated). */
     readonly activeCount: () => Effect.Effect<number>
-    /**
-     * Sets whether desktops render on the GPU (a render node present) or in software. A change restarts the live
-     * desktops, which keep their viewers.
-     */
-    readonly setHardwareRender: (enabled: boolean) => Effect.Effect<void, DesktopError>
+    /** The GPU is available: desktops restart on the GPU renderer. */
+    readonly attachHardwareRender: Effect.Effect<void, DesktopError>
+    /** The GPU is going away: desktops on the GPU stop now and come back on software rendering in the background. */
+    readonly releaseHardwareRender: Effect.Effect<void, DesktopError>
     readonly stopAll: () => Effect.Effect<void>
   }
 >() {}
@@ -201,6 +200,14 @@ interface PendingInput {
   readonly move: boolean
 }
 
+/** What a desktop needs to come back after a stop: its launch settings and the viewers that were watching it. */
+interface Relaunch {
+  readonly taskId: string
+  readonly terminal: DesktopStartOptions["terminal"]
+  readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
+  readonly sinks: ReadonlyArray<DesktopSink>
+}
+
 interface Session {
   readonly taskId: string
   readonly num: number
@@ -219,6 +226,8 @@ interface Session {
   runtimeDir: string | null
   /** The renderer weston was started with: `gl` on the GPU, `pixman` in software. Null until boot starts it. */
   renderer: "gl" | "pixman" | null
+  /** The boot, forked so a stop can cancel it. Null until startDesktop forks it. */
+  boot: Fiber.RuntimeFiber<unknown, unknown> | null
   /** Completes when the stream's config has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
@@ -1040,6 +1049,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         publish(s)
         s.sinks.clear()
         s.audio?.stop()
+        // Before terminating: a boot still running would spawn children after the snapshot below.
+        if (s.boot !== null) yield* Fiber.interrupt(s.boot)
         yield* Effect.promise(() => terminate(s.procs))
         if (s.runtimeDir !== null) rmSync(s.runtimeDir, { recursive: true, force: true })
       })
@@ -1091,6 +1102,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               ipc: [],
               runtimeDir: null,
               renderer: null,
+              boot: null,
               ready,
               procs: new Set(),
               sinks: new Set(),
@@ -1120,10 +1132,19 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           catch: toErr,
         })
         if (!claim.created) return yield* awaitReady(claim.s)
-        return yield* boot(claim.s).pipe(
-          Effect.tapError((e) => Effect.sync(() => failSession(claim.s, e.message))),
+        // Forked so the request ending does not abandon the boot, and so a stop can cancel it. A failed boot fails
+        // the desktop's ready, which is what the caller waits on.
+        claim.s.boot = yield* Effect.forkDaemon(
+          boot(claim.s).pipe(
+            Effect.tapError((e) => Effect.sync(() => failSession(claim.s, e.message))),
+            Effect.ignore,
+          ),
         )
+        return yield* awaitReady(claim.s)
       })
+
+    /** Viewers that have left. A relaunch skips them, so one that left mid-restart is not attached to the new desktop. */
+    const detachedSinks = new WeakSet<DesktopSink>()
 
     /**
      * Adds a viewer to the task's desktop. The returned effect removes the viewer from whichever desktop the task has
@@ -1150,6 +1171,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           s.awaiting.add(sink)
         }
         return Effect.sync(() => {
+          // Marked first: a relaunch that is still running must not attach this viewer again.
+          detachedSinks.add(sink)
           const current = sessions.get(taskId)
           if (current === undefined) return
           current.sinks.delete(sink)
@@ -1158,37 +1181,72 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         })
       })
 
-    // Restarts the task's desktop, which picks up the current renderer. Its viewers attach again to the new desktop.
-    const restartDesktop = (taskId: string) =>
+    /** Stops the task's desktop and returns what a relaunch needs: its launch settings and its viewers. */
+    const snapshotAndStop = (taskId: string) =>
       Effect.gen(function* () {
         const s = yield* lookup(taskId)
-        const sinks = [...s.sinks]
-        const { terminal, ipcNamespace } = s
+        const snapshot: Relaunch = { taskId, terminal: s.terminal, ipcNamespace: s.ipcNamespace, sinks: [...s.sinks] }
         yield* stopTask(taskId)
-        yield* startDesktop(taskId, { terminal, ipcNamespace })
-        for (const sink of sinks) {
-          yield* attachSink(taskId, sink).pipe(
+        return snapshot
+      })
+
+    // Starts the desktop again on the current renderer and attaches the viewers that are still watching it.
+    const relaunch = (snapshot: Relaunch) =>
+      Effect.gen(function* () {
+        yield* startDesktop(snapshot.taskId, { terminal: snapshot.terminal, ipcNamespace: snapshot.ipcNamespace })
+        for (const sink of snapshot.sinks) {
+          if (detachedSinks.has(sink)) continue
+          yield* attachSink(snapshot.taskId, sink).pipe(
             Effect.catchAll((e) => Effect.logWarning(`desktop viewer not reattached after restart: ${e.message}`)),
           )
         }
       })
 
+    // The GPU arrived: restart each desktop whose renderer is stale. A failed desktop that still has viewers is retried,
+    // since they are waiting on it; one that fails again stays failed and the others still restart.
+    const attachHardware = Effect.gen(function* () {
+      hardwareRender = true
+      for (const taskId of [...sessions.keys()]) {
+        const s = sessions.get(taskId)
+        if (s === undefined) continue
+        const stale =
+          (s.state === "starting" || s.state === "running") && s.renderer !== null && s.renderer !== desiredRenderer()
+        const retry = s.state === "failed" && s.sinks.size > 0
+        if (!stale && !retry) continue
+        yield* Effect.flatMap(snapshotAndStop(taskId), relaunch).pipe(
+          Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
+        )
+      }
+    })
+
+    // The GPU is going away: the desktops rendering on it stop now, so the GPU is free, and come back on software
+    // rendering in the background. Nothing waits for those boots.
+    const releaseHardware = Effect.gen(function* () {
+      hardwareRender = false
+      const stopped: Relaunch[] = []
+      for (const s of [...sessions.values()]) {
+        if (s.renderer === "gl" && (s.state === "starting" || s.state === "running")) {
+          stopped.push(yield* snapshotAndStop(s.taskId))
+        }
+      }
+      yield* Effect.forkDaemon(
+        Effect.forEach(
+          stopped,
+          (snapshot) =>
+            relaunch(snapshot).pipe(
+              Effect.catchAll((e) => Effect.logWarning(`desktop for task ${snapshot.taskId} not restarted: ${e.message}`)),
+            ),
+          { discard: true },
+        ),
+      )
+    })
+
+
     return DesktopManager.of({
       start: startDesktop,
       stop: stopTask,
-      setHardwareRender: (enabled) =>
-        Effect.gen(function* () {
-          hardwareRender = enabled
-          for (const taskId of [...sessions.keys()]) {
-            const s = sessions.get(taskId)
-            if (s === undefined || s.renderer === null || s.renderer === desiredRenderer()) continue
-            if (s.state !== "starting" && s.state !== "running") continue
-            // A desktop that fails to restart keeps its old renderer and is retried on the next call; the others still restart.
-            yield* restartDesktop(taskId).pipe(
-              Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
-            )
-          }
-        }),
+      attachHardwareRender: attachHardware,
+      releaseHardwareRender: releaseHardware,
 
       status: (taskId) => Effect.sync(() => toStatus(taskId, sessions.get(taskId))),
 
