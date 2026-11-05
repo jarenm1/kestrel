@@ -3,7 +3,14 @@ import { execFile } from "node:child_process"
 import { readFile } from "node:fs/promises"
 import { cpus, totalmem } from "node:os"
 import { join } from "node:path"
-import { TASK_STATS_WINDOW_MS, type TaskStats, type TaskStatsSample } from "@cloudagents/protocol"
+import {
+  TASK_STATS_WINDOW_MS,
+  type TaskAppUsage,
+  type TaskRamOther,
+  type TaskStats,
+  type TaskStatsSample,
+} from "@cloudagents/protocol"
+import { groupApps, otherMemory, readProcesses } from "./app-usage"
 import { Config } from "./config"
 import { CoreService } from "./core/service"
 import { sliceCgroup, taskCeilings } from "./sandbox/systemd"
@@ -61,18 +68,31 @@ const vram = (): Effect.Effect<Vram> =>
     )
   })
 
-/** The slice's memory in use and total CPU time; zero for a slice that is not running (its files are gone). */
-const readSlice = (cgroup: string): Effect.Effect<{ memory: number; cpuUsec: number }> =>
+/**
+ * The slice's memory in use and what it holds besides its processes, total CPU time and processes; zero and none for a
+ * slice that is not running (its files are gone).
+ */
+const readSlice = (cgroup: string) =>
   Effect.promise(async () => {
     const dir = join(CGROUP_ROOT, cgroup)
+    const processes = readProcesses(dir)
     try {
-      const [memory, cpuStat] = await Promise.all([
+      const [memory, memoryStat, cpuStat] = await Promise.all([
         readFile(join(dir, "memory.current"), "utf8"),
+        readFile(join(dir, "memory.stat"), "utf8"),
         readFile(join(dir, "cpu.stat"), "utf8"),
       ])
-      return { memory: Number(memory.trim()), cpuUsec: Number(/^usage_usec (\d+)$/m.exec(cpuStat)?.[1] ?? 0) }
+      const current = Number(memory.trim())
+      const read = await processes
+      return {
+        memory: current,
+        other: otherMemory(current, memoryStat, read),
+        cpuUsec: Number(/^usage_usec (\d+)$/m.exec(cpuStat)?.[1] ?? 0),
+        processes: read,
+      }
     } catch {
-      return { memory: 0, cpuUsec: 0 }
+      await processes
+      return { memory: 0, other: null, cpuUsec: 0, processes: [] }
     }
   })
 
@@ -83,8 +103,8 @@ interface Watched {
   idleSince: number | null
   cgroup: string | null
   cgroupCheckedAt: number
-  /** CPU time and wall clock at the previous sample; null until the first one. */
-  previous: { cpuUsec: number; at: number } | null
+  /** CPU time (the slice's, and each process's by key) and wall clock at the previous sample; null until the first. */
+  previous: { cpuUsec: number; at: number; processes: ReadonlyMap<string, number> } | null
 }
 
 export const TaskStatsLive = Layer.effect(
@@ -111,6 +131,8 @@ export const TaskStatsLive = Layer.effect(
       Effect.gen(function* () {
         const now = Date.now()
         let ramUsed: number | null = null
+        let apps: TaskAppUsage[] = []
+        let ramOther: TaskRamOther | null = null
         let cpu: number | null = null
         if (systemd && ramMax !== null && cores !== null) {
           if (w.cgroup === null && now - w.cgroupCheckedAt >= CGROUP_RETRY_MS) {
@@ -119,16 +141,23 @@ export const TaskStatsLive = Layer.effect(
               Effect.catchAll((e) => Effect.as(Effect.logWarning(`task ${taskId} stats: ${e.message}`), null)),
             )
           }
-          const slice = w.cgroup === null ? { memory: 0, cpuUsec: 0 } : yield* readSlice(w.cgroup)
+          const slice =
+            w.cgroup === null ? { memory: 0, other: null, cpuUsec: 0, processes: [] } : yield* readSlice(w.cgroup)
           ramUsed = slice.memory
+          ramOther = slice.other
           const previous = w.previous
-          w.previous = { cpuUsec: slice.cpuUsec, at: now }
+          w.previous = {
+            cpuUsec: slice.cpuUsec,
+            at: now,
+            processes: new Map(slice.processes.map((p) => [p.key, p.cpuUsec])),
+          }
           // The first reading is only the baseline; CPU use is the change between two of them.
           if (previous === null) return null
-          const elapsedUsec = (now - previous.at) * 1000
+          const capacityUsec = (now - previous.at) * 1000 * cores
           // A slice that was restarted counts again from zero.
           const busy = Math.max(0, slice.cpuUsec - previous.cpuUsec)
-          cpu = elapsedUsec > 0 ? Math.min(1, busy / (elapsedUsec * cores)) : 0
+          cpu = capacityUsec > 0 ? Math.min(1, busy / capacityUsec) : 0
+          apps = groupApps(slice.processes, previous.processes, capacityUsec)
         }
         const sample: TaskStatsSample = {
           at: now,
@@ -139,6 +168,8 @@ export const TaskStatsLive = Layer.effect(
           vramTotal: video?.total ?? null,
           diskUsed: core.storageUsed(taskId),
           diskMax: config.taskDiskMax,
+          apps,
+          ramOther,
         }
         w.samples.push(sample)
         const oldest = now - TASK_STATS_WINDOW_MS

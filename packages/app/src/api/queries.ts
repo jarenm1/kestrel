@@ -1,7 +1,8 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
+import { Either, Schema } from "effect"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
-import { fetchSnapshot } from "./snapshot"
+import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
 /** Agent box status poll; it feeds the offline banner. */
 const BOX_POLL_MS = 10_000
@@ -18,6 +19,8 @@ export const keys = {
   me: ["me"] as const,
   /** The public site's view of the session on the app host (null when signed out). */
   publicMe: ["public-me"] as const,
+  /** Assets attached to the `desktop-latest` GitHub release, for the download page. */
+  desktopRelease: ["desktop-release"] as const,
   /** The user's boxes and which one is active. */
   boxes: ["boxes"] as const,
   /** Own health of one of the user's boxes, by its URL. */
@@ -28,6 +31,11 @@ export const keys = {
   kestrelBox: ["kestrel-box"] as const,
   /** Kestrel's managed boxes, as operators see them (`Me.operator`). */
   fleetBoxes: ["fleet-boxes"] as const,
+  fleetActivity: ["fleet-activity"] as const,
+  /** The most common tool and agent failures across Kestrel's boxes, as operators see them. */
+  fleetToolFailures: ["fleet-tool-failures"] as const,
+  /** Nest hosts and their capacity, as operators see them. */
+  nestHosts: ["nest-hosts"] as const,
   /** A pairing code's pending approval, read by the approval page. */
   pairing: (code: string) => ["pairing", code] as const,
   connections: ["connections"] as const,
@@ -39,6 +47,12 @@ export const keys = {
   githubBranches: (repo: string) => ["github-branches", repo] as const,
   /** CLI sign-ins on the box the apps talk to. */
   cliAuth: ["cli-auth"] as const,
+  /** What the active box can run (`BoxCapabilities`): which harnesses it has. */
+  capabilities: ["capabilities"] as const,
+  /** The signed-in user's generated-text preferences, keyed by the box route they were read from. */
+  textGenerationSettings: (boxKey: string) => ["text-generation-settings", boxKey] as const,
+  /** The signed-in user's thread preferences, keyed by the box route they were read from. */
+  threadSettings: (boxKey: string) => ["thread-settings", boxKey] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["task-list"] as const,
   task: (taskId: string) => ["tasks", taskId] as const,
@@ -63,15 +77,19 @@ export const keys = {
 }
 
 /**
- * Roots of the queries read from the active box: box status and usage. Threads are read from the box each one lives
- * on, so they are not here. These are reset when the active box changes, so no figure of the previous box stays on
- * screen.
+ * Roots of the queries read from the active box: box status, usage and per-box settings. Threads are read from the box
+ * each one lives on, so they are not here. These are reset when the active box changes, so no figure or preference of
+ * the previous box stays on screen.
  */
 const ACTIVE_BOX_ROOTS: Record<string, true> = {
+  connections: true,
   usage: true,
   providerUsage: true,
   usageActivity: true,
   "cli-auth": true,
+  capabilities: true,
+  "text-generation-settings": true,
+  "thread-settings": true,
   box: true,
 }
 
@@ -93,6 +111,12 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
 export function storeTask(client: QueryClient, task: Task): void {
   client.setQueryData(keys.task(task.id), task)
   client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task))
+}
+
+/** Removes a deleted task from the cache: the thread list drops it and its own entry goes away. */
+export function dropTask(client: QueryClient, taskId: string): void {
+  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list?.filter((task) => task.id !== taskId))
+  client.removeQueries({ queryKey: keys.task(taskId), exact: true })
 }
 
 /**
@@ -119,11 +143,55 @@ export async function applyBoxList(client: QueryClient, list: BoxList): Promise<
   client.setQueryData(keys.boxes, list)
 }
 
+export interface DesktopAsset {
+  readonly name: string
+  readonly url: string
+  readonly size: number
+}
+
+export interface DesktopRelease {
+  readonly assets: readonly DesktopAsset[]
+}
+
+const GithubAsset = Schema.Struct({
+  name: Schema.String,
+  browser_download_url: Schema.String,
+  size: Schema.Number,
+})
+const GithubRelease = Schema.Struct({ assets: Schema.Array(GithubAsset) })
+const DESKTOP_RELEASE_URL = "https://api.github.com/repos/jarenm1/kestrel/releases/tags/desktop-latest"
+
+/** The `desktop-latest` release; an unpublished release is an empty list, not an error. */
+const fetchDesktopRelease = async (): Promise<DesktopRelease> => {
+  const response = await fetch(DESKTOP_RELEASE_URL, { headers: { accept: "application/vnd.github+json" } })
+  if (response.status === 404) return { assets: [] }
+  if (!response.ok) throw new Error(`GitHub release answered ${response.status}`)
+  const decoded = Schema.decodeUnknownEither(GithubRelease)((await response.json()) as unknown)
+  if (Either.isLeft(decoded)) throw new Error("GitHub release returned an unexpected shape")
+  return {
+    assets: decoded.right.assets.map((asset) => ({
+      name: asset.name,
+      url: asset.browser_download_url,
+      size: asset.size,
+    })),
+  }
+}
+
 export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
+  desktopRelease: () =>
+    queryOptions({
+      queryKey: keys.desktopRelease,
+      queryFn: fetchDesktopRelease,
+      staleTime: 5 * 60_000,
+    }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
   fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
+  fleetActivity: () =>
+    queryOptions({ queryKey: keys.fleetActivity, queryFn: api.fleetActivity, refetchInterval: BOX_POLL_MS }),
+  fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),
+  nestHosts: () => queryOptions({ queryKey: keys.nestHosts, queryFn: api.nestHosts }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>
     queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),
@@ -139,8 +207,17 @@ export const queries = {
   githubBranches: (repo: string) =>
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
+  capabilities: () => queryOptions({ queryKey: keys.capabilities, queryFn: api.capabilities }),
+  textGenerationSettings: (boxKey: string, boxId: string | null) =>
+    queryOptions({ queryKey: keys.textGenerationSettings(boxKey), queryFn: () => api.textGenerationSettings(boxId) }),
+  threadSettings: (boxKey: string, boxId: string | null) =>
+    queryOptions({ queryKey: keys.threadSettings(boxKey), queryFn: () => api.threadSettings(boxId) }),
   tasks: () => queryOptions({ queryKey: keys.tasks, queryFn: api.listTasks }),
-  task: (taskId: string) => queryOptions({ queryKey: keys.task(taskId), queryFn: () => api.getTask(taskId) }),
+  task: (taskId: string) =>
+    queryOptions({
+      queryKey: keys.task(taskId),
+      queryFn: () => fetchTaskSnapshot(queryClient, keys.task(taskId), () => api.getTask(taskId)),
+    }),
   // A thread never moves to another box.
   taskBox: (taskId: string) =>
     queryOptions({ queryKey: keys.taskBox(taskId), queryFn: () => api.taskBox(taskId), staleTime: Infinity }),

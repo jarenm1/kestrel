@@ -7,12 +7,6 @@ export function formatTime(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString()
 }
 
-/** Time of day only (e.g. "14:05"), for chat turns. */
-export function formatClock(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
 /** Coarse time since `iso` relative to `now` (ms): "just now", "5m ago", "3h ago", "2d ago". */
 export function formatAgo(iso: string, now: number): string {
   const seconds = Math.max(0, (now - new Date(iso).getTime()) / 1000)
@@ -32,6 +26,19 @@ export function formatElapsed(startMs: number, now: number): string {
   if (h > 0) return `${h}h ${m}m ${s}s`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
+}
+
+/** Bytes in binary units with a decimal for small values: "512 B", "1.5 MB", "12 GB". */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ["KB", "MB", "GB", "TB"]
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
 }
 
 /** Short name of a checkout's repository: "owner/name" → "name". */

@@ -1,0 +1,31 @@
+[package]
+name = "kestrel-depcache"
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+description = "Read-only, verifying dependency cache (npm, PyPI, crates.io) for Nest VMs"
+publish = false
+
+[[bin]]
+name = "kestrel-depcache"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+hex = "0.4"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

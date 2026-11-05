@@ -1,12 +1,18 @@
 import { Schema } from "effect"
 import {
   ApprovePairingBody,
+  BOX_TOKEN_QUERY,
   CREDENTIALS_HEADER,
   CliAuthStatus,
+  CliProvider,
   ControlPaths,
   CreateBoxBody,
+  CreateNestBoxBody,
+  NestLimits,
   CreateFleetBoxBody,
+  CreateMeterHostBody,
   GithubRepoSlug,
+  MeterReportBody,
   Paths,
   PreviewSession,
   PutApiKeyBody,
@@ -23,15 +29,18 @@ import {
   findProvider,
   isAvailable,
   type ApiKeyProvider,
-  type CliProvider,
+  type CliProvider as CliConnectionProvider,
   type OAuthProvider,
   type Provider,
 } from "./providers"
 import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { SESSION_HEADER, hub, isOperator, type Env } from "./env"
+import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
+import { desktopStreamTask } from "./desktop-tokens"
+import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
+import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -48,9 +57,10 @@ const storedView = (
   account: row?.account ?? null,
   available: isAvailable(provider, env),
   ...(expired ? { expired: true } : {}),
+  ...(provider.kind === "apikey" && provider.hint !== undefined ? { hint: provider.hint } : {}),
 })
 
-const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Connection => ({
+const cliView = (provider: CliConnectionProvider, status: CliAuthStatus | undefined): Connection => ({
   provider: provider.id,
   label: provider.label,
   kind: provider.kind,
@@ -60,16 +70,20 @@ const cliView = (provider: CliProvider, status: CliAuthStatus | undefined): Conn
   ...(status?.error === undefined ? {} : { error: status.error }),
 })
 
-/** Devbox CLI logins as the box reports them; empty when the box is offline or answers badly. */
-const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
-  const res = await hub(env).boxCall(login, "GET", ControlPaths.cliAuth)
-  if (!res.ok) return []
-  let body: unknown = null
+/** A box GET's JSON body, or null when the box is offline, too old for the route, or answers badly. */
+const boxJson = async (login: string, env: Env, path: string): Promise<unknown> => {
+  const res = await hub(env).boxCall(login, "GET", path)
+  if (!res.ok) return null
   try {
-    body = JSON.parse(res.body)
+    return JSON.parse(res.body) as unknown
   } catch {
-    return []
+    return null
   }
+}
+
+/** Preserve the installed clients' CLI-login response, including offline/older-box handling. */
+const fetchCliAuth = async (login: string, env: Env): Promise<readonly CliAuthStatus[]> => {
+  const body = await boxJson(login, env, ControlPaths.cliAuthFor(CliProvider.literals))
   return Schema.is(Schema.Array(CliAuthStatus))(body) ? body : []
 }
 
@@ -87,11 +101,13 @@ const listConnections = async (login: string, env: Env): Promise<Connection[]> =
     Promise.all(oauth.map((p) => oauthTokenRejected(login, p, env))),
   ])
   const expired = new Set(oauth.filter((_, i) => rejected[i]).map((p) => p.id))
-  return PROVIDERS.map((p) =>
+  // Keep the established response for installed clients. Updated clients normalize these rows against their own box.
+  const stored = PROVIDERS.map((p) =>
     p.kind === "cli"
-      ? cliView(p, cli.find((s) => s.provider === p.id))
+      ? cliView(p, cli.find((status) => status.provider === p.id))
       : storedView(p, rows.find((r) => r.provider === p.id), env, expired.has(p.id)),
   )
+  return stored
 }
 
 const putApiKey = async (request: Request, env: Env, login: string, provider: Provider): Promise<Response> => {
@@ -197,6 +213,19 @@ const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> |
   return hub(env).fetch(forwarded)
 }
 
+/** Relays a box file to the Hub with a file token in place of the session cookie; the token query is dropped. */
+const forwardFileToken = (request: Request, env: Env, url: URL, token: string): Promise<Response> => {
+  const target = new URL(url)
+  target.searchParams.delete(BOX_TOKEN_QUERY)
+  const headers = new Headers(request.headers)
+  headers.delete("cookie")
+  headers.delete(CREDENTIALS_HEADER)
+  // Only the Worker sets the Hub's session header; one the browser sent must not reach the Hub on this route.
+  headers.delete(SESSION_HEADER)
+  headers.set(FILE_TOKEN_HEADER, token)
+  return hub(env).fetch(new Request(`https://hub${target.pathname}${target.search}`, { method: "GET", headers }))
+}
+
 const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
   const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
   if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
@@ -214,11 +243,14 @@ const createPreviewSession = async (env: Env, login: string, taskId: string): Pr
 }
 
 const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
+const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
+  (path === ControlPaths.fileToken && method === "POST") ||
+  (DESKTOP_TOKEN_PATH.test(path) && method === "POST") ||
   (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
@@ -233,6 +265,12 @@ const USER_BOX_SECRET_PATH = /^\/api\/boxes\/([^/]+)\/secret$/
 const USER_BOX_TOKEN_PATH = /^\/api\/boxes\/([^/]+)\/token$/
 const PAIRING_PATH = /^\/api\/boxes\/pairings\/([^/]+)$/
 const PAIRING_APPROVE_PATH = /^\/api\/boxes\/pairings\/([^/]+)\/approve$/
+const NEST_BOX_RESUME_PATH = /^\/api\/nest\/boxes\/([^/]+)\/resume$/
+const NEST_BOX_SUSPEND_PATH = /^\/api\/nest\/boxes\/([^/]+)\/suspend$/
+const NEST_BOX_LIMITS_PATH = /^\/api\/nest\/boxes\/([^/]+)\/limits$/
+const NEST_BOX_PARK_PATH = /^\/api\/nest\/boxes\/([^/]+)\/park$/
+const NEST_BOX_GPU_ATTACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/attach$/
+const NEST_BOX_GPU_DETACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/detach$/
 const FLEET_BOX_PATH = /^\/api\/fleet\/boxes\/([^/]+)$/
 const FLEET_BOX_SECRET_PATH = /^\/api\/fleet\/boxes\/([^/]+)\/secret$/
 
@@ -336,6 +374,108 @@ const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<R
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 
+/** The most common tool failures, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes. */
+const handleToolFailures = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const days = Number(url.searchParams.get("days") ?? DEFAULT_TOOL_FAILURE_DAYS)
+  if (!Number.isInteger(days) || days < 1 || days > TOOL_FAILURE_RETENTION_DAYS) {
+    return errorResponse(400, "BadRequest", `days must be a whole number from 1 to ${TOOL_FAILURE_RETENTION_DAYS}`)
+  }
+  return json(await hub(env).commonToolFailures(days))
+}
+
+/**
+ * Active users per managed box, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes.
+ * The read includes every registered box, including one that never reported.
+ */
+const handleFleetActivity = async (request: Request, env: Env): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  return json(await hub(env).fleetActivity())
+}
+
+/**
+ * Nest usage metering for operators (`KESTREL_OPERATORS`): host registration and the reconciled report.
+ * Anyone else gets 404.
+ */
+const handleMeter = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+  const meter = hub(env)
+  const method = request.method
+
+  if (url.pathname === ControlPaths.meterHosts) {
+    if (method === "GET") return json(await meter.meterHosts())
+    if (method === "POST") {
+      const body = await decodeBody(request, CreateMeterHostBody)
+      if (body instanceof Response) return body
+      return json(await meter.createMeterHost(body), 201)
+    }
+  }
+  if (url.pathname === ControlPaths.meterReport && method === "POST") {
+    const body = await decodeBody(request, MeterReportBody)
+    if (body instanceof Response) return body
+    return answerBox(await meter.meterReport(body, new Date().toISOString()))
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
+/**
+ * Nest boxes for their owners, and the Nest host list for operators. Every route answers 404 unless
+ * `KESTREL_NEST_DOMAIN` is set; the host list also answers 404 to anyone but an operator.
+ */
+const handleNest = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  if (!env.KESTREL_NEST_DOMAIN) return errorResponse(404, "NotFound", "no such route")
+  const session = await currentSession(request, env)
+  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
+  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+  const boxes = hub(env)
+  const path = url.pathname
+  const method = request.method
+  if (path === ControlPaths.nestHosts && method === "GET") {
+    if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
+    return json(await boxes.nestHostList())
+  }
+  if (path === ControlPaths.nestBoxes && method === "POST") {
+    const body = await decodeBody(request, CreateNestBoxBody)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.createNestBox(sessionId, body), 201)
+  }
+  const resume = NEST_BOX_RESUME_PATH.exec(path)?.[1]
+  if (resume !== undefined && method === "POST") {
+    return answerBox(await boxes.resumeNestBox(sessionId, decodeURIComponent(resume)))
+  }
+  const suspend = NEST_BOX_SUSPEND_PATH.exec(path)?.[1]
+  if (suspend !== undefined && method === "POST") {
+    return answerBox(await boxes.suspendNestBox(sessionId, decodeURIComponent(suspend)))
+  }
+  const park = NEST_BOX_PARK_PATH.exec(path)?.[1]
+  if (park !== undefined && method === "POST") {
+    return answerBox(await boxes.parkNestBox(sessionId, decodeURIComponent(park)))
+  }
+  const gpuAttach = NEST_BOX_GPU_ATTACH_PATH.exec(path)?.[1]
+  if (gpuAttach !== undefined && method === "POST") {
+    return answerBox(await boxes.attachNestGpu(sessionId, decodeURIComponent(gpuAttach)))
+  }
+  const gpuDetach = NEST_BOX_GPU_DETACH_PATH.exec(path)?.[1]
+  if (gpuDetach !== undefined && method === "POST") {
+    return answerBox(await boxes.detachNestGpu(sessionId, decodeURIComponent(gpuDetach)))
+  }
+  const limits = NEST_BOX_LIMITS_PATH.exec(path)?.[1]
+  if (limits !== undefined && method === "PUT") {
+    const body = await decodeBody(request, NestLimits)
+    if (body instanceof Response) return body
+    return answerBox(await boxes.setNestLimits(sessionId, decodeURIComponent(limits), body))
+  }
+  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
+}
+
 /**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
@@ -343,15 +483,41 @@ const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<R
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
+  // A file token stands in for the session cookie on box files, and a desktop token on a desktop stream: a WebView or
+  // DOM `<img>` cannot send a Cookie header.
+  const fileToken = method === "GET" ? url.searchParams.get(BOX_TOKEN_QUERY) : null
+  if (fileToken !== null && (isBoxFilePath(path) || desktopStreamTask(path) !== null)) {
+    return forwardFileToken(request, env, url, fileToken)
+  }
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)
   }
+  if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
+  if (path === ControlPaths.nestHosts || path === ControlPaths.nestBoxes || path.startsWith(`${ControlPaths.nestBoxes}/`)) {
+    return handleNest(request, env, url)
+  }
+  if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
+  if (path === ControlPaths.fleetActivity) return handleFleetActivity(request, env)
   if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
 
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
+
+  if (path === ControlPaths.fileToken) {
+    // `currentSession` found the session from this cookie, so it is present; the token lasts no longer than it.
+    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+    const minted = await hub(env).createFileToken(sessionId)
+    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
+  }
+
+  const desktopToken = DESKTOP_TOKEN_PATH.exec(path)
+  if (desktopToken?.[1] && method === "POST") {
+    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
+    const minted = await hub(env).createDesktopToken(sessionId, decodeURIComponent(desktopToken[1]))
+    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
+  }
 
   const previewSession = PREVIEW_SESSION_PATH.exec(path)
   if (previewSession?.[1] && method === "POST") {
@@ -361,7 +527,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)
     if (!user) return errorResponse(401, "Unauthorized", "unknown user")
-    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl, operator: isOperator(env, login) }
+    const me: Me = { login: user.login, name: user.name, avatarUrl: user.avatarUrl, operator: isOperator(env, login), nestEnabled: Boolean(env.KESTREL_NEST_DOMAIN) }
     return json(me)
   }
 

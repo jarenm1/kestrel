@@ -1,24 +1,21 @@
 import React, { useEffect, useState } from "react";
-import { Alert, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { CliLoginStart, CliProvider, Connection } from "@cloudagents/protocol";
-import { keys } from "@/api/queries";
+import { confirmDestructive } from "@/lib/confirm";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import {
+  CLI_INTRO,
   ConnectionRowFrame,
   connectionStyles,
+  invalidateConnections,
 } from "@/components/ConnectionsShared";
 
-/** While a codex sign-in is pending, connections are re-read at this interval until the box reports the login. */
+/** While a device-code sign-in is pending, connections are re-read at this interval until the box reports the login. */
 const CLI_POLL_MS = 3000;
-
-const CLI_INTRO: Record<CliProvider, string> = {
-  "claude-cli": "Use your own Claude Pro or Max subscription.",
-  "codex-cli": "Use your own ChatGPT subscription.",
-};
 
 interface Props {
   connection: Connection;
@@ -33,10 +30,6 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   const [expired, setExpired] = useState(false);
   const [code, setCode] = useState("");
 
-  const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: keys.connections });
-  };
-
   const openPage = useMutation({
     mutationFn: (url: string) => WebBrowser.openBrowserAsync(url),
   });
@@ -48,14 +41,14 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
         setLogin(null);
         setCode("");
       }
-      refresh();
+      invalidateConnections(queryClient, api.boxScope);
     },
   });
   const logout = useMutation({
     mutationFn: () => api.cliLogout(provider),
     onSuccess: () => {
       setLogin(null);
-      refresh();
+      invalidateConnections(queryClient, api.boxScope);
     },
   });
   const start = useMutation({
@@ -68,7 +61,6 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       setCode("");
     },
   });
-
   const busy = start.isPending || submitCode.isPending || logout.isPending;
   const error = openPage.error ?? start.error ?? submitCode.error ?? logout.error;
 
@@ -82,14 +74,15 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
     return () => clearTimeout(id);
   }, [login]);
 
-  const polling = login?.provider === "codex-cli" && !expired && !connection.connected;
+  // A device-code sign-in finishes on the provider's page, so only a re-read shows it.
+  const polling = login !== null && !login.needsCode && !expired && !connection.connected;
   useEffect(() => {
     if (!polling) return;
     const id = setInterval(() => {
-      void queryClient.invalidateQueries({ queryKey: keys.connections });
+      invalidateConnections(queryClient, api.boxScope);
     }, CLI_POLL_MS);
     return () => clearInterval(id);
-  }, [polling, queryClient]);
+  }, [polling, queryClient, api.boxScope]);
 
   function cancel() {
     start.reset();
@@ -99,10 +92,9 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   }
 
   function confirmDisconnect() {
-    Alert.alert("Disconnect this subscription?", "Agent runs will stop using it.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Disconnect", style: "destructive", onPress: () => logout.mutate() },
-    ]);
+    confirmDestructive("Disconnect this subscription?", "Agent runs will stop using it.", "Disconnect", () =>
+      logout.mutate()
+    );
   }
 
   function stepContent() {
@@ -110,7 +102,11 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       return (
         <>
           <Text style={connectionStyles.muted}>{connection.error ?? "Agent box is offline."}</Text>
-          <Button variant="soft" style={connectionStyles.fit} onPress={refresh}>
+          <Button
+            variant="soft"
+            style={connectionStyles.fit}
+            onPress={() => invalidateConnections(queryClient, api.boxScope)}
+          >
             Check again
           </Button>
         </>
@@ -149,13 +145,13 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
             Open sign-in page
           </Button>
           <Text style={connectionStyles.muted}>
-            Sign in on Anthropic's page, then paste the code it shows you.
+            Sign in on that page, then paste the code it shows you.
           </Text>
           <Input
             value={code}
             onChangeText={setCode}
             placeholder="Code"
-            accessibilityLabel="Code from the Claude sign-in page"
+            accessibilityLabel="Code from the sign-in page"
             autoCapitalize="none"
             autoCorrect={false}
           />
@@ -183,7 +179,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
           >
             Open sign-in page
           </Button>
-          <Text style={connectionStyles.muted}>Enter this code on the OpenAI page:</Text>
+          <Text style={connectionStyles.muted}>Enter this code on the sign-in page:</Text>
           <View style={connectionStyles.actions}>
             {login.userCode ? (
               <Text selectable style={connectionStyles.code}>

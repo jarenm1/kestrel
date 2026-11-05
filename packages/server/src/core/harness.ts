@@ -1,6 +1,6 @@
 import { Context, Effect, Either, Layer, Runtime, Schema } from "effect"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createWriteStream, type WriteStream } from "node:fs"
+import { createWriteStream, lstatSync, type WriteStream } from "node:fs"
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { basename, join } from "node:path"
@@ -8,30 +8,40 @@ import {
   InternalError,
   RunItems,
   DEFAULT_MODEL_PROVIDER,
+  MODEL_PROVIDERS,
   modelInfo,
   type AgentEffort,
   type AgentItem,
   type AgentModel,
-  type ContextUsage,
   type CliProvider,
+  type ContextUsage,
   type Message,
   type ModelProvider,
   type Run,
   type ServerEvent,
   type Task,
 } from "@cloudagents/protocol"
+import { AGENT_CLIS, MODEL_HARNESS, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
-import { CredentialBroker } from "../broker"
+import { CredentialBroker, type BrokerProvider } from "../broker"
+import { boxControl } from "../control/client"
 import { Config, VERSION } from "../config"
+import { harnessAvailability, harnessProbe } from "../capabilities"
+import { GH_SHIM_SCRIPT } from "../gh/shim"
+import { CredentialStore } from "../credentials"
+import { GitHub } from "../github/api"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { SANDBOX_HOME, agentHome, initBox, prepareLaunch, sandboxSettingsOf } from "../sandbox"
 import { EventHub } from "./events"
 import { StateStore, newId, nowIso, type Mutable, type StoreState } from "./state"
+import { makeAcpDriver, type AcpRunInput } from "./acp"
 import { makeClaudeDriver } from "./claude-stream"
 import { makeCodexDriver, type CodexRunInput } from "./codex-app-server"
 import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
-import { makeTranscript, type Transcript } from "./transcript"
+import { makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
+import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
+import { writeAtomic } from "./atomic"
 
 export interface AgentHarnessShape {
   /**
@@ -39,16 +49,15 @@ export interface AgentHarnessShape {
    * With a free slot (CLOUDAGENTS_MAX_CONCURRENT_RUNS) the run starts at once and, on spawn failure, is aborted before the
    * error is returned. Otherwise it waits for a slot in the background, where a failure aborts it (logged). `user` is the signed-in user
    * the run is for: their CLI logins replace the broker's API keys, and the broker uses their keys.
-   * `resumeSession` is the agent session this run continues, or null for a fresh run.
+   * `start` is the prompt for a fresh session and the session the run may continue instead (`RunStart`).
    * `choice` is the model/effort the user picked for this message; omitted fields use the harness default.
    */
   readonly spawn: (
     task: Task,
     run: Run,
-    prompt: string,
+    start: RunStart,
     display: string | null,
     user: string,
-    resumeSession: string | null,
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
@@ -58,15 +67,18 @@ export interface AgentHarnessShape {
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
   /**
-   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input). False
-   * when the run cannot take it now (no turn going yet, or its last turn is over); the message then waits in the
-   * run's inbox for task_inbox.
+   * Adds `text` to the run's live turn (Codex `turn/steer`, a user message on Claude's stream-json input).
+   * `accepted` is false when the run cannot take it now (no turn going yet, or its last turn is over); the message
+   * then waits in the run's inbox for task_inbox. `afterItems` is the run's item count (`itemCount`) in the same
+   * step the text was sent, so every item before it was emitted before the agent got the text.
    */
-  readonly steer: (runId: string, text: string) => Effect.Effect<boolean>
+  readonly steer: (runId: string, text: string) => Effect.Effect<{ readonly accepted: boolean; readonly afterItems: number }>
   /** Marks a run that never started as failed. */
   readonly abort: (runId: string, reason: string) => Effect.Effect<void, InternalError>
   /** A run's display items: the live list while it runs, the persisted final list afterwards. */
   readonly items: (runId: string) => Effect.Effect<ReadonlyArray<AgentItem>, InternalError>
+  /** How many display items a live run has shown so far (a run waiting for a slot shows its queue item); 0 once it is over. */
+  readonly itemCount: (runId: string) => number
   /**
    * Plays a recorded fixture through the normal run pipeline (stdout -> items -> finish) instead
    * of launching an agent. Dev-only `/replay` flow; the fixture path is trusted repo state.
@@ -88,12 +100,51 @@ export interface AgentChoice {
   readonly effort?: AgentEffort
 }
 
+/**
+ * Where a provider's CLI keeps a run's native sessions: `task-home` under the thread's own home (the run uses the
+ * broker's keys), or the generation of the user's CLI login directory. Deleting that directory invalidates its
+ * generation even if the user reconnects before their next run.
+ */
+export type SessionContinuation = "task-home" | `cli-login:${string}`
+
+/** A marker survives restarts, but not logout's deletion of the CLI's session database. */
+const loginContinuation = (dir: string): Effect.Effect<SessionContinuation, InternalError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const path = join(dir, ".kestrel-session-generation")
+      let generation: string
+      try {
+        generation = await readFile(path, "utf8")
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
+        generation = newId()
+        await writeAtomic(path, generation)
+      }
+      return `cli-login:${generation}` as const
+    },
+    catch: () => new InternalError({ message: "cannot read the CLI session generation" }),
+  })
+
+/** What a run's agent session starts from (see Core.sendMessage). */
+export interface RunStart {
+  /** The prompt for a fresh session: the conversation so far in full. */
+  readonly fresh: string
+  /**
+   * The newest native session of the run's provider, where its CLI kept it (undefined when that was not recorded),
+   * and the prompt carrying only what happened since. The run resumes it only when its CLI keeps sessions there now;
+   * otherwise (an unrecorded place included, since it may be either), or when this is null, it starts fresh.
+   */
+  readonly resume: { readonly sessionId: string; readonly continuation: string | undefined; readonly prompt: string } | null
+  /** How this run's assistant prose should appear live; null keeps the transcript's token streaming. */
+  readonly responseStreamingMode?: ResponseStreamingMode | null
+}
+
 interface ActiveRun {
   readonly child: ChildProcess
   readonly log: WriteStream
   readonly taskId: string
-  readonly stdoutLines: string[]
-  readonly stderrLines: string[]
+  /** The model provider that minted this run's session, so a Claude stream is attributed to the right one. */
+  readonly provider: ModelProvider
   /** Display items in insertion order; a replacement keeps its original position. */
   readonly items: Map<string, AgentItem>
   /** When each item was last published, and replacements held back until ITEM_PUBLISH_MS has passed. */
@@ -105,23 +156,35 @@ interface ActiveRun {
   context: ContextUsage | null
   /** Agent session id, once the CLI names it. */
   sessionId: string | null
+  /** Where the CLI keeps the session; null for replays, whose sessions come from a fixture. */
+  readonly continuation: SessionContinuation | null
   /** The conversation the harness holds with the CLI over stdin; null for replays, which only print. */
   driver: RunDriver | null
-  /** True when stderr is the CLI's own log (Codex app-server), not output worth showing as the agent's answer. */
-  readonly stderrIsLog: boolean
+  readonly agentKind: ConversationKind | null
+  diagnostic: string | null
+  /** Failed tool calls already counted; a later item with the same id only replaces the earlier one. */
+  readonly failedTools: Set<string>
+  /** Set once the run is stopped; what its process reports while it shuts down is not a tool failure. */
+  stopped: boolean
 }
 
 /** How the harness talks to a run's CLI over stdin. */
 type RunConversation =
   | { readonly kind: "codex"; readonly input: Omit<CodexRunInput, "clientVersion"> }
   | { readonly kind: "claude"; readonly prompt: string }
+  | { readonly kind: "acp"; readonly provider: ModelProvider; readonly input: AcpRunInput }
 
 /** What a run starts from besides its process: the session's last context use, and its conversation if it has one. */
 interface RunSession {
   readonly seed: ContextUsage | null
+  readonly provider: ModelProvider
   readonly conversation: RunConversation | null
+  /** Where the CLI keeps the session; null for replays. */
+  readonly continuation: SessionContinuation | null
   /** The queue item the run showed while it waited for a slot; it seeds the run's items. Null when it got one at once. */
   readonly queued: AgentItem | null
+  /** How assistant prose becomes visible in the run's items. */
+  readonly streaming: ResponseStreamingMode | null
 }
 
 /** A run's slot: `queued` is the queue item it showed while it waited, null when it got a slot at once. */
@@ -148,6 +211,20 @@ interface ProcessSpec {
   readonly env: NodeJS.ProcessEnv
 }
 
+/**
+ * Where a thread's agent starts: its first checkout, so the harness finds that repository's root and loads its
+ * AGENTS.md / CLAUDE.md, or the workspace root while the thread has no checkout. The checkout is agent-writable: one
+ * the agent deleted or replaced with anything but a directory (a symlink to elsewhere on the host, say) gives the
+ * workspace root too. The whole workspace stays bound either way; only the starting directory changes.
+ */
+export const agentCwd = (workspacePath: string, task: Pick<Task, "checkouts">): string => {
+  const first = task.checkouts[0]
+  if (first === undefined) return workspacePath
+  const dir = join(workspacePath, first.dir)
+  // lstat, not stat: a symlink is not followed, so it is not a directory here.
+  return lstatSync(dir, { throwIfNoEntry: false })?.isDirectory() === true ? dir : workspacePath
+}
+
 const KILL_GRACE_MS = 3000
 /**
  * Least time between two publishes of the same item. Codex and Claude stream text (and Codex command output) a few
@@ -167,12 +244,37 @@ const isDeltaLine = (parsed: unknown): boolean => {
   return "method" in parsed && typeof parsed.method === "string" && DELTA_METHOD.test(parsed.method)
 }
 
-/** Env var pointing each CLI at a user's login, and the broker keys that login replaces. */
-const LOGIN_ENV: Record<CliProvider, { readonly env: string; readonly broker: ReadonlyArray<string> }> = {
-  "claude-cli": { env: "CLAUDE_CONFIG_DIR", broker: ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"] },
-  "codex-cli": { env: "CODEX_HOME", broker: ["OPENAI_API_KEY", "OPENAI_BASE_URL"] },
+/**
+ * The CLI logins a run mounts. Anthropic/OpenAI keep the two vendor logins so either CLI may shell out to the other.
+ * OpenCode's Console and Go logins and Antigravity get only their own; gateways and standalone ACP harnesses get none.
+ */
+export const loginsForProvider = <T extends { readonly provider: CliProvider }>(
+  provider: ModelProvider,
+  all: readonly T[],
+): readonly T[] => {
+  const harness = MODEL_HARNESS[provider]
+  if (!harness.broker) return harness.cli === null ? [] : all.filter((login) => login.provider === harness.cli)
+  return provider === "anthropic" || provider === "openai"
+    ? all.filter((login) => login.provider === "claude-cli" || login.provider === "codex-cli")
+    : []
 }
 
+/** The Claude Code tier pins and auto-compact window for a third-party gateway run. */
+export const claudeTierEnv = (model: AgentModel): Record<string, string> => {
+  const info = modelInfo(model)
+  return {
+    CLOUDAGENTS_MODEL: model,
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_FABLE_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
+    ...(info.compactWindow === undefined
+      ? {}
+      : { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(info.compactWindow) }),
+  }
+}
 export const AgentHarnessLive = Layer.effect(
   AgentHarness,
   Effect.gen(function* () {
@@ -181,6 +283,10 @@ export const AgentHarnessLive = Layer.effect(
     const hub = yield* EventHub
     const broker = yield* CredentialBroker
     const cliAuth = yield* CliAuth
+    // First runs sharing a login must observe one completely persisted directory generation.
+    const sessionGeneration = yield* Effect.makeSemaphore(1)
+    const credentials = yield* CredentialStore
+    const github = yield* GitHub
     const settings = sandboxSettingsOf(config)
     if (settings.systemd) {
       yield* initBox(settings.systemd)
@@ -189,6 +295,8 @@ export const AgentHarnessLive = Layer.effect(
       )
     }
     const runtime = yield* Effect.runtime<never>()
+    const control = boxControl(config)
+    const toolFailures = control === null ? null : makeToolFailureReporter(control.reportToolFailures)
     const runFork = Runtime.runFork(runtime)
     const active = new Map<string, ActiveRun>()
 
@@ -200,10 +308,17 @@ export const AgentHarnessLive = Layer.effect(
     const waiting: Array<{ readonly runId: string; readonly grant: (granted: boolean) => void }> = []
     /** The queue item each waiting run shows, with its task for publishing. */
     const queuedItems = new Map<string, { readonly taskId: string; readonly item: AgentItem }>()
+    /**
+     * The queue item ("Started.") of a run that waited for its slot and is still being launched: the run shows it
+     * already, though it joins the run's items only when `startRun` makes the run active. Dropped then, or when the run
+     * gives up its slot instead.
+     */
+    const startingItems = new Map<string, AgentItem>()
     const suspended = new Map<string, { count: number; closing: boolean; done: Promise<void>; resolve: () => void }>()
 
     /** Frees a run's slot and hands it to the run that has waited longest. No-op for a run that holds no slot. */
     const releaseSlot = (runId: string) => {
+      startingItems.delete(runId)
       if (!holding.delete(runId)) return
       const next = waiting.shift()
       if (next === undefined) return
@@ -230,6 +345,8 @@ export const AgentHarnessLive = Layer.effect(
             queuedItems.delete(runId)
             const item = granted ? queueItem("ok", "Started.") : queueItem("error", "Cancelled before it started.")
             publish({ _tag: "agent.item", taskId, runId, item })
+            // A run getting its slot back (withSlotReleased) is active already and keeps its own items.
+            if (granted && !active.has(runId)) startingItems.set(runId, item)
             return granted ? { queued: item } : null
           }),
         )
@@ -295,7 +412,7 @@ export const AgentHarnessLive = Layer.effect(
       entry.heldTimer ??= setTimeout(() => flushHeld(runId, entry), ITEM_PUBLISH_MS)
     }
 
-    const finish = (runId: string, exitCode: number | null, spawnError: string | null) =>
+    const finish = (runId: string, exitCode: number | null, spawnError: string | null, signal: string | null = null) =>
       Effect.gen(function* () {
         releaseSlot(runId)
         // The run's broker token dies with the run, whatever the outcome.
@@ -304,7 +421,6 @@ export const AgentHarnessLive = Layer.effect(
         if (!entry) return
         active.delete(runId)
         entry.log.end()
-        if (spawnError) entry.stderrLines.push(spawnError)
         // A run is over when its turn is, whatever the CLI's exit code; a refused request or an early exit shows as
         // the run's error, unless the run was stopped on purpose.
         entry.driver?.close()
@@ -335,13 +451,13 @@ export const AgentHarnessLive = Layer.effect(
           // An agent that asked for input keeps that state until the user answers.
           if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
           task.updatedAt = now
-          const failure = turn?.status === "failed" ? turn.error : null
-          const stdout = entry.stdoutLines.join("\n").trim()
-          const stderr = entry.stderrIsLog ? "" : entry.stderrLines.join("\n").trim()
+          const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
+          // Diagnostics stay in output.log and agent.output, never in portable conversation history:
+          // a log may echo the entire prompt or tool output and amplify it on the next handoff/delegation.
           const text =
             entry.transcript.finalText() ??
-            ((entry.stderrIsLog ? (failure ?? stdout) : stdout || stderr || failure) ||
-              (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`))
+            failure ??
+            (ok ? "Run finished with no output." : `Run failed (exit code ${exitCode ?? "none"}).`)
           const message: Message = {
             id: newId(),
             taskId: task.id,
@@ -354,6 +470,9 @@ export const AgentHarnessLive = Layer.effect(
           return Either.right({ run: { ...run }, task: { ...task }, message })
         })
         if (outcome === null) return
+        if (outcome.run.status === "failed" && entry.agentKind !== null && turn?.status === "failed") {
+          toolFailures?.record(agentFailure(entry.agentKind, spawnError ?? turn.error, entry.diagnostic, exitCode, signal))
+        }
         publish({ _tag: "message.created", message: outcome.message })
         publish({ _tag: "run.updated", run: outcome.run })
         publish({ _tag: "task.updated", task: outcome.task })
@@ -361,11 +480,12 @@ export const AgentHarnessLive = Layer.effect(
         Effect.catchAll((e) => Effect.logError(`run ${runId} finalize failed: ${e.message}`)),
       )
 
-    /** Remembers the agent session a run runs under and its provider, so the task's next run can resume it. */
-    const recordSession = (runId: string, sessionId: string, provider: ModelProvider) =>
+    /** Remembers the agent session a run runs under, its provider and where its CLI keeps it, so the task's next run can resume it. */
+    const recordSession = (runId: string, sessionId: string, provider: ModelProvider, continuation: SessionContinuation | null) =>
       store
         .update((s) => {
-          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), { runId, sessionId, provider }]
+          const session = { runId, sessionId, provider, ...(continuation === null ? {} : { continuation }) }
+          s.runSessions = [...s.runSessions.filter((x) => x.runId !== runId), session]
           return Either.right(null)
         })
         .pipe(Effect.catchAll((e) => Effect.logWarning(`run ${runId}: could not record its session: ${e.message}`)))
@@ -382,6 +502,7 @@ export const AgentHarnessLive = Layer.effect(
         if (waitIndex >= 0) waiting.splice(waitIndex, 1)[0]?.grant(false)
         const entry = active.get(runId)
         if (entry) {
+          entry.stopped = true
           // An interrupted turn ends on its own and closes the process; anything else is signalled now.
           const interrupted = entry.driver?.interrupt() ?? false
           if (!interrupted) killProcessGroup(entry.child.pid, "SIGTERM")
@@ -407,12 +528,21 @@ export const AgentHarnessLive = Layer.effect(
         })
       })
 
+    /** Counts a tool call's failure for the control plane. Replays have no driver; they only repeat old runs. */
+    const noteToolFailure = (entry: ActiveRun, item: AgentItem) => {
+      if (toolFailures === null || entry.driver === null || entry.stopped || item._tag !== "tool" || item.status !== "error") return
+      if (entry.failedTools.has(item.id)) return
+      entry.failedTools.add(item.id)
+      const failure = toolFailure(item.name, item.output)
+      if (failure !== null) toolFailures.record(failure)
+    }
+
     const handleLine = (runId: string, stream: "stdout" | "stderr", line: string) => {
       const entry = active.get(runId)
       if (!entry) return
       entry.log.write(`${line}\n`)
       if (stream === "stderr") {
-        entry.stderrLines.push(line)
+        entry.diagnostic = agentDiagnostic(line) ?? entry.diagnostic
         publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream, text: line })
         return
       }
@@ -421,17 +551,29 @@ export const AgentHarnessLive = Layer.effect(
         try {
           const parsed: unknown = JSON.parse(trimmed)
           entry.driver?.receive(parsed)
+          if (entry.agentKind === "claude" && typeof parsed === "object" && parsed !== null && "type" in parsed && parsed.type === "result" && "is_error" in parsed && parsed.is_error === true) {
+            const result = "result" in parsed && typeof parsed.result === "string" ? parsed.result : null
+            const errors = "errors" in parsed && Array.isArray(parsed.errors) ? parsed.errors.find((e: unknown) => typeof e === "string") : null
+            const detail = result || errors || ("subtype" in parsed && typeof parsed.subtype === "string" ? parsed.subtype : null)
+            if (detail !== null) entry.diagnostic = agentDiagnostic(`error: ${detail}`) ?? entry.diagnostic
+          }
           // Every parsed line goes through the run's transcript, whether or not it yields items.
-          for (const item of entry.transcript.push(parsed)) putItem(runId, entry, item)
-          const context = entry.transcript.context()
-          if (context !== null && context !== entry.context) {
+          for (const item of entry.transcript.push(parsed)) {
+            if (item._tag === "error" && !(entry.agentKind === "claude" && item.text.startsWith("claude result:"))) {
+              entry.diagnostic = agentDiagnostic(`error: ${item.text}`) ?? entry.diagnostic
+            }
+            putItem(runId, entry, item)
+            if (!endsCodexTurn(parsed) && !declinedCodexItem(parsed, item.id)) noteToolFailure(entry, item)
+          }
+          const context = entry.transcript.takeContext()
+          if (context !== undefined && context !== entry.context) {
             entry.context = context
             runFork(setContext(entry.taskId, context))
           }
-          const session = sessionOf(parsed)
+          const session = sessionOf(parsed, entry.provider)
           if (session !== null) {
             entry.sessionId = session.sessionId
-            runFork(recordSession(runId, session.sessionId, session.provider))
+            runFork(recordSession(runId, session.sessionId, session.provider, entry.continuation))
           }
           if (!isDeltaLine(parsed)) {
             publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "event", text: line })
@@ -441,7 +583,6 @@ export const AgentHarnessLive = Layer.effect(
           // not JSON after all; fall through to raw stdout
         }
       }
-      entry.stdoutLines.push(line)
       publish({ _tag: "agent.output", taskId: entry.taskId, runId, stream: "stdout", text: line })
     }
 
@@ -471,17 +612,20 @@ export const AgentHarnessLive = Layer.effect(
               child,
               log,
               taskId: task.id,
-              stdoutLines: [],
-              stderrLines: [],
+              provider: session.provider,
               items: new Map<string, AgentItem>(session.queued ? [[session.queued.id, session.queued]] : []),
               published: new Map(),
               held: new Map(),
               heldTimer: null,
-              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType)),
+              transcript: makeTranscript(session.seed, (data, mimeType) => saveRunImage(runDir, data, mimeType), session.streaming),
               context: session.seed,
               sessionId: null,
+              continuation: session.continuation,
               driver: null,
-              stderrIsLog: session.conversation?.kind === "codex",
+              agentKind: session.conversation?.kind ?? null,
+              diagnostic: null,
+              failedTools: new Set(),
+              stopped: false,
             }
             const stdin = child.stdin
             // A closed pipe (the CLI is gone) shows up as the child's exit, not as a write error.
@@ -491,11 +635,11 @@ export const AgentHarnessLive = Layer.effect(
               log.write(`>> ${line}\n`)
               stdin.write(`${line}\n`)
             }
-            // Claude can still be answering queued messages after its first result and EOF. Only Codex's
-            // onDone means all model work is over and the process is merely waiting to exit.
+            // Claude can still be answering queued messages after its first result and EOF. Codex's and an ACP agent's
+            // onDone mean all model work is over and the process is merely waiting to exit.
             const onDone = () => {
               stdin.end()
-              if (session.conversation?.kind === "codex") {
+              if (session.conversation !== null && session.conversation.kind !== "claude") {
                 setTimeout(() => active.has(run.id) && killProcessGroup(child.pid, "SIGTERM"), KILL_GRACE_MS).unref()
               }
             }
@@ -510,23 +654,33 @@ export const AgentHarnessLive = Layer.effect(
                   send,
                   onThread: (threadId) => {
                     entry.sessionId = threadId
-                    runFork(recordSession(run.id, threadId, "openai"))
+                    runFork(recordSession(run.id, threadId, entry.provider, entry.continuation))
                   },
                   onDone,
                 },
               )
+            } else if (conversation.kind === "acp") {
+              entry.driver = makeAcpDriver(conversation.input, {
+                send,
+                onSession: (sessionId) => {
+                  entry.sessionId = sessionId
+                  runFork(recordSession(run.id, sessionId, conversation.provider, entry.continuation))
+                },
+                onDone,
+              })
             } else {
               // Claude Code names its session in its stream-json `init`, which `handleLine` records.
               entry.driver = makeClaudeDriver(conversation.prompt, { send, onDone })
             }
             active.set(run.id, entry)
+            startingItems.delete(run.id)
             createInterface({ input: child.stdout }).on("line", (line) => handleLine(run.id, "stdout", line))
             createInterface({ input: child.stderr }).on("line", (line) => handleLine(run.id, "stderr", line))
             child.on("error", (err) => {
               runFork(finish(run.id, null, `failed to start agent: ${err.message}`))
             })
-            child.on("close", (code) => {
-              runFork(finish(run.id, code, null))
+            child.on("close", (code, signal) => {
+              runFork(finish(run.id, code, null, signal))
             })
             entry.driver?.start()
           },
@@ -534,12 +688,22 @@ export const AgentHarnessLive = Layer.effect(
         })
       })
 
+    // An active run counts its own items first: one waiting for its slot back (withSlotReleased) also has a queue item.
+    const itemCount = (runId: string): number =>
+      active.get(runId)?.items.size ?? (queuedItems.has(runId) || startingItems.has(runId) ? 1 : 0)
+
     const readItems = (runId: string): Effect.Effect<ReadonlyArray<AgentItem>, InternalError> =>
       Effect.gen(function* () {
-        const waitingItem = queuedItems.get(runId)
-        if (waitingItem) return [waitingItem.item]
+        // An active run keeps its transcript, including while it waits to get its slot back (withSlotReleased): the
+        // queue item it shows meanwhile goes to live clients on top of these items, it does not replace them.
         const entry = active.get(runId)
         if (entry) return [...entry.items.values()]
+        // A run that got its slot and is still launching already shows its "Started." item.
+        const startingItem = startingItems.get(runId)
+        if (startingItem !== undefined) return [startingItem]
+        // A run that is still waiting for a slot shows its queue item.
+        const waitingItem = queuedItems.get(runId)
+        if (waitingItem) return [waitingItem.item]
         const file = join(config.runsDir, runId, "items.json")
         const text = yield* Effect.tryPromise({
           try: async () => {
@@ -588,17 +752,35 @@ export const AgentHarnessLive = Layer.effect(
           })))
         }),
       ),
-      spawn: (task, run, prompt, display, user, resumeSession, choice) => {
+      spawn: (task, run, start, display, user, choice) => {
         const launch = (admission: Admission) => Effect.gen(function* () {
           const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
+          // A vendor CLI or gateway run reaches models through the broker; a harness that runs its own models
+          // (OpenCode free or Go, Antigravity) gets no broker access at all.
+          const channel: BrokerProvider | null = MODEL_HARNESS[provider].broker ? (provider as BrokerProvider) : null
+          if (MODEL_HARNESS[provider].conversation === "acp") {
+            // A harness the box cannot launch is refused here, not left to fail (or hang) mid-run. Probe only the
+            // harness this run needs, so a launch never runs every harness's `--version`.
+            const availability = harnessAvailability(provider, config, harnessProbe(config.sandboxPath))
+            if (!availability.available) {
+              return yield* Effect.fail(
+                new InternalError({
+                  message: `${MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider} cannot run on this box: ${availability.error ?? "its CLI is not installed"}.`,
+                }),
+              )
+            }
+          }
           const homeDir = join(config.homesDir, task.id)
           const mcpUrl = `${config.mcpBaseUrl}/mcp/${task.id}`
           const mcpConfigHost = join(homeDir, ".cloudagents", "mcp.json")
           const mcpConfigAgent = join(agentHome(settings, homeDir), ".cloudagents", "mcp.json")
+          // The run's `gh`: a script that asks the box to run GitHub CLI commands, so no GitHub token enters the sandbox.
+          const ghBinHost = join(homeDir, ".kestrel", "gh")
+          const ghBinAgent = join(agentHome(settings, homeDir), ".kestrel", "gh")
 
           const started = yield* Effect.gen(function* () {
-            // The run's token authorizes its MCP session as well as its model calls.
-            const lease = yield* broker.issue(run.id, user)
+            // The run's token authorizes its MCP session and, where the harness uses the broker, its model calls.
+            const lease = yield* broker.issue(run.id, user, channel)
             yield* Effect.tryPromise({
               try: async () => {
                 await mkdir(join(homeDir, ".cloudagents"), { recursive: true })
@@ -610,49 +792,78 @@ export const AgentHarnessLive = Layer.effect(
                 // The file carries the run's token: owner-only, including when it already existed.
                 await writeFile(mcpConfigHost, JSON.stringify(mcpJson, null, 2), { encoding: "utf8", mode: 0o600 })
                 await chmod(mcpConfigHost, 0o600)
+                await mkdir(ghBinHost, { recursive: true })
+                await writeFile(join(ghBinHost, "gh"), GH_SHIM_SCRIPT, { encoding: "utf8", mode: 0o755 })
+                await chmod(join(ghBinHost, "gh"), 0o755)
               },
               catch: (e) => new InternalError({ message: `cannot prepare run dir: ${String(e)}` }),
             })
 
             // A user's own CLI logins replace the broker's API keys for that provider.
-            const logins = yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message })))
+            const logins = loginsForProvider(provider, yield* cliAuth.loggedInDirs(user).pipe(Effect.mapError((e) => new InternalError({ message: e.message }))))
             const loginDirs = logins.map((login) => ({
               provider: login.provider,
               host: login.dir,
               // Sandboxed runs see the login under their home; unsandboxed runs read it in place.
               inside: settings.level === "off" ? login.dir : join(SANDBOX_HOME, ".kestrel", basename(login.dir)),
             }))
-            const dropped = new Set(logins.flatMap((login) => LOGIN_ENV[login.provider].broker))
+            const dropped = new Set(logins.flatMap((login) => AGENT_CLIS[login.provider].brokerEnv))
             const keptBroker = Object.fromEntries(Object.entries(lease.env).filter(([key]) => !dropped.has(key)))
-            const loginEnv = Object.fromEntries(loginDirs.map((d) => [LOGIN_ENV[d.provider].env, d.inside]))
+            const loginEnv = Object.fromEntries(loginDirs.map((d) => [AGENT_CLIS[d.provider].configEnv, d.inside]))
+            const workspacePath = join(config.threadsDir, task.id)
+            const cwd = agentCwd(workspacePath, task)
+            // A native session is usable only in the same surviving session store, not merely the same path.
+            const harness = MODEL_HARNESS[provider]
+            const login = logins.find((candidate) => candidate.provider === harness.cli)
+            const continuation: SessionContinuation = login === undefined
+              ? "task-home"
+              : yield* sessionGeneration.withPermits(1)(loginContinuation(login.dir))
+            const resumed = start.resume?.continuation === continuation ? start.resume : null
+            const resumeSession = resumed?.sessionId ?? null
+            const prompt = resumed?.prompt ?? start.fresh
+            const creds = yield* credentials.get(task.owner)
+            const gitIdentity = creds?.dev
+              ? { name: task.owner, email: `${task.owner}@kestrel.invalid` }
+              : yield* github.commitIdentity(task.owner, creds?.github).pipe(
+                  Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
+                )
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,
+              gitIdentity,
               kind: "run",
-              workspacePath: join(config.threadsDir, task.id),
+              workspacePath,
+              cwd,
               mirrorDir: join(config.mirrorsDir, task.owner),
               homeDir,
               display,
               env: {
-                CLOUDAGENTS_PROMPT: prompt,
                 ...(choice.model === undefined ? {} : { CLOUDAGENTS_MODEL: choice.model }),
                 ...(choice.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: choice.effort }),
+                ...(choice.model !== undefined && provider !== "anthropic" && MODEL_HARNESS[provider].conversation === "claude"
+                  ? claudeTierEnv(choice.model)
+                  : {}),
                 CLOUDAGENTS_MCP_CONFIG: mcpConfigAgent,
                 CLOUDAGENTS_MCP_URL: mcpUrl,
                 CLOUDAGENTS_TASK_ID: task.id,
                 CLOUDAGENTS_RUN_ID: run.id,
                 CLOUDAGENTS_MCP_TOKEN: lease.token,
+                KESTREL_GH_URL: `${config.mcpBaseUrl}/gh/${task.id}`,
+                KESTREL_GH_TOKEN: lease.token,
                 // Claude Code's MCP tool-call timeout (ms). task_ask has no timeout of its own: the largest timer
                 // delay lets a question wait as long as the user takes to answer.
                 MCP_TOOL_TIMEOUT: String(2 ** 31 - 1),
                 // Continues the agent session of the task's previous run, so the agent keeps the thread's context.
                 ...(resumeSession === null ? {} : { CLOUDAGENTS_RESUME_SESSION: resumeSession }),
-                ...keptBroker,
+                // A harness that runs its own models (free OpenCode, the Go plan, Antigravity) gets no broker keys:
+                // they would only offer it models it is not there for.
+                ...(MODEL_HARNESS[provider].broker ? keptBroker : {}),
                 ...loginEnv,
               },
               command: config.agentCommands[provider],
               roBinds: config.fakeAgentRoBinds,
               binds: loginDirs.map((d) => ({ host: d.host, sandbox: d.inside })),
+              pathPrefix: [ghBinAgent],
             })
 
             // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
@@ -671,22 +882,40 @@ export const AgentHarnessLive = Layer.effect(
               { file: launch.file, args: launch.args, cwd: launch.cwd, env: { ...launch.env } },
               {
                 seed: resumeSession === null ? null : (task.context ?? null),
+                provider,
+                continuation,
                 queued: admission.queued,
-                conversation:
-                  provider === "openai"
-                    ? {
-                        kind: "codex",
-                        input: {
-                          text: run.prompt,
-                          prompt,
-                          resumeThread: resumeSession,
-                          model: choice.model,
-                          effort: choice.effort,
-                          // The run's broker token, unless the user's own Codex login replaced it.
-                          apiKey: keptBroker.OPENAI_API_KEY,
-                        },
-                      }
-                    : { kind: "claude", prompt },
+                streaming: start.responseStreamingMode ?? null,
+                conversation: ({
+                  codex: () => ({
+                    kind: "codex",
+                    input: {
+                      text: run.prompt,
+                      prompt,
+                      cwd,
+                      workspacePath,
+                      resumeThread: resumeSession,
+                      model: choice.model,
+                      effort: choice.effort,
+                      // The run's broker token, unless the user's own Codex login replaced it.
+                      apiKey: keptBroker.OPENAI_API_KEY,
+                    },
+                  }),
+                  claude: () => ({ kind: "claude", prompt }),
+                  acp: () => ({
+                    kind: "acp",
+                    provider,
+                    input: {
+                      prompt,
+                      cwd,
+                      resumeSession,
+                      model: choice.model,
+                      effort: choice.effort,
+                      // The thread's tools, as the other harnesses get them from the run's MCP config.
+                      mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
+                    },
+                  }),
+                } satisfies Record<ConversationKind, () => RunConversation>)[harness.conversation](),
               },
             )
           }).pipe(Effect.either)
@@ -734,7 +963,7 @@ export const AgentHarnessLive = Layer.effect(
               cwd: serverDir,
               env: { ...process.env },
             },
-            { seed: null, conversation: null, queued: null },
+            { seed: null, provider: run.provider ?? DEFAULT_MODEL_PROVIDER, conversation: null, continuation: null, queued: null, streaming: null },
           ).pipe(Effect.either)
           if (Either.isLeft(started)) {
             yield* shape.abort(run.id, started.left.message)
@@ -745,7 +974,12 @@ export const AgentHarnessLive = Layer.effect(
       cancel: (runId) => stopRun(runId, false),
 
       steer: (runId, text) =>
-        Effect.promise(() => active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)),
+        Effect.promise(() => {
+          // Counted and sent synchronously: no stdout line can add an item between the two.
+          const afterItems = itemCount(runId)
+          const sent = active.get(runId)?.driver?.steer(text) ?? Promise.resolve(false)
+          return sent.then((accepted) => ({ accepted, afterItems }))
+        }),
 
       abort: (runId, reason) =>
         Effect.gen(function* () {
@@ -781,6 +1015,8 @@ export const AgentHarnessLive = Layer.effect(
 
       items: readItems,
 
+      itemCount,
+
       activeRunCount: () => Effect.sync(() => new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]).size),
 
       // Running, waiting for a slot, or holding one while still being launched (cancelled here, the launch gives up
@@ -790,7 +1026,7 @@ export const AgentHarnessLive = Layer.effect(
           new Set([...active.keys(), ...holding, ...waiting.map((w) => w.runId)]),
           (runId) => stopRun(runId, true).pipe(Effect.ignore),
           { discard: true },
-        ),
+        ).pipe(Effect.zipRight(toolFailures?.flush ?? Effect.void)),
     }
     return shape
   }),
@@ -798,12 +1034,16 @@ export const AgentHarnessLive = Layer.effect(
 
 /**
  * The agent session a JSON output line names, and the provider that minted it, or null. Claude Code's stream-json
- * opens with `{"type":"system","subtype":"init","session_id":…}`. A Codex run's thread comes from its driver.
+ * opens with `{"type":"system","subtype":"init","session_id":…}`; `provider` is the run's, since Anthropic-compatible
+ * gateways run that same CLI. A Codex run's thread comes from its driver.
  */
-const sessionOf = (event: unknown): { readonly sessionId: string; readonly provider: ModelProvider } | null => {
+const sessionOf = (
+  event: unknown,
+  provider: ModelProvider,
+): { readonly sessionId: string; readonly provider: ModelProvider } | null => {
   if (typeof event !== "object" || event === null || !("type" in event)) return null
   if (event.type === "system" && "subtype" in event && event.subtype === "init" && "session_id" in event) {
-    return typeof event.session_id === "string" ? { sessionId: event.session_id, provider: "anthropic" } : null
+    return typeof event.session_id === "string" ? { sessionId: event.session_id, provider } : null
   }
   return null
 }

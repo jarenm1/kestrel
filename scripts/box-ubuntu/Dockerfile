@@ -17,7 +17,12 @@ WORKDIR /home/dev
 # Claude Code: native installer -> ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
-# Codex: npm global under $HOME
-RUN npm i -g @openai/codex --prefix /home/dev/.npm-global
+# Codex and OpenCode 2: npm globals under $HOME
+RUN npm i -g @openai/codex @opencode/cli --prefix /home/dev/.npm-global
 
-RUN claude --version && codex --version && readlink -f "$(command -v claude)" && readlink -f "$(command -v codex)"
+# Antigravity CLI: its own installer -> ~/.local/bin/agy
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+RUN claude --version && codex --version && opencode --version && agy --version \
+ && readlink -f "$(command -v claude)" && readlink -f "$(command -v codex)" && readlink -f "$(command -v opencode)" \
+ && readlink -f "$(command -v agy)"

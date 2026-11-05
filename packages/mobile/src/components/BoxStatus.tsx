@@ -2,7 +2,6 @@ import React, { useMemo } from "react";
 import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { Server } from "lucide-react-native";
-import { useAuth } from "@/auth/AuthContext";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
@@ -26,7 +25,7 @@ export function useBoxOffline(): boolean {
 }
 
 /** Whether the box the app talks to answers; undefined until it is known. */
-function useBoxOnline(): boolean | undefined {
+export function useBoxOnline(): boolean | undefined {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   return useQuery(queries.box()).data?.online;
@@ -34,13 +33,12 @@ function useBoxOnline(): boolean | undefined {
 
 /**
  * The box a thread runs on, with its online dot: the web app's `ThreadBoxIndicator`. The web floats it over the chat;
- * here it takes its own line above the chat, so it never covers the first message. The app lists only the active
- * box's threads, so that is the box every open thread runs on.
+ * here it takes its own line above the chat, so it never covers the first message. It sits close under the panel's top
+ * edge and on the chat's `spacing.lg` column, clear of the panel's rounded corner. Each thread runs on the box it was
+ * opened from, so the indicator names that box.
  */
-export function ThreadBoxIndicator({ style }: { style?: StyleProp<ViewStyle> }) {
-  const { boxes, activeBoxId } = useAuth();
+export function ThreadBoxIndicator({ name, style }: { name: string; style?: StyleProp<ViewStyle> }) {
   const online = useBoxOnline();
-  const name = activeBoxId === null ? "Kestrel's box" : (boxes.find((box) => box.id === activeBoxId)?.name ?? "Box");
   const state = online === undefined ? "checking" : online ? "online" : "offline";
   return (
     <View style={[styles.indicator, style]} pointerEvents="none" accessibilityLabel={`Running on ${name}, ${state}`}>
@@ -70,8 +68,8 @@ const styles = StyleSheet.create({
   },
   indicator: {
     alignSelf: "flex-start",
-    marginTop: spacing.md,
-    marginLeft: spacing.md,
+    marginTop: spacing.sm,
+    marginLeft: spacing.lg,
     maxWidth: 192,
     flexDirection: "row",
     alignItems: "center",

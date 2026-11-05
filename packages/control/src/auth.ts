@@ -57,7 +57,8 @@ const beginOAuth = async (
 ): Promise<Response> => {
   const creds = oauthCredentials(env, provider)
   if (!creds) return errorResponse(503, "NotConfigured", `${provider.label} OAuth is not configured`)
-  const state = randomToken(24)
+  // A native client passes its own one-time nonce to bind the callback to its sign-in.
+  const state = url.searchParams.get("state") || randomToken(24)
   await hub(env).createOAuthState(state, kind, provider.id, returnTo, Date.now() + STATE_TTL_MS)
   const authorize = new URL(provider.authorizeUrl)
   authorize.searchParams.set("client_id", creds.clientId)
@@ -120,7 +121,8 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
     await stub.putConnection(account.login, provider.id, token, account.login)
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, account.login, Date.now() + SESSION_TTL_MS, false)
-    return redirect(row.returnTo, { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
+    const returnTo = row.returnTo.includes("?") ? `${row.returnTo}&state=${encodeURIComponent(state)}` : `${row.returnTo}?state=${encodeURIComponent(state)}`
+    return redirect(returnTo, { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
   }
 
   const login = (await currentSession(request, env))?.login
@@ -132,6 +134,31 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   return redirect(row.returnTo)
 }
 
+/** Serializes a value as a JS string literal safe to embed in an inline `<script>`. */
+export const scriptString = (value: string): string => JSON.stringify(value).replace(/</g, "\\u003c")
+
+/**
+ * Hands a completed sign-in to a native client through its custom URL scheme.
+ * The session id is only readable while holding the `HttpOnly` session cookie.
+ */
+const nativeCallback = async (
+  request: Request,
+  env: Env,
+  url: URL,
+  scheme: string,
+  client: string,
+): Promise<Response> => {
+  const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
+  const login = id ? (await hub(env).session(id))?.login : null
+  if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
+  const session = scriptString(id)
+  const nonce = scriptString(url.searchParams.get("state") ?? "")
+  return new Response(
+    `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel ${client}...</p><script>window.location.href="${scheme}auth-callback?session=" + encodeURIComponent(${session}) + "&state=" + encodeURIComponent(${nonce});</script></body></html>`,
+    { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+  )
+}
+
 /** Routes every `/auth/*` request. */
 export const handleAuth = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
@@ -140,6 +167,13 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
     const provider = findProvider("github")
     if (!provider || provider.kind !== "oauth") return errorResponse(404, "NotFound", "github is not a provider")
     const returnTo = safeReturnPath(url.searchParams.get("return"), "/")
+    // Local stacks usually have no GitHub OAuth app. With DEV_SESSION_LOGIN set, the normal sign-in button signs in as
+    // the dev user instead of answering NotConfigured.
+    if (oauthCredentials(env, provider) === null && env.DEV_SESSION_LOGIN) {
+      const state = url.searchParams.get("state")
+      const q = state === null ? "" : `&state=${encodeURIComponent(state)}`
+      return redirect(`/auth/dev-login?return=${encodeURIComponent(returnTo)}${q}`)
+    }
     return beginOAuth(env, url, "login", provider, returnTo)
   }
 
@@ -148,13 +182,11 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
   }
 
   if (path === "/auth/mobile-callback" && request.method === "GET") {
-    const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-    const login = id ? (await hub(env).session(id))?.login : null
-    if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
-    return new Response(
-      `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Kestrel</title><style>body{background:#0e1014;color:#e4e7ee;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}</style></head><body><p>Signing in to Kestrel mobile...</p><script>window.location.href="kestrel://auth-callback?session=" + encodeURIComponent("${id}");</script></body></html>`,
-      { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
-    )
+    return nativeCallback(request, env, url, "kestrel://", "mobile")
+  }
+
+  if (path === "/auth/desktop-callback" && request.method === "GET") {
+    return nativeCallback(request, env, url, "kestrel-desktop://", "desktop")
   }
 
   if (path === ControlPaths.logout && request.method === "POST") {
@@ -177,12 +209,18 @@ export const handleAuth = async (request: Request, env: Env, url: URL): Promise<
 
   // Dev-only sign-in: exists only when DEV_SESSION_LOGIN is set. Never set it in production.
   if (path === "/auth/dev-login" && env.DEV_SESSION_LOGIN && request.method === "GET") {
-    const login = env.DEV_SESSION_LOGIN
+    // `?login=` lets a local stack exercise more than one account; production never has DEV_SESSION_LOGIN.
+    const login = url.searchParams.get("login")?.trim() || env.DEV_SESSION_LOGIN
     const stub = hub(env)
     await stub.upsertUser({ login, name: login, avatarUrl: "" })
     const sessionId = randomToken(32)
     await stub.createSession(sessionId, login, Date.now() + SESSION_TTL_MS, true)
-    return redirect("/", { "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000) })
+    const state = url.searchParams.get("state")
+    const returnTo = safeReturnPath(url.searchParams.get("return"), "/")
+    const withState = state === null ? returnTo : returnTo.includes("?") ? `${returnTo}&state=${encodeURIComponent(state)}` : `${returnTo}?state=${encodeURIComponent(state)}`
+    return redirect(withState, {
+      "set-cookie": sessionCookie(sessionId, SESSION_TTL_MS / 1000),
+    })
   }
 
   return errorResponse(404, "NotFound", `no route for ${path}`)

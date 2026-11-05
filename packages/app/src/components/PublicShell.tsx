@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom"
 import { queries } from "@/api/queries"
 import { KestrelMark } from "@/components/KestrelMark"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { cn } from "@/lib/utils"
 import { APP_ORIGIN } from "@/routes"
 import "@/stylesfrontend.css"
@@ -75,6 +75,9 @@ export function PublicShell() {
           </NavLink>
           <NavLink to="/pricing" className={navLinkClass}>
             Pricing
+          </NavLink>
+          <NavLink to="/download" className={navLinkClass}>
+            Download
           </NavLink>
           <a
             href={GITHUB_URL}

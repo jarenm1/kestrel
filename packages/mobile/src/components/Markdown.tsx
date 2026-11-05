@@ -7,6 +7,8 @@ import type { PhrasingContent, RootContent, Table } from "mdast";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { gfm } from "micromark-extension-gfm";
+import { GithubReferenceLink } from "./GithubReferenceLink";
+import { githubReferenceFromLink } from "@cloudagents/composer/reference";
 import { colors, fonts, radius, spacing } from "@/theme";
 
 const BODY_SIZE = 15;
@@ -45,12 +47,23 @@ function inline(nodes: readonly PhrasingContent[], keyPrefix: string): ReactNode
             {node.value}
           </Text>
         );
-      case "link":
+      case "link": {
+        const label = node.children.every((child) => child.type === "text")
+          ? node.children.map((child) => child.type === "text" ? child.value : "").join("")
+          : undefined;
+        const reference = label === undefined ? undefined : githubReferenceFromLink(node.url, label);
+        if (reference !== undefined) return <GithubReferenceLink key={key} reference={reference} />;
         return (
-          <Text key={key} style={styles.link} onPress={() => void Linking.openURL(node.url)} accessibilityRole="link">
+          <Text
+            key={key}
+            style={styles.link}
+            onPress={() => void Linking.openURL(node.url)}
+            accessibilityRole="link"
+          >
             {inline(node.children, key)}
           </Text>
         );
+      }
       case "image":
         // Remote images are not loaded inline; the alt text links to them.
         return (

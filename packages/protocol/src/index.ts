@@ -47,15 +47,17 @@ export const Checkout = Schema.Struct({
   id: Schema.String,
   /** GitHub "owner/name" for github.com repositories, otherwise the https clone URL. */
   repo: Schema.String,
-  /** Directory of the checkout, relative to the thread workspace (the agent's working directory), e.g. `kestrel`. */
+  /** Directory of the checkout, relative to the thread workspace, e.g. `kestrel`. The agent starts in the first one. */
   dir: Schema.String,
-  /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`. */
+  /** Branch created for this thread, e.g. `cloudagents/fix-login-a1b2`, or the branch of the pull request it took over. */
   branch: Schema.String,
   /** Branch the checkout forked from and pull requests target. */
   baseBranch: Schema.String,
   createdAt: Schema.String,
-  /** Set once a pull request has been opened for `branch`; absent before that. */
+  /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
+  pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
   icon: Schema.optional(CheckoutIcon),
 })
@@ -88,6 +90,21 @@ export type Delegation = typeof Delegation.Type
 export type ContextUsage = typeof ContextUsage.Type
 
 /**
+ * A failed run whose provider usage limit is armed to resume the thread when the window resets. The box sets it after
+ * a usage-limit failure that names a provider-reported reset, whether or not auto-resume is on: `autoResume` is the
+ * user's switch at arm time, and the thread's notice lets them change it for this one failure.
+ */
+export const UsageLimitResume = Schema.Struct({
+  /** The failed run this arm belongs to: a newer run means the thread already continued. */
+  runId: Schema.String,
+  /** When the provider's exhausted window resets, as the provider reported it. */
+  resetsAt: Schema.String,
+  /** Whether this thread resumes by itself at the reset; off leaves it failed for the user. */
+  autoResume: Schema.Boolean,
+})
+export type UsageLimitResume = typeof UsageLimitResume.Type
+
+/**
  * A thread = one chat + one workspace directory + (optional) one desktop. It starts with no repository;
  * the agent checks repositories out into the workspace as the work needs them.
  */
@@ -96,11 +113,15 @@ export const Task = Schema.Struct({
   /** GitHub login of the user who started the thread. Only they can see or change it. */
   owner: Schema.String,
   title: Schema.String,
+  /** Generate a title from the first accepted message; cleared when generation starts or the user renames it. */
+  generateTitle: Schema.optional(Schema.Boolean),
   status: TaskStatus,
   createdAt: Schema.String,
   updatedAt: Schema.String,
   /** Oldest first. Empty until the agent checks a repository out. */
   checkouts: Schema.Array(Checkout),
+  /** Repository the user started the thread on without naming a branch; its agent picks what to check out. */
+  pickedRepo: Schema.optional(RepoRef),
   /** Port of the task's dev server, registered by its agent for the browser preview. */
   previewPort: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.between(1, 65535))),
   /** Set while the thread is archived: its runtime is torn down and it accepts no new messages; absent otherwise. */
@@ -109,6 +130,8 @@ export const Task = Schema.Struct({
   context: Schema.optional(ContextUsage),
   /** Present for a thread created as delegated work. */
   delegation: Schema.optional(Delegation),
+  /** Present while a usage-limit failure is waiting for its provider window to reset. */
+  usageLimitResume: Schema.optional(UsageLimitResume),
 })
 
 /** Short-lived bearer used by a sandboxed preview frame; grants access only to its own task preview. */
@@ -147,6 +170,12 @@ export const Message = Schema.Struct({
    * came from, with that thread's title when it was sent. Absent on messages the user typed.
    */
   fromThread: Schema.optional(Schema.Struct({ id: Schema.String, title: Schema.String })),
+  /**
+   * Set on a user message that reached a run already going (a steer, an answer, or mail for its inbox): how many of
+   * the run's display items it had shown by then, so the message reads at that point of the transcript. Absent on a
+   * run's prompt and on messages persisted before it was recorded.
+   */
+  afterItems: Schema.optional(Schema.Number),
 })
 export type Message = typeof Message.Type
 
@@ -166,6 +195,8 @@ export const Run = Schema.Struct({
   provider: Schema.optional(ModelProvider),
   /** Explicit model selected for this run; absent for runs using the box default. */
   model: Schema.optional(AgentModel),
+  /** Thinking level selected for this run; null is the model default, absent on older runs. */
+  effort: Schema.optional(Schema.NullOr(AgentEffort)),
   /** This run was still active when the box restarted and was reconciled as failed. */
   interruptedByRestart: Schema.optional(Schema.Boolean),
 })
@@ -249,18 +280,46 @@ export const DesktopStatus = Schema.Struct({
   /** The stream's frame rate cap, from `quality`. */
   fps: Schema.Number,
   quality: DesktopQuality,
-  /**
-   * MIME + codec string for MediaSource, e.g. `video/mp4; codecs="avc1.42E01F"`.
-   * Null until the stream is running. Clients MUST use this verbatim.
-   */
-  mime: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
 })
 export type DesktopStatus = typeof DesktopStatus.Type
 
-/** PUT `Paths.taskDesktopQuality` -> DesktopStatus. The encoder restarts at the new quality; viewers get a new init segment. */
+/** PUT `Paths.taskDesktopQuality` -> DesktopStatus. The encoder restarts at the new quality; viewers renegotiate. */
 export const SetDesktopQualityBody = Schema.Struct({ quality: DesktopQuality })
 export type SetDesktopQualityBody = typeof SetDesktopQualityBody.Type
+
+/**
+ * One application's share of a thread's resources: its processes in the thread's systemd slice, grouped by program
+ * (`node · vite` for a script run by node, bun, deno or python). `name` is null for the remainder past the largest
+ * groups, summed.
+ */
+export const TaskAppUsage = Schema.Struct({
+  name: Schema.NullOr(Schema.String),
+  processes: Schema.Number,
+  /**
+   * Proportional anonymous and shared memory in bytes (Pss_Anon + Pss_Shmem): a page several processes share, such as
+   * a fork's copy-on-write pages, is divided between them, so the groups add up without counting a page twice.
+   */
+  ramUsed: Schema.Number,
+  /** Share of the thread's CPU quota used since the previous sample, 0 to 1. */
+  cpu: Schema.Number,
+})
+export type TaskAppUsage = typeof TaskAppUsage.Type
+
+/**
+ * What a thread's RAM holds besides its processes' own memory, in bytes, from its slice's `memory.stat`. With
+ * `TaskAppUsage.ramUsed` over every group it adds up to `TaskStatsSample.ramUsed`, give or take what changed between
+ * the reads.
+ */
+export const TaskRamOther = Schema.Struct({
+  /** File contents cached in RAM: the kernel can reclaim it before the thread hits its limit. */
+  pageCache: Schema.Number,
+  /** Files in tmpfs (the sandbox's `/tmp`) and shared memory no process maps. */
+  tmpfs: Schema.Number,
+  /** The kernel's own memory for the thread: page tables, sockets, slab. */
+  kernel: Schema.Number,
+})
+export type TaskRamOther = typeof TaskRamOther.Type
 
 /**
  * One reading of a thread's resources against its own limits, in bytes. RAM and CPU come from the thread's systemd
@@ -281,6 +340,13 @@ export const TaskStatsSample = Schema.Struct({
   /** The thread's workspace, home and git data. It can pass `diskMax` briefly; the box then stops what keeps it growing. */
   diskUsed: Schema.NullOr(Schema.Number),
   diskMax: Schema.Number,
+  /**
+   * The slice's applications, most memory first; empty without systemd. Absent from boxes older than the field, so
+   * clients treat a missing list as unknown rather than empty.
+   */
+  apps: Schema.optional(Schema.Array(TaskAppUsage)),
+  /** The rest of `ramUsed` beside `apps`; null without systemd, absent from boxes older than the field. */
+  ramOther: Schema.optional(Schema.NullOr(TaskRamOther)),
 })
 export type TaskStatsSample = typeof TaskStatsSample.Type
 
@@ -297,9 +363,9 @@ export type TaskStats = typeof TaskStats.Type
 export const TASK_STATS_WINDOW_MS = 60_000
 
 /**
- * Client -> server input over the desktop WebSocket (JSON text frames).
- * Coordinates are normalized to [0, 1] relative to the stream frame so the
- * client never needs to know the X resolution.
+ * Client -> server input (JSON text) over the WebRTC data channels: `input` carries clicks, wheel, keys and text, and
+ * `pointer` carries `mouse.move` only. Coordinates are normalized to [0, 1] relative to the stream frame so the client
+ * never needs to know the X resolution.
  */
 export const DesktopInput = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("mouse.move"), x: Schema.Number, y: Schema.Number }),
@@ -311,6 +377,7 @@ export const DesktopInput = Schema.Union(
     button: Schema.Literal(1, 2, 3),
     down: Schema.Boolean,
   }),
+  /** Notch counts (integers); the server clamps each event to ±10. Positive dy scrolls down, positive dx right. */
   Schema.Struct({ _tag: Schema.Literal("mouse.wheel"), dx: Schema.Number, dy: Schema.Number }),
   Schema.Struct({
     _tag: Schema.Literal("key"),
@@ -318,18 +385,54 @@ export const DesktopInput = Schema.Union(
     key: Schema.String,
     down: Schema.Boolean,
   }),
-  Schema.Struct({ _tag: Schema.Literal("text"), text: Schema.String }),
+  /** Typed with xdotool `type`; soft keyboards send their text this way. */
+  Schema.Struct({ _tag: Schema.Literal("text"), text: Schema.String.pipe(Schema.maxLength(1000)) }),
 )
 export type DesktopInput = typeof DesktopInput.Type
 
+/** A STUN or TURN server for one WebRTC session, as `RTCPeerConnection` takes it. */
+export const DesktopRtcIceServer = Schema.Struct({
+  urls: Schema.Array(Schema.String),
+  username: Schema.optional(Schema.String),
+  credential: Schema.optional(Schema.String),
+})
+export type DesktopRtcIceServer = typeof DesktopRtcIceServer.Type
+
+/** An ICE candidate in either direction; a null `candidate` ends the viewer's gathering. */
+const DesktopRtcCandidate = Schema.Struct({
+  _tag: Schema.Literal("rtc.candidate"),
+  candidate: Schema.NullOr(Schema.String),
+  sdpMid: Schema.NullOr(Schema.String),
+  sdpMLineIndex: Schema.NullOr(Schema.Number),
+})
+
 /**
- * Client -> server flow-control ack over the desktop WebSocket (JSON text frames, sent alongside `DesktopInput`).
- * `frames` is the cumulative count of binary frames (init segment and fragments) the client has received on this
- * connection. The client sends one every ~100 ms or every 6 frames, whichever comes first. The server throttles a
- * connection only after its first ack, so clients that never ack keep the unthrottled stream.
+ * Client -> box WebRTC signaling over the desktop WebSocket, which already proved who the viewer is. `rtc.offer` carries
+ * the viewer's SDP offer (recvonly video and audio, and the `input` and `pointer` data channels); `rtc.candidate`
+ * trickles its ICE candidates; `rtc.close` ends the session; `rtc.config.request` asks for a new `rtc.config`, whose TURN
+ * credentials are fresh, before a retry on an old one.
  */
-export const DesktopAck = Schema.Struct({ _tag: Schema.Literal("stream.ack"), frames: Schema.Number })
-export type DesktopAck = typeof DesktopAck.Type
+export const DesktopRtcClientMessage = Schema.Union(
+  Schema.Struct({ _tag: Schema.Literal("rtc.offer"), sdp: Schema.String }),
+  DesktopRtcCandidate,
+  Schema.Struct({ _tag: Schema.Literal("rtc.close") }),
+  Schema.Struct({ _tag: Schema.Literal("rtc.config.request") }),
+)
+export type DesktopRtcClientMessage = typeof DesktopRtcClientMessage.Type
+
+/** Box -> client WebRTC signaling over the desktop WebSocket, next to `DesktopStatus`. */
+export const DesktopRtcServerMessage = Schema.Union(
+  Schema.Struct({
+    _tag: Schema.Literal("rtc.config"),
+    iceServers: Schema.Array(DesktopRtcIceServer),
+    iceTransportPolicy: Schema.Literal("all", "relay"),
+  }),
+  /** `retryable`: the box is at its viewer limit or negotiation failed, so a later try may work; false: no usable H.264. */
+  Schema.Struct({ _tag: Schema.Literal("rtc.unavailable"), reason: Schema.String, retryable: Schema.Boolean }),
+  Schema.Struct({ _tag: Schema.Literal("rtc.answer"), sdp: Schema.String }),
+  DesktopRtcCandidate,
+)
+export type DesktopRtcServerMessage = typeof DesktopRtcServerMessage.Type
 
 /** Server -> client events over the task event WebSocket (JSON text frames). */
 export const ServerEvent = Schema.Union(
@@ -366,19 +469,69 @@ export const CheckoutRequest = Schema.Struct({
   /** Branch to fork from. Defaults to the repository's default branch; with `pullRequest`, the pull request's base. */
   baseBranch: Schema.optional(BranchName),
   /**
-   * Start at the head of this GitHub pull request (`refs/pull/<n>/head`) instead of `baseBranch`. `baseBranch`
-   * stays the pull request's base (for opening a pull request); the checkout's diff is against the head it started at.
+   * Take over this GitHub pull request: start at its head (`refs/pull/<n>/head`) on its own branch, linked to it, so
+   * pushes update it. A pull request from a fork or not open starts on a new thread branch, still linked. `baseBranch`
+   * stays the pull request's base; the checkout's diff is against the head it started at.
    */
   pullRequest: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+  /** With `pullRequest`: start at its head on a new thread branch, unlinked, so nothing the run pushes can move it. */
+  detached: Schema.optional(Schema.Boolean),
 })
 export type CheckoutRequest = typeof CheckoutRequest.Type
 
+/** Per-user, per-box preferences for short generated text and assistant response presentation. */
+export const TextGenerationSettings = Schema.Struct({
+  /** Off preserves prompt-derived titles and unbuffered assistant streaming. */
+  enabled: Schema.optionalWith(Schema.Boolean, { default: () => true }),
+  /** Null uses the conversation's model. */
+  model: Schema.NullOr(AgentModel),
+  effort: Schema.NullOr(AgentEffort),
+  threadTitleInstructions: Schema.String,
+  responseStreamingMode: Schema.Literal("turn", "paragraph"),
+}).pipe(
+  Schema.filter((settings) =>
+    settings.model === null ||
+    settings.effort === null ||
+    modelInfo(settings.model).efforts.includes(settings.effort) ||
+    "The selected model does not support that thinking level",
+  ),
+)
+export type TextGenerationSettings = typeof TextGenerationSettings.Type
+
+export const DEFAULT_TEXT_GENERATION_SETTINGS: TextGenerationSettings = {
+  enabled: true,
+  model: null,
+  effort: null,
+  threadTitleInstructions: "",
+  responseStreamingMode: "paragraph",
+}
+
+/** Per-user, per-box preferences for how threads run, apart from generated text. */
+export const ThreadSettings = Schema.Struct({
+  /**
+   * After a run fails on its provider's usage limit, resume the thread with "Continue where you left off." when the
+   * provider reports the exhausted window's reset. Off leaves the thread failed for the user to retry.
+   */
+  autoResumeAfterUsageLimits: Schema.optionalWith(Schema.Boolean, { default: () => false }),
+})
+export type ThreadSettings = typeof ThreadSettings.Type
+
+export const DEFAULT_THREAD_SETTINGS: ThreadSettings = { autoResumeAfterUsageLimits: false }
+
 export const CreateTaskBody = Schema.Struct({
   title: Schema.optional(Schema.String),
+  /** Opt into an agent-generated title; an explicit title remains the provisional label until it arrives. */
+  generateTitle: Schema.optional(Schema.Boolean),
   /** Check this repository out before the first message, e.g. for an automation on a pull request. */
   checkout: Schema.optional(CheckoutRequest),
+  /** Point the agent at this repository and let it pick the branch or pull request to check out (`Task.pickedRepo`). */
+  pickedRepo: Schema.optional(RepoRef),
 })
 export type CreateTaskBody = typeof CreateTaskBody.Type
+
+/** Whether the thread's armed usage-limit auto-resume should run at the provider's reset. */
+export const SetUsageLimitAutoResumeBody = Schema.Struct({ autoResume: Schema.Boolean })
+export type SetUsageLimitAutoResumeBody = typeof SetUsageLimitAutoResumeBody.Type
 
 export const SendMessageBody = Schema.Struct({
   /** May be empty when `attachments` is not. */
@@ -461,7 +614,7 @@ const noFolderFiles = (): FolderFiles => ({ files: [], truncated: false })
 
 /**
  * `GET Paths.taskFiles(id)` (`?hidden=1` adds hidden files to the folders). `checkouts` has one entry per checkout, in
- * `Task.checkouts` order. `workspace` is the thread's working directory without its checkouts; `home` is the agent's
+ * `Task.checkouts` order. `workspace` is the thread workspace without its checkouts; `home` is the agent's
  * home, where desktop apps save.
  */
 export const FilesResponse = Schema.Struct({
@@ -507,6 +660,30 @@ export const HarnessCommands = Schema.Struct({
   commands: Schema.Array(HarnessCommand),
 })
 export type HarnessCommands = typeof HarnessCommands.Type
+
+/**
+ * Version 1 describes configuration and desktop prerequisites, not a guarantee of a successful start. The `platform`
+ * and `sandbox` value sets are closed within version 1: a new value is a new contract version.
+ */
+export const BoxCapabilities = Schema.Struct({
+  version: Schema.Literal(1),
+  platform: Schema.Literal("linux", "wsl", "lima", "other"),
+  sandbox: Schema.Literal("strict", "basic", "off"),
+  desktop: Schema.Literal("prerequisites-present", "unavailable"),
+  /**
+   * Model providers whose harness CLI the box found at startup, new enough to run. Absent on boxes from before it was
+   * reported. Clients offer a provider that needs no connection only when its harness is listed here.
+   */
+  harnesses: Schema.optional(Schema.Array(ModelProvider)),
+  /**
+   * The box's GPU: `none`, `static` (a GPU the machine always has), or `on-demand` (a Nest VM that borrows one from its
+   * host while needed, see `guest.ts`). Absent on boxes from before it was reported; treat as unknown.
+   */
+  gpu: Schema.optional(Schema.Literal("none", "static", "on-demand")),
+  /** True on a Nest VM: the box suspends when idle and resumes on the next request. Absent means false. */
+  suspend: Schema.optional(Schema.Boolean),
+})
+export type BoxCapabilities = typeof BoxCapabilities.Type
 
 export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
 export type Health = typeof Health.Type
@@ -624,6 +801,13 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 
 export const Paths = {
   health: "/api/health",
+  capabilities: "/api/capabilities",
+  /** GET / PUT TextGenerationSettings: the signed-in user's preferences on this box. */
+  textGenerationSettings: "/api/settings/text-generation",
+  /** GET / PUT ThreadSettings: the signed-in user's thread preferences on this box. */
+  threadSettings: "/api/settings/threads",
+  /** POST a browser's `WebRtcOffer` (box token) -> `WebRtcAnswer`: opens the direct data channel of a user box. */
+  webrtcOffer: "/api/webrtc/offer",
   /** GET -> Usage of the signed-in user in the current billing period. */
   usage: "/api/usage",
   /** GET `?tz=<IANA zone>` -> UsageActivity of the signed-in user, days counted in that zone. */
@@ -639,6 +823,8 @@ export const Paths = {
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
   /** POST cancels a child delegation and its descendants, returning the child thread. */
   taskDelegationCancel: (id: string, childId: string) => `/api/tasks/${id}/delegations/${childId}/cancel`,
+  /** PUT SetUsageLimitAutoResumeBody -> Task: turns the thread's armed auto-resume on or off. */
+  taskUsageLimit: (id: string) => `/api/tasks/${id}/usage-limit`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
   taskFiles: (id: string) => `/api/tasks/${id}/files`,
   /**
@@ -687,8 +873,8 @@ export const Paths = {
    */
   eventsWs: "/api/events",
   /**
-   * WebSocket: server sends `DesktopStatus` JSON text frames + fMP4 binary frames; client sends `DesktopInput` JSON
-   * and `DesktopAck` JSON.
+   * WebSocket: server sends `DesktopStatus` JSON text frames and WebRTC signaling (`DesktopRtcServerMessage`); the client
+   * sends WebRTC signaling (`DesktopRtcClientMessage`). Video and audio travel over WebRTC; input over its data channels.
    */
   taskDesktopWs: (id: string) => `/api/tasks/${id}/desktop/stream`,
   /** MCP (streamable HTTP) endpoint for the agent harness. */
@@ -696,11 +882,16 @@ export const Paths = {
 } as const
 
 export * from "./relay"
+export * from "./rtc"
 export * from "./control"
+export * from "./meter"
+export * from "./nest"
+export * from "./guest"
 export * from "./refs"
 export * from "./models"
 export * from "./boxtoken"
 export * from "./tool-names"
 export * from "./tool-display"
 export * from "./live-items"
+export * from "./transcript-segments"
 export * from "./thread-identity"

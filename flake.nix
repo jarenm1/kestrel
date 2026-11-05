@@ -28,6 +28,24 @@
           '';
         };
 
+        # Kept together so a stock Linux box can install the same desktop as the dev stack.
+        desktopDeps = with pkgs; [
+          weston
+          xwayland
+          openbox
+          hsetroot
+          xterm
+          xdotool
+          pulseaudio
+          ffmpeg-full.bin
+          xdamageCapture
+        ];
+        desktopEnv = assert pkgs.lib.versionAtLeast pkgs.weston.version "14"; pkgs.buildEnv {
+          name = "kestrel-desktop-deps";
+          paths = desktopDeps;
+          pathsToLink = [ "/bin" ];
+        };
+
         # Native / system dependencies. npm dependencies are pinned by bun.lock
         # and installed with `bun install` inside the dev shell.
         systemDeps = with pkgs; [
@@ -40,18 +58,9 @@
           bubblewrap
           passt         # `pasta`: each task's own network namespace (no host loopback, no abstract sockets)
           util-linux    # `nsenter`: sandbox launches join their task's network namespace
-          # Remote desktop stack (one virtual X display per task)
-          weston        # headless Wayland compositor hosting each desktop's X server
-          xwayland      # rootful X server per desktop; GPU-accelerated (glamor, DRI3) when the host has one
-          openbox       # minimal window manager; themed by packages/server/src/desktop/theme.ts
-          hsetroot      # paints the desktop wallpaper on the root window
-          xterm         # default app on agent desktops
-          xdotool       # input injection (mouse/keyboard) from the web client / MCP
-          ffmpeg-full   # x11grab capture -> H.264 -> fragmented MP4 (nixpkgs ffmpeg lacks x11grab)
-          xdamageCapture # frames from the X damage/cursor events -> ffmpeg rawvideo
           # Local control plane (`wrangler dev`); nixpkgs' build runs workerd on NixOS
           wrangler
-        ];
+        ] ++ desktopDeps;
 
         # The sandbox has no /etc/fonts, so the browser gets its font config explicitly.
         sandboxFontsConf = pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; };
@@ -92,6 +101,26 @@
             ${xtermStyle} "$@"
         '';
 
+        # Antigravity CLI 1.5 (nixpkgs has 1.4, before `agy acp --login` and `session/resume`): the same package on
+        # Google's 1.5.0 build, from the manifests its installer reads.
+        agy = pkgs.antigravity-cli.overrideAttrs (_: {
+          version = "1.5.0";
+          src = pkgs.fetchurl {
+            x86_64-linux = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/linux-x64/cli_linux_x64.tar.gz";
+              hash = "sha512-5gMfhQkpIQcF2MI5OlZluCuMOxloSm08VWyvox8m93rL8WTf7pbKhKWudnCsDMI4qXTJgcUXsmkZS9zP8nHL1Q==";
+            };
+            aarch64-linux = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/linux-arm/cli_linux_arm64.tar.gz";
+              hash = "sha512-UJUYsoIJRdsr6l4BPKQ6Sd9ceJJ8OsNBoRFSh9UmJzVuHpUGrA0gQPtGeRX7pN3pAGHQkf3b3fjdwhJjeuQBUA==";
+            };
+            aarch64-darwin = {
+              url = "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.0-5269980577660928/darwin-arm/cli_mac_arm64.tar.gz";
+              hash = "sha512-gzoKGKQY9wufuLKxpMTcVx8bFotRBKowN5RjaVlGzMAgHNSPnP0wIx62aK5tB+/htJphnMqhT37ihh+eBJ7ivg==";
+            };
+          }.${system};
+        });
+
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
         sandboxEnv = pkgs.buildEnv {
           name = "cloudagents-sandbox-env";
@@ -111,6 +140,8 @@
             bun
             claude-code
             codex
+            opencode
+            agy
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];
@@ -178,9 +209,24 @@
           # Rojo and Wally sync and package the project from the workspace; Rojo still needs its Studio plugin.
           toolkit-roblox-studio = mkToolkit "roblox-studio" [ robloxVinegar robloxXdgOpen pkgs.rojo pkgs.wally ];
         };
+        # Nest crates and the box's dependency tree (packages/host/nix/packages.nix).
+        nest = import ./packages/host/nix/packages.nix { inherit pkgs; lib = pkgs.lib; root = ./.; };
       in
       {
-        packages = toolkits;
+        packages = toolkits // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+          {
+            desktop-deps = desktopEnv;
+          }
+          // pkgs.lib.mapAttrs' (name: pkgs.lib.nameValuePair "kestrel-${name}") nest
+        ) // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          nest-guest = import ./packages/host/nix/guest.nix {
+            inherit nixpkgs system self systemDeps sandboxEnv sandboxSsl;
+            root = ./.;
+          };
+        };
+        checks = pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          nest = import ./packages/host/nix/test.nix { inherit self pkgs system; };
+        };
 
         devShells.default = pkgs.mkShell {
           packages = systemDeps;
@@ -387,5 +433,7 @@
           };
 
         formatter = pkgs.nixpkgs-fmt;
-      });
+      }) // {
+        nixosModules.nest-host = import ./packages/host/nix/host-module.nix { inherit self; };
+      };
 }

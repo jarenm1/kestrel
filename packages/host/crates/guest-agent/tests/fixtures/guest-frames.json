@@ -1,0 +1,241 @@
+{
+  "hostToGuest": [
+    {
+      "_tag": "configure",
+      "id": "req-1",
+      "hostId": "host-a",
+      "boxId": "box-1",
+      "vmId": "vm-1",
+      "cloneId": "0123456789abcdef0123456789abcdef",
+      "wallClockMs": 1767225600000,
+      "controlUrl": "https://control.example.test",
+      "publicUrl": "https://vm-1.example.test",
+      "enrollToken": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "network": {
+        "address": "10.77.0.5/32",
+        "gateway": "10.77.0.1",
+        "ipv6Address": "2001:db8:77::5/64",
+        "ipv6Gateway": "fe80::1",
+        "dns": [
+          "10.77.0.1",
+          "1.1.1.1"
+        ],
+        "depcacheUrl": "http://10.77.0.1:8081",
+        "nixCacheUrl": "http://10.77.0.1:8082",
+        "nixCachePublicKey": "kestrel-cache-1:AAAA0000="
+      }
+    },
+    {
+      "_tag": "configure",
+      "id": "req-2",
+      "hostId": "host-a",
+      "boxId": "box-1",
+      "vmId": "vm-1",
+      "cloneId": "0123456789abcdef0123456789abcdef",
+      "wallClockMs": 1767225600000,
+      "controlUrl": "https://control.example.test",
+      "publicUrl": "https://vm-1.example.test",
+      "enrollToken": null,
+      "network": {
+        "address": "10.77.0.5/32",
+        "gateway": "10.77.0.1",
+        "ipv6Address": null,
+        "ipv6Gateway": null,
+        "dns": [
+          "10.77.0.1",
+          "1.1.1.1"
+        ],
+        "depcacheUrl": null,
+        "nixCacheUrl": null,
+        "nixCachePublicKey": null
+      }
+    },
+    {
+      "_tag": "prepareSuspend",
+      "id": "req-3"
+    },
+    {
+      "_tag": "resumed",
+      "id": "req-4",
+      "wallClockMs": 1767225700000
+    },
+    {
+      "_tag": "freezeVolume",
+      "id": "req-5"
+    },
+    {
+      "_tag": "thawVolume",
+      "id": "req-6"
+    },
+    {
+      "_tag": "gpuAttached",
+      "id": "req-7",
+      "pciAddress": "0000:01:00.0"
+    },
+    {
+      "_tag": "gpuDetach",
+      "id": "req-8"
+    },
+    {
+      "_tag": "gpuDecision",
+      "id": "req-9",
+      "granted": true,
+      "error": null
+    },
+    {
+      "_tag": "gpuDecision",
+      "id": "req-11",
+      "granted": false,
+      "error": "GPU is already attached to another box"
+    },
+    {
+      "_tag": "ping",
+      "id": "req-10"
+    }
+  ],
+  "guestToHost": [
+    {
+      "_tag": "hello",
+      "protocol": 1,
+      "agentVersion": "0.1.0",
+      "bootId": "boot-1",
+      "cloneId": null,
+      "configured": false
+    },
+    {
+      "_tag": "hello",
+      "protocol": 1,
+      "agentVersion": "0.1.0",
+      "bootId": "boot-2",
+      "cloneId": "0123456789abcdef0123456789abcdef",
+      "configured": true
+    },
+    {
+      "_tag": "status",
+      "pressure": {
+        "memTotalBytes": 2147483648,
+        "memAvailableBytes": 1073741824,
+        "memSomeAvg10": 12.5,
+        "memFullAvg10": 0.25,
+        "cpuSomeAvg10": 3.75,
+        "onlineCpus": 2,
+        "loadAvg1": 0.5
+      },
+      "activity": null,
+      "gpu": "none"
+    },
+    {
+      "_tag": "status",
+      "pressure": {
+        "memTotalBytes": 2147483648,
+        "memAvailableBytes": 1073741824,
+        "memSomeAvg10": 12.5,
+        "memFullAvg10": 0.25,
+        "cpuSomeAvg10": 3.75,
+        "onlineCpus": 2,
+        "loadAvg1": 0.5
+      },
+      "activity": {
+        "runs": 1,
+        "desktops": 0,
+        "viewers": 2,
+        "recordings": 0,
+        "lastActivityAt": 1767225600000
+      },
+      "gpu": "attached"
+    },
+    {
+      "_tag": "gpuWanted",
+      "id": "req-12",
+      "wanted": true
+    },
+    {
+      "_tag": "reply",
+      "id": "req-1",
+      "ok": true
+    },
+    {
+      "_tag": "reply",
+      "id": "req-2",
+      "ok": false,
+      "error": "volume did not appear within 60s"
+    }
+  ],
+  "boxToGuest": [
+    {
+      "_tag": "hello",
+      "boxVersion": "2026.1.0"
+    },
+    {
+      "_tag": "activity",
+      "activity": {
+        "runs": 1,
+        "desktops": 0,
+        "viewers": 2,
+        "recordings": 0,
+        "lastActivityAt": 1767225600000
+      }
+    },
+    {
+      "_tag": "activity",
+      "activity": {
+        "runs": 1,
+        "desktops": 0,
+        "viewers": 2,
+        "recordings": 0,
+        "lastActivityAt": null
+      }
+    },
+    {
+      "_tag": "gpuWanted",
+      "id": "req-11",
+      "wanted": false
+    },
+    {
+      "_tag": "enrolled"
+    },
+    {
+      "_tag": "reply",
+      "id": "req-3",
+      "ok": true
+    }
+  ],
+  "guestToBox": [
+    {
+      "_tag": "quiesce",
+      "id": "req-3"
+    },
+    {
+      "_tag": "resumed",
+      "id": "req-4"
+    },
+    {
+      "_tag": "gpuState",
+      "state": "attached",
+      "pciAddress": "0000:01:00.0"
+    },
+    {
+      "_tag": "gpuState",
+      "state": "none",
+      "pciAddress": null
+    },
+    {
+      "_tag": "releaseGpu",
+      "id": "req-8"
+    },
+    {
+      "_tag": "reply",
+      "id": "req-4",
+      "ok": true
+    }
+  ],
+  "boxEnv": {
+    "boxId": "CLOUDAGENTS_BOX_ID",
+    "controlUrl": "CLOUDAGENTS_CONTROL_URL",
+    "publicUrl": "CLOUDAGENTS_BOX_PUBLIC_URL",
+    "guestAgentSocket": "CLOUDAGENTS_GUEST_AGENT_SOCKET",
+    "enrollToken": "CLOUDAGENTS_NEST_ENROLL_TOKEN",
+    "dataDir": "CLOUDAGENTS_DATA_DIR"
+  },
+  "boxUser": "kestrel-box"
+}

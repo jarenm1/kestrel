@@ -79,7 +79,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   server.registerTool(
     "github_pr_watch",
     {
-      description: "Watch one pull request from this thread. GitHub review comments and completed checks wake this thread so it can address actionable feedback. Requires exactly one checkout linked to the PR with github_pr_create or github_pr_status. Use when the user asks you to babysit or follow a PR. Watching another PR replaces this thread's watch.",
+      description: "Watch one pull request from this thread. GitHub review comments and completed checks wake this thread so it can address actionable feedback. Requires exactly one checkout linked to the PR with repo_checkout (pullRequest), github_pr_create or github_pr_status. Use when the user asks you to babysit or follow a PR. Watching another PR replaces this thread's watch.",
       inputSchema: { repo: z.string().describe("GitHub repository owner/name"), number: z.number().int().positive().describe("Pull request number") },
     },
     ({ repo, number }: { repo: string; number: number }) => guard(() => runTool(Effect.gen(function* () {

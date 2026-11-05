@@ -1,40 +1,46 @@
 import type { Message } from "@cloudagents/protocol"
 
-/** Roughly how much of the earlier conversation a handoff prompt carries, in characters. */
+/** Maximum rendered history size in characters; the new user message is never truncated. */
 export const HANDOFF_HISTORY_LIMIT = 60_000
 
 /**
- * The prompt a run starts with when the thread's latest session belongs to another provider: the conversation so
- * far (newest messages first to fit `limit`, then printed oldest first), framed as another agent's, followed by
- * the new prompt. System messages and empty text carry no conversation and are skipped.
+ * The prompt a run starts with when it needs conversation from another provider. Keep the newest whole turns
+ * within `limit`, then print oldest first. An oversized newest turn is explicitly truncated; labels and separators
+ * count toward the budget too. System messages and empty text carry no conversation and are skipped.
  */
 export const formatHandoff = (
   history: ReadonlyArray<Pick<Message, "role" | "text" | "fromThread">>,
   prompt: string,
   limit = HANDOFF_HISTORY_LIMIT,
+  mode: "full" | "delta" = "full",
 ): string => {
-  const turns: Array<{ readonly label: string; readonly text: string }> = []
-  for (const message of history) {
-    if ((message.role === "user" || message.role === "agent") && message.text.trim() !== "") {
-      const from = message.fromThread
-      const label =
-        message.role === "agent" ? "Agent" : from === undefined ? "User" : `Agent of thread "${from.title}" (${from.id})`
-      turns.push({ label, text: message.text })
-    }
-  }
-  const kept: typeof turns = []
+  const kept: string[] = []
   let used = 0
-  for (const turn of [...turns].reverse()) {
-    // The newest message is kept whole even when it alone exceeds the limit; the cap is approximate.
-    if (kept.length > 0 && used + turn.text.length + 1 > limit) break
-    kept.unshift(turn)
-    used += turn.text.length + 1
+  for (let i = history.length - 1; i >= 0; i--) {
+    const message = history[i]!
+    if ((message.role !== "user" && message.role !== "agent") || message.text.trim() === "") continue
+    const from = message.fromThread
+    const label =
+      message.role === "agent" ? "Agent" : from === undefined ? "User" : `Agent of thread "${from.title}" (${from.id})`
+    const turn = `${label}:\n${message.text}`
+    const size = turn.length + (kept.length === 0 ? 0 : 2)
+    if (used + size > limit) {
+      if (kept.length === 0 && limit > 0) {
+        const marker = "\n[Earlier conversation truncated]"
+        kept.push(limit <= marker.length ? marker.slice(0, limit) : turn.slice(0, limit - marker.length) + marker)
+      }
+      break
+    }
+    kept.push(turn)
+    used += size
   }
   if (kept.length === 0) return prompt
-  const transcript = kept.map((turn) => `${turn.label}:\n${turn.text}`).join("\n\n")
+  const transcript = kept.reverse().join("\n\n")
   return [
-    "You are continuing a conversation the user started with a different agent, which cannot continue this thread.",
-    "The conversation so far, oldest first:",
+    mode === "delta"
+      ? "Your session last ran before the following happened in this thread:"
+      : "Another agent worked on this conversation. Use the following context to continue.",
+    "The earlier messages to carry forward, oldest first:",
     "",
     transcript,
     "",

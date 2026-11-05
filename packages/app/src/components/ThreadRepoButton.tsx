@@ -1,6 +1,6 @@
 import { Schema } from "effect"
 import { GithubRepoSlug, type Checkout } from "@cloudagents/protocol"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,

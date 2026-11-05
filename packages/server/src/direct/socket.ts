@@ -30,9 +30,6 @@ export const wsStreamSocket = (ws: WebSocket): StreamSocket => {
     sendText: (data) => {
       if (open && ws.readyState === WebSocket.OPEN) ws.send(data)
     },
-    sendBinary: (data) => {
-      if (open && ws.readyState === WebSocket.OPEN) ws.send(data)
-    },
     close: (code, reason) => {
       if (!open) return
       ws.close(code, reason)

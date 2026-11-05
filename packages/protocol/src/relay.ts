@@ -26,8 +26,11 @@ export const CREDENTIALS_HEADER = "x-cloudagents-credentials"
 export interface RelayCredentials {
   readonly user: string // GitHub login of the signed-in user
   readonly github?: string // GitHub OAuth access token
-  readonly anthropic?: string // Anthropic API key
-  readonly openai?: string // OpenAI API key
+  /** Model API keys by `ModelProvider` id. The broker is the only reader. */
+  readonly providers?: Readonly<Record<string, string>>
+  /** Legacy Anthropic/OpenAI slots, still sent so boxes older than `providers` keep their keys. */
+  readonly anthropic?: string
+  readonly openai?: string
   /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
   readonly dev?: boolean
 }

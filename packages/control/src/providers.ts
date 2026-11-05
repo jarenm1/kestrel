@@ -32,6 +32,8 @@ export interface OAuthProvider extends ProviderBase {
 /** API-key provider: the user pastes a key; no OAuth. */
 export interface ApiKeyProvider extends ProviderBase {
   readonly kind: "apikey"
+  /** Setup note shown under the key field. */
+  readonly hint?: string
 }
 
 /** CLI provider: the user signs in with the CLI on the box; the box reports the login state. Nothing is stored here. */
@@ -94,8 +96,21 @@ export const PROVIDERS: readonly Provider[] = [
   },
   { id: "anthropic", label: "Anthropic", kind: "apikey" },
   { id: "openai", label: "OpenAI", kind: "apikey" },
+  { id: "openrouter", label: "OpenRouter", kind: "apikey" },
+  { id: "zai", label: "Z.ai", kind: "apikey" },
+  { id: "deepseek", label: "DeepSeek", kind: "apikey" },
+  { id: "minimax", label: "MiniMax", kind: "apikey" },
+  {
+    id: "moonshot",
+    label: "Kimi Platform (Moonshot)",
+    kind: "apikey",
+    hint: "Use a Moonshot Platform API key. Kimi Code membership keys use a different host and model ids and are not supported.",
+  },
   { id: "claude-cli", label: "Claude subscription", kind: "cli" },
   { id: "codex-cli", label: "ChatGPT subscription", kind: "cli" },
+  { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },
+  { id: "opencode", label: "OpenCode", kind: "cli" },
+  { id: "opencode-go", label: "OpenCode Go", kind: "cli" },
 ]
 
 export const findProvider = (id: string): Provider | undefined => PROVIDERS.find((p) => p.id === id)

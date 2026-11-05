@@ -7,10 +7,10 @@ import { dirname, join } from "node:path"
 import { InternalError } from "@cloudagents/protocol"
 import { desktopScaleEnv } from "../desktop/scale"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "../process"
-import { ensureTaskNet, joinTaskIpc, joinTaskNet } from "./netns"
+import { ensureTaskHolder, joinTaskDesktop, joinTaskNet } from "./netns"
 import { applyTaskLimits, busEnv, scopeArgs, type LaunchKind, type SystemdSettings } from "./systemd"
 
-export { stopAllTaskNets, stopTaskNet } from "./netns"
+export { stopAllTaskHolders, stopTaskHolder } from "./netns"
 export { initBox, removeTask, type LaunchKind, type SystemdSettings } from "./systemd"
 
 /** Where the per-task home is mounted inside the sandbox. */
@@ -81,7 +81,10 @@ const basicRoArgs = (): string[] => {
 }
 
 /** The agent CLIs and the runtime npm-installed ones need; `basic` makes these visible when installed in $HOME. */
-const HOME_TOOLS = ["claude", "codex", "node"]
+const HOME_TOOLS = ["claude", "codex", "opencode", "agy", "node"]
+
+/** Shell interpreter paths for repository scripts; targets stay in the read-only toolchain. */
+const SANDBOX_SHELLS = ["sh", "bash"]
 
 /**
  * bwrap args that let `basic` run agent CLIs installed in the box user's home, which the sandbox otherwise hides:
@@ -132,14 +135,18 @@ export interface SandboxBind {
 export interface BwrapOptions {
   /** `strict`: the nix store and the DNS/TLS files, in the task's namespaces. `basic`: the host's system directories. */
   readonly level: "strict" | "basic"
-  /** The thread workspace: the agent's working directory, bound read-write. Absolute. */
+  /** The thread workspace, bound read-write. Absolute. */
   readonly workspacePath: string
+  /** Where the process starts: `workspacePath` or a directory inside it. Absolute. */
+  readonly cwd: string
   /** The owner's mirror directory, bound read-only: checkouts read their git objects from it. Absolute. */
   readonly mirrorDir: string
   /** Host dir for the persisted per-task home, bound rw at /home/agent. */
   readonly homeDir: string
   /** X display number of the task desktop; its socket is bound when given. */
   readonly display?: number
+  /** `display` only: the task desktop's PulseAudio socket (see `pulseSocket`) is bound too. */
+  readonly audio?: boolean
   /** Exact environment of the sandboxed process. Nothing else from the host is passed. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -151,25 +158,26 @@ export interface BwrapOptions {
   readonly caBundle?: string | null
   /** `basic` only: bwrap args exposing the agent CLIs installed in the box user's home (`homeToolArgs`). */
   readonly homeToolArgs?: ReadonlyArray<string>
+  /** `strict` only: the toolchain dir (CLOUDAGENTS_SANDBOX_PATH), whose `env` becomes /usr/bin/env. */
+  readonly binPath?: string | null
 }
 
 /**
- * Returns the full argv, starting with the `bwrap` executable name. `strict` binds the nix store and runs in the task's
- * network and IPC namespaces (joined by the launch, see netns.ts); `basic` binds the host's system directories and
- * shares the host's network and IPC.
+ * Returns the full argv, starting with the `bwrap` executable name. `strict` binds the nix store; `basic` binds the
+ * host's system directories and shares the host's network. Launches run inside the namespaces they join (see netns.ts).
  */
 export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   const argv: string[] = [
     "bwrap",
     "--die-with-parent",
     "--new-session",
-    // Strict's network and IPC namespaces are the task's own, which the launch joins before bwrap (see netns.ts);
-    // basic unshares neither. The IPC namespace is shared with the desktop, so X clients can use MIT-SHM.
+    // When the launch joins the task's holder (see netns.ts), the IPC namespace is the desktop's, so X clients can use
+    // MIT-SHM; bwrap unshares neither IPC nor network itself.
     "--unshare-user-try",
     "--unshare-pid",
     "--unshare-uts",
     "--unshare-cgroup-try",
-    // That namespace maps the box user to root; keep the agent on the box user's own ids (agent CLIs refuse root).
+    // Agent CLIs refuse root, so keep the box user's own ids; a holder's namespace may map them to root (pasta's does).
     "--uid",
     String(process.getuid?.() ?? 0),
     "--gid",
@@ -200,6 +208,14 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.level === "basic") argv.push(...(opts.homeToolArgs ?? []))
   // Basic binds all of /etc, which holds these files.
   if (opts.level === "strict") {
+    if (opts.binPath) {
+      argv.push("--symlink", join(opts.binPath, "env"), "/usr/bin/env")
+      for (const shell of SANDBOX_SHELLS) {
+        const target = join(opts.binPath, shell)
+        if (!existsSync(target)) continue
+        argv.push("--symlink", target, `/bin/${shell}`, "--symlink", target, `/usr/bin/${shell}`)
+      }
+    }
     for (const file of SYSTEM_RO_FILES) {
       if (file === "/etc/ssl" && opts.caBundle) continue
       if (existsSync(file)) argv.push("--ro-bind", file, file)
@@ -208,11 +224,12 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   if (opts.caBundle) for (const path of CA_BUNDLE_PATHS) argv.push("--ro-bind", opts.caBundle, path)
   if (opts.display !== undefined) {
     const socket = x11Socket(opts.display)
+    if (opts.audio) argv.push("--bind", pulseSocket(opts.display), pulseSocket(opts.display))
     argv.push("--bind", socket, socket)
     argv.push(...gpuArgs())
   }
   for (const [name, value] of Object.entries(opts.env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", opts.workspacePath, "--", "sh", "-c", opts.command)
+  argv.push("--chdir", opts.cwd, "--", "sh", "-c", opts.command)
   return argv
 }
 
@@ -223,8 +240,9 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
  * directories and the agent CLIs installed in the box user's home (`homeToolArgs`). `network: "host"` shares the box's
  * network (sign-in needs it). `network: "none"` gives the process an empty network namespace: discovery never needs
  * the network, and the box's loopback services (broker, MCP, other tasks' servers) must stay out of reach. With
- * `workspacePath` it runs there and sees that thread workspace read-only, so project commands and skills are
- * discoverable.
+ * `workspacePath` it sees that thread workspace read-only, so project commands and skills are discoverable, and starts
+ * in `cwd` inside it (default: the workspace). `cwd` is resolved inside the sandbox, never bound from the host: a
+ * checkout the agent replaced with a symlink points at nothing mounted here.
  */
 export const cliBwrapArgs = (
   homeDir: string,
@@ -235,6 +253,7 @@ export const cliBwrapArgs = (
     readonly homeToolArgs: ReadonlyArray<string>
     readonly network: "host" | "none"
     readonly workspacePath?: string
+    readonly cwd?: string
   },
 ): string[] => {
   const workspacePath = options.workspacePath
@@ -266,11 +285,14 @@ export const cliBwrapArgs = (
     argv.push(...options.homeToolArgs)
   }
   for (const [name, value] of Object.entries(env)) argv.push("--setenv", name, value)
-  argv.push("--chdir", workspacePath ?? homeDir, "--", ...command)
+  argv.push("--chdir", options.cwd ?? workspacePath ?? homeDir, "--", ...command)
   return argv
 }
 
 export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display}`
+
+/** The task desktop's PulseAudio socket, in the holder's private X dir beside the X socket (see desktop/audio.ts). */
+export const pulseSocket = (display: number): string => `/tmp/.X11-unix/pulse-${display}`
 
 /**
  * The host GPU, for processes that can draw on the task desktop: DRM render nodes (never the card nodes, which can
@@ -295,12 +317,15 @@ const gpuArgs = (): string[] => {
   return argv
 }
 
-/** Parses ":101" into 101 when the desktop socket exists on the host. */
-export const displayNumber = (display: string | null): number | undefined => {
+/** The X socket directory the server sees for a task's namespace holder: its private /tmp/.X11-unix (see netns.ts). */
+export const x11Dir = (holder: number): string => `/proc/${holder}/root/tmp/.X11-unix`
+
+/** Parses ":101" into 101 when the desktop socket exists in `dir` (see x11Dir). */
+export const displayNumber = (display: string | null, dir: string): number | undefined => {
   const match = display === null ? null : /^:(\d+)$/.exec(display)
   if (!match) return undefined
   const n = Number(match[1])
-  return existsSync(x11Socket(n)) ? n : undefined
+  return existsSync(join(dir, `X${n}`)) ? n : undefined
 }
 
 export interface SandboxSettings {
@@ -320,9 +345,13 @@ export interface LaunchRequest {
   readonly settings: SandboxSettings
   /** Task the process belongs to; its systemd slice carries the resource limits. */
   readonly taskId: string
+  /** Resolved GitHub profile identity; dev-login sessions use a non-GitHub `.invalid` address. */
+  readonly gitIdentity: { readonly name: string; readonly email: string }
   readonly kind: LaunchKind
-  /** The thread workspace: the agent's working directory. */
+  /** The thread workspace, bound read-write; the whole of it stays reachable whatever `cwd` is. */
   readonly workspacePath: string
+  /** Where the process starts, inside `workspacePath`; defaults to `workspacePath`. */
+  readonly cwd?: string
   /** The owner's mirror directory, bound read-only into the sandbox. */
   readonly mirrorDir: string
   readonly homeDir: string
@@ -334,6 +363,8 @@ export interface LaunchRequest {
   readonly roBinds?: ReadonlyArray<string>
   /** Host dirs bound read-write inside the sandbox (a signed-in user's CLI logins). */
   readonly binds?: ReadonlyArray<SandboxBind>
+  /** Directories put first on PATH, as the launched process sees them (the run's `gh` shim). */
+  readonly pathPrefix?: ReadonlyArray<string>
 }
 
 export interface Launch {
@@ -354,14 +385,14 @@ export const sandboxSettingsOf = (config: {
   readonly sandboxPath: string | null
   readonly sandboxSslCertFile: string | null
   readonly systemd: SystemdSettings | null
-  readonly port: number
+  readonly sandboxPort: number
 }): SandboxSettings => ({
   level: config.sandbox,
   binPath: config.sandboxPath,
   // The CA bundle belongs to the Nix toolchain; `basic` uses the host's own /etc/ssl and `off` the host as is.
   sslCertFile: config.sandbox === "strict" ? config.sandboxSslCertFile : null,
   systemd: config.systemd,
-  boxPort: config.port,
+  boxPort: config.sandboxPort,
 })
 
 /**
@@ -392,33 +423,65 @@ const requireSystemdRun = (settings: SandboxSettings): Effect.Effect<string | nu
     : Effect.succeed(systemdRun)
 }
 
-/** Holder pid of the task's namespaces (started on first use) and the nsenter that joins them. Strict only. */
-const taskNamespaces = (
+/**
+ * The task's namespace holder (started on first use) and the nsenter that joins it. Strict's is pasta's, with the task's
+ * network; basic's and off's are bwrap's, without one (see netns.ts).
+ */
+const taskHolder = (
   settings: SandboxSettings,
   taskId: string,
   systemdRun: string | null,
 ): Effect.Effect<{ readonly holder: number; readonly nsenter: string }, InternalError> =>
   Effect.gen(function* () {
+    const systemd = settings.systemd && systemdRun ? { settings: settings.systemd, systemdRun } : null
+    const nsenter = findExecutable("nsenter")
+    if (nsenter === null) {
+      return yield* Effect.fail(
+        new InternalError({ message: "nsenter (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+      )
+    }
+    if (settings.level !== "strict") {
+      const bwrap = findExecutable("bwrap")
+      const sh = findExecutable("sh")
+      const sleep = findExecutable("sleep")
+      if (bwrap === null || sh === null || sleep === null) {
+        return yield* Effect.fail(
+          new InternalError({ message: "bwrap, sh and sleep must be on PATH; run inside `nix develop` or `nix run .#box`" }),
+        )
+      }
+      const holder = yield* ensureTaskHolder({
+        taskId,
+        start: { kind: "bwrap", bwrapPath: bwrap, shPath: sh, sleepPath: sleep },
+        systemd,
+      })
+      return { holder, nsenter }
+    }
     if (settings.binPath === null) {
       return yield* Effect.fail(new InternalError({ message: "CLOUDAGENTS_SANDBOX_PATH is not set" }))
     }
     const pasta = findExecutable("pasta")
-    const nsenter = findExecutable("nsenter")
     const unshare = findExecutable("unshare")
-    if (pasta === null || nsenter === null || unshare === null) {
+    if (pasta === null || unshare === null) {
       return yield* Effect.fail(
         new InternalError({
-          message: "pasta (passt), nsenter and unshare (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`",
+          message: "pasta (passt) and unshare (util-linux) must be on PATH; run inside `nix develop` or `nix run .#box`",
         }),
       )
     }
-    const holder = yield* ensureTaskNet({
+    const holder = yield* ensureTaskHolder({
       taskId,
-      boxPort: settings.boxPort,
-      pastaPath: pasta,
-      sleepPath: join(settings.binPath, "sleep"),
-      unsharePath: unshare,
-      systemd: settings.systemd && systemdRun ? { settings: settings.systemd, systemdRun } : null,
+      start: {
+        kind: "pasta",
+        pastaPath: pasta,
+        boxPort: settings.boxPort,
+        sleepPath: join(settings.binPath, "sleep"),
+        shPath: join(settings.binPath, "sh"),
+        unsharePath: unshare,
+        // util-linux's own mount: the PATH one may be NixOS's setuid wrapper, which a user namespace cannot run.
+        mountPath: join(dirname(unshare), "mount"),
+        umountPath: join(dirname(unshare), "umount"),
+      },
+      systemd,
     })
     return { holder, nsenter }
   })
@@ -468,7 +531,7 @@ export const taskPreviewFetch = (
     if (settings.level === "strict") {
       const systemdRun = yield* requireSystemdRun(settings)
       if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
-      const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
+      const { holder, nsenter } = yield* taskHolder(settings, taskId, systemdRun)
       const joined = joinTaskNet(nsenter, holder)
       file = joined[0]!
       args = [...joined.slice(1), process.execPath, ...args]
@@ -580,7 +643,7 @@ export const openTaskPreviewSocket = (
     if (settings.level === "strict") {
       const systemdRun = yield* requireSystemdRun(settings)
       if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
-      const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
+      const { holder, nsenter } = yield* taskHolder(settings, taskId, systemdRun)
       const joined = joinTaskNet(nsenter, holder)
       file = joined[0]!
       args = [...joined.slice(1), process.execPath, ...args]
@@ -646,29 +709,28 @@ export const openTaskPreviewSocket = (
   })
 
 /**
- * The task's IPC namespace, for the task desktop's X server and the box's MIT-SHM clients of it (capture,
- * screenshots): a process in it now, and the argv prefix that joins a process's IPC namespace. Starts the task's
- * namespaces if needed. Null unless strict: the other levels share the host's IPC.
+ * The task's namespace holder, for the task desktop: its X server and the box's clients of it (capture, screenshots,
+ * input) join its IPC and mount namespaces, where the desktop's socket directory is. Starts the holder if needed.
  */
 export const desktopNamespace = (
   settings: SandboxSettings,
   taskId: string,
-): Effect.Effect<{ readonly holder: number; readonly join: (pid: number) => string[] } | null, InternalError> =>
+): Effect.Effect<{ readonly holder: number; readonly x11Dir: string; readonly join: (pid: number) => string[] }, InternalError> =>
   Effect.gen(function* () {
-    if (settings.level !== "strict") return null
     const systemdRun = yield* requireSystemdRun(settings)
     if (settings.systemd) yield* applyTaskLimits(settings.systemd, taskId)
-    const { holder, nsenter } = yield* taskNamespaces(settings, taskId, systemdRun)
-    return { holder, join: (pid: number) => joinTaskIpc(nsenter, pid) }
+    const { holder, nsenter } = yield* taskHolder(settings, taskId, systemdRun)
+    return { holder, x11Dir: x11Dir(holder), join: (pid: number) => joinTaskDesktop(nsenter, pid) }
   })
 
 /**
- * Turns a launch request into the concrete process to spawn. `strict` joins the task's network and IPC namespaces
- * (`nsenter`, started on first use) and runs in bubblewrap over the nix store; `basic` runs in bubblewrap over the
- * host's system directories, sharing the host's network and IPC; `off` runs `sh -c`. The env inside is exactly the
- * base allowlist plus `req.env` (`off` adds the platform env). With systemd limits on, the process starts through
- * `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned pid is still the
- * sandbox's and process-group signals reach it.
+ * Turns a launch request into the concrete process to spawn. `strict` runs in bubblewrap over the nix store, joined to
+ * the task's holder's network, IPC and mount namespaces (started on first use); `basic` runs in bubblewrap over the
+ * host's system directories, sharing the host's network; `off` runs `sh -c`. A launch that shows the desktop joins the
+ * holder's IPC and mount namespaces at every level, so its X socket directory is the task's own (see netns.ts). The env
+ * inside is exactly the base allowlist plus `req.env` (`off` adds the platform env). With systemd limits on, the process
+ * starts through `systemd-run --scope` in the task's slice. systemd-run and nsenter exec in place, so the spawned pid is
+ * still the sandbox's and process-group signals reach it.
  */
 export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, InternalError> =>
   Effect.gen(function* () {
@@ -699,21 +761,37 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       { discard: true },
     )
     const home = agentHome(settings, req.homeDir)
+    const cwd = req.cwd ?? req.workspacePath
     const hostPath = process.env.PATH ?? "/usr/bin:/bin"
+    // Strict always joins the task's holder (for its network); the other levels only when the launch shows the desktop.
+    const ns = settings.level === "strict" || req.display !== null ? yield* taskHolder(settings, req.taskId, systemdRun) : null
+    const holderX11 = ns === null ? null : x11Dir(ns.holder)
+    const x11Display = holderX11 === null ? undefined : displayNumber(req.display, holderX11)
+    // The desktop's audio server makes this socket (desktop/audio.ts); apps get it only once it exists.
+    const pulse = x11Display !== undefined && existsSync(join(holderX11 as string, `pulse-${x11Display}`)) ? pulseSocket(x11Display) : undefined
+
     const env: Record<string, string> = {
       ...(settings.level === "off" ? platformEnv() : {}),
-      PATH:
+      PATH: [
+        ...(req.pathPrefix ?? []),
         settings.level === "strict"
           ? `${settings.binPath as string}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
           : settings.level === "basic"
             ? `${hostPath}:${SANDBOX_HOME}/${TOOLKIT_BIN}`
             : `${hostPath}:${join(req.homeDir, TOOLKIT_BIN)}`,
+      ].join(":"),
       HOME: home,
       TERM: process.env.TERM ?? "xterm",
+      // Task homes persist agent-written git config. Never borrow that identity (or guess one from repo history).
+      GIT_AUTHOR_NAME: req.gitIdentity.name,
+      GIT_AUTHOR_EMAIL: req.gitIdentity.email,
+      GIT_COMMITTER_NAME: req.gitIdentity.name,
+      GIT_COMMITTER_EMAIL: req.gitIdentity.email,
       ...(settings.sslCertFile
         ? { SSL_CERT_FILE: settings.sslCertFile, NIX_SSL_CERT_FILE: settings.sslCertFile }
         : {}),
       ...(req.display ? { DISPLAY: req.display, ...desktopScaleEnv } : {}),
+      ...(pulse ? { PULSE_SERVER: `unix:${pulse}` } : {}),
       ...req.env,
     }
 
@@ -721,38 +799,33 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       buildBwrapArgv({
         level,
         workspacePath: req.workspacePath,
+        cwd,
         mirrorDir: req.mirrorDir,
         homeDir: req.homeDir,
-        display: displayNumber(req.display),
+        display: x11Display,
+        audio: pulse !== undefined,
         env,
         command: req.command,
         roBinds: req.roBinds,
         binds: req.binds,
         caBundle: settings.sslCertFile,
         homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
+        binPath: settings.binPath,
       }).slice(1)
+    const sandbox = settings.level === "off" ? [shell(), "-c", req.command] : [bwrap as string, ...bwrapArgs(settings.level)]
+    const joinArgv =
+      ns === null ? [] : settings.level === "strict" ? joinTaskNet(ns.nsenter, ns.holder) : joinTaskDesktop(ns.nsenter, ns.holder)
+    const [file, ...args] = [...joinArgv, ...sandbox]
+    const inner = { file: file as string, args }
 
-    const inner: { file: string; args: string[] } =
-      settings.level === "off"
-        ? { file: shell(), args: ["-c", req.command] }
-        : settings.level === "basic"
-          ? { file: bwrap as string, args: bwrapArgs("basic") }
-          : yield* Effect.map(
-              taskNamespaces(settings, req.taskId, systemdRun),
-              ({ holder, nsenter }) => {
-                const [file, ...args] = joinTaskNet(nsenter, holder)
-                return { file: file as string, args: [...args, bwrap as string, ...bwrapArgs("strict")] }
-              },
-            )
-
-    if (settings.systemd === null) return { ...inner, env, cwd: req.workspacePath, home }
+    if (settings.systemd === null) return { ...inner, env, cwd, home }
 
     return {
       file: systemdRun as string,
       args: [...scopeArgs(settings.systemd, req.taskId, req.kind), inner.file, ...inner.args],
       // systemd-run needs the user bus; bwrap's --clearenv keeps it out of the sandbox.
       env: { ...env, ...busEnv() },
-      cwd: req.workspacePath,
+      cwd,
       home,
     }
   })

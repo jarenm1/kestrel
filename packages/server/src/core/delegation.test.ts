@@ -7,6 +7,7 @@ import { Config, type ServerConfig } from "../config"
 import { DesktopManager } from "../desktop"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
+import { CredentialBroker } from "../broker"
 import { GitHub } from "../github/api"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { EventHubLive } from "./events"
@@ -19,12 +20,14 @@ import { makeWebHandler } from "../http/router"
 test("delegation persists its lineage, deduplicates retries, and delivers one completion", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-delegation-"))
   const config: ServerConfig = {
-    port: 8899, host: "127.0.0.1", mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
+    port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
-    agentCommands: { anthropic: "", openai: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
+    agentCommands: { anthropic: "", openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null,
+    nest: null,
     sandboxSslCertFile: null, systemd: null, maxConcurrentRuns: 2, relay: null, direct: null, toolkitsFlake: null,
-    taskDiskMax: 1024 ** 3, desktopBundleMs: 0, githubApiUrl: "https://api.github.com",
+    taskDiskMax: 1024 ** 3, githubApiUrl: "https://api.github.com",
+    webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const choices: AgentChoice[] = []
   let testStore: StoreShape | undefined
@@ -35,13 +38,14 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
+    Layer.succeed(CredentialBroker, {} as never),
     Layer.succeed(AgentHarness, {
-      spawn: (_task: unknown, _run: unknown, _prompt: unknown, _display: unknown, _user: unknown, _session: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
+      spawn: (_task: unknown, _run: unknown, _start: unknown, _display: unknown, _user: unknown, choice: AgentChoice) => Effect.sync(() => { choices.push(choice) }),
       steer: () => Effect.succeed(false), cancel: (id: string) => testStore!.update((s) => {
         const run = s.runs.find((r) => r.id === id)
         if (run?.status === "running") { run.status = "cancelled"; run.endedAt = new Date().toISOString() }
         return Either.right(undefined)
-      }), stopAll: () => Effect.void, items: () => Effect.succeed([]),
+      }), stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
     } as never),
   )
   try {
@@ -190,7 +194,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const cancelParent = yield* core.delegate("parent", "parent-run", { ...input, requestId: "cancel-parent" })
       const cancelChild = yield* core.delegate(cancelParent.id, cancelParent.delegation!.runId!, { ...input, requestId: "cancel-child" })
       expect(Either.isLeft(yield* Effect.either(core.cancelDelegation("other", cancelParent.id)))).toBe(true)
-      const handler = yield* makeWebHandler(core, {} as never)
+      const handler = yield* makeWebHandler(core, {} as never, { version: 1, platform: "other", sandbox: "off", desktop: "unavailable" })
       const url = `http://localhost/api/tasks/parent/delegations/${cancelParent.id}/cancel`
       const forbidden = yield* Effect.promise(() => handler(new Request(url, { method: "POST", headers: { [BOX_USER_HEADER]: "other" } })))
       expect(forbidden.status).toBe(404)

@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { StringDecoder } from "node:string_decoder"
-import { Context, Data, Deferred, Effect, Layer } from "effect"
+import { Context, Data, Deferred, Effect, Fiber, Layer } from "effect"
+import { hasRenderNode } from "./requirements"
 import {
   DEFAULT_DESKTOP_QUALITY,
   DESKTOP_QUALITIES,
@@ -13,19 +14,27 @@ import {
   type DesktopStatus,
 } from "@cloudagents/protocol"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
-import { Mp4Muxer, type Mp4Piece } from "./fmp4"
+import { startDesktopAudio, type DesktopAudio } from "./audio"
+import { FlvDemuxer, type FlvEvent } from "./flv"
+import { type AvcConfig, type H264Unit, parseAvcConfig } from "./rtp"
+import { type H264EncoderProfile, WEBRTC_H264_LEVEL } from "./h264"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
+import { isWsl } from "./platform"
 import wallpaper from "./wallpaper.png" with { type: "file" }
 
 export class DesktopError extends Data.TaggedError("DesktopError")<{ readonly message: string }> {}
 
-/** What a media chunk is: the init segment, a keyframe (decodable on its own), or a delta that needs its predecessors. */
-export type MediaKind = "init" | "key" | "delta"
-
+/**
+ * What the desktop emits to a viewer: H.264 config and access units, and Opus packets from the desktop's audio, each with
+ * its RTP timestamp. `baselineOnly` is true while the viewer's payload is Constrained Baseline: the encoder stays on
+ * Baseline while such a viewer is connected (see profileFor).
+ */
 export interface DesktopSink {
+  readonly baselineOnly: boolean
   onStatus(s: DesktopStatus): void
-  onMedia(chunk: Uint8Array, kind: MediaKind): void
+  onMedia(unit: H264Unit): void
+  onAudio(opus: Uint8Array, timestamp: number): void
 }
 
 /** A process prepared by the caller (sandboxed); the desktop only spawns and tracks it. */
@@ -55,11 +64,16 @@ export interface DesktopApp {
   readonly output: string
 }
 
-/** The IPC namespace the task's sandboxes share. */
+/**
+ * The task holder's IPC and mount namespaces, which the task desktop and the box's clients of it join. The mount
+ * namespace holds the desktop's X socket directory: a private /tmp/.X11-unix, since WSLg mounts the host's read-only.
+ */
 export interface IpcNamespace {
   /** Pid of a process in it now (the task's namespace holder). */
   readonly holder: number
-  /** Argv prefix that runs a command in the IPC namespace of process `pid`. */
+  /** The X socket directory as this process sees it. */
+  readonly x11Dir: string
+  /** Argv prefix that runs a command in the IPC and mount namespaces of process `pid`. */
   readonly join: (pid: number) => ReadonlyArray<string>
 }
 
@@ -68,9 +82,9 @@ export interface DesktopStartOptions {
   readonly terminal: (display: string) => Effect.Effect<ProcessSpec, DesktopError>
   /**
    * The X server and the box's MIT-SHM clients (capture, screenshots) run in this namespace, so sandboxed apps can use
-   * MIT-SHM too. Null: everything shares the box's own.
+   * MIT-SHM too.
    */
-  readonly ipcNamespace: Effect.Effect<IpcNamespace | null, DesktopError>
+  readonly ipcNamespace: Effect.Effect<IpcNamespace, DesktopError>
 }
 
 export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
@@ -98,14 +112,18 @@ export class DesktopManager extends Context.Tag("cloudagents/DesktopManager")<
     readonly processes: (taskId: string) => Effect.Effect<ReadonlyArray<DesktopApp>, DesktopError>
     /** Terminates an app (SIGTERM, then SIGKILL) and returns its final state. */
     readonly kill: (taskId: string, id: string) => Effect.Effect<DesktopApp, DesktopError>
-    /** The live encoder's cached GOP, keyframe first, for resyncing a viewer that fell behind; null when not cached. */
-    readonly cachedGop: (taskId: string) => Effect.Effect<ReadonlyArray<Uint8Array> | null, DesktopError>
     readonly subscribe: (taskId: string, sink: DesktopSink) => Effect.Effect<Effect.Effect<void>, DesktopError>
     readonly watchStatus: (listener: (s: DesktopStatus) => void) => Effect.Effect<Effect.Effect<void>>
     /** Sets how the live desktop is streamed; a running encoder restarts at the new size and frame rate. */
     readonly setQuality: (taskId: string, quality: DesktopQuality) => Effect.Effect<DesktopStatus, DesktopError>
+    /** Re-picks the live encoder's profile after a viewer's payload changed (see profileFor). Synchronous; no-op without a live encoder. */
+    readonly refreshProfile: (taskId: string) => Effect.Effect<void>
     /** Desktops that are starting or running (a failed desktop has already had its processes terminated). */
     readonly activeCount: () => Effect.Effect<number>
+    /** The GPU is available: desktops restart on the GPU renderer. */
+    readonly attachHardwareRender: Effect.Effect<void, DesktopError>
+    /** The GPU is going away: desktops on the GPU stop now and come back on software rendering in the background. */
+    readonly releaseHardwareRender: Effect.Effect<void, DesktopError>
     readonly stopAll: () => Effect.Effect<void>
   }
 >() {}
@@ -140,22 +158,32 @@ const LINGER_MS = 15_000
 const MAX_ENCODER_RESTARTS = 3
 /** Unexpected xdotool helper exits tolerated per desktop before it fails. */
 const MAX_INPUT_RESTARTS = 3
-/** NVENC is skipped for this long after it reports a busy GPU (session limit). */
+/** Leave most of the desktop readiness budget for CPU fallback if NVENC never produces its config. */
+const NVENC_START_TIMEOUT_MS = 5_000
+/** NVENC is skipped for this long after it reports a busy GPU (session limit) or misses its startup deadline. */
 const NVENC_BUSY_BACKOFF_MS = 30_000
 /** Process-wide: NVENC that fails to start for a non-busy reason is not tried again. */
 let nvencDisabled = false
 let nvencBusyUntil = 0
+/** Process-wide: this ffmpeg has NVENC but not the CUDA filters (common in distro builds), so NVENC scales on the CPU. */
+let cudaFiltersMissing = false
+/** Boot waits this long for the audio server, so apps launched as the desktop comes up get its socket (see prepareLaunch). */
+const AUDIO_BOOT_WAIT_MS = 3_000
+/** Audio that dies is started again this many times per desktop, after this long. Running apps keep their dead socket. */
+const MAX_AUDIO_RESTARTS = 3
+const AUDIO_RESTART_DELAY_MS = 1_000
 
 type EncoderKind = "nvenc" | "x264"
 
-/** One ffmpeg encoder process and the muxer for its stdout. */
+/** One ffmpeg encoder process and the demuxer for its FLV stdout. */
 interface Encoder {
   readonly kind: EncoderKind
-  readonly muxer: Mp4Muxer
+  readonly demux: FlvDemuxer
   /** Set right after spawn. */
   child: ChildProcess | null
-  /** The init segment arrived: later exits are restarts, not boot failures. */
+  /** The config arrived: later exits are restarts, not boot failures. */
   initialized: boolean
+  startupTimer: NodeJS.Timeout | undefined
   /** Tail of stderr, for classifying why NVENC would not start. */
   stderr: string
 }
@@ -172,6 +200,14 @@ interface PendingInput {
   readonly move: boolean
 }
 
+/** What a desktop needs to come back after a stop: its launch settings and the viewers that were watching it. */
+interface Relaunch {
+  readonly taskId: string
+  readonly terminal: DesktopStartOptions["terminal"]
+  readonly ipcNamespace: DesktopStartOptions["ipcNamespace"]
+  readonly sinks: ReadonlyArray<DesktopSink>
+}
+
 interface Session {
   readonly taskId: string
   readonly num: number
@@ -181,14 +217,18 @@ interface Session {
   /** Size and frame rate cap of the stream; the encoder is started with it. */
   quality: DesktopQuality
   /**
-   * Argv prefix for the box's MIT-SHM clients: joins the X server's IPC namespace. The server lives as long as the
-   * session, so the target cannot go stale the way a holder pid could. Set by boot once it is spawned; empty without
-   * a namespace.
+   * Argv prefix for the box's clients of the desktop: joins the X server's IPC and mount namespaces (the mount namespace
+   * holds its socket directory). The server lives as long as the session, so the target cannot go stale the way a
+   * holder pid could. Set by boot once it is spawned; empty without a namespace.
    */
   ipc: ReadonlyArray<string>
   /** weston's XDG_RUNTIME_DIR (its Wayland socket); removed when the desktop stops. Null until boot makes it. */
   runtimeDir: string | null
-  /** Completes when the init segment has been parsed (running) or fails. */
+  /** The renderer weston was started with: `gl` on the GPU, `pixman` in software. Null until boot starts it. */
+  renderer: "gl" | "pixman" | null
+  /** The boot, forked so a stop can cancel it. Null until startDesktop forks it. */
+  boot: Fiber.RuntimeFiber<unknown, unknown> | null
+  /** Completes when the stream's config has been parsed (running) or fails. */
   readonly ready: Deferred.Deferred<void, DesktopError>
   /** Live child processes; each is a process-group leader (detached). */
   readonly procs: Set<ChildProcess>
@@ -197,10 +237,12 @@ interface Session {
   readonly apps: Map<string, AppRecord>
   /** Live encoder, or null while idle (no viewers past the linger) or after failure. */
   encoder: Encoder | null
+  /** The profile the live encoder produces (see profileFor); set when it starts. */
+  profile: H264EncoderProfile
   state: DesktopState
   error: string | null
-  mime: string | null
-  init: Uint8Array | null
+  /** The stream's H.264 config once the encoder produces it; null before that, and after a failure or stop. */
+  config: AvcConfig | null
   /** Fragments of the current GOP, keyframe first; null when not cached (restarting, or over the cap). */
   gop: Uint8Array[] | null
   gopBytes: number
@@ -212,6 +254,11 @@ interface Session {
   /** The long-lived xdotool helper; null until boot starts it and while it is being restarted. */
   input: InputPipe | null
   inputRestartsLeft: number
+  /** The desktop's Opus source (PulseAudio and capture), or null when audio is unavailable. */
+  audio: DesktopAudio | null
+  /** Ends this desktop's subscription to `audio`, which keeps its capture running; null while nobody is listening. */
+  audioListener: (() => void) | null
+  audioRestartsLeft: number
 }
 
 /** Keeps the tail of a launched app's output. Decodes per stream so UTF-8 split across chunks survives. */
@@ -250,8 +297,8 @@ const toErr = (e: unknown): DesktopError =>
 
 const pixel = (v: number, max: number) => Math.min(max - 1, Math.max(0, Math.round(v * max)))
 
-/** One click per 50 units of wheel delta, between 1 and 10 clicks. */
-const wheelClicks = (delta: number) => Math.min(10, Math.max(1, Math.round(Math.abs(delta) / 50)))
+/** Notches per mouse.wheel event in each direction. The viewer sends notch counts; a larger count is clamped to this. */
+const WHEEL_NOTCH_LIMIT = 10
 
 /** "ctrl+c" -> ["ctrl", "c"]. The plus key is named "plus", so "+" and "ctrl++" both name it. */
 const keyParts = (key: string): string[] => {
@@ -273,9 +320,11 @@ const xdotoolArgs = (e: DesktopInput): string[] => {
       ]
     case "mouse.wheel": {
       // X buttons: 4 = up, 5 = down, 6 = left, 7 = right.
+      const dy = Math.max(-WHEEL_NOTCH_LIMIT, Math.min(WHEEL_NOTCH_LIMIT, e.dy))
+      const dx = Math.max(-WHEEL_NOTCH_LIMIT, Math.min(WHEEL_NOTCH_LIMIT, e.dx))
       const args: string[] = []
-      if (e.dy !== 0) args.push("click", "--repeat", String(wheelClicks(e.dy)), e.dy > 0 ? "5" : "4")
-      if (e.dx !== 0) args.push("click", "--repeat", String(wheelClicks(e.dx)), e.dx > 0 ? "7" : "6")
+      if (dy !== 0) args.push("click", "--repeat", String(Math.abs(dy)), dy > 0 ? "5" : "4")
+      if (dx !== 0) args.push("click", "--repeat", String(Math.abs(dx)), dx > 0 ? "7" : "6")
       return args
     }
     case "key": {
@@ -308,13 +357,15 @@ const xdotoolLines = (e: DesktopInput): string[] => {
 }
 
 /**
- * Encoder arguments by kind. Both produce High-profile 4:2:0 H.264 with a GOP of `gop` frames and no B-frames.
- * NVENC takes the raw bgr0 frames directly and converts to 4:2:0 on the GPU (adding `-pix_fmt yuv420p`
- * moves that conversion to the CPU: ~50% of a core at 1080p60). `-delay 0 -zerolatency 1` stop NVENC from
- * holding output frames: screen change to fragment on stdout drops from 66 ms to 33 ms. p4/ll costs the same
- * CPU and latency as p1/ull at ~25-30% less bitrate on text and scrolling.
+ * Encoder arguments by kind and profile. Both produce 4:2:0 H.264 at level 4.0 (WEBRTC_H264_LEVEL) with a GOP of `gop`
+ * frames and no B-frames. `profile` is "high" (High, no B-frames) or "baseline" (Constrained Baseline); see profileFor.
+ * NVENC gets the frames as CUDA bgr0 surfaces (see ffmpegArgs) and converts them to 4:2:0 on the GPU. `-delay 0
+ * -zerolatency 1` stop NVENC from holding output frames: screen change to frame on stdout drops from 66 ms to 33 ms.
+ * p4/ll costs the same CPU and latency as p1/ull at ~25-30% less bitrate on text and scrolling. Both profiles need 4:2:0
+ * output: an RGB 4:4:4 source makes NVENC write High 4:4:4 whatever the profile says.
  */
-const encoderArgs = (kind: EncoderKind, gop: number): readonly string[] => {
+const encoderArgs = (kind: EncoderKind, gop: number, profile: H264EncoderProfile): readonly string[] => {
+  const profileArgs = ["-profile:v", profile, "-level:v", WEBRTC_H264_LEVEL]
   switch (kind) {
     case "nvenc":
       return [
@@ -329,7 +380,7 @@ const encoderArgs = (kind: EncoderKind, gop: number): readonly string[] => {
         "-maxrate", "20M",
         "-bufsize", "20M",
         "-bf", "0",
-        "-profile:v", "high",
+        ...profileArgs,
         "-g", String(gop),
         "-forced-idr", "1",
       ]
@@ -338,7 +389,8 @@ const encoderArgs = (kind: EncoderKind, gop: number): readonly string[] => {
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-tune", "zerolatency",
-        "-profile:v", "high",
+        ...profileArgs,
+        "-bf", "0",
         "-crf", "23",
         "-pix_fmt", "yuv420p",
         "-g", String(gop),
@@ -349,18 +401,28 @@ const encoderArgs = (kind: EncoderKind, gop: number): readonly string[] => {
 
 /**
  * ffmpeg reads the raw bgr0 frames that xdamage-capture writes to its stdin (xdamage-capture runs ffmpeg as its child)
- * at the desktop's size, and scales them to the quality's. xdamage-capture caps the frame rate, so the rate needs no
- * filter (an fps filter would duplicate frames on a static desktop).
+ * at the desktop's size, and scales them to the quality's. Frames pass through at their arrival times (`-fps_mode passthrough`);
+ * cfr would hold each frame until the next one arrives, adding up to a keepalive interval of latency. See ffmpegArgs.
+ * NVENC: the frames are uploaded to CUDA at full size and scale_cuda shrinks them there. The CPU area scale cost ~75%
+ * of a core at 2560x1440 -> 1920x1080 30 fps. scale_cuda takes bgr0 as-is; a format change before it fails in this build.
  */
-const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
+export const ffmpegArgs = (
+  kind: EncoderKind,
+  quality: DesktopQuality,
+  profile: H264EncoderProfile,
+  cudaFilters = true,
+): string[] => {
   const { width, height, fps } = DESKTOP_QUALITIES[quality]
+  const gpu = kind === "nvenc" && cudaFilters
+  // NVENC without CUDA filters takes the CPU's scale as 4:2:0: its RGB input would make it write High 4:4:4.
+  const cpuScale = `scale=${width}:${height}:flags=area${kind === "nvenc" ? ",format=yuv420p" : ""}`
   return [
     "-hide_banner",
     "-loglevel",
     "error",
-    // Frames arrive when the screen changes: no input buffering, timestamps from the arrival clock.
-    "-fflags",
-    "nobuffer",
+    ...(gpu ? ["-init_hw_device", "cuda=cu:0", "-filter_hw_device", "cu"] : []),
+    // No -fflags nobuffer: with it, the x264 fallback after a stalled NVENC never produced an init segment on a still
+    // desktop (startup.integration.test.ts, real xterm). Timestamps still come from the arrival clock.
     "-f",
     "rawvideo",
     "-pix_fmt",
@@ -371,20 +433,22 @@ const ffmpegArgs = (kind: EncoderKind, quality: DesktopQuality): string[] => {
     "1",
     "-i",
     "pipe:0",
-    // Area averaging keeps downscaled text legible.
+    // Area averaging keeps downscaled text legible on the CPU path. scale_cuda uses bicubic (interp_algo 3): the best of
+    // its kernels against the area reference (lanczos, 4, scored ~11 dB lower), and ~3 dB under the CPU area filter.
     "-vf",
-    `scale=${width}:${height}:flags=area`,
+    gpu ? `hwupload_cuda,scale_cuda=${width}:${height}:interp_algo=3` : cpuScale,
     // GOP backstop: equal to KEYFRAME_INTERVAL_S at the capped rate, so the clock normally fires first.
-    ...encoderArgs(kind, fps * KEYFRAME_INTERVAL_S),
+    ...encoderArgs(kind, fps * KEYFRAME_INTERVAL_S, profile),
     "-force_key_frames",
     `expr:gte(t-prev_forced_t,${KEYFRAME_INTERVAL_S})`,
-    // Keep the capture clock: a static desktop leaves gaps in the timeline instead of duplicating frames.
+    // Passthrough: each frame is emitted as it arrives. xdamage-capture sends a keepalive frame each second while the
+    // screen is still, so Chrome does not freeze long enough to send a PLI (about every 3 s), which replays the GOP.
     "-fps_mode",
     "passthrough",
     "-an",
     "-f",
     "flv",
-    // One video tag per frame: the muxer completes each frame as its tag arrives.
+    // One video tag per frame: the demuxer completes each frame as its tag arrives.
     "-flush_packets",
     "1",
     "pipe:1",
@@ -410,8 +474,8 @@ const terminate = async (procs: Iterable<ChildProcess>) => {
   for (const p of list) killProcessGroup(p.pid, "SIGKILL")
 }
 
-const waitForSocket = async (s: Session) => {
-  const socket = `/tmp/.X11-unix/X${s.num}`
+const waitForSocket = async (s: Session, x11Dir: string) => {
+  const socket = join(x11Dir, `X${s.num}`)
   const deadline = Date.now() + X_SOCKET_TIMEOUT_MS
   while (!existsSync(socket)) {
     if (s.state !== "starting") throw new Error(s.error ?? "the X server stopped before accepting connections")
@@ -419,14 +483,6 @@ const waitForSocket = async (s: Session) => {
     const { promise, resolve } = Promise.withResolvers<void>()
     setTimeout(resolve, 50)
     await promise
-  }
-}
-
-const hasRenderNode = (): boolean => {
-  try {
-    return readdirSync("/dev/dri").some((name) => name.startsWith("renderD"))
-  } catch {
-    return false
   }
 }
 
@@ -514,6 +570,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
   DesktopManager,
   Effect.gen(function* () {
     const sessions = new Map<string, Session>()
+    let hardwareRender = true
+    /** The renderer a desktop booted now gets: the GPU when it is wanted and a render node exists. */
+    const desiredRenderer = (): "gl" | "pixman" => (hardwareRender && hasRenderNode() ? "gl" : "pixman")
     const watchers = new Set<(s: DesktopStatus) => void>()
     /** Openbox config, theme and wallpaper shared by this process's desktops; written on the first boot, removed on exit. */
     let openboxConfig: { readonly dir: string; readonly rc: string; readonly wallpaper: string } | null = null
@@ -529,7 +588,6 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         height: HEIGHT,
         fps: DESKTOP_QUALITIES[quality].fps,
         quality,
-        mime: live ? s.mime : null,
         error: live ? s.error : null,
       }
     }
@@ -549,8 +607,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     /** Forgets the encoder and everything cached from it. The caller stops the process. */
     const detachEncoder = (s: Session) => {
       cancelLinger(s)
+      clearTimeout(s.encoder?.startupTimer)
       s.encoder = null
-      s.init = null
+      s.config = null
       s.gop = null
       s.gopBytes = 0
       s.awaiting.clear()
@@ -565,6 +624,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       detachEncoder(s)
       Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: full })))
       publish(s)
+      s.audio?.stop()
       void terminate(s.procs)
     }
 
@@ -578,65 +638,100 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
 
     /** Starts the linger countdown once the last viewer has left a live encoder. */
     const scheduleStop = (s: Session) => {
-      if (s.sinks.size > 0 || s.encoder === null || s.lingerTimer !== null) return
+      if (s.sinks.size > 0 || s.lingerTimer !== null) return
+      if (s.encoder === null) {
+        stopListeningToAudio(s)
+        return
+      }
       s.lingerTimer = setTimeout(() => {
         s.lingerTimer = null
-        if (s.sinks.size === 0) stopEncoder(s)
+        if (s.sinks.size > 0) return
+        stopEncoder(s)
+        stopListeningToAudio(s)
       }, LINGER_MS)
+    }
+
+    /** Runs the audio capture for this desktop's viewers. A no-op until the audio server is up (see startAudio). */
+    const listenToAudio = (s: Session) => {
+      if (s.audio === null || s.audioListener !== null) return
+      s.audioListener = s.audio.subscribe((packet) => {
+        for (const sink of s.sinks) sink.onAudio(packet.opus, packet.timestamp)
+      })
+    }
+
+    const stopListeningToAudio = (s: Session) => {
+      s.audioListener?.()
+      s.audioListener = null
     }
 
     const onEncoderBytes = (s: Session, enc: Encoder, data: Buffer) => {
       if (s.encoder !== enc || (s.state !== "starting" && s.state !== "running")) return
-      let pieces: Mp4Piece[]
+      let events: FlvEvent[]
       try {
-        pieces = enc.muxer.push(data)
+        events = enc.demux.push(data)
       } catch (e) {
         failSession(s, toErr(e).message)
         return
       }
-      for (const piece of pieces) {
-        if (piece.kind === "init") {
+      for (const event of events) {
+        if (event.kind === "config") {
+          let config: AvcConfig
+          try {
+            config = parseAvcConfig(event.avcc.slice())
+          } catch (e) {
+            failSession(s, toErr(e).message)
+            return
+          }
           enc.initialized = true
+          clearTimeout(enc.startupTimer)
+          enc.startupTimer = undefined
           s.restartsLeft = MAX_ENCODER_RESTARTS
-          s.init = piece.bytes
-          s.mime = `video/mp4; codecs="${piece.codec}"`
+          s.config = config
           s.state = "running"
           Deferred.unsafeDone(s.ready, Effect.void)
-          // Status first: a viewer needs the MIME type (and "running") before it can decode the init segment.
           publish(s)
-          for (const sink of s.sinks) sink.onMedia(piece.bytes, "init")
+          for (const sink of s.sinks) sink.onMedia({ kind: "config", config })
           scheduleStop(s)
           continue
         }
-        if (piece.keyframe) {
-          s.gop = [piece.bytes]
-          s.gopBytes = piece.bytes.length
+        // Copied: the demuxer's views are only valid until its next push.
+        const au = event.data.slice()
+        if (event.keyframe) {
+          s.gop = [au]
+          s.gopBytes = au.length
           s.awaiting.clear()
         } else if (s.gop !== null) {
-          s.gop.push(piece.bytes)
-          s.gopBytes += piece.bytes.length
+          s.gop.push(au)
+          s.gopBytes += au.length
           if (s.gopBytes > GOP_CACHE_MAX_BYTES) {
             s.gop = null
             s.gopBytes = 0
           }
         }
-        const kind: MediaKind = piece.keyframe ? "key" : "delta"
-        for (const sink of s.sinks) if (piece.keyframe || !s.awaiting.has(sink)) sink.onMedia(piece.bytes, kind)
+        const unit: H264Unit = { kind: event.keyframe ? "key" : "delta", au }
+        for (const sink of s.sinks) if (event.keyframe || !s.awaiting.has(sink)) sink.onMedia(unit)
       }
     }
 
+    // WSL desktops use CPU encoding: trying NVENC there can consume the first startup timeout.
+    const wsl = isWsl()
     /** NVENC when it is usable, libx264 otherwise. */
-    const preferredEncoder = (): EncoderKind => (!nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
+    const preferredEncoder = (): EncoderKind => (!wsl && !nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
+
+    /** Constrained Baseline while a connected viewer decodes only Baseline; High otherwise (see h264.ts). */
+    const profileFor = (s: Session): H264EncoderProfile =>
+      [...s.sinks].some((sink) => sink.baselineOnly) ? "baseline" : "high"
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
-      const { width, height, fps } = DESKTOP_QUALITIES[s.quality]
-      const enc: Encoder = { kind, muxer: new Mp4Muxer(width, height, fps), child: null, initialized: false, stderr: "" }
-      s.init = null
+      const { fps } = DESKTOP_QUALITIES[s.quality]
+      const enc: Encoder = { kind, demux: new FlvDemuxer(), child: null, initialized: false, startupTimer: undefined, stderr: "" }
+      s.config = null
       s.gop = null
       s.gopBytes = 0
       s.awaiting = new Set(s.sinks)
-      const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality)]
+      s.profile = profileFor(s)
+      const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality, s.profile, !cudaFiltersMissing)]
       enc.child = spawnTracked(s, "xdamage-capture", capture, {
         critical: false,
         prefix: s.ipc,
@@ -647,6 +742,61 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         onExit: (reason) => onEncoderExit(s, enc, reason),
       })
       s.encoder = enc
+      if (kind === "nvenc") {
+        enc.startupTimer = setTimeout(() => {
+          if (s.encoder !== enc || enc.initialized || (s.state !== "starting" && s.state !== "running")) return
+          // A timeout can be transient (slow startup or a quiet display), so retry hardware on a later start.
+          nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
+          console.warn(`desktop ${s.display}: nvenc did not initialize within ${NVENC_START_TIMEOUT_MS} ms; using libx264`)
+          stopEncoder(s)
+          launchEncoder(s, "x264")
+        }, NVENC_START_TIMEOUT_MS)
+      }
+    }
+
+    /**
+     * Starts the desktop's audio alongside the X server boot; the returned promise settles when it is up or has failed.
+     * A desktop without audio still serves video and input. The audio m-line is answered sendonly for every viewer
+     * (webrtc.ts), so audio that becomes ready after a viewer's offer starts flowing to it without renegotiation.
+     */
+    const startAudio = (s: Session, x11Dir: string): Promise<void> =>
+      startDesktopAudio({
+        display: s.display,
+        x11Dir,
+        spawn: (command, args, env) => spawnTracked(s, command, args, { critical: false, prefix: s.ipc, env }),
+        onError: (message) => {
+          console.warn(`desktop ${s.display}: audio: ${message}`)
+          s.audio = null
+          s.audioListener = null
+          if (s.audioRestartsLeft === 0) return
+          s.audioRestartsLeft--
+          setTimeout(() => {
+            if (s.state === "starting" || s.state === "running") void startAudio(s, x11Dir)
+          }, AUDIO_RESTART_DELAY_MS)
+        },
+      }).then(
+        (audio) => {
+          if (audio === null) return
+          if (s.state === "stopped" || s.state === "failed") {
+            audio.stop()
+            return
+          }
+          s.audio = audio
+          if (s.sinks.size > 0) listenToAudio(s)
+        },
+        (e) => console.warn(`desktop ${s.display}: audio failed to start: ${toErr(e).message}`),
+      )
+
+    /**
+     * Restarts a live encoder whose profile no longer matches the connected viewers. Viewers wait for its keyframe, as
+     * after any start. With no live encoder nothing restarts: the next start picks the profile itself.
+     */
+    const applyProfile = (s: Session) => {
+      const enc = s.encoder
+      if (enc === null || (s.state !== "starting" && s.state !== "running") || s.sinks.size === 0) return
+      if (profileFor(s) === s.profile) return
+      stopEncoder(s)
+      launchEncoder(s, enc.kind)
     }
 
     /** Starts an encoder from a process callback, where a spawn error must fail the desktop instead of throwing. */
@@ -663,6 +813,13 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       detachEncoder(s)
       const why = `${enc.kind} encoder exited (${reason})`
       if (enc.kind === "nvenc" && !enc.initialized) {
+        // This ffmpeg lacks the CUDA filters, which says nothing about NVENC: scale on the CPU and keep the GPU encoder.
+        if (!cudaFiltersMissing && /No such filter: '(?:hwupload|scale)_cuda'/.test(enc.stderr)) {
+          cudaFiltersMissing = true
+          console.warn(`desktop ${s.display}: ffmpeg has no CUDA filters; nvenc scales on the CPU`)
+          launchEncoder(s, "nvenc")
+          return
+        }
         // NVENC could not start. A busy GPU (session limit) is retried later; anything else disables NVENC.
         if (/OpenEncodeSessionEx|out of memory/i.test(enc.stderr)) nvencBusyUntil = Date.now() + NVENC_BUSY_BACKOFF_MS
         else nvencDisabled = true
@@ -734,6 +891,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const startInput = (s: Session) => {
       const child: ChildProcess = spawnTracked(s, "xdotool", ["-"], {
         critical: false,
+        prefix: s.ipc,
         stdin: true,
         onStderr: (d) => {
           Effect.runFork(Effect.logWarning(`desktop ${s.display} input: ${d.toString().trim()}`))
@@ -782,6 +940,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         // Idle time 0: an idle output stops the frame callbacks that pace Xwayland's Present. weston exits with Xwayland.
         // Only the /tmp/.X11-unix/X<n> file socket: sandboxes share the host network namespace, so the abstract socket
         // (`local`) would let every task's agent reach every display.
+        const renderer = desiredRenderer()
+        s.renderer = renderer
         const server = yield* Effect.try({
           try: () => {
             const runtimeDir = mkdtempSync(join(tmpdir(), `kestrel-wayland-${s.num}-`))
@@ -797,7 +957,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
               "weston",
               [
                 "--backend=headless",
-                `--renderer=${hasRenderNode() ? "gl" : "pixman"}`,
+                `--renderer=${renderer}`,
                 `--width=${WIDTH}`,
                 `--height=${HEIGHT}`,
                 "--shell=kiosk",
@@ -813,14 +973,16 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
                 "-nolisten",
                 "local",
               ],
-              { critical: true, prefix: ns === null ? [] : ns.join(ns.holder), env },
+              { critical: true, prefix: ns.join(ns.holder), env },
             )
           },
           catch: toErr,
         })
-        // Xwayland is weston's child, so it is in the same IPC namespace.
-        if (ns !== null && server.pid !== undefined) s.ipc = ns.join(server.pid)
-        yield* Effect.tryPromise({ try: () => waitForSocket(s), catch: toErr })
+        // Xwayland is weston's child, so it is in the same IPC and mount namespaces.
+        if (server.pid !== undefined) s.ipc = ns.join(server.pid)
+        // Audio boots in parallel with Xwayland: its Pulse server and null sink take about two seconds.
+        const audioUp = startAudio(s, ns.x11Dir)
+        yield* Effect.tryPromise({ try: () => waitForSocket(s, ns.x11Dir), catch: toErr })
         yield* Effect.try({ try: () => startInput(s), catch: toErr })
         const shared = yield* Effect.try({
           try: () => {
@@ -844,9 +1006,11 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           ),
           Effect.catchAll((e) => Effect.logWarning(`desktop ${s.display}: no wallpaper: ${e.message}`)),
         )
+        // A launch only gets the audio socket if it exists by then, and nothing can launch before `ready`.
+        yield* Effect.promise(() => Promise.race([audioUp, Bun.sleep(AUDIO_BOOT_WAIT_MS)]))
         yield* Effect.try({
           try: () => {
-            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false })
+            spawnTracked(s, "openbox", ["--sm-disable", "--config-file", shared.rc], { critical: false, prefix: s.ipc })
             startEncoder(s, preferredEncoder())
           },
           catch: toErr,
@@ -884,6 +1048,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         Deferred.unsafeDone(s.ready, Effect.fail(new DesktopError({ message: "desktop stopped" })))
         publish(s)
         s.sinks.clear()
+        s.audio?.stop()
+        // Before terminating: a boot still running would spawn children after the snapshot below.
+        if (s.boot !== null) yield* Fiber.interrupt(s.boot)
         yield* Effect.promise(() => terminate(s.procs))
         if (s.runtimeDir !== null) rmSync(s.runtimeDir, { recursive: true, force: true })
       })
@@ -912,61 +1079,185 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       if (openboxConfig !== null) rmSync(openboxConfig.dir, { recursive: true, force: true })
     })
 
-    return DesktopManager.of({
-      start: (taskId, opts) =>
-        Effect.gen(function* () {
-          if (process.platform !== "linux") {
-            return yield* Effect.fail(new DesktopError({ message: "the task desktop needs Linux (Xwayland, x11grab)" }))
-          }
-          if (sessions.get(taskId)?.state === "failed") yield* stopTask(taskId)
-          const ready = yield* Deferred.make<void, DesktopError>()
-          const claim = yield* Effect.try({
-            try: () => {
-              const existing = sessions.get(taskId)
-              if (existing) return { s: existing, created: false }
-              // Synchronous reservation: no yield point between picking and registering the display.
-              const num = pickDisplay()
-              const s: Session = {
-                taskId,
-                num,
-                display: `:${num}`,
-                terminal: opts.terminal,
-                ipcNamespace: opts.ipcNamespace,
-                quality: DEFAULT_DESKTOP_QUALITY,
-                ipc: [],
-                runtimeDir: null,
-                ready,
-                procs: new Set(),
-                sinks: new Set(),
-                apps: new Map(),
-                encoder: null,
-                input: null,
-                state: "starting",
-                error: null,
-                mime: null,
-                init: null,
-                gop: null,
-                gopBytes: 0,
-                awaiting: new Set(),
-                lingerTimer: null,
-                restartsLeft: MAX_ENCODER_RESTARTS,
-                inputRestartsLeft: MAX_INPUT_RESTARTS,
-                stderrTail: "",
-              }
-              sessions.set(taskId, s)
-              // Viewers show the boot state while it comes up; the start call itself only returns once it is running.
-              publish(s)
-              return { s, created: true }
-            },
-            catch: toErr,
-          })
-          if (!claim.created) return yield* awaitReady(claim.s)
-          return yield* boot(claim.s).pipe(
+    const startDesktop = (taskId: string, opts: DesktopStartOptions) =>
+      Effect.gen(function* () {
+        if (process.platform !== "linux") {
+          return yield* Effect.fail(new DesktopError({ message: "the task desktop needs Linux (Xwayland, x11grab)" }))
+        }
+        if (sessions.get(taskId)?.state === "failed") yield* stopTask(taskId)
+        const ready = yield* Deferred.make<void, DesktopError>()
+        const claim = yield* Effect.try({
+          try: () => {
+            const existing = sessions.get(taskId)
+            if (existing) return { s: existing, created: false }
+            // Synchronous reservation: no yield point between picking and registering the display.
+            const num = pickDisplay()
+            const s: Session = {
+              taskId,
+              num,
+              display: `:${num}`,
+              terminal: opts.terminal,
+              ipcNamespace: opts.ipcNamespace,
+              quality: DEFAULT_DESKTOP_QUALITY,
+              ipc: [],
+              runtimeDir: null,
+              renderer: null,
+              boot: null,
+              ready,
+              procs: new Set(),
+              sinks: new Set(),
+              apps: new Map(),
+              encoder: null,
+              profile: "high",
+              input: null,
+              state: "starting",
+              error: null,
+              config: null,
+              audio: null,
+              audioListener: null,
+              audioRestartsLeft: MAX_AUDIO_RESTARTS,
+              gop: null,
+              gopBytes: 0,
+              awaiting: new Set(),
+              lingerTimer: null,
+              restartsLeft: MAX_ENCODER_RESTARTS,
+              inputRestartsLeft: MAX_INPUT_RESTARTS,
+              stderrTail: "",
+            }
+            sessions.set(taskId, s)
+            // Viewers show the boot state while it comes up; the start call itself only returns once it is running.
+            publish(s)
+            return { s, created: true }
+          },
+          catch: toErr,
+        })
+        if (!claim.created) return yield* awaitReady(claim.s)
+        // Forked so the request ending does not abandon the boot, and so a stop can cancel it. A failed boot fails
+        // the desktop's ready, which is what the caller waits on.
+        claim.s.boot = yield* Effect.forkDaemon(
+          boot(claim.s).pipe(
             Effect.tapError((e) => Effect.sync(() => failSession(claim.s, e.message))),
-          )
-        }),
+            Effect.ignore,
+          ),
+        )
+        return yield* awaitReady(claim.s)
+      })
 
+    /** Viewers that have left. A relaunch skips them, so one that left mid-restart is not attached to the new desktop. */
+    const detachedSinks = new WeakSet<DesktopSink>()
+
+    /**
+     * Adds a viewer to the task's desktop. The returned effect removes the viewer from whichever desktop the task has
+     * when it runs, so a viewer that outlives a renderer restart still leaves cleanly.
+     */
+    const attachSink = (taskId: string, sink: DesktopSink) =>
+      Effect.gen(function* () {
+        const s = yield* lookup(taskId)
+        s.sinks.add(sink)
+        sink.onStatus(toStatus(taskId, s))
+        cancelLinger(s)
+        listenToAudio(s)
+        if (s.encoder === null && s.state === "running") {
+          // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
+          yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(
+            Effect.tapError(() => Effect.sync(() => s.sinks.delete(sink))),
+          )
+        } else if (s.config !== null && s.gop !== null) {
+          // Live encoder with a cached GOP: the config and its keyframe with deltas bring this viewer straight to live.
+          sink.onMedia({ kind: "config", config: s.config })
+          for (const [i, au] of s.gop.entries()) sink.onMedia({ kind: i === 0 ? "key" : "delta", au })
+        } else {
+          if (s.config !== null) sink.onMedia({ kind: "config", config: s.config })
+          s.awaiting.add(sink)
+        }
+        return Effect.sync(() => {
+          // Marked first: a relaunch that is still running must not attach this viewer again.
+          detachedSinks.add(sink)
+          const current = sessions.get(taskId)
+          if (current === undefined) return
+          current.sinks.delete(sink)
+          current.awaiting.delete(sink)
+          scheduleStop(current)
+        })
+      })
+
+    /** Stops the task's desktop and returns what a relaunch needs: its launch settings and its viewers. */
+    const snapshotAndStop = (taskId: string) =>
+      Effect.gen(function* () {
+        const s = yield* lookup(taskId)
+        const snapshot: Relaunch = { taskId, terminal: s.terminal, ipcNamespace: s.ipcNamespace, sinks: [...s.sinks] }
+        yield* stopTask(taskId)
+        return snapshot
+      })
+
+    // Starts the desktop again on the current renderer and attaches the viewers that are still watching it.
+    const relaunch = (snapshot: Relaunch) =>
+      Effect.gen(function* () {
+        yield* startDesktop(snapshot.taskId, { terminal: snapshot.terminal, ipcNamespace: snapshot.ipcNamespace })
+        for (const sink of snapshot.sinks) {
+          if (detachedSinks.has(sink)) continue
+          yield* attachSink(snapshot.taskId, sink).pipe(
+            Effect.catchAll((e) => Effect.logWarning(`desktop viewer not reattached after restart: ${e.message}`)),
+          )
+        }
+      })
+
+    // Whether the desktop renders on a renderer other than the one the GPU state now allows.
+    const stale = (s: Session) =>
+      (s.state === "starting" || s.state === "running") && s.renderer !== null && s.renderer !== desiredRenderer()
+    const liveApps = (s: Session) => [...s.apps.values()].some((app) => app.exit === null)
+
+    // Restarts the task's desktop, attaching the viewers that are still watching it.
+    const restart = (taskId: string) =>
+      Effect.flatMap(snapshotAndStop(taskId), relaunch).pipe(
+        Effect.catchAll((e) => Effect.logWarning(`desktop for task ${taskId} not restarted: ${e.message}`)),
+      )
+
+    // Restarts a desktop onto the current renderer once none of its apps is running. A restart stops the desktop's
+    // processes, so apps keep the renderer they started on until they exit (the exit hook in launch retries this).
+    const restartIdle = (s: Session) =>
+      sessions.get(s.taskId) === s && stale(s) && !liveApps(s) ? restart(s.taskId) : Effect.void
+
+    // The GPU arrived: restart each desktop whose renderer is stale and has no running app. A failed desktop that still
+    // has viewers is retried, since they are waiting on it; one that fails again stays failed and the others still restart.
+    const attachHardware = Effect.gen(function* () {
+      hardwareRender = true
+      for (const taskId of [...sessions.keys()]) {
+        const s = sessions.get(taskId)
+        if (s === undefined) continue
+        if (s.state === "failed" && s.sinks.size > 0) yield* restart(taskId)
+        else yield* restartIdle(s)
+      }
+    })
+
+    // The GPU is going away: the desktops rendering on it stop now, so the GPU is free, and come back on software
+    // rendering in the background. Nothing waits for those boots.
+    const releaseHardware = Effect.gen(function* () {
+      hardwareRender = false
+      const stopped: Relaunch[] = []
+      for (const s of [...sessions.values()]) {
+        if (s.renderer === "gl" && (s.state === "starting" || s.state === "running")) {
+          stopped.push(yield* snapshotAndStop(s.taskId))
+        }
+      }
+      yield* Effect.forkDaemon(
+        Effect.forEach(
+          stopped,
+          (snapshot) =>
+            relaunch(snapshot).pipe(
+              Effect.catchAll((e) => Effect.logWarning(`desktop for task ${snapshot.taskId} not restarted: ${e.message}`)),
+            ),
+          { discard: true },
+        ),
+      )
+    })
+
+
+    return DesktopManager.of({
+      start: startDesktop,
       stop: stopTask,
+      attachHardwareRender: attachHardware,
+      releaseHardwareRender: releaseHardware,
 
       status: (taskId) => Effect.sync(() => toStatus(taskId, sessions.get(taskId))),
 
@@ -988,7 +1279,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         Effect.gen(function* () {
           const s = yield* requireLive(taskId)
           const r = yield* Effect.tryPromise({
-            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display),
+            try: () => runCommand("xdotool", ["getmouselocation", "--shell"], s.display, s.ipc),
             catch: toErr,
           })
           const x = /^X=(\d+)$/m.exec(r.stdout.toString())
@@ -1004,11 +1295,17 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const s = yield* requireLive(taskId)
           const args = xdotoolArgs(event)
           if (args.length === 0) return
-          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display), catch: toErr })
+          const r = yield* Effect.tryPromise({ try: () => runCommand("xdotool", args, s.display, s.ipc), catch: toErr })
           if (r.exitCode !== 0) {
             return yield* Effect.fail(new DesktopError({ message: `xdotool failed: ${r.stderr.trim()}` }))
           }
         }),
+
+      refreshProfile: (taskId) =>
+        lookup(taskId).pipe(
+          Effect.flatMap((s) => Effect.sync(() => applyProfile(s))),
+          Effect.catchAll(() => Effect.void),
+        ),
 
       streamInput: (taskId, event) =>
         Effect.gen(function* () {
@@ -1037,6 +1334,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const app: AppRecord = { id: `app-${s.apps.size + 1}`, command, child, output, exit: null }
           child.once("exit", (code, signal) => {
             app.exit = { code, signal }
+            // A renderer change that waited on this app can now restart the desktop.
+            Effect.runFork(restartIdle(s))
           })
           s.apps.set(app.id, app)
           return appView(app)
@@ -1057,32 +1356,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           return appView(app)
         }),
 
-      cachedGop: (taskId) => Effect.map(lookup(taskId), (s) => (s.gop === null ? null : [...s.gop])),
-      subscribe: (taskId, sink) =>
-        Effect.gen(function* () {
-          const s = yield* lookup(taskId)
-          s.sinks.add(sink)
-          sink.onStatus(toStatus(taskId, s))
-          cancelLinger(s)
-          if (s.encoder === null && s.state === "running") {
-            // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
-            yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(
-              Effect.tapError(() => Effect.sync(() => s.sinks.delete(sink))),
-            )
-          } else if (s.init !== null && s.gop !== null) {
-            // Live encoder with a cached GOP: the keyframe and its deltas bring this viewer straight to live.
-            sink.onMedia(s.init, "init")
-            for (const [i, fragment] of s.gop.entries()) sink.onMedia(fragment, i === 0 ? "key" : "delta")
-          } else {
-            if (s.init !== null) sink.onMedia(s.init, "init")
-            s.awaiting.add(sink)
-          }
-          return Effect.sync(() => {
-            s.sinks.delete(sink)
-            s.awaiting.delete(sink)
-            scheduleStop(s)
-          })
-        }),
+      subscribe: (taskId, sink) => attachSink(taskId, sink),
 
       watchStatus: (listener) =>
         Effect.sync(() => {
@@ -1097,7 +1371,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           const s = yield* requireLive(taskId)
           if (s.quality === quality) return toStatus(taskId, s)
           s.quality = quality
-          // A live encoder restarts at the new size and rate, and viewers reconfigure from its init segment. An idle
+          // A live encoder restarts at the new size and rate, and viewers reconfigure from its new config. An idle
           // desktop (no encoder) starts at the new quality on its next subscribe.
           const kind = s.encoder?.kind
           if (kind !== undefined) {

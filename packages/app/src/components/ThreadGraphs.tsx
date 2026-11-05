@@ -1,7 +1,14 @@
 import { useId, useState, type PointerEvent } from "react"
-import { TASK_STATS_WINDOW_MS, type TaskStatsSample } from "@cloudagents/protocol"
+import {
+  TASK_STATS_WINDOW_MS,
+  type TaskAppUsage,
+  type TaskRamOther,
+  type TaskStatsSample,
+} from "@cloudagents/protocol"
 import { useTaskStats } from "@/hooks/useTaskStats"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { formatSize } from "@/util"
 
 /** Graph drawing units; the SVG stretches to the card, and strokes do not scale with it. */
 const W = 1000
@@ -147,17 +154,120 @@ function Graph({ label, points }: { label: string; points: readonly Point[] }) {
   )
 }
 
+/** One row of the applications list; `program` is false for memory no process maps, which has no CPU. */
+interface AppRow {
+  readonly name: string
+  readonly program: boolean
+  readonly detail: string | null
+  readonly ramUsed: number
+  readonly cpu: number | null
+}
+
+/** The latest sample as rows: its applications, most memory first, then the slice's memory outside any process. */
+function appRows(apps: readonly TaskAppUsage[], other: TaskRamOther | null | undefined): AppRow[] {
+  const rows: AppRow[] = apps.map((a) => ({
+    name: a.name ?? "Other",
+    program: a.name !== null,
+    detail: a.processes > 1 ? `${a.processes} processes` : null,
+    ramUsed: a.ramUsed,
+    cpu: a.cpu,
+  }))
+  if (other) {
+    const rest: readonly [string, number][] = [
+      ["Page cache", other.pageCache],
+      ["tmpfs & shared memory", other.tmpfs],
+      ["Kernel", other.kernel],
+    ]
+    for (const [name, ramUsed] of rest) {
+      if (ramUsed > 0) rows.push({ name, program: false, detail: null, ramUsed, cpu: null })
+    }
+  }
+  return rows
+}
+
 /**
- * The thread's RAM, CPU and storage against its own limits over the last minute, stacked, plus the GPU's VRAM
- * (shared by every thread). Each graph spans 0-100%; hovering one shows the sample nearest the pointer.
+ * What each application in the thread uses now, with its RAM against the thread's RAM limit, then the memory the
+ * thread holds outside its processes. Memory processes share is divided between them, so the rows add up to the total.
+ */
+function Applications({ sample }: { sample: TaskStatsSample | undefined }) {
+  if (sample === undefined) return <p className="px-1 text-xs text-muted-foreground">Waiting for the first reading…</p>
+  const { apps, ramUsed, ramMax } = sample
+  if (apps === undefined || ramUsed === null || ramMax === null || ramMax <= 0) {
+    return <p className="px-1 text-xs text-muted-foreground">This box does not report applications.</p>
+  }
+  const rows = appRows(apps, sample.ramOther)
+  return (
+    <div className="rounded-lg bg-card px-2.5 py-2 shadow-well">
+      <div className="flex items-baseline justify-between text-[11px] font-medium text-muted-foreground">
+        <span>RAM · CPU</span>
+        <span className="tabular-nums">
+          {formatSize(ramUsed)} of {formatSize(ramMax)}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="mt-1.5 text-xs text-muted-foreground">Nothing running</p>
+      ) : (
+        <ul className="mt-1.5 flex flex-col gap-1.5">
+          {rows.map((row) => (
+            <li key={`${row.program}:${row.name}`} className="text-xs">
+              <div className="flex items-baseline gap-2">
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate",
+                    row.program ? "font-mono text-foreground" : "text-muted-foreground",
+                  )}
+                  title={row.name}
+                >
+                  {row.name}
+                  {row.detail && <span className="ml-1.5 font-sans text-muted-foreground">{row.detail}</span>}
+                </span>
+                <span className="w-16 shrink-0 text-right text-muted-foreground tabular-nums">
+                  {formatSize(row.ramUsed)}
+                </span>
+                <span className="w-10 shrink-0 text-right text-muted-foreground tabular-nums">
+                  {row.cpu === null ? "" : percentText(row.cpu)}
+                </span>
+              </div>
+              <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-white/5">
+                <div
+                  className="h-full rounded-full bg-white/60"
+                  style={{ width: `${Math.min(100, (row.ramUsed / ramMax) * 100)}%` }}
+                />
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-2 text-[11px] text-muted-foreground">Memory shared by several processes is split between them.</p>
+    </div>
+  )
+}
+
+/**
+ * Two tabs under the desktop. Resources: the thread's RAM, CPU and storage against its own limits over the last
+ * minute, stacked, plus the GPU's VRAM (shared by every thread); each graph spans 0-100%, and hovering one shows the
+ * sample nearest the pointer. Applications: what each application in the thread uses now.
  */
 export function ThreadGraphs({ taskId }: { taskId: string }) {
   const samples = useTaskStats(taskId)
   return (
-    <div className="flex flex-col gap-2">
-      {GRAPHS.map((g) => (
-        <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
-      ))}
-    </div>
+    <Tabs defaultValue="resources" className="gap-2">
+      <TabsList className="h-8">
+        <TabsTrigger value="resources" className="px-3 text-xs">
+          Resources
+        </TabsTrigger>
+        <TabsTrigger value="applications" className="px-3 text-xs">
+          Applications
+        </TabsTrigger>
+      </TabsList>
+      <TabsContent value="resources" className="flex flex-col gap-2">
+        {GRAPHS.map((g) => (
+          <Graph key={g.label} label={g.label} points={pointsOf(samples, g.value)} />
+        ))}
+      </TabsContent>
+      <TabsContent value="applications">
+        <Applications sample={samples.at(-1)} />
+      </TabsContent>
+    </Tabs>
   )
 }

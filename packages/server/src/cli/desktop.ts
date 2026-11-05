@@ -2,15 +2,13 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, wr
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import xdamageSource from "../../native/xdamage-capture.c" with { type: "text" }
+import { DESKTOP_HELPER } from "../desktop/requirements"
 import { CliError, exec } from "./system"
-
-/** Optional desktop-session tools; the box runs without them, desktop runs need them. */
-export const DESKTOP_TOOLS = ["weston", "Xwayland", "openbox", "hsetroot", "xterm", "xdotool", "ffmpeg"] as const
 
 /** Where the desktop helper lives; `run` puts this directory first on PATH so the server finds it. */
 export const desktopBinDir = (): string => join(homedir(), ".local", "share", "kestrel", "bin")
 
-export const desktopHelperPath = (): string => join(desktopBinDir(), "xdamage-capture")
+export const desktopHelperPath = (): string => join(desktopBinDir(), DESKTOP_HELPER)
 
 /** Compiles the embedded `xdamage-capture.c` into `desktopBinDir()`, the way flake.nix builds it. */
 export const buildDesktopHelper = (): void => {

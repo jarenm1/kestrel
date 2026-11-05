@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http"
-import { BROKER_PROVIDERS, type BrokerProvider, CredentialBroker, type CredentialBrokerShape, UPSTREAM_BASE } from "./index"
+import { BROKER_PROVIDERS, BROKER_UPSTREAMS, type BrokerProvider, CredentialBroker, type CredentialBrokerShape } from "./index"
 
 export const BROKER_PREFIX = "/broker/"
 
@@ -44,7 +44,7 @@ const upstreamHeaders = (headers: IncomingHttpHeaders, provider: BrokerProvider,
     if (value === undefined || HOP_BY_HOP.has(name) || CLIENT_DROP.has(name)) continue
     out.set(name, Array.isArray(value) ? value.join(", ") : value)
   }
-  if (provider === "anthropic") out.set("x-api-key", key)
+  if (BROKER_UPSTREAMS[provider].keyHeader === "x-api-key") out.set("x-api-key", key)
   else out.set("authorization", `Bearer ${key}`)
   return out
 }
@@ -67,6 +67,9 @@ export const handleBroker = async (
 
   const provider = BROKER_PROVIDERS.find((p) => p === providerRaw)
   if (provider === undefined) return sendJson(res, 404, { _tag: "NotFound", message: `no broker for ${providerRaw}` })
+  if (!grant.providers.includes(provider)) {
+    return sendJson(res, 403, { _tag: "Forbidden", message: `this run is not authorized for ${provider}` })
+  }
 
   const key = await Effect.runPromise(broker.upstreamKey(provider, grant.user))
   if (key === null) {
@@ -75,7 +78,7 @@ export const handleBroker = async (
 
   const method = req.method ?? "GET"
   const body = method === "GET" || method === "HEAD" ? undefined : await readBody(req)
-  const url = `${UPSTREAM_BASE[provider]}${rest}${query}`
+  const url = `${BROKER_UPSTREAMS[provider].base}${rest}${query}`
 
   let upstream: Response
   try {

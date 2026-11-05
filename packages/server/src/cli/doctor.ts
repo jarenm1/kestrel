@@ -4,7 +4,8 @@ import { join } from "node:path"
 import { boxHomeToolArgs, cliBwrapArgs } from "../sandbox"
 import { DEFAULT_CONFIG, loadConfig } from "./config"
 import type { BoxConfig } from "./config"
-import { DESKTOP_TOOLS, desktopHelperPath } from "./desktop"
+import { desktopHelperPath } from "./desktop"
+import { DESKTOP_HELPER, DESKTOP_OPTIONAL_TOOLS, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, parseWestonVersion } from "../desktop/requirements"
 import { exec, onPath, portFree } from "./system"
 
 export const SERVICE_NAME = "kestrel-box.service"
@@ -63,7 +64,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
   // agent CLIs it finds there).
   const sandboxed = (config ?? DEFAULT_CONFIG).sandbox === "basic"
   const home = mkdtempSync(join(tmpdir(), "kestrel-doctor-"))
-  const agents = ["claude", "codex"].map((name) => {
+  const agents = ["claude", "codex", "opencode", "agy"].map((name) => {
     if (onPath(name) === null) return { name, ok: false, detail: "not on PATH" }
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
     const run = sandboxed
@@ -86,7 +87,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
     ok: agents.some((agent) => agent.ok),
     detail: agents.some((agent) => agent.ok)
       ? agents.filter((agent) => agent.ok).map((agent) => agent.name).join(", ")
-      : "neither claude nor codex runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex)",
+      : "no agent CLI runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex, npm i -g @opencode/cli, curl -fsSL https://antigravity.google/cli/install.sh | bash)",
   })
 
   const port = (config ?? DEFAULT_CONFIG).port
@@ -100,22 +101,11 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
     detail: free ? "free" : serviceActive ? `in use by ${SERVICE_NAME}` : "in use by another process",
   })
 
-  for (const tool of DESKTOP_TOOLS) {
-    const found = onPath(tool)
-    if (tool === "weston" && found !== null) {
-      checks.push(westonCheck(found))
-      continue
-    }
-    checks.push({
-      name: tool,
-      required: false,
-      ok: found !== null,
-      detail: found ?? "not installed (optional; needed for desktop runs)",
-    })
-  }
-  const helper = existsSync(desktopHelperPath()) || onPath("xdamage-capture") !== null
+  for (const tool of DESKTOP_REQUIRED_TOOLS) checks.push(desktopToolCheck(tool, "needed for desktop runs"))
+  for (const tool of DESKTOP_OPTIONAL_TOOLS) checks.push(desktopToolCheck(tool, "used when installed"))
+  const helper = existsSync(desktopHelperPath()) || onPath(DESKTOP_HELPER) !== null
   checks.push({
-    name: "xdamage-capture",
+    name: DESKTOP_HELPER,
     required: false,
     ok: helper,
     detail: helper ? "installed" : "not built (optional; needed for desktop runs)",
@@ -124,21 +114,26 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
   return checks
 }
 
-/** The desktop starts Xwayland as weston's client (`weston … -- Xwayland …`), which weston supports from 14.0. */
-const MIN_WESTON_MAJOR = 14
+/** One desktop tool on PATH; weston also has its version checked, because the desktop needs MIN_WESTON_MAJOR or newer. */
+const desktopToolCheck = (tool: string, role: string): Check => {
+  const found = onPath(tool)
+  if (found === null) return { name: tool, required: false, ok: false, detail: `not installed (optional; ${role})` }
+  if (tool !== "weston") return { name: tool, required: false, ok: true, detail: found }
+  return westonCheck(found)
+}
 
 const westonCheck = (path: string): Check => {
   const run = exec(path, ["--version"])
-  const version = /weston (\d+)\.\S*/.exec(run.stdout + run.stderr)
+  const version = parseWestonVersion(run.stdout + run.stderr)
   if (version === null) return { name: "weston", required: false, ok: false, detail: `${path}: version unknown` }
-  const ok = Number(version[1]) >= MIN_WESTON_MAJOR
+  const ok = version.major >= MIN_WESTON_MAJOR
   return {
     name: "weston",
     required: false,
     ok,
     detail: ok
-      ? `${path} (${version[0]})`
-      : `${path} is ${version[0]}; desktop runs need weston ${MIN_WESTON_MAJOR} or newer (e.g. \`nix profile install nixpkgs#weston\`)`,
+      ? `${path} (${version.text})`
+      : `${path} is ${version.text}; desktop runs need weston ${MIN_WESTON_MAJOR} or newer (e.g. \`nix profile install nixpkgs#weston\`)`,
   }
 }
 

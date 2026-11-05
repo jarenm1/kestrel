@@ -60,13 +60,13 @@ CLOUDAGENTS_FAKE_AGENT=1 bun run dev
 
 Open the printed URL (`http://localhost:5173/auth/dev-login`) to sign in as `dev`. This starts the Worker (`:8788`), a box connected to it (`:8797`, data in `.data-dev/`) and Vite (`:5173`); Ctrl+C stops all three. The public landing page is at `http://site.localhost:5173/`.
 
-- **Fake agent:** `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent that needs no model key. Drop it for a real agent and add a key or subscription in Settings › Connections.
+- **Fake agent:** `CLOUDAGENTS_FAKE_AGENT=1` runs a scripted agent that needs no model key. Drop it for a real agent and add a key or subscription in Settings › Connections. Under API keys, choose **Add API key**, select a provider, then enter and save the key. Saved providers stay visible; remove an unsaved row or disconnect a saved key to return that provider to the menu.
 - **Sandbox and desktop (Linux + Nix):** `nix run` runs the same stack with the flake's toolchain and turns on the bubblewrap sandbox and the task desktop. Without Nix, agents run **unsandboxed** and there is no desktop on macOS and Windows. On NixOS use the flake (npm's `workerd` does not start there).
-- **Linux without Nix:** the desktop needs weston 14 or newer (Ubuntu 24.04 ships 13: `nix profile install nixpkgs#weston`), Xwayland, openbox, hsetroot, xterm, xdotool, ffmpeg and the `xdamage-capture` helper from `packages/server/native`. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
+- **Linux without the Nix dev stack:** the desktop needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool, ffmpeg with x11grab and libx264, and `xdamage-capture`. Ubuntu 24.04 ships weston 13; see [desktop dependencies](docs/box.md#desktop-dependencies-on-linux) for a pinned Nix bundle. Add `CLOUDAGENTS_SYSTEMD=0` if you have no user systemd manager.
 - **Windows:** agent commands run through POSIX `sh` (from `PATH` or Git for Windows).
 - **Several stacks on one machine:** ports shift by `(uid - 1000) * 100 + KESTREL_DEV_SLOT * 10`, so give each running stack its own `KESTREL_DEV_SLOT` (0-9). The ports are printed at startup; forward the app port with `ssh -L` to use a remote dev machine.
 
-Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` changed). Contributing workflow: [AGENTS.md](AGENTS.md).
+Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `packages/mobile` changed). Contributing workflow: [AGENTS.md](AGENTS.md).
 
 ## Repository
 
@@ -78,6 +78,7 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` chan
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
 | [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
+| [`packages/desktop`](packages/desktop) | Electron desktop app for the same SPA, with GitHub-release auto-updates ([README](packages/desktop/README.md)). |
 
 Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](docs/goal-state.md), [the box: harnesses, sandbox and limits](docs/box.md), [bring your own box with cloud overflow (design)](docs/byo-box.md).
 

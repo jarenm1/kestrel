@@ -1,5 +1,5 @@
 import { useMemo, useSyncExternalStore } from "react";
-import * as SecureStore from "expo-secure-store";
+import { storage } from "@/lib/storage";
 import { Schema } from "effect";
 import {
   AgentModel,
@@ -41,7 +41,7 @@ function load() {
   if (loaded || loading !== null) return;
   loading = Promise.all(
     MODEL_PROVIDERS.map(async (provider) => {
-      const raw = await SecureStore.getItemAsync(storageKey(provider.id));
+      const raw = await storage.getItem(storageKey(provider.id));
       if (!touched.has(provider.id)) chosen.set(provider.id, parse(raw));
     })
   )
@@ -67,8 +67,8 @@ function subscribe(listener: () => void) {
 export function setShownModels(provider: ModelProvider, ids: readonly AgentModel[] | null): void {
   chosen.set(provider, ids);
   touched.add(provider);
-  if (ids === null) void SecureStore.deleteItemAsync(storageKey(provider));
-  else void SecureStore.setItemAsync(storageKey(provider), JSON.stringify(ids));
+  if (ids === null) void storage.deleteItem(storageKey(provider));
+  else void storage.setItem(storageKey(provider), JSON.stringify(ids));
   changed();
 }
 

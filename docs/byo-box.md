@@ -36,7 +36,9 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
-`codex`) on the host; the desktop also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
+`codex`, OpenCode 2.0.7+ as `opencode` from `npm i -g @opencode/cli` for its free-model account sign-in (2.1+ for a Go key), and Antigravity
+CLI as `agy` from `curl -fsSL https://antigravity.google/cli/install.sh | bash` for Google's) on the host; the desktop
+also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
 
 ### What a user's box runs with
 
@@ -53,6 +55,20 @@ Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (w
 - Rendering: the live desktop uses the GPU only on native Linux with render nodes. WSL2 exposes the GPU as `/dev/dxg`,
   not a render node, and Linux VMs on macOS get no 3D GPU, so there the desktop renders and encodes (x264) on the CPU.
 
+Desktop video, audio and input always use WebRTC, with no opt-in. The optional `webrtc` object in `config.json` sets its network; restart the box after editing it. Every field is optional. Without `iceServers`, the box and viewers use one STUN server, `stun:stun.cloudflare.com:3478`; set `iceServers` to replace it, or to `[]` to use none. An example:
+
+```json
+"webrtc": {
+  "iceServers": [{ "urls": ["stun:stun.example.org:3478"] }],
+  "turn": { "urls": ["turn:turn.example.org:3478"], "secret": "coturn static-auth-secret" },
+  "icePolicy": "all",
+  "portRange": "50000-50100",
+  "hostAddresses": ["100.64.0.5"]
+}
+```
+
+Which of these you need depends on your network, see [WebRTC desktop](box.md#webrtc-desktop). Kestrel relays no media. Your own TURN server, set with `turn`, is the only relay the box will use. If no path connects, the desktop does not stream: there is no WebSocket fallback.
+
 ### Releasing
 
 `bun run build:box` builds `dist/box/kestrel-box-{linux,darwin}-{x64,arm64}` (version from
@@ -65,8 +81,8 @@ releases.
 The Linux binaries must load through the standard `/lib` loader. `build:box` uses bun's `baseline` build for linux-x64
 (when the target matches the host, bun would reuse its own runtime, and on NixOS that one loads through `/nix/store`),
 and fails if a Linux binary names any other loader. Before publishing, `bun scripts/box-ubuntu/test.ts
-dist/box/kestrel-box-linux-x64` (needs docker) runs the binary on Ubuntu 24.04 with Claude Code and Codex installed
-under `$HOME`, and checks that the box answers, reads both CLIs' logins and starts a real agent run in the sandbox.
+dist/box/kestrel-box-linux-x64` (needs docker) runs the binary on Ubuntu 24.04 with Claude Code, Codex and OpenCode
+installed under `$HOME`, and checks that the box answers, reads both CLIs' logins and starts a real agent run in the sandbox.
 
 ### Manual setup
 
@@ -84,8 +100,7 @@ from the config.
 - One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
   still holds for Kestrel's own box.
 - One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic, including the desktop stream, goes browser → Worker → Hub → relay → box. Every relayed request is a
-  Durable Object request, which we pay for.
+- All app traffic goes browser → Worker → Hub → relay → box, including the desktop's status and WebRTC signaling. Desktop media does not: it goes between the box and each viewer over WebRTC, never through the Hub. Every relayed request is a Durable Object request, which we pay for.
 - The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
 - Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
 - The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
@@ -120,12 +135,13 @@ flowchart LR
   `Authorization: Bearer`, or `?access_token=` where no header can be set (WebSockets, `<img>`).
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
+- The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries the same request frames the relay uses, in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
 - Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.
-- `/mcp` and `/broker` are never public. The box serves them only to its own sandboxes, so the HTTPS front must answer them with 404.
+- `/mcp`, `/broker` and `/gh/` are never public. The box serves them only to its own sandboxes, so the HTTPS front must answer them with 404.
 - The web app shows the threads of every box at once. It opens one event stream per box (Kestrel's box through the
   Worker, each user box directly) and merges the lists; thread ids are globally unique UUIDs. Each thread's requests go
   to the box it lives on, found from the boxes' own listings. The control plane does not store the thread→box record
@@ -176,7 +192,7 @@ on `packages/protocol`; the PR for each step calls this out.
 
 ## Open questions
 
-- Paid relay for boxes without a tunnel: offer it, and how to meter the desktop stream.
+- Paid relay for boxes without a tunnel: offer one, and how to meter its media. Desktop video is WebRTC now, so such a relay would carry WebRTC media; Kestrel provides no media relay today ([box.md](box.md#webrtc-desktop)).
 - Orgs/teams owning boxes (out of scope here; boxes are single-owner).
 - Moving a thread between boxes: conversation handoff like `core/handoff.ts`, workspace via its thread branch or a
   snapshot.

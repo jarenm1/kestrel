@@ -1,4 +1,4 @@
-import { encodeBinary, encodeFrame } from "@cloudagents/protocol"
+import { encodeFrame } from "@cloudagents/protocol"
 import type { StreamSocket } from "../http/streams"
 
 /**
@@ -8,23 +8,19 @@ import type { StreamSocket } from "../http/streams"
  */
 export class RelayStream implements StreamSocket {
   readonly id: number
-  private readonly send: (data: string | Uint8Array) => void
+  private readonly send: (data: string) => void
   private open = true
   private textListener: ((data: string) => void) | null = null
   private readonly pendingText: string[] = []
   private closeListeners: Array<() => void> = []
 
-  constructor(id: number, send: (data: string | Uint8Array) => void) {
+  constructor(id: number, send: (data: string) => void) {
     this.id = id
     this.send = send
   }
 
   sendText(data: string): void {
     if (this.open) this.send(encodeFrame({ t: "ws-text", id: this.id, data }))
-  }
-
-  sendBinary(data: Uint8Array): void {
-    if (this.open) this.send(encodeBinary(this.id, data))
   }
 
   close(code?: number, reason?: string): void {

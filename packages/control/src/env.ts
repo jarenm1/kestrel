@@ -18,6 +18,11 @@ export interface Env {
   APP_ORIGIN?: string
   /** Comma- or whitespace-separated GitHub logins that run the managed-box fleet (`/api/fleet/boxes`). */
   KESTREL_OPERATORS?: string
+  /**
+   * The domain Nest boxes are served under (`<boxId>.<host slug>.<domain>`). Unset disables Nest: the Nest routes 404
+   * and `Me.nestEnabled` is false.
+   */
+  KESTREL_NEST_DOMAIN?: string
 }
 
 /** RPC stub for the single control-plane Hub instance. */
@@ -33,3 +38,10 @@ export const isOperator = (env: Env, login: string): boolean =>
  * this header is overwritten by the Worker.
  */
 export const SESSION_HEADER = "x-kestrel-session"
+
+/**
+ * Worker -> Hub only: a `FileToken` the Worker accepted as `?access_token=` on a box file (`isBoxFilePath`). The Hub
+ * resolves it to its user, drops it and the query parameter, and relays the file with that user's credentials. Whatever
+ * a browser sends in this header is overwritten or dropped by the Worker.
+ */
+export const FILE_TOKEN_HEADER = "x-kestrel-file-token"

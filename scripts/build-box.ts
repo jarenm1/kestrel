@@ -25,6 +25,8 @@ const targets = requested.length > 0 ? requested : ALL_TARGETS
 const outDir = join(root, "dist", "box")
 mkdirSync(outDir, { recursive: true })
 const entry = join(root, "packages/server/src/cli/main.ts")
+/** Worker entry points must be built into the binary too, or `new Worker(...)` finds nothing there. */
+const workers = [join(root, "packages/server/src/gh/jq-worker.ts")]
 
 /**
  * Bun targets per asset. linux-x64 is the `baseline` build: when the target matches the host, `bun build --compile`
@@ -57,7 +59,7 @@ for (const target of targets) {
   const outfile = join(outDir, `kestrel-box-${target}`)
   console.log(`building ${outfile}`)
   const result = Bun.spawnSync(
-    [process.execPath, "build", "--compile", `--target=${BUN_TARGETS[target]}`, entry, `--outfile=${outfile}`],
+    [process.execPath, "build", "--compile", `--target=${BUN_TARGETS[target]}`, entry, ...workers, `--outfile=${outfile}`],
     { cwd: root, stdio: ["ignore", "inherit", "inherit"] },
   )
   if (result.exitCode !== 0) throw new Error(`building ${target} failed with exit code ${result.exitCode}`)

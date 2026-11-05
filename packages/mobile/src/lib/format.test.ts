@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { formatElapsed } from "./format";
+import { formatElapsed, threadTitle } from "./format";
 
 const at = (seconds: number) => formatElapsed(0, seconds * 1000);
 
@@ -23,6 +23,18 @@ describe("formatElapsed", () => {
 
   test("a start in the future (clock skew with the box) reads 0s, not negative", () => {
     expect(formatElapsed(10_000, 0)).toBe("0s");
+  });
+});
+
+describe("threadTitle", () => {
+  test("reference URLs do not consume the title's text limit", () => {
+    expect(threadTitle("Review [PR #173](https://github.com/jarenm1/kestrel/pull/173) and [Issue #181](https://github.com/other/repo/issues/181)\nMore detail"))
+      .toBe("Review PR #173 and Issue #181");
+  });
+
+  test("a mismatched reference label is not silently rewritten", () => {
+    const mismatched = "[PR #1](https://github.com/a/b/issues/1)";
+    expect(threadTitle(mismatched)).toBe(mismatched);
   });
 });
 

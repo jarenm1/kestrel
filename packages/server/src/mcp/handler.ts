@@ -14,6 +14,7 @@ import { type TaskToolDeps, registerTaskTools } from "./tools/task"
 import { type ThreadToolDeps, registerThreadTools } from "./tools/threads"
 import { type ToolkitToolDeps, registerToolkitTools } from "./tools/toolkits"
 import { type WorkspaceToolDeps, registerWorkspaceTools } from "./tools/workspace"
+import { type GpuToolDeps, registerGpuTools } from "./tools/gpu"
 
 export interface McpAuthDeps {
   readonly auth: {
@@ -33,7 +34,8 @@ export type McpDeps = McpAuthDeps &
   ThreadToolDeps &
   GitHubToolDeps &
   AutomationToolDeps &
-  ToolkitToolDeps
+  ToolkitToolDeps &
+  GpuToolDeps
 
 const MCP_PATH = /^\/mcp\/([^/?#]+)/
 
@@ -63,6 +65,7 @@ const buildServer = (ctx: RunContext, deps: McpDeps): McpServer => {
   registerThreadTools(server, ctx, deps)
   registerAutomationTools(server, ctx, deps)
   registerGitHubTools(server, ctx, deps)
+  registerGpuTools(server, ctx, deps)
   return server
 }
 

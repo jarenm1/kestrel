@@ -1,10 +1,13 @@
 /**
  * Deterministic stand-in for the agent harness (CLOUDAGENTS_FAKE_AGENT=1).
- * Runs with cwd = the thread's workspace and talks to the task's MCP endpoint like a real agent would. Like the
- * real CLIs it takes its prompt on stdin: Claude Code's stream-json input for Anthropic models, Codex app-server's
- * JSON-RPC for OpenAI ones, and plays one turn.
+ * Runs where a real agent would (the thread's first checkout, else its workspace) and talks to the task's MCP
+ * endpoint like a real agent would. Like the real CLIs it takes its prompt on stdin: Claude Code's stream-json input
+ * for Anthropic models, Codex app-server's JSON-RPC for OpenAI ones, the Agent Client Protocol for OpenCode's, and
+ * plays one turn.
  */
 import { randomUUID } from "node:crypto"
+import { spawnSync } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -12,12 +15,22 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
 
 const mcpUrl = process.env.CLOUDAGENTS_MCP_URL
 const mcpToken = process.env.CLOUDAGENTS_MCP_TOKEN
-let prompt = process.env.CLOUDAGENTS_PROMPT ?? ""
+let prompt = ""
 const model = process.env.CLOUDAGENTS_MODEL
 const effort = process.env.CLOUDAGENTS_EFFORT
 const choice = [model === undefined ? null : `model: ${model}`, effort === undefined ? null : `effort: ${effort}`]
   .filter((part): part is string => part !== null)
   .join(", ")
+
+// Isolated text generation (thread titles): no MCP session, no thread files. The prompt is the whole stdin, and the
+// answer is one line, so the smoke test exercises the real spawn, credential and cleanup path without a model key.
+if (process.env.CLOUDAGENTS_TEXT_GENERATION === "1") {
+  const input = readFileSync(0, "utf8")
+  const source = /The user's first message:\s*"""\n([\s\S]*?)\n"""/.exec(input)?.[1] ?? ""
+  const title = source.replace(/\s+/g, " ").trim().split(" ").slice(0, 6).join(" ")
+  console.log(title === "" ? "Fake generated title" : title)
+  process.exit(0)
+}
 
 if (!mcpUrl || !mcpToken) {
   console.error("fake-agent: CLOUDAGENTS_MCP_URL or CLOUDAGENTS_MCP_TOKEN is not set")
@@ -25,10 +38,12 @@ if (!mcpUrl || !mcpToken) {
 }
 
 const appServer = model?.startsWith("gpt-") === true
+const acp = /^opencode(-go)?\//.test(model ?? "") || model?.startsWith("gemini-") === true
 // A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
-// `thread/start` or `thread/resume` response. A resumed run keeps its session.
-let resumeSession = appServer ? undefined : process.env.CLOUDAGENTS_RESUME_SESSION
-if (!appServer) {
+// `thread/start` or `thread/resume` response, an ACP run's session in `session/new` (or the one `session/resume` names).
+// A resumed run keeps its session.
+let resumeSession = appServer || acp ? undefined : process.env.CLOUDAGENTS_RESUME_SESSION
+if (!appServer && !acp) {
   console.log(JSON.stringify({ type: "system", subtype: "init", session_id: resumeSession ?? randomUUID() }))
 }
 
@@ -71,8 +86,45 @@ const runExecProbes = async (): Promise<number> => {
   return 0
 }
 
+// Runs `gh <command>` through the shell, as an agent's shell tool would, and reports what it printed and its exit code.
+const runGhProbe = async (command: string): Promise<number> => {
+  const result = spawnSync("sh", ["-c", `gh ${command}`], { encoding: "utf8" })
+  const message = `gh ${command}\nexit: ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+  console.log(`fake-agent: probe ${message}`)
+  await call("task_report", { status: result.status === 0 ? "done" : "failed", message })
+  return 0
+}
+
+// No model key is configured by the listener smoke test: 424 proves that the run token reached the broker and
+// passed authentication, without making a provider request. Never log the URL: it contains the run token.
+// `listener-probe <publicPort> <hostPort> <expect>`: with `unreachable` (strict networking), the sandbox's own loopback
+// must not reach the box's public port or another host loopback service (curl prints 000 when nothing listens).
+const runListenerProbe = async (publicPort?: string, hostPort?: string, expect?: string): Promise<number> => {
+  const base = process.env.ANTHROPIC_BASE_URL
+  if (base === undefined) throw new Error("listener probe requires ANTHROPIC_BASE_URL")
+  const response = await fetch(`${base}/v1/models`)
+  const body = await response.json() as { _tag?: string }
+  if (response.status !== 424 || body._tag !== "MissingCredential") {
+    throw new Error(`listener probe: broker answered ${response.status}`)
+  }
+  const exec = await call("workspace_exec", { command: "echo listener-probe-ok" })
+  if (exec.failed || !exec.text.startsWith("exit code: 0") || !exec.text.includes("listener-probe-ok")) {
+    throw new Error("listener probe: workspace_exec failed")
+  }
+  if (expect === "unreachable" && publicPort !== undefined && hostPort !== undefined) {
+    for (const port of [publicPort, hostPort]) {
+      const probe = await call("workspace_exec", {
+        command: `curl -s -m 3 -o /dev/null -w 'code=%{http_code}' http://127.0.0.1:${port}/ ; true`,
+      })
+      if (!probe.text.includes("code=000")) throw new Error(`listener probe: host loopback port ${port} reachable from sandbox`)
+    }
+  }
+  await call("task_report", { status: "done", message: "listener probe: MCP, broker and workspace exec passed" })
+  return 0
+}
+
 // Checks `repo` out into the thread, commits one file in the checkout and leaves another uncommitted, so the diff
-// must show both. Reports the checkout's directory.
+// must show both. Reports the checkout's directory, the directory the run started in and what repo_checkout said.
 const runCheckoutProbe = async (repo: string): Promise<number> => {
   const checkout = await call("repo_checkout", { repo })
   const dir = /\bat (\S+) \(/.exec(checkout.text)?.[1]
@@ -81,14 +133,18 @@ const runCheckoutProbe = async (repo: string): Promise<number> => {
     return 1
   }
   const committed = await call("workspace_exec", {
-    command: `cd '${dir}' && echo committed > CHECKOUT_PROBE.txt && git add CHECKOUT_PROBE.txt && git -c user.name=fake -c user.email=fake@example.com commit -qm "checkout probe"`,
+    // Appends, so a later run of the probe in the same thread has a change to commit too.
+    command: `cd '${dir}' && echo committed >> CHECKOUT_PROBE.txt && git add CHECKOUT_PROBE.txt && git -c user.name=fake -c user.email=fake@example.com commit -qm "checkout probe"`,
   })
   const uncommitted = await call("workspace_exec", { command: `cd '${dir}' && echo uncommitted > UNCOMMITTED_PROBE.txt` })
   if (!committed.text.startsWith("exit code: 0") || !uncommitted.text.startsWith("exit code: 0")) {
     await call("task_report", { status: "failed", message: `fake agent could not change files in ${dir}` })
     return 1
   }
-  await call("task_report", { status: "done", message: `checkout probe finished in ${dir}` })
+  await call("task_report", {
+    status: "done",
+    message: `checkout probe finished in ${dir}; run started in ${process.cwd()}; repo_checkout said: ${checkout.text}`,
+  })
   return 0
 }
 
@@ -269,9 +325,12 @@ const main = async (): Promise<number> => {
   // Probes match the user's text, not the user context the box puts before it (core/user-context.ts).
   const request = prompt.startsWith("The user is signed in to Kestrel as ") ? prompt.slice(prompt.indexOf("\n\n") + 2) : prompt
   if (request.trim() === "exec-probe") return runExecProbes()
+  const listener = /^listener-probe(?: (\d+) (\d+) (\S+))?$/.exec(request.trim())
+  if (listener !== null) return runListenerProbe(listener[1], listener[2], listener[3])
   const [probe, arg] = request.trim().split(/\s+/)
   if (probe === "automation-probe") return runAutomationProbes(arg)
   if (probe === "thread-probe") return runThreadProbe(arg)
+  if (probe === "gh-probe") return runGhProbe(request.trim().split(/\s+/).slice(1).join(" ") || "--version")
   if (probe === "ask-probe") return runAskProbe()
   // Another agent's "ping" (sent by a thread probe) is answered with "pong" to the thread it came from.
   const ping = /^Message from the agent of .*\(thread id (\S+)\):\n\nping\n/.exec(request)
@@ -385,6 +444,54 @@ const serveAppServer = () => {
     .on("close", () => process.exit(0))
 }
 
+/** The ACP side of an OpenCode run: one session, one prompt, played by `main`. Exits when the harness closes stdin. */
+const serveAcp = () => {
+  const send = (message: Record<string, unknown>) => console.log(JSON.stringify({ jsonrpc: "2.0", ...message }))
+  let sessionId = ""
+  let promptId: number | null = null
+  const endTurn = (stopReason: "end_turn" | "cancelled" | "refusal") => {
+    if (promptId === null) return
+    send({ id: promptId, result: { stopReason } })
+    promptId = null
+  }
+  createInterface({ input: process.stdin })
+    .on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> }
+      const params = message.params ?? {}
+      if (message.method === "session/cancel") {
+        endTurn("cancelled")
+        return
+      }
+      if (message.id === undefined) return
+      switch (message.method) {
+        case "initialize":
+          send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] } })
+          return
+        case "session/new":
+        case "session/resume": {
+          sessionId = message.method === "session/resume" ? String(params.sessionId) : randomUUID()
+          if (message.method === "session/resume") resumeSession = sessionId
+          const configOptions = [{ id: "model", type: "select", currentValue: model ?? "", options: [] }]
+          send({ id: message.id, result: message.method === "session/new" ? { sessionId, configOptions } : { configOptions } })
+          return
+        }
+        case "session/set_config_option":
+          send({ id: message.id, result: { configOptions: [{ id: "model", type: "select", currentValue: model ?? "", options: [] }] } })
+          return
+        case "session/prompt": {
+          const block = Array.isArray(params.prompt) ? (params.prompt[0] as { text?: string } | undefined) : undefined
+          prompt = block?.text ?? ""
+          promptId = message.id
+          void run().then((code) => endTurn(code === 0 ? "end_turn" : "refusal"))
+          return
+        }
+        default:
+          send({ id: message.id, error: { code: -32601, message: `${message.method} is not supported by the fake agent` } })
+      }
+    })
+    .on("close", () => process.exit(0))
+}
+
 /** The Claude Code side of a run: the first stream-json user message is the prompt; later ones steer the turn. */
 const serveClaude = () => {
   const send = (message: unknown) => console.log(JSON.stringify(message))
@@ -420,4 +527,5 @@ const serveClaude = () => {
 }
 
 if (appServer) serveAppServer()
+else if (acp) serveAcp()
 else serveClaude()

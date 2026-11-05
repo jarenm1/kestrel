@@ -1,5 +1,12 @@
 import { Either, Schema } from "effect"
-import { DesktopAck, DesktopInput, DesktopStatus, Paths, ServerEvent, TaskStats } from "@cloudagents/protocol"
+import {
+  DesktopRtcServerMessage,
+  DesktopStatus,
+  Paths,
+  ServerEvent,
+  TaskStats,
+  type DesktopRtcClientMessage,
+} from "@cloudagents/protocol"
 import { socketUrl, taskTarget, type Target } from "@/api/client"
 
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
@@ -106,70 +113,60 @@ export function openTaskStats(
   )
 }
 
+/**
+ * Where a desktop stream connects: a task on the box its thread lives on, or an explicit WebSocket URL (the embed,
+ * whose URL carries its own auth query).
+ */
+export type DesktopSource = { taskId: string } | { url: string }
+
 export interface DesktopHandlers {
   onStatus: (status: DesktopStatus) => void
-  /** Binary frames: first is the init segment, then media fragments. */
-  onMedia: (bytes: Uint8Array<ArrayBuffer>) => void
-  onClose: () => void
+  onSignal: (message: DesktopRtcServerMessage) => void
+  /**
+   * The socket closed, or never opened (`code` null). `opened` tells a refused or failed handshake from a stream that
+   * dropped after it was live.
+   */
+  onClose: (close: { code: number | null; opened: boolean }) => void
 }
 
 export interface DesktopConnection {
-  send: (input: DesktopInput) => void
+  /** WebRTC signaling to the box; no-op until the socket is open. */
+  send: (message: DesktopRtcClientMessage) => void
   close: () => void
 }
 
-/**
- * Acks go out after this many binary messages or this long, whichever comes first, so the server bounds what is in
- * flight. Acks are billed relay messages, hence the spacing: the lag an ack reports is about this interval plus a
- * round trip, and the box's resync threshold (FLOW_LAG_LOW_MS = 400) has to sit above that. One message may carry
- * several fragments when the box bundles them; acks count messages, as the box's flow control does.
- */
-const ACK_EVERY_FRAMES = 15
-const ACK_EVERY_MS = 250
-
-/** Opens the desktop stream WebSocket: status text frames, fMP4 binary frames, input and ack text frames. */
-export function openDesktopStream(taskId: string, handlers: DesktopHandlers): DesktopConnection {
+/** Opens the desktop WebSocket: DesktopStatus text frames and WebRTC signaling, both ways. Media and input are WebRTC. */
+export function openDesktopStream(source: DesktopSource, handlers: DesktopHandlers): DesktopConnection {
   let socket: WebSocket | undefined
-  let received = 0
-  let acked = 0
-  let ackedAt = performance.now()
-  let ackTimer: number | undefined
-  const sendAck = () => {
-    window.clearTimeout(ackTimer)
-    ackTimer = undefined
-    acked = received
-    ackedAt = performance.now()
-    const ack: DesktopAck = { _tag: "stream.ack", frames: received }
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(ack))
-  }
+  let opened = false
   const closeSocket = openSocket(
-    async () => socketUrl(Paths.taskDesktopWs(taskId), await taskTarget(taskId)),
-    (opened) => {
-      socket = opened
-      opened.binaryType = "arraybuffer"
-      opened.onmessage = (msg: MessageEvent<unknown>) => {
-        if (typeof msg.data === "string") {
-          const status = decodeText(DesktopStatus, msg.data)
-          if (status) handlers.onStatus(status)
+    async () => {
+      if ("url" in source) return source.url
+      return socketUrl(Paths.taskDesktopWs(source.taskId), await taskTarget(source.taskId))
+    },
+    (ws) => {
+      socket = ws
+      ws.onopen = () => {
+        opened = true
+      }
+      ws.onmessage = (msg: MessageEvent<unknown>) => {
+        if (typeof msg.data !== "string") return
+        const status = decodeText(DesktopStatus, msg.data)
+        if (status) {
+          handlers.onStatus(status)
           return
         }
-        if (!(msg.data instanceof ArrayBuffer)) return
-        received++
-        if (received - acked >= ACK_EVERY_FRAMES || performance.now() - ackedAt >= ACK_EVERY_MS) sendAck()
-        else ackTimer ??= window.setTimeout(sendAck, ACK_EVERY_MS)
-        handlers.onMedia(new Uint8Array(msg.data))
+        const signal = decodeText(DesktopRtcServerMessage, msg.data)
+        if (signal) handlers.onSignal(signal)
       }
-      opened.onclose = handlers.onClose
+      ws.onclose = (ev) => handlers.onClose({ code: ev.code, opened })
     },
-    handlers.onClose,
+    () => handlers.onClose({ code: null, opened: false }),
   )
   return {
-    send: (input) => {
-      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(input))
+    send: (message) => {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
     },
-    close: () => {
-      window.clearTimeout(ackTimer)
-      closeSocket()
-    },
+    close: closeSocket,
   }
 }

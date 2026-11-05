@@ -1,17 +1,23 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CreateFleetBoxBody, type CreatedFleetBox, type FleetBox } from "@cloudagents/protocol"
+import {
+  CreateFleetBoxBody,
+  type CreatedFleetBox,
+  type FleetBox,
+  type FleetActivity,
+  type NestHostStatus,
+} from "@cloudagents/protocol"
 import { Either, Schema } from "effect"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { BOX_FORM_ERROR, OnlineBadge } from "@/components/Boxes"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
-import { errorText } from "@/util"
+import { errorText, formatSize, formatTime } from "@/util"
 
 /** Validates a managed box's name and URL the way the server does; a trailing slash is dropped first. */
 function parseFleetForm(name: string, url: string): CreateFleetBoxBody | null {
@@ -25,12 +31,24 @@ function parseFleetForm(name: string, url: string): CreateFleetBoxBody | null {
 /** Settings › Fleet (operators only): Kestrel's managed boxes. Each one serves many users, reached directly at its URL. */
 export function Fleet() {
   const fleet = useQuery(queries.fleetBoxes())
+  const activity = useQuery(queries.fleetActivity())
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(timer)
+  }, [])
+  const me = useQuery(queries.me())
   const [created, setCreated] = useState<CreatedFleetBox | null>(null)
   const boxes = fleet.data?.boxes ?? []
 
   return (
     <>
       {fleet.error && <Alert>{errorText(fleet.error)}</Alert>}
+      {activity.error && <Alert>Activity telemetry unavailable: {errorText(activity.error)}</Alert>}
+      <p className="text-xs text-muted-foreground">
+        Active users made an authenticated box request in the last five minutes, including background polling.
+        Reports arrive every 30 seconds. Assigned users are shown separately.
+      </p>
       {fleet.isPending && <div className="text-muted-foreground">Loading…</div>}
       {created && <FleetSecretCard created={created} onDismiss={() => setCreated(null)} />}
       {fleet.data && (
@@ -38,17 +56,126 @@ export function Fleet() {
           <CardContent className="divide-y divide-white/[0.04] px-0">
             {boxes.length === 0 && <div className="px-5 py-4 text-muted-foreground">No managed boxes yet.</div>}
             {boxes.map((box) => (
-              <FleetBoxRow key={box.id} box={box} onSecret={setCreated} />
+              <FleetBoxRow
+                key={box.id}
+                box={box}
+                activity={activity.error ? undefined : activity.data}
+                now={now}
+                onSecret={setCreated}
+              />
             ))}
           </CardContent>
         </Card>
       )}
+      {me.data?.nestEnabled && <NestHosts />}
       <AddFleetBoxForm onCreated={setCreated} />
+      <ToolFailures />
     </>
   )
 }
 
-function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: CreatedFleetBox) => void }) {
+/** Nest hosts and what each one has free. Shown wherever Nest boxes are offered. */
+function NestHosts() {
+  const hosts = useQuery({ ...queries.nestHosts(), refetchInterval: 5_000 })
+
+  return (
+    <>
+      {hosts.error && <Alert>{errorText(hosts.error)}</Alert>}
+      {hosts.isPending && <div className="text-muted-foreground">Loading…</div>}
+      {hosts.data && (
+        <Card className="py-0">
+          <CardContent className="divide-y divide-white/[0.04] px-0">
+            {hosts.data.hosts.length === 0 && <div className="px-5 py-4 text-muted-foreground">No Nest hosts yet.</div>}
+            {hosts.data.hosts.map((host) => (
+              <NestHostRow key={host.id} host={host} />
+            ))}
+          </CardContent>
+        </Card>
+      )}
+    </>
+  )
+}
+
+function NestHostRow({ host }: { host: NestHostStatus }) {
+  const cap = host.capacity
+  return (
+    <div className="flex flex-col gap-2.5 px-5 py-4">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="truncate font-medium">{host.name}</span>
+        <Badge variant={host.connected ? "success" : "neutral"}>{host.connected ? "connected" : "offline"}</Badge>
+        {host.agentVersion && <span className="text-xs text-muted-foreground">agent {host.agentVersion}</span>}
+        {host.lastSeenAt && !host.connected && (
+          <span className="text-xs text-muted-foreground">last seen {formatTime(host.lastSeenAt)}</span>
+        )}
+      </div>
+      {cap ? (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <span>
+            {cap.running} running, {cap.suspended} suspended
+          </span>
+          <span>
+            vCPUs {cap.vcpusPlugged} of {cap.vcpus} plugged
+          </span>
+          <span>
+            Memory {formatSize(cap.memoryPluggedBytes)} of {formatSize(cap.memoryBytes)} plugged
+          </span>
+          <span>
+            Disk {formatSize(cap.diskFreeBytes)} free, {formatSize(cap.diskReservedBytes)} reserved
+          </span>
+          <span>
+            GPUs {cap.gpus.filter((gpu) => gpu.attachedTo === null).length} of {cap.gpus.length} free
+          </span>
+        </div>
+      ) : (
+        <span className="text-xs text-muted-foreground">No capacity reported yet.</span>
+      )}
+    </div>
+  )
+}
+
+/** What failed across Kestrel's boxes, most common first (the server's order). */
+function ToolFailures() {
+  const list = useQuery(queries.fleetToolFailures())
+
+  return (
+    <Card className="py-0">
+      <CardContent className="flex flex-col gap-3 px-5 py-4">
+        <div>
+          <span className="font-medium">Common failures</span>
+          <p className="text-muted-foreground">
+            Failed tools and agent turns{list.data && ` of the last ${list.data.days} days`}, most common first.
+          </p>
+        </div>
+        {list.error && <Alert>{errorText(list.error)}</Alert>}
+        {list.isPending && <div className="text-muted-foreground">Loading…</div>}
+        {list.data?.failures.length === 0 && <div className="text-muted-foreground">No failures reported.</div>}
+        {list.data && list.data.failures.length > 0 && (
+          <ol className="divide-y divide-white/[0.04]">
+            {list.data.failures.map((failure) => (
+              <li key={`${failure.tool}\n${failure.signature}`} className="flex items-start gap-4 py-2.5">
+                <span className="w-12 shrink-0 text-right font-medium tabular-nums">{failure.count}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span className="truncate font-mono text-xs">{failure.tool}</span>
+                  <span className="break-words text-muted-foreground">{failure.signature}</span>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {failure.firstSeen === failure.lastSeen ? failure.lastSeen : `${failure.firstSeen} to ${failure.lastSeen}`}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function FleetBoxRow({ box, activity, now, onSecret }: {
+  box: FleetBox
+  activity: FleetActivity | undefined
+  now: number
+  onSecret: (created: CreatedFleetBox) => void
+}) {
   const queryClient = useQueryClient()
   const health = useQuery(queries.boxHealth(box.url))
   const invalidate = () => queryClient.invalidateQueries({ queryKey: keys.fleetBoxes })
@@ -67,6 +194,12 @@ function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: Cre
   const pending = setState.isPending || rotate.isPending || remove.isPending
   const error = setState.error ?? rotate.error ?? remove.error
   const variant = box.state === "active" ? "success" : box.state === "draining" ? "warning" : "neutral"
+  const report = activity?.boxes.find((entry) => entry.boxId === box.id)
+  const received = report?.receivedAt ? Date.parse(report.receivedAt) : null
+  const fresh = received !== null && now - received < (activity?.staleAfterSeconds ?? 90) * 1000
+  const users = fresh
+    ? report?.users.filter((user) => now - Date.parse(user.lastActiveAt) < (activity?.windowSeconds ?? 300) * 1000) ?? []
+    : []
 
   return (
     <div className="flex flex-col gap-2.5 px-5 py-4">
@@ -79,7 +212,30 @@ function FleetBoxRow({ box, onSecret }: { box: FleetBox; onSecret: (created: Cre
           </div>
           <span className="truncate font-mono text-xs text-muted-foreground">{box.url}</span>
         </div>
-        <span className="text-xs text-muted-foreground">{box.users === 1 ? "1 user" : `${box.users} users`}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{box.users} assigned</span>
+      </div>
+      <div className="flex flex-col gap-1 text-xs">
+        <span className={fresh ? "font-medium" : "text-muted-foreground"}>
+          {fresh
+            ? `${users.length} active ${users.length === 1 ? "user" : "users"} · last 5 minutes`
+            : received !== null ? "Activity telemetry stale" : "Activity telemetry unavailable"}
+        </span>
+        {received !== null && (
+          <span className="text-muted-foreground">
+            Last report: <time dateTime={new Date(received).toISOString()}>{new Date(received).toLocaleString()}</time>
+          </span>
+        )}
+        {users.length > 0 && (
+          <ul className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+            {users.map((user) => (
+              <li key={user.login}>
+                <span className="font-medium text-foreground">@{user.login}</span>
+                {" · last seen "}
+                <time dateTime={user.lastActiveAt}>{new Date(user.lastActiveAt).toLocaleTimeString()}</time>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">

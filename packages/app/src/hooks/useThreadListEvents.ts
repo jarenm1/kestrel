@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react"
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
-import type { Task } from "@cloudagents/protocol"
 import type { Target } from "@/api/client"
 import { openUserEvents } from "@/api/events"
-import { keys, queries, storeTask } from "@/api/queries"
+import { dropTask, keys, queries, storeTask } from "@/api/queries"
 import { observeTask, playTurnSound, type SeenTasks } from "@/lib/turnSound"
 
 const RECONNECT_MS = 2000
@@ -55,10 +54,7 @@ function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): (
             break
           case "task.deleted":
             seen.delete(event.taskId)
-            queryClient.setQueryData(keys.tasks, (list: readonly Task[] | undefined) =>
-              list?.filter((task) => task.id !== event.taskId),
-            )
-            queryClient.removeQueries({ queryKey: keys.task(event.taskId), exact: true })
+            dropTask(queryClient, event.taskId)
             break
         }
       },

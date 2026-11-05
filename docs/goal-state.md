@@ -108,7 +108,7 @@ the natural place to begin.
 Gaps to close today:
 
 - Automations and PR watches run only on Kestrel's boxes.
-- The mobile app talks only to the active box, while web merges them all.
+- Web and mobile list threads across boxes. Mobile web links without a box identifier still open on the active box.
 - `toolkit_install` requires a box started from the Nix flake.
 - Managed boxes have a separate credential path (`/box/credentials`) because one box serves many users. Per-user VMs
   remove it: every box uses `/box/self`.
@@ -140,8 +140,10 @@ Today a BYOB user needs their own HTTPS tunnel and a local proxy that blocks `/m
 
 1. **Separate the sandbox listener.** `/mcp` and `/broker` share the box's main server (`packages/server/src/main.ts`).
    Move them to a listener only sandboxes can reach, so a tunnel can point straight at the public listener.
-2. **Spike WebRTC for the stream and the API.** Signaling goes through the box's dial-out socket. If a direct connection
-   proves reliable, the tunnel becomes optional.
+2. **WebRTC for the API, spiked.** The app posts its offer to `POST /api/webrtc/offer` on the box's own port, so signaling
+   needs the same direct route as the API and does not use the dial-out socket yet. Once open, the data channel carries API
+   calls and HTTP stays the fallback ([byo-box.md](byo-box.md#direct-data-path)). The desktop stream is on WebRTC as well,
+   signaled over the desktop WebSocket ([Streaming](#streaming)). The tunnel stays optional only once the reach question below is answered.
 3. **Keep tunnels as the fallback.** Tailscale, Cloudflare Tunnel or the user's own domain still work, and the installer
    should automate as much of this as it can.
 
@@ -167,8 +169,6 @@ product copy should say so plainly.
 
 - **Ship the desktop dependencies.** The desktop needs weston 14 or newer, but Ubuntu 24.04 ships 13. A stock Ubuntu box
   on either native Linux or WSL therefore needs a manual install today.
-- **Handle WSLg.** WSLg mounts `/tmp/.X11-unix` read-only, and the documented fix is a manual root `umount` that
-  `wsl --shutdown` reverts. The box should make this work without either step.
 - **Fix the first start on WSL.** The first desktop start can time out while NVENC fails and falls back to x264. Skip
   NVENC there, or do not count the failed attempt against the startup timeout.
 - **Fix hardware graphics on native Linux.** The sandbox exposes host drivers only at `/run/opengl-driver`, and the docs
@@ -199,23 +199,26 @@ A shape is a VM's resource class. The names and sizes will come from measurement
 | Standard CPU | Builds, tests and browser work | Software rendering, x264 |
 | GPU | Game, 3D and VFX work | Hardware rendering, NVENC |
 
-**GPU VMs start with a dedicated GPU through passthrough.** This is simple and isolates users fully, but it ties up a whole
-GPU, so GPU time is priced accordingly. Fractional GPUs (vGPU, MIG, SR-IOV or paravirtualized graphics) are a later cost
-optimization, and each needs testing with Blender and Godot before it is offered. Today's shared GPU was an MVP shortcut
-and does not carry forward.
+**GPUs are lent to VMs whole, through passthrough, while needed.** A VM hot-plugs a dedicated GPU when work needs one
+and returns it when done (see [nest.md](nest.md#resource-policy-host-agent)), so the GPU is tied up only while attached,
+and GPU time is priced from attach to detach. Fractional GPUs (vGPU, MIG, SR-IOV or paravirtualized graphics) are a
+later cost optimization, and each needs testing with Blender and Godot before it is offered. Today's shared GPU was an
+MVP shortcut and does not carry forward.
 
 ### Changing shape
 
-The volume is separate from the VM, so changing shape means stopping the VM and starting a new one with the same volume.
+A shape is a set of limits, not a VM type. The host resizes a running VM inside its limits (vCPU hot-add and removal,
+virtio-mem memory) and lends it a GPU by hot-plugging one while it is needed, so changing shape needs no restart. The
+design is in [nest.md](nest.md#resource-policy-host-agent).
 
-- **Start with one box per user,** resized only when it is idle.
-- **If a thread needs a GPU while others are running,** ask the user to wait for the box to go idle, or start a second box
-  for that thread. The web app already merges threads from several boxes. Cross-box thread tools would come later.
+- **One box per user.** A thread that needs a GPU asks for one; the box restarts its desktop on the GPU renderer, and
+  agent runs, shells and files carry on.
 - **Threads stay pinned to their box.** They never move automatically while running.
 
 ### Host layer
 
-A new package (`packages/host`) runs on each host. It dials out to the control plane and handles no user secrets.
+A new package (`packages/host`) runs on each host. It dials out to the control plane and handles no user secrets. Parts,
+interfaces and flows: [nest.md](nest.md).
 
 ```mermaid
 flowchart LR
@@ -243,7 +246,7 @@ flowchart LR
 
 | Part | Job |
 |---|---|
-| Hypervisor | Runs VMs. Cloud Hypervisor is the first candidate because it supports both VFIO passthrough and snapshots. Firecracker has no GPU passthrough. |
+| Hypervisor | Cloud Hypervisor: VFIO hot-plug, vCPU and virtio-mem resizing, lazy (userfaultfd) snapshot restore and live migration. Firecracker has no GPU passthrough or resizing. |
 | VM image | NixOS built from the flake, so the Nest gets `strict` sandboxing and toolkits. The Nix store can be shared read-only between VMs. |
 | Volumes | Local NVMe while a VM runs, with snapshots in object storage so that a parked user can resume on another host. |
 | Ingress | Routes each box's HTTPS URL to its VM and starts the wake flow when a request reaches a suspended one. |
@@ -267,11 +270,11 @@ stateDiagram-v2
 - **Running:** the VM holds its CPU, memory and any GPU.
 - **Suspended:** the VM's memory is saved to the local disk, and it resumes quickly on the same host. Open apps survive on
   CPU shapes.
-- **Parked:** the volume is in object storage and only disk is held. It starts as a fresh boot, so open apps are gone but
-  everything on disk stays.
+- **Parked:** the volume is in object storage and only disk is held. It resumes as a clone of a booted template VM with
+  the volume attached, so open apps are gone but everything on disk stays.
 
-GPU state generally cannot be snapshotted through passthrough, so assume GPU VMs skip Suspended until tested. They stop the
-desktop, save what can be saved and park, which makes evidence matter more on that shape.
+A VM with a GPU attached cannot be snapshotted, so suspend detaches the GPU first: the desktop falls back to software
+rendering, and evidence matters more on GPU work.
 
 **When a VM is idle:** it has no agent run, no viewer, no recording and no recent input. The box's activity socket
 (`packages/server/src/activity.ts`) already reports runs and desktops, which is a good starting point. A guest that lies
@@ -329,14 +332,12 @@ usage. Model usage stays on the user's own key or subscription.
 
 ## Streaming
 
-Today's stream is fMP4 over WebSocket, either through the Hub or direct to the box. The damage-driven capture sends almost
-nothing while the desktop is still, and the encoder stops shortly after the last viewer leaves.
+Desktop video, audio and input are on WebRTC: H.264 video and Opus audio sent directly from the box to each viewer, input over data channels, and signaling on the desktop WebSocket. The damage-driven capture sends almost nothing while the desktop is still, and the encoder stops shortly after the last viewer leaves. The current design is in [box.md](box.md#webrtc-desktop).
 
-- **Goal:** WebRTC directly from box to viewer, for lower latency and better behaviour on poor networks. WebSocket stays as
-  the fallback, so a tunnel-only box still streams.
-- **Relay:** the legacy Hub path goes away with the relay.
-- **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the
-  apps should set from the encoder capability.
+- **Done:** WebRTC from box to viewer. The fMP4 WebSocket path is deleted; WebSocket media is not kept as a fallback.
+- **No fallback, by decision:** keeping the WebSocket stream for a tunnel-only box would have sent video through the Hub or another relay Kestrel pays for, which breaks requirement 1. The tradeoff: a box reachable only over an HTTPS tunnel, with no LAN, tailnet or public UDP path and no operator-configured TURN, cannot stream. It needs a direct UDP path or its operator's TURN server.
+- **Relay:** the Hub carries only desktop signaling and status for boxes on the legacy relay, a handful of requests per session. No media passes through it, so it adds no media cost.
+- **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the apps should set from the encoder capability.
 
 ## Saved evidence
 
@@ -429,7 +430,7 @@ records, and usage records. `PLANS` changes when billing arrives.
 - **Resume times:** what suspend and resume cost in practice decides how aggressive the idle timeout can be.
 - **Memory billing:** whether ballooning returns enough memory to bill close to real use.
 - **Fractional GPUs:** which option works with our apps, and whether it is worth its licensing and setup.
-- **WebRTC reach:** how often a direct connection fails, and whether the API can reliably use it as well as the stream.
+- **WebRTC reach:** how often a direct connection fails on real networks. The API channel is tested on one host (a managed box on loopback, with HTTP fallback). The desktop stream has no fallback, so its failure rate on real networks is the open question.
 - **Evidence in PRs:** what GitHub actually renders, and how long Nest evidence is retained.
 - **Free tier:** whether the Nest has one, given that a free VM has a real cost even when suspended.
 - **Teams:** whether a team shares boxes or each seat gets its own. Boxes are single-owner in this design.

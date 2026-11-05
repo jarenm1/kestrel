@@ -47,7 +47,7 @@ export interface WorkspaceShape {
   /** Commit a ref names in the mirror, or null when it does not exist. */
   readonly resolveRef: (mirrorPath: string, ref: string) => Effect.Effect<string | null, WorkspaceError>
   /**
-   * Clones the mirror into `spec.dir` (sharing its objects), creates `branch` at `startSha`, creates the shadow
+   * Clones the mirror into `spec.dir` (sharing its objects), puts `branch` at `startSha`, creates the shadow
    * git dir and pins `pinRef` to `baseSha` in it. `spec.dir` must not exist yet.
    */
   readonly createCheckout: (
@@ -67,10 +67,21 @@ export interface WorkspaceShape {
   readonly findIcon: (mirrorPath: string, commit: string) => Effect.Effect<CheckoutIcon | null, WorkspaceError>
   /** Bytes of a blob in the mirror, at most `ICON_MAX_BYTES`. */
   readonly readIcon: (mirrorPath: string, blob: string) => Effect.Effect<Uint8Array, WorkspaceError>
+  /** Which of `paths` are regular files at `commit`, read from the mirror (never the agent-writable checkout). */
+  readonly filesAt: (
+    mirrorPath: string,
+    commit: string,
+    paths: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<string>, WorkspaceError>
   /** The commit the checkout's HEAD points at, read from its files. */
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
   readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
+  /**
+   * Commits on the checkout's HEAD and not on `baseRef` (a ref in the shadow), newest first, as `git log --cherry`
+   * prints them with `%H%x00%s%x00%b%x00`. Empty when there are none.
+   */
+  readonly commitLog: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
   /**
    * Paths of the checkout's files on disk, sorted: everything its `.gitignore` files do not ignore, plus files committed
    * at HEAD even when ignored. At most `limit`; `truncated` says there were more.
@@ -467,6 +478,8 @@ const make: WorkspaceShape = {
       }
       const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(listed.stdout)
       if (match?.[1] === undefined) return yield* Effect.fail(new WorkspaceError({ message: `${url} has no default branch` }))
+      // Checkouts clone the mirror, so its HEAD decides their local default branch and `origin/HEAD`.
+      yield* git(dirname(mirrorPath), ["--git-dir", mirrorPath, "symbolic-ref", "HEAD", `refs/heads/${match[1]}`])
       return match[1]
     }),
 
@@ -506,7 +519,8 @@ const make: WorkspaceShape = {
       })
       yield* git(threadDir, ["clone", "--shared", "--no-checkout", "--", mirrorPath, dir])
       yield* git(dir, ["remote", "set-url", "origin", url])
-      yield* git(dir, ["checkout", "-q", "-b", branch, startSha])
+      // -B: the clone already has a local branch for the mirror's HEAD, which a pull request's branch may be named like.
+      yield* git(dir, ["checkout", "-q", "-B", branch, startSha])
       yield* Effect.tryPromise({
         try: () => mkdir(dirname(shadowPath), { recursive: true }),
         catch: (e) => new WorkspaceError({ message: `mkdir failed: ${String(e)}` }),
@@ -519,6 +533,9 @@ const make: WorkspaceShape = {
       })
       yield* git(shadowPath, ["--git-dir", shadowPath, "update-ref", pinRef, baseSha])
     }),
+
+  filesAt: (mirrorPath, commit, paths) =>
+    Effect.map(listBlobs(mirrorPath, commit, paths), (found) => paths.filter((path) => found.has(path))),
 
   findIcon: (mirrorPath, commit) =>
     Effect.gen(function* () {
@@ -570,6 +587,20 @@ const make: WorkspaceShape = {
       } finally {
         yield* Effect.promise(() => rm(index, { force: true }))
       }
+    }),
+
+  commitLog: (spec) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const head = yield* readHeadSha(real)
+      if (head === null) return ""
+      return yield* shadowGit(spec.shadowPath, real, [
+        "log",
+        "--no-show-signature",
+        "--pretty=format:%H%x00%s%x00%b%x00",
+        "--cherry",
+        `${spec.baseRef}...${head}`,
+      ])
     }),
 
   listFiles: (spec) =>

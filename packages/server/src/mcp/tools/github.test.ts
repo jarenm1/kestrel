@@ -32,6 +32,7 @@ const pullRequest: PullRequest = {
   headSha: "abc123",
   baseRef: "main",
   headRef: "cloudagents/topic",
+  headRepo: "acme/widget",
   mergeable: true,
   mergeableState: "clean",
 }

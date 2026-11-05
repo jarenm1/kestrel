@@ -1,12 +1,14 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, SendMessageBody, SetDesktopQualityBody, AgentModel, type FileRoot } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { Paths, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
+import type { BoxCapabilities } from "@cloudagents/protocol"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
 import { dayFormat } from "../core/activity"
-import { BOX_DEV_HEADER } from "../relay/client"
+import { BOX_DEV_HEADER } from "../tunnel"
 
 type ApiError = NotFound | BadRequest | Conflict | InternalError
 
@@ -94,6 +96,17 @@ const signedIn = <A, R>(f: (user: string) => Effect.Effect<A, ApiError, R>) =>
 const cliProvider = Effect.flatMap(HttpRouter.params, (p) =>
   Schema.decodeUnknown(CliProvider)(p.provider ?? "").pipe(Effect.mapError(() => new BadRequest({ message: "unknown provider" }))),
 )
+
+/** The frozen provider catalog accepted by clients installed before OpenCode Go and the Console login. */
+const legacyCliProviders: Readonly<Record<string, true>> = { "claude-cli": true, "codex-cli": true, "antigravity-cli": true }
+
+/** A client advertises the provider literals it can decode; omitting the query keeps the installed-client contract. */
+const cliArray = <A extends { readonly provider: CliProvider }>(rows: readonly A[]) =>
+  Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
+    const advertised = new URL(req.url, "http://localhost").searchParams.get("providers")
+    const accepted = advertised === null ? null : new Set(advertised.split(","))
+    return rows.filter((row) => accepted === null ? legacyCliProviders[row.provider] === true : accepted.has(row.provider))
+  })
 
 /** The composer's chosen model (`?model=`); the box resolves the harness that will actually run. */
 const chosenModel = Effect.gen(function* () {
@@ -184,15 +197,48 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
+export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
       Effect.succeed(HttpServerResponse.unsafeJson(Schema.decodeSync(Health)({ ok: true, version: VERSION }))),
     ),
+    // Sandbox and desktop posture of this box: a signed-in user only, unlike health. 401 when no user is presented.
+    HttpRouter.get(
+      "/api/capabilities",
+      requestUser.pipe(
+        Effect.flatMap((user) =>
+          Effect.succeed(
+            user === null
+              ? HttpServerResponse.unsafeJson({ _tag: "Unauthorized", message: "no signed-in user" }, { status: 401 })
+              : HttpServerResponse.unsafeJson(capabilities),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.get(
+      Paths.textGenerationSettings,
+      respond(signedIn((user) => core.getTextGenerationSettings(user))),
+    ),
+    HttpRouter.put(
+      Paths.textGenerationSettings,
+      respond(signedIn((user) =>
+        Effect.flatMap(jsonBody(TextGenerationSettings), (settings) => core.setTextGenerationSettings(user, settings)),
+      )),
+    ),
+    HttpRouter.get(
+      Paths.threadSettings,
+      respond(signedIn((user) => core.getThreadSettings(user))),
+    ),
+    HttpRouter.put(
+      Paths.threadSettings,
+      respond(signedIn((user) =>
+        Effect.flatMap(jsonBody(ThreadSettings), (settings) => core.setThreadSettings(user, settings)),
+      )),
+    ),
     // Agent CLI sign-ins of the signed-in user on the box (Connections page); never tokens.
-    HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user)))),
-    HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user)))),
+    HttpRouter.get("/api/cli-auth", respond(signedIn((user) => cliAuth.status(user).pipe(Effect.flatMap(cliArray))))),
+    HttpRouter.get("/api/cli-auth/usage", respond(signedIn((user) => cliAuth.providerUsage(user).pipe(Effect.flatMap(cliArray))))),
     HttpRouter.post(
       "/api/cli-auth/:provider/login",
       respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),
@@ -203,6 +249,31 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
         Effect.flatMap(cliProvider, (provider) =>
           signedIn((user) =>
             Effect.flatMap(jsonBody(CliLoginCodeBody), (body) => cliAuth.submitCode(user, provider, body.code)),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/key",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(
+              jsonBody(PutApiKeyBody).pipe(Effect.mapError(() => new BadRequest({ message: "invalid API key request" }))),
+              (body) => cliAuth.submitKey(user, provider, body.apiKey),
+            ),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/cli-auth/:provider/banked-resets/use",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(UseBankedResetBody), (body) =>
+              cliAuth.useBankedReset(user, provider, body.resetId),
+            ),
           ),
         ),
       ),
@@ -244,6 +315,18 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
       Effect.flatMap(HttpRouter.params, (p) => respond(signedIn((user) =>
         Effect.zipRight(core.getTask(user, p.id ?? ""), core.cancelDelegation(p.id ?? "", p.childId ?? "")).pipe(Effect.map((status) => status.task)),
       ))),
+    ),
+    HttpRouter.put(
+      "/api/tasks/:id/usage-limit",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(SetUsageLimitAutoResumeBody), (body) =>
+              core.setUsageLimitAutoResume(user, id, body.autoResume),
+            ),
+          ),
+        ),
+      ),
     ),
     // Real commands of the harness the thread's next message runs on, discovered in the thread workspace.
     HttpRouter.get(
@@ -410,9 +493,9 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape) =>
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape) =>
+export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

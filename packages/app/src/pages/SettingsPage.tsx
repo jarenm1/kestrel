@@ -1,15 +1,30 @@
-import { useState } from "react"
-import { useQuery } from "@tanstack/react-query"
-import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
-import { Check, ChevronDown, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
-import { Link, Navigate, NavLink, Outlet } from "react-router-dom"
-import { queries } from "@/api/queries"
+import { useEffect, useId, useRef, useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  ControlPaths,
+  CURRENT_PLAN,
+  PLANS,
+  connectedModelProviders,
+  modelInfo,
+  type AgentEffort,
+  type AgentModel,
+  type BoxList,
+  type Plan,
+  type TextGenerationSettings as TextGenerationConfig,
+  type ThreadSettings as ThreadConfig,
+  type Usage,
+} from "@cloudagents/protocol"
+import { Check, ChevronDown, CreditCard, ExternalLink, Layers, LogOut, MessagesSquare, Plug, RotateCcw, Server, User } from "lucide-react"
+import { Navigate, NavLink, Outlet } from "react-router-dom"
+import { api } from "@/api/client"
+import { keys, queries } from "@/api/queries"
+import { ModelPicker, ThinkingPicker, effortOptions } from "@/components/AgentPickers"
 import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
 import { Fleet } from "@/components/Fleet"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
   DropdownMenu,
@@ -19,6 +34,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Slider } from "@/components/ui/slider"
+import { Textarea } from "@/components/ui/textarea"
+import { Switch } from "@/components/ui/switch"
+import { SERVER_URL } from "@/config"
+import { useShownModels } from "@/hooks/useShownModels"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 import { getTurnSound, getTurnVolume, playTurnSound, TURN_SOUND_KEY, TURN_VOLUME_KEY, turnSounds } from "@/lib/turnSound"
@@ -27,6 +46,7 @@ import { errorText } from "@/util"
 const sections = [
   { to: "profile", label: "Profile", icon: User },
   { to: "connections", label: "Connections", icon: Plug },
+  { to: "threads", label: "Threads", icon: MessagesSquare },
   { to: "boxes", label: "Boxes", icon: Server },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
@@ -156,9 +176,11 @@ function TurnSoundCard() {
 
 export function ProfileSettings() {
   const me = useQuery(queries.me())
+  const connections = useQuery(queries.connections())
   const signOut = useSignOut()
   if (!me.data) return null
   const { login, name, avatarUrl } = me.data
+  const github = connections.data?.find((connection) => connection.provider === "github")
 
   return (
     <>
@@ -188,18 +210,42 @@ export function ProfileSettings() {
           <Row label="Sign-in">
             <Badge variant="success">GitHub</Badge>
           </Row>
-          <Row label="Connections">
-            <span className="text-muted-foreground">Model keys, subscriptions and GitHub access.</span>
-            <Button asChild variant="soft" size="sm" className="ml-auto">
-              <Link to="/settings/connections">Manage</Link>
-            </Button>
-          </Row>
         </CardContent>
       </Card>
       <TurnSoundCard />
       <p className="text-xs text-muted-foreground">
         Name and avatar update from GitHub each time you sign in.
       </p>
+      <Card className="py-0">
+        <CardContent className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="font-semibold">GitHub access</h3>
+              {github && (
+                <>
+                  <Badge variant={github.expired ? "warning" : github.connected ? "success" : "neutral"}>
+                    {github.expired ? "expired" : github.connected ? "connected" : "not connected"}
+                  </Badge>
+                  {github.account && <span className="font-mono text-xs text-muted-foreground">{github.account}</span>}
+                </>
+              )}
+            </div>
+            <p className="text-muted-foreground">Let Kestrel work with your GitHub repositories.</p>
+            {connections.error && <Alert>{errorText(connections.error)}</Alert>}
+            {connections.isPending && <p className="text-muted-foreground">Loading GitHub access…</p>}
+            {github && !github.available && (
+              <p className="text-muted-foreground">GitHub access needs server configuration.</p>
+            )}
+          </div>
+          {github?.available && (
+            <Button asChild variant="soft" className="shrink-0">
+              <a href={SERVER_URL + ControlPaths.connectOAuth(github.provider) + "?return=/settings/profile"}>
+                {github.connected ? "Reconnect GitHub" : "Connect GitHub"}
+              </a>
+            </Button>
+          )}
+        </CardContent>
+      </Card>
       <div>
         <Button variant="soft" disabled={signOut.isPending} onClick={() => signOut.mutate()}>
           <LogOut />
@@ -213,8 +259,396 @@ export function ProfileSettings() {
 export function ConnectionsSettings() {
   return (
     <>
-      <SectionHeader title="Connections" desc="Accounts and keys Kestrel uses on your behalf." />
+      <h2 className="text-lg font-semibold tracking-tight">Connections</h2>
       <Connections />
+    </>
+  )
+}
+
+const STREAMING_OPTIONS = [
+  {
+    value: "paragraph",
+    label: "Show finished paragraphs",
+    desc: "Each paragraph or code block appears as soon as it is complete.",
+  },
+  {
+    value: "turn",
+    label: "Wait for the full response",
+    desc: "Text appears once the agent finishes its turn.",
+  },
+] as const
+
+const TEXT_GENERATION_DESC =
+  "Choose how short generated text is written, how new threads are titled, and how assistant prose is buffered."
+
+/**
+ * The active box's route. A box switch remounts the form, so no state from another box can survive it. When Kestrel's
+ * box is active (`activeBoxId === null`), `targetBoxId` names the managed box itself so a write can be pinned to it;
+ * null stays only for the legacy relay, which has no box id to pin.
+ */
+function activeBoxRoute(list: BoxList): { key: string; targetBoxId: string | null } {
+  const active = list.activeBoxId
+  const box =
+    active === null || active === list.managedBox?.id
+      ? list.managedBox
+      : list.boxes.find((candidate) => candidate.id === active)
+  return {
+    key: JSON.stringify([active, box?.id ?? null, box?.url ?? null]),
+    targetBoxId: active ?? box?.id ?? null,
+  }
+}
+
+export function ThreadsSettings() {
+  return (
+    <>
+      <h2 className="text-lg font-semibold tracking-tight">Threads</h2>
+      <section aria-label="Text generation" className="flex min-w-0 flex-col gap-6">
+        <TextGenerationSettings />
+      </section>
+      <section aria-label="Usage limits" className="flex min-w-0 flex-col gap-3">
+        <h3 className="font-semibold">Usage limits</h3>
+        <UsageLimitSettings />
+      </section>
+    </>
+  )
+}
+
+/**
+ * Generated-text preferences of the signed-in user on the active box: the model and thinking level used for short
+ * generated text, the instructions that shape automatic thread titles, and how assistant prose is buffered.
+ */
+function TextGenerationSettings() {
+  const boxes = useQuery(queries.boxes())
+  if (!boxes.data) {
+    return (
+      <>
+        <div>
+          <h3 className="font-semibold">Text generation</h3>
+          <p className="text-muted-foreground">{TEXT_GENERATION_DESC}</p>
+        </div>
+        {boxes.error && <Alert>{errorText(boxes.error)}</Alert>}
+        {boxes.isPending && <div className="text-muted-foreground">Loading settings…</div>}
+      </>
+    )
+  }
+  const route = activeBoxRoute(boxes.data)
+  // Keyed by the box route: switching boxes unmounts the old form synchronously; its writes stay pinned to that box.
+  return <TextGenerationSettingsForBox key={route.key} boxKey={route.key} boxId={route.targetBoxId} />
+}
+
+/**
+ * Model, thinking level and streaming save immediately; title instructions save on blur. Writes are queued so one PUT
+ * is in flight at a time, and the queue is pinned to the box it was opened for. Unmounting only suppresses form state
+ * updates: every accepted change still reaches that box and updates its cache, so navigating away cannot lose a pick.
+ */
+function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId: string | null }) {
+  const queryClient = useQueryClient()
+  const connections = useQuery(queries.connections())
+  const settings = useQuery(queries.textGenerationSettings(boxKey, boxId))
+  const shown = useShownModels()
+  const instructionsId = useId()
+  const [form, setForm] = useState<TextGenerationConfig>()
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [saveError, setSaveError] = useState<unknown>()
+  const savedInstructions = useRef("")
+  const queued = useRef<TextGenerationConfig | undefined>(undefined)
+  const draining = useRef(false)
+  const hydrated = useRef(false)
+  const disposed = useRef(false)
+
+  // Hydrate once from the snapshot the mount's own GET settled on, never from cached data a fresh GET may still be
+  // replacing. After that, later cache changes (including our own successful saves) must not overwrite user edits.
+  useEffect(() => {
+    if (hydrated.current || settings.data === undefined || !settings.isFetchedAfterMount) return
+    hydrated.current = true
+    setForm(settings.data)
+    savedInstructions.current = settings.data.threadTitleInstructions
+  }, [settings.data, settings.isFetchedAfterMount])
+
+  // Navigating away stops form updates but lets the queue keep draining to the box it was captured for.
+  useEffect(() => {
+    disposed.current = false
+    return () => {
+      disposed.current = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (saveState !== "saved") return
+    const timer = setTimeout(() => setSaveState("idle"), 2000)
+    return () => clearTimeout(timer)
+  }, [saveState])
+
+  function drainSave() {
+    if (draining.current) return
+    draining.current = true
+    void (async () => {
+      try {
+        // The queue keeps draining after unmount: its writes are pinned to `boxId`, so leaving the page cannot
+        // discard a pick the user already made.
+        while (queued.current !== undefined) {
+          const next = queued.current
+          queued.current = undefined
+          if (!disposed.current) {
+            setSaveError(undefined)
+            setSaveState("saving")
+          }
+          try {
+            const saved = await api.saveTextGenerationSettings(next, boxId)
+            // The box accepted this snapshot, so the next visit may start from it even if this view is gone.
+            queryClient.setQueryData(keys.textGenerationSettings(boxKey), saved)
+            if (!disposed.current) {
+              savedInstructions.current = next.threadTitleInstructions
+              setSaveState(queued.current === undefined ? "saved" : "saving")
+            }
+          } catch (error) {
+            if (!disposed.current) {
+              setSaveError(error)
+              setSaveState("error")
+            }
+          }
+        }
+      } finally {
+        draining.current = false
+        if (queued.current !== undefined) drainSave()
+      }
+    })()
+  }
+
+  function persist(next: TextGenerationConfig) {
+    if (!disposed.current) setForm(next)
+    queued.current = next
+    drainSave()
+  }
+
+  if (!form) {
+    return (
+      <>
+        <div>
+          <h3 className="font-semibold">Text generation</h3>
+          <p className="text-muted-foreground">{TEXT_GENERATION_DESC}</p>
+        </div>
+        {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+        {(settings.isPending || settings.isFetching) && (
+          <div className="text-muted-foreground">Loading settings…</div>
+        )}
+      </>
+    )
+  }
+
+  const connected = connections.data ? connectedModelProviders(connections.data) : []
+  const modelSections = connections.data
+    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((section) => section.models.length > 0)
+    : null
+  const model = form.model === null ? undefined : modelInfo(form.model)
+  const effort = form.effort ?? model?.defaultEffort ?? model?.efforts[0]
+
+  function update(patch: Partial<TextGenerationConfig>) {
+    if (!form) return
+    persist({ ...form, ...patch })
+  }
+
+  function saveInstructions() {
+    if (!form) return
+    const value = form.threadTitleInstructions.trim()
+    if (value !== savedInstructions.current) persist({ ...form, threadTitleInstructions: value })
+  }
+
+  return (
+    <>
+      <div>
+        <div className="flex items-center justify-between gap-4">
+          <h3 className="font-semibold">Text generation</h3>
+          <Switch
+            aria-label="Enable text generation"
+            checked={form.enabled}
+            onCheckedChange={(enabled) => update({ enabled })}
+          />
+        </div>
+        <p className="text-muted-foreground">
+          {form.enabled
+            ? TEXT_GENERATION_DESC
+            : "Off. Keep original prompt-based titles and token-by-token responses, without extra title-generation requests."}
+        </p>
+      </div>
+      {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+      {connections.error && <Alert>{errorText(connections.error)}</Alert>}
+      <fieldset
+        aria-label="Text generation settings"
+        disabled={!form.enabled}
+        inert={!form.enabled}
+        className="flex min-w-0 flex-col gap-6 border-0 p-0 transition-opacity disabled:opacity-40"
+      >
+        <Card className="py-0">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <span className="text-muted-foreground">Model</span>
+            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <ModelPicker
+                sections={modelSections}
+                value={model}
+                onChange={(id: AgentModel) => {
+                  const next = modelInfo(id)
+                  update({
+                    model: id,
+                    effort: form.effort !== null && next.efforts.includes(form.effort) ? form.effort : null,
+                  })
+                }}
+                defaultLabel="Conversation model"
+              />
+              {model !== undefined && model.efforts.length > 0 && (
+                <ThinkingPicker
+                  value={effort}
+                  options={effortOptions(model)}
+                  onChange={(level: AgentEffort) => update({ effort: level })}
+                />
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="py-0">
+          <CardContent className="flex flex-col gap-2 px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label htmlFor={instructionsId} className="font-medium">
+                Thread title instructions
+              </label>
+              {form.threadTitleInstructions !== "" && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => persist({ ...form, threadTitleInstructions: "" })}
+                >
+                  <RotateCcw />
+                  Reset
+                </Button>
+              )}
+            </div>
+            <Textarea
+              id={instructionsId}
+              rows={3}
+              value={form.threadTitleInstructions}
+              placeholder="Keep titles to a few words. Lead with the main subject."
+              onChange={(event) => setForm({ ...form, threadTitleInstructions: event.target.value })}
+              onBlur={saveInstructions}
+            />
+            <p className="text-xs text-muted-foreground">
+              Added to Kestrel's prompt when it automatically names a new thread. Leave blank to use the default
+              instructions. Changes save when you leave the field.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="py-0">
+          <CardContent className="px-5 py-4">
+            <div className="flex flex-col gap-3">
+              <div>
+                <h3 className="font-medium">Response streaming</h3>
+                <p className="text-xs text-muted-foreground">
+                  How assistant prose is buffered before it reaches the transcript.
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {STREAMING_OPTIONS.map((option) => {
+                  const active = form.responseStreamingMode === option.value
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => update({ responseStreamingMode: option.value })}
+                      className={cn(
+                        "rounded-xl border px-4 py-3 text-left transition-colors duration-200",
+                        active
+                          ? "border-primary/40 bg-white/[0.06] shadow-soft"
+                          : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]",
+                      )}
+                    >
+                      <span className="flex items-center justify-between gap-2 text-sm font-medium">
+                        {option.label}
+                        {active && <Check className="size-4 text-primary" />}
+                      </span>
+                      <span className="mt-1 block text-xs text-muted-foreground">{option.desc}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </fieldset>
+
+      {saveState === "error" && <Alert>{errorText(saveError)}</Alert>}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-muted-foreground" role="status">
+          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
+        </span>
+      </div>
+    </>
+  )
+}
+
+/**
+ * The active box's preferences for how threads run. Reads and writes are pinned to the box the form was opened for,
+ * like text generation: switching boxes remounts the form.
+ */
+function UsageLimitSettings() {
+  const boxes = useQuery(queries.boxes())
+  if (!boxes.data) {
+    return (
+      <>
+        {boxes.error && <Alert>{errorText(boxes.error)}</Alert>}
+        {boxes.isPending && <div className="text-muted-foreground">Loading settings…</div>}
+      </>
+    )
+  }
+  const route = activeBoxRoute(boxes.data)
+  return <UsageLimitSettingsForBox key={route.key} boxKey={route.key} boxId={route.targetBoxId} />
+}
+
+function UsageLimitSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId: string | null }) {
+  const queryClient = useQueryClient()
+  const settings = useQuery(queries.threadSettings(boxKey, boxId))
+  const save = useMutation({
+    mutationFn: (next: ThreadConfig) => api.saveThreadSettings(next, boxId),
+    onMutate: async (next) => {
+      const key = keys.threadSettings(boxKey)
+      await queryClient.cancelQueries({ queryKey: key })
+      const previous = queryClient.getQueryData<ThreadConfig>(key)
+      queryClient.setQueryData(key, next)
+      return { previous }
+    },
+    onError: (_error, _next, context) => {
+      if (context?.previous !== undefined) {
+        queryClient.setQueryData(keys.threadSettings(boxKey), context.previous)
+      }
+    },
+    onSuccess: (saved) => queryClient.setQueryData(keys.threadSettings(boxKey), saved),
+  })
+  const enabled = settings.data?.autoResumeAfterUsageLimits ?? false
+
+  return (
+    <>
+      <Card className="py-0">
+        <CardContent className="flex items-center justify-between gap-4 px-5 py-4">
+          <div className="min-w-0">
+            <div className="font-medium">Resume after usage limits</div>
+            <p className="text-xs text-muted-foreground">
+              Automatically resume threads when their usage limits reset. You can cancel auto-resume in each thread.
+            </p>
+          </div>
+          <Switch
+            aria-label="Resume after usage limits"
+            checked={enabled}
+            disabled={settings.data === undefined || save.isPending}
+            onCheckedChange={(next) => {
+              if (settings.data !== undefined) save.mutate({ ...settings.data, autoResumeAfterUsageLimits: next })
+            }}
+          />
+        </CardContent>
+      </Card>
+      {settings.error && <Alert>{errorText(settings.error)}</Alert>}
+      {save.error && <Alert>{errorText(save.error)}</Alert>}
     </>
   )
 }

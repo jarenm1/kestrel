@@ -1,17 +1,22 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import * as SecureStore from "expo-secure-store";
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
+import { storage } from "@/lib/storage";
 import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
 import { createApiClient, type ActiveBox } from "@/api/client";
-import { clearBoxScopedQueries } from "@/api/queries";
+import { fetchCredentials, hostOrigin } from "@/auth/session";
 
 const SERVER_URL_KEY = "kestrel_server_url";
 const SESSION_COOKIE_KEY = "kestrel_session";
+/** Served by the app host (web): the browser holds the session cookie, so there is always a session to check. */
+const browserSession = hostOrigin !== null;
+
+function sessionHeaders(sessionCookie: string | null): Record<string, string> {
+  return sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
+}
 
 interface AuthState {
   /** Base URL of the Kestrel control plane, e.g. "https://app.kestrel-agent.com" */
   serverUrl: string | null;
-  /** Session cookie value captured after OAuth */
+  /** Session cookie value captured after OAuth (native); always `null` on the web, where the browser keeps it */
   sessionCookie: string | null;
   /** Current signed-in user, or null if not authenticated */
   user: Me | null;
@@ -52,43 +57,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     activeBoxId: null,
     managedBox: null,
   });
-  const queryClient = useQueryClient();
   const activeBox = useMemo(
     () => resolveActiveBox(state.boxes, state.activeBoxId, state.managedBox),
     [state.boxes, state.activeBoxId, state.managedBox]
   );
-  // The box the cached box-served data was read from.
-  const cachedBoxRef = useRef<ActiveBox | null>(null);
-
-  /**
-   * Every box-list read goes through here. The box-served cache describes the box it was read from, so when the box the
-   * apps reach changes (id or url), that cache is dropped before the new list takes effect.
-   */
-  const applyBoxList = useCallback(
-    (list: BoxList) => {
-      const next = resolveActiveBox(list.boxes, list.activeBoxId, list.managedBox);
-      if (!sameBox(cachedBoxRef.current, next)) clearBoxScopedQueries(queryClient);
-      cachedBoxRef.current = next;
-      setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
-    },
-    [queryClient]
-  );
+  const applyBoxList = useCallback((list: BoxList) => {
+    setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
+  }, []);
 
   // Load saved server URL and session on mount
   useEffect(() => {
     (async () => {
       try {
-        const savedUrl = await SecureStore.getItemAsync(SERVER_URL_KEY);
-        const savedCookie = await SecureStore.getItemAsync(SESSION_COOKIE_KEY);
+        const savedUrl = hostOrigin ?? (await storage.getItem(SERVER_URL_KEY));
+        const savedCookie = browserSession ? null : await storage.getItem(SESSION_COOKIE_KEY);
         const urlToUse = savedUrl || "https://app.kestrel-agent.com";
-        
+
         setState((s) => ({
           ...s,
           serverUrl: urlToUse,
           sessionCookie: savedCookie,
         }));
 
-        if (savedCookie) {
+        if (savedCookie || browserSession) {
           await fetchMe(urlToUse, savedCookie, setState, applyBoxList);
         } else {
           setState((s) => ({ ...s, loading: false }));
@@ -101,13 +92,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setServerUrl = useCallback(async (url: string) => {
     const cleaned = url.replace(/\/+$/, "");
-    await SecureStore.setItemAsync(SERVER_URL_KEY, cleaned);
+    await storage.setItem(SERVER_URL_KEY, cleaned);
     setState((s) => ({ ...s, serverUrl: cleaned, error: null }));
   }, []);
 
   const setSessionCookie = useCallback(
     async (cookie: string) => {
-      await SecureStore.setItemAsync(SESSION_COOKIE_KEY, cookie);
+      await storage.setItem(SESSION_COOKIE_KEY, cookie);
       setState((s) => ({ ...s, sessionCookie: cookie, loading: true, error: null }));
       if (state.serverUrl) {
         await fetchMe(state.serverUrl, cookie, setState, applyBoxList);
@@ -121,20 +112,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    if (state.serverUrl && state.sessionCookie) {
+    if (state.serverUrl && (state.sessionCookie || browserSession)) {
       try {
         await fetch(`${state.serverUrl}/auth/logout`, {
           method: "POST",
-          // The explicit session header is authoritative; RN otherwise merges in WebView cookies.
-          credentials: "omit",
-          headers: { Cookie: `session=${state.sessionCookie}` },
+          // Native: the explicit session header is authoritative; RN otherwise merges in WebView cookies.
+          credentials: fetchCredentials,
+          headers: sessionHeaders(state.sessionCookie),
         });
       } catch {
         // Ignore logout errors
       }
     }
-    await SecureStore.deleteItemAsync(SESSION_COOKIE_KEY);
-    cachedBoxRef.current = null;
+    await storage.deleteItem(SESSION_COOKIE_KEY);
     setState((s) => ({
       ...s,
       sessionCookie: null,
@@ -156,7 +146,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const checkSession = useCallback(async () => {
-    if (state.serverUrl && state.sessionCookie) {
+    if (state.serverUrl && (state.sessionCookie || browserSession)) {
       await fetchMe(state.serverUrl, state.sessionCookie, setState, applyBoxList);
     }
   }, [state.serverUrl, state.sessionCookie, applyBoxList]);
@@ -192,14 +182,10 @@ async function fetchMe(
   applyBoxList: (list: BoxList) => void
 ) {
   try {
-    const headers: Record<string, string> = {};
-    if (sessionCookie) {
-      headers["Cookie"] = `session=${sessionCookie}`;
-    }
     const res = await fetch(`${serverUrl}/api/me`, {
-      headers,
-      // Do not combine the secure-store session with the native/WebView cookie jar.
-      credentials: "omit",
+      headers: sessionHeaders(sessionCookie),
+      // Native: do not combine the secure-store session with the native/WebView cookie jar.
+      credentials: fetchCredentials,
     });
     if (res.status === 401) {
       setState((s) => ({ ...s, user: null, loading: false, error: null }));
@@ -241,9 +227,4 @@ function resolveActiveBox(
   if (activeBoxId === null) return managedBox === null ? null : { id: managedBox.id, url: managedBox.url };
   const box = boxes.find((b) => b.id === activeBoxId);
   return box === undefined ? null : { id: box.id, url: box.url };
-}
-
-function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
-  if (a === null || b === null) return a === b;
-  return a.id === b.id && a.url === b.url;
 }

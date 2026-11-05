@@ -1,6 +1,6 @@
 import type { Task } from "@cloudagents/protocol"
-import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
+import { Alert } from "@cloudagents/ui/alert"
+import { Button } from "@cloudagents/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { errorText } from "@/util"
 

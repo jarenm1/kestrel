@@ -35,6 +35,8 @@
 #include <X11/extensions/Xfixes.h>
 
 static int64_t frame_ns = 0; /* one frame slot: 1 s / FPS */
+/* Resend the last screen after this long without damage: keeps the constant-rate encoder output flowing on a static desktop. */
+static const int64_t KEEPALIVE_NS = 1000000000LL;
 
 static int frame_fd = -1;
 static pid_t child = -1;
@@ -166,6 +168,7 @@ int main(int argc, char **argv) {
 
 	int xfd = ConnectionNumber(dpy);
 	int64_t next_slot = 0; /* earliest time the next frame may be sent */
+	int64_t last_sent = 0; /* time of the last frame written to COMMAND */
 	int pending = 1; /* emit the first frame immediately */
 	int have_pointer = 0;
 	int px = 0, py = 0;
@@ -194,6 +197,7 @@ int main(int argc, char **argv) {
 		}
 
 		int64_t now = now_ns();
+		if (!pending && now - last_sent >= KEEPALIVE_NS) pending = 1;
 		if (pending && now >= next_slot) {
 			/* Clear damage before grabbing so changes that land during the grab trigger the next frame. */
 			XDamageSubtract(dpy, damage, None, None);
@@ -204,6 +208,7 @@ int main(int argc, char **argv) {
 			next_slot += frame_ns;
 			if (now >= next_slot) next_slot = now + frame_ns;
 			pending = 0;
+			last_sent = now;
 		}
 
 		/* Wake for the next frame slot while pending, otherwise poll the pointer once per frame slot. */

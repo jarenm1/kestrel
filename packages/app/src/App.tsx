@@ -7,7 +7,9 @@ import { queries } from "@/api/queries"
 import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { PublicShell } from "@/components/PublicShell"
-import { Alert } from "@/components/ui/alert"
+import { Alert } from "@cloudagents/ui/alert"
+import { DesktopEmbedPage } from "@/pages/DesktopEmbedPage"
+import { DownloadPage } from "@/pages/DownloadPage"
 import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { NewThreadPage } from "@/pages/NewThreadPage"
@@ -20,6 +22,7 @@ import {
   FleetSettings,
   ProfileSettings,
   SettingsLayout,
+  ThreadsSettings,
 } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
@@ -34,6 +37,7 @@ export function App() {
         <Route element={<PublicShell />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/download" element={<DownloadPage />} />
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>
@@ -43,6 +47,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Host-embedded desktop viewer: the fragment carries the stream URL, so it sits outside the session guard. */}
+      <Route path="/embed/desktop" element={<DesktopEmbedPage />} />
 
       {/* Protected routes. The guard is the only place that checks the session. */}
       <Route element={<RequireAuth />}>
@@ -56,6 +62,7 @@ export function App() {
             <Route index element={<Navigate to="profile" replace />} />
             <Route path="profile" element={<ProfileSettings />} />
             <Route path="connections" element={<ConnectionsSettings />} />
+            <Route path="threads" element={<ThreadsSettings />} />
             <Route path="boxes" element={<BoxesSettings />} />
             <Route path="fleet" element={<FleetSettings />} />
             <Route path="billing" element={<BillingSettings />} />

@@ -5,6 +5,7 @@ import {
   Attachment,
   Automation,
   BOX_TOKEN_QUERY,
+  BoxCapabilities,
   BoxList,
   BoxStatus,
   BoxToken,
@@ -13,9 +14,11 @@ import {
   CliLoginStart,
   CliProvider,
   Connection,
+  connectionsForBox,
   ControlPaths,
   CreateBoxBody,
   CreateFleetBoxBody,
+  CreateNestBoxBody,
   CreatedBox,
   CreatedFleetBox,
   CreateTaskBody,
@@ -29,8 +32,11 @@ import {
   HarnessCommands,
   FleetBox,
   FleetBoxList,
+  FleetActivity,
   Me,
   Message,
+  type ModelProvider,
+  NestHostList,
   Paths,
   ProviderUsage,
   PendingPairing,
@@ -43,15 +49,21 @@ import {
   SetActiveBoxBody,
   type SetDesktopQualityBody,
   Task,
+  TextGenerationSettings,
+  ThreadSettings,
+  ToolFailureList,
   UpdateAutomationBody,
   UpdateBoxBody,
   UpdateFleetBoxBody,
   UserBox,
   Usage,
   UsageActivity,
+  type UseBankedResetBody,
+  UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
+import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
 
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
@@ -85,6 +97,41 @@ function errorMessage(text: string, fallback: string): string {
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
 
+/** Decodes one exchange: a non-2xx status fails with the server's message; a 2xx body is decoded with `schema`. */
+const decodeExchange = <A, I>(
+  schema: Schema.Schema<A, I>,
+  status: number,
+  statusText: string,
+  text: string,
+): Effect.Effect<A, ApiError> =>
+  Effect.gen(function* () {
+    if (status < 200 || status > 299) return yield* Effect.fail(new ApiError(status, errorMessage(text, statusText)))
+    // 204 and other empty bodies carry no JSON; they decode as `undefined`.
+    const json = yield* Effect.try({
+      try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
+      catch: () => new ApiError(status, "Server returned invalid JSON"),
+    })
+    return yield* Schema.decodeUnknown(schema)(json).pipe(
+      Effect.mapError((e) => new ApiError(status, `Unexpected response shape: ${e.message}`)),
+    )
+  })
+
+/** A box call over an open data channel: the box's reply decoded exactly as an HTTP response would be. */
+const viaChannel = <A, I>(
+  channel: BoxChannel,
+  schema: Schema.Schema<A, I>,
+  method: Method,
+  path: string,
+  body: unknown,
+): Effect.Effect<A, ApiError | ChannelUnsent> =>
+  Effect.flatMap(
+    Effect.tryPromise({
+      try: () => channel.request(method, path, body),
+      catch: (e) => (e instanceof ChannelUnsent ? e : new ApiError(0, e instanceof Error ? e.message : String(e))),
+    }),
+    (reply) => decodeExchange(schema, reply.status, "", reply.body),
+  )
+
 /**
  * One HTTP exchange decoded with `schema`. `session` marks control-plane calls: they carry the app session cookie and
  * report a 401 to the unauthorized listeners. Box calls carry `headers` (the box token) and no cookie.
@@ -116,19 +163,10 @@ const send = <A, I>(
       catch: (e) => new ApiError(res.status, String(e)),
     })
     if (session && res.status === 401) {
+      closeChannels()
       unauthorizedListeners.forEach((listener) => listener())
     }
-    if (!res.ok) {
-      return yield* Effect.fail(new ApiError(res.status, errorMessage(text, res.statusText)))
-    }
-    // 204 and other empty bodies carry no JSON; they decode as `undefined`.
-    const json = yield* Effect.try({
-      try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
-      catch: () => new ApiError(res.status, "Server returned invalid JSON"),
-    })
-    return yield* Schema.decodeUnknown(schema)(json).pipe(
-      Effect.mapError((e) => new ApiError(res.status, `Unexpected response shape: ${e.message}`)),
-    )
+    return yield* decodeExchange(schema, res.status, res.statusText, text)
   })
 
 /** A control-plane call: served by the Worker with the app session. */
@@ -229,6 +267,13 @@ function forgetBox(boxId: string): void {
   tokens.delete(boxId)
 }
 
+/** A Nest box's owner action. Its URL can change (a parked box resumes on another host), so its token is dropped and the list read again. */
+async function nestAction(id: string, path: string): Promise<BoxList> {
+  await run(Effect.asVoid(request(Schema.Unknown, "POST", path)))
+  forgetBox(id)
+  return loadBoxes()
+}
+
 /**
  * A call the box serves. Kestrel's box is called through the Worker like any control call. A user box is called
  * straight at its URL with a box token; a 401 means the token was refused, so it is minted again and the call is
@@ -248,14 +293,25 @@ const boxCall = <A, I>(
       try: () => boxToken(target.boxId),
       catch: (e) => (e instanceof ApiError ? e : new ApiError(0, String(e))),
     }),
-    (token) =>
-      send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` }).pipe(
+    (token) => {
+      // A body that is a Blob (a file upload) always goes over HTTP; everything else prefers the open channel.
+      const channel = body instanceof Blob ? null : channelFor(target.boxId, target.url, token)
+      const overHttp = () => send(schema, method, target.url + path, body, false, { authorization: `Bearer ${token}` })
+      const call =
+        channel === null
+          ? overHttp()
+          : viaChannel(channel, schema, method, path, body).pipe(
+              // The channel never delivered the request to the box, so this call goes over HTTP instead.
+              Effect.catchAll((e) => (e instanceof ChannelUnsent ? overHttp() : Effect.fail(e))),
+            )
+      return call.pipe(
         Effect.catchAll((e) => {
           if (e.status !== 401 || retried) return Effect.fail(e)
           forgetBox(target.boxId)
           return boxCall(target, schema, method, path, body, true)
         }),
-      ),
+      )
+    },
   )
 }
 
@@ -273,6 +329,60 @@ function onTask<A, I>(
 /** A box call on the active box: where new threads start, and the source of box-level state. */
 function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: string, body?: unknown): Promise<A> {
   return activeTarget().then((target) => run(boxCall(target, schema, method, path, body)))
+}
+
+/**
+ * A box call pinned to a box from the last box list read, so a later active-box switch cannot retarget it. `null` is
+ * the legacy relay (no managed box); callers with a managed box pass its id instead.
+ */
+function onBox<A, I>(
+  boxId: string | null,
+  schema: Schema.Schema<A, I>,
+  method: Method,
+  path: string,
+  body?: unknown,
+): Promise<A> {
+  const target = routeOf(boxId)
+  return target === undefined
+    ? Promise.reject(new ApiError(404, "That box is no longer in your box list"))
+    : run(boxCall(target, schema, method, path, body))
+}
+
+/** What `connectionsForBox` needs from one box: its CLI logins and the harnesses it can launch. */
+type BoxConnectionSource = {
+  readonly cliAuth: readonly CliAuthStatus[] | undefined
+  readonly harnesses: readonly ModelProvider[] | undefined
+  readonly error?: string
+}
+
+/**
+ * The box-level half of the connections list, read from one captured target so a box switch mid-call cannot mix two
+ * boxes. A box too old to report capabilities (404) still reports CLI logins: its native sign-ins stay usable while
+ * no harness is offered. Any other failure marks the whole box unavailable, so a network error can never expose a
+ * harness the box did not confirm.
+ */
+async function boxConnectionSource(target: Target): Promise<BoxConnectionSource> {
+  let cliAuth: readonly CliAuthStatus[]
+  try {
+    cliAuth = await run(boxCall(target, Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)))
+  } catch (error) {
+    return {
+      cliAuth: undefined,
+      harnesses: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+  try {
+    const capabilities = await run(boxCall(target, BoxCapabilities, "GET", Paths.capabilities))
+    return { cliAuth, harnesses: capabilities.harnesses }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return { cliAuth, harnesses: undefined }
+    return {
+      cliAuth: undefined,
+      harnesses: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
 }
 
 /**
@@ -421,7 +531,16 @@ export const api = {
   // Control plane (served by the Worker).
   me: () => run(request(Me, "GET", ControlPaths.me)),
   logout: () => run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.logout))),
-  connections: () => run(request(Schema.Array(Connection), "GET", ControlPaths.connections)),
+  /**
+   * Stored accounts and keys from the Worker, with the CLI logins and harness availability of the active box. The box
+   * is captured once, so rows always describe one box; a box that cannot answer leaves the stored accounts manageable
+   * and marks its CLI rows unavailable.
+   */
+  connections: async () => {
+    const stored = await run(request(Schema.Array(Connection), "GET", ControlPaths.connections))
+    const target = await activeTarget()
+    return connectionsForBox(stored, await boxConnectionSource(target))
+  },
   putApiKey: (provider: string, body: PutApiKeyBody) =>
     run(request(Connection, "PUT", ControlPaths.connection(provider), body)),
   deleteConnection: (provider: string) =>
@@ -454,6 +573,18 @@ export const api = {
     forgetBox(id)
     return created
   },
+  /** Nest boxes: creates one for the user and answers with the box list as it now stands. */
+  createNestBox: async (body: CreateNestBoxBody): Promise<BoxList> => {
+    await run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.nestBoxes, body)))
+    return loadBoxes()
+  },
+  resumeNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxResume(id)),
+  suspendNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxSuspend(id)),
+  parkNestBox: (id: string) => nestAction(id, ControlPaths.nestBoxPark(id)),
+  attachNestGpu: (id: string) => nestAction(id, ControlPaths.nestBoxGpuAttach(id)),
+  detachNestGpu: (id: string) => nestAction(id, ControlPaths.nestBoxGpuDetach(id)),
+  /** Operator-only: Nest hosts and their capacity, as the fleet page lists them. */
+  nestHosts: () => run(request(NestHostList, "GET", ControlPaths.nestHosts)),
   setActiveBox: async (boxId: string | null): Promise<BoxList> => {
     const body: SetActiveBoxBody = { boxId }
     return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
@@ -465,6 +596,7 @@ export const api = {
     adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
   /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
   fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
+  fleetActivity: () => run(request(FleetActivity, "GET", ControlPaths.fleetActivity)),
   createFleetBox: (body: CreateFleetBoxBody) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxes, body)),
   updateFleetBox: (id: string, body: UpdateFleetBoxBody) =>
     run(request(FleetBox, "PATCH", ControlPaths.fleetBox(id), body)),
@@ -472,6 +604,8 @@ export const api = {
     await run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.fleetBox(id))))
   },
   rotateFleetBoxSecret: (id: string) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxSecret(id))),
+  /** Operator-only: the most common failures of the server's default window, most common first. */
+  fleetToolFailures: () => run(request(ToolFailureList, "GET", ControlPaths.fleetToolFailures)),
   checkBox,
   forgetBox,
   /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */
@@ -480,14 +614,43 @@ export const api = {
   kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget()),
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
-  cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuth),
-  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsage),
+  cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)),
+  providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
+  /** What the active box can run, as it found at startup. */
+  capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
+  /**
+   * The signed-in user's generated-text preferences. `boxId` pins the read to the box a settings form was opened for;
+   * omitted, it reads the active box.
+   */
+  textGenerationSettings: (boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(TextGenerationSettings, "GET", Paths.textGenerationSettings)
+      : onBox(boxId, TextGenerationSettings, "GET", Paths.textGenerationSettings),
+  /** Replaces the signed-in user's generated-text preferences, on the same box `textGenerationSettings` read. */
+  saveTextGenerationSettings: (settings: TextGenerationSettings, boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings)
+      : onBox(boxId, TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),
+  /** The signed-in user's thread preferences, read from the active box or the one a settings form was pinned to. */
+  threadSettings: (boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(ThreadSettings, "GET", Paths.threadSettings)
+      : onBox(boxId, ThreadSettings, "GET", Paths.threadSettings),
+  /** Replaces the signed-in user's thread preferences, on the same box `threadSettings` read. */
+  saveThreadSettings: (settings: ThreadSettings, boxId?: string | null) =>
+    boxId === undefined
+      ? onActive(ThreadSettings, "PUT", Paths.threadSettings, settings)
+      : onBox(boxId, ThreadSettings, "PUT", Paths.threadSettings, settings),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
+  cliLoginKey: (provider: CliProvider, body: PutApiKeyBody) =>
+    onActive(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
   cliLogout: async (provider: CliProvider): Promise<void> => {
     await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
   },
+  useBankedReset: (provider: CliProvider, body: UseBankedResetBody) =>
+    onActive(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
   taskFileUrl,
   /**
    * The sandboxed preview document of a thread. It is served from the thread's box: a user box's URL, or the app's own
@@ -525,6 +688,10 @@ export const api = {
   },
   archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
   unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
+  /** Deletes the thread for good: its history, checkouts and files. */
+  deleteTask: async (taskId: string): Promise<void> => {
+    await onTask(taskId, Schema.Unknown, "DELETE", Paths.task(taskId))
+  },
   listMessages: (taskId: string) => onTask(taskId, Schema.Array(Message), "GET", Paths.taskMessages(taskId)),
   /** Slash commands of the harness for the composer's chosen model in this thread. */
   commands: (taskId: string, model: AgentModel) =>
@@ -551,6 +718,9 @@ export const api = {
   runItems: (taskId: string, runId: string) => onTask(taskId, RunItems, "GET", Paths.runItems(runId)),
   cancelRun: (taskId: string, runId: string) => onTask(taskId, Run, "POST", Paths.runCancel(runId)),
   cancelDelegation: (taskId: string, childId: string) => onTask(taskId, Task, "POST", Paths.taskDelegationCancel(taskId, childId)),
+  /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */
+  setUsageLimitAutoResume: (taskId: string, autoResume: boolean) =>
+    onTask(taskId, Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),

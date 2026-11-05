@@ -8,10 +8,12 @@ interface Props {
   provider: ModelProvider | undefined;
   pending: boolean;
   onSelect: (command: HarnessCommand) => void;
+  activeIndex: number;
 }
 
-export function SlashCommands({ matches, provider, pending, onSelect }: Props) {
-  if (pending) {
+export function SlashCommands({ matches, provider, pending, onSelect, activeIndex }: Props) {
+  // App-owned actions are available before (and without) the harness list: only an empty menu waits on it.
+  if (pending && matches.length === 0) {
     return (
       <View style={styles.card}>
         <View style={styles.loadingRow}>
@@ -37,11 +39,12 @@ export function SlashCommands({ matches, provider, pending, onSelect }: Props) {
         keyExtractor={(item) => `${harnessCommandPrefix(item, provider)}${item.name}`}
         keyboardShouldPersistTaps="always"
         style={styles.list}
-        renderItem={({ item }) => (
+        renderItem={({ item, index }) => (
           <Pressable
-            style={({ pressed }) => [styles.item, pressed && styles.itemPressed]}
+            style={({ pressed }) => [styles.item, (pressed || index === activeIndex) && styles.itemPressed]}
             onPress={() => onSelect(item)}
             accessibilityRole="button"
+            accessibilityState={{ selected: index === activeIndex }}
           >
             <View style={styles.nameRow}>
               <Text style={styles.name}>

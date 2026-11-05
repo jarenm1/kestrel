@@ -95,6 +95,24 @@ describe("checkout git runs in the shadow", () => {
     }
   })
 
+  test("commitLog lists only the checkout's own commits, newest first, with subject and body", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const co = await makeCheckout(root, origin)
+    expect(await withWorkspace((ws) => ws.commitLog({ ...co.spec, baseRef: co.pinRef }))).toBe("")
+
+    await writeFile(join(co.spec.dir, "one.txt"), "1\n")
+    git(co.spec.dir, ["add", "one.txt"])
+    git(co.spec.dir, ["commit", "-m", "first change", "-m", "why it matters"])
+    await writeFile(join(co.spec.dir, "two.txt"), "2\n")
+    git(co.spec.dir, ["add", "two.txt"])
+    git(co.spec.dir, ["commit", "-m", "second change"])
+
+    const log = await withWorkspace((ws) => ws.commitLog({ ...co.spec, baseRef: co.pinRef }))
+    const [second, first] = [git(co.spec.dir, ["rev-parse", "HEAD"]), git(co.spec.dir, ["rev-parse", "HEAD~1"])]
+    expect(log).toBe(`${second}\0second change\0\0\n${first}\0first change\0why it matters\n\0`)
+  })
+
   test("listFiles lists files on disk without ignored ones, except committed ones, and caps the list", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)
@@ -173,6 +191,74 @@ describe("checkout git runs in the shadow", () => {
 
     expect(existsSync(marker)).toBe(false)
     expect(git(origin, ["rev-parse", "refs/heads/cloudagents/t1"])).toBe(head)
+  })
+
+  test("a checkout can be on a branch named like the mirror's HEAD, at another commit", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const seed = join(root, "seed")
+    const start = git(seed, ["rev-parse", "HEAD"])
+    await writeFile(join(seed, "later.txt"), "later\n")
+    git(seed, ["add", "."])
+    git(seed, ["commit", "-m", "later"])
+    const mirrorPath = join(root, "mirrors", "origin.git")
+    await withWorkspace((ws) => ws.syncMirror({ mirrorPath, url: origin }))
+    // The clone makes a local branch for the mirror's HEAD, so that branch has to exist on the remote and be taken over.
+    const branch = git(mirrorPath, ["symbolic-ref", "--short", "HEAD"])
+    git(seed, ["push", "-f", origin, `HEAD:refs/heads/${branch}`])
+    await withWorkspace((ws) => ws.syncMirror({ mirrorPath, url: origin }))
+
+    const threadDir = join(root, "threads", "t1")
+    const dir = join(threadDir, "repo")
+    await withWorkspace((ws) =>
+      ws.createCheckout({
+        threadDir,
+        dir,
+        shadowPath: join(root, "shadows", "t1", "c1.git"),
+        mirrorPath,
+        url: origin,
+        branch,
+        startSha: start,
+        baseSha: start,
+        pinRef: checkoutPinRef("t1", "c1"),
+      }),
+    )
+
+    expect(git(dir, ["symbolic-ref", "--short", "HEAD"])).toBe(branch)
+    expect(git(dir, ["rev-parse", "HEAD"])).toBe(start)
+  })
+
+  test("a checkout has the remote's default branch and origin/HEAD, whatever git's init default", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    // A default branch no git init default names, so the mirror's initial HEAD is always wrong.
+    git(origin, ["branch", "-m", "main", "trunk"])
+    const mirrorPath = join(root, "mirrors", "origin.git")
+    const threadDir = join(root, "threads", "t1")
+    const dir = join(threadDir, "repo")
+    const head = await withWorkspace((ws) =>
+      Effect.gen(function* () {
+        const defaultBranch = yield* ws.syncMirror({ mirrorPath, url: origin })
+        const sha = yield* ws.resolveRef(mirrorPath, `refs/heads/${defaultBranch}`)
+        if (sha === null) return yield* Effect.die("mirror has no default branch")
+        yield* ws.createCheckout({
+          threadDir,
+          dir,
+          shadowPath: join(root, "shadows", "t1", "c1.git"),
+          mirrorPath,
+          url: origin,
+          branch: "cloudagents/t1",
+          startSha: sha,
+          baseSha: sha,
+          pinRef: checkoutPinRef("t1", "c1"),
+        })
+        return sha
+      }),
+    )
+
+    // What agents compare their branch against.
+    expect(git(dir, ["rev-parse", "trunk"])).toBe(head)
+    expect(git(dir, ["rev-parse", "origin/HEAD"])).toBe(head)
   })
 
   test("a checkout whose .git points outside the thread workspace is refused", async () => {

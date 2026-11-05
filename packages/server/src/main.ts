@@ -1,8 +1,9 @@
+import { availableHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
-import { Effect, Fiber, Layer } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError } from "@cloudagents/protocol"
-import { ConfigLive, Config, type ServerConfig } from "./config"
+import { Effect, Fiber, Layer, Ref } from "effect"
+import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError, Paths } from "@cloudagents/protocol"
+import { ConfigLive, Config, dataDirFromEnv } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
 import { EventHubLive } from "./core/events"
@@ -11,7 +12,9 @@ import { StateLive } from "./core/state"
 import { WorkspaceLive } from "./core/workspace"
 import { CredentialBroker, CredentialBrokerLive } from "./broker"
 import { BROKER_PREFIX, handleBroker } from "./broker/handler"
-import { type ControlClient, makeControlClient } from "./control/client"
+import { coreGhBackend } from "./gh/backend"
+import { createGhHandler, GH_PREFIX } from "./gh/handler"
+import { boxControl } from "./control/client"
 import { CredentialStore, CredentialStoreLive } from "./credentials"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
@@ -19,10 +22,15 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { BOX_DEV_HEADER, runRelay } from "./relay/client"
+import { runRelay } from "./relay/client"
+import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
+import { makeBoxActivityReporter, type BoxActivityReporter } from "./direct/box-activity"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
 import { openActivitySocket } from "./activity"
+import { ensureNestSecret } from "./platform/enroll"
+import { BoxPlatform, BoxPlatformLive } from "./platform"
+import { ActivityTracker, ActivityTrackerLive } from "./platform/tracker"
 
 const BaseLive = Layer.provideMerge(
   CredentialBrokerLive,
@@ -32,31 +40,18 @@ const BaseLive = Layer.provideMerge(
     EventHubLive,
     DesktopManagerLive,
     CredentialStoreLive,
+    ActivityTrackerLive,
     Layer.provide(GitHubLive, ConfigLive),
   ),
 )
 const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
 const StateWithBase = Layer.provideMerge(StateLive, CliAuthWithBase)
 const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
-const CoreWithBase = Layer.provideMerge(CoreLive, HarnessWithBase)
+const PlatformWithBase = Layer.provideMerge(BoxPlatformLive, HarnessWithBase)
+const CoreWithBase = Layer.provideMerge(CoreLive, PlatformWithBase)
 const AppLive = Layer.provideMerge(TaskStatsLive, CoreWithBase)
 
 const MCP_PREFIX = "/mcp/"
-
-/**
- * The control plane the automation tools call: a managed box with its own secret, else the relayed box with the relay
- * token. A user's own box has no automations.
- */
-const automationControl = (config: ServerConfig): ControlClient | null => {
-  if (config.direct?.managed) {
-    return makeControlClient({
-      controlUrl: config.direct.controlUrl,
-      boxId: config.direct.boxId,
-      boxSecret: config.direct.boxSecret,
-    })
-  }
-  return config.relay === null ? null : makeControlClient(config.relay)
-}
 
 /** Reads a node request body into a web Request so the Effect HttpApp can handle it. */
 const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
@@ -135,7 +130,17 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
-  const webHandler = yield* makeWebHandler(core, cliAuth)
+  const platform = yield* BoxPlatform
+  const tracker = yield* ActivityTracker
+  // The box's startup snapshot: which harness CLIs it found.
+  const capabilities = { ...boxCapabilities(config.sandbox, undefined, platform.hardware), harnesses: availableHarnesses(config) }
+  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
+  // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
+  // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.
+  const handle = (request: Request) => {
+    if (new URL(request.url).pathname !== Paths.health) Effect.runSync(tracker.touch)
+    return webHandler(request)
+  }
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
@@ -160,6 +165,7 @@ const program = Effect.gen(function* () {
       push: core.gitPush,
       openPullRequest: core.openPullRequest,
       pullRequestStatus: core.pullRequestStatus,
+      readReference: core.readReference,
       reviewPullRequest: core.reviewPullRequest,
       updatePullRequest: core.updatePullRequest,
       commentOnPullRequest: core.commentOnPullRequest,
@@ -167,39 +173,60 @@ const program = Effect.gen(function* () {
       changeLabels: core.changeLabels,
     },
     ask: core.ask,
-    automations: { control: automationControl(config), taskOwner: core.taskOwner },
+    automations: { control: boxControl(config), taskOwner: core.taskOwner },
     inbox: core.inbox,
     threads: { maxConcurrentRuns: config.maxConcurrentRuns, owner: core.taskOwner, create: core.createTask, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread, delegate: core.delegate, delegatedStatus: core.delegatedStatus, cancelDelegation: core.cancelDelegation, acknowledgeDelegation: core.acknowledgeDelegation, withSlotReleased: harness.withSlotReleased },
     previewOpen: core.previewOpen,
+    gpu: platform.gpuOnDemand,
+  })
+
+  const ghHandler = createGhHandler({
+    grantFor: broker.grantForToken,
+    runFor: core.runFor,
+    backend: (taskId) => coreGhBackend(core, taskId),
   })
 
   let direct: DirectListener | null = null
+  /** Reports this managed box's active users; null on a user's own box, which reports to no fleet. */
+  let boxActivity: BoxActivityReporter | null = null
   if (config.direct !== null) {
     const store = yield* CredentialStore
+    boxActivity = config.direct.managed ? makeBoxActivityReporter(config.direct) : null
     direct = makeDirectListener({
-      auth: makeBoxAuth(config.direct, store),
+      auth: makeBoxAuth(config.direct, store, fetch, boxActivity ?? undefined),
+      activity: boxActivity ?? undefined,
       core,
-      webHandler,
+      webHandler: handle,
       runtime: yield* Effect.runtime<WsServices>(),
     })
   }
-  const serve = direct === null ? webHandler : direct.handle
+  const serve = direct === null ? handle : direct.handle
 
   const server = createServer((req, res) => {
-    // The broker only answers sandboxed runs holding a live token; it is routed first on purpose.
+    toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+      .catch((error: unknown) => failResponse(res, error))
+  })
+  const sandboxServer = createServer((req, res) => {
     const handled = req.url?.startsWith(BROKER_PREFIX)
       ? handleBroker(broker, req, res)
       : req.url?.startsWith(MCP_PREFIX)
         ? mcpHandler(req, res)
-        : toWebRequest(req).then(serve).then((response) => writeWebResponse(res, response))
+        : req.url?.startsWith(GH_PREFIX)
+          ? ghHandler(req, res)
+          : Promise.resolve().then(() => { res.statusCode = 404; res.end() })
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
   // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
+  yield* listen(sandboxServer, "127.0.0.1", config.sandboxPort)
   yield* listen(server, config.host, config.port)
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
+  yield* Effect.logInfo(`sandbox listener on 127.0.0.1:${config.sandboxPort}`)
+
+  // Reports start only once the box actually serves; a managed box sends an empty snapshot first, then every 30 seconds.
+  boxActivity?.start()
 
   // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
   const activity = yield* openActivitySocket(
@@ -207,24 +234,46 @@ const program = Effect.gen(function* () {
     Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
   )
 
-  let relayFiber: Fiber.RuntimeFiber<void> | null = null
-  if (config.relay) {
-    relayFiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle: webHandler }),
+  // The control plane link. A Nest VM's resume restarts it, since its socket from before the snapshot is dead.
+  const relayFiber = yield* Ref.make<Fiber.RuntimeFiber<void> | null>(null)
+  const startRelay = Effect.gen(function* () {
+    if (config.relay === null) return
+    const fiber = yield* Effect.forkDaemon(
+      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle }),
     )
+    yield* Ref.set(relayFiber, fiber)
     yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  }
+  })
+  yield* startRelay
+
+  // The resume hook restarts the relay, which needs the services the relay runs with; the platform needs none.
+  const relayServices = yield* Effect.context<WsServices | CredentialStore>()
+  const platformFiber = yield* Effect.forkDaemon(
+    platform.run({
+      resumed: Effect.gen(function* () {
+        const old = yield* Ref.get(relayFiber)
+        if (old !== null) yield* Fiber.interrupt(old)
+        yield* startRelay
+      }).pipe(Effect.provide(relayServices)),
+    }),
+  )
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
+  boxActivity?.stop()
   if (activity !== null) yield* activity.close
-  if (relayFiber !== null) yield* Fiber.interrupt(relayFiber)
+  yield* Fiber.interrupt(platformFiber)
+  const relay = yield* Ref.get(relayFiber)
+  if (relay !== null) yield* Fiber.interrupt(relay)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
+  if (direct !== null) direct.close()
   yield* closeServer(server)
+  yield* closeServer(sandboxServer)
 }).pipe(Effect.provide(AppLive))
 
-Effect.runPromise(program).then(
+// A Nest VM enrolls before the config loads: the secret it stores is what the config reads.
+Effect.runPromise(ensureNestSecret(process.env, dataDirFromEnv()).pipe(Effect.andThen(program))).then(
   () => process.exit(0),
   (error: unknown) => {
     console.error("cloudagents server failed:", error)

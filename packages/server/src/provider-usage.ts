@@ -1,11 +1,21 @@
-import type { CliProvider, ProviderUsage, ProviderUsageWindow } from "@cloudagents/protocol"
+import { execFile } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import type {
+  CliProvider,
+  ProviderBankedReset,
+  ProviderUsage,
+  ProviderUsageWindow,
+  UseBankedResetResult,
+} from "@cloudagents/protocol"
 import { VERSION } from "./config"
 import { discover, type DiscoveryLaunch } from "./harness-commands"
 
 /*
  * The subscription limits of a signed-in agent CLI, as the CLI itself reports them: Claude Code answers a `get_usage`
- * control request on its stream-json interface, Codex answers `account/rateLimits/read` over app-server. The CLI reads
- * and refreshes its own login, so no token is read here. Neither call starts a model turn.
+ * control request on its stream-json interface, Codex answers `account/rateLimits/read` over app-server (with the
+ * banked resets the account holds) and spends one with `account/rateLimitResetCredit/consume`. The CLI reads and
+ * refreshes its own login, so no token is read here. None of these calls starts a model turn. OpenCode has no such
+ * call for a Go key: the box reads the key from OpenCode (`auth export`) and asks the Go plan's usage endpoint itself.
  */
 
 const TIMEOUT_MS = 15_000
@@ -15,6 +25,7 @@ const MONTH_MINS = 30 * 24 * HOUR_MINS
 const LABEL_MAX = 80
 /** Codex's refusal when no account is signed in; every other error means it could not answer. */
 const CODEX_SIGNED_OUT = /authentication required/i
+const ID_MAX = 200
 
 type Fields = Record<string, unknown>
 
@@ -79,6 +90,22 @@ const codexWindow = (id: string, value: unknown, fallbackMins: number): Provider
   }
 }
 
+/** The account's banked resets, soonest to expire first; undefined when Codex does not report any. */
+const codexBankedResets = (value: unknown): ProviderUsage["bankedResets"] => {
+  const summary = fields(value)
+  const available = finite(summary?.availableCount)
+  if (summary === null || available === null) return undefined
+  const resets: ProviderBankedReset[] = []
+  for (const item of Array.isArray(summary.credits) ? summary.credits : []) {
+    const credit = fields(item)
+    const id = credit?.id
+    if (credit?.status !== "available" || typeof id !== "string" || id === "" || id.length > ID_MAX) continue
+    resets.push({ id, title: text(credit.title), expiresAt: isoFromEpochSeconds(credit.expiresAt) })
+  }
+  resets.sort((a, b) => (a.expiresAt === null ? 1 : b.expiresAt === null ? -1 : a.expiresAt.localeCompare(b.expiresAt)))
+  return { available: Math.max(Math.floor(available), resets.length), resets }
+}
+
 /** Parses Codex's `account/rateLimits/read` result. `primary` and `secondary` are positions, so durations come from each window. */
 export const parseCodexUsage = (value: unknown): ProviderUsage => {
   const result = fields(value)
@@ -101,7 +128,23 @@ export const parseCodexUsage = (value: unknown): ProviderUsage => {
           resetsAt: isoFromEpochSeconds(individual?.resetsAt),
         },
   ].filter((window) => window !== null)
-  return { provider: "codex-cli", status: "ok", plan, windows }
+  const bankedResets = codexBankedResets(result?.rateLimitResetCredits)
+  return { provider: "codex-cli", status: "ok", plan, windows, ...(bankedResets && { bankedResets }) }
+}
+
+/** Maps Codex's `account/rateLimitResetCredit/consume` outcome; a repeated idempotency key means it already reset. */
+export const parseCodexResetOutcome = (value: unknown): UseBankedResetResult => {
+  switch (fields(value)?.outcome) {
+    case "reset":
+    case "alreadyRedeemed":
+      return { outcome: "reset" }
+    case "nothingToReset":
+      return { outcome: "nothing_to_reset" }
+    case "noCredit":
+      return { outcome: "no_reset" }
+    default:
+      throw new Error("codex gave an unknown reset outcome")
+  }
 }
 
 export const probeClaudeUsage = (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS): Promise<ProviderUsage> => {
@@ -118,10 +161,18 @@ export const probeClaudeUsage = (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS
   })
 }
 
-export const probeCodexUsage = (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS): Promise<ProviderUsage> =>
-  discover<ProviderUsage>(launch, "codex usage", timeoutMs, (send) => {
+/** Opens a Codex app-server session, then sends `method` and hands its reply to `onReply`. */
+const codexRequest = <A>(
+  launch: DiscoveryLaunch,
+  label: string,
+  timeoutMs: number,
+  method: string,
+  params: unknown,
+  onReply: (record: Fields) => A,
+): Promise<A> =>
+  discover<A>(launch, label, timeoutMs, (send) => {
     const initializeId = 1
-    const usageId = 2
+    const requestId = 2
     send({
       method: "initialize",
       id: initializeId,
@@ -130,14 +181,95 @@ export const probeCodexUsage = (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS)
     return (message) => {
       const record = fields(message)
       if (record?.id === initializeId) {
-        if (record.error !== undefined) throw new Error("codex usage could not initialize")
+        if (record.error !== undefined) throw new Error(`${label} could not initialize`)
         send({ method: "initialized", params: {} })
-        send({ method: "account/rateLimits/read", id: usageId, params: null })
+        send({ method, id: requestId, params })
         return undefined
       }
-      if (record?.id !== usageId) return undefined
-      if (record.error === undefined) return parseCodexUsage(record.result)
-      if (CODEX_SIGNED_OUT.test(String(fields(record.error)?.message))) return signedOut("codex-cli")
-      throw new Error("codex usage was refused")
+      return record?.id === requestId ? onReply(record) : undefined
     }
   })
+
+export const probeCodexUsage = (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS): Promise<ProviderUsage> =>
+  codexRequest(launch, "codex usage", timeoutMs, "account/rateLimits/read", null, (record) => {
+    if (record.error === undefined) return parseCodexUsage(record.result)
+    if (CODEX_SIGNED_OUT.test(String(fields(record.error)?.message))) return signedOut("codex-cli")
+    throw new Error("codex usage was refused")
+  })
+
+/** Spends the banked reset `resetId`. Each call is one attempt, so it gets its own idempotency key. */
+export const useCodexBankedReset = (
+  launch: DiscoveryLaunch,
+  resetId: string,
+  timeoutMs = TIMEOUT_MS,
+): Promise<UseBankedResetResult> =>
+  codexRequest(
+    launch,
+    "codex reset",
+    timeoutMs,
+    "account/rateLimitResetCredit/consume",
+    { creditId: resetId, idempotencyKey: randomUUID() },
+    (record) => {
+      if (record.error === undefined) return parseCodexResetOutcome(record.result)
+      throw new Error(text(fields(record.error)?.message) ?? "codex refused the reset")
+    },
+  )
+
+/** The Go plan's limits for an API key, as OpenCode itself reads them (its 403 means the account has no Go plan). */
+const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
+
+/** The key of the active Go credential in `opencode auth export`'s output; null when there is none. */
+export const openCodeGoKey = (value: unknown): string | null => {
+  for (const item of Array.isArray(value) ? value : []) {
+    const credential = fields(item)
+    const secret = fields(credential?.value)
+    if (credential?.integrationID === "opencode-go" && credential.active === true && secret?.type === "key" && typeof secret.key === "string") {
+      return secret.key
+    }
+  }
+  return null
+}
+
+const goWindow = (id: string, label: string, value: unknown): ProviderUsageWindow | null => {
+  const window = fields(value)
+  const used = finite(window?.percent)
+  return used === null ? null : { id, label, usedPercent: percent(used), resetsAt: isoFromString(window?.resetsAt) }
+}
+
+/** Parses the Go usage endpoint's `{ usage: { rolling, weekly, monthly } }`, each with `percent` and `resetsAt`. */
+export const parseOpenCodeGoUsage = (value: unknown): ProviderUsage => {
+  const usage = fields(fields(value)?.usage)
+  const windows = [
+    goWindow("rolling", "5-hour", usage?.rolling),
+    goWindow("weekly", "Weekly", usage?.weekly),
+    goWindow("monthly", "Monthly", usage?.monthly),
+  ].filter((window) => window !== null)
+  if (windows.length === 0) {
+    return { provider: "opencode-go", status: "unavailable", plan: null, windows: [], error: "OpenCode Go reported no limits" }
+  }
+  return { provider: "opencode-go", status: "ok", plan: "go", windows }
+}
+
+export const probeOpenCodeGoUsage = async (launch: DiscoveryLaunch, timeoutMs = TIMEOUT_MS): Promise<ProviderUsage> => {
+  const { promise, resolve, reject } = Promise.withResolvers<string>()
+  execFile(launch.file, [...launch.args], { env: { ...launch.env }, cwd: launch.cwd, timeout: timeoutMs }, (err, stdout) =>
+    err ? reject(new Error("opencode auth export failed")) : resolve(stdout),
+  )
+  const exported = await promise
+  let credentials: unknown
+  try {
+    credentials = JSON.parse(exported)
+  } catch {
+    throw new Error("opencode auth export: unreadable output")
+  }
+  const key = openCodeGoKey(credentials)
+  if (key === null) return signedOut("opencode-go")
+  const response = await fetch(OPENCODE_GO_USAGE_URL, {
+    headers: { authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (response.status === 403) return signedOut("opencode-go")
+  if (response.status === 401) throw new Error("OpenCode does not accept the Go key")
+  if (!response.ok) throw new Error(`OpenCode Go usage answered ${response.status}`)
+  return parseOpenCodeGoUsage(await response.json())
+}

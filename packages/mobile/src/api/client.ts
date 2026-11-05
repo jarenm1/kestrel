@@ -4,6 +4,7 @@ import {
   Automation,
   AutomationRun,
   BOX_TOKEN_QUERY,
+  BoxCapabilities,
   BoxList,
   BoxStatus,
   BoxToken,
@@ -12,18 +13,22 @@ import {
   CliLoginStart,
   CliProvider,
   Connection,
+  connectionsForBox,
   ControlPaths,
   CreateAutomationBody,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
+  FileToken,
   GithubRepo,
   Health,
   HarnessCommands,
   Me,
   Message,
+  type ModelProvider,
   Paths,
   PreviewSession,
+  ProviderUsage,
   PutApiKeyBody,
   Run,
   RunItems,
@@ -33,8 +38,12 @@ import {
   TriggerAutomationBody,
   UpdateAutomationBody,
   Usage,
+  UsageActivity,
+  type UseBankedResetBody,
+  UseBankedResetResult,
   type UserBox,
 } from "@cloudagents/protocol";
+import { fetchCredentials } from "@/auth/session";
 
 export class ApiError extends Error {
   constructor(
@@ -63,21 +72,51 @@ function errorMessage(text: string, fallback: string): string {
 /** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
+/** Whether two active boxes are the same route; `null` (Kestrel's relayed box) only matches `null`. */
+export function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.id === b.id && a.url === b.url;
+}
+
 /** Image source for a box file; it needs the session cookie, or the box token, so it is passed as request headers or a query. */
 export interface FileSource {
   uri: string;
   headers: Record<string, string>;
 }
 
+/**
+ * How a WebView or DOM `<img>` loads box files: `${base}${path}${query}`. Nothing here can send a Cookie header, so the
+ * query carries a token instead; refresh before `expiresAt` (epoch ms).
+ */
+export interface FileAccess {
+  readonly base: string;
+  readonly query: string;
+  readonly expiresAt: number;
+}
+
 /** A minted box token is replaced this long before the box says it expires. */
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 
+/** The desktop viewer page on the app host. Its ws URL and task id travel in the fragment, which the server never sees. */
+const DESKTOP_EMBED_PATH = "/embed/desktop";
+
 /** Typed client for the control plane and the agent box, bound to one server URL, session and active box. */
 export interface ApiClient {
+  /** Stable identity for box-served cache entries; includes URL so a changed route cannot reuse old data. */
+  readonly boxScope: string;
   /** Source of a file the box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). */
   fileSource(path: string): Promise<FileSource>;
+  /** Source of any box file for a WebView or DOM `<img>`: `${base}${path}${query}`, valid until `expiresAt` (epoch ms). */
+  fileAccess(): Promise<FileAccess>;
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
   socketUrl(path: string): Promise<string>;
+  /**
+   * The WebSocket URL for a task's desktop stream, which carries its own auth: the embed page holds no session. A box
+   * token on a user box, a desktop token on the relayed box. `fresh` mints a new one.
+   */
+  desktopSocketUrl(taskId: string, options?: { fresh?: boolean }): Promise<string>;
+  /** The desktop embed page URL for a task, given the stream's ws URL from `desktopSocketUrl`. */
+  desktopEmbedUrl(taskId: string, ws: string): string;
   /** The sandboxed preview frame URL for a preview session token minted by `previewSession`. */
   previewFrameUrl(taskId: string, token: string): string;
 
@@ -87,11 +126,14 @@ export interface ApiClient {
   putApiKey(provider: string, body: PutApiKeyBody): Promise<Connection>;
   deleteConnection(provider: string): Promise<void>;
   githubRepos(): Promise<readonly GithubRepo[]>;
+  /** Branch names of a GitHub repository, its default branch first; 404 without a GitHub connection or access. */
+  githubBranches(repo: string): Promise<readonly string[]>;
   boxes(): Promise<BoxList>;
   setActiveBox(boxId: string | null): Promise<BoxList>;
   box(): Promise<BoxStatus>;
   cliLoginStart(provider: CliProvider): Promise<CliLoginStart>;
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
+  cliLoginKey(provider: CliProvider, body: PutApiKeyBody): Promise<CliAuthStatus>;
   cliLogout(provider: CliProvider): Promise<void>;
   listAutomations(): Promise<readonly Automation[]>;
   createAutomation(body: CreateAutomationBody): Promise<Automation>;
@@ -110,11 +152,20 @@ export interface ApiClient {
   listRuns(taskId: string): Promise<readonly Run[]>;
   runItems(runId: string): Promise<RunItems>;
   cancelRun(runId: string): Promise<Run>;
+  /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */
+  setUsageLimitAutoResume(taskId: string, autoResume: boolean): Promise<Task>;
   getDiff(taskId: string): Promise<DiffResponse>;
   getDesktop(taskId: string): Promise<DesktopStatus>;
   startDesktop(taskId: string): Promise<DesktopStatus>;
   stopDesktop(taskId: string): Promise<void>;
   usage(): Promise<Usage>;
+  /** The CLI providers' plan limits on the active box. */
+  providerUsage(): Promise<readonly ProviderUsage[]>;
+  /** What the active box can run, as it found at startup. */
+  capabilities(): Promise<BoxCapabilities>;
+  useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
+  /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
+  usageActivity(): Promise<UsageActivity>;
   commands(taskId: string, model: AgentModel): Promise<HarnessCommands>;
   previewSession(taskId: string): Promise<PreviewSession>;
 }
@@ -135,8 +186,8 @@ async function send<A, I>(
     res = await fetch(url, {
       method,
       headers: requestHeaders,
-      // RN's cookie jar would append a second session to our explicit Cookie header.
-      credentials: "omit",
+      // Native: RN's cookie jar would append a second session to our explicit Cookie header. Web: the browser's cookie.
+      credentials: fetchCredentials,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
@@ -169,15 +220,16 @@ export function createApiClient(
   const cookieHeaders: Record<string, string> = sessionCookie ? { Cookie: `session=${sessionCookie}` } : {};
 
   // The user's box token, single-flight: concurrent callers share one mint, and a failed mint is not kept.
-  let boxToken: { token: Promise<string>; refreshAt: number } | null = null;
-  function mintBoxToken(box: ActiveBox): Promise<string> {
-    if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.token;
-    const entry: { token: Promise<string>; refreshAt: number } = {
+  let boxToken: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } | null = null;
+  function mintBoxToken(box: ActiveBox, fresh = false): Promise<{ token: string; expiresAt: number }> {
+    if (fresh) boxToken = null;
+    if (boxToken && Date.now() < boxToken.refreshAt) return boxToken.minted;
+    const entry: { minted: Promise<{ token: string; expiresAt: number }>; refreshAt: number } = {
       refreshAt: Number.POSITIVE_INFINITY,
-      token: request(BoxToken, "POST", ControlPaths.userBoxToken(box.id)).then(
+      minted: request(BoxToken, "POST", ControlPaths.userBoxToken(box.id)).then(
         (minted) => {
           entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted.token;
+          return { token: minted.token, expiresAt: Date.parse(minted.expiresAt) };
         },
         (error: unknown) => {
           if (boxToken === entry) boxToken = null;
@@ -186,7 +238,50 @@ export function createApiClient(
       ),
     };
     boxToken = entry;
-    return entry.token;
+    return entry.minted;
+  }
+
+  // A file token for the relayed box, single-flight in the same way: reused until a minute before it expires.
+  let fileToken: { minted: Promise<FileToken>; refreshAt: number } | null = null;
+  function mintFileToken(): Promise<FileToken> {
+    if (fileToken && Date.now() < fileToken.refreshAt) return fileToken.minted;
+    const entry: { minted: Promise<FileToken>; refreshAt: number } = {
+      refreshAt: Number.POSITIVE_INFINITY,
+      minted: request(FileToken, "POST", ControlPaths.fileToken).then(
+        (minted) => {
+          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
+          return minted;
+        },
+        (error: unknown) => {
+          if (fileToken === entry) fileToken = null;
+          throw error;
+        }
+      ),
+    };
+    fileToken = entry;
+    return entry.minted;
+  }
+
+  // A desktop token for the relayed box, single-flight per task in the same way.
+  let desktopToken: { taskId: string; minted: Promise<FileToken>; refreshAt: number } | null = null;
+  function mintDesktopToken(taskId: string, fresh: boolean): Promise<FileToken> {
+    if (!fresh && desktopToken?.taskId === taskId && Date.now() < desktopToken.refreshAt) return desktopToken.minted;
+    const entry: { taskId: string; minted: Promise<FileToken>; refreshAt: number } = {
+      taskId,
+      refreshAt: Number.POSITIVE_INFINITY,
+      minted: request(FileToken, "POST", ControlPaths.desktopToken(taskId)).then(
+        (minted) => {
+          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
+          return minted;
+        },
+        (error: unknown) => {
+          if (desktopToken === entry) desktopToken = null;
+          throw error;
+        }
+      ),
+    };
+    desktopToken = entry;
+    return entry.minted;
   }
 
   // Control plane (served by the Worker): authenticated by the session cookie.
@@ -209,7 +304,13 @@ export function createApiClient(
     if (activeBox === null) return request(schema, method, path, body);
     const box = activeBox;
     const attempt = async () =>
-      send(schema, method, `${box.url}${path}`, { Authorization: `Bearer ${await mintBoxToken(box)}` }, body);
+      send(
+        schema,
+        method,
+        `${box.url}${path}`,
+        { Authorization: `Bearer ${(await mintBoxToken(box)).token}` },
+        body
+      );
     try {
       return await attempt();
     } catch (error) {
@@ -220,27 +321,87 @@ export function createApiClient(
     }
   }
 
+  /**
+   * The box-level half of the connections list. A box too old to report capabilities (404) still reports CLI logins:
+   * its native sign-ins stay usable while no harness is offered. Any other failure marks the whole box unavailable, so
+   * a network error can never expose a harness the box did not confirm.
+   */
+  async function boxConnectionSource(): Promise<{
+    cliAuth: readonly CliAuthStatus[] | undefined;
+    harnesses: readonly ModelProvider[] | undefined;
+    error?: string;
+  }> {
+    let cliAuth: readonly CliAuthStatus[];
+    try {
+      cliAuth = await boxRequest(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals));
+    } catch (error) {
+      return {
+        cliAuth: undefined,
+        harnesses: undefined,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    try {
+      const capabilities = await boxRequest(BoxCapabilities, "GET", Paths.capabilities);
+      return { cliAuth, harnesses: capabilities.harnesses };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return { cliAuth, harnesses: undefined };
+      return {
+        cliAuth: undefined,
+        harnesses: undefined,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   return {
+    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
       if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
-      const token = await mintBoxToken(activeBox);
+      const { token } = await mintBoxToken(activeBox);
       return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
+    },
+    fileAccess: async () => {
+      if (activeBox !== null) {
+        const { token, expiresAt } = await mintBoxToken(activeBox);
+        return { base: activeBox.url, query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, expiresAt };
+      }
+      // The relayed Kestrel box: a WebView cannot send the session cookie, so the Worker accepts a file token instead.
+      const minted = await mintFileToken();
+      return {
+        base: serverUrl,
+        query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(minted.token)}`,
+        expiresAt: Date.parse(minted.expiresAt),
+      };
     },
     socketUrl: async (path) => {
       if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
-      const token = await mintBoxToken(activeBox);
+      const { token } = await mintBoxToken(activeBox);
       return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
+    desktopSocketUrl: async (taskId, options) => {
+      const path = Paths.taskDesktopWs(taskId);
+      const box = activeBox;
+      const { token } = box !== null ? await mintBoxToken(box, options?.fresh) : await mintDesktopToken(taskId, options?.fresh ?? false);
+      const base = box !== null ? box.url : serverUrl;
+      return `${base.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+    },
+    desktopEmbedUrl: (taskId, ws) =>
+      `${serverUrl}${DESKTOP_EMBED_PATH}#ws=${encodeURIComponent(ws)}&task=${encodeURIComponent(taskId)}`,
     previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
 
     // Control plane (served by the Worker).
     me: () => request(Me, "GET", ControlPaths.me),
     logout: () => request(Schema.Unknown, "POST", ControlPaths.logout).then(() => undefined),
-    connections: () => request(Schema.Array(Connection), "GET", ControlPaths.connections),
+    connections: async () => {
+      const stored = await request(Schema.Array(Connection), "GET", ControlPaths.connections);
+      return connectionsForBox(stored, await boxConnectionSource());
+    },
     putApiKey: (provider, body) => request(Connection, "PUT", ControlPaths.connection(provider), body),
     deleteConnection: (provider) =>
       request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)).then(() => undefined),
     githubRepos: () => request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos),
+    githubBranches: (repo) => request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo)),
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
@@ -256,6 +417,7 @@ export function createApiClient(
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
     cliLoginCode: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
+    cliLoginKey: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
     cliLogout: (provider) =>
       boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)).then(() => undefined),
     listAutomations: () => request(Schema.Array(Automation), "GET", ControlPaths.automations),
@@ -276,11 +438,23 @@ export function createApiClient(
     listRuns: (taskId) => boxRequest(Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
     runItems: (runId) => boxRequest(RunItems, "GET", Paths.runItems(runId)),
     cancelRun: (runId) => boxRequest(Run, "POST", Paths.runCancel(runId)),
+    setUsageLimitAutoResume: (taskId, autoResume) =>
+      boxRequest(Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
     getDiff: (taskId) => boxRequest(DiffResponse, "GET", Paths.taskDiff(taskId)),
     getDesktop: (taskId) => boxRequest(DesktopStatus, "GET", Paths.taskDesktop(taskId)),
     startDesktop: (taskId) => boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId)),
     stopDesktop: (taskId) => boxRequest(Schema.Unknown, "DELETE", Paths.taskDesktop(taskId)).then(() => undefined),
     usage: () => boxRequest(Usage, "GET", Paths.usage),
+    providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
+    capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
+    useBankedReset: (provider, body) =>
+      boxRequest(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
+    usageActivity: () =>
+      boxRequest(
+        UsageActivity,
+        "GET",
+        `${Paths.usageActivity}?tz=${encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone)}`
+      ),
     commands: (taskId: string, model: AgentModel) =>
       boxRequest(HarnessCommands, "GET", `${Paths.taskCommands(taskId)}?model=${encodeURIComponent(model)}`),
     previewSession: (taskId: string) => boxRequest(PreviewSession, "POST", Paths.taskPreviewSession(taskId)),

@@ -1,34 +1,39 @@
-import React, { type ComponentRef, Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { type NativeScrollEvent, type NativeSyntheticEvent, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
-import { Paths, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
-import { createQueries, keys, upsert } from "@/api/queries";
+import React, { useEffect, useMemo, useState } from "react";
+import { Linking, StyleSheet, Text, View } from "react-native";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus, type UsageLimitResume } from "@cloudagents/protocol";
+import type { ActiveBox } from "@/api/client";
+import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
-import { AttachmentImage } from "@/components/AttachmentImage";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
-import { errorText, formatClock, formatElapsed } from "@/lib/format";
-import { colors, fonts, radius, shadows, spacing } from "@/theme";
+import { useTranscriptBridge } from "@/hooks/useTranscriptBridge";
+import { errorText, formatElapsed } from "@/lib/format";
+import { useNavigation } from "@/nav/navigation";
+import { colors, fonts, radius, spacing } from "@/theme";
 import { Composer } from "./Composer";
-import { Markdown } from "./Markdown";
-import { RunTranscript } from "./RunTranscript";
+import TranscriptDom from "./TranscriptDom";
+import type { SwipeDirection } from "@/lib/swipe";
 
 interface Props {
   taskId: string;
+  /** The box the thread runs on (`null`: Kestrel's relayed box); threads it links to open on the same box. */
+  box: ActiveBox | null;
   taskStatus: TaskStatus | undefined;
   messages: readonly Message[];
   runs: readonly Run[];
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined;
   context?: ContextUsage | null | undefined;
+  /** A horizontal swipe over the transcript, which the screen's own swipe gestures cannot see in the native app. */
+  onSwipe: (direction: SwipeDirection) => void;
 }
 
-/** Within this distance of the end, new content keeps the thread scrolled to the bottom. */
-const STICK_PX = 80;
-
 const ELAPSED_TICK_MS = 1000;
+/** A file token is renewed this long before it expires, so an image never loads with a stale one. */
+const FILE_ACCESS_MARGIN_MS = 60_000;
 
 function Elapsed({ startedAt }: { startedAt: string }) {
   const [now, setNow] = useState(Date.now);
@@ -51,61 +56,49 @@ function WorkingIndicator({ run }: { run: Run }) {
   );
 }
 
-/** `children`: what hangs off a message (attachments), shown under its text. */
-function ThreadItem({
-  message,
-  hideText = false,
-  children,
-}: {
-  message: Message;
-  /** The run transcript already renders this text; only what hangs off the message stays. */
-  hideText?: boolean;
-  children?: ReactNode;
-}) {
-  switch (message.role) {
-    case "user":
-      return (
-        <View style={styles.userWrap}>
-          {/* Sent by the agent of another of the user's threads (thread_send), not typed by the user. */}
-          {message.fromThread ? (
-            <Text style={styles.fromThread} numberOfLines={1}>
-              From the agent of {message.fromThread.title}
-            </Text>
-          ) : null}
-          <View style={styles.userBubble}>
-            <Text style={styles.userText} selectable>
-              {message.text}
-            </Text>
-          </View>
-          {children}
-        </View>
-      );
-    case "agent":
-      if (hideText && children === undefined) return null;
-      return (
-        <View>
-          {hideText ? null : <Markdown text={message.text} />}
-          {children}
-          <Text style={styles.messageTime}>{formatClock(message.createdAt)}</Text>
-        </View>
-      );
-    case "system":
-      return (
-        <View style={styles.systemWrap}>
-          <Text style={styles.system}>{message.text}</Text>
-          {children}
-        </View>
-      );
-  }
+/** The thread's armed usage-limit resume, or nothing when it has none. */
+function UsageLimitNotice({ task }: { task: Task | undefined }) {
+  const arm = task?.usageLimitResume;
+  if (task === undefined || arm === undefined) return null;
+  return <ArmedUsageLimit task={task} arm={arm} />;
+}
+
+/** The same notice and per-thread toggle as the web app, in native views. */
+function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
+  const { api } = useApiClient();
+  const queryClient = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: (autoResume: boolean) => api.setUsageLimitAutoResume(task.id, autoResume),
+    onSuccess: (updated) => queryClient.setQueryData(boxKeys(api.boxScope).task(updated.id), updated),
+  });
+  const paused = !arm.autoResume;
+  const at = Number.isNaN(Date.parse(arm.resetsAt))
+    ? "when the limit resets"
+    : new Date(arm.resetsAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return (
+    <View style={styles.limit}>
+      <Text style={styles.limitTitle}>Usage limit reached</Text>
+      <Text style={styles.limitText}>
+        {paused
+          ? `Auto-resume is off for this thread. The limit resets ${at}.`
+          : `This thread resumes automatically ${at}, when the provider's limit resets.`}
+      </Text>
+      <Button variant="soft" size="sm" disabled={toggle.isPending} onPress={() => toggle.mutate(paused)}>
+        {paused ? "Resume at reset" : "Cancel auto-resume"}
+      </Button>
+      {toggle.error ? <Alert>{errorText(toggle.error)}</Alert> : null}
+    </View>
+  );
 }
 
 /** Stands in for the composer on an archived thread: its history stays readable until it is unarchived. */
 function ArchivedNotice({ task }: { task: Task }) {
   const { unarchive } = useThreadArchive();
+  const { api } = useApiClient();
   return (
     <View style={styles.archived}>
       <Text style={styles.archivedText}>This thread is archived. Unarchive it to send messages again.</Text>
-      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate(task.id)}>
+      <Button variant="soft" size="sm" disabled={unarchive.isPending} onPress={() => unarchive.mutate({ api, taskId: task.id })}>
         Unarchive
       </Button>
       {unarchive.error ? <Alert>{errorText(unarchive.error)}</Alert> : null}
@@ -113,114 +106,93 @@ function ArchivedNotice({ task }: { task: Task }) {
   );
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, context }: Props) {
+/**
+ * The thread's transcript (the desktop's own, in `TranscriptDom`) above the native composer. This side owns the data:
+ * it reads the query cache that `useTaskState` keeps live and forwards changes across the DOM bridge.
+ */
+export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTask, context, onSwipe }: Props) {
   const { api } = useApiClient();
+  const nav = useNavigation();
   const queryClient = useQueryClient();
   const queries = useMemo(() => createQueries(api), [api]);
-  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  // Follow new content only while the reader is at the end, so scrolling back through history is not yanked down.
-  const atEnd = useRef(true);
+  const task = useQuery(queries.task(taskId));
+  // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo);
+  const referenceRepos = checkoutRepos.length === 0 && task.data?.pickedRepo
+    ? [task.data.pickedRepo]
+    : checkoutRepos;
+  const files = useQuery({
+    queryKey: [...boxKeys(api.boxScope).box, "file-access"],
+    queryFn: () => api.fileAccess(),
+    refetchInterval: (query) =>
+      query.state.data ? Math.max(5_000, query.state.data.expiresAt - Date.now() - FILE_ACCESS_MARGIN_MS) : false,
+  });
 
-  const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  // A run's transcript follows the last user message it took: the prompt, or a later message that steered it or
-  // waited in its inbox. The user's messages read first, then everything the agent did with them.
-  const transcriptAfter = new Map<string, string>();
-  for (const m of sortedMessages) {
-    if (m.role === "user" && m.runId !== null) transcriptAfter.set(m.runId, m.id);
-  }
-  const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-  // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
+  const sortedRuns = useMemo(() => [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt)), [runs]);
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(run.id)) });
-  const itemCountByRun = new Map(sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]));
+  // Rebuilt every render; the bridge compares each run's item list, which the query cache keeps by identity.
+  const runItems: Record<string, readonly AgentItem[]> = {};
+  sortedRuns.forEach((run, index) => {
+    const items = runItemQueries[index]?.data;
+    if (items !== undefined) runItems[run.id] = items;
+  });
 
   // The latest question with options gets answer choices in the composer while waiting for input.
-  const lastAsk = sortedMessages.filter((m) => m.role === "agent" && m.options !== undefined).at(-1);
+  const lastAsk = [...messages]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .filter((m) => m.role === "agent" && m.options !== undefined)
+    .at(-1);
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined;
 
+  const bridge = useTranscriptBridge({ taskId, messages, runs, runItems, pendingAskId: pendingAsk?.id });
+
   const send = useMutation({
-    mutationFn: (body: SendMessageBody) => api.sendMessage(taskId, body),
-    onSuccess: (res) => {
-      atEnd.current = true;
+    mutationFn: ({ api, taskId, body }: ThreadCall & { body: SendMessageBody }) => api.sendMessage(taskId, body),
+    onSuccess: (res, { api, taskId }) => {
+      const keys = boxKeys(api.boxScope);
       queryClient.setQueryData<Message[]>(keys.messages(taskId), (list) => upsert(list, res.message));
       queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, res.run));
     },
   });
   const cancel = useMutation({
-    mutationFn: (runId: string) => api.cancelRun(runId),
-    onSuccess: (run) => queryClient.setQueryData<Run[]>(keys.runs(taskId), (list) => upsert(list, run)),
+    mutationFn: ({ api, runId }: ThreadCall & { runId: string }) => api.cancelRun(runId),
+    onSuccess: (run, { api, taskId }) =>
+      queryClient.setQueryData<Run[]>(boxKeys(api.boxScope).runs(taskId), (list) => upsert(list, run)),
   });
   const latestRun = sortedRuns.at(-1);
   const activeRun = latestRun?.status === "running" ? latestRun : undefined;
 
-  function onScroll(e: NativeSyntheticEvent<NativeScrollEvent>) {
-    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    atEnd.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - STICK_PX;
-  }
-
   return (
     <View style={styles.flex}>
-      <ScrollView
-        ref={scrollRef}
-        style={styles.flex}
-        contentContainerStyle={styles.thread}
-        onScroll={onScroll}
-        scrollEventThrottle={64}
-        keyboardDismissMode="interactive"
-        onContentSizeChange={() => {
-          if (atEnd.current) scrollRef.current?.scrollToEnd({ animated: false });
-        }}
-      >
-        {sortedMessages.length === 0 ? (
-          <Text style={styles.empty}>No messages yet. Describe what to do.</Text>
-        ) : null}
-        {sortedMessages.map((m) => {
-          const transcriptRunId =
-            m.role === "user" && m.runId !== null && transcriptAfter.get(m.runId) === m.id ? m.runId : null;
-          const pending = m.id === pendingAsk?.id;
-          const duplicate =
-            m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0;
-          const attachments = pending ? [] : (m.attachments ?? []);
-          return (
-            <Fragment key={m.id}>
-              <ThreadItem message={m} hideText={duplicate || pending}>
-                {attachments.length > 0 ? (
-                  <>
-                    {attachments.map((a) => (
-                      <AttachmentImage
-                        key={a.id}
-                        path={Paths.taskAttachment(taskId, a.id)}
-                        style={styles.attachment}
-                        accessibilityLabel="Attachment"
-                      />
-                    ))}
-                  </>
-                ) : undefined}
-              </ThreadItem>
-              {transcriptRunId !== null ? (
-                <RunTranscript
-                  taskId={taskId}
-                  runId={transcriptRunId}
-                  running={runs.some((run) => run.id === transcriptRunId && run.status === "running")}
-                />
-              ) : null}
-            </Fragment>
-          );
-        })}
-      </ScrollView>
+      <TranscriptDom
+        ref={bridge.ref}
+        snapshot={bridge.snapshot}
+        files={files.data ? { base: files.data.base, query: files.data.query } : null}
+        onResync={async () => bridge.resync()}
+        onFileError={async () => void files.refetch()}
+        openExternal={async (url) => void Linking.openURL(url)}
+        openThread={async (id) => nav.push({ name: "thread", taskId: id, box })}
+        onSwipe={async (direction) => onSwipe(direction)}
+        dom={{ style: styles.transcript, containerStyle: styles.flex }}
+      />
+      <UsageLimitNotice task={task.data} />
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />
       ) : (
         <Composer
+          key={taskId}
+          repos={referenceRepos}
           taskId={taskId}
           ask={pendingAsk}
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
-          onSend={(body) => send.mutateAsync(body)}
+          lastRun={threadChoiceRun(sortedRuns, messages)}
+          onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}
           error={send.error ?? cancel.error}
-          onStop={activeRun ? () => cancel.mutate(activeRun.id) : undefined}
+          onStop={activeRun ? () => cancel.mutate({ api, taskId, runId: activeRun.id }) : undefined}
           stopping={cancel.isPending}
         />
       )}
@@ -230,20 +202,7 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, co
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  thread: { flexGrow: 1, gap: 20, paddingHorizontal: spacing.lg, paddingVertical: spacing.lg },
-  empty: { margin: "auto", color: colors.mutedForeground, fontSize: 14 },
-  userWrap: { alignItems: "flex-end", gap: spacing.xs },
-  fromThread: { maxWidth: "85%", color: colors.mutedForeground, fontSize: 11 },
-  userBubble: {
-    maxWidth: "85%",
-    borderRadius: radius.xxl,
-    backgroundColor: colors.white08,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: 10,
-    ...shadows.soft,
-  },
-  userText: { color: colors.foreground, fontSize: 15, lineHeight: 22 },
-  messageTime: { color: colors.mutedForeground, fontSize: 11, marginTop: 6 },
+  transcript: { flex: 1, backgroundColor: "transparent" },
   workingWrap: {
     paddingHorizontal: spacing.lg,
     paddingTop: 4,
@@ -265,13 +224,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: fonts.mono,
   },
-  agentSide: { alignSelf: "flex-start" },
-  systemWrap: { alignSelf: "center", alignItems: "center" },
-  system: { color: colors.mutedForeground, fontSize: 12, fontStyle: "italic", textAlign: "center" },
-  footer: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
-  footerText: { color: colors.mutedForeground, fontSize: 11 },
-  attachment: { width: 240, height: 180, marginTop: spacing.sm, borderRadius: radius.xl },
-  options: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.md },
   archived: {
     gap: spacing.sm,
     margin: spacing.md,
@@ -280,5 +232,17 @@ const styles = StyleSheet.create({
     borderRadius: radius.xl,
     backgroundColor: colors.background + "99",
   },
+  limit: {
+    gap: spacing.sm,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.warning + "40",
+    borderRadius: radius.xl,
+    backgroundColor: colors.warning + "1a",
+  },
+  limitTitle: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
+  limitText: { color: colors.mutedForeground, fontSize: 13 },
   archivedText: { color: colors.mutedForeground, fontSize: 14 },
 });

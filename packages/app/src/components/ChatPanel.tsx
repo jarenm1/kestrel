@@ -1,18 +1,17 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
-import type { ContextUsage, Message, Run, SendMessageBody, Task, TaskStatus } from "@cloudagents/protocol"
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
+import { Transcript } from "@cloudagents/ui/transcript"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
-import { formatClock, formatElapsed } from "@/util"
+import { formatElapsed } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer, type ElementContext } from "./Composer"
-import { Markdown } from "./Markdown"
-import { MessageAttachments } from "./MessageAttachments"
-import { RunTranscript } from "./RunTranscript"
 import { StatusIcon } from "./StatusIcon"
+import { UsageLimitNotice } from "./UsageLimitNotice"
 
 interface Props {
   taskId: string
@@ -28,13 +27,8 @@ interface Props {
   context: ContextUsage | undefined
 }
 
-const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
-
 /** How often the running turn's elapsed time is redrawn. */
 const ELAPSED_TICK_MS = 1000
-
-/** Within this distance of the bottom, keep following new content. */
-const STICK_PX = 80
 
 /** The run's time so far, redrawn every second. */
 function Elapsed({ startedAt }: { startedAt: string }) {
@@ -60,11 +54,6 @@ function WorkingIndicator({ run }: { run: Run }) {
       </div>
     </div>
   )
-}
-
-/** Under an agent reply: the time it was sent. */
-function MessageTime({ iso }: { iso: string }) {
-  return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
 }
 
 /** Delegated threads are independent conversations; their original run stays linked even after follow-ups. */
@@ -98,104 +87,27 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
   )
 }
 
-/** `children`: what hangs off a message (attachments), shown under its text. */
-function ThreadItem({
-  message,
-  hideText = false,
-  children,
-}: {
-  message: Message
-  /** The run transcript already renders this text; only what hangs off the message stays. */
-  hideText?: boolean
-  children?: ReactNode
-}) {
-  switch (message.role) {
-    case "user":
-      return (
-        <div className={cn("flex flex-col items-end", ENTER_CLASS)}>
-          {/* Sent by the agent of another of the user's threads (thread_send), not typed by the user. */}
-          {message.fromThread && (
-            <div className="mb-1 max-w-[85%] truncate text-[11px] text-muted-foreground">
-              From the agent of{" "}
-              <Link to={threadPath(message.fromThread.id)} className="font-medium hover:underline">
-                {message.fromThread.title}
-              </Link>
-            </div>
-          )}
-          {/* A message of only attachments has no text bubble. */}
-          {message.text !== "" && (
-            <div className="max-w-[85%] rounded-2xl bg-white/[0.08] px-4 py-2.5 break-words whitespace-pre-wrap shadow-soft">
-              {message.text}
-            </div>
-          )}
-          {children}
-        </div>
-      )
-    case "agent": {
-      // A duplicated message only keeps its attachments: the transcript already shows its text.
-      if (hideText && (children === undefined || children === null)) return null
-      return (
-        <div className={ENTER_CLASS}>
-          {!hideText && <Markdown text={message.text} />}
-          {children}
-          {!hideText && <MessageTime iso={message.createdAt} />}
-        </div>
-      )
-    }
-    case "system":
-      return (
-        <div className={cn("self-center text-xs text-muted-foreground italic", ENTER_CLASS)}>
-          {message.text}
-          {children}
-        </div>
-      )
-  }
-}
-
 export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
-  const threadRef = useRef<HTMLDivElement>(null)
-  const contentRef = useRef<HTMLDivElement>(null)
-  const atEnd = useRef(true)
+  // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
+  const task = useQuery(queries.task(taskId))
+  const checkoutRepos = (task.data?.checkouts ?? []).map((checkout) => checkout.repo)
+  const referenceRepos = checkoutRepos.length === 0 && task.data?.pickedRepo
+    ? [task.data.pickedRepo]
+    : checkoutRepos
 
-  const sortedMessages = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  // A run's transcript follows the last user message it took: the prompt, or a later message that steered it or
-  // waited in its inbox. The user's messages read first, then everything the agent did with them.
-  const transcriptAfter = new Map<string, string>()
-  for (const m of sortedMessages) if (m.role === "user" && m.runId !== null) transcriptAfter.set(m.runId, m.id)
   const sortedRuns = [...runs].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-  // Items of every run in the thread: their count says whether an agent message duplicates its transcript.
+  // Items of every run in the thread; live events keep these cache entries current.
   const runItemQueries = useQueries({ queries: sortedRuns.map((run) => queries.runItems(taskId, run.id)) })
-  const itemCountByRun = new Map(
-    sortedRuns.map((run, index) => [run.id, runItemQueries[index]?.data?.length ?? 0]),
-  )
+  const runItems: Record<string, readonly AgentItem[]> = {}
+  sortedRuns.forEach((run, index) => {
+    const items = runItemQueries[index]?.data
+    if (items !== undefined) runItems[run.id] = items
+  })
   // `task_ask` questions are the messages with `options` (possibly none). The latest one, while the agent is blocked
   // on it, moves into the composer: its screenshot, question and options sit above the box until it is answered.
-  const lastAsk = [...sortedMessages].reverse().find((m) => m.options !== undefined)
+  const lastAsk = [...messages].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).reverse().find((m) => m.options !== undefined)
   const pendingAsk = taskStatus === "needs_input" ? lastAsk : undefined
-
-  useLayoutEffect(() => {
-    const el = threadRef.current
-    const content = contentRef.current
-    if (!el || !content) return
-
-    // A newly opened thread starts at the bottom, even if the previous thread was paused.
-    atEnd.current = true
-    const follow = () => {
-      if (atEnd.current) el.scrollTop = el.scrollHeight
-    }
-    follow()
-    // Also follow late layout changes, such as images loading and transcript expansion.
-    const observer = new ResizeObserver(follow)
-    observer.observe(content)
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [taskId])
-
-  function onThreadScroll() {
-    const el = threadRef.current
-    if (el) atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight <= STICK_PX
-  }
 
   const send = useMutation({
     mutationFn: ({ body, files = [] }: { body: SendMessageBody; files?: readonly File[] }) =>
@@ -215,43 +127,20 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <DelegatedTasks taskId={taskId} />
-      {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
-      <div className={cn("min-h-0 flex-1 overflow-auto px-5 pt-4", activeRun ? "pb-14" : "pb-4")} ref={threadRef} onScroll={onThreadScroll}>
-        <div ref={contentRef} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
-          {sortedMessages.length === 0 && (
-            <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
-          )}
-          {sortedMessages.map((m) => {
-            const transcriptRunId =
-              m.role === "user" && m.runId !== null && transcriptAfter.get(m.runId) === m.id ? m.runId : null
-            const pending = m.id === pendingAsk?.id
-            // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
-            const duplicate =
-              m.role === "agent" && m.options === undefined && m.runId !== null && (itemCountByRun.get(m.runId) ?? 0) > 0
-            const attachments = pending ? [] : (m.attachments ?? [])
-            return (
-              <Fragment key={m.id}>
-                <ThreadItem message={m} hideText={duplicate || pending}>
-                  {attachments.length > 0 ? (
-                    <MessageAttachments
-                      taskId={taskId}
-                      attachments={attachments}
-                      className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
-                    />
-                  ) : null}
-                </ThreadItem>
-                {transcriptRunId !== null && (
-                  <RunTranscript
-                    taskId={taskId}
-                    runId={transcriptRunId}
-                    running={runs.some((run) => run.id === transcriptRunId && run.status === "running")}
-                  />
-                )}
-              </Fragment>
-            )
-          })}
+      {task.data?.usageLimitResume !== undefined && (
+        <div className="px-5 pt-10">
+          <UsageLimitNotice task={task.data} />
         </div>
-      </div>
+      )}
+      {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
+      <Transcript
+        taskId={taskId}
+        messages={messages}
+        runs={runs}
+        runItems={runItems}
+        pendingAskId={pendingAsk?.id}
+        className={cn("px-5 pt-4", activeRun ? "pb-14" : "pb-4")}
+      />
       <div className="relative flex justify-center px-5 pt-2 pb-5">
         {activeRun && <WorkingIndicator run={activeRun} />}
         {/*
@@ -271,10 +160,13 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
           <ArchivedNotice task={archivedTask} />
         ) : (
           <Composer
+            key={taskId}
             taskId={taskId}
             draftKey={taskId}
+            repos={referenceRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
+            lastRun={threadChoiceRun(sortedRuns, messages)}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}
             ask={pendingAsk}

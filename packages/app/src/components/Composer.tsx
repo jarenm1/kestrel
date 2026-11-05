@@ -1,5 +1,4 @@
 import {
-  Fragment,
   useEffect,
   useId,
   useRef,
@@ -9,152 +8,67 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react"
-import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { ArrowUp, Check, ChevronDown, FileText, MousePointer2, Paperclip, Settings2, Square, X } from "lucide-react"
+import { ArrowUp, Check, FileText, MousePointer2, Paperclip, Square, X } from "lucide-react"
 import {
-  AgentEffort,
   AgentModel,
-  EFFORT_LABELS,
+  EffortPick,
+  ModelProvider,
+  GithubRepoSlug,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
   harnessCommandPrefix,
+  resolveAgentChoice,
   type ContextUsage,
   type HarnessCommand,
   type Message,
   type ModelInfo,
-  type ModelProvider,
-  type ModelProviderInfo,
+  type Run,
   type SendMessageBody,
+  type SendMessageResponse,
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
-import { Alert } from "@/components/ui/alert"
-import { Button } from "@/components/ui/button"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { Alert } from "@cloudagents/ui/alert"
+import { Button } from "@cloudagents/ui/button"
+import { ModelPicker, ThinkingPicker, effortOptions, type ModelSection } from "@/components/AgentPickers"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
+import {
+  appCommandOf,
+  matchAppCommand,
+  withAppCommands,
+  type AppCommand,
+  type AppCommandHandlers,
+} from "@cloudagents/composer/commands"
+import {
+  ComposerEditor,
+  composerViewOf,
+  type ComposerEditorHandle,
+  type ComposerEditorView,
+} from "@cloudagents/composer/editor"
+import { findModelMentionTrigger, filterMentionModels } from "@cloudagents/composer/models"
+import { ModelMentions } from "@/components/ModelMentions"
+import { GithubReferenceMenu } from "@/components/GithubReferenceMenu"
 import { useOpenUsagePanel } from "@/components/UsagePanel"
-import { Textarea } from "@/components/ui/textarea"
+import {
+  findGithubReferenceTrigger,
+  type GithubReferenceKind,
+} from "@cloudagents/composer/reference"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
+import { usePromptHistory } from "@/hooks/usePromptHistory"
+import { harnessOf } from "@/lib/harnesses"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
-import { Markdown } from "./Markdown"
-import { MessageAttachments } from "./MessageAttachments"
+import { Markdown } from "@cloudagents/ui/markdown"
+import { MessageAttachments } from "@cloudagents/ui/message-attachments"
 
-/** A connected provider and the models the user keeps in the picker for it. */
-interface ModelSection {
-  readonly provider: ModelProviderInfo
-  readonly models: readonly ModelInfo[]
-}
-
-/** A pill that opens a single-choice menu; shows its label until something other than Default is picked. */
-function PillPicker<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string
-  value: T | undefined
-  options: readonly { value: T | undefined; label: string }[]
-  onChange: (value: T | undefined) => void
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" className="data-[state=open]:bg-white/[0.06]">
-          {value === undefined ? label : options.find((o) => o.value === value)?.label}
-          <ChevronDown className="opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top">
-        <DropdownMenuLabel>{label}</DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={value ?? ""}
-          onValueChange={(v) => onChange(options.find((o) => (o.value ?? "") === v)?.value)}
-        >
-          {options.map((o) => (
-            <DropdownMenuRadioItem key={o.label} value={o.value ?? ""}>
-              {o.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-/**
- * Model menu: one group per connected provider, divided, with the models the user keeps for it (Connections).
- * `sections` is null while connections load.
- */
-function ModelPicker({
-  sections,
-  value,
-  onChange,
-}: {
-  sections: readonly ModelSection[] | null
-  value: ModelInfo | undefined
-  onChange: (value: AgentModel) => void
-}) {
-  const label = value?.name ?? (sections === null ? "Model" : "No models")
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" className="data-[state=open]:bg-white/[0.06]">
-          {label}
-          <ChevronDown className="opacity-60" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        side="top"
-        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
-      >
-        {sections !== null && sections.length === 0 && (
-          <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
-        )}
-        <DropdownMenuRadioGroup
-          value={value?.id ?? ""}
-          onValueChange={(v) => {
-            if (Schema.is(AgentModel)(v)) onChange(v)
-          }}
-        >
-          {sections?.map((section, i) => (
-            <Fragment key={section.provider.id}>
-              {i > 0 && <DropdownMenuSeparator />}
-              <DropdownMenuLabel>{section.provider.name}</DropdownMenuLabel>
-              {section.models.map((m) => (
-                <DropdownMenuRadioItem key={m.id} value={m.id}>
-                  {m.name}
-                </DropdownMenuRadioItem>
-              ))}
-            </Fragment>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link to="/settings/connections" className="text-muted-foreground">
-            <Settings2 />
-            Manage models
-          </Link>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
+const MODEL_LOGOS = Object.fromEntries(ModelProvider.literals.map((provider) => {
+  const harness = harnessOf(provider)
+  return [provider, { src: harness.logo, monochrome: harness.monochrome }]
+}))
 
 /** A file waiting to go with the next message: a thumbnail for images, else its name; the cross removes it. */
 function PendingFile({ file, onRemove }: { file: File; onRemove: () => void }) {
@@ -292,7 +206,7 @@ function AskPanel({
 
 interface Props {
   /** Resolves once the message is accepted; the text and files are cleared only then. */
-  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<unknown>
+  onSend: (body: SendMessageBody, files: readonly File[]) => Promise<SendMessageResponse | void>
   pending: boolean
   error: unknown
   /**
@@ -307,6 +221,8 @@ interface Props {
   activeRunId?: string | undefined
   /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
   activeRunProvider?: ModelProvider | undefined
+  /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
+  lastRun?: Pick<Run, "model" | "effort"> | undefined
   placeholder?: string
   autoFocus?: boolean
   className?: string
@@ -317,27 +233,19 @@ interface Props {
   onElementsChange?: (elements: readonly ElementContext[]) => void
   /** The thread's context use, drawn along the top of the box; absent on a new thread or before a turn reports it. */
   context?: ContextUsage | undefined
-  /**
-   * The agent's open question (a `task_ask` message), shown at the top of the box. A picked option is sent as the
+  /** The agent's open question (a `task_ask` message), shown at the top of the box. A picked option is sent as the
    * answer, followed by anything typed; with nothing picked, the typed text answers.
    */
   ask?: Message | undefined
+  /** New-thread repository choice; it also names `#` references. */
+  repo?: string | undefined
+  /** Called when the reference menu's repository picker changes the new thread's repository. */
+  onRepoChange?: (repo: string | undefined) => void
+  /** Repositories an existing thread has checked out; one is unambiguous, several ask for a pick. */
+  repos?: readonly string[]
 }
 
-/** Kestrel's own slash command, listed ahead of the harness's and run by the app. */
-const USAGE_COMMAND: HarnessCommand = { name: "usage", description: "Show your usage limits and activity", prefix: "/" }
-
-/** The harness's commands that Kestrel's own does not replace: it answers `/usage` itself, whichever harness runs. */
-const withoutShadowed = (commands: readonly HarnessCommand[], provider: ModelProvider | undefined) =>
-  commands.filter((c) => !(c.name.toLowerCase() === USAGE_COMMAND.name && harnessCommandPrefix(c, provider) === "/"))
-
-/** What stays in the draft once its leading `/usage` has run; undefined when the draft does not start with it. */
-const afterUsageCommand = (text: string): string | undefined => {
-  const match = /^\s*\/usage(?:\s+|$)/i.exec(text)
-  return match === null ? undefined : text.slice(match[0].length)
-}
-
-/** Message box with file attachments, the model and thinking-level pickers, slash commands, and a round send / stop button. */
+/** Message box with file attachments, the model and thinking-level pickers, slash commands, `#` references, and a round send / stop button. */
 export function Composer({
   onSend,
   pending,
@@ -347,6 +255,7 @@ export function Composer({
   taskId,
   activeRunId,
   activeRunProvider,
+  lastRun,
   placeholder,
   autoFocus,
   className,
@@ -355,49 +264,64 @@ export function Composer({
   onElementsChange,
   context,
   ask,
+  repo,
+  onRepoChange,
+  repos = [],
 }: Props) {
   const [text, setText] = useStoredDraft(draftKey)
-  const [caret, setCaret] = useState(0)
+  const promptHistory = usePromptHistory(draftKey)
+  const [view, setView] = useState<ComposerEditorView>(() => composerViewOf(text))
   const [files, setFiles] = useState<readonly File[]>([])
   const [fileError, setFileError] = useState<string>()
   const [dragging, setDragging] = useState(false)
   const [composerFocused, setComposerFocused] = useState(false)
-  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [autocompleteDismissed, setAutocompleteDismissed] = useState(false)
   const [activeCommandIndex, setActiveCommandIndex] = useState(0)
+  const [activeReferenceIndex, setActiveReferenceIndex] = useState(0)
+  const [activeModelIndex, setActiveModelIndex] = useState(0)
+  const [referenceMenuEngaged, setReferenceMenuEngaged] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
-  const textarea = useRef<HTMLTextAreaElement>(null)
+  const editor = useRef<ComposerEditorHandle>(null)
   // The picked option belongs to one question; a new question starts with nothing picked.
   const [choice, setChoice] = useState<{ askId: string; index: number }>()
   const askOptions = ask?.options ?? []
   const chosenIndex = choice !== undefined && choice.askId === ask?.id ? choice.index : undefined
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex]
   const slashMenuId = useId()
+  const referenceMenuId = useId()
+  const modelMenuId = useId()
   const openUsagePanel = useOpenUsagePanel()
-  const [storedModel, setModel] = useStoredChoice("kestrel.model", AgentModel)
-  const [storedEffort, setEffort] = useStoredChoice("kestrel.effort", AgentEffort)
+  // The shared catalog decides what appears and matches; every app action needs its local implementation here.
+  const appCommandHandlers: AppCommandHandlers = { usage: openUsagePanel }
+  // A thread keeps its unsent picks to itself; the unsuffixed keys belong to the new-thread composer.
+  const pickSuffix = taskId === undefined ? "" : `.${taskId}`
+  const [pickedModel, setPickedModel, clearPickedModel] = useStoredChoice(`kestrel.model${pickSuffix}`, AgentModel)
+  const [pickedEffort, setPickedEffort, clearPickedEffort] = useStoredChoice(`kestrel.effort${pickSuffix}`, EffortPick)
+  const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
+  const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
   const shown = useShownModels()
+  // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
+  const [pickedReferenceRepo, setPickedReferenceRepo] = useState<string>()
+  const checkoutRepos = repos.filter((candidate) => Schema.is(GithubRepoSlug)(candidate))
+  const soleCheckout = checkoutRepos.length === 1 ? checkoutRepos[0] : undefined
+  const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
+  useEffect(() => setPickedReferenceRepo(undefined), [repo])
+  const connected = connections.data ? connectedModelProviders(connections.data) : []
   const sections: readonly ModelSection[] | null = connections.data
-    ? connectedModelProviders(connections.data)
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((s) => s.models.length > 0)
+    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
     : null
-  // The stored pick counts only while it is on offer; otherwise the first model on offer stands in, unsaved.
   const offered = sections?.flatMap((s) => s.models) ?? []
-  const model = offered.find((m) => m.id === storedModel) ?? offered[0]
-  const effort = storedEffort !== undefined && model?.efforts.includes(storedEffort) ? storedEffort : undefined
-  const effortOptions: readonly { value: AgentEffort | undefined; label: string }[] = [
-    { value: undefined, label: "Default" },
-    ...(model?.efforts ?? []).map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
-  ]
+  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
   // Codex lists its commands and skills on `/`, and only its skills on their native `$`. The menu follows the caret
   // while it stays inside the first word, then closes once an argument starts.
-  const firstSpace = text.search(/\s/)
-  const commandTokenEnd = firstSpace === -1 ? text.length : firstSpace
-  const trigger: "/" | "$" | undefined = text.startsWith("/") ? "/" : text.startsWith("$") ? "$" : undefined
+  const visible = view.plain
+  const firstSpace = visible.search(/\s/)
+  const commandTokenEnd = firstSpace === -1 ? visible.length : firstSpace
+  const trigger: "/" | "$" | undefined = visible.startsWith("/") ? "/" : visible.startsWith("$") ? "$" : undefined
   const expectedProvider = activeRunProvider ?? model?.provider
   // The running turn's provider wins over the picker. An older run without a stored provider is probed once.
   const triggerAllowed =
@@ -409,9 +333,9 @@ export function Composer({
     (taskId !== undefined || trigger === "/") &&
     trigger !== undefined &&
     triggerAllowed &&
-    caret > 0 &&
-    (firstSpace === -1 || caret <= firstSpace)
-      ? text.slice(1, caret)
+    view.caret > 0 &&
+    (firstSpace === -1 || view.caret <= firstSpace)
+      ? visible.slice(1, view.caret)
       : undefined
   // Keyed by thread, model and running turn, and fetched only while a trigger token is present: a new thread never
   // asks, and another thread's or provider's cached list can never be shown here.
@@ -424,10 +348,7 @@ export function Composer({
   const commandMatches =
     slashQuery === undefined
       ? []
-      : [
-          ...(trigger === "/" ? [USAGE_COMMAND] : []),
-          ...withoutShadowed(commandQuery.data?.commands ?? [], commandProvider),
-        ].filter(
+      : withAppCommands(commandQuery.data?.commands ?? [], commandProvider).filter(
           (c) =>
             (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
@@ -438,44 +359,90 @@ export function Composer({
     (trigger !== "$" || commandProvider === "openai") &&
     (taskId !== undefined || commandMatches.length > 0) &&
     composerFocused &&
-    !slashDismissed
+    !autocompleteDismissed
   const selectedCommandIndex =
     commandMatches.length === 0 ? -1 : Math.min(activeCommandIndex, commandMatches.length - 1)
   const selectedCommand = selectedCommandIndex === -1 ? undefined : commandMatches[selectedCommandIndex]
+  const modelTrigger = findModelMentionTrigger(view.referenceText, view.caret)
+  const modelMatches = modelTrigger === undefined ? [] : filterMentionModels(offered, modelTrigger.query)
+  const modelMenuOpen = modelTrigger !== undefined && !slashMenuOpen && composerFocused && !autocompleteDismissed
+  const selectedModelIndex = modelMatches.length === 0 ? -1 : Math.min(activeModelIndex, modelMatches.length - 1)
+  const selectedMentionModel = modelMatches[selectedModelIndex]
+  // A `#123` token anywhere opens the same menu. `referenceText` masks existing chips, so their labels never reopen it.
+  const referenceTrigger = findGithubReferenceTrigger(view.referenceText, view.caret)
+  const referenceMenuOpen =
+    referenceTrigger !== undefined &&
+    !slashMenuOpen &&
+    !modelMenuOpen &&
+    !autocompleteDismissed &&
+    (composerFocused || referenceMenuEngaged)
+  const selectedReferenceIndex = Math.min(activeReferenceIndex, 1)
 
   // A shorter prefix or a different harness reorders what is active; start at the top again.
   useEffect(() => {
     setActiveCommandIndex(0)
   }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider])
 
-  function runUsageCommand(rest: string) {
-    setText(rest)
-    setCaret(0)
-    openUsagePanel()
+  useEffect(() => {
+    setActiveReferenceIndex(0)
+  }, [referenceTrigger?.start, referenceTrigger?.number])
+
+  useEffect(() => {
+    setActiveModelIndex(0)
+  }, [modelTrigger?.start, modelTrigger?.query])
+  // Once the menu is gone, a picker interaction must not keep a later menu open without focus.
+  useEffect(() => {
+    if (!referenceMenuOpen) setReferenceMenuEngaged(false)
+  }, [referenceMenuOpen])
+
+  /** Runs an app action: only its invocation and the gap after it leave the draft, which never goes to the agent. */
+  function runAppCommand(command: AppCommand, consumed: number) {
+    editor.current?.replaceRange(0, consumed, "")
+    appCommandHandlers[command.name]()
   }
 
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
-    const rest = text.slice(commandTokenEnd).replace(/^\s+/, "")
-    // Kestrel's own command sends nothing, so picking it runs it and only its token leaves the draft.
-    if (command === USAGE_COMMAND) {
-      runUsageCommand(rest)
+    // App actions send nothing, so picking one runs it and only its invocation and gap leave the draft.
+    const app = appCommandOf(command, commandProvider)
+    if (app !== undefined) {
+      runAppCommand(app, matchAppCommand(visible)?.consumed ?? commandTokenEnd)
       return
     }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
     const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
-    const nextText = `${prefix}${command.name} ` + rest
-    const nextCaret = prefix.length + command.name.length + 1
-    setText(nextText)
-    setCaret(nextCaret)
-    setSlashDismissed(true)
-    // Wait for React to write the new value before moving the caret into it.
-    requestAnimationFrame(() => {
-      const el = textarea.current
-      if (el === null) return
-      el.focus()
-      el.setSelectionRange(nextCaret, nextCaret)
-    })
+    // Replace the token and the whitespace after it; anything typed after (including reference chips) stays.
+    const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0
+    editor.current?.replaceRange(0, commandTokenEnd + gap, `${prefix}${command.name} `)
+    setAutocompleteDismissed(true)
+    editor.current?.focus()
+  }
+
+  function chooseMentionModel(mentionModel: ModelInfo) {
+    if (modelTrigger === undefined) return
+    editor.current?.insertModelMention(mentionModel, modelTrigger.start, modelTrigger.end)
+    setAutocompleteDismissed(true)
+    editor.current?.focus()
+  }
+
+  /** Turns the `#123` being typed into an inline chip; the following text stays exactly where it was. */
+  function chooseReference(kind: GithubReferenceKind) {
+    if (referenceTrigger === undefined || referenceRepo === undefined) return
+    editor.current?.insertReference(
+      { repo: referenceRepo, kind, number: referenceTrigger.number },
+      referenceTrigger.start,
+      referenceTrigger.end,
+    )
+    setAutocompleteDismissed(true)
+    setReferenceMenuEngaged(false)
+    editor.current?.focus()
+  }
+
+  function chooseReferenceRepo(next: string | undefined) {
+    setPickedReferenceRepo(next)
+    onRepoChange?.(next)
+    // The picker took focus; return it (and the caret to the number) so the two choices stay open for Enter.
+    requestAnimationFrame(() => editor.current?.focusAt(referenceTrigger?.end ?? view.caret))
   }
 
   /** Adds files, refusing empty ones and any over the box's limit before they are uploaded. */
@@ -492,11 +459,11 @@ export function Composer({
 
   function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
-    // Overrides the harness's `/usage`, typed any way: it never reaches the agent, so it works during a turn too, and
-    // any text after it and any attachments stay for the next message.
-    const afterUsage = afterUsageCommand(text)
-    if (afterUsage !== undefined && chosenOption === undefined) {
-      runUsageCommand(afterUsage)
+    // An app command typed any way never reaches the agent, so it works during a turn too; any text after it and any
+    // attachments stay for the next message.
+    const app = matchAppCommand(visible)
+    if (app !== undefined && chosenOption === undefined) {
+      runAppCommand(app.command, app.consumed)
       return
     }
     // Enter submits via requestSubmit, which ignores the disabled button, so guard here too.
@@ -504,24 +471,30 @@ export function Composer({
     if (empty || pending) return
     const message = [chosenOption ?? "", text.trim(), elementsText(elements)].filter((part) => part !== "").join("\n\n")
     onSend({ text: message, model: model?.id, effort }, files).then(
-      () => {
+      (sent) => {
+        promptHistory.remember(text.trim())
         setText("")
         onElementsChange?.([])
         setFiles([])
         setFileError(undefined)
         setChoice(undefined)
+        // The new run now records these picks. A message joining a running turn keeps them for the next turn.
+        if (taskId !== undefined && sent !== undefined && sent.message.afterItems === undefined) {
+          clearPickedModel(pickedModel)
+          clearPickedEffort(pickedEffort)
+        }
       },
       () => {},
     )
   }
 
-  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+  function onKey(e: KeyboardEvent<HTMLElement>) {
     // IME composition owns Enter/arrows; never pick a command or submit from a composition key.
     const composing = e.nativeEvent.isComposing || e.keyCode === 229
     if (!composing && slashMenuOpen) {
       if (e.key === "Escape") {
         e.preventDefault()
-        setSlashDismissed(true)
+        setAutocompleteDismissed(true)
         return
       }
       if ((e.key === "ArrowDown" || e.key === "ArrowUp") && commandMatches.length > 0) {
@@ -544,6 +517,56 @@ export function Composer({
         return
       }
     }
+    if (!composing && modelMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setAutocompleteDismissed(true)
+        return
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault()
+        if (modelMatches.length > 0) {
+          const delta = e.key === "ArrowDown" ? 1 : -1
+          setActiveModelIndex((Math.max(0, selectedModelIndex) + delta + modelMatches.length) % modelMatches.length)
+        }
+        return
+      }
+      if (e.key === "Enter" && !e.shiftKey && selectedMentionModel !== undefined) {
+        e.preventDefault()
+        chooseMentionModel(selectedMentionModel)
+        return
+      }
+      if (e.key === "Tab" && !e.shiftKey && selectedMentionModel !== undefined) {
+        e.preventDefault()
+        chooseMentionModel(selectedMentionModel)
+        return
+      }
+    }
+    if (!composing && referenceMenuOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setAutocompleteDismissed(true)
+        setReferenceMenuEngaged(false)
+        return
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault()
+        const delta = e.key === "ArrowDown" ? 1 : -1
+        setActiveReferenceIndex((selectedReferenceIndex + delta + 2) % 2)
+        return
+      }
+      // Enter picks the highlighted kind; without a repository there is nothing to insert yet.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        chooseReference(selectedReferenceIndex === 0 ? "pr" : "issue")
+        return
+      }
+      if (e.key === "Tab" && !e.shiftKey && referenceRepo !== undefined) {
+        e.preventDefault()
+        chooseReference(selectedReferenceIndex === 0 ? "pr" : "issue")
+        return
+      }
+    }
     // With an empty box, the arrow keys move through the question's options.
     if (!composing && ask && askOptions.length > 0 && text === "" && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
       e.preventDefault()
@@ -552,14 +575,53 @@ export function Composer({
       setChoice({ askId: ask.id, index: (start + delta + askOptions.length) % askOptions.length })
       return
     }
+    if (
+      !composing && !slashMenuOpen && !referenceMenuOpen && !modelMenuOpen && !ask &&
+      !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+      (e.key === "ArrowUp" || e.key === "ArrowDown")
+    ) {
+      const current = editor.current?.readView()
+      const selection = window.getSelection()
+      // An unchanged recall keeps browsing at the end, even when it spans visual lines.
+      // Ordinary drafts keep native Up movement; Range geometry also detects soft wrapping.
+      const continuingHistory = current !== undefined &&
+        promptHistory.isBrowsing(current.markdown) && current.caret === current.plain.length
+      let atHistoryBoundary = continuingHistory || (current !== undefined &&
+        (e.key === "ArrowUp" ? current.caret === 0 : current.caret === current.plain.length))
+      if (current && !continuingHistory && !current.plain.includes("\n") && e.key === "ArrowUp" &&
+        current.caret === current.plain.length && selection?.isCollapsed) {
+        const range = document.createRange()
+        range.selectNodeContents(e.currentTarget)
+        const rects = range.getClientRects()
+        const first = rects[0]
+        atHistoryBoundary = first === undefined
+        if (first !== undefined) {
+          atHistoryBoundary = true
+          for (const rect of rects) {
+            if (rect.height > 0 && (rect.top >= first.bottom || rect.bottom <= first.top)) {
+              atHistoryBoundary = false
+              break
+            }
+          }
+        }
+      }
+      if (current && selection?.isCollapsed && atHistoryBoundary) {
+        const recalled = promptHistory.navigate(e.key === "ArrowUp" ? -1 : 1, current.markdown)
+        if (recalled !== undefined) {
+          e.preventDefault()
+          setAutocompleteDismissed(true)
+          setText(recalled)
+        }
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !composing) {
       e.preventDefault()
-      e.currentTarget.form?.requestSubmit()
+      e.currentTarget.closest("form")?.requestSubmit()
     }
   }
 
   /** Pasted files (e.g. a screenshot) are attached; pasted text goes into the box as usual. */
-  function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+  function onPaste(e: ClipboardEvent<HTMLDivElement>) {
     const pasted = Array.from(e.clipboardData.files)
     if (pasted.length === 0) return
     e.preventDefault()
@@ -578,6 +640,24 @@ export function Composer({
     e.preventDefault()
     addFiles(Array.from(e.dataTransfer.files))
   }
+
+  const activeListboxId = slashMenuOpen
+    ? selectedCommand !== undefined
+      ? slashListboxId(slashMenuId)
+      : undefined
+    : referenceMenuOpen
+      ? slashListboxId(referenceMenuId)
+      : modelMenuOpen
+        ? slashListboxId(modelMenuId)
+        : undefined
+  const activeOptionId =
+    slashMenuOpen && selectedCommand !== undefined
+      ? slashOptionId(slashMenuId, selectedCommandIndex)
+      : referenceMenuOpen
+        ? slashOptionId(referenceMenuId, selectedReferenceIndex)
+        : modelMenuOpen && selectedMentionModel !== undefined
+          ? slashOptionId(modelMenuId, selectedModelIndex)
+          : undefined
 
   return (
     <div className={cn("w-full max-w-3xl", className)}>
@@ -603,7 +683,7 @@ export function Composer({
             onChoose={(index) => {
               setChoice({ askId: ask.id, index })
               // Back to the box, so Enter sends the pick.
-              textarea.current?.focus()
+              editor.current?.focus()
             }}
           />
         )}
@@ -626,9 +706,8 @@ export function Composer({
           </div>
         )}
         <div className="relative">
-          <Textarea
-            ref={textarea}
-            className="min-h-12 resize-none bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
+          <ComposerEditor
+            ref={editor}
             value={text}
             placeholder={
               placeholder ??
@@ -638,29 +717,23 @@ export function Composer({
                   : "Type your answer (Enter to send)"
                 : "Message the agent (Enter to send, Shift+Enter for newline)")
             }
-            rows={2}
             autoFocus={autoFocus}
-            role="combobox"
-            aria-autocomplete="list"
-            aria-haspopup="listbox"
-            aria-expanded={slashMenuOpen}
-            aria-controls={
-              slashMenuOpen && selectedCommand !== undefined ? slashListboxId(slashMenuId) : undefined
-            }
-            aria-activedescendant={
-              slashMenuOpen && selectedCommand !== undefined
-                ? slashOptionId(slashMenuId, selectedCommandIndex)
-                : undefined
-            }
-            onChange={(e) => {
-              setText(e.target.value)
-              setCaret(e.target.selectionStart)
-              setSlashDismissed(false)
+            className="max-h-56 min-h-12 bg-transparent shadow-none focus-visible:bg-transparent focus-visible:shadow-none"
+            modelLogos={MODEL_LOGOS}
+            ariaExpanded={slashMenuOpen || referenceMenuOpen || modelMenuOpen}
+            ariaControls={activeListboxId}
+            ariaActiveDescendant={activeOptionId}
+            onChange={(next) => {
+              setView(next)
+              if (next.markdown !== text) {
+                setText(next.markdown)
+                setAutocompleteDismissed(false)
+              }
             }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onFocus={() => {
               setComposerFocused(true)
-              setSlashDismissed(false)
+              setAutocompleteDismissed(false)
+              setReferenceMenuEngaged(false)
             }}
             onBlur={() => setComposerFocused(false)}
             onKeyDown={onKey}
@@ -680,6 +753,31 @@ export function Composer({
               onActiveIndexChange={setActiveCommandIndex}
               onSelect={chooseCommand}
             />
+          )}
+          {modelMenuOpen && modelTrigger !== undefined && (
+            <ModelMentions
+              id={modelMenuId}
+              matches={modelMatches}
+              query={modelTrigger.query}
+              pending={connections.isPending}
+              failed={connections.isError}
+              activeIndex={selectedModelIndex}
+              onActiveIndexChange={setActiveModelIndex}
+              onSelect={chooseMentionModel}
+            />
+          )}
+          {referenceMenuOpen && referenceTrigger !== undefined && (
+            <div onPointerDownCapture={() => setReferenceMenuEngaged(true)}>
+              <GithubReferenceMenu
+                id={referenceMenuId}
+                number={referenceTrigger.number}
+                repo={referenceRepo}
+                onRepoChange={chooseReferenceRepo}
+                activeIndex={selectedReferenceIndex}
+                onActiveIndexChange={setActiveReferenceIndex}
+                onSelect={chooseReference}
+              />
+            </div>
           )}
         </div>
         <input
@@ -704,9 +802,9 @@ export function Composer({
           >
             <Paperclip />
           </Button>
-          <ModelPicker sections={sections} value={model} onChange={setModel} />
+          <ModelPicker sections={sections} value={model} onChange={setPickedModel} />
           {model !== undefined && model.efforts.length > 0 && (
-            <PillPicker label="Thinking" value={effort} options={effortOptions} onChange={setEffort} />
+            <ThinkingPicker value={effort} options={effortOptions(model)} onChange={setPickedEffort} />
           )}
           {onStop && empty ? (
             <Button

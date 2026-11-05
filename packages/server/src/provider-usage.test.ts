@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { parseClaudeUsage, parseCodexUsage } from "./provider-usage"
+import { openCodeGoKey, parseClaudeUsage, parseCodexResetOutcome, parseCodexUsage, parseOpenCodeGoUsage } from "./provider-usage"
 
 describe("parseClaudeUsage", () => {
   test("reads the session, weekly and extra usage windows, not per-model ones", () => {
@@ -71,5 +71,74 @@ describe("parseCodexUsage", () => {
 
   test("an answer with no snapshot is unavailable", () => {
     expect(parseCodexUsage({}).status).toBe("unavailable")
+  })
+
+  test("lists available banked resets soonest to expire first, keeping the provider's count", () => {
+    const usage = parseCodexUsage({
+      rateLimits: { planType: "plus", primary: { usedPercent: 1 } },
+      rateLimitResetCredits: {
+        availableCount: 4,
+        credits: [
+          { id: "never", grantedAt: 1, resetType: "codexRateLimits", status: "available", title: null, expiresAt: null },
+          { id: "late", grantedAt: 1, resetType: "codexRateLimits", status: "available", title: "Referral", expiresAt: 1793560000 },
+          { id: "used", grantedAt: 1, resetType: "codexRateLimits", status: "redeemed", expiresAt: 1793500000 },
+          { id: "soon", grantedAt: 1, resetType: "unknown", status: "available", expiresAt: 1793550000 },
+        ],
+      },
+    })
+    expect(usage.bankedResets).toEqual({
+      available: 4,
+      resets: [
+        { id: "soon", title: null, expiresAt: new Date(1793550000_000).toISOString() },
+        { id: "late", title: "Referral", expiresAt: new Date(1793560000_000).toISOString() },
+        { id: "never", title: null, expiresAt: null },
+      ],
+    })
+  })
+
+  test("a count without details still reports banked resets; no summary reports none", () => {
+    const base = { rateLimits: { primary: { usedPercent: 1 } } }
+    expect(parseCodexUsage({ ...base, rateLimitResetCredits: { availableCount: 2, credits: null } }).bankedResets).toEqual({
+      available: 2,
+      resets: [],
+    })
+    expect(parseCodexUsage({ ...base, rateLimitResetCredits: null }).bankedResets).toBeUndefined()
+  })
+})
+
+describe("parseCodexResetOutcome", () => {
+  test("maps each consume outcome, a replayed key counting as reset", () => {
+    expect(parseCodexResetOutcome({ outcome: "reset" })).toEqual({ outcome: "reset" })
+    expect(parseCodexResetOutcome({ outcome: "alreadyRedeemed" })).toEqual({ outcome: "reset" })
+    expect(parseCodexResetOutcome({ outcome: "nothingToReset" })).toEqual({ outcome: "nothing_to_reset" })
+    expect(parseCodexResetOutcome({ outcome: "noCredit" })).toEqual({ outcome: "no_reset" })
+    expect(() => parseCodexResetOutcome({ outcome: "later" })).toThrow()
+  })
+})
+
+describe("OpenCode Go usage", () => {
+  test("uses only the active Go key, never a different integration or an inactive account", () => {
+    expect(openCodeGoKey([
+      { integrationID: "opencode", active: true, value: { type: "key", key: "console" } },
+      { integrationID: "opencode-go", active: false, value: { type: "key", key: "old" } },
+      { integrationID: "opencode-go", active: true, value: { type: "key", key: "current" } },
+    ])).toBe("current")
+    expect(openCodeGoKey([{ integrationID: "opencode-go", active: true, value: { type: "oauth", access: "token" } }])).toBeNull()
+  })
+
+  test("maps all three windows, normalizes reset times and bounds percentages", () => {
+    expect(parseOpenCodeGoUsage({ usage: {
+      rolling: { percent: 12.5, resetsAt: "2026-11-04T01:00:00-05:00" },
+      weekly: { percent: 125, resetsAt: null },
+      monthly: { percent: -1, resetsAt: "unknown" },
+    } })).toEqual({
+      provider: "opencode-go", status: "ok", plan: "go",
+      windows: [
+        { id: "rolling", label: "5-hour", usedPercent: 12.5, resetsAt: "2026-11-04T06:00:00.000Z" },
+        { id: "weekly", label: "Weekly", usedPercent: 100, resetsAt: null },
+        { id: "monthly", label: "Monthly", usedPercent: 0, resetsAt: null },
+      ],
+    })
+    expect(parseOpenCodeGoUsage({ usage: { rolling: { percent: Number.NaN } } }).status).toBe("unavailable")
   })
 })

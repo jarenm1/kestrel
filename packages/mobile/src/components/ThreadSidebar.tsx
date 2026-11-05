@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { FlatList, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries } from "@tanstack/react-query";
 import {
   Archive,
   ChevronsUpDown,
@@ -14,6 +14,7 @@ import {
   Workflow,
 } from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
+import { sameBox } from "@/api/client";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { KestrelMark } from "@/components/KestrelMark";
@@ -22,7 +23,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { LiveText } from "@/components/ui/LiveText";
-import { useApiClient } from "@/hooks/useApiClient";
+import { type BoxSource, useBoxSources } from "@/hooks/useBoxSources";
 import { useThreadArchive } from "@/hooks/useThreadArchive";
 import { errorText, formatAgo, repoShortName } from "@/lib/format";
 import { type Route, useNavigation } from "@/nav/navigation";
@@ -58,12 +59,14 @@ function NavRow({ icon: Icon, label, route, active }: { icon: LucideIcon; label:
  */
 function ThreadRow({
   task,
+  source,
   active,
   archiving,
   onArchive,
   now,
 }: {
   task: Task;
+  source: BoxSource;
   active: boolean;
   archiving: boolean;
   onArchive: () => void;
@@ -74,9 +77,11 @@ function ThreadRow({
   const checkoutsLabel = task.checkouts.map((c) => `${c.repo}, ${c.branch}`).join("; ");
   return (
     <Pressable
-      onPress={() => nav.navigate({ name: "thread", taskId: task.id })}
+      onPress={() => nav.navigate({ name: "thread", taskId: task.id, box: source.box })}
       accessibilityRole="button"
-      accessibilityLabel={[task.title || "Untitled thread", STATUS_LABEL[task.status], checkoutsLabel].filter(Boolean).join(" — ")}
+      accessibilityLabel={[task.title || "Untitled thread", STATUS_LABEL[task.status], checkoutsLabel]
+        .filter(Boolean)
+        .join(" — ")}
       accessibilityState={{ selected: active }}
       style={({ pressed }) => [styles.threadRow, (pressed || active) && styles.rowActive]}
     >
@@ -87,7 +92,8 @@ function ThreadRow({
             {checkout ? repoShortName(checkout.repo) : null}
             {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
           </Text>
-          {active ? null : <Text style={styles.threadTime}>{formatAgo(task.updatedAt, now)}</Text>}
+          {/* The open thread's archive button covers the time; it keeps its space so the line does not reflow. */}
+          <Text style={[styles.threadTime, active && styles.hidden]}>{formatAgo(task.updatedAt, now)}</Text>
         </View>
         <LiveText live={task.status === "running"} style={[styles.threadTitle, active && styles.threadTitleActive]}>
           {task.title || "Untitled thread"}
@@ -113,7 +119,7 @@ function ThreadRow({
           <StatusIcon status={task.status} size={14} />
         </View>
       </View>
-      {/* The open thread's archive button takes the time's corner, as on the web. */}
+      {/* The open thread's archive button floats over the time's corner, as on the web, so the row keeps its width. */}
       {active ? (
         <Button
           variant="ghost"
@@ -187,32 +193,42 @@ function SettingsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   );
 }
 
-/** The user's threads under the workspace pages, the left drawer: most recent first, working threads last. */
+type ThreadEntry = { task: Task; source: BoxSource };
+
+/**
+ * The user's threads under the workspace pages, the left drawer: most recent first, working threads last. Threads come
+ * from every box the user has; the thread view names its box, and a box that is still loading or failed says so.
+ */
 export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
-  const { api } = useApiClient();
   const { user } = useAuth();
-  const queries = useMemo(() => createQueries(api), [api]);
-  const tasks = useQuery(queries.tasks());
+  const sources = useBoxSources();
+  const tasksByBox = useQueries({ queries: sources.map((source) => createQueries(source.api).tasks()) });
   const nav = useNavigation();
   const { archive } = useThreadArchive();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const current = nav.current;
-  const openTaskId = current.name === "thread" ? current.taskId : undefined;
   const now = Date.now();
 
   // Working threads sit at the bottom, by the composer and the dock, each part newest first. Ordered by updatedAt,
   // which also moves when a run finishes; Task has no `lastMessageAt` to sort by yet.
-  const byRecent = [...(tasks.data ?? [])].sort(
-    (a, b) => Number(a.status === "running") - Number(b.status === "running") || b.updatedAt.localeCompare(a.updatedAt)
-  );
-  const threads = byRecent.filter((task) => task.archivedAt === undefined);
+  const byRecent: ThreadEntry[] = sources
+    .flatMap((source, i) => (tasksByBox[i].data ?? []).map((task) => ({ task, source })))
+    .sort(
+      (a, b) =>
+        Number(a.task.status === "running") - Number(b.task.status === "running") ||
+        b.task.updatedAt.localeCompare(a.task.updatedAt)
+    );
+  const threads = byRecent.filter(({ task }) => task.archivedAt === undefined);
   const archivedCount = byRecent.length - threads.length;
+  const allLoaded = tasksByBox.every((query) => query.isSuccess);
 
-  function archiveThread(task: Task) {
-    archive.mutate(task.id, {
+  function archiveThread({ task, source }: ThreadEntry) {
+    archive.mutate({ api: source.api, taskId: task.id }, {
       // The open thread leaves the list; go back to the empty chat.
       onSuccess: () => {
-        if (task.id === openTaskId) nav.navigate({ name: "new-thread" });
+        if (current.name === "thread" && current.taskId === task.id && sameBox(current.box, source.box)) {
+          nav.navigate({ name: "new-thread" });
+        }
       },
     });
   }
@@ -232,9 +248,26 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
         active={current.name === "archived"}
       />
       {threads.length > 0 ? <Text style={styles.section}>Threads</Text> : null}
-      {tasks.error ? <Alert style={styles.alert}>{errorText(tasks.error)}</Alert> : null}
+      {sources.map((source, i) => {
+        const query = tasksByBox[i];
+        if (query.error) {
+          return (
+            <Alert key={source.api.boxScope} style={styles.alert}>
+              {`${source.label}: ${errorText(query.error)}`}
+            </Alert>
+          );
+        }
+        if (query.isPending) {
+          return (
+            <Text key={source.api.boxScope} style={styles.empty}>
+              Loading {source.label}…
+            </Text>
+          );
+        }
+        return null;
+      })}
       {archive.error ? <Alert style={styles.alert}>{errorText(archive.error)}</Alert> : null}
-      {tasks.data && threads.length === 0 ? <Text style={styles.empty}>No threads yet.</Text> : null}
+      {threads.length === 0 && allLoaded ? <Text style={styles.empty}>No threads yet.</Text> : null}
     </View>
   );
 
@@ -242,15 +275,20 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
     <View style={styles.root}>
       <FlatList
         data={threads}
-        keyExtractor={(task) => task.id}
+        keyExtractor={({ task, source }) => `${source.api.boxScope}:${task.id}`}
         ListHeaderComponent={header}
         contentContainerStyle={[styles.list, { paddingBottom: bottomInset + 80 }]}
-        renderItem={({ item }) => (
+        renderItem={({ item: { task, source } }) => (
           <ThreadRow
-            task={item}
-            active={item.id === openTaskId}
-            archiving={archive.isPending && archive.variables === item.id}
-            onArchive={() => archiveThread(item)}
+            task={task}
+            source={source}
+            active={current.name === "thread" && current.taskId === task.id && sameBox(current.box, source.box)}
+            archiving={
+              archive.isPending &&
+              archive.variables?.taskId === task.id &&
+              archive.variables.api.boxScope === source.api.boxScope
+            }
+            onArchive={() => archiveThread({ task, source })}
             now={now}
           />
         )}
@@ -312,21 +350,19 @@ const styles = StyleSheet.create({
   alert: { marginHorizontal: spacing.sm, marginBottom: spacing.sm },
   empty: { color: colors.mutedForeground, fontSize: 14, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   threadRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: radius.md,
     marginVertical: 1,
   },
-  threadInfo: { flex: 1, minWidth: 0, gap: spacing.xs },
+  threadInfo: { gap: spacing.xs },
   threadLine: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
   threadMeta: { flex: 1, color: colors.mutedForeground, fontSize: 12 },
   threadTime: { color: colors.mutedForeground, fontSize: 12, fontVariant: ["tabular-nums"] },
+  hidden: { opacity: 0 },
   threadTitle: { color: colors.mutedForeground, fontSize: 14, fontWeight: "500" },
   threadTitleActive: { color: colors.foreground, fontWeight: "600" },
-  archive: { width: 28, height: 28, marginTop: -spacing.xs, marginRight: -spacing.xs },
+  archive: { position: "absolute", top: spacing.xs, right: spacing.xs, width: 28, height: 28 },
   dock: {
     position: "absolute",
     left: spacing.md,
