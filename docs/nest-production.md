@@ -574,7 +574,7 @@ Storage is the real cost, so retention needs care.
 | Limit | When we hit it | Fix |
 |---|---|---|
 | Meter data filling the Hub's [10 GB](https://developers.cloudflare.com/durable-objects/platform/limits) | About 80 running or suspended VMs, over 90 days, at an estimated 1 KB per row. At the limit, **all Hub writes fail**, including sign-in state | Raw records go to object storage, and hourly per-VM rollups go to the ledger |
-| One object for everyone | Long before the soft limit of about [1,000 requests per second](https://developers.cloudflare.com/durable-objects/platform/limits), since the one object handles every user's requests in turn | Per-user objects for credentials, boxes, automations and wallets |
+| One object for everyone | Long before the soft limit of about [1,000 requests per second](https://developers.cloudflare.com/durable-objects/platform/limits), since the one object handles every user's requests in turn | Partition by user: Nest wallets and ledgers per user, and BYOB users on [fixed shards](goal-state.md#cost-budget) to keep their cost down |
 | Host sockets on the Hub | With many hosts | Hosts connect to regional controllers, and regions hold one socket each |
 
 At [Durable Objects prices](https://developers.cloudflare.com/durable-objects/platform/pricing/), this split should keep

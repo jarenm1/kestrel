@@ -26,8 +26,10 @@ Visual work is checked in two ways, and they do different jobs:
 
 ## Requirements
 
-1. **BYOB costs Kestrel next to nothing.** Control-plane traffic grows with sign-ins and sessions, never with agent
-   activity or video. Thread data, events, video and evidence do not pass through Kestrel for a BYOB user.
+1. **BYOB costs Kestrel next to nothing:** at most $0.01 per active user per month, enforced by quotas. Kestrel forwards
+   small signals for a BYOB user and does the work nowhere: automations and webhooks run on the user's box, with the
+   user's keys. Control-plane traffic never grows with agent activity or video. Thread data, events, video, evidence and
+   webhook bodies do not pass through Kestrel. See [BYOB cost](#byob-cost).
 2. **BYOB and the Nest work the same way.** Both are the same box behind the same contract. The Nest is effectively
    Kestrel's first BYOB customer, plus provisioning and billing.
 3. **Nest billing follows real use.** People pay for what their VM uses, and an idle VM costs them close to nothing.
@@ -160,9 +162,12 @@ interface PoolCapabilities {
   readonly workers: boolean
 }
 
-// Pool to Kestrel: hello, capacity summary, box state or URL changed
-// Kestrel to pool: create, wake, suspend, park, destroy, setLimits, gpu
+// Pool to Kestrel: hello, box state or URL changed, answers to the requests below
+// Kestrel to pool: capacity request, create, wake, suspend, park, destroy, setLimits, gpu, webhook doorbell
 ```
+
+Nothing on this socket is periodic except protocol pings, which don't wake the object holding it. Kestrel asks for capacity
+when it needs to place something, rather than receiving regular reports.
 
 Epochs, hosts and volumes stay private to the pool. `NestHostCommand` remains the internal protocol of Kestrel's
 `kestrel-host` driver, not the public contract.
@@ -204,20 +209,110 @@ Work needed in today's code:
 The control plane handles short requests only: sign-in, the box directory, box tokens, credentials, pool selection,
 usage rollups and billing.
 
-**Cost guardrails**
+**Guardrails**
 
-- No thread data, event streams, video or evidence for BYOB users.
-- Each pool holds at most one low-traffic dial-out socket for presence, wake-ups and WebRTC signaling. Keep-alives use
-  Durable Object hibernation and auto-responses, so an idle pool does not wake the Hub.
+- Each pool holds at most one low-traffic dial-out socket. An idle pool doesn't wake the object holding it.
 - Usage arrives as rollups, and only from the Nest. Raw records stay in object storage.
 - The legacy relay is deleted once its remaining users have moved.
 
-An active BYOB user costs on the order of a few thousand control requests a month, which is well under a cent at current
-Workers and Durable Objects pricing. Check the current price list before relying on the exact figure.
+**Scale:** the Hub is one Durable Object for all users. Partition user data before BYOB grows large, and move host sockets
+and Nest scheduling out into pool controllers. Meter records are the first limit to reach: they fill the Hub's 10 GB at
+around 80 running or suspended VMs ([details](nest-production.md#control-plane-scale)).
 
-**Scale:** the Hub is one Durable Object for all users. Split per-user data into per-user objects before BYOB grows large,
-and move host sockets and Nest scheduling out into pool controllers. Meter records are the first limit to reach: they fill
-the Hub's 10 GB at around 80 running or suspended VMs ([details](nest-production.md#control-plane-scale)).
+## BYOB cost
+
+Kestrel acts like a doorbell for a BYOB user, not a tunnel. It tells a box that something happened, and the box does the
+work and fetches what it needs from the source.
+
+| Kestrel may carry | Kestrel never carries or stores |
+|---|---|
+| Sign-in, the box directory, box tokens | API calls, event streams, files, previews |
+| Pairing and credential updates | Desktop video, audio or input |
+| WebRTC signaling, a few messages per session | Thread data and evidence |
+| Lifecycle commands and capacity requests | Webhook bodies |
+| Webhook doorbells | Usage records |
+
+A general tunnel for all of a box's traffic isn't free BYOB, because its cost would grow with agent activity. That's what
+the legacy relay does today, and why it goes away. A box that needs one uses the operator's own Tailscale, Cloudflare Tunnel
+or TURN server, or pays for Kestrel's if that's ever offered.
+
+### Webhooks on a BYOB box
+
+Delivery takes the cheapest route that works:
+
+```mermaid
+flowchart TD
+  GH["GitHub event"] --> Q{"Is the box publicly reachable?"}
+  Q -->|Yes| DIRECT["GitHub delivers to the box<br/>Kestrel sees nothing"]
+  Q -->|No| W["Worker: verify, filter<br/>no object touched yet"]
+  W -->|"forged or irrelevant"| DROP["Dropped"]
+  W -->|"relevant"| S{"Is the box connected?"}
+  S -->|Yes| BELL["Doorbell over the pool socket:<br/>delivery id, event, repo, PR, action"]
+  S -->|No| GONE["Dropped, and nothing is stored"]
+  BELL --> BOX["Box dedupes, reads the current state<br/>from GitHub, runs the automation"]
+  GONE -.->|"on reconnect"| RECON["Box catches up from GitHub"]
+  RECON --> BOX
+```
+
+- **A stateless Worker does the checking.** The webhook URL is `/webhooks/github/<poolId>/<route token>`. The route token is
+  an HMAC of the pool id, and the GitHub secret is derived from a Worker-held key plus the pool and repository. So the
+  Worker verifies a delivery with no database lookup, and forged or irrelevant traffic never wakes an object.
+- **The body stops at the Worker.** Only the small doorbell goes on. This suits the existing rule that an agent inspects
+  the current PR state and doesn't treat a payload as an instruction. It also means Kestrel holds no one's code or comments.
+- **GitHub is the durable queue.** Kestrel stores no deliveries for BYOB. A box that was offline catches up when it
+  reconnects by re-reading the open PRs it watches and listing recent deliveries with the owner's token. GitHub
+  [doesn't retry failed deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)
+  and [shows the past 3 days](https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/viewing-webhook-deliveries)
+  in its UI. Confirm the API's window. Past that, the re-read of PR state still finds what matters for a watch, although
+  a one-off `pull_request` trigger can be missed.
+- **The box creates and owns the hook,** with host-side GitHub credentials, as for its other GitHub operations.
+
+**Scheduled automations run on the box too.** The box stores them and fires them from its own scheduler, so the Hub keeps no
+alarm for a BYOB user. A box that's off misses its schedule, and each automation says whether to run once on return or skip.
+The apps read and edit them directly on the box. On the Nest, a box tells its controller when it next needs waking before it
+suspends.
+
+### Cost budget
+
+Estimates, using an assumed active user: 2,000 webhook doorbells, 60 desktop sessions and 300 other control calls a month.
+Prices are [Workers](https://developers.cloudflare.com/workers/platform/pricing/) and
+[Durable Objects](https://developers.cloudflare.com/durable-objects/platform/pricing/) list prices.
+
+| Cost | Per user per month | At 100,000 users |
+|---|---|---|
+| Worker requests, about 2,600 | $0.0008 | $78 |
+| Object requests, about 2,600 | $0.0004 | $39 |
+| Worker CPU, about 1 ms each | Under $0.0001 | $5 |
+| Object duration, at most 64 shards always awake | At most $0.0026 | At most $263 |
+| **Total** | **About $0.004** | **About $385** |
+
+Up to about 380 such users, requests fit in the 1 million object requests included in the $5 Workers plan.
+
+**Duration is the trap.** A Durable Object is billed for wall-clock time while it's awake, and a wake keeps it in memory for a
+short time afterwards. If each of 2,600 wakes lingered for 10 seconds on its own per-user object, duration alone would cost
+about $0.04, which is four times the budget. So **BYOB users share a fixed set of shards**, chosen by a hash of the user.
+An always-awake object costs at most about $4.10 a month, however many users it serves, and that caps the total.
+
+Measure the real wake time and socket limits per object before relying on these figures.
+
+### Enforcing it
+
+- **Quotas per pool:** a limit on doorbells per minute and per month, and on pools per account. Past a limit, doorbells for
+  one PR are combined, and then dropped, since the box can catch up from GitHub.
+- **Cheap rejection:** the Worker caps body size and rate-limits by route token before doing any signature work.
+- **A cost meter:** count Worker and object requests per pool, and alert when the budget is at risk. Any feature that adds
+  control-plane traffic per agent action fails review against requirement 1.
+
+### What this changes in today's code
+
+- [Every webhook delivery looks up the hook in the Hub](../packages/control/src/webhooks.ts) before checking its signature,
+  and reads the whole body first with no size cap. So any unauthenticated POST whose JSON names a repository costs a Hub
+  request, whether or not that repository has a hook. This should be fixed whatever else happens.
+- Automations, their schedule and PR-watch queues live in the Hub, and today they run only on Kestrel's boxes.
+- The app posts WebRTC offers straight to the box. Moving signaling onto the pool socket, a few messages per session, removes
+  the need for a tunnel on boxes that can make a direct connection.
+- [Cross-box thread tools](byo-box.md#cross-box-features) were planned through the control plane. They must go directly
+  between boxes, since agent traffic can't pass through Kestrel for BYOB.
 
 ## BYOB
 
@@ -467,7 +562,8 @@ Two tracks can run side by side. The Nest track's steps are detailed in
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.
 5. **Evidence:** explicit recording, clips and run summaries first, then the rolling buffer and desktop idle stop.
 6. **Pools:** host ownership, the pool contract, generic box state in the apps, and one socket per pool.
-7. **Parity:** automations and PR watches on BYOB through the pool socket, and multi-box support on mobile.
+7. **Parity at no cost:** a stateless webhook Worker with doorbells, automations and PR watches running on the box, WebRTC
+   signaling over the pool socket, quotas and the cost meter, and multi-box support on mobile.
 8. **BYOB clusters:** a self-hosted controller, using the same library as the Nest and `kestrel-host` on the user's metal.
 9. **Cross-pool placement:** overflow rules and worker leases.
 10. **Other drivers,** such as Kubernetes, when demand shows which ones.

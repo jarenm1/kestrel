@@ -128,8 +128,8 @@ flowchart LR
   verifies them offline, so the control plane is not on the request path.
 - Credentials: the box fetches its owner's connection secrets (GitHub token, API keys) from `GET /box/self` with its
   secret, and again only when a token's `cv` differs from what it holds.
-- Later: each box keeps a low-traffic socket to the Hub (tagged per box id) for presence, capacity reports, automation
-  triggers and cross-box thread messages. No thread data, events or desktop frames go over it.
+- Later: each box keeps a low-traffic socket to the control plane for presence, capacity requests, webhook doorbells and
+  WebRTC signaling. No thread data, events or desktop frames go over it.
 
 ### Direct data path
 
@@ -171,8 +171,10 @@ shapes, the host layer and billing.
 
 ### Cross-box features
 
-- `thread_list` / `thread_read` / `thread_send` span the user's boxes, routed through the control plane socket.
-- Automations name a target box, or `auto` (the placement rules above).
+- `thread_list` / `thread_read` / `thread_send` span the user's boxes, going directly between boxes with tokens from the
+  control plane. They never pass through the control plane socket, because agent traffic must not add to Kestrel's costs
+  ([BYOB cost](goal-state.md#byob-cost)).
+- Automations name a target box, or `auto` (the placement rules above). They run on the box.
 
 ## Work order
 
