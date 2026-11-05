@@ -34,46 +34,74 @@ const COMPONENTS: Components = { a: Link }
 // Single newlines stay line breaks: run output that falls back to raw stdout/stderr is line-oriented.
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
 
-/** A code fence opener: up to three spaces of indent, then a run of backticks or tildes. */
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/
+/** A code fence opener: a run of backticks or tildes at any indent, since a list item may hold one. */
+const FENCE_OPEN = /^\s*(`{3,}|~{3,})/
 /** A code fence closer: its run alone on the line, at least as long as the opener's. */
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/
-/** A line that begins a drawing: an `<svg>` tag, indented or not, at the start of the line. */
-const DRAWING_OPEN = /^\s*<svg\b/i
+const FENCE_CLOSE = /^\s*(`{3,}|~{3,})[ \t]*$/
+/** A drawing opener: an `<svg …>` tag alone on its line. Prose that merely starts with the tag is not a drawing. */
+const DRAWING_OPEN = /^\s*<svg\b[^>]*?(?<!\/)>\s*$/i
 const DRAWING_CLOSE = /<\/svg\s*>/i
 
 /**
- * Markdown ends a raw HTML block at a blank line, so a drawing whose elements are indented in blank-line-separated
- * groups falls apart: the first group renders, and the rest arrives as an indented code sample. Blank lines inside a
- * drawing are dropped to keep it in one block; fenced code samples keep theirs.
+ * A drawing's lines, minus the blank lines that split it: markdown ends a raw HTML block at a blank line, so a line
+ * indented deeper than the `<svg>` opener after one arrives as a code sample instead of another element. Only those
+ * blank lines go, and a sample whose own lines share the opener's indent keeps all of theirs.
  */
-function keepDrawingsWhole(text: string): string {
-  if (!DRAWING_CLOSE.test(text)) return text
-  const lines: string[] = []
-  let fence: string | undefined
-  let drawing = false
-  for (const line of text.split("\n")) {
-    if (drawing) {
-      if (line.trim().length > 0) lines.push(line)
-      if (DRAWING_CLOSE.test(line)) drawing = false
+function joinDrawing(lines: string[]): string[] {
+  const indentOf = (line: string) => line.length - line.trimStart().length
+  const openerIndent = indentOf(lines[0]!)
+  const kept: string[] = []
+  let blanks: string[] = []
+  for (const line of lines) {
+    if (line.trim().length === 0) {
+      blanks.push(line)
       continue
     }
+    if (indentOf(line) <= openerIndent) kept.push(...blanks)
+    blanks = []
+    kept.push(line)
+  }
+  kept.push(...blanks)
+  return kept
+}
+
+/**
+ * Keeps an agent's inline SVG in one raw HTML block. The drawing is buffered until its closing tag, and left as
+ * written when a code fence opens first — a stray `<svg>` in prose must not reach into later paragraphs or code.
+ */
+function keepDrawingsWhole(text: string): string {
+  const kept: string[] = []
+  let fence: string | undefined
+  let drawing: string[] | undefined
+  for (const line of text.split("\n")) {
     const opener = FENCE_OPEN.exec(line)?.[1]
+    if (drawing !== undefined) {
+      if (opener === undefined) {
+        drawing.push(line)
+        if (!DRAWING_CLOSE.test(line)) continue
+        kept.push(...joinDrawing(drawing))
+        drawing = undefined
+        continue
+      }
+      kept.push(...drawing)
+      drawing = undefined
+    }
     const closer = FENCE_CLOSE.exec(line)?.[1]
     if (fence !== undefined) {
-      lines.push(line)
+      kept.push(line)
       if (closer !== undefined && closer[0] === fence[0] && closer.length >= fence.length) fence = undefined
       continue
     }
     if (opener !== undefined) {
       fence = opener
-      lines.push(line)
+      kept.push(line)
       continue
     }
-    if (DRAWING_OPEN.test(line) && !DRAWING_CLOSE.test(line)) drawing = true
-    lines.push(line)
+    if (DRAWING_OPEN.test(line)) drawing = [line]
+    else kept.push(line)
   }
-  return lines.join("\n")
+  if (drawing !== undefined) kept.push(...drawing)
+  return kept.join("\n")
 }
 
 /**
