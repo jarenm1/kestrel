@@ -47,6 +47,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { HarnessLogo } from "@/components/HarnessLogo"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
 import {
   appCommandOf,
@@ -67,10 +69,12 @@ import {
   findGithubReferenceTrigger,
   type GithubReferenceKind,
 } from "@cloudagents/composer/reference"
+import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
 import { usePromptHistory } from "@/hooks/usePromptHistory"
+import { HARNESSES, harnessOf, type Harness, type HarnessId } from "@/lib/harnesses"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
@@ -192,9 +196,31 @@ function ThinkingPicker({
   )
 }
 
+/** A connected harness with the providers it runs that have models in the picker. */
+interface HarnessTab {
+  readonly harness: Harness
+  readonly sections: readonly ModelSection[]
+}
+
+/** A provider's models under its label in the menu's list. */
+interface ModelGroup {
+  readonly harness: Harness
+  readonly section: ModelSection
+  readonly models: readonly ModelInfo[]
+}
+
+// Rendered heights in rem: a provider label, a model row, and the menu's fixed parts (padding, search, Manage models).
+const MODEL_LABEL_REM = 1.75
+const MODEL_ROW_REM = 2
+const MODEL_MENU_CHROME_REM = 5.5
+/** Tallest the menu gets before its list scrolls; the window's room caps it further. */
+const MODEL_MENU_MAX_REM = 24
+
 /**
- * Model menu: one group per connected provider, divided, with the models the user keeps for it (Connections).
- * `sections` is null while connections load.
+ * Model menu: a rail of the connected harnesses, the picked harness's models grouped by the provider behind them (its
+ * subscription or an API key the user added), and a search box over every harness. The menu is as tall as its tallest
+ * harness (up to a cap), so switching harnesses or searching never resizes it; longer lists scroll. In the search box,
+ * ArrowLeft and ArrowRight step through the harnesses. `sections` is null while connections load.
  */
 function ModelPicker({
   sections,
@@ -205,11 +231,70 @@ function ModelPicker({
   value: ModelInfo | undefined
   onChange: (value: AgentModel) => void
 }) {
+  const tabs: readonly HarnessTab[] = HARNESSES.map((harness) => ({
+    harness,
+    sections: (sections ?? []).filter((section) => harnessOf(section.provider.id) === harness),
+  })).filter((tab) => tab.sections.length > 0)
+  const offered = tabs.flatMap((tab) =>
+    tab.sections.flatMap((section) => section.models.map((model) => ({ harness: tab.harness, section, model }))),
+  )
+  const menu = useFilterMenu(
+    offered,
+    (item) => `${item.model.name} ${item.model.id} ${item.section.provider.name} ${item.harness.name}`,
+    (item) => onChange(item.model.id),
+  )
+  // Unset shows the selected model's harness; each opening goes back to it.
+  const [pickedHarness, setPickedHarness] = useState<HarnessId>()
+  const valueHarness = value === undefined ? undefined : harnessOf(value.provider)
+  const tab =
+    tabs.find((candidate) => candidate.harness.id === pickedHarness) ??
+    tabs.find((candidate) => candidate.harness === valueHarness) ??
+    tabs[0]
+  const searching = menu.query !== ""
+  const matched = new Set(menu.matches.map((item) => item.model.id))
+  const groups: readonly ModelGroup[] = searching
+    ? tabs.flatMap((candidate) =>
+        candidate.sections
+          .map((section) => ({ harness: candidate.harness, section, models: section.models.filter((m) => matched.has(m.id)) }))
+          .filter((group) => group.models.length > 0),
+      )
+    : (tab?.sections.map((section) => ({ harness: tab.harness, section, models: section.models })) ?? [])
+  const tallestTabRem = Math.max(
+    2 * MODEL_ROW_REM,
+    ...tabs.map((candidate) =>
+      candidate.sections.reduce((sum, section) => sum + MODEL_LABEL_REM + section.models.length * MODEL_ROW_REM, 0),
+    ),
+  )
+  const menuHeight = `min(${Math.min(MODEL_MENU_MAX_REM, MODEL_MENU_CHROME_REM + tallestTabRem)}rem + 1px, var(--radix-dropdown-menu-content-available-height))`
+
+  function stepHarness(delta: 1 | -1) {
+    if (tab === undefined) return
+    const next = tabs[(tabs.indexOf(tab) + delta + tabs.length) % tabs.length]!
+    setPickedHarness(next.harness.id)
+  }
+
+  function onSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (!searching && tabs.length > 1 && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault()
+      e.stopPropagation()
+      stepHarness(e.key === "ArrowRight" ? 1 : -1)
+      return
+    }
+    menu.inputProps.onKeyDown(e)
+  }
+
   const label = value?.name ?? (sections === null ? "Model" : "No models")
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      open={menu.open}
+      onOpenChange={(open) => {
+        if (open) setPickedHarness(undefined)
+        menu.setOpen(open)
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button type="button" variant="ghost" size="sm" className="data-[state=open]:bg-white/[0.06]">
+          {valueHarness && <HarnessLogo harness={valueHarness} className="size-4" />}
           {label}
           <ChevronDown className="opacity-60" />
         </Button>
@@ -217,36 +302,85 @@ function ModelPicker({
       <DropdownMenuContent
         align="start"
         side="top"
-        className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto"
+        className="flex w-80 max-w-(--radix-dropdown-menu-content-available-width) p-0"
+        style={{ height: menuHeight }}
       >
-        {sections !== null && sections.length === 0 && (
-          <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
+        {!searching && tabs.length > 0 && (
+          <div
+            role="group"
+            aria-label="Harnesses"
+            className="flex w-12 shrink-0 flex-col gap-1 overflow-y-auto border-r border-white/[0.06] p-1.5"
+          >
+            {tabs.map((candidate) => (
+              <button
+                key={candidate.harness.id}
+                type="button"
+                tabIndex={-1}
+                aria-label={candidate.harness.name}
+                aria-pressed={candidate === tab}
+                title={candidate.harness.name}
+                // Keeps focus in the search box, so typing still filters after switching harness.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setPickedHarness(candidate.harness.id)}
+                className={cn(
+                  "flex aspect-square w-full items-center justify-center rounded-xl text-foreground transition-colors hover:bg-white/[0.07]",
+                  candidate === tab && "bg-white/[0.1]",
+                )}
+              >
+                <HarnessLogo harness={candidate.harness} className="size-5" />
+              </button>
+            ))}
+          </div>
         )}
-        <DropdownMenuRadioGroup
-          value={value?.id ?? ""}
-          onValueChange={(v) => {
-            if (Schema.is(AgentModel)(v)) onChange(v)
-          }}
-        >
-          {sections?.map((section, i) => (
-            <Fragment key={section.provider.id}>
-              {i > 0 && <DropdownMenuSeparator />}
-              <DropdownMenuLabel>{section.provider.name}</DropdownMenuLabel>
-              {section.models.map((m) => (
-                <DropdownMenuRadioItem key={m.id} value={m.id}>
-                  {m.name}
-                </DropdownMenuRadioItem>
+        <div className="flex min-w-0 flex-1 flex-col p-1.5">
+          {tabs.length > 0 && (
+            <Input
+              {...menu.inputProps}
+              onKeyDown={onSearchKeyDown}
+              placeholder={tab && !searching ? `Search models · ${tab.harness.name}` : "Search models"}
+              aria-label="Search models"
+              className="mb-1 h-8 shrink-0"
+            />
+          )}
+          <div ref={menu.listRef} className="min-h-0 flex-1 overflow-y-auto">
+            {sections === null && <DropdownMenuLabel>Loading models…</DropdownMenuLabel>}
+            {sections !== null && tabs.length === 0 && (
+              <DropdownMenuLabel>Connect a harness or add an API key to choose a model.</DropdownMenuLabel>
+            )}
+            <DropdownMenuRadioGroup
+              value={value?.id ?? ""}
+              onValueChange={(v) => {
+                if (Schema.is(AgentModel)(v)) onChange(v)
+              }}
+            >
+              {groups.map((group) => (
+                <Fragment key={group.section.provider.id}>
+                  <DropdownMenuLabel className="flex items-center gap-1.5">
+                    {searching && <HarnessLogo harness={group.harness} className="size-3.5" />}
+                    <span className="truncate">
+                      {searching ? `${group.harness.name} · ${group.section.provider.name}` : group.section.provider.name}
+                    </span>
+                  </DropdownMenuLabel>
+                  {group.models.map((m) => (
+                    <DropdownMenuRadioItem key={m.id} value={m.id} {...filterItemProps}>
+                      <span className="min-w-0 flex-1 truncate">{m.name}</span>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </Fragment>
               ))}
-            </Fragment>
-          ))}
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild>
-          <Link to="/settings/connections" className="text-muted-foreground">
-            <Settings2 />
-            Manage models
-          </Link>
-        </DropdownMenuItem>
+            </DropdownMenuRadioGroup>
+            {searching && groups.length === 0 && (
+              <DropdownMenuLabel>No model matches “{menu.query}”.</DropdownMenuLabel>
+            )}
+          </div>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem asChild>
+            <Link to="/settings/connections" className="text-muted-foreground">
+              <Settings2 />
+              Manage models
+            </Link>
+          </DropdownMenuItem>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   )

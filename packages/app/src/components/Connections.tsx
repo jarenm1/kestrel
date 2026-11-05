@@ -33,10 +33,8 @@ import { Input } from "@/components/ui/input"
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"
-import claudeLogo from "@/assets/claude.svg"
-import openaiLogo from "@/assets/openai.svg"
-import antigravityLogo from "@/assets/antigravity.svg"
-import opencodeLogo from "@/assets/opencode.svg"
+import { HarnessLogo } from "@/components/HarnessLogo"
+import { HARNESSES } from "@/lib/harnesses"
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8
@@ -148,31 +146,15 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
   )
 }
 
-
-const HARNESS_LOGOS: Record<string, { src: string; monochrome: boolean }> = {
-  "claude-cli": { src: claudeLogo, monochrome: false },
-  "codex-cli": { src: openaiLogo, monochrome: true },
-  "antigravity-cli": { src: antigravityLogo, monochrome: false },
-  opencode: { src: opencodeLogo, monochrome: true },
-}
-
 /** Keep all row content aligned with the name, leaving the logo in its own hanging column. */
 function HarnessRow({ connection, children }: { connection: Connection; children: ReactNode }) {
-  const logo = HARNESS_LOGOS[connection.provider]
+  const harness = HARNESSES.find((candidate) => candidate.connection === connection.provider)
   const modelProvider = MODEL_PROVIDERS.find(
     (provider) => provider.id === connection.provider || provider.connections.includes(connection.provider),
   )
   return (
     <div className="flex items-start gap-3 px-5 py-4">
-      {logo && (logo.monochrome ? (
-        <span
-          aria-hidden="true"
-          className="mt-0.5 size-6 shrink-0 bg-current"
-          style={{ mask: `url("${logo.src}") center / contain no-repeat` }}
-        />
-      ) : (
-        <img src={logo.src} alt="" className="mt-0.5 size-6 shrink-0 object-contain" />
-      ))}
+      {harness && <HarnessLogo harness={harness} className="mt-0.5 size-6" />}
       <div className="flex min-w-0 flex-1 flex-col gap-2.5">
         <div className="flex flex-wrap items-center gap-3">
           <ConnectionHeader
