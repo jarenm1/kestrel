@@ -105,8 +105,11 @@ Bun.serve({
         case "hello": {
           hello = frame
           capacity = frame.capacity
-          for (const vm of frame.vms as Vm[]) vms.set(vm.boxId, vm)
           sendLease()
+          break
+        }
+        case "inventory": {
+          for (const vm of frame.vms as Vm[]) vms.set(vm.boxId, vm)
           break
         }
         case "capacity":
