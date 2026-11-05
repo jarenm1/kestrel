@@ -10,7 +10,7 @@ use tokio::sync::{watch, Semaphore};
 use tokio::time::timeout;
 
 use crate::activity::{ActivityGuard, Tracker};
-use crate::api::HostApi;
+use crate::api::{HostApi, RouteReply};
 
 /// How long a route to a running box stays cached. Short: a suspended VM stops answering at once, and a failed connect
 /// invalidates the entry anyway.
@@ -130,6 +130,15 @@ pub enum Resolved {
     Unavailable,
 }
 
+/// What a health probe learns about a box. A probe never wakes a box and is never counted as activity.
+pub enum Probe {
+    Running(String),
+    /// The box exists but is not running; the state is the host's (suspended, parked, starting, ...).
+    NotRunning(String),
+    NotFound,
+    Unavailable,
+}
+
 #[derive(Clone)]
 enum Cached {
     Upstream(String),
@@ -180,25 +189,13 @@ impl Router {
             Some(Cached::Missing) => return Resolved::NotFound,
             None => {}
         }
-        let Ok(slot) = self.lookups.try_acquire() else {
-            return Resolved::Unavailable;
-        };
-        let answer = timeout(API_TIMEOUT, self.api.route(box_id)).await;
-        drop(slot);
-        let route = match answer {
-            Ok(Ok(route)) => route,
-            Ok(Err(e)) => {
-                eprintln!("kestrel-ingress: route {box_id}: {e}");
-                return Resolved::Unavailable;
+        let route = match self.lookup(box_id).await {
+            Ok(Some(route)) => route,
+            Ok(None) => {
+                self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
+                return Resolved::NotFound;
             }
-            Err(_) => {
-                eprintln!("kestrel-ingress: route {box_id}: host API timed out");
-                return Resolved::Unavailable;
-            }
-        };
-        let Some(route) = route.filter(|route| route.state != "deleted") else {
-            self.store(box_id, Cached::Missing, MISSING_CACHE_TTL);
-            return Resolved::NotFound;
+            Err(()) => return Resolved::Unavailable,
         };
         let guard = self.activity.request_started(box_id);
         match route.state.as_str() {
@@ -220,6 +217,41 @@ impl Router {
                 }
             }
             _ => Resolved::Unavailable,
+        }
+    }
+
+    /// What the host says about `box_id`, without waking it or counting it as activity. The health endpoint uses this:
+    /// the app polls it, so it must neither keep an idle box awake nor wake a suspended one.
+    pub async fn probe(&self, box_id: &str) -> Probe {
+        match self.lookup(box_id).await {
+            Err(()) => Probe::Unavailable,
+            Ok(None) => Probe::NotFound,
+            Ok(Some(route)) if route.state == "running" => match route.upstream {
+                Some(upstream) => Probe::Running(upstream),
+                None => Probe::Unavailable,
+            },
+            Ok(Some(route)) => Probe::NotRunning(route.state),
+        }
+    }
+
+    /// Asks the host about `box_id`. `Ok(None)` for a box it does not know, or one that is deleted. A failed or timed-out
+    /// call is `Err`. Never wakes a box.
+    async fn lookup(&self, box_id: &str) -> Result<Option<RouteReply>, ()> {
+        let Ok(slot) = self.lookups.try_acquire() else {
+            return Err(());
+        };
+        let answer = timeout(API_TIMEOUT, self.api.route(box_id)).await;
+        drop(slot);
+        match answer {
+            Ok(Ok(route)) => Ok(route.filter(|route| route.state != "deleted")),
+            Ok(Err(e)) => {
+                eprintln!("kestrel-ingress: route {box_id}: {e}");
+                Err(())
+            }
+            Err(_) => {
+                eprintln!("kestrel-ingress: route {box_id}: host API timed out");
+                Err(())
+            }
         }
     }
 
@@ -515,6 +547,7 @@ mod tests {
                 r#"{"state":"running","upstream":"http://10.77.0.2:8787"}"#,
             ),
             ("GET", "/v1/boxes/asleep/route") => (200, r#"{"state":"suspended"}"#),
+            ("GET", "/v1/boxes/parked/route") => (200, r#"{"state":"parked"}"#),
             ("POST", "/v1/boxes/asleep/wake") => (200, r#"{"upstream":"http://10.77.0.3:8787"}"#),
             _ => (404, "{}"),
         }
@@ -567,5 +600,33 @@ mod tests {
         assert_eq!(upstream, "http://10.77.0.3:8787");
         assert_eq!(tracker.open_connections("asleep"), 1);
         drop(guard);
+    }
+
+    #[tokio::test]
+    async fn a_health_probe_reports_a_sleeping_box_without_waking_it() {
+        let (socket, calls) = fake_host(host_answer).await;
+        let tracker = Arc::new(Tracker::default());
+        let router = router_for(socket, &tracker);
+        assert!(matches!(router.probe("asleep").await, Probe::NotRunning(s) if s == "suspended"));
+        assert!(matches!(router.probe("parked").await, Probe::NotRunning(s) if s == "parked"));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "one route lookup each, and no wake"
+        );
+        assert_eq!(tracker.tracked(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_health_probe_of_a_running_box_is_not_activity() {
+        let (socket, _calls) = fake_host(host_answer).await;
+        let tracker = Arc::new(Tracker::default());
+        let router = router_for(socket, &tracker);
+        let Probe::Running(upstream) = router.probe("box1").await else {
+            panic!("box1 should probe as running");
+        };
+        assert_eq!(upstream, "http://10.77.0.2:8787");
+        assert!(matches!(router.probe("ghost").await, Probe::NotFound));
+        assert_eq!(tracker.tracked(), 0);
     }
 }

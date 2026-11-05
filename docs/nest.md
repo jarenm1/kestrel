@@ -282,6 +282,9 @@ Caddy terminates TLS for `*.<slug>.<nest domain>` (DNS challenge) and proxies ev
   timeout 60 s, then 503 with `Retry-After`); parked, or no lease → the host agent sends `wakeRequest` and the request
   waits the same way for the control plane's `resume`;
 - unknown → 404.
+- `GET /api/health` (the app's health poll) never wakes a box and is not activity. Running → proxied to the VM without
+  counting; suspended, parked or otherwise not running → 503 `{ "ok": false, "state": "<state>" }` with `Retry-After`;
+  unknown → 404. A box that is running but refuses the connection answers 503 with `"state": "unreachable"`.
 
 It reports per-box open connections and the last request time to the host agent every 5 s.
 

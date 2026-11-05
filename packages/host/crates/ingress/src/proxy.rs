@@ -67,13 +67,13 @@ impl Proxy {
         }
     }
 
-    /// Sends `req` to `upstream` (`http://ip:port`). The activity guard lives as long as the response body, or the
-    /// upgraded connection.
+    /// Sends `req` to `upstream` (`http://ip:port`). The activity guard, when there is one, lives as long as the response
+    /// body or the upgraded connection. A health probe passes none: its requests are not activity.
     pub async fn forward(
         &self,
         upstream: &str,
         mut req: Request<Incoming>,
-        guard: ActivityGuard,
+        guard: Option<ActivityGuard>,
     ) -> Result<Response<Body>, ForwardError> {
         let authority = upstream
             .parse::<Uri>()
@@ -150,6 +150,16 @@ pub fn plain(status: StatusCode, text: &'static str) -> Response<Body> {
     response
 }
 
+/// A complete small JSON response.
+pub fn json(status: StatusCode, body: String) -> Response<Body> {
+    let mut response = Response::new(full(Bytes::from(body)));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
 fn full(bytes: Bytes) -> Body {
     Full::new(bytes).map_err(never).boxed()
 }
@@ -162,7 +172,7 @@ fn never(infallible: Infallible) -> hyper::Error {
     match infallible {}
 }
 
-async fn tunnel(client: OnUpgrade, upstream: OnUpgrade, _guard: ActivityGuard) {
+async fn tunnel(client: OnUpgrade, upstream: OnUpgrade, _guard: Option<ActivityGuard>) {
     let (client, upstream) = match tokio::try_join!(client, upstream) {
         Ok(pair) => pair,
         Err(e) => {
@@ -178,7 +188,7 @@ async fn tunnel(client: OnUpgrade, upstream: OnUpgrade, _guard: ActivityGuard) {
 /// Keeps the activity guard alive until the response body is dropped or fully read.
 struct Guarded {
     inner: Body,
-    _guard: ActivityGuard,
+    _guard: Option<ActivityGuard>,
 }
 
 impl HttpBody for Guarded {

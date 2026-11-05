@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use http::header::{HeaderValue, HOST, RETRY_AFTER};
-use http::{Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -25,10 +25,12 @@ use tokio::net::TcpListener;
 use activity::Tracker;
 use api::HostApi;
 use proxy::{Body, ForwardError, Proxy};
-use route::{Resolved, Router};
+use route::{Probe, Resolved, Router};
 
 /// Seconds a client is told to wait before it retries a 503.
 const RETRY_AFTER_SECS: &str = "10";
+/// The path apps poll for health. It never wakes a box and is never counted as activity.
+const HEALTH_PATH: &str = "/api/health";
 
 #[derive(Parser)]
 #[command(about = "Routes <box>.<domain suffix> to the box's VM, waking it when suspended")]
@@ -108,6 +110,9 @@ async fn handle(
     let Some(box_id) = box_id else {
         return Ok(proxy::plain(StatusCode::NOT_FOUND, "not found"));
     };
+    if req.method() == Method::GET && req.uri().path() == HEALTH_PATH {
+        return Ok(health(&state, &box_id, req).await);
+    }
     Ok(route_and_forward(&state, &box_id, req).await)
 }
 
@@ -123,7 +128,7 @@ async fn route_and_forward(
     loop {
         match state.router.resolve(box_id).await {
             Resolved::Upstream { upstream, guard } => {
-                match state.proxy.forward(&upstream, req, guard).await {
+                match state.proxy.forward(&upstream, req, Some(guard)).await {
                     Ok(response) => return response,
                     Err(ForwardError::Connect(unsent)) => {
                         state.router.invalidate(box_id);
@@ -164,4 +169,37 @@ fn retry_later() -> Response<Body> {
         .headers_mut()
         .insert(RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_SECS));
     response
+}
+
+/// A health answer for a box that is not serving: 503 with its state and a Retry-After.
+fn health_unavailable(state: &str) -> Response<Body> {
+    let mut response = proxy::json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({ "ok": false, "state": state }).to_string(),
+    );
+    response
+        .headers_mut()
+        .insert(RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER_SECS));
+    response
+}
+
+/// `GET /api/health` never wakes a box and is never counted as activity: apps poll it, so counting it would keep an
+/// idle box awake for as long as it is polled.
+async fn health(state: &AppState, box_id: &str, req: Request<Incoming>) -> Response<Body> {
+    match state.router.probe(box_id).await {
+        Probe::Running(upstream) => match state.proxy.forward(&upstream, req, None).await {
+            Ok(response) => response,
+            Err(ForwardError::Connect(_)) => {
+                state.router.invalidate(box_id);
+                health_unavailable("unreachable")
+            }
+            Err(ForwardError::TimedOut) => {
+                proxy::plain(StatusCode::GATEWAY_TIMEOUT, "upstream timed out")
+            }
+            Err(ForwardError::Failed) => proxy::plain(StatusCode::BAD_GATEWAY, "upstream failed"),
+        },
+        Probe::NotRunning(box_state) => health_unavailable(&box_state),
+        Probe::NotFound => proxy::plain(StatusCode::NOT_FOUND, "not found"),
+        Probe::Unavailable => retry_later(),
+    }
 }
