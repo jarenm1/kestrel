@@ -1,4 +1,5 @@
 import type { GuestNetwork } from "@cloudagents/protocol"
+import { Schema } from "effect"
 import { HostError } from "./errors"
 import type { NestNetwork } from "./schema"
 
@@ -122,6 +123,37 @@ export const tapAddrsAddCommand = (network: NestNetwork): NetCommand => [
   TAP_ADDRS_SET,
   tapAddrsElement(network),
 ]
+
+/** The `nft -j list set` listing of `tap_addrs`. Only the element pairs `[ifname, address]` are read. */
+const TapAddrsListing = Schema.Struct({
+  nftables: Schema.Array(
+    Schema.Struct({
+      set: Schema.optional(
+        Schema.Struct({
+          elem: Schema.optional(Schema.Array(Schema.Struct({ concat: Schema.Tuple(Schema.String, Schema.String) }))),
+        }),
+      ),
+    }),
+  ),
+})
+
+/** Arguments to `nft` that list the elements of `tap_addrs` as JSON, for `missingTapAddrs`. */
+export const tapAddrsListArgs: readonly string[] = ["-j", "list", "set", "inet", NFT_TABLE, TAP_ADDRS_SET]
+
+/**
+ * The live taps whose element `tap_addrs` lacks, given its JSON listing. A reload of the nftables service flushes the
+ * set while taps keep running, so the caller re-adds these. Throws on a listing it cannot read, rather than guessing
+ * which taps are covered.
+ */
+export const missingTapAddrs = (listing: string, lives: readonly NestNetwork[]): NestNetwork[] => {
+  const decoded = Schema.decodeUnknownSync(TapAddrsListing)(JSON.parse(listing))
+  const present = new Set(
+    decoded.nftables.flatMap((entry) =>
+      (entry.set?.elem ?? []).map((element) => `${element.concat[0]} ${element.concat[1]}`),
+    ),
+  )
+  return lives.filter((network) => !present.has(`${network.tap} ${network.address}`))
+}
 
 /** Creates a tap, gives it the host side of the point-to-point link, and routes the guest address to it. */
 export const tapUpCommands = (network: NestNetwork, egressMbit: number): NetCommand[] => [

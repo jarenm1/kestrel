@@ -21,7 +21,7 @@ import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath, writeFileAtomic } from "./fs-atomic"
 import { readLeaseUntil, writeLeaseUntil } from "./lease"
-import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, networkForSlot, tapAddrsAddCommand, tapDownCommands, tapUpCommands } from "./network"
+import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, missingTapAddrs, networkForSlot, tapAddrsAddCommand, tapAddrsListArgs, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
 import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
 import { recoverPlan } from "./recovery"
@@ -73,6 +73,8 @@ export interface VmEvents {
   readonly wakeRequest: (boxId: string) => void
   /** A background task failed; the manager keeps running and retries on its next tick. */
   readonly error: (message: string) => void
+  /** Something the manager repaired on its own, not a failure: the firewall had lost a tap's element. */
+  readonly notice: (message: string) => void
 }
 
 export interface IngressActivity {
@@ -259,6 +261,18 @@ export class VmManager {
     removeStaleTemplates(this.layout, keep)
     this.timers.push(setInterval(() => this.guarded("policy tick", () => this.tick()), GUEST_STATUS_INTERVAL_MS))
     this.timers.push(setInterval(() => this.guarded("meter tick", () => this.meterTick()), this.config.meterIntervalMs))
+    let resyncing = false
+    this.timers.push(
+      setInterval(() => {
+        if (resyncing) return
+        resyncing = true
+        void this.resyncTapAddrs()
+          .catch((error: unknown) => this.events.error(`tap_addrs resync failed: ${errorMessage(error)}`))
+          .finally(() => {
+            resyncing = false
+          })
+      }, GUEST_STATUS_INTERVAL_MS),
+    )
   }
 
   /**
@@ -272,6 +286,22 @@ export class VmManager {
     for (const record of records) {
       if (record.network !== null) await runNetCommands([tapAddrsAddCommand(record.network)])
     }
+  }
+
+  /**
+   * Re-adds the element of every live tap that `tap_addrs` lacks. An nftables reload (a NixOS switch restarts the
+   * service) flushes the set while VMs keep running, which drops their traffic until repaired. A VM with an operation in
+   * progress is skipped: its tap is being brought up or torn down.
+   */
+  private async resyncTapAddrs(): Promise<void> {
+    const lives = [...this.records.values()].flatMap((record) =>
+      record.network !== null && record.operation === null ? [record.network] : [],
+    )
+    if (lives.length === 0) return
+    const missing = missingTapAddrs(await runChecked("nft", tapAddrsListArgs), lives)
+    if (missing.length === 0) return
+    await runNetCommands(missing.map((network) => tapAddrsAddCommand(network)))
+    this.events.notice(`restored tap_addrs elements the firewall had lost: ${missing.map((network) => network.tap).join(", ")}`)
   }
 
   /** A periodic task that throws must not stop its timer: the failure is reported and the next run tries again. */

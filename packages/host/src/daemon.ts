@@ -39,6 +39,7 @@ export const runDaemon = async (configPath: string): Promise<void> => {
     vm: (report) => control?.sendVm(report),
     wakeRequest: (boxId) => control?.sendWakeRequest(boxId),
     error: log,
+    notice: log,
   })
   let link: ControlLink
   let api: LocalApi
