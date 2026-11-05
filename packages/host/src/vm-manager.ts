@@ -16,10 +16,11 @@ import {
   type NestVmState,
 } from "@cloudagents/protocol"
 import { ChClient, TEMPLATE_BOOT_MEMORY_BYTES, TEMPLATE_BOOT_VCPUS, type MemoryRestoreMode } from "./ch-api"
-import { launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
+import { killVmm, launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
 import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath, writeFileAtomic } from "./fs-atomic"
+import { readLeaseUntil, writeLeaseUntil } from "./lease"
 import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, networkForSlot, tapAddrsAddCommand, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
 import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
@@ -53,7 +54,8 @@ const VOLUME_STOP_GRACE_MS = 10_000
 const WAKE_TIMEOUT_MS = 60_000
 const WAKE_POLL_MS = 250
 const GPU_INTERVAL_MS = 5 * 60_000
-const GPU_HOLD_MS = 5 * 60_000
+const RECONNECT_MIN_MS = 1_000
+const RECONNECT_MAX_MS = 30_000
 /** A guest status older than this is not used for policy decisions. */
 const STATUS_FRESH_MS = 3 * GUEST_STATUS_INTERVAL_MS
 
@@ -82,7 +84,8 @@ export interface IngressActivity {
 interface Runtime {
   link: GuestLink | null
   status: { readonly pressure: GuestPressure; readonly activity: BoxActivity | null; readonly at: number } | null
-  gpuWanted: boolean
+  /** The VMM was killed for a lapsed lease and the record is being settled; no second kill. */
+  fencing: boolean
   ingress: { openConnections: number; lastRequestAt: number | null }
   memoryScale: ScaleState
   cpuScale: ScaleState
@@ -99,7 +102,7 @@ interface Runtime {
 const newRuntime = (): Runtime => ({
   link: null,
   status: null,
-  gpuWanted: false,
+  fencing: false,
   ingress: { openConnections: 0, lastRequestAt: null },
   memoryScale: NO_SCALE,
   cpuScale: NO_SCALE,
@@ -197,6 +200,7 @@ const createNewRecord = (fields: {
   backedUpAt: null,
   localRef: null,
   localDirty: fields.localDirty,
+  frozen: false,
   network: null,
   process: null,
   volumeProcess: null,
@@ -214,6 +218,8 @@ export class VmManager {
   private readonly records = new Map<string, VmRecord>()
   private readonly runtimes = new Map<string, Runtime>()
   private readonly queues = new Map<string, Promise<void>>()
+  /** GPU each box is being given, from before its first await until the device is in the VMM and the guest is told. */
+  private readonly gpuReservations = new Map<string, string>()
   private readonly timers: ReturnType<typeof setInterval>[] = []
   private leaseUntil = 0
 
@@ -235,6 +241,7 @@ export class VmManager {
    */
   async start(): Promise<void> {
     ensureStateDirs(this.layout)
+    this.leaseUntil = readLeaseUntil(this.layout.leasePath) ?? 0
     const records = listVms(this.layout)
     await this.loadFirewall(records)
     readMemoryPressureAvg10()
@@ -343,6 +350,7 @@ export class VmManager {
   }
 
   setLease(validUntil: number): void {
+    writeLeaseUntil(this.layout.leasePath, validUntil)
     this.leaseUntil = validUntil
   }
 
@@ -546,21 +554,42 @@ export class VmManager {
     })
   }
 
-  private attachLink(rt: Runtime, link: GuestLink): void {
+  private attachLink(boxId: string, link: GuestLink): void {
+    const rt = this.runtime(boxId)
     rt.link = link
     link.onFrame((frame) => {
       if (frame._tag === "status") {
         rt.status = { pressure: frame.pressure, activity: frame.activity, at: Date.now() }
       } else if (frame._tag === "gpuWanted") {
-        rt.gpuWanted = frame.wanted
+        void this.serial(boxId, () => this.decideGpu(boxId, frame.id, frame.wanted))
       }
     })
     link.onClose(() => {
       if (rt.link !== link) return
       rt.link = null
       rt.status = null
-      rt.gpuWanted = false
+      this.reconnectLink(boxId, RECONNECT_MIN_MS)
     })
+  }
+
+  /** Reconnects a running box's guest link, doubling the wait after each failure, until the box stops running. */
+  private reconnectLink(boxId: string, delayMs: number): void {
+    setTimeout(() => {
+      const vm = this.running(boxId)
+      if (vm === null) return
+      const rt = this.runtime(boxId)
+      if (rt.link !== null) return
+      if (vm.operation !== null) {
+        this.reconnectLink(boxId, delayMs)
+        return
+      }
+      connectGuest(this.paths(boxId).vsockSocket, CONNECT_TIMEOUT_MS)
+        .then(({ link }) => {
+          if (this.running(boxId) === null) link.close()
+          else this.attachLink(boxId, link)
+        })
+        .catch(() => this.reconnectLink(boxId, Math.min(delayMs * 2, RECONNECT_MAX_MS)))
+    }, delayMs)
   }
 
   private closeLink(boxId: string): void {
@@ -657,7 +686,7 @@ export class VmManager {
     if (vm.network !== null) await tapDown(vm.network)
     rmSync(p.restore, { recursive: true, force: true })
     if (vm.snapshotGen !== null) rmSync(p.snapshot(vm.snapshotGen), { recursive: true, force: true })
-    return { ...vm, process: null, network: null, volumeProcess: null, snapshotGen: null, gpus: [], gpuAttachedAt: null }
+    return { ...vm, process: null, network: null, volumeProcess: null, snapshotGen: null, gpus: [], gpuAttachedAt: null, frozen: false }
   }
 
   private async apply(command: NestHostCommand): Promise<void> {
@@ -684,6 +713,7 @@ export class VmManager {
   }
 
   private async create(cmd: Command<"create">): Promise<void> {
+    if (Date.now() >= this.leaseUntil) throw new HostError("the control plane lease has lapsed; a box is not created without a valid lease")
     const existing = this.records.get(cmd.boxId)
     if (existing !== undefined && existing.state !== "deleted") {
       if (cmd.ownerEpoch !== existing.ownerEpoch) {
@@ -716,6 +746,7 @@ export class VmManager {
   }
 
   private async resumeCommand(cmd: Command<"resume">): Promise<void> {
+    if (Date.now() >= this.leaseUntil) throw new HostError("the control plane lease has lapsed; a box is not resumed without a valid lease")
     this.validateLimits(cmd.limits)
     const current = this.records.get(cmd.boxId)
     if (current !== undefined && current.state !== "deleted" && cmd.ownerEpoch < current.ownerEpoch) {
@@ -780,9 +811,8 @@ export class VmManager {
   private async resumeParked(vm: VmRecord, enrollToken: string | null): Promise<void> {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "resume", "parked")
-    // Only a volume this host created for a box with no backup (both refs null) or one whose backup is the command's ref.
-    const hostCreated = cur.volumeRef === null && cur.localRef === null && cur.localDirty
-    const usableLocal = existsSync(p.volume) && (hostCreated || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
+    // Unbacked local changes make the local volume the only copy. Otherwise it is usable only when it matches the backup this command restores.
+    const usableLocal = existsSync(p.volume) && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
     if (!usableLocal) {
       if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
       rmSync(p.volume, { force: true })
@@ -845,7 +875,7 @@ export class VmManager {
     await client.restore(p.restore, restoreMode())
     await client.resume()
     const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
-    this.attachLink(rt, link)
+    this.attachLink(started.boxId, link)
     await this.ask(rt, { _tag: "resumed", id: newRequestId(), wallClockMs: Date.now() }, GUEST_REPLY_TIMEOUT_MS.resumed)
     this.finish(started, "running", { localRef: null, localDirty: true })
   }
@@ -885,7 +915,7 @@ export class VmManager {
     })
     await client.addDisk({ path: p.swap, id: "swap", serial: NEST_SWAP_SERIAL, readonly: false, direct: false, num_queues: 1, image_type: "Raw" })
     const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
-    this.attachLink(rt, link)
+    this.attachLink(started.boxId, link)
     await this.configureGuest(started, enrollToken)
     this.finish(started, "running", {
       vcpus: TEMPLATE_BOOT_VCPUS,
@@ -926,19 +956,37 @@ export class VmManager {
   }
 
   /**
-   * Quiesces a running VM for a suspend or park: the guest syncs, then the VMM pauses. A refused or timed-out sync aborts
-   * the operation and the VM keeps running (the operation is cleared before the error propagates, so it is not rolled back).
+   * Quiesces a running VM for a suspend or park: the freeze is recorded, then the guest syncs and freezes its volume and
+   * the VMM pauses. A refused or timed-out step ends the freeze and clears the operation before the error propagates, so
+   * the VM keeps running (or is stopped, if the guest cannot thaw).
    */
-  private async quiesce(cur: VmRecord): Promise<void> {
+  private async quiesce(cur: VmRecord): Promise<VmRecord> {
+    const frozen = this.commit({ ...cur, frozen: true })
     try {
       await this.ask(this.runtime(cur.boxId), { _tag: "prepareSuspend", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.prepareSuspend)
       await new ChClient(this.paths(cur.boxId).apiSocket).pause()
+      return frozen
     } catch (error) {
-      // prepareSuspend leaves the volume frozen: an aborted operation thaws it, so the VM can write again.
-      await this.tryAsk(this.runtime(cur.boxId), { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
-      this.finish(cur, "running", { lastError: `aborted: ${errorMessage(error)}` })
+      const reason = `aborted: ${errorMessage(error)}`
+      if (await this.thawOrStop(cur.boxId, reason)) this.finish(this.records.get(cur.boxId) ?? frozen, "running", { lastError: reason })
       throw error
     }
+  }
+
+  /**
+   * Ends an unfinished freeze with thawVolume. A guest that does not thaw is stopped and parked on its local volume; the
+   * caller must then stop its operation. Returns true when the VM stays running.
+   */
+  private async thawOrStop(boxId: string, reason: string): Promise<boolean> {
+    const vm = this.records.get(boxId)
+    if (vm === undefined || !vm.frozen) return true
+    const thawed = await this.tryAsk(this.runtime(boxId), { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+    if (thawed) {
+      this.commit({ ...vm, frozen: false })
+      return true
+    }
+    await this.failTo(boxId, "parked", new HostError(`${reason}; the guest did not thaw its volume, so the VM was stopped`))
+    return false
   }
 
   /** Brings a running VM to `suspended`: detach GPUs, quiesce, snapshot, stop the VMM. */
@@ -946,7 +994,7 @@ export class VmManager {
     const p = this.paths(vm.boxId)
     let cur = this.begin(vm, "suspend", null)
     cur = await this.detachGpus(cur)
-    await this.quiesce(cur)
+    cur = await this.quiesce(cur)
     const client = new ChClient(p.apiSocket)
     const gen = (cur.snapshotGen ?? 0) + 1
     const dir = p.snapshot(gen)
@@ -965,7 +1013,7 @@ export class VmManager {
     rmSync(p.restore, { recursive: true, force: true })
     // The VMM that was restored from the previous generation has now exited, so that image is no longer read.
     if (cur.snapshotGen !== null) rmSync(p.snapshot(cur.snapshotGen), { recursive: true, force: true })
-    this.finish(cur, "suspended", { process: null, snapshotGen: gen, gpus: [], gpuAttachedAt: null })
+    this.finish(cur, "suspended", { process: null, snapshotGen: gen, gpus: [], gpuAttachedAt: null, frozen: false })
   }
 
   /**
@@ -977,7 +1025,7 @@ export class VmManager {
     let cur = this.begin(vm, "park", null)
     if (cur.state === "running") {
       cur = await this.detachGpus(cur)
-      await this.quiesce(cur)
+      cur = await this.quiesce(cur)
     }
     this.closeLink(vm.boxId)
     await stopVmmProcess(cur.process, p.apiSocket, VMM_STOP_GRACE_MS)
@@ -1063,9 +1111,8 @@ export class VmManager {
   private async gpuAttachCommand(cmd: Command<"gpuAttach">): Promise<void> {
     const vm = this.heldAt(cmd.boxId, cmd.ownerEpoch)
     if (vm.state !== "running") throw new HostError(`cannot attach a GPU to a ${vm.state} box`)
-    if (vm.limits.gpu !== "on-demand") throw new HostError("this box's limits do not allow a GPU")
     if (vm.gpus.length > 0) return
-    await this.attachGpu(vm)
+    await this.attachGpu(vm, null)
   }
 
   private async gpuDetachCommand(cmd: Command<"gpuDetach">): Promise<void> {
@@ -1075,40 +1122,88 @@ export class VmManager {
   }
 
   private freeGpu(): string | null {
-    const used = new Set<string>()
+    const used = new Set<string>(this.gpuReservations.values())
     for (const vm of this.records.values()) if (vm.state !== "deleted") for (const gpu of vm.gpus) used.add(gpu)
     return this.config.gpus.find((gpu) => !used.has(gpu.pciAddress))?.pciAddress ?? null
   }
 
-  /** Host memory a running VM commits: its plugged memory, or its whole limit while a GPU pins all of it. */
+  /** Host memory a running VM commits: its plugged memory, or its whole limit while it holds or is being given a GPU. */
   private committedMemory(exceptBoxId: string): number {
     let total = 0
     for (const vm of this.records.values()) {
       if (vm.boxId === exceptBoxId || vm.state !== "running") continue
-      total += vm.gpus.length > 0 ? vm.limits.maxMemoryBytes : vm.memoryBytes
+      total += vm.gpus.length > 0 || this.gpuReservations.has(vm.boxId) ? vm.limits.maxMemoryBytes : vm.memoryBytes
     }
     return total
   }
 
-  private async attachGpu(vm: VmRecord): Promise<void> {
+  /**
+   * The guest asked for a GPU (`wanted`) or to give its GPU back. Each request is answered exactly once, and a denial
+   * is final for that request.
+   */
+  private async decideGpu(boxId: string, id: string, wanted: boolean): Promise<void> {
+    const rt = this.runtime(boxId)
+    try {
+      const vm = this.running(boxId)
+      if (!wanted) {
+        if (vm !== null) await this.detachGpus(vm)
+        this.answerGpu(boxId, id, true, null)
+        return
+      }
+      if (vm === null) throw new HostError("the box is not running")
+      if (rt.lastGpuAttachAt !== null && Date.now() - rt.lastGpuAttachAt < GPU_INTERVAL_MS) {
+        throw new HostError("a GPU was attached too recently")
+      }
+      await this.attachGpu(vm, id)
+    } catch (error) {
+      this.answerGpu(boxId, id, false, errorMessage(error))
+    }
+  }
+
+  /** Answers a guest's `gpuWanted`. A closed link means the guest is gone, so there is nothing to answer. */
+  private answerGpu(boxId: string, id: string, granted: boolean, error: string | null): void {
+    const link = this.runtime(boxId).link
+    if (link === null || link.isClosed()) return
+    link.send({ _tag: "gpuDecision", id, granted, error })
+  }
+
+  /**
+   * Hot-plugs a free GPU into a running box. With `decision` set, the guest asked for it: the request is granted once the
+   * device is in the VMM, and the box is then told it is attached. Throws before a grant, so the caller can deny; after a
+   * grant a failure is recorded on the box, and an operator's attach (no decision) throws it.
+   */
+  private async attachGpu(vm: VmRecord, decision: string | null): Promise<void> {
+    if (vm.limits.gpu !== "on-demand") throw new HostError("this box's limits do not allow a GPU")
     const pci = this.freeGpu()
     if (pci === null) throw new HostError("no free GPU on this host")
     if (this.committedMemory(vm.boxId) + vm.limits.maxMemoryBytes > this.config.capacity.memoryBytes) {
       throw new HostError("not enough host memory to attach a GPU (an attached GPU pins the box's maximum memory)")
     }
+    // Reserved before the first await, so a concurrent attach on another box cannot take the same card or memory.
+    this.gpuReservations.set(vm.boxId, pci)
     const rt = this.runtime(vm.boxId)
     rt.lastGpuAttachAt = Date.now()
     const cur = this.begin(vm, "gpuAttach", null)
     const client = new ChClient(this.paths(vm.boxId).apiSocket)
     try {
       await client.addDevice(gpuPath(pci), gpuDeviceId(pci))
-      await this.ask(rt, { _tag: "gpuAttached", id: newRequestId(), pciAddress: pci }, GUEST_REPLY_TIMEOUT_MS.gpuAttached)
     } catch (error) {
+      this.gpuReservations.delete(vm.boxId)
       await client.removeDevice(gpuDeviceId(pci)).catch(() => undefined)
       this.finish(cur, cur.state, { lastError: errorMessage(error) })
       throw error
     }
-    this.finish(cur, cur.state, { gpus: [pci], gpuAttachedAt: Date.now() })
+    if (decision !== null) this.answerGpu(vm.boxId, decision, true, null)
+    try {
+      await this.ask(rt, { _tag: "gpuAttached", id: newRequestId(), pciAddress: pci }, GUEST_REPLY_TIMEOUT_MS.gpuAttached)
+      this.finish(cur, cur.state, { gpus: [pci], gpuAttachedAt: Date.now() })
+    } catch (error) {
+      await client.removeDevice(gpuDeviceId(pci)).catch(() => undefined)
+      this.finish(cur, cur.state, { lastError: errorMessage(error) })
+      if (decision === null) throw error
+    } finally {
+      this.gpuReservations.delete(vm.boxId)
+    }
   }
 
   private async detachGpus(vm: VmRecord): Promise<VmRecord> {
@@ -1143,26 +1238,48 @@ export class VmManager {
   }
 
   /**
-   * Past the control plane's lease the host fences: a running VM stops at once, without a sync, and is held parked on
-   * its local volume. Nothing is woken.
+   * Settles a fenced VM. Its VMM is already dead (see fenceNow), so this releases what it held and parks it on its local
+   * volume. Nothing is woken.
    */
   private async fence(boxId: string): Promise<void> {
     const vm = this.running(boxId)
-    if (vm === null || Date.now() < this.leaseUntil) return
+    if (vm === null) return
     const released = await this.releaseVm(vm)
     this.finish(released, "parked", { lastError: "fenced: control plane lease lapsed" })
   }
 
-  /** Every policy tick: CPU activity, one scheduled action per running box, parking and cache eviction, host pressure. */
+  /**
+   * Past the control plane's lease a running VM is killed at once: no sync, no guest request. Its link is closed, and it
+   * is settled through the box's queue after whatever it was doing has failed.
+   */
+  private fenceNow(vm: VmRecord): void {
+    const rt = this.runtime(vm.boxId)
+    if (rt.fencing) return
+    rt.fencing = true
+    this.closeLink(vm.boxId)
+    void killVmm(vm.process, this.paths(vm.boxId).apiSocket)
+      .then(() => this.enqueue(vm.boxId, () => this.fence(vm.boxId)))
+      .catch((error: unknown) => {
+        // The VMM is still up; the next tick sees the lapsed lease and tries again.
+        const current = this.running(vm.boxId)
+        if (current !== null) this.commit({ ...current, lastError: errorMessage(error) })
+      })
+      .finally(() => {
+        rt.fencing = false
+      })
+  }
+
+  /** Every policy tick: host pressure, fenced VMs, CPU activity, one scheduled action per running box, parking and cache eviction. */
   private tick(): void {
     const now = Date.now()
     const lapsed = now >= this.leaseUntil
     const tight = this.isDiskTight()
+    if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
     for (const vm of this.records.values()) {
       const boxId = vm.boxId
       if (vm.state === "running") {
         if (lapsed) {
-          if (!this.runtime(boxId).busy) this.schedule(boxId, () => this.fence(boxId))
+          this.fenceNow(vm)
           continue
         }
         this.sampleCpu(vm, now)
@@ -1174,7 +1291,6 @@ export class VmManager {
         this.schedule(boxId, () => this.evictCache(boxId))
       }
     }
-    if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
   }
 
   /** Host-measured activity: a cgroup that used enough CPU since the previous sample counts as active now. */
@@ -1250,7 +1366,6 @@ export class VmManager {
     // Scaling and GPU decisions need the guest's pressure report; idleness does not, so a silent guest is still parked.
     if (fresh !== null) {
       vm = await this.scale(vm, rt, fresh.pressure, now)
-      vm = await this.gpuPolicy(vm, rt, now)
     }
     const idle = isIdle({
       now,
@@ -1297,18 +1412,6 @@ export class VmManager {
     return this.resizeVm(vm, { vcpus: cpu.next, memoryBytes: memory.next })
   }
 
-  private async gpuPolicy(vm: VmRecord, rt: Runtime, now: number): Promise<VmRecord> {
-    if (vm.gpus.length > 0 && !rt.gpuWanted && vm.gpuAttachedAt !== null && now - vm.gpuAttachedAt >= GPU_HOLD_MS) {
-      return this.detachGpus(vm)
-    }
-    const attachAllowed = rt.lastGpuAttachAt === null || now - rt.lastGpuAttachAt >= GPU_INTERVAL_MS
-    if (rt.gpuWanted && vm.limits.gpu === "on-demand" && vm.gpus.length === 0 && attachAllowed) {
-      await this.attachGpu(vm)
-      return this.records.get(vm.boxId) ?? vm
-    }
-    return vm
-  }
-
   /** Backs the volume up when the interval has passed and the volume may have changed. A failed backup is retried with backoff. */
   private async backupIfDue(boxId: string): Promise<void> {
     const vm = this.running(boxId)
@@ -1341,28 +1444,35 @@ export class VmManager {
     const rt = this.runtime(boxId)
     const device = vm.volumeProcess?.device ?? null
     const copy = join(p.dir, "backup.raw")
-    await this.ask(rt, { _tag: "freezeVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.freezeVolume)
-    let source: string
+    this.commit({ ...vm, frozen: true })
     try {
-      if (device !== null) {
-        source = device
-      } else {
-        await runChecked("cp", ["--reflink=auto", p.volume, copy])
-        source = copy
-      }
-    } finally {
-      if (device === null) await this.tryAsk(rt, { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+      await this.ask(rt, { _tag: "freezeVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.freezeVolume)
+    } catch (error) {
+      await this.thawOrStop(boxId, `backup aborted: ${errorMessage(error)}`)
+      throw error
     }
-    let ref: { readonly volumeRef: string }
+    // A lazy device is read while frozen, so the backup is a consistent image of the frozen volume.
+    let volumeRef: string | null = null
     try {
-      ref = await backupVolume(this.volume, { path: source, boxId })
-    } finally {
+      if (device !== null) volumeRef = (await backupVolume(this.volume, { path: device, boxId })).volumeRef
+      else await runChecked("cp", ["--reflink=auto", p.volume, copy])
+    } catch (error) {
+      await this.thawOrStop(boxId, `backup aborted: ${errorMessage(error)}`)
       rmSync(copy, { force: true })
-      if (device !== null) await this.tryAsk(rt, { _tag: "thawVolume", id: newRequestId() }, GUEST_REPLY_TIMEOUT_MS.thawVolume)
+      throw error
+    }
+    const thawed = await this.thawOrStop(boxId, "backup source taken")
+    if (volumeRef === null) {
+      try {
+        if (!thawed) throw new HostError("the guest did not thaw its volume, so the VM was stopped")
+        volumeRef = (await backupVolume(this.volume, { path: copy, boxId })).volumeRef
+      } finally {
+        rmSync(copy, { force: true })
+      }
     }
     const current = this.running(boxId)
     if (current === null) return
-    this.commit({ ...current, volumeRef: ref.volumeRef, backedUpAt: Date.now() })
+    this.commit({ ...current, volumeRef, backedUpAt: Date.now() })
   }
 
   /** Periodic sample of every live VM; a deleted VM was already sampled by its final commit. */
@@ -1410,7 +1520,7 @@ export class VmManager {
     if (plan.adoptVmm) {
       try {
         const { link } = await connectGuest(p.vsockSocket, CONNECT_TIMEOUT_MS)
-        this.attachLink(this.runtime(record.boxId), link)
+        this.attachLink(record.boxId, link)
       } catch (error) {
         next = await this.releaseVm({ ...next, state: "parked" })
         next = { ...next, since: Date.now(), lastError: errorMessage(error) }

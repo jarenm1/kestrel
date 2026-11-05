@@ -125,3 +125,18 @@ export const stopVmm = async (identity: ProcIdentity | null, apiSocket: string, 
   process.kill(identity.pid, "SIGKILL")
   await waitExit(identity, 5_000)
 }
+
+/**
+ * Kills a VMM at once, for a lapsed lease: no API request, no grace period. Resolves only once the process has exited,
+ * and throws if it has not, because the caller releases the VM's volume next. Only signals the process while its
+ * identity still matches.
+ */
+export const killVmm = async (identity: ProcIdentity | null, apiSocket: string): Promise<void> => {
+  if (identity === null || !isProcessAlive(identity) || !processIsVmm(identity, apiSocket)) return
+  try {
+    process.kill(identity.pid, "SIGKILL")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+  }
+  if (!(await waitExit(identity, 5_000))) throw new HostError(`VMM ${identity.pid} did not exit after SIGKILL`)
+}

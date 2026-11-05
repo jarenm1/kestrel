@@ -140,6 +140,12 @@ export class GuestLink {
     return promise
   }
 
+  /** Sends a frame that expects no reply. */
+  send(frame: HostToGuest): void {
+    if (this.closed) throw new GuestClosedError("guest connection is closed")
+    this.write(frame)
+  }
+
   private write(frame: HostToGuest): void {
     this.socket.write(`${JSON.stringify(frame)}\n`)
   }

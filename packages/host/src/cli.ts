@@ -2,12 +2,15 @@
 import { parseArgs } from "node:util"
 import { runDaemon } from "./daemon"
 import { HostError, UsageError, errorMessage } from "./errors"
+import { loadConfig } from "./config"
+import { runFence } from "./fence"
 
 const DEFAULT_CONFIG = "/etc/kestrel-host/config.json"
 const DEFAULT_SOCKET = "/run/kestrel-host/operator.sock"
 
 const USAGE = `usage:
   kestrel-host daemon [--config <file>]            run the host agent (default ${DEFAULT_CONFIG})
+  kestrel-host fence [--config <file>]             kill VMs while the control plane's lease has lapsed (run as its own unit)
   kestrel-host vm list [--socket <path>]           list the VMs on this host
   kestrel-host vm show <boxId> [--socket <path>]   show one VM
   kestrel-host vm suspend|park|destroy <boxId> [--socket <path>]
@@ -77,6 +80,10 @@ export const runCli = async (argv: readonly string[]): Promise<number> => {
     const [command, ...rest] = positionals
     if (command === "daemon" && rest.length === 0) {
       await runDaemon(values.config ?? DEFAULT_CONFIG)
+      return 0
+    }
+    if (command === "fence" && rest.length === 0) {
+      await runFence(loadConfig(values.config ?? DEFAULT_CONFIG))
       return 0
     }
     if (command === "vm") return await runVm(rest, values.socket ?? DEFAULT_SOCKET)

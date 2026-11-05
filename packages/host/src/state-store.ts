@@ -31,6 +31,8 @@ export interface StateLayout {
   readonly templatesDir: string
   readonly vmsDir: string
   readonly meterDir: string
+  /** The control plane's lease, read by the fence watchdog. */
+  readonly leasePath: string
 }
 
 export const stateLayout = (root: string): StateLayout => ({
@@ -39,6 +41,7 @@ export const stateLayout = (root: string): StateLayout => ({
   templatesDir: join(root, "templates"),
   vmsDir: join(root, "vms"),
   meterDir: join(root, "meter"),
+  leasePath: join(root, "lease.json"),
 })
 
 /** A box id names a directory under `vms/`; anything else is refused before a path is built. */
