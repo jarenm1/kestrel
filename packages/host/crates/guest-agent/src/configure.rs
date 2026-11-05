@@ -4,12 +4,12 @@
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::args::Config;
 use crate::http::wait_healthy;
@@ -21,6 +21,10 @@ use crate::system::{
 
 const DISK_WAIT: Duration = Duration::from_secs(60);
 const HEALTH_WAIT: Duration = Duration::from_secs(50);
+/// Everything `configure` waits for, counted from its start. The host gives configure 120 s; this ends before that.
+const CONFIGURE_BUDGET: Duration = Duration::from_secs(100);
+/// The first MiB of a volume disk must be zero before it is formatted.
+const BLANK_CHECK_BYTES: u64 = 1 << 20;
 
 /// The clone id recorded in the machine id, when this VM has been configured before.
 pub fn read_clone_id(machine_id: &Path) -> Option<String> {
@@ -34,6 +38,9 @@ fn is_clone_id(id: &str) -> bool {
 }
 
 pub async fn configure(cfg: &Config, sys: &System, args: &ConfigureArgs) -> Res<()> {
+    // The host times configure out at 120 s. The waits share one budget that ends first, so a slow disk or box comes
+    // back as an error reply rather than as silence the host times out on.
+    let deadline = Instant::now() + CONFIGURE_BUDGET;
     validate(args)?;
     sys.set_realtime(args.wall_clock_ms)?;
     write_file(
@@ -48,8 +55,8 @@ pub async fn configure(cfg: &Config, sys: &System, args: &ConfigureArgs) -> Res<
         log("[dry-run] not waiting for the volume and swap disks");
     } else {
         tokio::try_join!(
-            wait_for_path(&cfg.volume_device, DISK_WAIT),
-            wait_for_path(&cfg.swap_device, DISK_WAIT)
+            wait_for_path(&cfg.volume_device, budget_left(deadline, DISK_WAIT)),
+            wait_for_path(&cfg.swap_device, budget_left(deadline, DISK_WAIT))
         )?;
     }
     setup_swap(cfg, sys).await?;
@@ -65,7 +72,12 @@ pub async fn configure(cfg: &Config, sys: &System, args: &ConfigureArgs) -> Res<
         ],
     )
     .await?;
-    wait_healthy(&cfg.box_health_url, HEALTH_WAIT).await
+    wait_healthy(&cfg.box_health_url, budget_left(deadline, HEALTH_WAIT)).await
+}
+
+/// Time left before `deadline`, capped at `cap`.
+fn budget_left(deadline: Instant, cap: Duration) -> Duration {
+    deadline.saturating_duration_since(Instant::now()).min(cap)
 }
 
 /// Reject anything that would reach a command line or an env file in a form we did not intend.
@@ -88,9 +100,6 @@ fn validate(args: &ConfigureArgs) -> Res<()> {
     let net = &args.network;
     cidr_v4(&net.address)?;
     ipv4(&net.gateway)?;
-    if net.dns.is_empty() {
-        return Err("network.dns lists no resolver".into());
-    }
     for resolver in &net.dns {
         ipv4(resolver)?;
     }
@@ -168,6 +177,23 @@ async fn configure_network(cfg: &Config, sys: &System, net: &GuestNetwork) -> Re
     let address = net.address.as_str();
     let gateway = net.gateway.as_str();
     sys.run("ip", &["link", "set", iface, "up"]).await?;
+    // Re-configuring replaces the network. `addr replace` would keep an earlier address, and a dropped IPv6 config would
+    // keep its default route. Routes are flushed by `proto boot`, the protocol `ip route replace` sets below: the
+    // kernel's fe80::/64 route is left alone (`scope global` on routes would remove it).
+    sys.run("ip", &["-4", "addr", "flush", "dev", iface])
+        .await?;
+    sys.run("ip", &["-4", "route", "flush", "dev", iface])
+        .await?;
+    sys.run(
+        "ip",
+        &["-6", "addr", "flush", "dev", iface, "scope", "global"],
+    )
+    .await?;
+    sys.run(
+        "ip",
+        &["-6", "route", "flush", "dev", iface, "proto", "boot"],
+    )
+    .await?;
     sys.run("ip", &["addr", "replace", address, "dev", iface])
         .await?;
     sys.run(
@@ -220,12 +246,31 @@ fn first_non_loopback() -> Res<String> {
 
 async fn setup_swap(cfg: &Config, sys: &System) -> Res<()> {
     let swap = path_str(&cfg.swap_device)?;
-    // A swap device from an earlier configure is still active on a re-configured VM; the new disk replaces it.
-    if let Err(e) = sys.run("swapoff", &[swap]).await {
-        log(format!("swapoff (ignored): {e}"));
+    // A swap device from an earlier configure may still be active on a re-configured VM; the new disk replaces it. A
+    // failed swapoff on an active device is fatal: mkswap must not run on a device still in use.
+    if swap_active(&cfg.swap_device)? {
+        sys.run("swapoff", &[swap]).await?;
     }
     sys.run("mkswap", &["-q", swap]).await?;
     sys.run("swapon", &[swap]).await
+}
+
+/// Whether `device` is listed in `/proc/swaps`. A device that does not exist is not active.
+fn swap_active(device: &Path) -> Res<bool> {
+    let Ok(device) = fs::canonicalize(device) else {
+        return Ok(false);
+    };
+    let swaps = fs::read_to_string("/proc/swaps").map_err(|e| format!("read /proc/swaps: {e}"))?;
+    Ok(swap_listed(&swaps, &device))
+}
+
+/// `proc_swaps` is the text of `/proc/swaps`: a header line, then one device per line.
+fn swap_listed(proc_swaps: &str, device: &Path) -> bool {
+    proc_swaps
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|name| Path::new(name) == device)
 }
 
 async fn mount_volume(cfg: &Config, sys: &System) -> Res<()> {
@@ -245,6 +290,13 @@ async fn mount_volume(cfg: &Config, sys: &System) -> Res<()> {
                 ))
             }
             None => {
+                // blkid sees no filesystem, but the disk may hold data it cannot read: only a blank disk is formatted.
+                if !device_is_blank(&cfg.volume_device)? {
+                    return Err(format!(
+                        "{} has no filesystem but is not blank; refusing to format it",
+                        cfg.volume_device.display()
+                    ));
+                }
                 let device = path_str(&cfg.volume_device)?;
                 sys.run("mkfs.ext4", &["-q", "-F", "-L", NEST_VOLUME_SERIAL, device])
                     .await?;
@@ -253,6 +305,17 @@ async fn mount_volume(cfg: &Config, sys: &System) -> Res<()> {
     }
     ensure_dir(mount, 0o755, None)?;
     mount_ext4(sys, &cfg.volume_device, mount).await
+}
+
+/// Whether the first MiB of `device` is all zero.
+fn device_is_blank(device: &Path) -> Res<bool> {
+    let mut head = Vec::new();
+    File::open(device)
+        .map_err(|e| format!("open {}: {e}", device.display()))?
+        .take(BLANK_CHECK_BYTES)
+        .read_to_end(&mut head)
+        .map_err(|e| format!("read {}: {e}", device.display()))?;
+    Ok(head.iter().all(|b| *b == 0))
 }
 
 /// Re-stack the Nix store overlay so its writable upper directory lives on the volume. The image's overlay has a
@@ -706,6 +769,31 @@ mod tests {
             .expect("stat .npmrc")
             .file_type()
             .is_file());
+    }
+
+    #[test]
+    fn swap_listed_matches_only_the_named_device() {
+        let proc_swaps = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/vdb\t\t\t\tpartition\t1048572\t\t0\t\t-2\n";
+        assert!(swap_listed(proc_swaps, Path::new("/dev/vdb")));
+        assert!(!swap_listed(proc_swaps, Path::new("/dev/vdc")));
+        assert!(!swap_listed("Filename\tType\n", Path::new("Filename")));
+    }
+
+    /// Any data in a disk's first MiB (a partition table or a filesystem superblock) makes it not blank, so it is never
+    /// formatted.
+    #[test]
+    fn only_a_zeroed_first_mebibyte_counts_as_blank() {
+        let root = scratch("blank-disk");
+        let disk = root.join("disk");
+        fs::write(&disk, vec![0u8; 2 << 20]).expect("write blank disk");
+        assert!(device_is_blank(&disk).expect("probe blank disk"));
+        // The ext4 superblock magic (0xEF53) at byte 1080.
+        let mut used = vec![0u8; 2 << 20];
+        used[1080] = 0x53;
+        used[1081] = 0xEF;
+        fs::write(&disk, used).expect("write used disk");
+        assert!(!device_is_blank(&disk).expect("probe used disk"));
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Dropping a config removes the link the box may have planted, never the file it points at.
