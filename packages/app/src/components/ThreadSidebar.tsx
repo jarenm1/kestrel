@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
+import { Archive, ChevronDown, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
@@ -25,6 +25,8 @@ const STATUS_LABEL: Record<Task["status"], string> = {
 const SCROLL_PX_PER_S = 60
 /** How often "5m ago" labels refresh. */
 const CLOCK_TICK_MS = 30_000
+/** Remembers that the user folded the working dock. */
+const DOCK_COLLAPSED_KEY = "kestrel.workingDockCollapsed"
 
 function useNow(intervalMs: number): number {
   const [now, setNow] = useState(Date.now)
@@ -100,25 +102,28 @@ interface Props {
 }
 
 /**
- * The user's threads (tasks) as vertical tabs: those waiting on the user first, working ones last, each group most
- * recent first. Collapsed, it is an icon rail; the button that expands it again lives in the page panel
- * (`WorkspaceLayout`).
+ * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
+ * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
+ * ends. Collapsed, it is an icon rail; the button that expands it again lives in the page panel (`WorkspaceLayout`).
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
   const { archive } = useThreadArchive()
+  const [dockCollapsed, setDockCollapsed] = useState(() => localStorage.getItem(DOCK_COLLAPSED_KEY) === "1")
+  useEffect(() => {
+    if (dockCollapsed) localStorage.setItem(DOCK_COLLAPSED_KEY, "1")
+    else localStorage.removeItem(DOCK_COLLAPSED_KEY)
+  }, [dockCollapsed])
 
   // TODO: order by the user's last message, not updatedAt (which also moves when a run finishes);
   // needs a `lastMessageAt` on Task from the server. The "ago" label has the same caveat.
-  // Working threads need nothing from the user, so they sink below the ones that do.
-  const byRecent = [...(tasks ?? [])].sort(
-    (a, b) =>
-      Number(a.status === "running") - Number(b.status === "running") || b.updatedAt.localeCompare(a.updatedAt),
-  )
-  const sorted = byRecent.filter((task) => task.archivedAt === undefined)
-  const archivedCount = byRecent.length - sorted.length
+  const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const active = byRecent.filter((task) => task.archivedAt === undefined)
+  const archivedCount = byRecent.length - active.length
+  const threads = active.filter((task) => task.status !== "running")
+  const working = active.filter((task) => task.status === "running")
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -127,6 +132,38 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
         if (task.id === openTaskId) navigate(APP_HOME)
       },
     })
+  }
+
+  function railTab(task: Task) {
+    return (
+      <NavLink
+        key={task.id}
+        to={threadPath(task.id)}
+        aria-label={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
+        title={`${task.title || "Untitled thread"}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
+        className={(s) => cn(tabClass(s), "shrink-0 justify-center py-1.5")}
+      >
+        <span className="relative inline-flex">
+          <ThreadAvatar task={task} />
+          <span className="absolute -right-1.5 -bottom-1.5 flex size-5 items-center justify-center rounded-full bg-[radial-gradient(closest-side,var(--secondary)_55%,transparent)]">
+            <StatusIcon status={task.status} className="[&>svg]:size-3" />
+          </span>
+        </span>
+      </NavLink>
+    )
+  }
+
+  function threadTab(task: Task) {
+    return (
+      <ThreadTab
+        key={task.id}
+        task={task}
+        now={now}
+        isOpen={task.id === openTaskId}
+        archiving={archive.isPending && archive.variables === task.id}
+        onArchive={() => archiveThread(task)}
+      />
+    )
   }
 
   if (collapsed) {
@@ -159,23 +196,16 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
           >
             <Archive className="size-4" />
           </NavLink>
-          {sorted.map((task) => (
-            <NavLink
-              key={task.id}
-              to={threadPath(task.id)}
-              aria-label={`${task.title || "Untitled thread"} — ${STATUS_LABEL[task.status]}`}
-              title={`${task.title || "Untitled thread"}\n${STATUS_LABEL[task.status]} · ${formatAgo(task.updatedAt, now)}`}
-              className={(s) => cn(tabClass(s), "justify-center py-1.5")}
-            >
-              <span className="relative inline-flex">
-                <ThreadAvatar task={task} />
-                <span className="absolute -right-1.5 -bottom-1.5 flex size-5 items-center justify-center rounded-full bg-[radial-gradient(closest-side,var(--secondary)_55%,transparent)]">
-                  <StatusIcon status={task.status} className="[&>svg]:size-3" />
-                </span>
-              </span>
-            </NavLink>
-          ))}
+          {threads.map(railTab)}
         </nav>
+        {working.length > 0 && (
+          <nav
+            aria-label="Working threads"
+            className="mr-1 flex max-h-[40%] shrink-0 flex-col items-stretch gap-1 overflow-auto border-t border-border/60 pt-1"
+          >
+            {working.map(railTab)}
+          </nav>
+        )}
         <AccountMenu compact />
       </div>
     )
@@ -212,76 +242,110 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
         </NavLink>
         {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
         {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
-        {sorted.length > 0 && (
+        {threads.length > 0 && (
           <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
         )}
-        {sorted.map((task) => {
-          const isOpen = task.id === openTaskId
-          const [checkout, ...otherCheckouts] = task.checkouts
-          return (
-            <div key={task.id} className="group/thread relative mt-0.5 flex min-w-0">
-              <NavLink
-                to={threadPath(task.id)}
-                title={[task.title, ...task.checkouts.map((c) => `${c.repo} · ${c.branch}`)].join("\n")}
-                className={(s) => cn(tabClass(s), "flex-1 flex-col gap-1 py-2 pr-2.5 pl-2.5")}
-              >
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                  <ThreadAvatar task={task} small />
-                  <span className="min-w-0 flex-1 truncate">
-                    {checkout ? repoShortName(checkout.repo) : null}
-                    {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
-                  </span>
-                  {/* The archive button takes this corner on hover and on the open thread. */}
-                  <span
-                    className={cn(
-                      "shrink-0 tabular-nums transition-opacity",
-                      isOpen ? "opacity-0" : "group-hover/thread:opacity-0 group-has-[button:focus-visible]/thread:opacity-0",
-                    )}
-                  >
-                    {formatAgo(task.updatedAt, now)}
-                  </span>
-                </span>
-                <FadingTitle text={task.title} working={task.status === "running"} />
-                <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                  {checkout ? (
-                    <>
-                      {checkout.pullRequest ? (
-                        <GitPullRequest aria-hidden="true" className="size-3.5 shrink-0" />
-                      ) : (
-                        <GitBranch aria-hidden="true" className="size-3.5 shrink-0" />
-                      )}
-                      <span className="min-w-0 flex-1 truncate">
-                        {checkout.branch}
-                        {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
-                      </span>
-                    </>
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate">{STATUS_LABEL[task.status]}</span>
-                  )}
-                  <StatusIcon status={task.status} className="[&>svg]:size-3.5" />
-                </span>
-              </NavLink>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  "absolute top-1 right-1 size-6 transition-opacity",
-                  isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
-                )}
-                aria-label="Archive thread"
-                title="Archive thread"
-                disabled={archive.isPending && archive.variables === task.id}
-                onClick={() => archiveThread(task)}
-              >
-                <ArchiveBoxIcon />
-              </Button>
-            </div>
-          )
-        })}
+        {threads.map(threadTab)}
       </nav>
+      {working.length > 0 && (
+        <section aria-label="Working threads" className="mt-2 flex max-h-[45%] shrink-0 flex-col border-t border-border/60 pt-1">
+          <button
+            type="button"
+            aria-expanded={!dockCollapsed}
+            aria-controls="working-dock"
+            onClick={() => setDockCollapsed((c) => !c)}
+            className="mr-3 flex items-center gap-1.5 rounded-[0.5rem] px-2.5 py-1.5 text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-white/[0.03] hover:text-foreground"
+          >
+            <StatusIcon status="running" className="[&>svg]:size-3.5" />
+            <span className="flex-1 text-left">Working</span>
+            <span className="tabular-nums">{working.length}</span>
+            <ChevronDown
+              aria-hidden="true"
+              className={cn("size-3.5 shrink-0 transition-transform", dockCollapsed && "-rotate-90")}
+            />
+          </button>
+          {!dockCollapsed && (
+            <div id="working-dock" className="flex min-h-0 flex-col gap-0.5 overflow-auto">
+              {working.map(threadTab)}
+            </div>
+          )}
+        </section>
+      )}
       <div className="pt-2 pr-3">
         <AccountMenu />
       </div>
+    </div>
+  )
+}
+
+interface ThreadTabProps {
+  task: Task
+  now: number
+  isOpen: boolean
+  archiving: boolean
+  onArchive: () => void
+}
+
+/** One thread in the expanded sidebar: repo and age, title, branch and status, with an archive button on hover. */
+function ThreadTab({ task, now, isOpen, archiving, onArchive }: ThreadTabProps) {
+  const [checkout, ...otherCheckouts] = task.checkouts
+  return (
+    <div className="group/thread relative mt-0.5 flex min-w-0 shrink-0">
+      <NavLink
+        to={threadPath(task.id)}
+        title={[task.title, ...task.checkouts.map((c) => `${c.repo} · ${c.branch}`)].join("\n")}
+        className={(s) => cn(tabClass(s), "flex-1 flex-col gap-1 py-2 pr-2.5 pl-2.5")}
+      >
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <ThreadAvatar task={task} small />
+          <span className="min-w-0 flex-1 truncate">
+            {checkout ? repoShortName(checkout.repo) : null}
+            {otherCheckouts.length > 0 ? ` +${otherCheckouts.length}` : null}
+          </span>
+          {/* The archive button takes this corner on hover and on the open thread. */}
+          <span
+            className={cn(
+              "shrink-0 tabular-nums transition-opacity",
+              isOpen ? "opacity-0" : "group-hover/thread:opacity-0 group-has-[button:focus-visible]/thread:opacity-0",
+            )}
+          >
+            {formatAgo(task.updatedAt, now)}
+          </span>
+        </span>
+        <FadingTitle text={task.title} working={task.status === "running"} />
+        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+          {checkout ? (
+            <>
+              {checkout.pullRequest ? (
+                <GitPullRequest aria-hidden="true" className="size-3.5 shrink-0" />
+              ) : (
+                <GitBranch aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 flex-1 truncate">
+                {checkout.branch}
+                {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+              </span>
+            </>
+          ) : (
+            <span className="min-w-0 flex-1 truncate">{STATUS_LABEL[task.status]}</span>
+          )}
+          <StatusIcon status={task.status} className="[&>svg]:size-3.5" />
+        </span>
+      </NavLink>
+      <Button
+        variant="ghost"
+        size="icon"
+        className={cn(
+          "absolute top-1 right-1 size-6 transition-opacity",
+          isOpen ? "opacity-100" : "opacity-0 group-hover/thread:opacity-100 focus-visible:opacity-100",
+        )}
+        aria-label="Archive thread"
+        title="Archive thread"
+        disabled={archiving}
+        onClick={onArchive}
+      >
+        <ArchiveBoxIcon />
+      </Button>
     </div>
   )
 }
