@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { HarnessLogo } from "@/components/HarnessLogo";
 import { HARNESSES, harnessOf, type Harness } from "@/lib/harnesses";
+import { thinkingFillWidth, thinkingStopOffsets } from "@/lib/thinking";
 import { colors, radius, shadows, spacing } from "@/theme";
 import { ThinkingSlider } from "@/components/ThinkingSlider";
 
@@ -74,7 +75,8 @@ export function ThinkingPicker({
   const selected = options[index]!;
   const ringFill = EFFORT_RING_FILL[selected.value];
   // Both input implementations reserve 16px at each end for the thumb.
-  const offset = (stop: number) => 16 + Math.max(0, width - 32) * stop / (options.length - 1);
+  const offsets = thinkingStopOffsets(options.length, width);
+  const offset = (stop: number) => offsets[stop]!;
   return (
     <>
       <Button
@@ -117,7 +119,7 @@ export function ThinkingPicker({
             </View>
             <View style={styles.sliderHitArea} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
               <View pointerEvents="none" style={styles.sliderTrack}>
-                <View style={[styles.sliderFill, { width: offset(index) + 8 }]} />
+                <View style={[styles.sliderFill, { width: thinkingFillWidth(options.length, width, index) }]} />
                 {options.map((option, stop) => (
                   <View
                     key={option.label}
@@ -129,21 +131,25 @@ export function ThinkingPicker({
                 ))}
                 <View style={[styles.sliderThumb, { left: offset(index) - 12 }]} />
               </View>
-              <ThinkingSlider
-                value={index}
-                max={options.length - 1}
-                label={selected.label}
-                onChange={(stop) => onChange(options[stop]!.value)}
-              />
+              {options.length > 1 ? (
+                <ThinkingSlider
+                  value={index}
+                  max={options.length - 1}
+                  label={selected.label}
+                  onChange={(stop) => onChange(options[stop]!.value)}
+                />
+              ) : null}
             </View>
             <View
-              style={styles.thinkingEndpoints}
+              style={[styles.thinkingEndpoints, options.length === 1 && styles.thinkingEndpointsSingle]}
               aria-hidden
               accessibilityElementsHidden
               importantForAccessibility="no-hide-descendants"
             >
               <Text style={styles.thinkingLabel}>{options[0]!.label}</Text>
-              <Text style={styles.thinkingLabel}>{options[options.length - 1]!.label}</Text>
+              {options.length > 1 ? (
+                <Text style={styles.thinkingLabel}>{options[options.length - 1]!.label}</Text>
+              ) : null}
             </View>
           </View>
         </View>
@@ -253,6 +259,8 @@ export function ModelPicker({
     () => offered.filter((row) => matchesSearch(row, needle)),
     [offered, needle]
   );
+  // Filter each group by the row objects that matched, not by model id: two providers may offer the same id.
+  const matchedModels = useMemo(() => new Set(matched.map((row) => row.model)), [matched]);
   const valueHarness = value === undefined ? undefined : harnessOf(value.provider);
   // Opening clears the pick so the selected model's harness is restored every time.
   const tab =
@@ -266,7 +274,7 @@ export function ModelPicker({
           .map((section) => ({
             harness: candidate.harness,
             section,
-            models: section.models.filter((model) => matched.some((row) => row.model.id === model.id)),
+            models: section.models.filter((model) => matchedModels.has(model)),
           }))
           .filter((group) => group.models.length > 0)
       )
@@ -540,4 +548,5 @@ const styles = StyleSheet.create({
   sliderStop: { position: "absolute", top: 14, width: 4, height: 4, borderRadius: radius.full },
   sliderThumb: { position: "absolute", top: 4, width: 24, height: 24, borderRadius: radius.full, backgroundColor: colors.primary, ...shadows.soft },
   thinkingEndpoints: { flexDirection: "row", justifyContent: "space-between" },
+  thinkingEndpointsSingle: { justifyContent: "center" },
 });
