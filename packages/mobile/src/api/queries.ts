@@ -43,6 +43,10 @@ export const boxKeys = (scope: string) => ({
   providerUsage: ["box-data", scope, "provider-usage"] as const,
   /** What the box can run (`BoxCapabilities`): which harnesses it has. */
   capabilities: ["box-data", scope, "capabilities"] as const,
+  /** Generated-text preferences of this box's user (title, model, streaming). */
+  textGenerationSettings: ["box-data", scope, "text-generation-settings"] as const,
+  /** Thread-run preferences of this box's user (usage-limit auto-resume). */
+  threadSettings: ["box-data", scope, "thread-settings"] as const,
   usageActivity: ["box-data", scope, "usage-activity"] as const,
   /** All of the user's threads. Named apart from `task(id)` so invalidating one never touches the other. */
   tasks: ["box-data", scope, "task-list"] as const,
@@ -151,6 +155,10 @@ export function createQueries(api: ApiClient) {
     usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
     providerUsage: () => queryOptions({ queryKey: scoped.providerUsage, queryFn: () => api.providerUsage() }),
     capabilities: () => queryOptions({ queryKey: scoped.capabilities, queryFn: () => api.capabilities() }),
+    textGenerationSettings: () =>
+      queryOptions({ queryKey: scoped.textGenerationSettings, queryFn: () => api.textGenerationSettings() }),
+    threadSettings: () =>
+      queryOptions({ queryKey: scoped.threadSettings, queryFn: () => api.threadSettings() }),
     usageActivity: () => queryOptions({ queryKey: scoped.usageActivity, queryFn: () => api.usageActivity() }),
     commands: (
       taskId: string | undefined,
