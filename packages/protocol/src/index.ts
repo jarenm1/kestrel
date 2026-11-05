@@ -91,17 +91,16 @@ export type ContextUsage = typeof ContextUsage.Type
 
 /**
  * A failed run whose provider usage limit is armed to resume the thread when the window resets. The box sets it after
- * a usage-limit failure when the user's `ThreadSettings.autoResumeAfterUsageLimits` is on; `cancelledAt` keeps the
- * notice in the thread without resuming, and the whole entry is cleared once the resumed run starts.
+ * a usage-limit failure that names a provider-reported reset, whether or not auto-resume is on: `autoResume` is the
+ * user's switch at arm time, and the thread's notice lets them change it for this one failure.
  */
 export const UsageLimitResume = Schema.Struct({
   /** The failed run this arm belongs to: a newer run means the thread already continued. */
   runId: Schema.String,
-  provider: ModelProvider,
   /** When the provider's exhausted window resets, as the provider reported it. */
   resetsAt: Schema.String,
-  /** Set when the user cancelled auto-resume for this thread. */
-  cancelledAt: Schema.optional(Schema.String),
+  /** Whether this thread resumes by itself at the reset; off leaves it failed for the user. */
+  autoResume: Schema.Boolean,
 })
 export type UsageLimitResume = typeof UsageLimitResume.Type
 

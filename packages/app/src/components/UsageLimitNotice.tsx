@@ -31,7 +31,7 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
       queryClient.setQueryData(keys.tasks, (list: Task[] | undefined) => upsert(list, updated))
     },
   })
-  const cancelled = arm.cancelledAt !== undefined
+  const paused = !arm.autoResume
   const at = resetLabel(arm.resetsAt)
   return (
     <div
@@ -41,8 +41,8 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
       <div className="min-w-0 flex-1">
         <div className="font-medium">Usage limit reached</div>
         <p className="text-xs text-muted-foreground">
-          {cancelled
-            ? `Auto-resume is cancelled for this thread. The limit resets ${at}.`
+          {paused
+            ? `Auto-resume is off for this thread. The limit resets ${at}.`
             : `This thread resumes automatically ${at}, when the provider's limit resets.`}
         </p>
       </div>
@@ -50,9 +50,9 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
         size="sm"
         variant="ghost"
         disabled={toggle.isPending}
-        onClick={() => toggle.mutate(cancelled)}
+        onClick={() => toggle.mutate(paused)}
       >
-        {cancelled ? "Resume at reset" : "Cancel auto-resume"}
+        {paused ? "Resume at reset" : "Cancel auto-resume"}
       </Button>
       {toggle.error && <span className="text-xs text-destructive">Could not change auto-resume.</span>}
     </div>

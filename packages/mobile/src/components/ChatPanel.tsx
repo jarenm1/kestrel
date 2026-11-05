@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Linking, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol";
+import { threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus, type UsageLimitResume } from "@cloudagents/protocol";
 import type { ActiveBox } from "@/api/client";
 import { createQueries, boxKeys, upsert, type ThreadCall } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";
@@ -52,6 +52,41 @@ function WorkingIndicator({ run }: { run: Run }) {
         <Text style={styles.workingText}>Working</Text>
         <Elapsed startedAt={run.startedAt} />
       </View>
+    </View>
+  );
+}
+
+/** The thread's armed usage-limit resume, or nothing when it has none. */
+function UsageLimitNotice({ task }: { task: Task | undefined }) {
+  const arm = task?.usageLimitResume;
+  if (task === undefined || arm === undefined) return null;
+  return <ArmedUsageLimit task={task} arm={arm} />;
+}
+
+/** The same notice and per-thread toggle as the web app, in native views. */
+function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
+  const { api } = useApiClient();
+  const queryClient = useQueryClient();
+  const toggle = useMutation({
+    mutationFn: (autoResume: boolean) => api.setUsageLimitAutoResume(task.id, autoResume),
+    onSuccess: (updated) => queryClient.setQueryData(boxKeys(api.boxScope).task(updated.id), updated),
+  });
+  const paused = !arm.autoResume;
+  const at = Number.isNaN(Date.parse(arm.resetsAt))
+    ? "when the limit resets"
+    : new Date(arm.resetsAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return (
+    <View style={styles.limit}>
+      <Text style={styles.limitTitle}>Usage limit reached</Text>
+      <Text style={styles.limitText}>
+        {paused
+          ? `Auto-resume is off for this thread. The limit resets ${at}.`
+          : `This thread resumes automatically ${at}, when the provider's limit resets.`}
+      </Text>
+      <Button variant="soft" size="sm" disabled={toggle.isPending} onPress={() => toggle.mutate(paused)}>
+        {paused ? "Resume at reset" : "Cancel auto-resume"}
+      </Button>
+      {toggle.error ? <Alert>{errorText(toggle.error)}</Alert> : null}
     </View>
   );
 }
@@ -140,6 +175,7 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
         onSwipe={async (direction) => onSwipe(direction)}
         dom={{ style: styles.transcript, containerStyle: styles.flex }}
       />
+      <UsageLimitNotice task={task.data} />
       {activeRun ? <WorkingIndicator run={activeRun} /> : null}
       {archivedTask ? (
         <ArchivedNotice task={archivedTask} />
@@ -196,5 +232,17 @@ const styles = StyleSheet.create({
     borderRadius: radius.xl,
     backgroundColor: colors.background + "99",
   },
+  limit: {
+    gap: spacing.sm,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.warning + "40",
+    borderRadius: radius.xl,
+    backgroundColor: colors.warning + "1a",
+  },
+  limitTitle: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
+  limitText: { color: colors.mutedForeground, fontSize: 13 },
   archivedText: { color: colors.mutedForeground, fontSize: 14 },
 });

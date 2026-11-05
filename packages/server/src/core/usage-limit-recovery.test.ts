@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Either } from "effect"
-import type { AgentItem, ProviderUsage, Task, ThreadSettings } from "@cloudagents/protocol"
+import { Conflict, type AgentItem, type ProviderUsage, type Task, type ThreadSettings } from "@cloudagents/protocol"
 import type { StoreShape, StoreState } from "./state"
 import { makeUsageLimitRecovery } from "./usage-limit-recovery"
 
@@ -67,6 +67,8 @@ const setup = (input: {
   usage?: ProviderUsage
   items?: ReadonlyArray<AgentItem>
   settings?: ThreadSettings
+  providerUsage?: () => Effect.Effect<ReadonlyArray<ProviderUsage>, unknown>
+  deliver?: () => Effect.Effect<void, unknown>
 }) => {
   const { store, state } = memoryStore(input.state)
   const delivered: string[] = []
@@ -76,8 +78,12 @@ const setup = (input: {
     publish: (updated) => published.push(updated),
     settings: () => Effect.succeed(input.settings ?? { autoResumeAfterUsageLimits: true }),
     items: () => Effect.succeed(input.items ?? [{ _tag: "error", id: "error", text: "usage limit reached" }]),
-    providerUsage: () => Effect.succeed([input.usage ?? usage(new Date(Date.now() - 30_000).toISOString())]),
-    deliver: (_task, _run, deliveryId) => Effect.sync(() => void delivered.push(deliveryId)),
+    providerUsage:
+      input.providerUsage ??
+      (() => Effect.succeed([input.usage ?? usage(new Date(Date.now() - 30_000).toISOString())])),
+    deliver:
+      input.deliver ??
+      ((_task, _run, deliveryId) => Effect.sync(() => void delivered.push(deliveryId))),
   })
   return { recovery, state, delivered, published }
 }
@@ -87,7 +93,7 @@ test("arms a usage-limit failure and resumes it once the provider's window has r
   const { recovery, state, delivered, published } = setup({ state: stateWith({ runs: [failedRun(endedAt)] }) })
 
   await Effect.runPromise(recovery.sweep)
-  expect(state.tasks[0]!.usageLimitResume).toMatchObject({ runId: "run", provider: "anthropic" })
+  expect(state.tasks[0]!.usageLimitResume).toMatchObject({ runId: "run", autoResume: true })
   expect(delivered).toEqual([])
   expect(published.at(-1)?.usageLimitResume?.runId).toBe("run")
   const resetsAt = state.tasks[0]!.usageLimitResume!.resetsAt
@@ -111,7 +117,27 @@ test("arms a reset still in the future but does not resume before it", async () 
   expect(delivered).toEqual([])
 })
 
-test("a cancelled thread stays failed even after the reset", async () => {
+test("a thread with auto-resume off keeps the reset for a per-thread opt-in", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const { recovery, state, delivered } = setup({
+    state: stateWith({ runs: [failedRun(endedAt)] }),
+    settings: { autoResumeAfterUsageLimits: false },
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toMatchObject({ runId: "run", autoResume: false })
+  await Effect.runPromise(recovery.sweep)
+  expect(delivered).toEqual([])
+
+  // The notice's "Resume at reset" turns this one thread on.
+  const armed = state.tasks[0]!.usageLimitResume!
+  state.tasks[0] = { ...state.tasks[0]!, usageLimitResume: { ...armed, autoResume: true } }
+  await Effect.runPromise(recovery.sweep)
+  expect(delivered).toHaveLength(1)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+})
+
+test("an arm already off is not resumed at reset", async () => {
   const endedAt = new Date(Date.now() - 60_000).toISOString()
   const { recovery, state, delivered } = setup({
     state: stateWith({
@@ -119,9 +145,8 @@ test("a cancelled thread stays failed even after the reset", async () => {
         task({
           usageLimitResume: {
             runId: "run",
-            provider: "anthropic",
             resetsAt: new Date(Date.now() - 30_000).toISOString(),
-            cancelledAt: new Date().toISOString(),
+            autoResume: false,
           },
         }),
       ],
@@ -131,25 +156,52 @@ test("a cancelled thread stays failed even after the reset", async () => {
 
   await Effect.runPromise(recovery.sweep)
   expect(delivered).toEqual([])
-  expect(state.tasks[0]!.usageLimitResume?.cancelledAt).toBeDefined()
+  expect(state.tasks[0]!.usageLimitResume?.autoResume).toBe(false)
 })
 
-test("turning auto-resume off drops the arm instead of resuming later", async () => {
+test("a cancelled delegated thread is neither armed nor resumed", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const delegation = {
+    parentTaskId: "parent",
+    parentRunId: "parent-run",
+    requestId: "request",
+    fingerprint: "fingerprint",
+    cancelledAt: new Date().toISOString(),
+  }
+  const pending = setup({
+    state: stateWith({ tasks: [task({ delegation })], runs: [failedRun(endedAt)] }),
+  })
+  await Effect.runPromise(pending.recovery.sweep)
+  expect(pending.state.tasks[0]!.usageLimitResume).toBeUndefined()
+
+  const armed = setup({
+    state: stateWith({
+      tasks: [
+        task({
+          delegation,
+          usageLimitResume: { runId: "run", resetsAt: new Date(Date.now() - 30_000).toISOString(), autoResume: true },
+        }),
+      ],
+      runs: [failedRun(endedAt)],
+    }),
+  })
+  await Effect.runPromise(armed.recovery.sweep)
+  expect(armed.delivered).toEqual([])
+  expect(armed.state.tasks[0]!.usageLimitResume).toBeUndefined()
+})
+
+test("a delivery conflict drops the arm instead of promising a resume forever", async () => {
   const endedAt = new Date(Date.now() - 60_000).toISOString()
   const { recovery, state, delivered } = setup({
     state: stateWith({
       tasks: [
         task({
-          usageLimitResume: {
-            runId: "run",
-            provider: "anthropic",
-            resetsAt: new Date(Date.now() - 30_000).toISOString(),
-          },
+          usageLimitResume: { runId: "run", resetsAt: new Date(Date.now() - 30_000).toISOString(), autoResume: true },
         }),
       ],
       runs: [failedRun(endedAt)],
     }),
-    settings: { autoResumeAfterUsageLimits: false },
+    deliver: () => Effect.fail(new Conflict({ message: "the thread moved on" })),
   })
 
   await Effect.runPromise(recovery.sweep)
@@ -157,7 +209,25 @@ test("turning auto-resume off drops the arm instead of resuming later", async ()
   expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
 })
 
-test("does not arm another failure, or a provider whose limits the box cannot read", async () => {
+test("a failed usage probe is retried on the next sweep", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  let calls = 0
+  const resetsAt = new Date(Date.now() - 30_000).toISOString()
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedRun(endedAt)] }),
+    providerUsage: () => {
+      calls += 1
+      return calls === 1 ? Effect.fail(new Error("probe timed out")) : Effect.succeed([usage(resetsAt)])
+    },
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
+})
+
+test("does not arm another failure, agent prose, or a provider whose limits the box cannot read", async () => {
   const endedAt = new Date(Date.now() - 60_000).toISOString()
   const unrelated = setup({
     state: stateWith({ runs: [failedRun(endedAt)] }),

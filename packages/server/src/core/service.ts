@@ -353,8 +353,8 @@ export interface CoreShape {
     dev: boolean,
   ) => Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError>
   /**
-   * Turns a thread's armed usage-limit auto-resume on or off. Off keeps the thread's notice (reset time and all) so the
-   * user can turn it back on; a thread with no arm is a Conflict.
+   * Turns a thread's armed usage-limit auto-resume on or off. The arm stays either way so the notice keeps the reset
+   * and the user can turn it back on for this thread; a thread with no arm is a Conflict.
    */
   readonly setUsageLimitAutoResume: (
     user: string,
@@ -1305,6 +1305,8 @@ export const CoreLive = Layer.effect(
       dev: boolean,
       from: FromThread | null,
       deliveryId?: string,
+      /** Automatic deliveries only: refuse unless this is still the thread's latest run (see the sweep's arm). */
+      expectRunId?: string,
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
@@ -1369,6 +1371,14 @@ export const CoreLive = Layer.effect(
             }
             if (task.archivedAt !== undefined) {
               return Either.left(new Conflict({ message: "task is archived; unarchive it first" }))
+            }
+            if (expectRunId !== undefined) {
+              // Checked in the same update that reserves the run: a user reply that landed since the sweep must not
+              // have the continuation steered into its run.
+              const last = [...s.runs].reverse().find((r) => r.taskId === taskId)
+              if (last?.id !== expectRunId) {
+                return Either.left(new Conflict({ message: "the thread moved on; auto-resume was not started" }))
+              }
             }
             // A replay needs its own run: it must not land in a running run's inbox or answer its
             // question. Refused here, inside the same update that checks for a running run.
@@ -1603,12 +1613,7 @@ export const CoreLive = Layer.effect(
           if (arm === undefined) {
             return Either.left(new Conflict({ message: "this thread is not waiting on a usage limit" }))
           }
-          if (autoResume) {
-            // The thread's own toggle overrides the user's later choice for this one failure.
-            task.usageLimitResume = { runId: arm.runId, provider: arm.provider, resetsAt: arm.resetsAt }
-          } else if (arm.cancelledAt === undefined) {
-            task.usageLimitResume = { ...arm, cancelledAt: nowIso() }
-          }
+          if (arm.autoResume !== autoResume) task.usageLimitResume = { ...arm, autoResume }
           return Either.right({ ...task })
         })
         hub.publish({ _tag: "task.updated", task: updated })
@@ -1651,6 +1656,7 @@ export const CoreLive = Layer.effect(
             false,
             null,
             deliveryId,
+            run.id,
           ),
         ),
     })
@@ -1766,6 +1772,8 @@ export const CoreLive = Layer.effect(
           for (const task of s.tasks) {
             if (task.delegation?.runId && ids.includes(task.delegation.runId)) {
               task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
+              // A cancelled delegated thread must not wake at a usage-limit reset and run for a parent that stopped it.
+              delete task.usageLimitResume
               if (task.status === "needs_input") task.status = "idle"
               task.updatedAt = nowIso()
               changed.push({ ...task })
@@ -1782,6 +1790,14 @@ export const CoreLive = Layer.effect(
       Effect.gen(function* () {
         const status = yield* delegatedStatus(parentTaskId, childTaskId)
         if (status.run && (status.run.status === "running" || status.waitingForChildren || status.task.status === "needs_input")) yield* cancelDelegatedTree(status.run.id)
+        // A child that already failed (on a usage limit, say) is not in the running tree; its arm goes here.
+        const cleared = yield* store.update((s) => {
+          const child = s.tasks.find((t) => t.id === childTaskId)
+          if (child?.usageLimitResume === undefined) return Either.right(null)
+          delete child.usageLimitResume
+          return Either.right({ ...child })
+        })
+        if (cleared !== null) hub.publish({ _tag: "task.updated", task: cleared })
         return yield* delegatedStatus(parentTaskId, childTaskId)
       })
 

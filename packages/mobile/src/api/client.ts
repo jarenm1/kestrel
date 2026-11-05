@@ -152,6 +152,8 @@ export interface ApiClient {
   listRuns(taskId: string): Promise<readonly Run[]>;
   runItems(runId: string): Promise<RunItems>;
   cancelRun(runId: string): Promise<Run>;
+  /** Turns a thread's armed usage-limit auto-resume on or off; the box answers with the thread as stored. */
+  setUsageLimitAutoResume(taskId: string, autoResume: boolean): Promise<Task>;
   getDiff(taskId: string): Promise<DiffResponse>;
   getDesktop(taskId: string): Promise<DesktopStatus>;
   startDesktop(taskId: string): Promise<DesktopStatus>;
@@ -436,6 +438,8 @@ export function createApiClient(
     listRuns: (taskId) => boxRequest(Schema.Array(Run), "GET", Paths.taskRuns(taskId)),
     runItems: (runId) => boxRequest(RunItems, "GET", Paths.runItems(runId)),
     cancelRun: (runId) => boxRequest(Run, "POST", Paths.runCancel(runId)),
+    setUsageLimitAutoResume: (taskId, autoResume) =>
+      boxRequest(Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
     getDiff: (taskId) => boxRequest(DiffResponse, "GET", Paths.taskDiff(taskId)),
     getDesktop: (taskId) => boxRequest(DesktopStatus, "GET", Paths.taskDesktop(taskId)),
     startDesktop: (taskId) => boxRequest(DesktopStatus, "POST", Paths.taskDesktop(taskId)),

@@ -16,7 +16,7 @@ export const MODEL_USAGE_CLI: Partial<Record<ModelProvider, CliProvider>> = {
 }
 
 const USAGE_LIMIT =
-  /\b(?:usage|rate|quota|weekly|monthly|daily)[ -]?(?:limit|limits)\b|\bquota (?:has been )?(?:reached|exceeded)\b|\btoo many requests\b|\b429\b|\blimit (?:has been )?(?:reached|exceeded)\b/i
+  /\b(?:usage|rate|quota|weekly|monthly|daily)[ -]?(?:limit|limits)\b|\bquota (?:has been )?(?:reached|exceeded)\b|\binsufficient[ _]quota\b|\bcredit balance\b|\breached (?:your|the) limit\b|\bout of credits?\b|\btoo many requests\b|\b429\b|\blimit (?:has been )?(?:reached|exceeded)\b/i
 
 /** Whether any of a failed run's texts says the provider refused it for a usage limit (not for another error). */
 export const isUsageLimitFailure = (texts: readonly string[]): boolean => texts.some((text) => USAGE_LIMIT.test(text))
