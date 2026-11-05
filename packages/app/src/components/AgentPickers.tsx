@@ -177,21 +177,18 @@ const HARNESS_RAIL_PX = 40
  * harness (up to a cap), so switching harnesses or searching never resizes it; longer lists scroll. In the search box,
  * ArrowLeft and ArrowRight step through the harnesses. `sections` is null while connections load.
  *
- * With `defaultLabel` the menu offers that default (and the trigger shows it while `value` is unset), which settings
- * use for "Conversation model" and its reset action.
+ * `defaultLabel` labels an unset choice without offering a model reset.
  */
 export function ModelPicker({
   sections,
   value,
   onChange,
   defaultLabel,
-  onReset,
 }: {
   sections: readonly ModelSection[] | null
   value: ModelInfo | undefined
   onChange: (value: AgentModel) => void
   defaultLabel?: string
-  onReset?: () => void
 }) {
   const tabs: readonly HarnessTab[] = HARNESSES.map((harness) => ({
     harness,
@@ -245,7 +242,6 @@ export function ModelPicker({
     menu.inputProps.onKeyDown(e)
   }
 
-  const defaultAction = defaultLabel !== undefined && onReset !== undefined
   const label = value?.name ?? defaultLabel ?? (sections === null ? "Model" : "No models")
   return (
     <DropdownMenu
@@ -317,22 +313,15 @@ export function ModelPicker({
           )}
           <div ref={menu.listRef} className="min-h-0 flex-1 overflow-y-auto">
             {sections === null && <DropdownMenuLabel>Loading models…</DropdownMenuLabel>}
-            {sections !== null && tabs.length === 0 && !defaultAction && (
+            {sections !== null && tabs.length === 0 && (
               <DropdownMenuLabel>Connect a harness or add an API key to choose a model.</DropdownMenuLabel>
             )}
             <DropdownMenuRadioGroup
               value={value?.id ?? ""}
               onValueChange={(v) => {
-                if (defaultAction && v === "") onReset()
-                else if (Schema.is(AgentModel)(v)) onChange(v)
+                if (Schema.is(AgentModel)(v)) onChange(v)
               }}
             >
-              {defaultAction && (
-                <>
-                  <DropdownMenuRadioItem value="">{defaultLabel}</DropdownMenuRadioItem>
-                  <DropdownMenuSeparator />
-                </>
-              )}
               {groups.map((group) => (
                 <Fragment key={group.section.provider.id}>
                   <DropdownMenuLabel className="flex items-center gap-1.5">

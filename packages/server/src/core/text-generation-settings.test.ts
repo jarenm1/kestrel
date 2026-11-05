@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
 import { Effect, Schema } from "effect"
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_TEXT_GENERATION_SETTINGS, TextGenerationSettings } from "@cloudagents/protocol"
@@ -12,6 +12,7 @@ afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
 test("persists a user's choices without exposing them to another user or box", async () => {
   const chosen: TextGenerationSettings = {
+    enabled: false,
     model: "claude-opus-5",
     effort: "low",
     threadTitleInstructions: "Use sentence case and name the affected subsystem.",
@@ -21,6 +22,23 @@ test("persists a user's choices without exposing them to another user or box", a
   expect(await Effect.runPromise(readTextGenerationSettings(root, "alice"))).toEqual(chosen)
   expect(await Effect.runPromise(readTextGenerationSettings(root, "bob"))).toEqual(DEFAULT_TEXT_GENERATION_SETTINGS)
   expect(await Effect.runPromise(readTextGenerationSettings(join(root, "other-box"), "alice"))).toEqual(DEFAULT_TEXT_GENERATION_SETTINGS)
+})
+
+test("existing saved preferences retain their choices when the toggle is introduced", async () => {
+  const chosen: TextGenerationSettings = {
+    ...DEFAULT_TEXT_GENERATION_SETTINGS,
+    model: "claude-opus-5",
+    effort: "medium",
+    threadTitleInstructions: "Name the affected subsystem.",
+    responseStreamingMode: "turn",
+  }
+  await Effect.runPromise(writeTextGenerationSettings(root, "alice", chosen))
+  const [name] = await readdir(join(root, "text-generation"))
+  const file = join(root, "text-generation", name!)
+  const legacy = JSON.parse(await readFile(file, "utf8"))
+  delete legacy.enabled
+  await writeFile(file, JSON.stringify(legacy))
+  expect(await Effect.runPromise(readTextGenerationSettings(root, "alice"))).toEqual(chosen)
 })
 
 test("corrupt saved settings fail instead of silently resetting user choices", async () => {

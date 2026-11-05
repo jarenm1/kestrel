@@ -3,7 +3,6 @@ import { useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   ControlPaths,
   CURRENT_PLAN,
-  DEFAULT_TEXT_GENERATION_SETTINGS,
   PLANS,
   connectedModelProviders,
   modelInfo,
@@ -14,7 +13,7 @@ import {
   type TextGenerationSettings as TextGenerationConfig,
   type Usage,
 } from "@cloudagents/protocol"
-import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, RotateCcw, Server, Sparkles, User } from "lucide-react"
+import { Check, CreditCard, ExternalLink, Layers, LogOut, MessagesSquare, Plug, RotateCcw, Server, User } from "lucide-react"
 import { Navigate, NavLink, Outlet } from "react-router-dom"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -27,6 +26,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Textarea } from "@/components/ui/textarea"
+import { Switch } from "@/components/ui/switch"
 import { SERVER_URL } from "@/config"
 import { useShownModels } from "@/hooks/useShownModels"
 import { useSignOut } from "@/hooks/useSignOut"
@@ -36,7 +36,7 @@ import { errorText } from "@/util"
 const sections = [
   { to: "profile", label: "Profile", icon: User },
   { to: "connections", label: "Connections", icon: Plug },
-  { to: "text-generation", label: "Text generation", icon: Sparkles },
+  { to: "threads", label: "Threads", icon: MessagesSquare },
   { to: "boxes", label: "Boxes", icon: Server },
   { to: "billing", label: "Billing", icon: CreditCard },
 ] as const
@@ -217,16 +217,30 @@ function activeBoxRoute(list: BoxList): { key: string; targetBoxId: string | nul
   }
 }
 
+export function ThreadsSettings() {
+  return (
+    <>
+      <h2 className="text-lg font-semibold tracking-tight">Threads</h2>
+      <section aria-label="Text generation" className="flex min-w-0 flex-col gap-6">
+        <TextGenerationSettings />
+      </section>
+    </>
+  )
+}
+
 /**
  * Generated-text preferences of the signed-in user on the active box: the model and thinking level used for short
  * generated text, the instructions that shape automatic thread titles, and how assistant prose is buffered.
  */
-export function TextGenerationSettings() {
+function TextGenerationSettings() {
   const boxes = useQuery(queries.boxes())
   if (!boxes.data) {
     return (
       <>
-        <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+        <div>
+          <h3 className="font-semibold">Text generation</h3>
+          <p className="text-muted-foreground">{TEXT_GENERATION_DESC}</p>
+        </div>
         {boxes.error && <Alert>{errorText(boxes.error)}</Alert>}
         {boxes.isPending && <div className="text-muted-foreground">Loading settings…</div>}
       </>
@@ -325,7 +339,10 @@ function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId
   if (!form) {
     return (
       <>
-        <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+        <div>
+          <h3 className="font-semibold">Text generation</h3>
+          <p className="text-muted-foreground">{TEXT_GENERATION_DESC}</p>
+        </div>
         {settings.error && <Alert>{errorText(settings.error)}</Alert>}
         {(settings.isPending || settings.isFetching) && (
           <div className="text-muted-foreground">Loading settings…</div>
@@ -354,128 +371,133 @@ function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId
 
   return (
     <>
-      <SectionHeader title="Text generation" desc={TEXT_GENERATION_DESC} />
+      <div>
+        <div className="flex items-center justify-between gap-4">
+          <h3 className="font-semibold">Text generation</h3>
+          <Switch
+            aria-label="Enable text generation"
+            checked={form.enabled}
+            onCheckedChange={(enabled) => update({ enabled })}
+          />
+        </div>
+        <p className="text-muted-foreground">
+          {form.enabled
+            ? TEXT_GENERATION_DESC
+            : "Off. Keep original prompt-based titles and token-by-token responses, without extra title-generation requests."}
+        </p>
+      </div>
       {settings.error && <Alert>{errorText(settings.error)}</Alert>}
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-      <Card className="py-0">
-        <CardContent className="divide-y divide-white/[0.04] px-0">
-          <Row label="Model">
-            <ModelPicker
-              sections={modelSections}
-              value={model}
-              onChange={(id: AgentModel) => {
-                const next = modelInfo(id)
-                update({
-                  model: id,
-                  effort: form.effort !== null && next.efforts.includes(form.effort) ? form.effort : null,
-                })
-              }}
-              defaultLabel="Conversation model"
-              onReset={() => update({ model: null, effort: null })}
-            />
-            {model !== undefined && model.efforts.length > 0 && (
-              <ThinkingPicker
-                value={effort}
-                options={effortOptions(model)}
-                onChange={(level: AgentEffort) => update({ effort: level })}
+      <fieldset
+        aria-label="Text generation settings"
+        disabled={!form.enabled}
+        inert={!form.enabled}
+        className="flex min-w-0 flex-col gap-6 border-0 p-0 transition-opacity disabled:opacity-40"
+      >
+        <Card className="py-0">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <span className="text-muted-foreground">Model</span>
+            <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+              <ModelPicker
+                sections={modelSections}
+                value={model}
+                onChange={(id: AgentModel) => {
+                  const next = modelInfo(id)
+                  update({
+                    model: id,
+                    effort: form.effort !== null && next.efforts.includes(form.effort) ? form.effort : null,
+                  })
+                }}
+                defaultLabel="Conversation model"
               />
-            )}
-            {form.model !== null && (
-              <Button type="button" variant="ghost" size="sm" onClick={() => update({ model: null, effort: null })}>
-                <RotateCcw />
-                Reset
-              </Button>
-            )}
-          </Row>
-        </CardContent>
-      </Card>
-
-      <Card className="py-0">
-        <CardContent className="flex flex-col gap-2 px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <label htmlFor={instructionsId} className="font-medium">
-              Thread title instructions
-            </label>
-            {form.threadTitleInstructions !== "" && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => persist({ ...form, threadTitleInstructions: "" })}
-              >
-                <RotateCcw />
-                Reset
-              </Button>
-            )}
-          </div>
-          <Textarea
-            id={instructionsId}
-            rows={3}
-            value={form.threadTitleInstructions}
-            placeholder="Keep titles to a few words. Lead with the main subject."
-            onChange={(event) => setForm({ ...form, threadTitleInstructions: event.target.value })}
-            onBlur={saveInstructions}
-          />
-          <p className="text-xs text-muted-foreground">
-            Added to Kestrel's prompt when it automatically names a new thread. Leave blank to use the default
-            instructions. Changes save when you leave the field.
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card className="py-0">
-        <CardContent className="px-5 py-4">
-          <div className="flex flex-col gap-3">
-            <div>
-              <h3 className="font-medium">Response streaming</h3>
-              <p className="text-xs text-muted-foreground">
-                How assistant prose is buffered before it reaches the transcript.
-              </p>
+              {model !== undefined && model.efforts.length > 0 && (
+                <ThinkingPicker
+                  value={effort}
+                  options={effortOptions(model)}
+                  onChange={(level: AgentEffort) => update({ effort: level })}
+                />
+              )}
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {STREAMING_OPTIONS.map((option) => {
-                const active = form.responseStreamingMode === option.value
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => update({ responseStreamingMode: option.value })}
-                    className={cn(
-                      "rounded-xl border px-4 py-3 text-left transition-colors duration-200",
-                      active
-                        ? "border-primary/40 bg-white/[0.06] shadow-soft"
-                        : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]",
-                    )}
-                  >
-                    <span className="flex items-center justify-between gap-2 text-sm font-medium">
-                      {option.label}
-                      {active && <Check className="size-4 text-primary" />}
-                    </span>
-                    <span className="mt-1 block text-xs text-muted-foreground">{option.desc}</span>
-                  </button>
-                )
-              })}
+          </CardContent>
+        </Card>
+
+        <Card className="py-0">
+          <CardContent className="flex flex-col gap-2 px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label htmlFor={instructionsId} className="font-medium">
+                Thread title instructions
+              </label>
+              {form.threadTitleInstructions !== "" && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => persist({ ...form, threadTitleInstructions: "" })}
+                >
+                  <RotateCcw />
+                  Reset
+                </Button>
+              )}
             </div>
-          </div>
-        </CardContent>
-      </Card>
+            <Textarea
+              id={instructionsId}
+              rows={3}
+              value={form.threadTitleInstructions}
+              placeholder="Keep titles to a few words. Lead with the main subject."
+              onChange={(event) => setForm({ ...form, threadTitleInstructions: event.target.value })}
+              onBlur={saveInstructions}
+            />
+            <p className="text-xs text-muted-foreground">
+              Added to Kestrel's prompt when it automatically names a new thread. Leave blank to use the default
+              instructions. Changes save when you leave the field.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="py-0">
+          <CardContent className="px-5 py-4">
+            <div className="flex flex-col gap-3">
+              <div>
+                <h3 className="font-medium">Response streaming</h3>
+                <p className="text-xs text-muted-foreground">
+                  How assistant prose is buffered before it reaches the transcript.
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {STREAMING_OPTIONS.map((option) => {
+                  const active = form.responseStreamingMode === option.value
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => update({ responseStreamingMode: option.value })}
+                      className={cn(
+                        "rounded-xl border px-4 py-3 text-left transition-colors duration-200",
+                        active
+                          ? "border-primary/40 bg-white/[0.06] shadow-soft"
+                          : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04]",
+                      )}
+                    >
+                      <span className="flex items-center justify-between gap-2 text-sm font-medium">
+                        {option.label}
+                        {active && <Check className="size-4 text-primary" />}
+                      </span>
+                      <span className="mt-1 block text-xs text-muted-foreground">{option.desc}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </fieldset>
 
       {saveState === "error" && <Alert>{errorText(saveError)}</Alert>}
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-sm text-muted-foreground" role="status">
           {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
         </span>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="ml-auto"
-          onClick={() => persist({ ...DEFAULT_TEXT_GENERATION_SETTINGS })}
-        >
-          <RotateCcw />
-          Reset to defaults
-        </Button>
       </div>
     </>
   )

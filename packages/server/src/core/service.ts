@@ -742,6 +742,7 @@ export const CoreLive = Layer.effect(
      */
     const applyGeneratedTitle = (user: string, taskId: string, baseline: string, title: string) =>
       Effect.gen(function* () {
+        if (!(yield* readTextGenerationSettings(config.dataDir, user)).enabled) return
         const updated = yield* store.update((s): Either.Either<Task | null, never> => {
           const task = s.tasks.find((t) => t.id === taskId)
           if (task === undefined || !mayReplaceTitle(task, user, baseline)) return Either.right(null)
@@ -1287,11 +1288,11 @@ export const CoreLive = Layer.effect(
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
-        // A preference read that fails must not stop the message: the defaults are the shipped behavior.
+        // Unreadable preferences must not stop chat or accidentally enable a paid title-generation request.
         const textSettings = yield* readTextGenerationSettings(config.dataDir, user).pipe(
           Effect.catchAll((e) =>
             Effect.logWarning(`task ${taskId}: cannot read text generation settings: ${e.message}`).pipe(
-              Effect.as(DEFAULT_TEXT_GENERATION_SETTINGS),
+              Effect.as({ ...DEFAULT_TEXT_GENERATION_SETTINGS, enabled: false }),
             ),
           ),
         )
@@ -1365,7 +1366,9 @@ export const CoreLive = Layer.effect(
             const now = nowIso()
             // An opt-in title is spent by the first accepted message. The provisional title at this moment is the
             // baseline a generated title may still replace; any later rename wins over it.
-            const titleRequest = pendingTitleRequest(task, from, !s.messages.some((m) => m.taskId === taskId), text, attachments)
+            const titleRequest = textSettings.enabled
+              ? pendingTitleRequest(task, from, !s.messages.some((m) => m.taskId === taskId), text, attachments)
+              : null
             if (from === null) delete task.generateTitle
             // Any message of the user settles the task's question: it is the answer, or it is ignored once the question's
             // run is gone. Another agent's message leaves the question to the user.
@@ -1470,7 +1473,7 @@ export const CoreLive = Layer.effect(
                     continuation: resumeSession.continuation,
                     prompt: withUserContext(user, formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, "delta"), notes),
                   },
-              responseStreamingMode: textSettings.responseStreamingMode,
+              responseStreamingMode: textSettings.enabled ? textSettings.responseStreamingMode : null,
             }
             return Either.right({
               task: { ...task },

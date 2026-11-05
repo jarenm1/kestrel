@@ -65,14 +65,21 @@ harnesses, with each harness's model-visibility picker beside its name; **API ke
 its model preferences together. These pickers change which models appear in chat, not the box's installed models.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
 
-Settings › Text generation stores each user's preferences on the active box (`GET`/`PUT /api/settings/text-generation`).
-The model and thinking controls are shared with the composer. “Conversation model” inherits that conversation's model
-and thinking level; an explicitly selected model uses its own supported default until a level is selected. Custom
-thread-title instructions are appended to the title prompt. Response streaming either reveals completed paragraphs
-and fenced code blocks or waits for the assistant's full response; tools and thinking remain live.
+Settings › Threads (`/settings/threads`) groups thread preferences into sections. Its Text generation section stores
+each user's choices on the active box (`GET`/`PUT /api/settings/text-generation`). The section's toggle disables its
+controls without clearing the selected model, thinking level, title instructions or streaming choice. Off skips
+title-generation requests, leaves new threads' original prompt-derived titles intact and restores token-by-token
+responses for new runs. A pending generated title is not applied while the section is off. Re-enabling restores the
+saved choices; it does not rename existing threads retroactively.
 
-New desktop and mobile threads opt into automatic naming with `CreateTaskBody.generateTitle`. The first accepted
-user message starts a separate, non-resuming text-generation request in a temporary sandbox workspace, using the
+The right-aligned model and thinking controls are shared with the composer, with no model-reset action. “Conversation
+model” inherits that conversation's model and thinking level; an explicitly selected model uses its own supported
+default until a level is selected. Custom thread-title instructions are appended to the title prompt. While enabled,
+response streaming either reveals completed paragraphs and fenced code blocks or waits for the assistant's full
+response; tools and thinking remain live.
+
+New desktop and mobile threads opt into automatic naming with `CreateTaskBody.generateTitle`. When enabled, the first
+accepted user message starts a separate, non-resuming text-generation request in a temporary sandbox workspace, using the
 owner's existing provider credentials without the thread's MCP tools. It never enters the conversation history or
 changes its model/session. The provisional prompt-derived title remains on failure; generated titles cannot overwrite
 an archived, deleted or renamed thread. Explicitly named automations and delegated threads keep their titles.

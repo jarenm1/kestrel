@@ -464,6 +464,8 @@ export type CheckoutRequest = typeof CheckoutRequest.Type
 
 /** Per-user, per-box preferences for short generated text and assistant response presentation. */
 export const TextGenerationSettings = Schema.Struct({
+  /** Off preserves prompt-derived titles and unbuffered assistant streaming. */
+  enabled: Schema.optionalWith(Schema.Boolean, { default: () => true }),
   /** Null uses the conversation's model. */
   model: Schema.NullOr(AgentModel),
   effort: Schema.NullOr(AgentEffort),
@@ -480,6 +482,7 @@ export const TextGenerationSettings = Schema.Struct({
 export type TextGenerationSettings = typeof TextGenerationSettings.Type
 
 export const DEFAULT_TEXT_GENERATION_SETTINGS: TextGenerationSettings = {
+  enabled: true,
   model: null,
   effort: null,
   threadTitleInstructions: "",
