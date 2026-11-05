@@ -2,7 +2,7 @@
 //! chunk is `null` and needs no object. A manifest is stored sealed under its own key, so it opens only for the box and
 //! only under the manifest number it was written as. The manifest key is the `volumeRef` the control plane records.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::BoxKey;
@@ -97,20 +97,35 @@ pub fn chunk_key(box_id: &str, name: &str) -> String {
     format!("boxes/{box_id}/chunks/{name}")
 }
 
-pub fn manifest_key(box_id: &str, n: u64) -> String {
-    format!("boxes/{box_id}/manifests/{n}.json")
+/// The object key of manifest `n`. The random `token` makes each manifest object unique, so a key never names different
+/// content, even after the manifest with the same number is deleted.
+pub fn manifest_key(box_id: &str, n: u64, token: &str) -> String {
+    format!("boxes/{box_id}/manifests/{n}-{token}.json")
+}
+
+/// A fresh random token for a manifest key: 8 random bytes in hex.
+pub fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow!("random manifest token: {e}"))?;
+    Ok(hex::encode(bytes))
 }
 
 pub fn manifests_prefix(box_id: &str) -> String {
     format!("boxes/{box_id}/manifests/")
 }
 
-/// The manifest number of a key under `boxes/<box>/manifests/`, if it is one.
+/// The manifest number of a key under `boxes/<box>/manifests/`, if the key is exactly one `manifest_key` makes.
 pub fn manifest_number(box_id: &str, key: &str) -> Option<u64> {
-    key.strip_prefix(&manifests_prefix(box_id))?
-        .strip_suffix(".json")?
-        .parse()
-        .ok()
+    let name = key
+        .strip_prefix(&manifests_prefix(box_id))?
+        .strip_suffix(".json")?;
+    let (number, token) = name.split_once('-')?;
+    let n: u64 = number.parse().ok()?;
+    let token_ok = token.len() == 16
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (token_ok && manifest_key(box_id, n, token) == key).then_some(n)
 }
 
 /// A `volumeRef` is only usable for the box it was taken for.
@@ -125,6 +140,8 @@ pub fn check_ref(box_id: &str, volume_ref: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::testutil::{BOX, box_key};
+
+    const TOKEN: &str = "0123456789abcdef";
 
     fn sealed_two_chunk_manifest(key: &BoxKey, object: &str) -> (Manifest, Vec<u8>) {
         let manifest = Manifest::new(BOX, CHUNK_SIZE * 2, vec![None, None], "t".into());
@@ -144,7 +161,7 @@ mod tests {
     fn sealed_manifest_opens_under_its_own_key() {
         let dir = tempfile::tempdir().unwrap();
         let key = box_key(dir.path(), BOX);
-        let object = manifest_key(BOX, 3);
+        let object = manifest_key(BOX, 3, TOKEN);
         let (manifest, sealed) = sealed_two_chunk_manifest(&key, &object);
         assert_eq!(
             Manifest::open(&sealed, &key, BOX, &object).unwrap(),
@@ -156,7 +173,7 @@ mod tests {
     fn manifest_rejects_tampering_replay_and_other_boxes() {
         let dir = tempfile::tempdir().unwrap();
         let key = box_key(dir.path(), BOX);
-        let object = manifest_key(BOX, 3);
+        let object = manifest_key(BOX, 3, TOKEN);
         let (_, sealed) = sealed_two_chunk_manifest(&key, &object);
 
         let mut tampered = sealed.clone();
@@ -164,7 +181,15 @@ mod tests {
         tampered[last] ^= 1;
         assert!(Manifest::open(&tampered, &key, BOX, &object).is_err());
 
-        assert!(Manifest::open(&sealed, &key, BOX, &manifest_key(BOX, 4)).is_err());
+        assert!(
+            Manifest::open(
+                &sealed,
+                &key,
+                BOX,
+                &manifest_key(BOX, 3, "fedcba9876543210")
+            )
+            .is_err()
+        );
 
         let other = box_key(dir.path(), "box-b");
         assert!(Manifest::open(&sealed, &other, "box-b", &object).is_err());
@@ -183,7 +208,7 @@ mod tests {
     fn manifest_rejects_a_wrong_chunk_count() {
         let dir = tempfile::tempdir().unwrap();
         let key = box_key(dir.path(), BOX);
-        let object = manifest_key(BOX, 1);
+        let object = manifest_key(BOX, 1, TOKEN);
         let short = Manifest::new(BOX, CHUNK_SIZE * 2, vec![None], "t".into());
         let sealed = short.seal(&key, &object).unwrap();
         assert!(Manifest::open(&sealed, &key, BOX, &object).is_err());
@@ -191,8 +216,12 @@ mod tests {
 
     #[test]
     fn refs_are_bound_to_their_box() {
-        let key = manifest_key("box-a", 3);
+        let key = manifest_key("box-a", 3, TOKEN);
         assert_eq!(manifest_number("box-a", &key), Some(3));
+        assert_eq!(
+            manifest_number("box-a", "boxes/box-a/manifests/3.json"),
+            None
+        );
         assert!(check_ref("box-a", &key).is_ok());
         assert!(check_ref("box-b", &key).is_err());
         assert!(check_ref("box-a", "boxes/box-a/chunks/abc").is_err());

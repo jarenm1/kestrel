@@ -47,10 +47,13 @@ enum Command {
         #[arg(long)]
         size_bytes: u64,
     },
-    /// Uploads the changed chunks of a volume image and writes a new manifest.
+    /// Uploads the changed chunks of a volume image and writes a new manifest. The snapshot, baseline, and lock for the box
+    /// are kept in `--state-dir`, which must be on the same reflink filesystem as the volume.
     Backup {
         #[arg(long)]
         path: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
         #[command(flatten)]
         remote: Remote,
     },
@@ -121,12 +124,17 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Create { path, size_bytes } => create(&path, size_bytes),
-        Command::Backup { path, remote } => {
+        Command::Backup {
+            path,
+            state_dir,
+            remote,
+        } => {
             let key = remote.box_key()?;
             let store = store::open(&remote.store)?;
             print_json(&backup::backup(
                 &path,
                 &remote.box_id,
+                &state_dir,
                 store.as_ref(),
                 &key,
             )?)

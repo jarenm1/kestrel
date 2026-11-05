@@ -47,10 +47,13 @@ impl Fixture {
     }
 
     fn backup(&self, volume: &Path) -> serde_json::Value {
+        fs::create_dir_all(self.path("state")).unwrap();
         self.json(&[
             "backup",
             "--path",
             volume.to_str().unwrap(),
+            "--state-dir",
+            self.path("state").to_str().unwrap(),
             "--box",
             "box-1",
             "--store",
@@ -140,12 +143,15 @@ fn backup_accepts_a_relative_volume_path() {
     let fx = Fixture::new();
     let volume = fx.create("volume.raw");
     fill(&volume, 0, 0x5A, 4096);
+    fs::create_dir(fx.path("state")).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_kestrel-volume"))
         .current_dir(fx.dir.path())
         .args([
             "backup",
             "--path",
             "volume.raw",
+            "--state-dir",
+            "state",
             "--box",
             "box-1",
             "--store",
@@ -160,7 +166,7 @@ fn backup_accepts_a_relative_volume_path() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(fx.path("volume.raw.base.ref").is_file());
+    assert!(fx.path("state/box-1.base.ref").is_file());
 }
 
 #[test]

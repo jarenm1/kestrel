@@ -201,8 +201,8 @@ impl Volume {
             return Ok(());
         }
         if let Some(name) = &self.manifest.chunks[index] {
-            let len = chunk_len(self.manifest.size_bytes, index);
-            let plaintext = fetch_chunk(self.store.as_ref(), &self.box_id, &self.key, name, len)?;
+            let mut plaintext = fetch_chunk(self.store.as_ref(), &self.box_id, &self.key, name)?;
+            plaintext.truncate(chunk_len(self.manifest.size_bytes, index));
             self.file
                 .write_all_at(&plaintext, index as u64 * CHUNK_SIZE)?;
             self.file.sync_data()?;
@@ -398,7 +398,7 @@ mod tests {
         let store = FileStore::new(dir.join("store"));
         let key = box_key(dir, BOX);
         let path = volume(dir, chunks);
-        backup(&path, BOX, &store, &key).unwrap().volume_ref
+        backup(&path, BOX, dir, &store, &key).unwrap().volume_ref
     }
 
     #[test]
@@ -476,7 +476,9 @@ mod tests {
             .unwrap();
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
-        let volume_ref = backup(&path, BOX, &store, &key).unwrap().volume_ref;
+        let volume_ref = backup(&path, BOX, dir.path(), &store, &key)
+            .unwrap()
+            .volume_ref;
         let dest = dir.path().join("dest.raw");
         let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
         assert!(lazy.manifest.chunks[1].is_none());
@@ -501,7 +503,9 @@ mod tests {
             .unwrap();
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
-        let second = backup(&path, BOX, &store, &key).unwrap().volume_ref;
+        let second = backup(&path, BOX, dir.path(), &store, &key)
+            .unwrap()
+            .volume_ref;
         assert_ne!(first, second);
         assert!(open(dir.path(), &second, &dest).is_err());
     }

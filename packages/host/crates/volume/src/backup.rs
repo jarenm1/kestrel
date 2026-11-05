@@ -5,7 +5,8 @@
 //! manifest is the commit point: the baseline advances only after the manifest is stored.
 
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -16,9 +17,10 @@ use serde::Serialize;
 
 use crate::crypto::BoxKey;
 use crate::extents;
-use crate::files::{suffixed, write_file_atomic};
+use crate::files::write_file_atomic;
 use crate::manifest::{
     CHUNK_SIZE, Manifest, check_ref, chunk_key, manifest_key, manifest_number, manifests_prefix,
+    random_token,
 };
 use crate::store::Store;
 
@@ -65,6 +67,33 @@ impl Drop for Cleanup {
     }
 }
 
+/// An exclusive lock on one box's backup state, held for a whole backup so two backups of the same box never race on
+/// its baseline. Released when dropped.
+struct BoxLock {
+    /// Held open so the `flock` lasts until this value is dropped.
+    _file: File,
+}
+
+impl BoxLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        // SAFETY: `flock` takes a valid descriptor and an operation flag, and touches no memory.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        ensure!(
+            rc == 0,
+            "locking {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+        Ok(Self { _file: file })
+    }
+}
+
 /// Runs `f` over `items` on up to `WORKERS` threads and returns the results in input order. The first error stops
 /// new work and is returned.
 pub fn parallel_map<T: Send, R: Send>(
@@ -106,14 +135,9 @@ pub fn parallel_map<T: Send, R: Send>(
     Ok(done.into_iter().map(|(_, result)| result).collect())
 }
 
-/// Fetches and authenticates one chunk. A missing or corrupt chunk is an error, never a silent zero.
-pub fn fetch_chunk(
-    store: &dyn Store,
-    box_id: &str,
-    key: &BoxKey,
-    name: &str,
-    expected_len: usize,
-) -> Result<Vec<u8>> {
+/// Fetches and authenticates one chunk. Chunks are stored zero-padded to `CHUNK_SIZE`, so callers truncate to the chunk's
+/// length. A missing or corrupt chunk is an error, never a silent zero.
+pub fn fetch_chunk(store: &dyn Store, box_id: &str, key: &BoxKey, name: &str) -> Result<Vec<u8>> {
     let sealed = store
         .get(&chunk_key(box_id, name))?
         .ok_or_else(|| anyhow!("chunk {name} is missing from the store"))?;
@@ -121,8 +145,8 @@ pub fn fetch_chunk(
         .open_chunk(name, &sealed)
         .with_context(|| format!("chunk {name}"))?;
     ensure!(
-        plaintext.len() == expected_len,
-        "chunk {name} has {} bytes, expected {expected_len}",
+        plaintext.len() == CHUNK_SIZE as usize,
+        "chunk {name} has {} bytes, expected {CHUNK_SIZE}",
         plaintext.len()
     );
     Ok(plaintext)
@@ -133,31 +157,45 @@ pub fn chunk_len(size: u64, index: usize) -> usize {
     (size - start).min(CHUNK_SIZE) as usize
 }
 
-/// The newest manifest for `box_id`, with its number. It must open under `key`.
+/// The newest manifest for `box_id`: its number, its object key, and the manifest, which must open under `key`.
 pub fn latest_manifest(
     store: &dyn Store,
     box_id: &str,
     key: &BoxKey,
-) -> Result<Option<(u64, Manifest)>> {
-    let mut newest: Option<u64> = None;
+) -> Result<Option<(u64, String, Manifest)>> {
+    let mut newest: Option<(u64, String)> = None;
     for object_key in store.list(&manifests_prefix(box_id))? {
         if let Some(n) = manifest_number(box_id, &object_key) {
-            newest = Some(newest.map_or(n, |current| current.max(n)));
+            let candidate = (n, object_key);
+            if newest.as_ref().is_none_or(|best| candidate > *best) {
+                newest = Some(candidate);
+            }
         }
     }
-    let Some(n) = newest else { return Ok(None) };
-    let object = manifest_key(box_id, n);
+    let Some((n, object)) = newest else {
+        return Ok(None);
+    };
     let bytes = store
         .get(&object)?
         .ok_or_else(|| anyhow!("manifest {object} is missing"))?;
-    Ok(Some((n, Manifest::open(&bytes, key, box_id, &object)?)))
+    let manifest = Manifest::open(&bytes, key, box_id, &object)?;
+    Ok(Some((n, object, manifest)))
 }
 
-pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Result<BackupOutput> {
+/// Backs up the volume at `path`. The snapshot, the baseline, and the box lock live in `state_dir`, which must be on the
+/// same reflink filesystem as the volume.
+pub fn backup(
+    path: &Path,
+    box_id: &str,
+    state_dir: &Path,
+    store: &dyn Store,
+    key: &BoxKey,
+) -> Result<BackupOutput> {
+    let _lock = BoxLock::acquire(&state_dir.join(format!("{box_id}.lock")))?;
     let prev = latest_manifest(store, box_id, key)?;
-    let snap_path = suffixed(path, ".snap");
-    let base_path = suffixed(path, ".base");
-    let ref_path = suffixed(path, ".base.ref");
+    let snap_path = state_dir.join(format!("{box_id}.snap"));
+    let base_path = state_dir.join(format!("{box_id}.base"));
+    let ref_path = state_dir.join(format!("{box_id}.base.ref"));
 
     extents::snapshot(path, &snap_path)?;
     let _snap_guard = Cleanup::new(snap_path.clone());
@@ -168,9 +206,9 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
 
     // The baseline is only usable when it is the exact file the newest manifest describes.
     let base_ok = match &prev {
-        Some((n, manifest)) => {
+        Some((_, object, manifest)) => {
             manifest.size_bytes == size
-                && fs::read_to_string(&ref_path).is_ok_and(|r| r.trim() == manifest_key(box_id, *n))
+                && fs::read_to_string(&ref_path).is_ok_and(|r| r.trim() == object.as_str())
                 && fs::metadata(&base_path).is_ok_and(|m| m.len() == size)
         }
         None => false,
@@ -194,7 +232,7 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
             .as_ref()
             .is_some_and(|base| base[index] == snap_sigs[index]);
         if unchanged {
-            chunks[index] = prev.as_ref().and_then(|(_, m)| m.chunks[index].clone());
+            chunks[index] = prev.as_ref().and_then(|(_, _, m)| m.chunks[index].clone());
         } else if is_data[index] {
             to_read.push(index);
         }
@@ -202,15 +240,19 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
 
     let previous_names: HashSet<&str> = prev
         .iter()
-        .flat_map(|(_, m)| m.chunks.iter().flatten())
+        .flat_map(|(_, _, m)| m.chunks.iter().flatten())
         .map(String::as_str)
         .collect();
     let uploads = parallel_map(to_read, |index| {
-        let mut buf = vec![0u8; chunk_len(size, index)];
-        snap.read_exact_at(&mut buf, index as u64 * CHUNK_SIZE)?;
+        let mut buf = vec![0u8; CHUNK_SIZE as usize];
+        snap.read_exact_at(
+            &mut buf[..chunk_len(size, index)],
+            index as u64 * CHUNK_SIZE,
+        )?;
         if buf.iter().all(|b| *b == 0) {
             return Ok((index, None, 0u64, false));
         }
+        // Chunks are padded to CHUNK_SIZE before naming and sealing, so stored sizes do not reveal the last chunk's length.
         let name = key.chunk_name(&buf);
         if previous_names.contains(name.as_str()) || store.exists(&chunk_key(box_id, &name))? {
             return Ok((index, Some(name), 0, false));
@@ -228,9 +270,9 @@ pub fn backup(path: &Path, box_id: &str, store: &dyn Store, key: &BoxKey) -> Res
         chunks_uploaded += u64::from(uploaded);
     }
 
-    let number = prev.as_ref().map_or(1, |(n, _)| n + 1);
+    let number = prev.as_ref().map_or(1, |(n, _, _)| n + 1);
     let manifest = Manifest::new(box_id, size, chunks, jiff::Timestamp::now().to_string());
-    let manifest_ref = manifest_key(box_id, number);
+    let manifest_ref = manifest_key(box_id, number, &random_token()?);
     store.put(&manifest_ref, &manifest.seal(key, &manifest_ref)?)?;
 
     fs::rename(&snap_path, &base_path)
@@ -267,13 +309,8 @@ pub fn restore(
         .filter_map(|(index, name)| name.clone().map(|name| (index, name)))
         .collect();
     parallel_map(work, |(index, name)| {
-        let plaintext = fetch_chunk(
-            store,
-            box_id,
-            key,
-            &name,
-            chunk_len(manifest.size_bytes, index),
-        )?;
+        let mut plaintext = fetch_chunk(store, box_id, key, &name)?;
+        plaintext.truncate(chunk_len(manifest.size_bytes, index));
         file.write_all_at(&plaintext, index as u64 * CHUNK_SIZE)?;
         Ok(())
     })?;
@@ -313,7 +350,7 @@ mod tests {
         let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 4);
 
-        let first = backup(&path, BOX, &store, &key).unwrap();
+        let first = backup(&path, BOX, dir.path(), &store, &key).unwrap();
         assert_eq!(first.chunks, 4);
 
         let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
@@ -322,7 +359,7 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let second = backup(&path, BOX, &store, &key).unwrap();
+        let second = backup(&path, BOX, dir.path(), &store, &key).unwrap();
         assert_eq!(second.chunks, 1, "only the modified chunk should upload");
         assert_ne!(second.volume_ref, first.volume_ref);
 
@@ -338,8 +375,8 @@ mod tests {
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 2);
-        backup(&path, BOX, &store, &key).unwrap();
-        let again = backup(&path, BOX, &store, &key).unwrap();
+        backup(&path, BOX, dir.path(), &store, &key).unwrap();
+        let again = backup(&path, BOX, dir.path(), &store, &key).unwrap();
         assert_eq!(again.chunks, 0);
         assert_eq!(again.bytes_uploaded, 0);
     }
@@ -350,8 +387,8 @@ mod tests {
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 1);
-        let out = backup(&path, BOX, &store, &key).unwrap();
-        let manifest = latest_manifest(&store, BOX, &key).unwrap().unwrap().1;
+        let out = backup(&path, BOX, dir.path(), &store, &key).unwrap();
+        let manifest = latest_manifest(&store, BOX, &key).unwrap().unwrap().2;
         let name = manifest.chunks[0].clone().unwrap();
         let chunk_path = dir.path().join("store").join(chunk_key(BOX, &name));
         let mut bytes = fs::read(&chunk_path).unwrap();
@@ -372,12 +409,12 @@ mod tests {
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 1);
-        let out = backup(&path, BOX, &store, &key).unwrap();
+        let out = backup(&path, BOX, dir.path(), &store, &key).unwrap();
         let stored = dir.path().join("store").join(&out.volume_ref);
         let original = fs::read(&stored).unwrap();
         let dest = dir.path().join("restored.raw");
 
-        let replayed = manifest_key(BOX, 9);
+        let replayed = manifest_key(BOX, 9, "0123456789abcdef");
         store.put(&replayed, &original).unwrap();
         assert!(restore(&replayed, BOX, &store, &key, &dest).is_err());
         assert!(!dest.exists());
@@ -396,10 +433,76 @@ mod tests {
         let store = FileStore::new(dir.path().join("store"));
         let key = box_key(dir.path(), BOX);
         let path = volume(dir.path(), 2);
-        backup(&path, BOX, &store, &key).unwrap();
+        backup(&path, BOX, dir.path(), &store, &key).unwrap();
         delete(BOX, &store).unwrap();
         assert!(store.list(&format!("boxes/{BOX}/")).unwrap().is_empty());
         assert!(latest_manifest(&store, BOX, &key).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_manifest_key_is_never_reused_after_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = volume(dir.path(), 1);
+        let first = backup(&path, BOX, dir.path(), &store, &key)
+            .unwrap()
+            .volume_ref;
+        store.delete(&first).unwrap();
+        let second = backup(&path, BOX, dir.path(), &store, &key)
+            .unwrap()
+            .volume_ref;
+        assert_ne!(first, second);
+        let dest = dir.path().join("restored.raw");
+        assert!(restore(&first, BOX, &store, &key, &dest).is_err());
+    }
+
+    #[test]
+    fn stored_chunks_are_all_the_same_size_and_restore_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("store"));
+        let key = box_key(dir.path(), BOX);
+        let path = dir.path().join("volume.raw");
+        fs::write(&path, vec![0x5A; CHUNK_SIZE as usize + 100]).unwrap();
+        let volume_ref = backup(&path, BOX, dir.path(), &store, &key)
+            .unwrap()
+            .volume_ref;
+        let manifest = latest_manifest(&store, BOX, &key).unwrap().unwrap().2;
+        let sizes: HashSet<usize> = manifest
+            .chunks
+            .iter()
+            .flatten()
+            .map(|name| store.get(&chunk_key(BOX, name)).unwrap().unwrap().len())
+            .collect();
+        assert_eq!(
+            sizes.len(),
+            1,
+            "stored sizes must not reveal the last chunk's length"
+        );
+        let restored = dir.path().join("restored.raw");
+        restore(&volume_ref, BOX, &store, &key, &restored).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), fs::read(&restored).unwrap());
+    }
+
+    #[test]
+    fn a_box_lock_blocks_a_second_backup_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("box-a.lock");
+        let held = BoxLock::acquire(&lock_path).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let contender = thread::spawn(move || {
+            let _again = BoxLock::acquire(&lock_path).unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a second lock must wait for the first"
+        );
+        drop(held);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the second lock is acquired after release");
+        contender.join().unwrap();
     }
 
     #[test]
