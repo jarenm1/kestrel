@@ -81,6 +81,7 @@ Typing `@` at a word boundary in the desktop or phone composer opens model sugge
 Suggestions use the same connected, visible models as the model picker, search names and routing identities, and
 show the harness logo with a provider-qualified slug identifying whose connection/usage the model uses. Selecting
 one inserts an atomic logo/name chip; it does not change the answering model or automatically launch a child.
+Inline mentions use a smaller 12px logo and a subtle rounded backing in both the composer and sent transcript.
 The prompt and saved draft retain a readable Markdown mention with the exact model id, provider and harness, so
 the agent can use that identity with `delegate_task` or `delegate_batch`. Model and GitHub-reference chips can
 coexist; both are masked from autocomplete triggers. Shared parsing and provider-to-harness identity live in

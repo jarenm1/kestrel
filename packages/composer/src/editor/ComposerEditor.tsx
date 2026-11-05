@@ -285,9 +285,9 @@ function createReferenceToken(reference: GithubReference): HTMLSpanElement {
   return token
 }
 
-/** A model mention reads like the picker's selected model: harness logo then name, same compact size and spacing. */
+/** A compact model mention with a subtle backing to distinguish it from ordinary prompt text. */
 const MODEL_CHIP_CLASS =
-  "mx-px inline-flex items-center gap-1.5 whitespace-nowrap align-middle text-xs font-medium text-foreground"
+  "mx-px inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-white/[0.07] px-1.5 py-0.5 align-middle text-xs font-medium text-foreground"
 
 /** The provider's harness logo, drawn as a mask when the asset is monochrome, exactly as the model picker draws it. */
 function createModelLogo(model: ModelInfo, logos: ComposerModelLogos | undefined): HTMLElement | undefined {
@@ -297,7 +297,7 @@ function createModelLogo(model: ModelInfo, logos: ComposerModelLogos | undefined
     const mask = document.createElement("span")
     mask.dataset.harnessLogo = "true"
     mask.setAttribute("aria-hidden", "true")
-    mask.className = "size-4 shrink-0 self-center bg-current"
+    mask.className = "size-3 shrink-0 self-center bg-current"
     mask.style.mask = `url("${logo.src}") center / contain no-repeat`
     return mask
   }
@@ -306,7 +306,7 @@ function createModelLogo(model: ModelInfo, logos: ComposerModelLogos | undefined
   image.src = logo.src
   image.alt = ""
   image.draggable = false
-  image.className = "size-4 shrink-0 self-center object-contain"
+  image.className = "size-3 shrink-0 self-center object-contain"
   return image
 }
 

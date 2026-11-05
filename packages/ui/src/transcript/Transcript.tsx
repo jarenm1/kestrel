@@ -45,12 +45,12 @@ function UserMessageText({ text }: { text: string }) {
               key={index}
               title={`${mention.slug} · ${mention.harnessName}`}
               aria-label={`${mention.name}, ${mention.harnessName}, ${mention.slug}`}
-              className="mx-px inline-flex items-center gap-1.5 whitespace-nowrap align-middle text-xs font-medium text-foreground"
+              className="mx-px inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-white/[0.07] px-1.5 py-0.5 align-middle text-xs font-medium text-foreground"
             >
               {logo && (logo.monochrome ? (
-                <span aria-hidden="true" className="size-4 shrink-0 bg-current" style={{ mask: `url("${logo.src}") center / contain no-repeat` }} />
+                <span aria-hidden="true" className="size-3 shrink-0 bg-current" style={{ mask: `url("${logo.src}") center / contain no-repeat` }} />
               ) : (
-                <img src={logo.src} alt="" className="size-4 shrink-0 object-contain" />
+                <img src={logo.src} alt="" className="size-3 shrink-0 object-contain" />
               ))}
               {mention.name}
             </span>

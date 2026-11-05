@@ -67,12 +67,15 @@ export const composerEditorStyles = `
     stroke-linejoin: round;
   }
 
-  /* A model mention reads like the picker's selected model: harness mark then name, with no chrome of its own. */
+  /* Model mentions use the same compact logo and subtle backing as the shared transcript. */
   [data-composer-editor] [data-model-mention] {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     margin: 0 1px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background-color: rgba(255, 255, 255, 0.07);
     vertical-align: middle;
     white-space: nowrap;
     color: inherit;
@@ -83,8 +86,8 @@ export const composerEditorStyles = `
   [data-composer-editor] [data-harness-logo] {
     flex-shrink: 0;
     align-self: center;
-    width: 16px;
-    height: 16px;
+    width: 12px;
+    height: 12px;
   }
 
   /* A monochrome logo keeps its inline mask style and takes the text color, as on desktop. */
