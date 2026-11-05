@@ -170,4 +170,16 @@ describe("agent HTML and SVG", () => {
     expect(html).toContain('<text x="1" y="1">hi</text>')
     expect(html).not.toContain("&lt;rect")
   })
+
+  test("text inside a drawing keeps its character references as text", () => {
+    const html = render('<svg viewBox="0 0 10 10">\n\n <text x="1" y="1">a &lt;rect/&gt; b</text>\n</svg>')
+    expect(html).toContain('<text x="1" y="1">a &lt;rect/&gt; b</text>')
+    expect(html).not.toContain("<rect")
+  })
+
+  test("a fenced sample without a language stays a code sample", () => {
+    const html = render('<svg viewBox="0 0 10 10">\n\n```\n<rect/>\n</svg>\n```\n')
+    expect(html).toContain("<pre><code>")
+    expect(html).toContain("&lt;rect/&gt;")
+  })
 })

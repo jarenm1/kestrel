@@ -39,19 +39,29 @@ const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkDrawingsWhole]
 /** A raw HTML block that opens a drawing. */
 const DRAWING_OPEN = /^\s*<svg\b[^>]*>/i
 const DRAWING_CLOSE = /<\/svg\s*>/i
+/** A code fence: a run of backticks or tildes at any indent, the first thing on its line. */
+const FENCE = /^\s*(`{3,}|~{3,})/
+
+/** mdast decodes character references in text; put back what raw HTML needs so the drawing keeps its literal text. */
+const escapeText = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
 /**
  * The text of a node that continues a drawing interrupted by a blank line: SVG markup as raw HTML, an indented code
  * sample (elements indented four spaces or more), or a paragraph of inline HTML (elements indented one to three).
- * `undefined` for anything else, which ends the search.
+ * `undefined` for anything else, which ends the search. Fenced code is a sample, not a continuation, so it stays code.
  */
-function drawingText(node: RootContent): string | undefined {
+function drawingText(node: RootContent, lines: string[]): string | undefined {
   if (node.type === "html") return node.value
-  if (node.type === "code") return node.lang === null ? node.value : undefined
+  if (node.type === "code") {
+    const line = lines[(node.position?.start.line ?? 0) - 1]
+    if (node.lang !== null || line === undefined || FENCE.test(line)) return undefined
+    return node.value
+  }
   if (node.type !== "paragraph") return undefined
   let text = ""
   for (const child of node.children) {
-    if (child.type === "html" || child.type === "text") text += child.value
+    if (child.type === "html") text += child.value
+    else if (child.type === "text") text += escapeText(child.value)
     else if (child.type === "break") text += "\n"
     else return undefined
   }
@@ -71,7 +81,8 @@ function isBlockContainer(node: RootContent): node is Blockquote | List | ListIt
  * stay as they are.
  */
 function remarkDrawingsWhole() {
-  return (tree: Root) => {
+  return (tree: Root, file?: { value?: unknown }) => {
+    const lines = typeof file?.value === "string" ? file.value.split("\n") : []
     const walk = (parent: { children: RootContent[] }) => {
       for (let index = 0; index < parent.children.length; index++) {
         const node = parent.children[index]!
@@ -80,7 +91,7 @@ function remarkDrawingsWhole() {
           let end = index
           let closed = false
           while (end + 1 < parent.children.length) {
-            const continuation = drawingText(parent.children[end + 1]!)
+            const continuation = drawingText(parent.children[end + 1]!, lines)
             if (continuation === undefined || !continuation.trimStart().startsWith("<")) break
             end += 1
             parts.push(continuation)
