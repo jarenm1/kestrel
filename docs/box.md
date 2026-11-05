@@ -240,8 +240,10 @@ Operators see Settings › Fleet and the `/api/fleet/boxes` routes (`Me.operator
 Settings › Fleet separates **assigned users** (placement) from **active users**: unique assigned logins that made
 an authenticated request to that box within the last five minutes. Background polling counts; this is not a measure
 of human attention or running agents. HTTP requests and requests on an authenticated WebRTC API channel refresh
-activity. Opening a desktop or event stream counts, but traffic on an already-open stream does not; merely watching
-a desktop can therefore age out. Legacy relay traffic and user-owned boxes are not included.
+activity. Validated preview-token requests also count, including preview documents, HTTP subresources and WebSocket
+upgrades; invalid tokens or tokens used for another task do not. Opening a desktop, event or preview WebSocket
+stream counts, but traffic on an already-open stream does not; merely watching a desktop can therefore age out.
+Legacy relay traffic and user-owned boxes are not included.
 
 Managed boxes send a complete snapshot, including an empty snapshot when idle, every 30 seconds to
 `POST /box/telemetry/activity`, authenticated with their box id and secret. Collection is in memory and resets on

@@ -41,7 +41,7 @@ interface Routed {
 
 export interface DirectListenerDeps {
   readonly auth: BoxAuth
-  /** Told about requests over long-lived WebRTC channels, whose only token authentication happens when they open. */
+  /** Told about validated preview requests and requests over authenticated, long-lived WebRTC channels. */
   readonly activity?: BoxActivitySink
   readonly core: Pick<CoreShape, "previewTokenFor">
   /** The app's web handler (`makeWebHandler`), serving HTTP requests whose identity is already set. */
@@ -91,6 +91,7 @@ const route = async (
     if (session === null || session.taskId !== preview.taskId) {
       return { status: 404, tag: "NotFound", message: "preview session is invalid" }
     }
+    deps.activity?.record(session.user)
     return {
       url: new URL(`${Paths.taskPreview(preview.taskId)}${preview.path}`, url),
       user: session.user,
