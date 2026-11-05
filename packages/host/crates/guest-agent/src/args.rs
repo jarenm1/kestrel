@@ -25,7 +25,7 @@ kestrel-guest-agent [OPTIONS]
   --nix-store <path>                       the overlay mounted on the Nix store (default /nix/store)
   --nix-lower <path>                       read-only lower of that overlay (default /nix/.ro-store/store)
   --nix-tmp-upper <path>                   tmpfs upper of that overlay, moved to the volume (default /nix/.rw-store/store)
-  --dry-run-system                         log mount/ip/systemctl/modprobe/clock/poweroff instead of running them
+  --dry-run-system                         log mount/ip/systemctl/modprobe/clock instead of running them
   -h, --help
 ";
 

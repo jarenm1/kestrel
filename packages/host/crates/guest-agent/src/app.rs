@@ -577,7 +577,17 @@ async fn gpu_attached(app: &Arc<App>, pci_address: String) -> Res<()> {
             Ok(())
         }
         Err(e) => {
-            set_gpu(app, GpuState::None, None);
+            // Modules loaded before the failure stay loaded unless unloaded now. If that fails, the GPU stays recorded
+            // as attached, so the host's gpuDetach retries the unload instead of finding nothing to do.
+            match gpu::detach(&app.sys).await {
+                Ok(()) => set_gpu(app, GpuState::None, None),
+                Err(unload) => {
+                    log(format!(
+                        "could not unload the partly attached GPU: {unload}"
+                    ));
+                    set_gpu(app, GpuState::Attached, Some(pci_address));
+                }
+            }
             Err(e)
         }
     }
