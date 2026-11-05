@@ -828,7 +828,7 @@ export const AgentHarnessLive = Layer.effect(
               : yield* github.commitIdentity(task.owner, creds?.github).pipe(
                   Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
                 )
-            const resources = projectResourcesFor(config.projectResources ?? [], task)
+            const resources = yield* projectResourcesFor(config.projectResources ?? [], task)
             const launch = yield* prepareLaunch({
               settings,
               taskId: task.id,

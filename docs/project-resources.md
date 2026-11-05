@@ -1,6 +1,6 @@
 # Project resources
 
-An operator can provision a versioned engine directory and a shared project cache on a box. This is opt-in: set `CLOUDAGENTS_PROJECT_RESOURCES_FILE` to an absolute path to a host-controlled JSON file before starting the box. Sandboxing must be enabled. The box validates the file at startup and rejects invalid configuration.
+An operator can provision a versioned engine directory and a shared project cache on a box. This is opt-in: set `CLOUDAGENTS_PROJECT_RESOURCES_FILE` to an absolute canonical path to a host-controlled JSON file before starting the box. The manifest must be a regular file without symlink components, outside the box data directory and every writable resource cache. Sandboxing must be enabled. The box validates the file at startup and rejects invalid configuration. These path checks do not replace the requirement for host-controlled ancestors: operators must prevent sandbox users from modifying or replacing the manifest and its parent directories.
 
 ```json
 {
