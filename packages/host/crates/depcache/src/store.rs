@@ -387,6 +387,10 @@ impl Store {
         if total > self.cap {
             return Err(Error::TooLarge(self.cap));
         }
+        // The staged files count against the cap until they are indexed, so no more than `cap` is ever on disk.
+        let mut reservation = self
+            .reserve(total)
+            .ok_or_else(|| Error::Busy("downloads hold the cache budget; retry".to_owned()))?;
         let mut staged = Vec::with_capacity(link_files.len() + 2);
         for (path, bytes) in link_files {
             staged.push((path, self.stage(&bytes)?, bytes.len() as u64));
@@ -403,11 +407,7 @@ impl Store {
         ));
         {
             let mut lru = lock_index(&self.lru);
-            if total > self.cap.saturating_sub(lru.reserved) {
-                return Err(Error::Busy(
-                    "downloads hold the cache budget; retry".to_owned(),
-                ));
-            }
+            lru.reserved -= reservation.release();
             let mut committed: io::Result<()> = Ok(());
             for (path, tmp, size) in staged {
                 match tmp.persist(&path) {
@@ -661,5 +661,26 @@ mod tests {
             Err(Error::TooLarge(64))
         ));
         assert!(store.read_fresh_meta("k").expect("read").is_none());
+    }
+
+    #[test]
+    fn a_listing_waits_for_the_downloads_holding_the_cache() {
+        let (_dir, store) = store(1000);
+        let held = store.reserve(900).expect("reserve");
+        let cached = Cached {
+            fetched_at: now_secs(),
+            content_type: "text/plain".to_owned(),
+            body: vec![b'x'; 200],
+        };
+        assert!(matches!(
+            store.commit_metadata("k", &[], &cached),
+            Err(Error::Busy(_))
+        ));
+        assert_eq!(lock_index(&store.lru).bytes, 0, "nothing was indexed");
+        drop(held);
+        store
+            .commit_metadata("k", &[], &cached)
+            .expect("commit once the downloads are done");
+        assert!(store.read_fresh_meta("k").expect("read").is_some());
     }
 }
