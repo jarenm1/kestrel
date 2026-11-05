@@ -35,6 +35,8 @@ interface Props {
   /** Shows the pressed (web: active/hover) fill without a press, e.g. the selected tab. */
   active?: boolean;
   accessibilityLabel?: string;
+  /** False removes the button from the keyboard tab order (web, and hardware keyboards); used inside folded panels. */
+  focusable?: boolean;
   style?: StyleProp<ViewStyle>;
   hitSlop?: number;
 }
@@ -49,6 +51,7 @@ export function Button({
   disabled,
   active,
   accessibilityLabel,
+  focusable,
   style,
   hitSlop,
 }: Props) {
@@ -59,6 +62,7 @@ export function Button({
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      focusable={focusable}
       hitSlop={hitSlop ?? (size === "sm" ? 6 : 4)}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
