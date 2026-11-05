@@ -58,6 +58,11 @@ implementation; Expo bundles that surface locally for native iOS/Android through
 as ordinary GitHub Markdown links with explicit repository, kind and number, so drafts and messages cross UI
 surfaces without a protocol change. See [mobile references](../packages/mobile/README.md#github-references).
 
+In desktop Settings, Profile manages GitHub repository access, including connecting and reconnecting OAuth.
+Connections contains only model access: **Harnesses/Subscriptions** groups subscription sign-ins and installed
+harnesses, with each harness's model-visibility picker beside its name; **API keys** keeps key-based access and
+its model preferences together. These pickers change which models appear in chat, not the box's installed models.
+
 The shared composer also owns the app-command catalog and invocation rules (`src/commands.ts`). App actions such
 as `/usage` execute locally on suggestion selection or message submission; they never reach the harness and
 override same-named slash commands, but not `$skills`. Each host implements the exhaustive `AppCommandHandlers`

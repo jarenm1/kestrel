@@ -1,17 +1,14 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent, type ReactNode } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import {
   CLI_SIGN_IN,
   CliProvider,
-  ControlPaths,
   MODEL_PROVIDERS,
-  connectedModelProviders,
   providerModels,
 
   type CliLoginStart,
   type Connection,
   type AgentModel,
-  type ModelProvider,
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
@@ -32,11 +29,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
-import { SERVER_URL } from "@/config"
 
 import { setShownModels, useShownModels } from "@/hooks/useShownModels"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"
+import claudeLogo from "@/assets/claude.svg"
+import openaiLogo from "@/assets/openai.svg"
+import antigravityLogo from "@/assets/antigravity.svg"
+import opencodeLogo from "@/assets/opencode.svg"
 
 /** API keys shorter than this are rejected by the server (`PutApiKeyBody`). */
 const MIN_API_KEY_LENGTH = 8
@@ -51,19 +51,15 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
 }
 
-/** Providers whose model list stays under Models even though they also take an API key. */
-const MODELS_CARD_PROVIDERS: readonly ModelProvider[] = ["anthropic", "openai"]
-
 /** Key-based CLI logins belong with API keys, but keep their box-local authentication. */
 function isApiKeyConnection(connection: Connection) {
   return connection.kind === "apikey" ||
     (connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) && CLI_SIGN_IN[connection.provider] === "key")
 }
 
-/** Body of Settings › Connections: the accounts and keys, then the models each provider shows in the chat picker. */
+/** Model subscriptions, installed harnesses, and API keys with their chat model preferences. */
 export function Connections() {
   const connections = useQuery(queries.connections())
-  const capabilities = useQuery(queries.capabilities())
   const list = connections.data
 
   return (
@@ -72,10 +68,10 @@ export function Connections() {
       {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
       {list && (
         <div className="flex flex-col gap-2">
-          <h2 className="font-semibold tracking-tight">Accounts and subscriptions</h2>
+          <h2 className="font-semibold tracking-tight">Harnesses/Subscriptions</h2>
           <Card className="py-0">
             <CardContent className="divide-y divide-white/[0.04] px-0">
-              {list.filter((connection) => !isApiKeyConnection(connection)).map((connection) =>
+              {list.filter((connection) => connection.kind === "cli" && !isApiKeyConnection(connection)).map((connection) =>
                 connection.kind === "cli" && Schema.is(CliProvider)(connection.provider) ? (
                   <CliConnectionRow key={connection.provider} connection={connection} provider={connection.provider} />
                 ) : connection.kind === "cli" && connection.provider === "opencode" ? (
@@ -89,7 +85,6 @@ export function Connections() {
         </div>
       )}
       {list && <ApiKeysCard connections={list} />}
-      {list && <ModelListsCard connections={list} harnesses={capabilities.data?.harnesses} />}
     </>
   )
 }
@@ -152,61 +147,41 @@ function ApiKeysCard({ connections }: { connections: readonly Connection[] }) {
 }
 
 
-/** Per model provider, the models the chat's model picker offers; the rest stay out of the way. */
-function ModelListsCard({
-  connections,
-  harnesses,
-}: {
-  connections: readonly Connection[]
-  harnesses: readonly ModelProvider[] | undefined
-}) {
-  const connected = new Set(connectedModelProviders(connections, harnesses).map((p) => p.id))
-  // A provider whose access is an API key shows its model list in that key's row instead.
-  const apiKeyProviders = new Set(
-    connections.filter(isApiKeyConnection).map((connection) => connection.provider),
-  )
-  const rows = MODEL_PROVIDERS.filter(
-    (provider) =>
-      MODELS_CARD_PROVIDERS.includes(provider.id) || !provider.connections.some((id) => apiKeyProviders.has(id)),
-  )
-  return (
-    <div className="flex flex-col gap-2">
-      <h2 className="font-semibold tracking-tight">Models</h2>
-      <Card className="py-0">
-        <CardContent className="divide-y divide-white/[0.04] px-0">
-          {rows.map((provider) => (
-            <ModelListRow key={provider.id} provider={provider} connected={connected.has(provider.id)} />
-          ))}
-        </CardContent>
-      </Card>
-    </div>
-  )
+const HARNESS_LOGOS: Record<string, { src: string; monochrome: boolean }> = {
+  "claude-cli": { src: claudeLogo, monochrome: false },
+  "codex-cli": { src: openaiLogo, monochrome: true },
+  "antigravity-cli": { src: antigravityLogo, monochrome: false },
+  opencode: { src: opencodeLogo, monochrome: true },
 }
 
-function ModelListRow({ provider, connected }: { provider: ModelProviderInfo; connected: boolean }) {
+/** Keep all row content aligned with the name, leaving the logo in its own hanging column. */
+function HarnessRow({ connection, children }: { connection: Connection; children: ReactNode }) {
+  const logo = HARNESS_LOGOS[connection.provider]
+  const modelProvider = MODEL_PROVIDERS.find(
+    (provider) => provider.id === connection.provider || provider.connections.includes(connection.provider),
+  )
   return (
-    <div className="flex items-center gap-3 px-5 py-4">
-      <div className="flex flex-col gap-0.5">
-        {provider.connections.length === 0 ? (
-          <div className="flex items-center gap-2">
-            <strong>{provider.name}</strong>
-            <Badge variant="neutral">no sign-in needed</Badge>
-          </div>
-        ) : (
-          <ConnectionHeader label={provider.name} connected={connected} />
-        )}
-        {provider.id === "opencode" && (
-          <span className="text-xs text-muted-foreground">Free models need no Go key or broker credentials.</span>
-        )}
-        {!connected && (
-          <span className="text-xs text-muted-foreground">
-            {provider.connections.length === 0
-              ? `${provider.name} is not installed on this box.`
-              : "Connect a key or subscription above to use these."}
-          </span>
-        )}
+    <div className="flex items-start gap-3 px-5 py-4">
+      {logo && (logo.monochrome ? (
+        <span
+          aria-hidden="true"
+          className="mt-0.5 size-6 shrink-0 bg-current"
+          style={{ mask: `url("${logo.src}") center / contain no-repeat` }}
+        />
+      ) : (
+        <img src={logo.src} alt="" className="mt-0.5 size-6 shrink-0 object-contain" />
+      ))}
+      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+        <div className="flex flex-wrap items-center gap-3">
+          <ConnectionHeader
+            label={connection.label}
+            connected={connection.connected}
+            expired={connection.expired === true}
+          />
+          {modelProvider && <ModelPicker provider={modelProvider} />}
+        </div>
+        {children}
       </div>
-      <ModelPicker provider={provider} />
     </div>
   )
 }
@@ -234,7 +209,12 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
   return (
     <DropdownMenu open={menu.open} onOpenChange={menu.setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="soft" size="sm" className="ml-auto">
+        <Button
+          variant="soft"
+          size="sm"
+          className="ml-auto"
+          aria-label={`Choose ${provider.name} models shown in chat`}
+        >
           {shown.length} of {all.length} shown
           <ChevronDown className="opacity-60" />
         </Button>
@@ -281,14 +261,13 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
 /** Free OpenCode has installation state, not a key or subscription to manage. */
 function FreeOpenCodeRow({ connection }: { connection: Connection }) {
   return (
-    <div className="flex flex-col gap-1 px-5 py-4">
-      <ConnectionHeader label={connection.label} connected={connection.available} />
+    <HarnessRow connection={connection}>
       <span className="text-xs text-muted-foreground">
         {connection.available
           ? "Installed on the box. Free models need no sign-in or Go key. MCP tools are available."
           : `${connection.error ?? "OpenCode is not installed on this box"}. Install OpenCode 2 to offer its free models.`}
       </span>
-    </div>
+    </HarnessRow>
   )
 }
 
@@ -318,9 +297,9 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
   })
   const busy = save.isPending || disconnect.isPending
   const error = save.error ?? disconnect.error
-  // The provider whose models this key unlocks; its list lives here instead of under Models.
+  // API-key access keeps its model preferences beside the key.
   const modelProvider = MODEL_PROVIDERS.find(
-    (provider) => !MODELS_CARD_PROVIDERS.includes(provider.id) && provider.connections.includes(connection.provider),
+    (provider) => provider.connections.includes(connection.provider),
   )
 
   function submit(e: FormEvent<HTMLFormElement>) {
@@ -339,17 +318,7 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         expired={connection.expired === true}
       />
       {keyProvider && <p className="text-xs text-muted-foreground">{CLI_INTRO[keyProvider]}</p>}
-      {connection.kind === "oauth" ? (
-        connection.available ? (
-          <Button asChild variant="soft" className="w-fit">
-            <a href={SERVER_URL + ControlPaths.connectOAuth(connection.provider)}>
-              {connection.connected ? "Reconnect" : "Connect"}
-            </a>
-          </Button>
-        ) : (
-          <div className="text-muted-foreground">needs server config</div>
-        )
-      ) : keyProvider && !connection.available ? (
+      {keyProvider && !connection.available ? (
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
           <Button variant="soft" onClick={onSuccess}>Check again</Button>
@@ -400,7 +369,7 @@ function ConnectionHeader({
   expired?: boolean
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <strong>{label}</strong>
       {expired ? (
         <Badge variant="warning">expired</Badge>
@@ -597,10 +566,9 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   }
 
   return (
-    <div className="flex flex-col gap-2.5 px-5 py-4">
-      <ConnectionHeader label={connection.label} connected={connection.connected} />
+    <HarnessRow connection={connection}>
       <div className="flex flex-col gap-2">{body()}</div>
       {error && <Alert>{errorText(error)}</Alert>}
-    </div>
+    </HarnessRow>
   )
 }

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
-import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
+import { ControlPaths, CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol"
 import { Check, CreditCard, ExternalLink, Layers, LogOut, Plug, Server, User } from "lucide-react"
-import { Link, Navigate, NavLink, Outlet } from "react-router-dom"
+import { Navigate, NavLink, Outlet } from "react-router-dom"
 import { queries } from "@/api/queries"
 import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
@@ -10,6 +10,7 @@ import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { SERVER_URL } from "@/config"
 import { useSignOut } from "@/hooks/useSignOut"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
@@ -79,9 +80,11 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 export function ProfileSettings() {
   const me = useQuery(queries.me())
+  const connections = useQuery(queries.connections())
   const signOut = useSignOut()
   if (!me.data) return null
   const { login, name, avatarUrl } = me.data
+  const github = connections.data?.find((connection) => connection.provider === "github")
 
   return (
     <>
@@ -111,12 +114,35 @@ export function ProfileSettings() {
           <Row label="Sign-in">
             <Badge variant="success">GitHub</Badge>
           </Row>
-          <Row label="Connections">
-            <span className="text-muted-foreground">Model keys, subscriptions and GitHub access.</span>
-            <Button asChild variant="soft" size="sm" className="ml-auto">
-              <Link to="/settings/connections">Manage</Link>
-            </Button>
-          </Row>
+        </CardContent>
+      </Card>
+      <Card className="py-0">
+        <CardContent className="flex flex-col gap-3 px-5 py-4">
+          <div>
+            <h3 className="font-semibold">GitHub access</h3>
+            <p className="text-muted-foreground">Let Kestrel work with your GitHub repositories.</p>
+          </div>
+          {connections.error && <Alert>{errorText(connections.error)}</Alert>}
+          {connections.isPending && <p className="text-muted-foreground">Loading GitHub access…</p>}
+          {github && (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={github.expired ? "warning" : github.connected ? "success" : "neutral"}>
+                  {github.expired ? "expired" : github.connected ? "connected" : "not connected"}
+                </Badge>
+                {github.account && <span className="font-mono text-xs text-muted-foreground">{github.account}</span>}
+              </div>
+              {github.available ? (
+                <Button asChild variant="soft" className="w-fit">
+                  <a href={SERVER_URL + ControlPaths.connectOAuth(github.provider) + "?return=/settings/profile"}>
+                    {github.connected ? "Reconnect GitHub" : "Connect GitHub"}
+                  </a>
+                </Button>
+              ) : (
+                <p className="text-muted-foreground">GitHub access needs server configuration.</p>
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
       <p className="text-xs text-muted-foreground">
