@@ -459,6 +459,10 @@ describe("park and GPU", () => {
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: "park" })
     fleet.result("host-a", park.commandId, true, null, undefined)
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "parked", pending: null })
+    await hello("host-b")
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = [...commandsTo("host-a"), ...commandsTo("host-b")].find((entry) => entry.command._tag === "resume")
+    expect(resume?.command).toMatchObject({ _tag: "resume", ownerEpoch: 2 })
   })
 
   test("a box another user owns cannot be parked", async () => {

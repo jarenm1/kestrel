@@ -195,8 +195,9 @@ export class NestFleet {
       this.forget(row)
       return
     }
-    // A parked box whose resume the host refused was never started there, so no host holds its claim.
-    if (kind === "resume" && !ok && row.state === "parked") row.hostId = null
+    // A parked box with nothing in flight is held by no host. A refused resume never started there. A park result can
+    // arrive after the parked report, which kept the claim while the command was pending.
+    if (row.state === "parked" && row.pendingId === null) row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
   }
