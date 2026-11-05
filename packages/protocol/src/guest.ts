@@ -6,18 +6,20 @@
  *   `CONNECT <port>\n` and reads `OK <port>\n` before frames flow. One host connection at a time; a new one replaces the
  *   old one (after a restore the old one is dead).
  * - **Box link**: `kestrel-box` connects to the Unix socket `GUEST_AGENT_BOX_SOCKET` inside the guest, which the box
- *   finds in `CLOUDAGENTS_GUEST_AGENT_SOCKET`. Its presence is what makes a box report `gpu: "on-demand"` and
- *   `suspend: true`.
+ *   finds in `CLOUDAGENTS_GUEST_AGENT_SOCKET`. The socket is mode 0600 and owned by `NEST_BOX_USER`; the guest agent
+ *   accepts a connection only from that uid (SO_PEERCRED), so no other process in the VM can send `activity` or
+ *   `gpuWanted`. Its presence is what makes a box report `gpu: "on-demand"` and `suspend: true`.
  *
  * Both links carry newline-delimited JSON, one frame per line, at most `MAX_GUEST_FRAME_BYTES` per line. Every frame
- * has a `_tag`. A request carries `id`; the peer answers it with exactly one `reply` with the same `id`. Unknown tags
- * are ignored, so either side may add frames without a version bump.
+ * has a `_tag`. A request carries `id`; the peer answers it with exactly one `reply` with the same `id`. A line that
+ * fails to decode (unknown `_tag`, or a field that does not match) is logged and dropped by the reader, so frames and
+ * fields change only with a `GUEST_PROTOCOL` bump.
  *
  * The Rust guest agent mirrors these schemas with serde (`#[serde(tag = "_tag")]`, camelCase fields).
  */
 import { Schema } from "effect"
 
-/** Version of the frames below; sent in the guest's `hello`. Unknown tags are ignored within a version. */
+/** Version of the frames below; sent in the guest's `hello`. Bump on any frame or field change (see the header). */
 export const GUEST_PROTOCOL = 1
 export const GUEST_AGENT_VSOCK_PORT = 1024
 export const GUEST_AGENT_BOX_SOCKET = "/run/kestrel-guest/box.sock"
@@ -25,11 +27,13 @@ export const GUEST_AGENT_BOX_SOCKET = "/run/kestrel-guest/box.sock"
 export const MAX_GUEST_FRAME_BYTES = 64 * 1024
 /** Longest `error` a reply carries; the sender cuts a longer one. */
 export const GUEST_ERROR_MAX_CHARS = 1000
+/** A string written into `NEST_BOX_ENV_FILE`: visible ASCII without quotes, backslashes or spaces, so no line break or quote can inject another variable. */
+const EnvValue = Schema.String.pipe(Schema.maxLength(2048), Schema.pattern(/^[A-Za-z0-9._~:\/?#@!$&()*+,;=%[\]-]+$/))
 
 /**
  * How long the host waits for each reply before it acts without the guest: a guest is user-controlled and may never
- * answer. On timeout: `prepareSuspend` → snapshot anyway; `gpuDetach` → unplug anyway; `shutdown` → power off;
- * `configure` and `resumed` → the VM is reported unhealthy and retried.
+ * answer. On timeout: `prepareSuspend` → the suspend or park is aborted and the VM keeps running; `gpuDetach` → unplug
+ * anyway; `shutdown` → power off; `configure` and `resumed` → the VM is reported unhealthy and retried.
  */
 export const GUEST_REPLY_TIMEOUT_MS = {
   configure: 120_000,
@@ -61,9 +65,12 @@ export const NEST_VOLUME_MOUNT = "/var/lib/kestrel"
 /** Environment file the guest agent writes on `configure`, read by `kestrel-box.service`. Root-owned, 0600. */
 export const NEST_BOX_ENV_FILE = "/var/lib/kestrel/box.env"
 
+/** The uid the box service runs as; the guest agent accepts a box-socket connection only from this uid. */
+export const NEST_BOX_USER = "kestrel-box"
+
 /**
- * The variables the guest agent writes to `NEST_BOX_ENV_FILE`, and nothing else. `enrollToken` only while the box has
- * not enrolled; the box stores its secret in its data dir and then ignores the token.
+ * The variables the guest agent writes to `NEST_BOX_ENV_FILE`, and nothing else. `enrollToken` only until the box sends
+ * `enrolled`; the box stores its secret in its data dir, and the guest then rewrites the file without the token.
  */
 export const NEST_BOX_ENV = {
   boxId: "CLOUDAGENTS_BOX_ID",
@@ -157,13 +164,13 @@ export const HostToGuest = Schema.Union(
     _tag: Schema.Literal("configure"),
     id: RequestId,
     hostId: Schema.String,
-    boxId: Schema.String,
+    boxId: EnvValue,
     vmId: Schema.String,
     /** 32 lowercase hex characters, unique per clone; becomes `/etc/machine-id`. */
     cloneId: Schema.String.pipe(Schema.pattern(/^[0-9a-f]{32}$/)),
     wallClockMs: NonNegativeInt,
-    controlUrl: Schema.String,
-    publicUrl: Schema.String,
+    controlUrl: EnvValue,
+    publicUrl: EnvValue,
     enrollToken: Schema.NullOr(EnrollToken),
     network: GuestNetwork,
   }),
@@ -183,6 +190,17 @@ export const HostToGuest = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("thawVolume"), id: RequestId }),
   /** A GPU was hot-plugged at `pciAddress`. Load its driver, tell the box, reply once the device is usable. */
   Schema.Struct({ _tag: Schema.Literal("gpuAttached"), id: RequestId, pciAddress: PciAddress }),
+  /**
+   * Answer to the guest's `gpuWanted` with the same `id`. Denied (`granted: false`) is final for that request, and
+   * `error` says why. Granted: a `wanted: true` is followed by `gpuAttached`, and the box is answered once the device is
+   * usable; a `wanted: false` is followed by `gpuDetach`, and the box is answered once it is released.
+   */
+  Schema.Struct({
+    _tag: Schema.Literal("gpuDecision"),
+    id: RequestId,
+    granted: Schema.Boolean,
+    error: Schema.NullOr(Schema.String.pipe(Schema.maxLength(GUEST_ERROR_MAX_CHARS))),
+  }),
   /** The host wants the GPU back. Have the box release it, unbind the driver, reply; the host unplugs it next. */
   Schema.Struct({ _tag: Schema.Literal("gpuDetach"), id: RequestId }),
   /** Clean power-off (park, destroy). Reply, then shut down. */
@@ -210,8 +228,8 @@ export const GuestToHost = Schema.Union(
     activity: Schema.NullOr(BoxActivity),
     gpu: GpuState,
   }),
-  /** The box wants a GPU (`true`) or is done with it (`false`). The host decides and answers with frames above. */
-  Schema.Struct({ _tag: Schema.Literal("gpuWanted"), wanted: Schema.Boolean }),
+  /** The box wants a GPU (`true`) or is done with it (`false`); `id` is the box's request id. Answered with `gpuDecision`. */
+  Schema.Struct({ _tag: Schema.Literal("gpuWanted"), id: RequestId, wanted: Schema.Boolean }),
   GuestReply,
 )
 export type GuestToHost = typeof GuestToHost.Type
@@ -220,7 +238,13 @@ export type GuestToHost = typeof GuestToHost.Type
 export const BoxToGuest = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("hello"), boxVersion: Schema.String }),
   Schema.Struct({ _tag: Schema.Literal("activity"), activity: BoxActivity }),
-  Schema.Struct({ _tag: Schema.Literal("gpuWanted"), wanted: Schema.Boolean }),
+  /** The box enrolled and saved its secret: the guest rewrites `NEST_BOX_ENV_FILE` without `enrollToken`. */
+  Schema.Struct({ _tag: Schema.Literal("enrolled") }),
+  /**
+   * The box wants a GPU (`true`) or is done with it (`false`). Answered with a `reply` to `id`: ok once the GPU is
+   * attached (or released), an error when the host denies it.
+   */
+  Schema.Struct({ _tag: Schema.Literal("gpuWanted"), id: RequestId, wanted: Schema.Boolean }),
   GuestReply,
 )
 export type BoxToGuest = typeof BoxToGuest.Type
