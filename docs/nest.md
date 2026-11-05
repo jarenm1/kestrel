@@ -191,6 +191,12 @@ reads the copy, which the CLI reflinks again to its own snapshot.
   the request until the control plane answers. Past `validUntil` the host fences: it stops every running VM at once
   without a sync and wakes nothing. The control plane moves a box off a host it cannot reach only after that host's last
   `validUntil` plus `NEST_FENCE_MARGIN_MS`.
+- **A second placement.** A parked box with no claim has no VM on any host, so control places it on a host with room with
+  a higher epoch and a new `vmId`. The previous host refuses commands below that epoch and evicts its copy on the first
+  inventory that shows it at a lower epoch. Control does not wait for the old host to fence. A copy the old host started
+  at its own epoch, before it learned of the move, runs until that inventory. Parked volumes are synced and frozen, so no
+  write from that copy can reach the volume after the move. A box leaves a host only after its claim is released (a
+  `park` result, or a timed-out destroy of a parked box), never while a resume to that host is pending.
 - **Fence watchdog.** The agent writes each lease's `validUntil` to `lease.json` in the host state dir before it acts on
   the lease, and it starts no VM and wakes no box without a valid one. A separate systemd service (`kestrel-fence`, shipped
   by the host module with `Restart=always`, not dependent on the agent) stops every `kestrel-vm-*.scope` once the clock
@@ -306,7 +312,8 @@ Caddy terminates TLS for `*.<slug>.<nest domain>` (DNS challenge) and proxies ev
 - running → proxies to the VM (HTTP/1.1 and WebSocket upgrades);
 - suspended here with a valid lease → holds the request, asks the host agent to wake the box, then proxies (wake
   timeout 60 s, then 503 with `Retry-After`); parked, or no lease → the host agent sends `wakeRequest` and the request
-  waits the same way for the control plane's `resume`;
+  waits the same way for the control plane's `resume`. A resume placed on another host ends that wait with 503 and
+  `Retry-After` on the request's old host, and the app refetches the box list, which carries the new URL;
 - unknown → 404.
 - `GET /api/health` (the app's health poll) never wakes a box and is not activity. Running → proxied to the VM without
   counting; suspended, parked or otherwise not running → 503 `{ "ok": false, "state": "<state>" }` with `Retry-After`;
@@ -359,8 +366,10 @@ cache.nixos.org.
   user asks for one at creation), insert the box with a fresh secret and an enroll token (hashed), epoch 1, send
   `create`. The box later calls `nestEnroll` and gets the secret; enrollment is idempotent until the box first
   authenticates, and a resent `create` carries a fresh token.
-- **Resume**: suspended → its host; parked → any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1);
-  a host that is offline holds the box until it returns. `wakeRequest` from a host is treated as a resume request.
+- **Resume**: suspended → its host; parked → the host its URL names when that host has room (the request reached its
+  ingress), otherwise any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1; the box's URL moves to the new
+  host's slug). A host that is offline holds a parked box that has a claim until it returns. `wakeRequest` from a host is
+  treated as a resume request.
 - **Reconcile**: `result` frames are applied as they arrive; when the last `inventory` chunk arrives, VMs with a stale
   epoch are evicted, and a VM the control plane does not know is logged and left alone.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.
