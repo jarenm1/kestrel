@@ -237,7 +237,7 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
   }
   // The desktop's sandbox gets the GPU as before; a headless workload asks for it without a display. Neither path
   // exposes card nodes, and a headless launch binds no X socket, so GPU access no longer depends on a desktop.
-  if (opts.display !== undefined || opts.gpu === true) argv.push(...gpuArgs(opts.gpuProbe))
+  if (opts.display !== undefined || opts.gpu === true) argv.push(...gpuArgs(opts.gpuProbe, opts.display === undefined))
   for (const [name, value] of Object.entries(opts.env)) {
     // A headless GPU workload must not inherit a stale DISPLAY (or the audio socket that goes with it).
     if (opts.gpu === true && opts.display === undefined && (name === "DISPLAY" || name === "PULSE_SERVER")) continue
@@ -310,8 +310,7 @@ export const pulseSocket = (display: number): string => `/tmp/.X11-unix/pulse-${
 
 /**
  * The device nodes a headless workload may use: DRM render nodes and NVIDIA's compute devices (nvidiactl, the uvm pair
- * and the nvidia-caps directory). Everything else is left out, and so is every modeset-capable node: DRI card nodes and
- * /dev/nvidia-modeset.
+ * and the nvidia-caps directory). Headless launches get only these, so /dev/nvidia-modeset is never bound for them.
  */
 const GPU_DEVICE_NODE = /^\/dev\/(dri\/renderD\d+|nvidia(\d+|ctl|-uvm|-uvm-tools|-caps))$/
 
@@ -320,7 +319,7 @@ const GPU_DEVICE_NODE = /^\/dev\/(dri\/renderD\d+|nvidia(\d+|ctl|-uvm|-uvm-tools
  * headless launch can check availability without reading /dev.
  */
 export interface GpuProbe {
-  /** Device nodes to expose. Only render (DRI) and compute (NVIDIA) nodes belong here; card nodes are filtered out. */
+  /** Device nodes on the host: DRM render nodes and NVIDIA's device files. Card nodes are filtered out by gpuArgs. */
   readonly devices: () => ReadonlyArray<string>
   readonly exists: (path: string) => boolean
 }
@@ -335,7 +334,7 @@ export const hostGpuProbe: GpuProbe = {
       // no DRM devices
     }
     try {
-      for (const name of readdirSync("/dev")) if (GPU_DEVICE_NODE.test(`/dev/${name}`)) devices.push(`/dev/${name}`)
+      for (const name of readdirSync("/dev")) if (name.startsWith("nvidia")) devices.push(`/dev/${name}`)
     } catch {
       // no NVIDIA devices
     }
@@ -356,13 +355,14 @@ const GPU_DRIVER_DIRS = ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run
  * the card nodes, which can modeset), NVIDIA's compute device files, and the host's GL/Vulkan drivers at
  * /run/opengl-driver, where nixpkgs' libglvnd and Vulkan loader look (NixOS; elsewhere sandboxed apps keep Mesa's
  * software drivers). Mesa finds a render node's driver through sysfs, so /sys/dev and /sys/devices are visible
- * read-only. Empty on a host without a GPU.
+ * read-only. A headless launch gets only the allow-listed nodes. Empty on a host without a GPU.
  */
-export const gpuArgs = (probe: GpuProbe = hostGpuProbe): string[] => {
+export const gpuArgs = (probe: GpuProbe = hostGpuProbe, headless = false): string[] => {
   const devices = probe
     .devices()
-    // Even a hand-written probe cannot make a modeset-capable node visible: only the allow-listed nodes pass.
-    .filter((device) => GPU_DEVICE_NODE.test(device))
+    // Even a hand-written probe cannot make a card node visible.
+    .filter((device) => !/^\/dev\/dri\/card\d+$/.test(device))
+    .filter((device) => !headless || GPU_DEVICE_NODE.test(device))
   if (devices.length === 0) return []
   const argv: string[] = []
   for (const device of devices) argv.push("--dev-bind", device, device)

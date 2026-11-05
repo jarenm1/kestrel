@@ -40,7 +40,7 @@ The host needs a usable GPU device and its userspace drivers:
 | What | Where |
 |---|---|
 | DRM render node | `/dev/dri/renderD*`, readable and writable by the box user. Card nodes (`/dev/dri/card*`) are never exposed because they can modeset the host display. |
-| NVIDIA compute devices | `/dev/nvidia*`, when the host uses NVIDIA's driver. |
+| NVIDIA compute devices | `/dev/nvidiactl`, `/dev/nvidia[0-9]*`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools` and `/dev/nvidia-caps`, when the host uses NVIDIA's driver. `/dev/nvidia-modeset` is never exposed to headless work. |
 | Driver lookup | `/sys/dev` and `/sys/devices`, bound read-only; Mesa uses them to find the render node's driver. |
 | GL/Vulkan drivers | `/run/opengl-driver` and `/run/opengl-driver-32` when they exist. On NixOS this is where nixpkgs' libglvnd and Vulkan loader look. |
 

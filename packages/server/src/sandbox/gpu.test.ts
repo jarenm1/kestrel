@@ -63,11 +63,13 @@ describe("headless GPU bwrap args", () => {
       ...base,
       level: "basic",
       display: 101,
-      gpuProbe: probe(["/dev/dri/renderD128", "/dev/dri/card0"]),
+      gpuProbe: probe(["/dev/dri/renderD128", "/dev/dri/card0", "/dev/nvidia-modeset"]),
     })
     expect(hasBind(argv, "/dev/dri/renderD128", "/dev/dri/renderD128")).toBe(true)
     expect(argv.join(" ")).toContain("--bind /tmp/.X11-unix/X101 /tmp/.X11-unix/X101")
     expect(argv.join(" ")).not.toContain("/dev/dri/card0")
+    // Desktop launches bind the NVIDIA nodes they bound before the headless allow-list existed.
+    expect(hasBind(argv, "/dev/nvidia-modeset", "/dev/nvidia-modeset")).toBe(true)
   })
 })
 
@@ -80,9 +82,10 @@ describe("gpuArgs", () => {
     expect(gpuArgs(probe(["/dev/dri/card0"]))).toEqual([])
   })
 
-  test("never exposes NVIDIA's modeset node, only the compute devices", () => {
+  test("a headless launch never gets NVIDIA's modeset node, only the compute devices", () => {
     const argv = gpuArgs(
       probe(["/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-modeset", "/dev/nvidia-caps"]),
+      true,
     )
     expect(hasBind(argv, "/dev/nvidia0", "/dev/nvidia0")).toBe(true)
     expect(hasBind(argv, "/dev/nvidiactl", "/dev/nvidiactl")).toBe(true)
