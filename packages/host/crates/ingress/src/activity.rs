@@ -39,6 +39,7 @@ impl Tracker {
     fn request_finished(&self, box_id: &str) {
         if let Some(entry) = self.lock().get_mut(box_id) {
             entry.open = entry.open.saturating_sub(1);
+            entry.last_request_at = now_ms();
         }
     }
 
