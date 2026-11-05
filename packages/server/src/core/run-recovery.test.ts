@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test"
 import { Effect, Either } from "effect"
-import { Conflict, type AgentItem, type ProviderUsage, type Task, type ThreadSettings } from "@cloudagents/protocol"
+import { Conflict, type AgentItem, type ProviderUsage, type Run, type Task, type ThreadSettings } from "@cloudagents/protocol"
 import type { StoreShape, StoreState } from "./state"
-import { makeUsageLimitRecovery } from "./usage-limit-recovery"
+import { makeRunRecovery, AUTO_RETRY_LIMIT, autoRetryDelay } from "./run-recovery"
 
 const task = (overrides: Partial<Task> = {}): Task => ({
   id: "task",
@@ -15,16 +15,16 @@ const task = (overrides: Partial<Task> = {}): Task => ({
   ...overrides,
 })
 
-const failedRun = (endedAt: string) => ({
+const failedRun = (endedAt: string): Run => ({
   id: "run",
   taskId: "task",
   prompt: "Do the work",
-  status: "failed" as const,
+  status: "failed",
   startedAt: new Date(Date.parse(endedAt) - 60_000).toISOString(),
   endedAt,
   exitCode: 1,
-  provider: "anthropic" as const,
-  model: "claude-opus-5-5" as const,
+  provider: "anthropic",
+  model: "claude-opus-5-5",
   effort: null,
 })
 
@@ -69,11 +69,13 @@ const setup = (input: {
   settings?: ThreadSettings
   providerUsage?: () => Effect.Effect<ReadonlyArray<ProviderUsage>, unknown>
   deliver?: () => Effect.Effect<void, unknown>
+  retry?: () => Effect.Effect<void, unknown>
 }) => {
   const { store, state } = memoryStore(input.state)
   const delivered: string[] = []
+  const retried: { readonly deliveryId: string; readonly attempt: number }[] = []
   const published: Task[] = []
-  const recovery = makeUsageLimitRecovery({
+  const recovery = makeRunRecovery({
     store,
     publish: (updated) => published.push(updated),
     settings: () => Effect.succeed(input.settings ?? { autoResumeAfterUsageLimits: true }),
@@ -84,8 +86,12 @@ const setup = (input: {
     deliver:
       input.deliver ??
       ((_task, _run, deliveryId) => Effect.sync(() => void delivered.push(deliveryId))),
+    retry:
+      input.retry ??
+      ((_task, _run, deliveryId, attempt) =>
+        Effect.sync(() => void retried.push({ deliveryId, attempt }))),
   })
-  return { recovery, state, delivered, published }
+  return { recovery, state, delivered, retried, published }
 }
 
 test("arms a usage-limit failure and resumes it once the provider's window has reset", async () => {
@@ -260,4 +266,150 @@ test("does not arm another failure, agent prose, or a provider whose limits the 
   })
   await Effect.runPromise(gateway.recovery.sweep)
   expect(gateway.state.tasks[0]!.usageLimitResume).toBeUndefined()
+})
+
+const failedWith = (overrides: Partial<Run> = {}): Run => ({
+  ...failedRun(new Date(Date.now() - 30_000).toISOString()),
+  ...overrides,
+})
+
+const transportError: ReadonlyArray<AgentItem> = [
+  { _tag: "error", id: "error", text: "the provider returned 502 Bad Gateway" },
+]
+
+test("retries a failure that is not a usage limit after a backoff, then clears the arm", async () => {
+  const { recovery, state, retried, published } = setup({
+    state: stateWith({ runs: [failedWith()] }),
+    items: transportError,
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  const arm = state.tasks[0]!.autoRetry!
+  expect(arm).toMatchObject({ runId: "run", attempt: 1 })
+  expect(Date.parse(arm.nextAt)).toBeGreaterThan(Date.now())
+  expect(retried).toEqual([])
+  expect(published.at(-1)?.autoRetry?.runId).toBe("run")
+
+  await Effect.runPromise(recovery.sweep)
+  expect(retried).toEqual([])
+
+  state.tasks[0]!.autoRetry = { ...arm, nextAt: new Date(Date.now() - 1).toISOString() }
+  await Effect.runPromise(recovery.sweep)
+  expect(retried).toEqual([{ deliveryId: "auto-retry:task:run:1", attempt: 1 }])
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
+
+test("a failed retry waits longer before the next one", async () => {
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedWith({ autoRetryAttempt: 1 })] }),
+    items: transportError,
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  const arm = state.tasks[0]!.autoRetry!
+  expect(arm.attempt).toBe(2)
+  expect(Math.abs(Date.parse(arm.nextAt) - Date.now() - autoRetryDelay(2))).toBeLessThan(1_000)
+})
+
+test("the chain stops after the retry limit and after the last retry fails", async () => {
+  const last = setup({
+    state: stateWith({ runs: [failedWith({ autoRetryAttempt: AUTO_RETRY_LIMIT })] }),
+    items: transportError,
+  })
+  await Effect.runPromise(last.recovery.sweep)
+  expect(last.state.tasks[0]!.autoRetry).toBeUndefined()
+  expect(last.retried).toEqual([])
+})
+
+test("auto-retry delays double from 5 s and stop at 60 s", () => {
+  expect([1, 2, 3, 4, 5, 6].map(autoRetryDelay)).toEqual([5_000, 10_000, 20_000, 40_000, 60_000, 60_000])
+})
+
+test("never retries a usage-limit failure, even when the provider reports no reset", async () => {
+  const { recovery, state, retried } = setup({
+    state: stateWith({ runs: [failedWith()] }),
+    items: [{ _tag: "error", id: "error", text: "You have reached your weekly usage limit." }],
+    providerUsage: () => Effect.succeed([{ provider: "claude-cli", status: "ok", plan: "Pro", windows: [] }]),
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+  expect(retried).toEqual([])
+})
+
+test("a run on a provider without its explicit model is not retried", async () => {
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedWith({ provider: "openrouter" as const, model: undefined })] }),
+    items: transportError,
+  })
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
+
+test("a user reply or a newer run drops the pending retry", async () => {
+  const { recovery, state, retried } = setup({
+    state: stateWith({
+      runs: [
+        failedWith(),
+        {
+          ...failedWith({ id: "newer" }),
+          status: "running" as const,
+          endedAt: null,
+          autoRetryAttempt: undefined,
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    }),
+    items: transportError,
+  })
+  state.tasks[0]!.autoRetry = { runId: "run", attempt: 1, nextAt: new Date(Date.now() - 1).toISOString() }
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+  expect(retried).toEqual([])
+})
+
+test("a delivery conflict drops the pending retry", async () => {
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedWith()] }),
+    items: transportError,
+    retry: () => Effect.fail(new Conflict({ message: "the thread moved on" })),
+  })
+  state.tasks[0]!.autoRetry = { runId: "run", attempt: 1, nextAt: new Date(Date.now() - 1).toISOString() }
+
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
+
+test("an archived thread or a cancelled delegation is not retried", async () => {
+  const archived = setup({
+    state: stateWith({
+      tasks: [task({ archivedAt: new Date().toISOString() })],
+      runs: [failedWith()],
+    }),
+    items: transportError,
+  })
+  await Effect.runPromise(archived.recovery.sweep)
+  expect(archived.state.tasks[0]!.autoRetry).toBeUndefined()
+
+  const cancelled = setup({
+    state: stateWith({
+      tasks: [
+        task({
+          delegation: {
+            parentTaskId: "parent",
+            parentRunId: "parent-run",
+            requestId: "request",
+            fingerprint: "fingerprint",
+            cancelledAt: new Date().toISOString(),
+          },
+        }),
+      ],
+      runs: [failedWith()],
+    }),
+    items: transportError,
+  })
+  await Effect.runPromise(cancelled.recovery.sweep)
+  expect(cancelled.state.tasks[0]!.autoRetry).toBeUndefined()
 })

@@ -65,7 +65,7 @@ import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } fro
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 import { readTextGenerationSettings, writeTextGenerationSettings } from "./text-generation-settings"
 import { readThreadSettings, writeThreadSettings } from "./thread-settings"
-import { makeUsageLimitRecovery, USAGE_LIMIT_SWEEP } from "./usage-limit-recovery"
+import { AUTO_RETRY_MESSAGE, makeRunRecovery, RUN_RECOVERY_SWEEP } from "./run-recovery"
 import { USAGE_LIMIT_RESUME_MESSAGE } from "./usage-limits"
 import { makeTextGenerator, mayReplaceTitle, pendingTitleRequest } from "./text-generation"
 
@@ -1307,6 +1307,8 @@ export const CoreLive = Layer.effect(
       deliveryId?: string,
       /** Automatic deliveries only: refuse unless this is still the thread's latest run (see the sweep's arm). */
       expectRunId?: string,
+      /** Set on an automatic retry's run: its retry number, 1-based (see the sweep). */
+      autoRetryAttempt?: number,
     ): Effect.Effect<SendMessageResponse, NotFound | Conflict | BadRequest | InternalError> =>
       Effect.gen(function* () {
         yield* ownedTask(user, taskId)
@@ -1470,6 +1472,7 @@ export const CoreLive = Layer.effect(
               provider,
               ...(choice.model === undefined ? {} : { model: choice.model }),
               effort: choice.effort ?? null,
+              ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
             }
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
@@ -1636,7 +1639,7 @@ export const CoreLive = Layer.effect(
       return model === undefined ? {} : { model }
     }
 
-    const usageLimitRecovery = makeUsageLimitRecovery({
+    const runRecovery = makeRunRecovery({
       store,
       publish: (task) => hub.publish({ _tag: "task.updated", task }),
       settings: (user) => readThreadSettings(config.dataDir, user),
@@ -1659,12 +1662,30 @@ export const CoreLive = Layer.effect(
             run.id,
           ),
         ),
+      retry: (task, run, deliveryId, attempt) =>
+        Effect.asVoid(
+          deliverMessage(
+            task.owner,
+            task.id,
+            AUTO_RETRY_MESSAGE,
+            {
+              ...(run.model === undefined ? {} : { model: run.model }),
+              ...(run.effort === null || run.effort === undefined ? {} : { effort: run.effort }),
+            },
+            [],
+            false,
+            null,
+            deliveryId,
+            run.id,
+            attempt,
+          ),
+        ),
     })
 
     yield* Effect.forkDaemon(
-      usageLimitRecovery.sweep.pipe(
-        Effect.catchAllCause((cause) => Effect.logWarning(`usage-limit sweep failed: ${Cause.pretty(cause)}`)),
-        Effect.repeat(Schedule.spaced(USAGE_LIMIT_SWEEP)),
+      runRecovery.sweep.pipe(
+        Effect.catchAllCause((cause) => Effect.logWarning(`run recovery sweep failed: ${Cause.pretty(cause)}`)),
+        Effect.repeat(Schedule.spaced(RUN_RECOVERY_SWEEP)),
       ),
     )
 
@@ -1772,8 +1793,9 @@ export const CoreLive = Layer.effect(
           for (const task of s.tasks) {
             if (task.delegation?.runId && ids.includes(task.delegation.runId)) {
               task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
-              // A cancelled delegated thread must not wake at a usage-limit reset and run for a parent that stopped it.
+              // A cancelled delegated thread must not wake at a usage-limit reset or retry for a parent that stopped it.
               delete task.usageLimitResume
+              delete task.autoRetry
               if (task.status === "needs_input") task.status = "idle"
               task.updatedAt = nowIso()
               changed.push({ ...task })
@@ -1793,8 +1815,10 @@ export const CoreLive = Layer.effect(
         // A child that already failed (on a usage limit, say) is not in the running tree; its arm goes here.
         const cleared = yield* store.update((s) => {
           const child = s.tasks.find((t) => t.id === childTaskId)
-          if (child?.usageLimitResume === undefined) return Either.right(null)
+          if (child === undefined) return Either.right(null)
+          if (child.usageLimitResume === undefined && child.autoRetry === undefined) return Either.right(null)
           delete child.usageLimitResume
+          delete child.autoRetry
           return Either.right({ ...child })
         })
         if (cleared !== null) hub.publish({ _tag: "task.updated", task: cleared })

@@ -105,6 +105,21 @@ export const UsageLimitResume = Schema.Struct({
 export type UsageLimitResume = typeof UsageLimitResume.Type
 
 /**
+ * A failed run whose automatic retry waits for its backoff. The box schedules it after any failure except a
+ * provider usage limit (that one has `UsageLimitResume`), so a transient provider, network or startup failure does
+ * not leave the thread failed. A user reply, a new run or the last retry cancels it.
+ */
+export const AutoRetry = Schema.Struct({
+  /** The failed run this retry belongs to: a newer run means the thread already moved on. */
+  runId: Schema.String,
+  /** The retry number that will start, 1-based. */
+  attempt: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  /** Epoch time the retry may start, after its backoff. */
+  nextAt: Schema.String,
+})
+export type AutoRetry = typeof AutoRetry.Type
+
+/**
  * A thread = one chat + one workspace directory + (optional) one desktop. It starts with no repository;
  * the agent checks repositories out into the workspace as the work needs them.
  */
@@ -132,6 +147,8 @@ export const Task = Schema.Struct({
   delegation: Schema.optional(Delegation),
   /** Present while a usage-limit failure is waiting for its provider window to reset. */
   usageLimitResume: Schema.optional(UsageLimitResume),
+  /** Present while an automatic retry of the thread's failed run waits for its backoff. */
+  autoRetry: Schema.optional(AutoRetry),
 })
 
 /** Short-lived bearer used by a sandboxed preview frame; grants access only to its own task preview. */
@@ -199,6 +216,8 @@ export const Run = Schema.Struct({
   effort: Schema.optional(Schema.NullOr(AgentEffort)),
   /** This run was still active when the box restarted and was reconciled as failed. */
   interruptedByRestart: Schema.optional(Schema.Boolean),
+  /** Set on a run started automatically after the thread's previous run failed: its retry number, 1-based. */
+  autoRetryAttempt: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 export type Run = typeof Run.Type
 
