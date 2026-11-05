@@ -191,6 +191,10 @@ reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflink
   (memory lost, files kept), and is reported.
 - **Guest replies** time out per `GUEST_REPLY_TIMEOUT_MS`, and the host then acts without the guest. Lines longer than
   `MAX_GUEST_FRAME_BYTES` drop the connection; replies to unknown ids are ignored.
+- **Freezes.** `prepareSuspend` and `freezeVolume` leave the volume frozen. The guest never thaws it on its own: the host
+  ends every freeze with `thawVolume`, with `resumed`, or by stopping the VM. The host records a freeze in `vm.json` before
+  it sends one, so an agent restart that finds an unfinished freeze stops that VM instead of resuming it, and a lapsed
+  lease stops every running VM as above. A frozen volume is consistent, so only memory is lost.
 
 ## Resource policy (host agent)
 
