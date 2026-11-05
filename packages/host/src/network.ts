@@ -45,6 +45,7 @@ export const firewallRuleset = (taps: readonly NestNetwork[]): string =>
     "  }",
     "  chain input {",
     "    type filter hook input priority filter; policy accept;",
+    "    ct state established,related accept",
     `    iifname "kn-*" ip daddr ${HOST_GATEWAY} tcp dport { ${GATEWAY_TCP_PORTS.join(", ")} } accept`,
     `    iifname "kn-*" ip daddr ${HOST_GATEWAY} udp dport 53 accept`,
     '    iifname "kn-*" drop',
