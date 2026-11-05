@@ -1,4 +1,5 @@
 import { useId, useMemo, type ComponentProps } from "react"
+import type { Blockquote, List, ListItem, Root, RootContent } from "mdast"
 import ReactMarkdown, { type Components, type ExtraProps, type Options } from "react-markdown"
 import rehypeRaw from "rehype-raw"
 import rehypeSanitize from "rehype-sanitize"
@@ -32,76 +33,73 @@ function Link({ node: _node, children, ...props }: ComponentProps<"a"> & ExtraPr
 const COMPONENTS: Components = { a: Link }
 
 // Single newlines stay line breaks: run output that falls back to raw stdout/stderr is line-oriented.
-const REMARK_PLUGINS = [remarkGfm, remarkBreaks]
+// The drawing repair runs last, so it sees the breaks `remarkBreaks` and the tables `remarkGfm` added.
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkDrawingsWhole]
 
-/** A code fence opener: a run of backticks or tildes at any indent, since a list item may hold one. */
-const FENCE_OPEN = /^\s*(`{3,}|~{3,})/
-/** A code fence closer: its run alone on the line, at least as long as the opener's. */
-const FENCE_CLOSE = /^\s*(`{3,}|~{3,})[ \t]*$/
-/** A drawing opener: an `<svg …>` tag alone on its line. Prose that merely starts with the tag is not a drawing. */
-const DRAWING_OPEN = /^\s*<svg\b[^>]*?(?<!\/)>\s*$/i
+/** A raw HTML block that opens a drawing. */
+const DRAWING_OPEN = /^\s*<svg\b[^>]*>/i
 const DRAWING_CLOSE = /<\/svg\s*>/i
 
 /**
- * A drawing's lines, minus the blank lines that split it: markdown ends a raw HTML block at a blank line, so a line
- * indented deeper than the `<svg>` opener after one arrives as a code sample instead of another element. Only those
- * blank lines go, and a sample whose own lines share the opener's indent keeps all of theirs.
+ * The text of a node that continues a drawing interrupted by a blank line: SVG markup as raw HTML, an indented code
+ * sample (elements indented four spaces or more), or a paragraph of inline HTML (elements indented one to three).
+ * `undefined` for anything else, which ends the search.
  */
-function joinDrawing(lines: string[]): string[] {
-  const indentOf = (line: string) => line.length - line.trimStart().length
-  const openerIndent = indentOf(lines[0]!)
-  const kept: string[] = []
-  let blanks: string[] = []
-  for (const line of lines) {
-    if (line.trim().length === 0) {
-      blanks.push(line)
-      continue
-    }
-    if (indentOf(line) <= openerIndent) kept.push(...blanks)
-    blanks = []
-    kept.push(line)
+function drawingText(node: RootContent): string | undefined {
+  if (node.type === "html") return node.value
+  if (node.type === "code") return node.lang === null ? node.value : undefined
+  if (node.type !== "paragraph") return undefined
+  let text = ""
+  for (const child of node.children) {
+    if (child.type === "html" || child.type === "text") text += child.value
+    else if (child.type === "break") text += "\n"
+    else return undefined
   }
-  kept.push(...blanks)
-  return kept
+  return text
+}
+
+/** Containers whose children are blocks: a drawing is only ever one of those, never inline inside a paragraph. */
+function isBlockContainer(node: RootContent): node is Blockquote | List | ListItem {
+  return node.type === "blockquote" || node.type === "list" || node.type === "listItem"
 }
 
 /**
- * Keeps an agent's inline SVG in one raw HTML block. The drawing is buffered until its closing tag, and left as
- * written when a code fence opens first — a stray `<svg>` in prose must not reach into later paragraphs or code.
+ * Markdown ends a raw HTML block at a blank line, so an inline SVG laid out in blank-line-separated groups falls
+ * apart: the block stops at the first blank line and the rest parses as an indented code sample or a paragraph of
+ * inline HTML. Merge that continuation back into the raw HTML it belongs to, before the sanitizer sees either, so the
+ * whole drawing renders. Prose that merely mentions `<svg>`, and code that quotes SVG markup, are separate nodes and
+ * stay as they are.
  */
-function keepDrawingsWhole(text: string): string {
-  const kept: string[] = []
-  let fence: string | undefined
-  let drawing: string[] | undefined
-  for (const line of text.split("\n")) {
-    const opener = FENCE_OPEN.exec(line)?.[1]
-    if (drawing !== undefined) {
-      if (opener === undefined) {
-        drawing.push(line)
-        if (!DRAWING_CLOSE.test(line)) continue
-        kept.push(...joinDrawing(drawing))
-        drawing = undefined
-        continue
+function remarkDrawingsWhole() {
+  return (tree: Root) => {
+    const walk = (parent: { children: RootContent[] }) => {
+      for (let index = 0; index < parent.children.length; index++) {
+        const node = parent.children[index]!
+        if (node.type === "html" && DRAWING_OPEN.test(node.value) && !DRAWING_CLOSE.test(node.value)) {
+          const parts = [node.value]
+          let end = index
+          let closed = false
+          while (end + 1 < parent.children.length) {
+            const continuation = drawingText(parent.children[end + 1]!)
+            if (continuation === undefined || !continuation.trimStart().startsWith("<")) break
+            end += 1
+            parts.push(continuation)
+            if (DRAWING_CLOSE.test(continuation)) {
+              closed = true
+              break
+            }
+          }
+          if (closed) {
+            node.value = parts.join("\n")
+            parent.children.splice(index + 1, end - index)
+          }
+        }
+        const child = parent.children[index]!
+        if (isBlockContainer(child)) walk(child)
       }
-      kept.push(...drawing)
-      drawing = undefined
     }
-    const closer = FENCE_CLOSE.exec(line)?.[1]
-    if (fence !== undefined) {
-      kept.push(line)
-      if (closer !== undefined && closer[0] === fence[0] && closer.length >= fence.length) fence = undefined
-      continue
-    }
-    if (opener !== undefined) {
-      fence = opener
-      kept.push(line)
-      continue
-    }
-    if (DRAWING_OPEN.test(line)) drawing = [line]
-    else kept.push(line)
+    walk(tree)
   }
-  if (drawing !== undefined) kept.push(...drawing)
-  return kept.join("\n")
 }
 
 /**
@@ -129,7 +127,7 @@ export function Markdown({ text, className }: { text: string; className?: string
       )}
     >
       <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins} components={COMPONENTS}>
-        {keepDrawingsWhole(text)}
+        {text}
       </ReactMarkdown>
     </div>
   )
