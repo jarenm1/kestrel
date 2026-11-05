@@ -10,7 +10,7 @@ wire formats are in `packages/protocol/src/nest.ts` (host to control plane) and 
 
 ```
 kestrel-host daemon [--config /etc/kestrel-host/config.json]
-kestrel-host vm list [--socket /run/kestrel-host/api.sock]
+kestrel-host vm list [--socket /run/kestrel-host/operator.sock]
 kestrel-host vm show <boxId>      [--socket ...]
 kestrel-host vm suspend <boxId>   [--socket ...]
 kestrel-host vm park <boxId>      [--socket ...]
@@ -77,16 +77,24 @@ The daemon keeps one WebSocket to `ControlPaths.nestHostConnect` with `Authoriza
 
 ## Local API
 
-HTTP over the Unix socket `<runDir>/api.sock` (directory mode 0750, socket mode 0660). Unknown boxes return 404.
+Two Unix sockets in `<runDir>`. The directory is mode 0750 and group `kestrel-ingress`. Unknown boxes return 404.
+
+`api.sock` (mode 0660, group `kestrel-ingress`) is the ingress surface and nothing else:
+
+| Route | Result |
+| --- | --- |
+| `GET /v1/boxes/:boxId/route` | `{state, upstream}` |
+| `POST /v1/boxes/:boxId/wake` | `{upstream}`; 503 `{error}` when the box does not reach running in time |
+| `POST /v1/ingress/activity` | body `{boxes:[{boxId, openConnections, lastRequestAt}]}`; 204 |
+
+`operator.sock` (mode 0600, owned by the agent's user, root) is the operator surface. The `kestrel-ingress` group cannot
+connect to it, so a compromised ingress cannot destroy or park boxes. The `kestrel-host vm` commands default to it.
 
 | Route | Result |
 | --- | --- |
 | `GET /v1/vms` | `NestVmReport[]` |
 | `GET /v1/boxes/:boxId` | VM report (404 if not on this host) |
-| `GET /v1/boxes/:boxId/route` | `{state, upstream}` for ingress |
-| `POST /v1/boxes/:boxId/wake` | `{upstream}`; 503 `{error}` when the box does not reach running in time |
 | `POST /v1/boxes/:boxId/suspend` / `park` / `destroy` | `{ok, error, vm}`; 409 when refused |
-| `POST /v1/ingress/activity` | body `{boxes:[{boxId, openConnections, lastRequestAt}]}`; 204 |
 
 ## Metering
 

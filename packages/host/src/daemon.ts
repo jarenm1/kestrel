@@ -9,6 +9,9 @@ import { stateLayout } from "./state-store"
 import { readGuestImage } from "./template"
 import { VmManager } from "./vm-manager"
 
+/** The group kestrel-ingress runs as; it may reach `api.sock` and nothing else. */
+const INGRESS_GROUP = "kestrel-ingress"
+
 /** How often queued meter records are posted to the control plane. */
 const METER_SHIP_INTERVAL_MS = 60_000
 
@@ -47,7 +50,7 @@ export const runDaemon = async (configPath: string): Promise<void> => {
     log,
   })
   control = link
-  const api = startLocalApi({ socketPath: join(config.runDir, "api.sock"), manager })
+  const api = startLocalApi({ runDir: config.runDir, ingressGroup: INGRESS_GROUP, manager })
   link.start()
 
   const shipTimer = setInterval(() => {

@@ -4,7 +4,7 @@ import { runDaemon } from "./daemon"
 import { HostError, UsageError, errorMessage } from "./errors"
 
 const DEFAULT_CONFIG = "/etc/kestrel-host/config.json"
-const DEFAULT_SOCKET = "/run/kestrel-host/api.sock"
+const DEFAULT_SOCKET = "/run/kestrel-host/operator.sock"
 
 const USAGE = `usage:
   kestrel-host daemon [--config <file>]            run the host agent (default ${DEFAULT_CONFIG})

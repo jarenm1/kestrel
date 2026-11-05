@@ -122,7 +122,8 @@ Built by `packages/host/nix/guest.nix` from the flake (output `packages.<system>
   vms/<boxId>/restore/           per-restore source with rewritten config.json
   vms/<boxId>/api.sock           cloud-hypervisor API
   vms/<boxId>/vsock.sock         hybrid vsock (the host only connects; it never listens on vsock.sock_<port>)
-/run/kestrel-host/api.sock       host agent local API (ingress, operators)
+/run/kestrel-host/api.sock       host agent ingress API (kestrel-ingress group)
+/run/kestrel-host/operator.sock  host agent operator API (root only)
 ```
 
 Host secrets (control plane host secret, object storage keys, the fleet volume key) are files under `/etc/kestrel-host/`
@@ -325,14 +326,24 @@ background poll, not use: ingress leaves it out of the last request time, and it
 
 ### Host agent local API
 
-HTTP on `/run/kestrel-host/api.sock` (root and the `kestrel-ingress` group):
+Two Unix sockets under `/run/kestrel-host/`; the directory is 0750 and group `kestrel-ingress`.
+
+`api.sock` (0660, `kestrel-ingress` group) is the ingress surface only:
 
 | Route | Answer |
 |---|---|
 | `GET /v1/boxes/:boxId/route` | `{ state, upstream }`, `upstream` = `http://10.77.x.y:8787` or null |
 | `POST /v1/boxes/:boxId/wake` | waits until running; `{ upstream }`, or 503 `{ error }` |
 | `POST /v1/ingress/activity` | body `{ boxes: [{ boxId, openConnections, lastRequestAt }] }` → 204 |
-| `GET /v1/vms` | `NestVmReport[]`, for operators |
+
+`operator.sock` (0600, root) is the operator surface. The `kestrel-ingress` group cannot connect to it, so a compromised
+ingress cannot suspend, park or destroy a box or touch its backups:
+
+| Route | Answer |
+|---|---|
+| `GET /v1/vms` | `NestVmReport[]` |
+| `GET /v1/boxes/:boxId` | VM report, or 404 |
+| `POST /v1/boxes/:boxId/suspend` / `park` / `destroy` | `{ ok, error, vm }`; 409 when refused |
 
 ## Dependency cache
 

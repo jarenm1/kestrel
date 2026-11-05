@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { chmodSync, chownSync, mkdirSync, readFileSync, rmSync } from "node:fs"
-import { dirname } from "node:path"
+import { join } from "node:path"
 import { Schema } from "effect"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { STRICT } from "./schema"
@@ -24,15 +24,20 @@ const BOX_ROUTE = /^\/v1\/boxes\/([^/]+)(?:\/(route|wake|suspend|park|destroy))?
 
 const json = (body: unknown, status = 200): Response => Response.json(body, { status })
 
+/** Unknown boxes answer 404, a wake that does not reach `running` answers 503, other failures answer 500. */
+const failure = (error: unknown): Response => {
+  if (error instanceof UnknownBoxError) return json({ error: error.message }, 404)
+  if (error instanceof WakeTimeoutError) return json({ error: error.message }, 503)
+  return json({ error: errorMessage(error) }, 500)
+}
+
 /**
- * The host's local API, served on a unix socket. Ingress asks where a box is and wakes it; operators list and act on
- * VMs. Unknown boxes answer 404, a wake that does not reach `running` answers 503, other failures answer 500.
+ * The ingress surface, served on `api.sock`: kestrel-ingress asks where a box is, wakes it and reports activity. Nothing
+ * else is reachable from here; operator actions live on `operator.sock`.
  */
-export const handleLocalRequest = async (manager: VmManager, request: Request): Promise<Response> => {
-  const url = new URL(request.url)
-  const path = url.pathname
+export const handleIngressRequest = async (manager: VmManager, request: Request): Promise<Response> => {
+  const path = new URL(request.url).pathname
   try {
-    if (request.method === "GET" && path === "/v1/vms") return json(manager.reports())
     if (request.method === "POST" && path === "/v1/ingress/activity") {
       const decoded = Schema.decodeUnknownEither(IngressActivityBody, STRICT)(await request.json())
       if (decoded._tag === "Left") return json({ error: "invalid ingress activity body" }, 400)
@@ -43,12 +48,31 @@ export const handleLocalRequest = async (manager: VmManager, request: Request): 
     if (match !== null) {
       const boxId = decodeURIComponent(match[1] ?? "")
       const action = match[2]
+      if (action === "route" && request.method === "GET") return json(manager.route(boxId))
+      if (action === "wake" && request.method === "POST") return json({ upstream: await manager.wake(boxId) })
+    }
+    return json({ error: "not found" }, 404)
+  } catch (error) {
+    return failure(error)
+  }
+}
+
+/**
+ * The operator surface, served on `operator.sock` (root only): lists and inspects VMs and applies suspend, park and
+ * destroy. Refused commands answer 409 with the outcome.
+ */
+export const handleOperatorRequest = async (manager: VmManager, request: Request): Promise<Response> => {
+  const path = new URL(request.url).pathname
+  try {
+    if (request.method === "GET" && path === "/v1/vms") return json(manager.reports())
+    const match = BOX_ROUTE.exec(path)
+    if (match !== null) {
+      const boxId = decodeURIComponent(match[1] ?? "")
+      const action = match[2]
       if (action === undefined && request.method === "GET") {
         const report = manager.reports().find((vm) => vm.boxId === boxId)
         return report === undefined ? json({ error: `unknown box ${boxId}` }, 404) : json(report)
       }
-      if (action === "route" && request.method === "GET") return json(manager.route(boxId))
-      if (action === "wake" && request.method === "POST") return json({ upstream: await manager.wake(boxId) })
       const operator = OperatorAction.literals.find((literal) => literal === action)
       if (operator !== undefined && request.method === "POST") {
         const { outcome, vm } = await manager.execute(randomUUID(), { _tag: operator, boxId })
@@ -57,14 +81,9 @@ export const handleLocalRequest = async (manager: VmManager, request: Request): 
     }
     return json({ error: "not found" }, 404)
   } catch (error) {
-    if (error instanceof UnknownBoxError) return json({ error: error.message }, 404)
-    if (error instanceof WakeTimeoutError) return json({ error: error.message }, 503)
-    return json({ error: errorMessage(error) }, 500)
+    return failure(error)
   }
 }
-
-/** The API socket is shared with kestrel-ingress through this group: the directory is 0750 and the socket 0660. */
-const INGRESS_GROUP = "kestrel-ingress"
 
 const groupGid = (name: string): number => {
   const entry = readFileSync("/etc/group", "utf8").split("\n").find((line) => line.startsWith(`${name}:`))
@@ -73,24 +92,42 @@ const groupGid = (name: string): number => {
   return gid
 }
 
-/** Serves the local API on `socketPath`. Replaces a stale socket file; the socket is group-writable for ingress. */
-export const startLocalApi = (opts: { readonly socketPath: string; readonly manager: VmManager }): { stop(): void } => {
-  const gid = groupGid(INGRESS_GROUP)
-  const dir = dirname(opts.socketPath)
-  mkdirSync(dir, { recursive: true, mode: 0o750 })
-  chownSync(dir, -1, gid)
-  chmodSync(dir, 0o750)
-  rmSync(opts.socketPath, { force: true })
-  const server = Bun.serve({
-    unix: opts.socketPath,
-    fetch: (request) => handleLocalRequest(opts.manager, request),
+/**
+ * Serves both local sockets in `runDir`. The directory is 0750 and group `ingressGroup`; `api.sock` is 0660 in that group
+ * so kestrel-ingress can reach it. `operator.sock` is 0600 and owned by the agent's user, so the group cannot reach it.
+ * Stale socket files are replaced.
+ */
+export const startLocalApi = (opts: {
+  readonly runDir: string
+  readonly ingressGroup: string
+  readonly manager: VmManager
+}): { stop(): void } => {
+  const gid = groupGid(opts.ingressGroup)
+  mkdirSync(opts.runDir, { recursive: true, mode: 0o750 })
+  chownSync(opts.runDir, -1, gid)
+  chmodSync(opts.runDir, 0o750)
+
+  const ingressSocket = join(opts.runDir, "api.sock")
+  const operatorSocket = join(opts.runDir, "operator.sock")
+  rmSync(ingressSocket, { force: true })
+  rmSync(operatorSocket, { force: true })
+  const ingress = Bun.serve({
+    unix: ingressSocket,
+    fetch: (request) => handleIngressRequest(opts.manager, request),
   })
-  chownSync(opts.socketPath, -1, gid)
-  chmodSync(opts.socketPath, 0o660)
+  const operator = Bun.serve({
+    unix: operatorSocket,
+    fetch: (request) => handleOperatorRequest(opts.manager, request),
+  })
+  chownSync(ingressSocket, -1, gid)
+  chmodSync(ingressSocket, 0o660)
+  chmodSync(operatorSocket, 0o600)
   return {
     stop: () => {
-      server.stop(true)
-      rmSync(opts.socketPath, { force: true })
+      ingress.stop(true)
+      operator.stop(true)
+      rmSync(ingressSocket, { force: true })
+      rmSync(operatorSocket, { force: true })
     },
   }
 }
