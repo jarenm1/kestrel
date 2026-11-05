@@ -49,13 +49,12 @@ pub fn now_secs() -> u64 {
 /// Runs a store operation on the blocking pool, so disk I/O never stalls the async runtime.
 pub async fn on_store<T: Send + 'static>(
     state: &Arc<AppState>,
-    op: impl FnOnce(&Store) -> io::Result<T> + Send + 'static,
+    op: impl FnOnce(&Store) -> Result<T, Error> + Send + 'static,
 ) -> Result<T, Error> {
     let state = Arc::clone(state);
     tokio::task::spawn_blocking(move || op(&state.store))
         .await
         .map_err(|e| Error::Internal(e.to_string()))?
-        .map_err(Error::from)
 }
 
 /// Returns the metadata document under `kind/variant/key`, fetching and rewriting it when it is missing or older than
@@ -139,7 +138,7 @@ pub async fn metadata(
 
 async fn fresh_metadata(state: &Arc<AppState>, cache_key: &str) -> Result<Option<Cached>, Error> {
     let cache_key = cache_key.to_owned();
-    on_store(state, move |store| store.read_fresh_meta(&cache_key)).await
+    on_store(state, move |store| Ok(store.read_fresh_meta(&cache_key)?)).await
 }
 
 /// Reads a metadata document, refusing one over `limit`. Metadata is held in memory until it is rewritten, so the read
@@ -186,7 +185,7 @@ async fn current_link(
     key: &str,
 ) -> Result<Option<Link>, Error> {
     let key = key.to_owned();
-    on_store(state, move |store| store.current_link(kind, &key)).await
+    on_store(state, move |store| Ok(store.current_link(kind, &key)?)).await
 }
 
 /// Opens the artifact a current link names, verified against the link's digest. Downloads it first when it is not
@@ -204,7 +203,7 @@ pub async fn artifact(
         .await;
     let (verify_path, expected) = (path, link.expected.clone());
     let stored = on_store(state, move |store| {
-        verify_stored(store, &verify_path, &expected)
+        Ok(verify_stored(store, &verify_path, &expected)?)
     })
     .await?;
     match stored {
@@ -314,7 +313,7 @@ async fn download(
     }
     let expected = link.expected.clone();
     let file = on_store(state, move |store| {
-        store.commit_blob(tmp, &expected, size, reservation)
+        Ok(store.commit_blob(tmp, &expected, size, reservation)?)
     })
     .await?;
     info!("stored {kind} {key}: {size} bytes, verified {algo}");

@@ -15,11 +15,12 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempPath};
 use tracing::{info, warn};
 
 use crate::cache::now_secs;
 use crate::digest::{Algo, Expected};
+use crate::error::Error;
 
 /// An artifact a metadata document lists. Served only while `source` is fresh and its latest fetch still lists the
 /// artifact with `expected`.
@@ -38,6 +39,8 @@ pub struct Link {
 pub struct MetaHead {
     pub fetched_at: u64,
     pub content_type: String,
+    /// Kind and key of every link this fetch wrote. The document is served only while all of them exist.
+    pub links: Vec<(String, String)>,
 }
 
 pub struct Cached {
@@ -75,6 +78,10 @@ impl Lru {
         self.tick += 1;
         entry.0 = self.tick;
         self.by_tick.insert(self.tick, path.to_owned());
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.by_path.contains_key(path)
     }
 
     fn remove(&mut self, path: &Path) {
@@ -308,7 +315,8 @@ impl Store {
         }
     }
 
-    /// The cached document when it is fresh.
+    /// The cached document when it is fresh and every link it wrote is still present. A missing link means the fetch
+    /// that re-creates it must run again, so the document is not served from cache.
     pub fn read_fresh_meta(&self, cache_key: &str) -> io::Result<Option<Cached>> {
         let Some(head) = self
             .read_meta_head(cache_key)?
@@ -316,15 +324,27 @@ impl Store {
         else {
             return Ok(None);
         };
+        let head_path = self.meta_path(cache_key, "head");
         let body_path = self.meta_path(cache_key, "body");
+        let link_paths: Vec<PathBuf> = head
+            .links
+            .iter()
+            .map(|(kind, key)| self.link_path(kind, key))
+            .collect();
+        {
+            let mut lru = lock_index(&self.lru);
+            if !link_paths.iter().all(|path| lru.contains(path)) {
+                return Ok(None);
+            }
+            lru.touch(&head_path);
+            lru.touch(&body_path);
+            for path in &link_paths {
+                lru.touch(path);
+            }
+        }
         let Some(body) = read_optional(&body_path)? else {
             return Ok(None);
         };
-        {
-            let mut lru = lock_index(&self.lru);
-            lru.touch(&self.meta_path(cache_key, "head"));
-            lru.touch(&body_path);
-        }
         Ok(Some(Cached {
             fetched_at: head.fetched_at,
             content_type: head.content_type,
@@ -334,26 +354,42 @@ impl Store {
 
     /// Records one metadata fetch: its links, then its body, then its header. Every file is staged and synced before
     /// the index lock is taken, and then renamed into place in that order, so a durable header never names a link or
-    /// body that is missing.
+    /// body that is missing. A listing that cannot fit beside the downloads in flight is refused whole, never kept in
+    /// part.
     pub fn commit_metadata(
         &self,
         cache_key: &str,
         links: &[(&'static str, String, Link)],
         cached: &Cached,
-    ) -> io::Result<()> {
+    ) -> Result<(), Error> {
         let head = serde_json::to_vec(&MetaHead {
             fetched_at: cached.fetched_at,
             content_type: cached.content_type.clone(),
+            links: links
+                .iter()
+                .map(|(kind, key, _)| ((*kind).to_owned(), key.clone()))
+                .collect(),
         })
         .map_err(io::Error::other)?;
-        let mut staged = Vec::with_capacity(links.len() + 2);
-        for (kind, key, link) in links {
-            let bytes = serde_json::to_vec(link).map_err(io::Error::other)?;
-            staged.push((
-                self.link_path(kind, key),
-                self.stage(&bytes)?,
-                bytes.len() as u64,
-            ));
+        let link_files = links
+            .iter()
+            .map(|(kind, key, link)| -> Result<_, serde_json::Error> {
+                Ok((self.link_path(kind, key), serde_json::to_vec(link)?))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io::Error::other)?;
+        let total = link_files
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum::<u64>()
+            + cached.body.len() as u64
+            + head.len() as u64;
+        if total > self.cap {
+            return Err(Error::TooLarge(self.cap));
+        }
+        let mut staged = Vec::with_capacity(link_files.len() + 2);
+        for (path, bytes) in link_files {
+            staged.push((path, self.stage(&bytes)?, bytes.len() as u64));
         }
         staged.push((
             self.meta_path(cache_key, "body"),
@@ -367,10 +403,15 @@ impl Store {
         ));
         {
             let mut lru = lock_index(&self.lru);
-            let mut committed = Ok(());
+            if total > self.cap.saturating_sub(lru.reserved) {
+                return Err(Error::Busy(
+                    "downloads hold the cache budget; retry".to_owned(),
+                ));
+            }
+            let mut committed: io::Result<()> = Ok(());
             for (path, tmp, size) in staged {
                 match tmp.persist(&path) {
-                    Ok(_) => lru.insert(path, size),
+                    Ok(()) => lru.insert(path, size),
                     Err(e) => {
                         committed = Err(e.error);
                         break;
@@ -384,12 +425,13 @@ impl Store {
         Ok(())
     }
 
-    /// Writes and syncs a file under a temporary name. It is visible under its final name only once renamed into place.
-    fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile> {
+    /// Writes and syncs a file under a temporary name, then closes it. It is visible under its final name only once
+    /// renamed into place.
+    fn stage(&self, bytes: &[u8]) -> io::Result<TempPath> {
         let mut tmp = self.new_tmp()?;
         tmp.write_all(bytes)?;
         tmp.as_file().sync_data()?;
-        Ok(tmp)
+        Ok(tmp.into_temp_path())
     }
 
     /// Fresh means fetched within the TTL. A fetch time in the future, after the clock moved back, is not fresh.
@@ -558,5 +600,66 @@ mod tests {
         for path in lru.by_path.keys() {
             assert!(path.exists(), "indexed {} is on disk", path.display());
         }
+    }
+
+    #[test]
+    fn metadata_is_not_served_once_one_of_its_links_is_evicted() {
+        let (_dir, store) = store(1000);
+        let listed = vec![3u8; 10];
+        let link = Link {
+            upstream: "https://up.example/a.tgz".to_owned(),
+            expected: Expected {
+                algo: Algo::Sha256,
+                hex: hex::encode(Sha256::digest(&listed)),
+            },
+            source: "k".to_owned(),
+            fetched_at: now_secs(),
+        };
+        let cached = Cached {
+            fetched_at: now_secs(),
+            content_type: "text/plain".to_owned(),
+            body: b"doc".to_vec(),
+        };
+        store
+            .commit_metadata("k", &[("npm", "a".to_owned(), link)], &cached)
+            .expect("commit");
+        assert!(store.read_fresh_meta("k").expect("read").is_some());
+
+        // A blob that fits only once the link is gone, so the link is exactly what gets evicted.
+        let link_path = store.link_path("npm", "a");
+        let link_len = fs::metadata(&link_path).expect("link on disk").len();
+        let rest = lock_index(&store.lru).bytes - link_len;
+        let blob = vec![7u8; (1000 - rest) as usize];
+        let expected = Expected {
+            algo: Algo::Sha256,
+            hex: hex::encode(Sha256::digest(&blob)),
+        };
+        let reservation = store.reserve(blob.len() as u64).expect("reserve");
+        let mut tmp = store.new_tmp().expect("tmp");
+        std::io::Write::write_all(&mut tmp, &blob).expect("write");
+        store
+            .commit_blob(tmp, &expected, blob.len() as u64, reservation)
+            .expect("commit blob");
+
+        assert!(!link_path.exists(), "the link was evicted");
+        assert!(
+            store.read_fresh_meta("k").expect("read").is_none(),
+            "a listing with an evicted link is refetched, not served"
+        );
+    }
+
+    #[test]
+    fn a_listing_larger_than_the_cache_is_refused_whole() {
+        let (_dir, store) = store(64);
+        let cached = Cached {
+            fetched_at: now_secs(),
+            content_type: "text/plain".to_owned(),
+            body: vec![b'x'; 100],
+        };
+        assert!(matches!(
+            store.commit_metadata("k", &[], &cached),
+            Err(Error::TooLarge(64))
+        ));
+        assert!(store.read_fresh_meta("k").expect("read").is_none());
     }
 }
