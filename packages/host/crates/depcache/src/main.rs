@@ -6,6 +6,7 @@ use clap::Parser;
 use kestrel_depcache::{router, AppState, Config};
 use tracing_subscriber::EnvFilter;
 
+const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
 /// Read-only, verifying dependency cache for Nest VMs (npm, PyPI, crates.io).
@@ -30,6 +31,9 @@ struct Args {
     /// How long fetched metadata (packuments, simple pages, index files) is served before refetching.
     #[arg(long, default_value_t = 300)]
     metadata_ttl_secs: u64,
+    /// Largest metadata document accepted from upstream; metadata is held in memory while it is rewritten.
+    #[arg(long, default_value_t = 128 * MIB)]
+    max_metadata_bytes: u64,
     #[arg(long, default_value = "https://registry.npmjs.org")]
     npm_registry: String,
     #[arg(long, default_value = "https://pypi.org")]
@@ -60,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config {
         public_base_url: origin(args.public_base_url),
         metadata_ttl: std::time::Duration::from_secs(args.metadata_ttl_secs),
+        max_metadata_bytes: args.max_metadata_bytes,
         npm_registry: origin(args.npm_registry),
         pypi_index: origin(args.pypi_index),
         pypi_files: origin(args.pypi_files),

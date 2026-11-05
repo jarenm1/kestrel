@@ -101,6 +101,7 @@ fn config_for(
     up: &str,
     metadata_ttl: Duration,
     allow_http_upstreams: bool,
+    max_metadata_bytes: u64,
 ) -> Config {
     Config {
         public_base_url: public_base_url.to_owned(),
@@ -111,6 +112,7 @@ fn config_for(
         crates_index: format!("{up}/index"),
         crates_static: format!("{up}/static/crates"),
         allow_http_upstreams,
+        max_metadata_bytes,
     }
 }
 
@@ -119,10 +121,25 @@ async fn start(metadata_ttl: Duration, cache_bytes: u64) -> Harness {
 }
 
 async fn start_with(metadata_ttl: Duration, cache_bytes: u64, max_artifact_bytes: u64) -> Harness {
+    start_full(
+        metadata_ttl,
+        cache_bytes,
+        max_artifact_bytes,
+        DEFAULT_METADATA,
+    )
+    .await
+}
+
+async fn start_full(
+    metadata_ttl: Duration,
+    cache_bytes: u64,
+    max_artifact_bytes: u64,
+    max_metadata_bytes: u64,
+) -> Harness {
     let (upstream, up) = spawn_upstream().await;
     let (cache_listener, cache) = listen().await;
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = config_for(&cache, &up, metadata_ttl, true);
+    let config = config_for(&cache, &up, metadata_ttl, true, max_metadata_bytes);
     let state = Arc::new(
         AppState::new(config, dir.path(), cache_bytes, max_artifact_bytes).expect("state"),
     );
@@ -195,6 +212,7 @@ fn packument(name: &str, versions: &[(&str, String, String)]) -> Vec<u8> {
 
 const FOREVER: Duration = Duration::from_secs(300);
 const BIG: u64 = 1 << 30;
+const DEFAULT_METADATA: u64 = 128 << 20;
 
 #[tokio::test]
 async fn npm_tarball_is_served_verified_and_cached() {
@@ -337,15 +355,61 @@ async fn pypi_file_is_linked_by_its_page_and_served_by_path() {
     let (status, html) = h.get("/pypi/simple/six/").await;
     assert_eq!(status, 200);
     let link = format!(
-        "{}/pypi/files/packages/six-1.0-py3-none-any.whl#sha256={}",
+        "{}/pypi/files/six/packages/six-1.0-py3-none-any.whl#sha256={}",
         h.cache,
         sha256_hex(&whl)
     );
     assert!(String::from_utf8(html).expect("utf8").contains(&link));
 
     assert_eq!(
-        h.get("/pypi/files/packages/six-1.0-py3-none-any.whl").await,
+        h.get("/pypi/files/six/packages/six-1.0-py3-none-any.whl")
+            .await,
         (200, whl)
+    );
+}
+
+#[tokio::test]
+async fn expired_pypi_file_link_recovers_its_project_from_the_url() {
+    let h = start(Duration::from_secs(1), BIG).await;
+    let whl = b"six expiring wheel".to_vec();
+    let file_url = format!("{}/files/packages/six-1.0-py3-none-any.whl", h.up);
+    let page = format!(
+        r#"<a href="{file_url}#sha256={}">six-1.0-py3-none-any.whl</a>"#,
+        sha256_hex(&whl)
+    );
+    h.upstream
+        .serve("/pypi/simple/six/", "text/html", page.into_bytes());
+    h.upstream.serve(
+        "/files/packages/six-1.0-py3-none-any.whl",
+        "application/octet-stream",
+        whl.clone(),
+    );
+    h.upstream
+        .serve("/npm/other", "application/json", packument("other", &[]));
+
+    let (status, html) = h.get("/pypi/simple/six/").await;
+    assert_eq!(status, 200);
+    let link = format!(
+        "{}/pypi/files/six/packages/six-1.0-py3-none-any.whl#sha256={}",
+        h.cache,
+        sha256_hex(&whl)
+    );
+    assert!(String::from_utf8(html).expect("utf8").contains(&link));
+
+    // Once past the TTL, the next metadata commit sweeps the six page and its file link.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.get("/npm/other").await.0, 200);
+
+    assert_eq!(
+        h.get("/pypi/files/six/packages/six-1.0-py3-none-any.whl")
+            .await,
+        (200, whl),
+        "the expired link is rebuilt from the project named in the URL"
+    );
+    assert_eq!(
+        h.upstream.hits("/pypi/simple/six/"),
+        2,
+        "the project page was refetched for the link"
     );
 }
 
@@ -427,9 +491,9 @@ async fn unsafe_and_unlisted_paths_are_rejected() {
 
 #[tokio::test]
 async fn least_recently_used_artifacts_are_evicted_above_the_cap() {
-    let a = b"0123456789abcdefghij".to_vec();
-    let b = b"klmnopqrstuvwxyz0123".to_vec();
-    let h = start(FOREVER, 30).await;
+    let a = vec![b'a'; 10_000];
+    let b = vec![b'b'; 10_000];
+    let h = start(FOREVER, 15_000).await;
     let tarball = |v: &str| format!("{}/npm/pkg/-/pkg-{v}.tgz", h.up);
     h.upstream.serve(
         "/npm/pkg",
@@ -558,6 +622,31 @@ async fn artifact_above_the_per_artifact_limit_is_refused_and_not_stored() {
 }
 
 #[tokio::test]
+async fn metadata_above_the_limit_is_refused_and_not_stored() {
+    let h = start_full(FOREVER, BIG, BIG, 64).await;
+    let tgz = b"listed tarball".to_vec();
+    let tarball = format!("{}/npm/pkg/-/pkg-1.0.0.tgz", h.up);
+    h.upstream.serve(
+        "/npm/pkg",
+        "application/json",
+        packument("pkg", &[("1.0.0", tarball, sri512(&tgz))]),
+    );
+
+    assert_eq!(h.get("/npm/pkg").await.0, 502);
+    assert_eq!(h.get("/npm/pkg").await.0, 502);
+    assert_eq!(
+        h.upstream.hits("/npm/pkg"),
+        2,
+        "an oversized document is not cached, so each request refetches it"
+    );
+    assert_eq!(
+        files_under(&h.dir.path().join("meta")),
+        0,
+        "nothing oversized is stored"
+    );
+}
+
+#[tokio::test]
 async fn expired_metadata_and_links_are_swept() {
     let h = start(Duration::from_secs(1), BIG).await;
     let tar = |name: &str| format!("{}/npm/{name}/-/{name}-1.0.0.tgz", h.up);
@@ -594,7 +683,13 @@ async fn expired_metadata_and_links_are_swept() {
 fn plain_http_upstreams_need_the_explicit_opt_in() {
     let dir = tempfile::tempdir().expect("tempdir");
     let refused = AppState::new(
-        config_for("http://cache", "http://up", FOREVER, false),
+        config_for(
+            "http://cache",
+            "http://up",
+            FOREVER,
+            false,
+            DEFAULT_METADATA,
+        ),
         dir.path(),
         BIG,
         BIG,
@@ -604,7 +699,7 @@ fn plain_http_upstreams_need_the_explicit_opt_in() {
         Some(std::io::ErrorKind::InvalidInput)
     );
     assert!(AppState::new(
-        config_for("http://cache", "http://up", FOREVER, true),
+        config_for("http://cache", "http://up", FOREVER, true, DEFAULT_METADATA),
         dir.path(),
         BIG,
         BIG,
@@ -616,7 +711,13 @@ fn plain_http_upstreams_need_the_explicit_opt_in() {
 fn per_artifact_limit_must_fit_in_the_cache() {
     let dir = tempfile::tempdir().expect("tempdir");
     let refused = AppState::new(
-        config_for("http://cache", "https://up", FOREVER, false),
+        config_for(
+            "http://cache",
+            "https://up",
+            FOREVER,
+            false,
+            DEFAULT_METADATA,
+        ),
         dir.path(),
         10,
         20,

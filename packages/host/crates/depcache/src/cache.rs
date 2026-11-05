@@ -77,6 +77,11 @@ pub async fn metadata(
     if let Some(cached) = fresh_metadata(state, &cache_key).await? {
         return Ok(cached);
     }
+    let _slot = state
+        .metadata_slots
+        .acquire()
+        .await
+        .map_err(|e| Error::Internal(e.to_string()))?;
     let response = state
         .client
         .get(upstream)
@@ -98,7 +103,7 @@ pub async fn metadata(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_owned();
-    let body = response.bytes().await?;
+    let body = read_metadata(response, state.config.max_metadata_bytes, upstream).await?;
     let rewritten =
         rewrite(&state.config, upstream, &body, &content_type).map_err(Error::Upstream)?;
     let fetched_at = now_secs();
@@ -135,6 +140,27 @@ pub async fn metadata(
 async fn fresh_metadata(state: &Arc<AppState>, cache_key: &str) -> Result<Option<Cached>, Error> {
     let cache_key = cache_key.to_owned();
     on_store(state, move |store| store.read_fresh_meta(&cache_key)).await
+}
+
+/// Reads a metadata document, refusing one over `limit`. Metadata is held in memory until it is rewritten, so the read
+/// stops at the limit instead of buffering whatever the upstream sends.
+async fn read_metadata(
+    response: reqwest::Response,
+    limit: u64,
+    upstream: &str,
+) -> Result<Vec<u8>, Error> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if (body.len() + chunk.len()) as u64 > limit {
+            return Err(Error::Upstream(format!(
+                "{upstream} sends more than {limit} bytes of metadata"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// The current link for `kind/key`. When there is none, `refresh` (the fetch of the metadata that lists it) runs
@@ -241,11 +267,23 @@ async fn download(
         )));
     }
     let limit = state.max_artifact_bytes;
-    if let Some(declared) = response.content_length() {
+    let declared = response.content_length();
+    if let Some(declared) = declared {
         if declared > limit {
             return Err(Error::TooLarge(declared));
         }
     }
+    // Held from here until the download commits or fails, so concurrent downloads cannot together outgrow the cap.
+    // A response without a declared length may be as large as the per-artifact limit.
+    let budget = declared.unwrap_or(limit);
+    let reservation = on_store(state, move |store| Ok(store.reserve(budget)))
+        .await?
+        .ok_or_else(|| {
+            Error::Busy(format!(
+                "downloads hold the cache budget; retry {}",
+                link.upstream
+            ))
+        })?;
     let (tmp, out) = on_store(state, |store| {
         let tmp = store.new_tmp()?;
         let out = tmp.reopen()?;
@@ -259,7 +297,7 @@ async fn download(
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         size += chunk.len() as u64;
-        if size > limit {
+        if size > budget {
             return Err(Error::TooLarge(size));
         }
         hasher.update(&chunk);
@@ -275,7 +313,10 @@ async fn download(
         )));
     }
     let expected = link.expected.clone();
-    let file = on_store(state, move |store| store.commit_blob(tmp, &expected, size)).await?;
+    let file = on_store(state, move |store| {
+        store.commit_blob(tmp, &expected, size, reservation)
+    })
+    .await?;
     info!("stored {kind} {key}: {size} bytes, verified {algo}");
     Ok((file, size))
 }

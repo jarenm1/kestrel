@@ -1,6 +1,6 @@
 //! PyPI: simple index pages (`/pypi/simple/<project>/`, HTML or PEP 691 JSON) are cached for the metadata TTL and
 //! rewritten so each file link from the files origin points at this cache with its `sha256` fragment. A file
-//! (`/pypi/files/<path>`) is served only through a current project-page link and verified against that `sha256`.
+//! (`/pypi/files/<project>/<path>`) is served only through a current project-page link and verified against that `sha256`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -71,33 +71,28 @@ pub async fn file(
     if !is_safe_path(&rest) {
         return Err(Error::BadRequest(format!("not a PyPI file path: {rest}")));
     }
-    let lookup = rest.clone();
-    let stored = cache::on_store(&state, move |store| store.read_link(LINK_KIND, &lookup))
-        .await?
-        .ok_or_else(|| {
-            Error::NotFound(format!(
-                "{rest} is not listed by any project page the cache has fetched"
-            ))
-        })?;
-    let (json, project) = parse_source(&stored.source)
-        .ok_or_else(|| Error::Internal(format!("unrecognised link source {}", stored.source)))?;
+    // A file path is `<project>/<path>`. The project names the page that lists the file, so an expired link is
+    // refetched from that page.
+    let Some((project, _)) = rest.split_once('/') else {
+        return Err(Error::BadRequest(format!("not a PyPI file path: {rest}")));
+    };
     let project = project.to_owned();
     let link = cache::resolve_link(
         &state,
         LINK_KIND,
         &rest,
-        fetch_simple(&state, json, &project),
+        fetch_simple(&state, false, &project),
     )
     .await?;
     let (file, len) = cache::artifact(&state, LINK_KIND, &rest, &link).await?;
     Ok(cache::file_response(file, len))
 }
 
-/// `pypi-simple/<variant>/<project>` -> (json variant, project).
-fn parse_source(source: &str) -> Option<(bool, &str)> {
-    let rest = source.strip_prefix("pypi-simple/")?;
-    let (variant, project) = rest.split_once('/')?;
-    Some((variant == "json", project))
+/// The project a simple page describes, from its upstream URL `{pypi_index}/simple/<project>/`.
+fn project_of<'a>(config: &Config, upstream: &'a str) -> Option<&'a str> {
+    let rest = upstream.strip_prefix(&format!("{}/simple/", config.pypi_index))?;
+    let project = rest.strip_suffix('/')?;
+    is_safe_path(project).then_some(project)
 }
 
 fn rewrite_simple(
@@ -106,24 +101,31 @@ fn rewrite_simple(
     body: &[u8],
     content_type: &str,
 ) -> Result<Rewritten, String> {
+    let project = project_of(config, upstream)
+        .ok_or_else(|| format!("{upstream} is not a PyPI project page"))?;
     if content_type.contains("json") {
-        rewrite_json(config, upstream, body, content_type)
+        rewrite_json(config, project, upstream, body, content_type)
     } else {
-        rewrite_html(config, upstream, body, content_type)
+        rewrite_html(config, project, upstream, body, content_type)
     }
 }
 
-/// The cache key (the path) and artifact of a file link whose URL is on the files origin, has no query, and whose
-/// `sha256` is valid.
-fn file_link(config: &Config, url: &str, sha256: &str) -> Option<(String, Artifact)> {
+/// The cache key (`<project>/<path>`) and artifact of a file link whose URL is on the files origin, has no query, and
+/// whose `sha256` is valid.
+fn file_link(
+    config: &Config,
+    project: &str,
+    url: &str,
+    sha256: &str,
+) -> Option<(String, Artifact)> {
     let prefix = format!("{}/", config.pypi_files);
-    let key = url.strip_prefix(&prefix)?;
-    if key.contains('?') || !is_safe_path(key) {
+    let path = url.strip_prefix(&prefix)?;
+    if path.contains('?') || !is_safe_path(path) {
         return None;
     }
     let expected = parse_hex(Algo::Sha256, sha256)?;
     Some((
-        key.to_owned(),
+        format!("{project}/{path}"),
         Artifact {
             upstream: url.to_owned(),
             expected,
@@ -138,6 +140,7 @@ fn public_file_url(config: &Config, key: &str, hex: &str) -> String {
 
 fn rewrite_html(
     config: &Config,
+    project: &str,
     upstream: &str,
     body: &[u8],
     content_type: &str,
@@ -146,7 +149,7 @@ fn rewrite_html(
         std::str::from_utf8(body).map_err(|_| format!("{upstream} sent a non-UTF-8 index page"))?;
     let mut links = Vec::new();
     let rewritten = ANCHOR.replace_all(page, |caps: &Captures| {
-        match rewrite_anchor(config, &caps[1]) {
+        match rewrite_anchor(config, project, &caps[1]) {
             Some((tag, key, artifact)) => {
                 links.push((LINK_KIND, key, artifact));
                 tag
@@ -162,11 +165,15 @@ fn rewrite_html(
 }
 
 /// Rewrites one `<a>` tag's attributes; `None` leaves the tag as it is.
-fn rewrite_anchor(config: &Config, attrs: &str) -> Option<(String, String, Artifact)> {
+fn rewrite_anchor(
+    config: &Config,
+    project: &str,
+    attrs: &str,
+) -> Option<(String, String, Artifact)> {
     let href = HREF.captures(attrs)?[1].replace("&amp;", "&");
     let (url, fragment) = href.split_once('#')?;
     let sha256 = fragment.strip_prefix("sha256=")?;
-    let (key, artifact) = file_link(config, url, sha256)?;
+    let (key, artifact) = file_link(config, project, url, sha256)?;
     let link = public_file_url(config, &key, &artifact.expected.hex);
     let attrs = METADATA.replace_all(attrs, "");
     let attrs = HREF.replace(&attrs, format!("href=\"{link}\"").as_str());
@@ -175,6 +182,7 @@ fn rewrite_anchor(config: &Config, attrs: &str) -> Option<(String, String, Artif
 
 fn rewrite_json(
     config: &Config,
+    project: &str,
     upstream: &str,
     body: &[u8],
     content_type: &str,
@@ -196,7 +204,7 @@ fn rewrite_json(
             let (Some(url), Some(sha256)) = (url, sha256) else {
                 continue;
             };
-            let Some((key, artifact)) = file_link(config, &url, &sha256) else {
+            let Some((key, artifact)) = file_link(config, project, &url, &sha256) else {
                 continue;
             };
             object.remove("dist-info-metadata");
@@ -237,6 +245,7 @@ mod tests {
         );
         let out = rewrite_html(
             &config,
+            "six",
             "https://pypi.org/simple/six/",
             page.as_bytes(),
             "text/html",
@@ -244,7 +253,7 @@ mod tests {
         .expect("html");
         let html = String::from_utf8(out.body).expect("utf8");
         assert!(html.contains(&format!(
-            r#"<a href="http://169.254.0.1:3141/pypi/files/packages/aa/six-1.0-py3-none-any.whl#sha256={GOOD}">six</a>"#
+            r#"<a href="http://169.254.0.1:3141/pypi/files/six/packages/aa/six-1.0-py3-none-any.whl#sha256={GOOD}">six</a>"#
         )));
         assert!(html.contains(&format!(
             r#"<a href="https://example.com/x.whl#sha256={GOOD}">x</a>"#
@@ -269,6 +278,7 @@ mod tests {
         });
         let out = rewrite_json(
             &config,
+            "six",
             "https://pypi.org/simple/six/",
             doc.to_string().as_bytes(),
             "application/vnd.pypi.simple.v1+json",
@@ -277,19 +287,9 @@ mod tests {
         let doc: Value = serde_json::from_slice(&out.body).expect("json");
         assert_eq!(
             doc["files"][0]["url"],
-            format!("http://169.254.0.1:3141/pypi/files/packages/aa/six-1.0-py3-none-any.whl#sha256={GOOD}")
+            format!("http://169.254.0.1:3141/pypi/files/six/packages/aa/six-1.0-py3-none-any.whl#sha256={GOOD}")
         );
         assert!(doc["files"][0].get("core-metadata").is_none());
         assert_eq!(out.links.len(), 1);
-    }
-
-    #[test]
-    fn source_round_trips_through_parse_source() {
-        assert_eq!(parse_source("pypi-simple/json/six"), Some((true, "six")));
-        assert_eq!(
-            parse_source("pypi-simple/html/zope.interface"),
-            Some((false, "zope.interface"))
-        );
-        assert_eq!(parse_source("npm-packument/full/six"), None);
     }
 }

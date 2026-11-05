@@ -1,14 +1,16 @@
-//! On-disk state. Artifacts are content-addressed (`blobs/<algo>/<hex>`) and evicted least recently used above a byte
-//! cap. Link records say which artifact a metadata document lists under a key. Metadata is stored as a small header
-//! (`*.head`) and a body (`*.body`), so freshness checks never read the body. Links and metadata whose fetch is past
-//! the TTL are swept, so `links/` and `meta/` stay bounded the way `blobs/` does.
+//! On-disk state. Everything the cache keeps on disk is an entry in one least-recently-used index capped at `cap`
+//! bytes: artifacts (`blobs/<algo>/<hex>`), link records (`links/`) and metadata (`meta/*.head`, `meta/*.body`).
+//! A download in flight holds a reservation against the cap until it commits or fails. Every change to a file and to
+//! the index happens under the index lock, so eviction, sweeps and commits never interleave. Metadata is stored as a
+//! small header (`*.head`) and a body (`*.body`), so freshness checks never read the body. Links and metadata whose
+//! fetch is past the TTL are swept.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -47,7 +49,10 @@ pub struct Cached {
 #[derive(Default)]
 struct Lru {
     tick: u64,
+    /// Bytes of every committed file.
     bytes: u64,
+    /// Bytes promised to downloads in flight.
+    reserved: u64,
     /// path -> (tick, size)
     by_path: HashMap<PathBuf, (u64, u64)>,
     by_tick: BTreeMap<u64, PathBuf>,
@@ -79,18 +84,15 @@ impl Lru {
         }
     }
 
-    /// Least recently used paths to delete so the total fits `cap`, never `keep`.
-    fn victims(&self, cap: u64, keep: &Path) -> Vec<PathBuf> {
-        let mut bytes = self.bytes;
+    /// Least recently used paths to delete so that committed bytes plus reservations fit `limit`.
+    fn victims(&self, limit: u64) -> Vec<PathBuf> {
+        let mut used = self.bytes + self.reserved;
         let mut victims = Vec::new();
         for path in self.by_tick.values() {
-            if bytes <= cap {
+            if used <= limit {
                 break;
             }
-            if path.as_path() == keep {
-                continue;
-            }
-            bytes -= self.by_path[path].1;
+            used -= self.by_path[path].1;
             victims.push(path.clone());
         }
         victims
@@ -101,11 +103,36 @@ pub struct Store {
     root: PathBuf,
     cap: u64,
     metadata_ttl: Duration,
-    lru: Mutex<Lru>,
+    /// The index and every change to the files it tracks. Held for each such change, so eviction, sweeps and commits
+    /// never interleave.
+    lru: Arc<Mutex<Lru>>,
     /// Unix time of the last sweep.
     last_sweep: AtomicU64,
-    /// Metadata commits hold this shared; a sweep holds it exclusively, so it never sees a half-written document.
-    meta_lock: RwLock<()>,
+}
+
+/// Budget held for a download in flight. It counts against the cap until the download commits or is dropped.
+pub struct Reservation {
+    lru: Arc<Mutex<Lru>>,
+    bytes: u64,
+}
+
+impl Reservation {
+    fn release(&mut self) -> u64 {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let bytes = self.release();
+        if bytes > 0 {
+            lock_index(&self.lru).reserved -= bytes;
+        }
+    }
+}
+
+fn lock_index(lru: &Mutex<Lru>) -> MutexGuard<'_, Lru> {
+    lru.lock().expect("lru lock")
 }
 
 impl Store {
@@ -122,20 +149,22 @@ impl Store {
             root: root.to_owned(),
             cap,
             metadata_ttl,
-            lru: Mutex::default(),
+            lru: Arc::default(),
             last_sweep: AtomicU64::new(0),
-            meta_lock: RwLock::new(()),
         };
-        store.index_existing_blobs()?;
+        store.index_existing()?;
         store.sweep_if_due();
         Ok(store)
     }
 
-    /// Adopts blobs left by an earlier run, oldest first, and evicts down to the cap.
-    fn index_existing_blobs(&self) -> io::Result<()> {
-        let mut found = Vec::new();
+    /// Adopts files left by an earlier run, oldest first, and evicts down to the cap.
+    fn index_existing(&self) -> io::Result<()> {
+        let mut dirs = vec![self.root.join("meta"), self.root.join("links")];
         for algo in [Algo::Sha512, Algo::Sha256] {
-            let dir = self.root.join("blobs").join(algo.name());
+            dirs.push(self.root.join("blobs").join(algo.name()));
+        }
+        let mut found = Vec::new();
+        for dir in dirs {
             fs::create_dir_all(&dir)?;
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
@@ -150,21 +179,21 @@ impl Store {
             }
         }
         found.sort_by_key(|(mtime, _, _)| *mtime);
-        let mut lru = self.lru.lock().expect("lru lock");
+        let mut lru = lock_index(&self.lru);
         for (_, path, size) in found {
             lru.insert(path, size);
         }
-        let victims = lru.victims(self.cap, Path::new(""));
-        for victim in &victims {
-            lru.remove(victim);
-        }
-        drop(lru);
-        remove_evicted(&victims);
+        self.evict(&mut lru, self.cap);
         Ok(())
     }
 
-    pub fn cap(&self) -> u64 {
-        self.cap
+    /// Deletes least recently used files until the index fits `limit`. A file leaves the index and the disk together.
+    fn evict(&self, lru: &mut Lru, limit: u64) {
+        let victims = lru.victims(limit);
+        for victim in &victims {
+            lru.remove(victim);
+        }
+        remove_evicted(&victims);
     }
 
     pub fn blob_path(&self, expected: &Expected) -> PathBuf {
@@ -179,36 +208,48 @@ impl Store {
         NamedTempFile::new_in(self.root.join("tmp"))
     }
 
-    /// Moves a verified download into place, evicts least recently used artifacts above the cap, and returns the
-    /// committed file positioned at its start.
+    /// Reserves `bytes` of the cap for a download, evicting least recently used files to make room. `None` when
+    /// downloads in flight already hold the room.
+    pub fn reserve(&self, bytes: u64) -> Option<Reservation> {
+        let mut lru = lock_index(&self.lru);
+        if lru.reserved + bytes > self.cap {
+            return None;
+        }
+        lru.reserved += bytes;
+        self.evict(&mut lru, self.cap);
+        Some(Reservation {
+            lru: Arc::clone(&self.lru),
+            bytes,
+        })
+    }
+
+    /// Moves a verified download into place in place of its reservation, evicts least recently used files above the
+    /// cap, and returns the committed file positioned at its start.
     pub fn commit_blob(
         &self,
         tmp: NamedTempFile,
         expected: &Expected,
         size: u64,
+        mut reservation: Reservation,
     ) -> io::Result<File> {
         let path = self.blob_path(expected);
+        let mut lru = lock_index(&self.lru);
         let mut file = tmp.persist(&path).map_err(|e| e.error)?;
-        file.seek(SeekFrom::Start(0))?;
-        let mut lru = self.lru.lock().expect("lru lock");
-        lru.insert(path.clone(), size);
-        let victims = lru.victims(self.cap, &path);
-        for victim in &victims {
-            lru.remove(victim);
-        }
+        lru.reserved -= reservation.release();
+        lru.insert(path, size);
+        self.evict(&mut lru, self.cap);
         drop(lru);
-        remove_evicted(&victims);
+        file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }
 
     pub fn touch_blob(&self, path: &Path) {
-        self.lru.lock().expect("lru lock").touch(path);
+        lock_index(&self.lru).touch(path);
     }
 
     /// Drops a blob that is missing or failed verification.
     pub fn forget_blob(&self, path: &Path) {
-        self.lru.lock().expect("lru lock").remove(path);
-        remove_file_if_exists(path);
+        drop_file(&mut lock_index(&self.lru), path);
     }
 
     fn link_path(&self, kind: &str, key: &str) -> PathBuf {
@@ -217,7 +258,7 @@ impl Store {
             .join(format!("{}.json", hashed(&format!("{kind}\0{key}"))))
     }
 
-    pub fn read_link(&self, kind: &str, key: &str) -> io::Result<Option<Link>> {
+    fn read_link(&self, kind: &str, key: &str) -> io::Result<Option<Link>> {
         let Some(bytes) = read_optional(&self.link_path(kind, key))? else {
             return Ok(None);
         };
@@ -230,17 +271,16 @@ impl Store {
         }
     }
 
-    fn write_link(&self, kind: &str, key: &str, link: &Link) -> io::Result<()> {
-        let bytes = serde_json::to_vec(link).map_err(io::Error::other)?;
-        self.write_atomic(&self.link_path(kind, key), &bytes)
-    }
-
     /// The link for `kind/key` when its source metadata is fresh and that metadata's latest fetch wrote this link.
     pub fn current_link(&self, kind: &str, key: &str) -> io::Result<Option<Link>> {
         let Some(link) = self.read_link(kind, key)? else {
             return Ok(None);
         };
-        Ok(self.link_is_current(&link)?.then_some(link))
+        if !self.link_is_current(&link)? {
+            return Ok(None);
+        }
+        lock_index(&self.lru).touch(&self.link_path(kind, key));
+        Ok(Some(link))
     }
 
     fn link_is_current(&self, link: &Link) -> io::Result<bool> {
@@ -276,9 +316,15 @@ impl Store {
         else {
             return Ok(None);
         };
-        let Some(body) = read_optional(&self.meta_path(cache_key, "body"))? else {
+        let body_path = self.meta_path(cache_key, "body");
+        let Some(body) = read_optional(&body_path)? else {
             return Ok(None);
         };
+        {
+            let mut lru = lock_index(&self.lru);
+            lru.touch(&self.meta_path(cache_key, "head"));
+            lru.touch(&body_path);
+        }
         Ok(Some(Cached {
             fetched_at: head.fetched_at,
             content_type: head.content_type,
@@ -286,33 +332,70 @@ impl Store {
         }))
     }
 
-    /// Records one metadata fetch: its links, then its body, then its header. Each file is fsynced before the next is
-    /// written, so a durable header never names a link or body that is not yet on disk.
+    /// Records one metadata fetch: its links, then its body, then its header. Every file is staged and synced before
+    /// the index lock is taken, and then renamed into place in that order, so a durable header never names a link or
+    /// body that is missing.
     pub fn commit_metadata(
         &self,
         cache_key: &str,
         links: &[(&'static str, String, Link)],
         cached: &Cached,
     ) -> io::Result<()> {
+        let head = serde_json::to_vec(&MetaHead {
+            fetched_at: cached.fetched_at,
+            content_type: cached.content_type.clone(),
+        })
+        .map_err(io::Error::other)?;
+        let mut staged = Vec::with_capacity(links.len() + 2);
+        for (kind, key, link) in links {
+            let bytes = serde_json::to_vec(link).map_err(io::Error::other)?;
+            staged.push((
+                self.link_path(kind, key),
+                self.stage(&bytes)?,
+                bytes.len() as u64,
+            ));
+        }
+        staged.push((
+            self.meta_path(cache_key, "body"),
+            self.stage(&cached.body)?,
+            cached.body.len() as u64,
+        ));
+        staged.push((
+            self.meta_path(cache_key, "head"),
+            self.stage(&head)?,
+            head.len() as u64,
+        ));
         {
-            let _shared = self.meta_lock.read().expect("meta lock");
-            for (kind, key, link) in links {
-                self.write_link(kind, key, link)?;
+            let mut lru = lock_index(&self.lru);
+            let mut committed = Ok(());
+            for (path, tmp, size) in staged {
+                match tmp.persist(&path) {
+                    Ok(_) => lru.insert(path, size),
+                    Err(e) => {
+                        committed = Err(e.error);
+                        break;
+                    }
+                }
             }
-            self.write_atomic(&self.meta_path(cache_key, "body"), &cached.body)?;
-            let head = MetaHead {
-                fetched_at: cached.fetched_at,
-                content_type: cached.content_type.clone(),
-            };
-            let bytes = serde_json::to_vec(&head).map_err(io::Error::other)?;
-            self.write_atomic(&self.meta_path(cache_key, "head"), &bytes)?;
+            self.evict(&mut lru, self.cap);
+            committed?;
         }
         self.sweep_if_due();
         Ok(())
     }
 
+    /// Writes and syncs a file under a temporary name. It is visible under its final name only once renamed into place.
+    fn stage(&self, bytes: &[u8]) -> io::Result<NamedTempFile> {
+        let mut tmp = self.new_tmp()?;
+        tmp.write_all(bytes)?;
+        tmp.as_file().sync_data()?;
+        Ok(tmp)
+    }
+
+    /// Fresh means fetched within the TTL. A fetch time in the future, after the clock moved back, is not fresh.
     fn is_fresh(&self, fetched_at: u64) -> bool {
-        now_secs().saturating_sub(fetched_at) < self.metadata_ttl.as_secs()
+        let now = now_secs();
+        fetched_at <= now && now - fetched_at < self.metadata_ttl.as_secs()
     }
 
     /// Sweeps at most once per TTL. A failed sweep is logged and retried on a later call.
@@ -329,9 +412,9 @@ impl Store {
     }
 
     /// Deletes what can no longer be served: a header past its TTL with its body, a body whose header is gone, and a
-    /// link whose fetch is past its TTL. Holds the metadata lock exclusively.
+    /// link whose fetch is past its TTL. Runs under the index lock.
     fn sweep(&self) -> io::Result<()> {
-        let _exclusive = self.meta_lock.write().expect("meta lock");
+        let mut lru = lock_index(&self.lru);
         for entry in fs::read_dir(self.root.join("meta"))? {
             let path = entry?.path();
             match path.extension().and_then(|ext| ext.to_str()) {
@@ -339,12 +422,12 @@ impl Store {
                     let head = read_optional(&path)?
                         .and_then(|bytes| serde_json::from_slice::<MetaHead>(&bytes).ok());
                     if !head.is_some_and(|head| self.is_fresh(head.fetched_at)) {
-                        remove_file_if_exists(&path);
-                        remove_file_if_exists(&path.with_extension("body"));
+                        drop_file(&mut lru, &path);
+                        drop_file(&mut lru, &path.with_extension("body"));
                     }
                 }
                 Some("body") if !path.with_extension("head").exists() => {
-                    remove_file_if_exists(&path);
+                    drop_file(&mut lru, &path);
                 }
                 _ => {}
             }
@@ -354,19 +437,17 @@ impl Store {
             let link =
                 read_optional(&path)?.and_then(|bytes| serde_json::from_slice::<Link>(&bytes).ok());
             if !link.is_some_and(|link| self.is_fresh(link.fetched_at)) {
-                remove_file_if_exists(&path);
+                drop_file(&mut lru, &path);
             }
         }
         Ok(())
     }
+}
 
-    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut tmp = self.new_tmp()?;
-        tmp.write_all(bytes)?;
-        tmp.as_file().sync_data()?;
-        tmp.persist(path).map_err(|e| e.error)?;
-        Ok(())
-    }
+/// Removes a file from the index and from the disk.
+fn drop_file(lru: &mut Lru, path: &Path) {
+    lru.remove(path);
+    remove_file_if_exists(path);
 }
 
 fn remove_evicted(victims: &[PathBuf]) {
@@ -397,4 +478,85 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 fn hashed(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    fn store(cap: u64) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open(dir.path(), cap, Duration::from_secs(300)).expect("open");
+        (dir, store)
+    }
+
+    #[test]
+    fn metadata_fetched_in_the_future_is_not_fresh() {
+        let (_dir, store) = store(1 << 20);
+        let cached = Cached {
+            fetched_at: now_secs() + 3600,
+            content_type: "text/plain".to_owned(),
+            body: b"doc".to_vec(),
+        };
+        store.commit_metadata("k", &[], &cached).expect("commit");
+        assert!(store.read_fresh_meta("k").expect("read").is_none());
+    }
+
+    #[test]
+    fn reservations_hold_the_cap_until_released() {
+        let (_dir, store) = store(100);
+        let first = store.reserve(60).expect("fits the cap");
+        assert!(
+            store.reserve(60).is_none(),
+            "two downloads cannot both hold 60 of 100 bytes"
+        );
+        drop(first);
+        assert!(store.reserve(60).is_some());
+    }
+
+    #[test]
+    fn concurrent_commits_keep_the_index_and_the_disk_in_step() {
+        let (dir, store) = store(30);
+        let payloads: Vec<Vec<u8>> = (0u8..6).map(|i| vec![i; 10]).collect();
+        std::thread::scope(|scope| {
+            for thread in 0..4usize {
+                let (store, payloads) = (&store, &payloads);
+                scope.spawn(move || {
+                    for round in 0..200 {
+                        let payload = &payloads[(thread + round) % payloads.len()];
+                        let expected = Expected {
+                            algo: Algo::Sha256,
+                            hex: hex::encode(Sha256::digest(payload)),
+                        };
+                        let reservation = loop {
+                            match store.reserve(10) {
+                                Some(reservation) => break reservation,
+                                None => std::thread::yield_now(),
+                            }
+                        };
+                        let mut tmp = store.new_tmp().expect("tmp");
+                        std::io::Write::write_all(&mut tmp, payload).expect("write");
+                        store
+                            .commit_blob(tmp, &expected, 10, reservation)
+                            .expect("commit");
+                    }
+                });
+            }
+        });
+
+        let lru = lock_index(&store.lru);
+        assert_eq!(lru.reserved, 0);
+        let indexed_bytes: u64 = lru.by_path.values().map(|(_, size)| size).sum();
+        assert_eq!(lru.bytes, indexed_bytes);
+        assert!(lru.bytes <= 30);
+        let on_disk = fs::read_dir(dir.path().join("blobs").join(Algo::Sha256.name()))
+            .expect("read_dir")
+            .count();
+        assert_eq!(on_disk, lru.by_path.len());
+        for path in lru.by_path.keys() {
+            assert!(path.exists(), "indexed {} is on disk", path.display());
+        }
+    }
 }

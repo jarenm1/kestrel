@@ -30,6 +30,9 @@ pub use error::Error;
 /// Longest redirect chain followed to an upstream artifact.
 const MAX_REDIRECTS: usize = 10;
 
+/// Metadata fetches allowed in flight at once.
+const MAX_METADATA_FETCHES: usize = 8;
+
 /// Runtime configuration. Upstream bases have no trailing slash.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -37,6 +40,8 @@ pub struct Config {
     pub public_base_url: String,
     /// How long fetched metadata is served before it is refetched.
     pub metadata_ttl: Duration,
+    /// Largest metadata document accepted from upstream. Metadata is held in memory while it is rewritten.
+    pub max_metadata_bytes: u64,
     pub npm_registry: String,
     pub pypi_index: String,
     pub pypi_files: String,
@@ -65,6 +70,8 @@ pub struct AppState {
     pub store: store::Store,
     /// Largest single artifact that is downloaded; the store's cap bounds the total.
     pub max_artifact_bytes: u64,
+    /// Bounds metadata fetches in flight. Each holds up to `max_metadata_bytes` in memory while it is read.
+    pub metadata_slots: tokio::sync::Semaphore,
     pub client: reqwest::Client,
     pub flights: flight::Flights,
 }
@@ -107,6 +114,7 @@ impl AppState {
             config,
             store: store::Store::open(storage_dir, cache_bytes, metadata_ttl)?,
             max_artifact_bytes,
+            metadata_slots: tokio::sync::Semaphore::new(MAX_METADATA_FETCHES),
             client,
             flights: flight::Flights::default(),
         })
@@ -184,6 +192,7 @@ pub(crate) fn test_config() -> Config {
     Config {
         public_base_url: "http://169.254.0.1:3141".to_owned(),
         metadata_ttl: Duration::from_secs(300),
+        max_metadata_bytes: 128 << 20,
         npm_registry: "https://registry.npmjs.org".to_owned(),
         pypi_index: "https://pypi.org".to_owned(),
         pypi_files: "https://files.pythonhosted.org".to_owned(),

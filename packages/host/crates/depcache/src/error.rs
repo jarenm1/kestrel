@@ -11,6 +11,8 @@ pub enum Error {
     NotFound(String),
     TooLarge(u64),
     Upstream(String),
+    /// Downloads in flight hold the whole cache budget; the request can be retried.
+    Busy(String),
     Internal(String),
 }
 
@@ -28,6 +30,7 @@ impl IntoResponse for Error {
                 format!("artifact of {bytes} bytes is larger than the cache cap"),
             ),
             Self::Upstream(m) => (StatusCode::BAD_GATEWAY, m),
+            Self::Busy(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             Self::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
         (status, message).into_response()
