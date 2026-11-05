@@ -108,8 +108,9 @@ export const lastActiveAt = (opts: {
 }): number => Math.max(opts.runningSince, opts.lastRequestAt ?? 0, opts.lastCpuActiveAt ?? 0)
 
 /**
- * Idle means nothing running, no viewers or recordings, no open ingress connections, and no activity for
- * `idleAfterMs`. An unknown guest activity (null) is not idle.
+ * Idle means nothing running, no viewers or recordings, no open ingress connections, and no host-measured activity for
+ * `idleAfterMs`. `activity` is the guest's last fresh report, or null when there is none: the guest then counts as doing
+ * nothing and the host's own signals (ingress, CPU) decide, so a hung or silent guest cannot keep its box awake forever.
  */
 export const isIdle = (opts: {
   readonly now: number
@@ -119,8 +120,7 @@ export const isIdle = (opts: {
   readonly idleAfterMs: number
 }): boolean => {
   const { activity } = opts
-  if (activity === null) return false
-  const busy = activity.runs + activity.desktops + activity.viewers + activity.recordings
+  const busy = activity === null ? 0 : activity.runs + activity.desktops + activity.viewers + activity.recordings
   return busy === 0 && opts.openConnections === 0 && opts.now - opts.lastActiveMs >= opts.idleAfterMs
 }
 

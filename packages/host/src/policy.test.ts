@@ -103,8 +103,10 @@ describe("idle", () => {
     expect(isIdle({ ...base, activity: quiet })).toBe(true)
   })
 
-  test("a VM whose guest has not reported yet is not idle", () => {
-    expect(isIdle({ ...base, activity: null })).toBe(false)
+  test("a guest with no fresh report is judged by the host's own signals alone", () => {
+    expect(isIdle({ ...base, activity: null })).toBe(true)
+    expect(isIdle({ ...base, activity: null, openConnections: 1 })).toBe(false)
+    expect(isIdle({ ...base, activity: null, lastActiveMs: base.now - 500 })).toBe(false)
   })
 
   test("runs, desktops, viewers, recordings or open connections keep a VM awake", () => {
