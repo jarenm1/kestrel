@@ -435,5 +435,6 @@
         formatter = pkgs.nixpkgs-fmt;
       }) // {
         nixosModules.nest-host = import ./packages/host/nix/host-module.nix { inherit self; };
+        nixosModules.zen-ddc = import ./packages/host/nix/zen-module.nix;
       };
 }
