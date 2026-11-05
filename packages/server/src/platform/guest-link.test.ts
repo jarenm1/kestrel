@@ -259,6 +259,27 @@ describe("guest link", () => {
     await expect(refused).rejects.toThrow("no GPU on this host")
   })
 
+  test("a request made while disconnected settles the earlier request for the same state", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    const first = link.setWanted(true)
+    const second = link.setWanted(true)
+    await guest.when(() => guest.connections() === 1)
+    await guest.when(() => wishIds(guest).length === 1)
+    guest.send({ _tag: "reply", id: wishIds(guest)[0], ok: true })
+    await expect(first).resolves.toBeUndefined()
+    await expect(second).resolves.toBeUndefined()
+  })
+
+  test("a request superseded by a release before it attached is refused", async () => {
+    const guest = await fakeGuest()
+    const { link } = startLink(guest)
+    await guest.when(() => guest.connections() === 1)
+    const requested = link.setWanted(true)
+    link.setWanted(false)
+    await expect(requested).rejects.toThrow("the GPU was released before it attached")
+  })
+
   test("a release made while disconnected reaches the guest on reconnect", async () => {
     const guest = await fakeGuest()
     const { link } = startLink(guest)

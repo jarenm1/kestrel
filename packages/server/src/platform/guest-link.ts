@@ -191,11 +191,23 @@ export const startGuestLink = (options: GuestLinkOptions): GuestLink => {
   return {
     setWanted: (value) => {
       const next = { id: randomUUID(), wanted: value }
+      const previous = wish
       wish = next
       const answer = new Promise<void>((resolve, reject) => {
         if (closed) reject(new Error("the box is stopping"))
         else awaiting.set(next.id, { resolve, reject })
       })
+      // The guest answers only the latest wish (the reconnect replay carries only it), so an older wish still waiting is
+      // settled by this answer when it asks for the same state, and refused when it asks for the other one.
+      const superseded = previous === null ? undefined : awaiting.get(previous.id)
+      if (previous !== null && superseded !== undefined) {
+        awaiting.delete(previous.id)
+        if (previous.wanted === value) answer.then(superseded.resolve, superseded.reject)
+        else
+          superseded.reject(
+            new Error(value ? "the GPU was requested again before the release finished" : "the GPU was released before it attached"),
+          )
+      }
       // A caller that does not await the answer (a release, a withdrawn wish) still gets its failure logged.
       answer.catch((error: unknown) =>
         options.warn(
