@@ -62,6 +62,7 @@ import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
+import { projectResourcesFor } from "./project-resources"
 import { STORAGE_CHECK_MS, STORAGE_GROWTH_SLACK, diskUsage, formatBytes } from "./storage"
 import { readTextGenerationSettings, writeTextGenerationSettings } from "./text-generation-settings"
 import { readThreadSettings, writeThreadSettings } from "./thread-settings"
@@ -701,6 +702,7 @@ export const CoreLive = Layer.effect(
           : yield* github.commitIdentity(task.owner, creds?.github).pipe(
               Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
             )
+        const resources = yield* projectResourcesFor(config.projectResources ?? [], task, config.dataDir)
         return yield* prepareLaunch({
           settings: sandboxSettings,
           taskId: task.id,
@@ -710,7 +712,9 @@ export const CoreLive = Layer.effect(
           mirrorDir: join(config.mirrorsDir, task.owner),
           homeDir: join(config.homesDir, task.id),
           display,
-          env: { CLOUDAGENTS_TASK_ID: task.id },
+          env: { ...resources.env, CLOUDAGENTS_TASK_ID: task.id },
+          binds: resources.binds,
+          roTargetBinds: resources.roTargetBinds,
           command,
         })
       })

@@ -19,6 +19,8 @@ const BOX_VARS = [
   "CLOUDAGENTS_TASK_MEMORY_HIGH",
   "CLOUDAGENTS_TASK_SWAP_MAX",
   "CLOUDAGENTS_BOX_SWAP_MAX",
+  "CLOUDAGENTS_PROJECT_RESOURCES_FILE",
+  "CLOUDAGENTS_SANDBOX",
 ] as const
 
 const CONTROL = "https://control.example"
@@ -46,6 +48,12 @@ const configWith = (env: Record<string, string>) => {
 }
 
 describe("sandbox listener settings", () => {
+  test("project resources remain disabled without an explicit manifest, including sandbox off", () => {
+    expect(configWith({}).projectResources).toEqual([])
+    expect(configWith({ CLOUDAGENTS_PROJECT_RESOURCES_FILE: "   " }).projectResources).toEqual([])
+    expect(configWith({ CLOUDAGENTS_SANDBOX: "off" }).projectResources).toEqual([])
+    expect(() => configWith({ CLOUDAGENTS_SANDBOX: "off", CLOUDAGENTS_PROJECT_RESOURCES_FILE: "/missing-manifest.json" })).toThrow("project resources require a sandbox")
+  })
   test("wildcard public binding never changes the loopback sandbox URL", () => {
     const config = configWith({ CLOUDAGENTS_HOST: "::", CLOUDAGENTS_PORT: "9000" })
     expect(config.sandboxPort).toBe(19000)

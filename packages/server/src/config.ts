@@ -8,6 +8,7 @@ import type { SandboxLevel } from "./sandbox"
 import { defaultMemoryHigh, type Provisioning, type SystemdSettings } from "./sandbox/systemd"
 import { parseSize } from "./size"
 import { readStoredSecret } from "./platform/secret"
+import { loadProjectResources } from "./core/project-resources"
 
 export const VERSION: string = pkg.version
 
@@ -56,6 +57,7 @@ const DEFAULT_GOOGLE_COMMAND =
   'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry'
 
 export interface ServerConfig {
+  readonly projectResources?: ReturnType<typeof loadProjectResources>
   readonly port: number
   readonly host: string
   /** Loopback-only listener for MCP and the credential broker. */
@@ -189,6 +191,9 @@ export const loadConfig = (): ServerConfig => {
       }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)
+  const resourcesFile = process.env.CLOUDAGENTS_PROJECT_RESOURCES_FILE?.trim()
+  if (resourcesFile && sandbox === "off") throw new Error("project resources require a sandbox")
+  const projectResources = resourcesFile ? loadProjectResources(resourcesFile, dataDir) : []
   if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")
   const sandboxSsl = process.env.CLOUDAGENTS_SANDBOX_SSL?.trim() || null
   const fakeAgentRoBinds = fakeAgent ? [process.execPath, join(repoRoot, "packages/server"), join(repoRoot, "node_modules")] : []
@@ -245,6 +250,7 @@ export const loadConfig = (): ServerConfig => {
     fakeAgent,
     homesDir: join(dataDir, "homes"),
     sandbox,
+    projectResources,
     sandboxPath,
     sandboxSslCertFile: sandboxSsl,
     toolkitsFlake: process.env.CLOUDAGENTS_TOOLKITS_FLAKE?.trim() || null,
