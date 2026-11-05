@@ -33,7 +33,7 @@ const EnvValue = Schema.String.pipe(Schema.maxLength(2048), Schema.pattern(/^[A-
 /**
  * How long the host waits for each reply before it acts without the guest: a guest is user-controlled and may never
  * answer. On timeout: `prepareSuspend` → the suspend or park is aborted and the VM keeps running; `gpuDetach` → unplug
- * anyway; `shutdown` → power off; `configure` and `resumed` → the VM is reported unhealthy and retried.
+ * anyway; `configure` and `resumed` → the VM is reported unhealthy and retried.
  */
 export const GUEST_REPLY_TIMEOUT_MS = {
   configure: 120_000,
@@ -43,7 +43,6 @@ export const GUEST_REPLY_TIMEOUT_MS = {
   gpuDetach: 15_000,
   freezeVolume: 30_000,
   thawVolume: 10_000,
-  shutdown: 30_000,
   ping: 5_000,
 } as const
 
@@ -203,8 +202,6 @@ export const HostToGuest = Schema.Union(
   }),
   /** The host wants the GPU back. Have the box release it, unbind the driver, reply; the host unplugs it next. */
   Schema.Struct({ _tag: Schema.Literal("gpuDetach"), id: RequestId }),
-  /** Clean power-off (park, destroy). Reply, then shut down. */
-  Schema.Struct({ _tag: Schema.Literal("shutdown"), id: RequestId }),
   Schema.Struct({ _tag: Schema.Literal("ping"), id: RequestId }),
 )
 export type HostToGuest = typeof HostToGuest.Type

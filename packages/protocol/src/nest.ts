@@ -186,7 +186,10 @@ export const NestHostCommand = Schema.Union(
     enrollToken: Schema.NullOr(NestEnrollToken),
   }),
   Schema.Struct({ _tag: Schema.Literal("suspend"), boxId: Id, ownerEpoch: OwnerEpoch }),
-  /** Back up the volume to object storage and release everything but (optionally cached) disk. */
+  /**
+   * Quiesce and sync a running VM as for suspend (a failed or timed-out quiesce aborts the park), then back up the volume
+   * to object storage and release everything but (optionally cached) disk.
+   */
   Schema.Struct({ _tag: Schema.Literal("park"), boxId: Id, ownerEpoch: OwnerEpoch }),
   /** Change the limits of a box in any state; a running VM is resized at once when it is above them. */
   Schema.Struct({ _tag: Schema.Literal("setLimits"), boxId: Id, ownerEpoch: OwnerEpoch, limits: NestLimits }),

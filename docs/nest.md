@@ -160,9 +160,10 @@ A memory image can always be discarded safely, because the volume was synced fir
 guest replies once the box is healthy → `running`. A restore that fails falls back to a template clone with the same
 volume (the VM's processes are lost, its files are not).
 
-**Park.** From running: `shutdown` over vsock, wait for exit (power off after 30 s); from suspended: discard the
-memory image. Then `kestrel-volume backup` → `volumeRef` (recorded in `vm.json`) → `parked`. The local volume stays as
-a cache until the host needs the space or the control plane sends `evict`.
+**Park.** From running: `prepareSuspend` (as for suspend; a timeout or failure aborts the park and the VM keeps running)
+→ `pause` → stop the process, discarding its memory. From suspended: discard the memory image. Then `kestrel-volume backup`
+→ `volumeRef` (recorded in `vm.json`) → `parked`. The local volume stays as a cache until the host needs the space or the
+control plane sends `evict`.
 
 **Periodic backup of a running VM** (every `backupInterval`, default 1 h, when the volume changed): `freezeVolume` →
 reflink `volume.raw` → `thawVolume` → `kestrel-volume backup` of the reflinked copy → report `volumeRef`, `backedUpAt`.
