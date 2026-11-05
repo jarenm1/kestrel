@@ -84,7 +84,7 @@ in
     enable = lib.mkEnableOption "the Nest host (per-user VMs on Cloud Hypervisor)";
 
     slug = lib.mkOption {
-      type = lib.types.strMatching "[a-z0-9-]+";
+      type = lib.types.strMatching "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
       description = "This host's DNS label; boxes are served at `<boxId>.<slug>.<domain>`.";
     };
 
