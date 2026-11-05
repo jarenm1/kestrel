@@ -4,6 +4,7 @@
 //! restart resumes instead of refetching. A background hydrator fetches the rest in order.
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -55,6 +56,25 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Binds the bitmap to one box and one manifest, so it cannot be applied to another restore.
 fn identity(box_id: &str, volume_ref: &str) -> Vec<u8> {
     Sha256::digest(format!("{box_id}\n{volume_ref}")).to_vec()
+}
+
+/// Publishes the bitmap of a restore whose destination does not exist yet. A file at `path` is replaced only if it is a
+/// bitmap for this same restore, left by an interrupted create; any other file is refused and left untouched.
+fn create_bitmap(path: &Path, bytes: &[u8], identity: &[u8], chunks: usize) -> Result<()> {
+    match fs::read(path) {
+        Ok(old) => {
+            Presence::decode(&old, identity, chunks).with_context(|| {
+                format!("{} exists and is not this restore's bitmap", path.display())
+            })?;
+            fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    }
+    let mut file = create_unnamed(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    link_unnamed(&file, path)
 }
 
 /// Which chunks are present, as atomic bits so reads never wait on a fetch. The bitmap file is the identity followed by
@@ -161,7 +181,12 @@ impl Volume {
             let file = create_unnamed(dest)?;
             file.set_len(manifest.size_bytes)?;
             file.sync_all()?;
-            write_file_atomic(&bitmap_path, &present.encode(&identity, None))?;
+            create_bitmap(
+                &bitmap_path,
+                &present.encode(&identity, None),
+                &identity,
+                chunks,
+            )?;
             link_unnamed(&file, dest)?;
             (file, present)
         };
@@ -523,13 +548,13 @@ mod tests {
         let volume_ref = backed_up(dir.path(), 1);
         let dest = dir.path().join("dest.raw");
         let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
-        // A directory where the bitmap's temp file goes makes every bitmap write fail.
-        let blocker = suffixed(&lazy.bitmap_path, ".tmp");
-        fs::create_dir(&blocker).unwrap();
+        // A directory at the bitmap path makes every bitmap write fail, because the rename over it cannot succeed.
+        fs::remove_file(&lazy.bitmap_path).unwrap();
+        fs::create_dir(&lazy.bitmap_path).unwrap();
         let mut buf = [0u8; 4];
         assert!(lazy.read(0, &mut buf).is_err());
         assert!(!lazy.present.get(0));
-        fs::remove_dir(&blocker).unwrap();
+        fs::remove_dir(&lazy.bitmap_path).unwrap();
         lazy.read(0, &mut buf).unwrap();
         assert_eq!(buf, [1; 4]);
         assert!(lazy.present.get(0));
@@ -548,5 +573,33 @@ mod tests {
             fs::read(&other).unwrap(),
             vec![7u8; 3 * CHUNK_SIZE as usize]
         );
+    }
+
+    #[test]
+    fn a_file_at_the_bitmap_path_is_refused_and_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 2);
+        let dest = dir.path().join("dest.raw");
+        let bitmap = suffixed(&dest, BITMAP_SUFFIX);
+        fs::write(&bitmap, b"someone else's image").unwrap();
+        assert!(open(dir.path(), &volume_ref, &dest).is_err());
+        assert_eq!(fs::read(&bitmap).unwrap(), b"someone else's image");
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn a_stale_bitmap_from_an_interrupted_create_does_not_mark_chunks_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume_ref = backed_up(dir.path(), 2);
+        let dest = dir.path().join("dest.raw");
+        {
+            let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+            lazy.read(0, &mut [0u8; 4]).unwrap();
+        }
+        // The image is gone but its bitmap, with chunk 0 marked present, survives: an interrupted restore of the same
+        // manifest leaves exactly that.
+        fs::remove_file(&dest).unwrap();
+        let lazy = open(dir.path(), &volume_ref, &dest).unwrap();
+        assert!(!lazy.present.get(0));
     }
 }

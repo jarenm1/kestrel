@@ -11,13 +11,26 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+/// Replaces `path` with `bytes` through a temp file under a fresh random name, created exclusively, so no existing file
+/// is ever opened or truncated. The temp file is fsynced and renamed over `path`; a failure removes only the temp file.
 pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = suffixed(path, ".tmp");
-    let mut file = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    let mut token = [0u8; 8];
+    getrandom::fill(&mut token).map_err(|e| anyhow!("random temp name: {e}"))?;
+    let tmp = suffixed(path, &format!(".{}.tmp", hex::encode(token)));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("creating {}", tmp.display()))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
     drop(file);
-    fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
+    let published = written.map_err(anyhow::Error::from).and_then(|()| {
+        fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))
+    });
+    if published.is_err() {
+        fs::remove_file(&tmp).ok();
+    }
+    published?;
     sync_parent(path)
 }
 

@@ -258,6 +258,9 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
   two processes never serve one image from separate presence maps. `restore` (eager) holds the same `<dest>.lock` for the
   whole restore. It writes the image as an unnamed file in `dest`'s directory (`O_TMPFILE`) and links it to `dest` with
   `linkat`, which fails if `dest` exists, so no staging name is ever opened or truncated. The lock file is left beside `dest`.
+  Sidecars are never replaced blindly: `<dest>.bitmap` is replaced only when it is a bitmap for the same restore (left by an
+  interrupted create), and any other file there is refused and left untouched. Temp files for state writes use a fresh
+  random name created exclusively, so no existing file is opened or truncated.
 
 ### `kestrel-volume` CLI
 
