@@ -30,16 +30,18 @@ const GATEWAY_TCP_PORTS = [3141, 5000, 53]
 const PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"]
 
 /**
- * The whole guest firewall as one `nft -f` script. The script destroys and rebuilds both tables, which empties
- * `tap_addrs`: the caller must re-add the element of every live tap afterwards. It is loaded before any tap is brought
- * up, so a guest never has a tap without its anti-spoofing rule. Traffic not from a tap is not touched.
+ * The whole guest firewall as one `nft -f` script. The script destroys and rebuilds both tables with the live taps'
+ * elements in the same transaction, so a reload restores every running tap's anti-spoofing rule at once. It is loaded
+ * before any tap is brought up, so a guest never has a tap without its anti-spoofing rule. Traffic not from a tap is
+ * not touched.
  */
-export const firewallRuleset = (): string =>
+export const firewallRuleset = (taps: readonly NestNetwork[]): string =>
   [
     `destroy table inet ${NFT_TABLE}`,
     `table inet ${NFT_TABLE} {`,
     `  set ${TAP_ADDRS_SET} {`,
     "    type ifname . ipv4_addr",
+    ...(taps.length === 0 ? [] : [`    elements = { ${taps.map(tapAddrsElement).join(", ")} }`]),
     "  }",
     "  chain input {",
     "    type filter hook input priority filter; policy accept;",
@@ -111,9 +113,9 @@ export const guestNetwork = (
 export type NetCommand = readonly string[]
 
 /** The set element that allows one tap to send only from its VM's address. */
-const tapAddrsElement = (network: NestNetwork): string => `{ "${network.tap}" . ${network.address} }`
+const tapAddrsElement = (network: NestNetwork): string => `"${network.tap}" . ${network.address}`
 
-/** Adds the tap's element to `tap_addrs`; loaded again for every live tap after the ruleset is replaced. */
+/** Adds the tap's element to `tap_addrs` when its tap comes up. */
 export const tapAddrsAddCommand = (network: NestNetwork): NetCommand => [
   "nft",
   "add",
@@ -121,7 +123,7 @@ export const tapAddrsAddCommand = (network: NestNetwork): NetCommand => [
   "inet",
   NFT_TABLE,
   TAP_ADDRS_SET,
-  tapAddrsElement(network),
+  `{ ${tapAddrsElement(network)} }`,
 ]
 
 /** The `nft -j list set` listing of `tap_addrs`. Only the element pairs `[ifname, address]` are read. */
@@ -187,6 +189,6 @@ export const tapUpCommands = (network: NestNetwork, egressMbit: number): NetComm
 ]
 
 export const tapDownCommands = (network: NestNetwork): NetCommand[] => [
-  ["nft", "delete", "element", "inet", NFT_TABLE, TAP_ADDRS_SET, tapAddrsElement(network)],
+  ["nft", "delete", "element", "inet", NFT_TABLE, TAP_ADDRS_SET, `{ ${tapAddrsElement(network)} }`],
   ["ip", "link", "del", "dev", network.tap],
 ]

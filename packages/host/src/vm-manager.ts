@@ -21,7 +21,7 @@ import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
 import { fsyncDir, fsyncPath, writeFileAtomic } from "./fs-atomic"
 import { readLeaseUntil, writeLeaseUntil } from "./lease"
-import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, missingTapAddrs, networkForSlot, tapAddrsAddCommand, tapAddrsListArgs, tapDownCommands, tapUpCommands } from "./network"
+import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, missingTapAddrs, networkForSlot, tapAddrsListArgs, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
 import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
 import { recoverPlan } from "./recovery"
@@ -245,7 +245,7 @@ export class VmManager {
     ensureStateDirs(this.layout)
     this.leaseUntil = readLeaseUntil(this.layout.leasePath) ?? 0
     const records = listVms(this.layout)
-    await this.loadFirewall(records)
+    await this.reloadFirewall(records.flatMap((record) => (record.network === null ? [] : [record.network])))
     readMemoryPressureAvg10()
     for (const record of records) this.records.set(record.boxId, record)
     for (const record of [...this.records.values()]) await this.recover(record)
@@ -266,8 +266,8 @@ export class VmManager {
       setInterval(() => {
         if (resyncing) return
         resyncing = true
-        void this.resyncTapAddrs()
-          .catch((error: unknown) => this.events.error(`tap_addrs resync failed: ${errorMessage(error)}`))
+        void this.resyncFirewall()
+          .catch((error: unknown) => this.events.error(`firewall resync failed: ${errorMessage(error)}`))
           .finally(() => {
             resyncing = false
           })
@@ -276,32 +276,30 @@ export class VmManager {
   }
 
   /**
-   * Replaces the guest firewall with the agent's ruleset, then re-adds the element of every tap a record says is live.
-   * Replacing the ruleset empties `tap_addrs`, so this runs before recovery and before any tap is brought up.
+   * Replaces the guest firewall with the agent's ruleset, carrying the element of every live tap. The replacement is one
+   * `nft -f` transaction, so no running tap is left without its anti-spoofing rule.
    */
-  private async loadFirewall(records: readonly VmRecord[]): Promise<void> {
+  private async reloadFirewall(lives: readonly NestNetwork[]): Promise<void> {
     const path = join(this.layout.root, "firewall.nft")
-    writeFileAtomic(path, firewallRuleset())
+    writeFileAtomic(path, firewallRuleset(lives))
     await runChecked("nft", ["-f", path])
-    for (const record of records) {
-      if (record.network !== null) await runNetCommands([tapAddrsAddCommand(record.network)])
-    }
   }
 
   /**
-   * Re-adds the element of every live tap that `tap_addrs` lacks. An nftables reload (a NixOS switch restarts the
-   * service) flushes the set while VMs keep running, which drops their traffic until repaired. A VM with an operation in
-   * progress is skipped: its tap is being brought up or torn down.
+   * Checks the guest firewall every tick. An nftables service reload can flush the whole ruleset, or only `tap_addrs`,
+   * while VMs keep running; a missing table or set, or a live tap without its element, reloads the complete firewall.
+   * This runs with no live tap too: a new tap needs the tables.
    */
-  private async resyncTapAddrs(): Promise<void> {
-    const lives = [...this.records.values()].flatMap((record) =>
-      record.network !== null && record.operation === null ? [record.network] : [],
+  private async resyncFirewall(): Promise<void> {
+    const lives = [...this.records.values()].flatMap((record) => (record.network === null ? [] : [record.network]))
+    const listing = await runTool("nft", tapAddrsListArgs)
+    if (listing.status === 0 && missingTapAddrs(listing.stdout, lives).length === 0) return
+    await this.reloadFirewall(lives)
+    this.events.notice(
+      listing.status === 0
+        ? "reloaded the guest firewall: tap_addrs lacked the element of a live tap"
+        : `reloaded the guest firewall: its tables were missing (${listing.stderr.trim()})`,
     )
-    if (lives.length === 0) return
-    const missing = missingTapAddrs(await runChecked("nft", tapAddrsListArgs), lives)
-    if (missing.length === 0) return
-    await runNetCommands(missing.map((network) => tapAddrsAddCommand(network)))
-    this.events.notice(`restored tap_addrs elements the firewall had lost: ${missing.map((network) => network.tap).join(", ")}`)
   }
 
   /** A periodic task that throws must not stop its timer: the failure is reported and the next run tries again. */
