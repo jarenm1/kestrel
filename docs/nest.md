@@ -151,9 +151,9 @@ the VM's own tap) → `resume` → `add-disk` the volume (id `volume`, serial `k
 disks, mounts the volume, writes the box env and starts the box → reply once the box answers `/api/health` →
 `running`. The local volume is used only when its recorded backup equals the command's `volumeRef`.
 
-**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs and drops caches; 30 s, then the host
-goes on without it) → `pause` → `snapshot` to a new generation → stop the process → `suspended`. A memory image can
-always be discarded safely, because the volume was synced first.
+**Suspend.** Detach any GPU (below) → `prepareSuspend` (box quiesces, guest syncs and drops caches; 30 s; a timeout
+aborts the suspend and the VM keeps running) → `pause` → `snapshot` to a new generation → stop the process → `suspended`.
+A memory image can always be discarded safely, because the volume was synced first; an unsynced disk is never snapshotted.
 
 **Resume from suspended.** Prepare `restore/` from the latest generation (disk paths rewritten) → restore
 (`ondemand`; `copy` when `/dev/userfaultfd` is unavailable) → `resume` → vsock `resumed` with the wall clock; the
@@ -204,12 +204,15 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
   its target with no headroom.
 - **Disk**: capacity reserves room to suspend every running VM (its plugged memory). Below the reserve the host parks
   instead of suspending, evicts cached volumes of parked boxes, and reports less free space so nothing new is placed.
-- **GPU**: `gpuWanted: true` from the guest (honoured only when `limits.gpu` is `on-demand`, at most one attach per
-  5 min, held at least 5 min), or `gpuAttach` from the control plane, attaches a free host GPU (bound to `vfio-pci` at
-  host boot) with `add-device` once the host has room for the VM's whole `maxMemoryBytes` (an attached device pins all
-  guest memory), then sends `gpuAttached`. No free GPU: the request fails and the box shows it; moving to another host
-  is a park and a resume there. `gpuWanted: false`, `gpuDetach`, or the desktop idle → `gpuDetach` over vsock →
-  `remove-device`. Suspend always detaches first. GPU time is billed from attach to detach.
+- **GPU**: `gpuWanted` from the guest (with the box's request `id`; honoured only when `limits.gpu` is `on-demand`, at
+  most one attach per 5 min, held at least 5 min), or `gpuAttach` from the control plane, attaches a free host GPU
+  (bound to `vfio-pci` at host boot) with `add-device` once the host has room for the VM's whole `maxMemoryBytes` (an
+  attached device pins all guest memory), then sends `gpuAttached`. The host answers every `gpuWanted` with
+  `gpuDecision` for the same `id`. Denied (no free GPU, no room, or the rate limit): the guest replies to the box's
+  request with the reason, and the box shows it; moving to another host is a park and a resume there. Granted: the
+  guest replies `ok` once the device is usable. `gpuWanted: false`, `gpuDetach`, or the desktop idle → `gpuDetach` over
+  vsock → `remove-device`; the box's request is answered once released. Suspend always detaches first. GPU time is
+  billed from attach to detach.
 
 ## Storage
 
@@ -223,7 +226,8 @@ Runs every `GUEST_STATUS_INTERVAL_MS` per running VM from the guest's `status` f
 - **Lazy restore** (`kestrel-volume restore-lazy`): a `ublk` block device backed by a local sparse file and a chunk
   bitmap. A read of a missing chunk fetches it from object storage, writes it locally, then serves it; a background
   task hydrates the rest. Once complete the VM switches to the plain file at its next restore (the disk path is
-  rewritten in `restore/config.json`).
+  rewritten in `restore/config.json`). A backup reads `volume.raw` only once hydration is complete: the periodic backup
+  skips a hydrating volume that round (`backedUpAt` unchanged), and park waits for hydration before its backup.
 
 ### `kestrel-volume` CLI
 
