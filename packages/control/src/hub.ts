@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers"
+import { closeWatches, discardFailedActivity } from "./pr-watch-table"
 import { Either, Option, Schema } from "effect"
 import {
   CREDENTIALS_HEADER,
@@ -397,6 +398,7 @@ export class Hub extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS pr_close_deliveries (delivery_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL)`)
       sql.exec(`CREATE TABLE IF NOT EXISTS preview_sessions (
         token TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -1389,11 +1391,8 @@ export class Hub extends DurableObject<Env> {
     this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ?", login, taskId)
   }
 
-  closePullRequestWatches(repo: string, number: number): string[] {
-    const owners = this.ctx.storage.sql.exec<{ login: string }>("SELECT DISTINCT login FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number).toArray().map((row) => row.login)
-    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
-    this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
-    return owners
+  closePullRequestWatches(deliveryId: string, repo: string, number: number): string[] {
+    return this.ctx.storage.transactionSync(() => closeWatches(this.ctx.storage.sql, deliveryId, repo, number, Date.now(), DELIVERY_RETENTION_MS))
   }
 
   async githubActivity(deliveryId: string, activity: { repo: string; numbers: readonly number[]; kind: string; headSha?: string }): Promise<{ duplicate: boolean; queued: number }> {
@@ -1482,8 +1481,7 @@ export class Hub extends DurableObject<Env> {
       // A newer event can replace the row during the box call. Never delete or postpone that event.
       if (result.ok) this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
       else if (result.status === 404 || result.status === 409) {
-        this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
-        this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
+        discardFailedActivity(this.ctx.storage.sql, row)
       }
       else this.ctx.storage.sql.exec("UPDATE pr_activity_queue SET due_at = ? WHERE login = ? AND task_id = ? AND delivery_id = ?", Date.now() + 60000, row.login, row.taskId, row.deliveryId)
     }
