@@ -156,7 +156,7 @@
     },
     "packages/server": {
       "name": "@cloudagents/server",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@cloudagents/protocol": "workspace:*",
         "@effect/platform": "^0.97.3",
