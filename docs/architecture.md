@@ -157,9 +157,12 @@ and `cached`. Each strip describes one model response, including intermediate to
 the whole agent turn. Input includes fresh and cache-write tokens but excludes cache reads; `cached` shows
 cache reads separately. Counts are compact, with exact values on hover; unreported buckets display `?`.
 Repeated Claude content blocks and Codex usage notifications do not create duplicate response strips.
-The context meter remains a separate current-context measurement. Turn totals remain available to internal
-accounting consumers but are not displayed as response usage. Historical runs without response usage and
-ACP agents reporting only prompt/session totals have no response strip; cache splits are never guessed.
+The context meter remains a separate current-context measurement. Historical runs without response usage and
+ACP agents reporting only prompt/session totals retain a compact `Turn total` input/output footer. Its input
+includes cached tokens; the label's tooltip makes that distinction explicit, and no cache split is guessed.
+Each turn with main-agent response strips suppresses its aggregate footer, without suppressing totals for
+other turns in the same run. Subagent strips do not suppress the main turn's footer. Duration and cost are
+not displayed; failures remain visible with either usage format.
 
 OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
 Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX

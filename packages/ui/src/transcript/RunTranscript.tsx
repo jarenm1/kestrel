@@ -25,6 +25,7 @@ interface Ctx {
   readonly source: RunSource
   readonly tree: Tree
   readonly liveIds: ReadonlySet<string>
+  readonly turnTotals: ReadonlySet<string>
   readonly running: boolean
 }
 
@@ -120,8 +121,20 @@ function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx 
     case "usage":
       return <UsageStrip item={item} />
     case "turn":
-      // The turn's old token, duration and cost totals are no longer shown; a failure still is.
-      return item.isError ? <div className="text-[11px] text-destructive">failed</div> : null
+      return (
+        <>
+          {ctx.turnTotals.has(item.id) && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
+              <span title="Response-level usage unavailable; total input includes cached tokens.">Turn total</span>
+              <span aria-hidden="true">·</span>
+              <TokenCount value={item.inputTokens} label="in" />
+              <span aria-hidden="true">·</span>
+              <TokenCount value={item.outputTokens} label="out" />
+            </div>
+          )}
+          {item.isError && <div className="text-[11px] text-destructive">failed</div>}
+        </>
+      )
     case "error":
       return <Alert>{item.text}</Alert>
   }
@@ -153,6 +166,18 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
 export function RunTranscript({ taskId, runId, items, running, from, to }: Props) {
   const tree = useMemo(() => buildTree(items), [items])
   const liveIds = useMemo(() => liveItemIds(items, running), [items, running])
+  // Inspect the whole run before slicing: a response strip can live in an earlier message segment.
+  const turnTotals = useMemo(() => {
+    const totals = new Set<string>()
+    let hasResponseUsage = false
+    for (const item of items) {
+      if (item._tag === "usage" && item.parentToolId === null) hasResponseUsage = true
+      if (item._tag !== "turn") continue
+      if (!hasResponseUsage && (item.inputTokens !== null || item.outputTokens !== null)) totals.add(item.id)
+      hasResponseUsage = false
+    }
+    return totals
+  }, [items])
   const source = useMemo(() => ({ taskId, runId }), [taskId, runId])
   const roots = useMemo(() => {
     const position = new Map(items.map((item, index) => [item.id, index]))
@@ -164,5 +189,5 @@ export function RunTranscript({ taskId, runId, items, running, from, to }: Props
 
   if (roots.length === 0) return null
 
-  return <Items items={roots} ctx={{ source, tree, liveIds, running }} />
+  return <Items items={roots} ctx={{ source, tree, liveIds, turnTotals, running }} />
 }
