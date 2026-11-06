@@ -802,6 +802,14 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
+  /** Whether `secret` is the registered user box's own, without reading its owner's credentials. */
+  async boxVerify(boxId: string, secret: string): Promise<boolean> {
+    const row = this.ctx.storage.sql
+      .exec<{ secret: string }>("SELECT secret FROM user_boxes WHERE id = ?", boxId)
+      .toArray()[0]
+    return row !== undefined && (await safeEqual(secret, row.secret))
+  }
+
   private boxList(login: string): BoxList {
     const sql = this.ctx.storage.sql
     const boxes = sql

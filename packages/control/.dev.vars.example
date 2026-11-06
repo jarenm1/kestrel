@@ -4,5 +4,8 @@ GITHUB_CLIENT_SECRET=
 BOX_TOKEN=
 # Comma-separated GitHub logins that manage the managed-box fleet (/api/fleet/boxes). Empty: no operators.
 KESTREL_OPERATORS=
+# Cloudflare Realtime TURN key id and API token, for POST /box/turn. Set both or neither; the token is never sent to a box.
+KESTREL_TURN_KEY_ID=
+KESTREL_TURN_API_TOKEN=
 # Dev only: enables GET /auth/dev-login as this GitHub login. Never set in production.
 # DEV_SESSION_LOGIN=jarenm1

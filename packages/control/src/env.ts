@@ -23,6 +23,12 @@ export interface Env {
    * and `Me.nestEnabled` is false.
    */
   KESTREL_NEST_DOMAIN?: string
+  /**
+   * Cloudflare Realtime TURN key id and provider API token, for `POST /box/turn`. Both unset: boxes get 204 and keep
+   * their own TURN configuration. One without the other: the route answers 502, naming both.
+   */
+  KESTREL_TURN_KEY_ID?: string
+  KESTREL_TURN_API_TOKEN?: string
 }
 
 /** RPC stub for the single control-plane Hub instance. */

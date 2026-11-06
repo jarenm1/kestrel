@@ -417,6 +417,14 @@ export const DesktopRtcIceServer = Schema.Struct({
 })
 export type DesktopRtcIceServer = typeof DesktopRtcIceServer.Type
 
+/** Box-authenticated request for managed TURN credentials; never exposes the provider API token. */
+export const BOX_TURN_PATH = "/box/turn"
+export const BoxTurnCredentials = Schema.Struct({
+  iceServers: Schema.Array(DesktopRtcIceServer),
+  expiresAt: Schema.Number,
+})
+export type BoxTurnCredentials = typeof BoxTurnCredentials.Type
+
 /** An ICE candidate in either direction; a null `candidate` ends the viewer's gathering. */
 const DesktopRtcCandidate = Schema.Struct({
   _tag: Schema.Literal("rtc.candidate"),

@@ -1,5 +1,6 @@
 import {
   BOX_ID_HEADER,
+  BOX_TURN_PATH,
   BOX_USER_HEADER,
   ControlPaths,
   MAX_ACTIVITY_CLOCK_SKEW_SECONDS,
@@ -22,6 +23,7 @@ import { cappedRequest, decodeBody, errorResponse, json, safeEqual, UpstreamErro
 import { hub, type Env } from "./env"
 import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
+import { handleBoxTurn } from "./turn"
 
 export { Hub } from "./hub"
 
@@ -229,6 +231,7 @@ export default {
       if (url.pathname === ControlPaths.nestEnroll) return await nestEnroll(request, env)
       if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
+      if (url.pathname === BOX_TURN_PATH) return await handleBoxTurn(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
       if (url.pathname === ControlPaths.meterRecords) return await meterRecords(request, env)
       if (url.pathname === ControlPaths.boxToolFailures) return await boxToolFailures(request, env)

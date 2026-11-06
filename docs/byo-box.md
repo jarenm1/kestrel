@@ -67,7 +67,7 @@ Desktop video, audio and input always use WebRTC, with no opt-in. The optional `
 }
 ```
 
-Which of these you need depends on your network, see [WebRTC desktop](box.md#webrtc-desktop). Kestrel relays no media. Your own TURN server, set with `turn`, is the only relay the box will use. If no path connects, the desktop does not stream: there is no WebSocket fallback.
+Which of these you need depends on your network; see [WebRTC desktop](box.md#webrtc-desktop). A registered box automatically obtains viewer TURN credentials when its control plane has managed TURN enabled, including TCP/TLS-on-443 paths for restrictive Wi-Fi. An explicit local `turn` configuration or `turn:`/`turns:` entry in `iceServers` takes precedence. An unregistered standalone box needs its own TURN. The relay must reach a box candidate over UDP; an HTTPS tunnel alone is not a media path. If no path connects, the desktop does not stream: there is no WebSocket fallback.
 
 ### Releasing
 
@@ -192,7 +192,7 @@ on `packages/protocol`; the PR for each step calls this out.
 
 ## Open questions
 
-- Paid relay for boxes without a tunnel: offer one, and how to meter its media. Desktop video is WebRTC now, so such a relay would carry WebRTC media; Kestrel provides no media relay today ([box.md](box.md#webrtc-desktop)).
+- Metering and charging users for managed TURN bandwidth. The operator can configure Cloudflare Realtime TURN today; the provider charges the operator, and Kestrel does not yet attribute those bytes to users ([box.md](box.md#webrtc-desktop)).
 - Orgs/teams owning boxes (out of scope here; boxes are single-owner).
 - Moving a thread between boxes: conversation handoff like `core/handoff.ts`, workspace via its thread branch or a
   snapshot.

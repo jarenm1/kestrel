@@ -1,9 +1,9 @@
 import { Effect, Runtime, Schema } from "effect"
-import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage } from "@cloudagents/protocol"
+import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage, type DesktopStatus } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, DesktopRtcSession, MediaTap, mintIceServers } from "../desktop"
+import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, viewerIceServers } from "../desktop"
 import { TaskStatsService } from "../stats"
 import { ActivityTracker } from "../platform/tracker"
 
@@ -135,8 +135,11 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
 
     // Holds this viewer's config and GOP, so a WebRTC peer that joins or asks for a keyframe is resynced from here.
     const tap = new MediaTap()
+    let socketClosed = false
     const decodeInput = Schema.decodeUnknown(Schema.parseJson(DesktopInput))
-    const sendSignal = (message: DesktopRtcServerMessage) => socket.sendText(JSON.stringify(message))
+    const sendSignal = (message: DesktopRtcServerMessage) => {
+      if (!socketClosed) socket.sendText(JSON.stringify(message))
+    }
     const rtc = new DesktopRtcSession(config.webrtc, taskId, tap, {
       send: sendSignal,
       onInput: (raw, channel) =>
@@ -153,9 +156,40 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
       profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
       debug: (message) => fork(Effect.logDebug(message)),
     })
+    const managed = managedTurn(config)
+    // A status or a config must not outpace the one before it: a slow credential fetch may not deliver its config after
+    // a later status. Closing the socket also ends the queue: nothing is written to a socket the browser left.
+    let signalQueue: Promise<void> = Promise.resolve()
+    const enqueue = (run: () => Promise<void>): void => {
+      if (socketClosed) return
+      signalQueue = signalQueue
+        .then(() => (socketClosed ? undefined : run()))
+        .catch((e: unknown) => {
+          if (!socketClosed) {
+            fork(Effect.logWarning(`desktop stream failed: ${e instanceof Error ? e.message : String(e)}`))
+          }
+        })
+    }
+    const sendStatus = (status: DesktopStatus) => {
+      if (!socketClosed) socket.sendText(JSON.stringify(status))
+    }
+    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it
+    // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
+    let configSent = false
+    const sendConfig = async (): Promise<void> => {
+      const resolved = await viewerIceServers(config.webrtc, managed, taskId)
+      if (socketClosed) return
+      if (resolved.warning !== null) fork(Effect.logWarning(resolved.warning))
+      sendSignal({
+        _tag: "rtc.config",
+        iceServers: resolved.iceServers,
+        iceTransportPolicy: config.webrtc.policy,
+      })
+    }
     const decodeMessage = Schema.decodeUnknown(Schema.parseJson(DesktopRtcClientMessage))
     const handleMessage = (raw: string) =>
       Effect.gen(function* () {
+        if (socketClosed) return
         const message = yield* decodeMessage(raw).pipe(Effect.either)
         if (message._tag === "Left") {
           yield* Effect.logWarning(`desktop message rejected: ${message.left.message}`)
@@ -163,33 +197,30 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         }
         const signal = message.right
         if (signal._tag === "rtc.config.request") {
-          if (configSent) sendConfig()
+          if (configSent) enqueue(sendConfig)
           return
         }
         yield* Effect.promise(() => rtc.handle(signal))
       })
 
-    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it
-    // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
-    let configSent = false
-    const sendConfig = () =>
-      sendSignal({
-        _tag: "rtc.config",
-        iceServers: mintIceServers(config.webrtc, taskId),
-        iceTransportPolicy: config.webrtc.policy,
-      })
     yield* Effect.acquireUseRelease(
       desktop.subscribe(taskId, {
         get baselineOnly(): boolean {
           return rtc.baselineOnly
         },
         onStatus: (status) => {
-          if (status.state !== "running") configSent = false
-          else if (!configSent) {
+          if (status.state !== "running") {
+            configSent = false
+            enqueue(async () => sendStatus(status))
+          } else if (configSent) {
+            enqueue(async () => sendStatus(status))
+          } else {
             configSent = true
-            sendConfig()
+            enqueue(async () => {
+              await sendConfig()
+              sendStatus(status)
+            })
           }
-          socket.sendText(JSON.stringify(status))
         },
         onMedia: (unit) => {
           tap.push(unit)
@@ -202,7 +233,13 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           socket.onText((data) => fork(handleMessage(data)))
           yield* Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void)))
         }),
-      (unsubscribe) => Effect.zipRight(unsubscribe, Effect.sync(() => rtc.close())),
+      (unsubscribe) =>
+        Effect.zipRight(
+          Effect.sync(() => {
+            socketClosed = true
+          }),
+          Effect.zipRight(unsubscribe, Effect.sync(() => rtc.close())),
+        ),
     ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
   })
 
