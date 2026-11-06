@@ -1,6 +1,13 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query"
 import type { Task } from "@cloudagents/protocol"
 
+/** Run item keys are outside the task key prefix, so a reconnect must invalidate them separately. */
+export function invalidateRunItems(client: QueryClient): void {
+  void client.invalidateQueries({
+    predicate: ({ queryKey }) => queryKey.length === 3 && queryKey[0] === "runs" && queryKey[2] === "items",
+  })
+}
+
 /**
  * Fetches a list snapshot, keeping entries live events wrote while it was in flight: those are newer than the snapshot.
  * Every other entry the snapshot has wins, so one cached while no events arrived (a thread left mid-run keeps its run

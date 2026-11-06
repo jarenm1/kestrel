@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import { QueryClient } from "@tanstack/react-query"
 import type { Run, Task } from "@cloudagents/protocol"
-import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
+import { fetchSnapshot, fetchTaskSnapshot, invalidateRunItems } from "./snapshot"
+
+test("reconnect marks cached run items stale outside the task prefix", () => {
+  const client = new QueryClient()
+  client.setQueryData(["runs", "run", "items"], [{ id: "item" }])
+  client.setQueryData(["runs", "run", "other"], [])
+  invalidateRunItems(client)
+  expect(client.getQueryState(["runs", "run", "items"])?.isInvalidated).toBe(true)
+  expect(client.getQueryState(["runs", "run", "other"])?.isInvalidated).toBe(false)
+})
 
 const key = ["tasks", "task", "runs"]
 
