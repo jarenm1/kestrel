@@ -156,6 +156,7 @@ export interface OpenPullRequestInput {
   readonly checkoutId?: string
   /** Branch to merge into; default: the checkout's base branch. */
   readonly base?: string
+  readonly branch?: string
 }
 
 /** A checkout of the thread as the `gh` shim sees it: where it lives on disk and its GitHub repository, if any. */
@@ -463,7 +464,7 @@ export interface CoreShape {
     NotFound | BadRequest | Conflict | InternalError
   >
   /** Used by the MCP handler: pushes a checkout's branch to its GitHub remote (never forced). Returns the branch. */
-  readonly gitPush: (taskId: string, checkoutId?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
+  readonly gitPush: (taskId: string, checkoutId?: string, branch?: string) => Effect.Effect<string, NotFound | BadRequest | InternalError>
   /** Used by the MCP handler: pushes the checkout's branch and opens its pull request, or returns the open one. */
   readonly openPullRequest: (
     taskId: string,
@@ -819,11 +820,16 @@ export const CoreLive = Layer.effect(
       })
 
     /** Pushes the checkout's branch from its shadow repo (never forced). The token is set for github.com remotes only. */
-    const pushCheckout = (task: Task, checkout: Checkout): Effect.Effect<void, BadRequest | InternalError> =>
+    const pushCheckout = (task: Task, checkout: Checkout, requestedBranch?: string): Effect.Effect<void, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const ref = yield* checkoutRepoRef(checkout)
         const token = ref.github === null ? undefined : yield* requiredGithubToken(task.owner)
-        if (checkout.pullRequestTakeover && checkout.pullRequest !== undefined) {
+        const branch = requestedBranch ?? checkout.branch
+        if (requestedBranch !== undefined && branch !== checkout.branch) {
+          const defaultBranch = yield* workspace.syncMirror({ mirrorPath: join(config.mirrorsDir, task.owner, ref.mirrorRel), url: ref.url, githubToken: token }).pipe(Effect.mapError(toInternal("fetch repo")))
+          if (branch === checkout.baseBranch || branch === defaultBranch) return yield* Effect.fail(new BadRequest({ message: `cannot push base or default branch ${branch}` }))
+        }
+        if (branch === checkout.branch && checkout.pullRequestTakeover && checkout.pullRequest !== undefined) {
           const access = yield* githubAccess(task.owner, ref)
           const pr = yield* github.getPullRequestStatus(access.token, access.slug, checkout.pullRequest.number).pipe(Effect.mapError(fromGitHub))
           if (pr.state !== "open" || pr.headRef !== checkout.branch || pr.headRepo?.toLowerCase() !== ref.repo.toLowerCase()) {
@@ -831,9 +837,9 @@ export const CoreLive = Layer.effect(
           }
         }
         const spec = checkoutSpec(task.id, checkout)
-        const head = yield* workspace.headSha(spec).pipe(Effect.mapError(toInternal("read checkout head")))
+        const head = yield* (requestedBranch === undefined ? workspace.headSha(spec) : workspace.branchSha(spec, branch)).pipe(Effect.mapError(toInternal("read branch head")))
         yield* workspace
-          .pushBranch({ ...spec, url: ref.url, branch: checkout.branch, head, githubToken: token })
+          .pushBranch({ ...spec, url: ref.url, branch, head, githubToken: token })
           .pipe(Effect.mapError(toInternal("push")))
       })
 
@@ -2550,12 +2556,12 @@ export const CoreLive = Layer.effect(
       taskOwner: (taskId) => Effect.map(requireTask(taskId), (task) => task.owner),
       storageUsed: (taskId) => storageUsed.get(taskId) ?? null,
 
-      gitPush: (taskId, checkoutId) =>
+      gitPush: (taskId, checkoutId, branch) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const checkout = yield* pickCheckout(task, checkoutId)
-          yield* pushCheckout(task, checkout)
-          return checkout.branch
+          yield* pushCheckout(task, checkout, branch)
+          return branch ?? checkout.branch
         }),
 
       openPullRequest: (taskId, input) =>
@@ -2566,20 +2572,21 @@ export const CoreLive = Layer.effect(
           const checkout = yield* pickCheckout(task, input.checkoutId)
           const ref = yield* checkoutRepoRef(checkout)
           const { slug, token } = yield* githubAccess(task.owner, ref)
-          yield* pushCheckout(task, checkout)
-          const existing = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
+          const branch = input.branch ?? checkout.branch
+          yield* pushCheckout(task, checkout, input.branch)
+          const existing = yield* github.findOpenPullRequest(token, slug, branch).pipe(Effect.mapError(fromGitHub))
           const pullRequest =
             existing ??
             (yield* github
               .createPullRequest(token, slug, {
                 title,
                 body: input.body,
-                head: checkout.branch,
+                head: branch,
                 base: input.base ?? checkout.baseBranch,
                 draft: input.draft,
               })
               .pipe(Effect.mapError(fromGitHub)))
-          yield* recordPullRequest(taskId, checkout.id, { number: pullRequest.number, url: pullRequest.url }, existing === null)
+          if (branch === checkout.branch) yield* recordPullRequest(taskId, checkout.id, { number: pullRequest.number, url: pullRequest.url }, existing === null)
           return { pullRequest, created: existing === null }
         }),
 

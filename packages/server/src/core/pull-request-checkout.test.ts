@@ -133,6 +133,26 @@ const newRoot = async (): Promise<string> => {
 }
 
 describe("repo_checkout with a pull request", () => {
+  test("pushes an explicit worktree branch and refuses the default branch", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    await withCore(prStatus({}), origin, root, (core, threadDir) =>
+      Effect.gen(function* () {
+        const { checkout } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        const dir = join(threadDir, checkout.dir)
+        const worktree = join(threadDir, "worktree")
+        git(dir, ["worktree", "add", "-b", "agent/change", worktree])
+        yield* Effect.promise(() => writeFile(join(worktree, "work.txt"), "work\n"))
+        git(worktree, ["add", "work.txt"])
+        git(worktree, ["commit", "-m", "work"])
+        expect(yield* core.gitPush("t1", undefined, "agent/change")).toBe("agent/change")
+        expect(git(origin, ["rev-parse", "refs/heads/agent/change"])).toBe(git(worktree, ["rev-parse", "HEAD"]))
+        const rejected = yield* Effect.either(core.gitPush("t1", undefined, "main"))
+        expect(Either.isLeft(rejected)).toBe(true)
+        if (Either.isLeft(rejected)) expect(rejected.left.message).toContain("base or default")
+      }),
+    )
+  })
   test("takes the pull request over: its own branch at its head, linked, and pushes update it", async () => {
     const root = await newRoot()
     const { origin } = await makeOrigin(root, "topic")

@@ -75,6 +75,8 @@ export interface WorkspaceShape {
   ) => Effect.Effect<ReadonlyArray<string>, WorkspaceError>
   /** The commit the checkout's HEAD points at, read from its files. */
   readonly headSha: (spec: CheckoutSpec) => Effect.Effect<string, WorkspaceError>
+  /** Read a local branch shared by the checkout and its linked worktrees. */
+  readonly branchSha: (spec: CheckoutSpec, branch: string) => Effect.Effect<string, WorkspaceError>
   /** Everything on the checkout against `baseRef` (a ref in the shadow): commits, staged, unstaged and untracked files. */
   readonly diff: (spec: CheckoutSpec & { readonly baseRef: string }) => Effect.Effect<string, WorkspaceError>
   /**
@@ -573,6 +575,14 @@ const make: WorkspaceShape = {
     Effect.gen(function* () {
       const sha = yield* readHeadSha(yield* verifyCheckout(spec))
       if (sha === null) return yield* Effect.fail(new WorkspaceError({ message: "the checkout has no commit yet" }))
+      return sha
+    }),
+
+  branchSha: (spec, branch) =>
+    Effect.gen(function* () {
+      const real = yield* verifyCheckout(spec)
+      const sha = yield* readRefSha(join(real, ".git"), `refs/heads/${branch}`)
+      if (!SHA.test(sha)) return yield* Effect.fail(new WorkspaceError({ message: `local branch ${branch} does not name a commit` }))
       return sha
     }),
 

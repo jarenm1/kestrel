@@ -76,6 +76,23 @@ const makeCheckout = async (root: string, origin: string) => {
 }
 
 describe("checkout git runs in the shadow", () => {
+  test("pushes the committed branch of a linked worktree using the checkout's shadow", async () => {
+    const root = await newRoot()
+    const origin = await makeRemote(root)
+    const co = await makeCheckout(root, origin)
+    const worktree = join(co.spec.threadDir, "worktree")
+    git(co.spec.dir, ["worktree", "add", "-b", "agent/topic", worktree])
+    await writeFile(join(worktree, "work.txt"), "committed in worktree\n")
+    git(worktree, ["add", "work.txt"])
+    git(worktree, ["commit", "-m", "worktree change"])
+    const expected = git(worktree, ["rev-parse", "HEAD"])
+    const head = await withWorkspace((ws) => ws.branchSha(co.spec, "agent/topic"))
+    expect(head).toBe(expected)
+    await withWorkspace((ws) => ws.pushBranch({ ...co.spec, url: origin, branch: "agent/topic", head }))
+    expect(git(origin, ["rev-parse", "refs/heads/agent/topic"])).toBe(expected)
+    expect(await withWorkspace((ws) => ws.headSha(co.spec))).toBe(co.head)
+    expect((await Effect.runPromiseExit(Effect.provide(Effect.flatMap(WorkspaceService, (ws) => ws.branchSha(co.spec, "../config")), WorkspaceLive)))._tag).toBe("Failure")
+  })
   test("diff covers commits, staged, unstaged and untracked changes against the pinned base", async () => {
     const root = await newRoot()
     const origin = await makeRemote(root)

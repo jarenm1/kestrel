@@ -7,10 +7,10 @@ import { type RunContext, guard, runTool, text, truncate } from "./common"
 
 export interface GitHubToolDeps {
   readonly github: {
-    readonly push: (taskId: string, checkoutId?: string) => Effect.Effect<string, unknown>
+    readonly push: (taskId: string, checkoutId?: string, branch?: string) => Effect.Effect<string, unknown>
     readonly openPullRequest: (
       taskId: string,
-      input: { readonly title: string; readonly body: string; readonly draft: boolean; readonly checkoutId?: string },
+      input: { readonly title: string; readonly body: string; readonly draft: boolean; readonly checkoutId?: string; readonly branch?: string },
     ) => Effect.Effect<{ readonly pullRequest: PullRequest; readonly created: boolean }, unknown>
     readonly pullRequestStatus: (taskId: string, checkoutId?: string) => Effect.Effect<PullRequestStatus, unknown>
     readonly readReference: (
@@ -157,15 +157,15 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Push a checkout's branch to its GitHub remote so it can be reviewed. Commit your work first: uncommitted " +
-        "changes are not pushed. The base branch is never pushed and nothing is force-pushed.",
-      inputSchema: { checkout: checkoutArg },
+        "changes are not pushed. Pass branch to push a local branch from a linked worktree. The base and default branches are never pushed and nothing is force-pushed.",
+      inputSchema: { checkout: checkoutArg, branch: z.string().min(1).optional().describe("Local branch to push, including a linked worktree's branch; default: checkout branch") },
     },
-    ({ checkout }: { checkout?: string }) =>
+    ({ checkout, branch }: { checkout?: string; branch?: string }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const branch = yield* deps.github.push(ctx.taskId, checkout)
-            return text(`pushed ${branch}`)
+            const pushed = yield* deps.github.push(ctx.taskId, checkout, branch)
+            return text(`pushed ${pushed}`)
           }),
         ),
       ),
@@ -176,15 +176,16 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Open a GitHub pull request from a checkout's branch into its base branch. Pushes the branch first (commit " +
-        "your work before calling this). If a pull request is already open for the branch, returns that one instead.",
+        "your work before calling this). Pass branch for a linked worktree's local branch; such a PR is not linked to the checkout. If a pull request is already open for the branch, returns that one instead.",
       inputSchema: {
         title: z.string().describe("Pull request title"),
         body: z.string().optional().describe("Pull request description"),
         draft: z.boolean().optional().describe("Open as a draft (default false)"),
         checkout: checkoutArg,
+        branch: z.string().min(1).optional().describe("Local branch to push and open a pull request for; default: checkout branch"),
       },
     },
-    ({ title, body, draft, checkout }: { title: string; body?: string; draft?: boolean; checkout?: string }) =>
+    ({ title, body, draft, checkout, branch }: { title: string; body?: string; draft?: boolean; checkout?: string; branch?: string }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
@@ -193,6 +194,7 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
               body: body ?? "",
               draft: draft ?? false,
               checkoutId: checkout,
+              branch,
             })
             const verb = created ? "opened" : "already open:"
             return text(`${verb} pull request #${pullRequest.number}: ${pullRequest.url}`)
