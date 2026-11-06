@@ -38,7 +38,10 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 On NixOS the CLI and its desktop tools come from the Nix store. Install an agent CLI separately and ensure it is on
 your PATH before running `kestrel-box install`; the doctor checks it can run in the sandbox. Keep the package installed in a profile: the user
 service points to that store version. After upgrading the profile, run `kestrel-box install` again to update and restart
-the service. This uses the basic sandbox; the Nest host module is a separate service.
+the service. This uses the basic sandbox; the Nest host module is a separate service. The existing `.#kestrel-box`
+package is the server entry point, not the pairing CLI; when run directly it defaults to
+`${XDG_DATA_HOME:-$HOME/.local/share}/kestrel/box` rather than writing inside the Nix store. Set
+`CLOUDAGENTS_DATA_DIR` to select a different directory.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,

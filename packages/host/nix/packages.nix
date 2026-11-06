@@ -78,6 +78,9 @@ let
     hash = "sha256-ZAvSjA/bznNIY+Xk1jZbac2JjKeKfd8ykugFKJRfV3Y=";
     sources = [ "packages/protocol" "packages/server" ];
     entry = "src/main.ts";
+    # The default server data directory is relative to its source tree, which is read-only in the Nix store.
+    # Keep explicit data directories (including the Nest guest's) intact.
+    wrapperArgs = ''--run 'export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-''${XDG_DATA_HOME:-$HOME/.local/share}/kestrel/box}"' '';
   };
 
   # The Nest guest uses `box` directly. This separate entry point provides the user-facing
