@@ -166,6 +166,8 @@ export class ControlLink {
       ...(vm !== null ? { vm } : {}),
     })
     if (sent) this.opts.manager.markReported([commandId])
+    // Publish a snapshot after the result so the control plane can transfer boot reservations to host accounting.
+    this.send({ _tag: "capacity", capacity: this.opts.manager.capacity() })
   }
 
   private onClose(socket: WebSocket): void {

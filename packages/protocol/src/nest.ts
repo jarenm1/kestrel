@@ -144,6 +144,8 @@ export const NestHostCapacity = Schema.Struct({
   gpus: Schema.Array(NestHostGpu).pipe(Schema.maxItems(NEST_MAX_GPUS)),
   running: NonNegativeInt,
   suspended: NonNegativeInt,
+  /** VM incarnations included in the running memory and disk figures. Absent on older hosts. */
+  runningVmIds: Schema.optional(Schema.Array(Id)),
 })
 export type NestHostCapacity = typeof NestHostCapacity.Type
 

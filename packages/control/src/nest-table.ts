@@ -45,6 +45,10 @@ export const ensureNestTables = (sql: FleetSql): void => {
   if (!boxColumns.some((c) => c.name === "create_failed")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN create_failed INTEGER NOT NULL DEFAULT 0")
   }
+  if (!boxColumns.some((c) => c.name === "boot_reserved")) {
+    sql.exec("ALTER TABLE nest_boxes ADD COLUMN boot_reserved INTEGER NOT NULL DEFAULT 0")
+    sql.exec("UPDATE nest_boxes SET boot_reserved = 1 WHERE pending_kind = 'create' OR (pending_kind = 'resume' AND state = 'parked')")
+  }
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_host ON nest_boxes (host_id)`)
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_deadline ON nest_boxes (pending_deadline)`)
 }
@@ -73,6 +77,7 @@ export type NestBoxRow = {
   pendingDeadline: number | null
   /** The create command failed or timed out: the box has no VM and needs the owner to delete it. */
   createFailed: boolean
+  bootReserved: boolean
 }
 
 /** A `nest_hosts` row; `capacity` is what the host last reported. */
@@ -107,13 +112,14 @@ type NestBoxSqlRow = {
   pendingCommand: string | null
   pendingDeadline: number | null
   createFailed: number
+  bootReserved: number
 }
 
 const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vmId, owner_epoch AS ownerEpoch,
   state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
   memory_bytes AS memoryBytes, gpus, wake_wanted AS wakeWanted, enroll_hash AS enrollHash,
   enroll_expires_at AS enrollExpiresAt, pending_id AS pendingId, pending_kind AS pendingKind,
-  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed`
+  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed, boot_reserved AS bootReserved`
 
 const decodeLimits = Schema.decodeUnknownSync(NestLimits)
 /**
@@ -148,14 +154,15 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
   pendingCommand: row.pendingCommand === null ? null : decodeCommand(row.pendingCommand),
   pendingDeadline: row.pendingDeadline,
   createFailed: row.createFailed !== 0,
+  bootReserved: row.bootReserved !== 0,
 })
 
 export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
     `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, state, limits, volume_ref, backed_up_at,
       image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id, pending_kind,
-      pending_command, pending_deadline, create_failed)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      pending_command, pending_deadline, create_failed, boot_reserved)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ...nestBoxBindings(row),
   )
 }
@@ -166,7 +173,7 @@ export const saveNestBox = (sql: FleetSql, row: NestBoxRow): void => {
     `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, state = ?, limits = ?, volume_ref = ?,
       backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?, enroll_hash = ?,
       enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?,
-      create_failed = ?
+      create_failed = ?, boot_reserved = ?
      WHERE box_id = ?`,
     ...nestBoxBindings(row).slice(1),
     row.boxId,
@@ -195,6 +202,7 @@ const nestBoxBindings = (row: NestBoxRow): (string | number | null)[] => [
   row.pendingCommand === null ? null : JSON.stringify(row.pendingCommand),
   row.pendingDeadline,
   row.createFailed ? 1 : 0,
+  row.bootReserved ? 1 : 0,
 ]
 
 export const deleteNestBox = (sql: FleetSql, boxId: string): void => {
@@ -246,15 +254,22 @@ export const nestBoxesOfUser = (sql: FleetSql, login: string): NestBoxRow[] =>
     .toArray()
     .map(toBoxRow)
 
-/** Boots a host is already committed to: a `create` in flight, or a parked box's `resume` sent to it. */
+/** Boots not yet reflected in a host capacity snapshot. */
 export const nestBootsOnHost = (sql: FleetSql, hostId: string): number =>
   sql
     .exec<{ boots: number }>(
       `SELECT COUNT(*) AS boots FROM nest_boxes WHERE host_id = ?
-       AND (pending_kind = 'create' OR (pending_kind = 'resume' AND state = 'parked'))`,
+       AND boot_reserved = 1`,
       hostId,
     )
     .toArray()[0]?.boots ?? 0
+
+/** A snapshot identifies exactly which VM incarnations its running totals include. */
+export const acknowledgeNestBoots = (sql: FleetSql, hostId: string, vmIds: readonly string[]): void => {
+  for (const vmId of vmIds) {
+    sql.exec("UPDATE nest_boxes SET boot_reserved = 0 WHERE host_id = ? AND vm_id = ?", hostId, vmId)
+  }
+}
 
 export const upsertNestHost = (sql: FleetSql, host: NestHostRow): void => {
   sql.exec(
