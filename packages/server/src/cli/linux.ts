@@ -53,7 +53,8 @@ const waitHealthy = async (port: number): Promise<boolean> => {
 }
 
 export const installLinux = async (): Promise<void> => {
-  if (!isCompiledBinary()) {
+  const nixLauncher = process.env.KESTREL_BOX_NIX_LAUNCHER
+  if (!isCompiledBinary() && !nixLauncher) {
     throw new CliError("install runs from the compiled binary; build it with `bun run build:box` and run dist/box/kestrel-box-<os>-<arch> install")
   }
   if (isWsl() && !systemdIsPid1()) {
@@ -65,8 +66,8 @@ export const installLinux = async (): Promise<void> => {
   const checks = await linuxChecks()
   if (!printChecks(checks)) throw new CliError("required checks failed; fix them and run install again")
 
-  const binary = installedBinary()
-  if (resolve(process.execPath) !== binary) {
+  const binary = nixLauncher ?? installedBinary()
+  if (!nixLauncher && resolve(process.execPath) !== binary) {
     mkdirSync(installDir(), { recursive: true })
     const staged = `${binary}.new`
     copyFileSync(process.execPath, staged)
@@ -75,11 +76,13 @@ export const installLinux = async (): Promise<void> => {
     console.log(`installed ${binary}`)
   }
 
-  try {
-    buildDesktopHelper()
-    console.log(`built desktop helper in ${desktopBinDir()}`)
-  } catch (error) {
-    console.warn(`warn desktop helper not built (desktop runs will not work): ${(error as Error).message}`)
+  if (!nixLauncher) {
+    try {
+      buildDesktopHelper()
+      console.log(`built desktop helper in ${desktopBinDir()}`)
+    } catch (error) {
+      console.warn(`warn desktop helper not built (desktop runs will not work): ${(error as Error).message}`)
+    }
   }
 
   const path = [desktopBinDir(), installDir(), process.env.PATH ?? ""].join(":")
@@ -89,6 +92,7 @@ export const installLinux = async (): Promise<void> => {
   writeFileSync(staged, unitText(binary, path))
   renameSync(staged, unit)
   console.log(`wrote ${unit}`)
+  if (nixLauncher) console.log("Keep this package installed in a Nix profile to retain the service executable.")
 
   const wasActive = isActive()
   requireSystemctl(["daemon-reload"])
