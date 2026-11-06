@@ -16,6 +16,19 @@ const assistant = (content: ReadonlyArray<unknown>, parentToolUseId: string | nu
   uuid: "uuid-1",
 })
 
+/** A finalized assistant block that also reports the API message's usage. */
+const assistantUsage = (
+  id: string,
+  content: ReadonlyArray<unknown>,
+  usage: Record<string, unknown>,
+  parentToolUseId: string | null = null,
+) => ({
+  type: "assistant",
+  message: { id, role: "assistant", content, usage },
+  parent_tool_use_id: parentToolUseId,
+  uuid: "uuid-usage",
+})
+
 const toolResult = (toolUseId: string, content: unknown, isError = false, parentToolUseId: string | null = null) => ({
   type: "user",
   message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: isError }] },
@@ -78,6 +91,97 @@ describe("claude stream-json", () => {
     expect(ids).toHaveLength(3)
     expect(new Set(ids).size).toBe(3)
     expect(second.map((item) => item._tag)).toEqual(["text", "thinking"])
+  })
+
+  test("duplicate blocks of one message keep one usage item, counting cache writes as input", () => {
+    const transcript = makeTranscript()
+    const at = Date.UTC(2026, 0, 2, 3, 4, 5)
+    // The first block is held: the response is not known to be over until a later block or event.
+    const first = valid(
+      transcript.push({
+        ...assistantUsage(
+          "msg_dup",
+          [{ type: "text", text: "one" }],
+          { input_tokens: 4, cache_creation_input_tokens: 10, cache_read_input_tokens: 20, output_tokens: 3 },
+        ),
+        emittedAtMs: at,
+      }),
+    )
+    expect(first.map((item) => item._tag)).toEqual(["text"])
+    // The same message prints another block with the same usage, and the final output.
+    const second = valid(
+      transcript.push(
+        assistantUsage(
+          "msg_dup",
+          [{ type: "tool_use", id: "toolu_dup", name: "Bash", input: { command: "ls" } }],
+          { input_tokens: 4, cache_creation_input_tokens: 10, cache_read_input_tokens: 20, output_tokens: 7 },
+        ),
+      ),
+    )
+    expect(second.some((item) => item._tag === "usage")).toBe(false)
+
+    // The next response proves the previous one finished; its usage shows once, before the new content.
+    const boundary = valid(
+      transcript.push(
+        assistantUsage("msg_next", [{ type: "text", text: "next" }], {
+          input_tokens: 1,
+          cache_read_input_tokens: 2,
+          output_tokens: 1,
+        }),
+      ),
+    )
+    expect(boundary.map((item) => item._tag)).toEqual(["usage", "text"])
+    expect(boundary[0]).toEqual({
+      _tag: "usage",
+      id: "usage-msg_dup",
+      parentToolId: null,
+      timestamp: new Date(at).toISOString(),
+      inputTokens: 14,
+      outputTokens: 7,
+      cachedTokens: 20,
+    })
+
+    // A result closes the next response too, but does not add a second copy of the first response's usage.
+    const result = valid(
+      transcript.push({ type: "result", subtype: "success", is_error: false, result: "done" }),
+    )
+    expect(result.filter((item) => item._tag === "usage").map((item) => item.id)).toEqual(["usage-msg_next"])
+  })
+
+  test("a subagent's response usage carries the Task call that produced it", () => {
+    const transcript = makeTranscript()
+    transcript.push({ type: "assistant", message: { id: "msg_task", content: [{ type: "tool_use", id: "toolu_task", name: "Task", input: {} }] }, parent_tool_use_id: null })
+    const child = valid(
+      transcript.push(
+        assistantUsage(
+          "msg_child",
+          [{ type: "text", text: "child" }],
+          { input_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 5, output_tokens: 7 },
+          "toolu_task",
+        ),
+      ),
+    )
+    expect(child.map((item) => item._tag)).toEqual(["text"])
+    const next = valid(
+      transcript.push(
+        assistantUsage("msg_main", [{ type: "text", text: "main" }], {
+          input_tokens: 1,
+          cache_read_input_tokens: 1,
+          output_tokens: 1,
+        }),
+      ),
+    )
+    expect(next[0]).toEqual({
+      _tag: "usage",
+      id: "usage-msg_child",
+      parentToolId: "toolu_task",
+      timestamp: expect.any(String),
+      inputTokens: 5,
+      outputTokens: 7,
+      cachedTokens: 5,
+    })
+    // The main agent's usage is still held for its own response.
+    expect(next.filter((item) => item._tag === "usage")).toHaveLength(1)
   })
 
   test("result emits a turn item and the final text", () => {
@@ -260,6 +364,59 @@ describe("claude partial messages", () => {
     expect(main).toMatchObject({ parentToolId: null, text: "Waiting on the search." })
     expect(sub?.id).not.toBe(main?.id)
   })
+
+  test("a stream's usage takes message_delta's final output, once, after held prose", () => {
+    const transcript = makeTranscript(null, null, "turn")
+    const at = Date.UTC(2026, 0, 2, 5, 6, 7)
+    expect(
+      transcript.push(
+        streamEvent({
+          type: "message_start",
+          message: {
+            id: "msg_s",
+            usage: { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 16 },
+          },
+        }),
+      ),
+    ).toEqual([])
+    transcript.push(blockStart(0, "text"))
+    // Turn mode holds the prose; usage must not arrive above it.
+    expect(transcript.push(delta(0, { type: "text_delta", text: "The answer." }))).toEqual([])
+    // The finalized assistant block repeats the usage; it is the same response, not a second one.
+    expect(
+      transcript.push({
+        ...assistantUsage(
+          "msg_s",
+          [{ type: "text", text: "The answer." }],
+          { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 16 },
+        ),
+        emittedAtMs: at,
+      }),
+    ).toEqual([])
+
+    // message_delta reports the final output; the usage keeps one id and shows after the flushed prose.
+    const finalized = valid(
+      transcript.push(
+        streamEvent({
+          type: "message_delta",
+          usage: { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 106 },
+        }),
+      ),
+    )
+    expect(finalized.map((item) => item._tag)).toEqual(["text", "usage"])
+    expect(finalized[0]).toMatchObject({ _tag: "text", text: "The answer." })
+    expect(finalized[1]).toEqual({
+      _tag: "usage",
+      id: "usage-msg_s",
+      parentToolId: null,
+      timestamp: new Date(at).toISOString(),
+      inputTokens: 11_369,
+      outputTokens: 106,
+      cachedTokens: 14_517,
+    })
+    // The stream's stop has no further usage to add.
+    expect(transcript.push(streamEvent({ type: "message_stop" }))).toEqual([])
+  })
 })
 
 /** An app-server notification as Codex prints it. */
@@ -382,6 +539,112 @@ describe("codex app-server", () => {
     // After a compaction the next call reports the smaller size.
     transcript.push(usage([19_000, 1_500], [800, 100], 272_000, "tu2"))
     expect(transcript.context()).toEqual({ model: "gpt-6-luna", usedTokens: 900, windowTokens: 272_000 })
+  })
+
+  test("each cumulative total is one response's usage, even when two calls share last counts; a repeated update adds none", () => {
+    const transcript = makeTranscript()
+    const firstAt = Date.UTC(2026, 0, 2, 3, 4, 5)
+    const secondAt = firstAt + 60_000
+    const update = (
+      total: { input: number; cached: number; output: number },
+      last: { input: number; cached: number; output: number },
+      emittedAtMs: number,
+    ) => ({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "th1",
+        turnId: "tu1",
+        tokenUsage: {
+          total: {
+            totalTokens: total.input + total.output,
+            inputTokens: total.input,
+            cachedInputTokens: total.cached,
+            outputTokens: total.output,
+          },
+          last: {
+            totalTokens: last.input + last.output,
+            inputTokens: last.input,
+            cachedInputTokens: last.cached,
+            outputTokens: last.output,
+          },
+          modelContextWindow: 475_000,
+        },
+      },
+      emittedAtMs,
+    })
+
+    const first = valid(transcript.push(update({ input: 14_185, cached: 12_288, output: 188 }, { input: 14_185, cached: 12_288, output: 188 }, firstAt)))
+    expect(first).toEqual([
+      {
+        _tag: "usage",
+        id: "usage-codex-th1-tu1-1",
+        parentToolId: null,
+        timestamp: new Date(firstAt).toISOString(),
+        inputTokens: 1_897,
+        outputTokens: 188,
+        cachedTokens: 12_288,
+      },
+    ])
+    // The same cumulative total is the same response, even if the notification repeats.
+    expect(transcript.push(update({ input: 14_185, cached: 12_288, output: 188 }, { input: 14_185, cached: 12_288, output: 188 }, firstAt))).toEqual([])
+
+    // A second call with identical last counts is a new response: the total moved.
+    const second = valid(
+      transcript.push(update({ input: 28_370, cached: 24_576, output: 376 }, { input: 14_185, cached: 12_288, output: 188 }, secondAt)),
+    )
+    expect(second).toEqual([
+      {
+        _tag: "usage",
+        id: "usage-codex-th1-tu1-2",
+        parentToolId: null,
+        timestamp: new Date(secondAt).toISOString(),
+        inputTokens: 1_897,
+        outputTokens: 188,
+        cachedTokens: 12_288,
+      },
+    ])
+    // The turn's existing totals are still what the cumulative counts say.
+    const [turn] = valid(transcript.push(turnCompleted("completed")))
+    expect(turn).toEqual({
+      _tag: "turn",
+      id: expect.any(String),
+      durationMs: 1200,
+      inputTokens: 28_370,
+      outputTokens: 376,
+      costUsd: null,
+      isError: false,
+    })
+  })
+
+  test("a usage update without cached counts reports cache unknown, not zero", () => {
+    const transcript = makeTranscript()
+    const at = Date.UTC(2026, 0, 2, 4, 0, 0)
+    const items = valid(
+      transcript.push({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId: "th1",
+          turnId: "tu1",
+          tokenUsage: {
+            total: { inputTokens: 10, outputTokens: 2 },
+            last: { inputTokens: 10, outputTokens: 2 },
+            modelContextWindow: 1_000,
+          },
+        },
+        emittedAtMs: at,
+      }),
+    )
+    expect(items).toEqual([
+      {
+        _tag: "usage",
+        id: "usage-codex-th1-tu1-1",
+        parentToolId: null,
+        timestamp: new Date(at).toISOString(),
+        inputTokens: null,
+        outputTokens: 2,
+        cachedTokens: null,
+      },
+    ])
   })
 
   test("a failed turn reports its error once; a retried error is not reported", () => {

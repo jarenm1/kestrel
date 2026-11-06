@@ -1,7 +1,6 @@
 import { useMemo } from "react"
 import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolItem } from "@cloudagents/protocol"
 import { Alert } from "../alert"
-import { cn } from "../cn"
 import { Markdown } from "./Markdown"
 import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
 
@@ -47,15 +46,38 @@ function buildTree(items: readonly AgentItem[]): Tree {
   return { roots, children }
 }
 
-function turnSummary(item: Extract<AgentItem, { _tag: "turn" }>): string {
-  const parts: string[] = []
-  if (item.durationMs !== null) parts.push(`${(item.durationMs / 1000).toFixed(1)}s`)
-  if (item.inputTokens !== null || item.outputTokens !== null) {
-    parts.push(`${item.inputTokens ?? "?"} in · ${item.outputTokens ?? "?"} out`)
-  }
-  if (item.costUsd !== null) parts.push(`$${item.costUsd.toFixed(4)}`)
-  if (item.isError) parts.push("failed")
-  return parts.join(" · ")
+const COMPACT_TOKENS = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
+const EXACT_TOKENS = new Intl.NumberFormat("en")
+
+/** A token count in the response strip; its exact value is the title when compacted, `?` when not reported. */
+function TokenCount({ value, label }: { value: number | null; label: string }) {
+  if (value === null) return <span title={`${label} not reported`}>? {label}</span>
+  const text = COMPACT_TOKENS.format(value)
+  const exact = EXACT_TOKENS.format(value)
+  return <span title={text === exact ? undefined : exact}>{text} {label}</span>
+}
+
+/** Local time of day with seconds (e.g. "14:05:32"); an unparsable timestamp is shown as it came. */
+function formatUsageTime(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime())
+    ? iso
+    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+}
+
+/** One response's usage: when it finished, and its own tokens — never the run's totals. */
+function UsageStrip({ item }: { item: Extract<AgentItem, { _tag: "usage" }> }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
+      <time dateTime={item.timestamp}>{formatUsageTime(item.timestamp)}</time>
+      <span aria-hidden="true">·</span>
+      <TokenCount value={item.inputTokens} label="in" />
+      <span aria-hidden="true">·</span>
+      <TokenCount value={item.outputTokens} label="out" />
+      <span aria-hidden="true">·</span>
+      <TokenCount value={item.cachedTokens} label="cached" />
+    </div>
+  )
 }
 
 /** A run of consecutive tool calls under one group, which shows a summary line once there are two or more. */
@@ -95,20 +117,11 @@ function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx 
       return <Markdown text={item.text} />
     case "thinking":
       return <ThinkingBlock text={item.text} live={ctx.liveIds.has(item.id)} />
-    case "turn": {
-      const summary = turnSummary(item)
-      if (summary === "") return null
-      return (
-        <div
-          className={cn(
-            "flex items-center gap-1.5 text-[11px] text-muted-foreground",
-            item.isError && "text-destructive",
-          )}
-        >
-          {summary}
-        </div>
-      )
-    }
+    case "usage":
+      return <UsageStrip item={item} />
+    case "turn":
+      // The turn's old token, duration and cost totals are no longer shown; a failure still is.
+      return item.isError ? <div className="text-[11px] text-destructive">failed</div> : null
     case "error":
       return <Alert>{item.text}</Alert>
   }

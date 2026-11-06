@@ -4,6 +4,7 @@ import type { AgentItem } from "./index"
  * Items that may still be streaming. The main agent and each subagent (items under one `parentToolId`) stream
  * concurrently, so each stream's newest item is live while the run is; a subagent's stream ends with its tool call.
  * An item updated in place keeps its position, so "newest" is the last position per stream, not the last update.
+ * A `usage` item ends the response it followed, so it becomes that stream's newest and settles the thinking before it.
  */
 export function liveItemIds(items: readonly AgentItem[], running: boolean): ReadonlySet<string> {
   const live = new Set<string>()

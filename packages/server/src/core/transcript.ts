@@ -98,6 +98,48 @@ const claudeWindow = (modelUsage: unknown, model: string | null): number | null 
   return window !== null && window > 0 ? window : null
 }
 
+/** A response's token buckets: fresh prompt input (cache writes included), completion, and cache reads. */
+interface ResponseUsage {
+  readonly id: string
+  readonly parentToolId: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  cachedTokens: number | null
+  timestamp: string | null
+  emitted: boolean
+  /** A stream for this response is open (`message_start` without its `message_stop` yet). */
+  active: boolean
+}
+
+/** ISO time of a provider event: its `emittedAtMs` epoch-milliseconds or `timestamp`, when valid. */
+const eventTime = (...events: ReadonlyArray<unknown>): string | null => {
+  for (const event of events) {
+    if (!isRecord(event)) continue
+    const milliseconds = asNumber(event.emittedAtMs)
+    if (milliseconds !== null && milliseconds > 0 && Math.abs(milliseconds) <= 8.64e15) {
+      const date = new Date(milliseconds)
+      if (!Number.isNaN(date.getTime())) return date.toISOString()
+    }
+    const text = asString(event.timestamp)
+    if (text !== null) {
+      const date = new Date(text)
+      if (!Number.isNaN(date.getTime())) return date.toISOString()
+    }
+  }
+  return null
+}
+
+/** The usage item for a response, using the time it was first seen finished when the provider gave none. */
+const usageItem = (state: ResponseUsage): AgentItem => ({
+  _tag: "usage",
+  id: state.id,
+  parentToolId: state.parentToolId,
+  timestamp: state.timestamp ?? new Date().toISOString(),
+  inputTokens: state.inputTokens,
+  outputTokens: state.outputTokens,
+  cachedTokens: state.cachedTokens,
+})
+
 /** How assistant prose reaches the app: at the end of a turn, or once each paragraph or code block is complete. */
 export type ResponseStreamingMode = "turn" | "paragraph"
 
@@ -177,6 +219,11 @@ export const makeTranscript = (
   const codexRunning = new Map<string, AgentItem & { _tag: "tool" }>()
   /** Each Codex turn's token totals: before its first model call, and the latest. */
   const codexTurnTokens = new Map<string, { readonly baseInput: number; readonly baseOutput: number; input: number; output: number }>()
+  /**
+   * Per-response usage already reported, by thread and turn. The thread's cumulative `total` identifies a new model
+   * call; `last` alone does not, because two calls can have identical usage. A repeated total is the same response.
+   */
+  const codexResponseUsage = new Map<string, { readonly seen: Set<string>; count: number }>()
   /** The turn's plan (`turn/plan/updated`), shown as a todo list until the turn ends. */
   const codexPlans = new Map<string, AgentItem & { _tag: "tool" }>()
   /** Last top-level Codex error and its turn, so only that turn's end does not repeat it. */
@@ -207,6 +254,71 @@ export const makeTranscript = (
     contextChanged = true
   }
 
+  /**
+   * Per-response usage by Claude message id. Every printed block of one API message repeats its usage, and a
+   * stream's `message_delta` reports the final output after the assistant snapshot, so an item is updated under
+   * the first id it showed under rather than added again.
+   */
+  const claudeResponseUsage = new Map<string, ResponseUsage>()
+
+  /** A message id is unique per context; the context keeps a subagent's response apart from the main agent's. */
+  const claudeUsageKey = (messageId: string, parentToolId: string | null): string => `${parentToolId ?? ""}\u0000${messageId}`
+
+  const claudeUsageState = (messageId: string | null, parentToolId: string | null): ResponseUsage => {
+    const key = messageId === null ? null : claudeUsageKey(messageId, parentToolId)
+    const known = key === null ? undefined : claudeResponseUsage.get(key)
+    if (known !== undefined) return known
+    const state: ResponseUsage = {
+      id: messageId === null ? `usage-${nextId()}` : `usage-${messageId}`,
+      parentToolId,
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      timestamp: null,
+      emitted: false,
+      active: false,
+    }
+    claudeResponseUsage.set(key ?? state.id, state)
+    return state
+  }
+
+  /** Merge the buckets a Claude event reports; a missing bucket leaves the value already known. */
+  const recordClaudeUsage = (state: ResponseUsage, usage: Record<string, unknown>, completedAt?: string | null) => {
+    // Cache writes were read by the model too, so they are prompt input; cache reads stay their own bucket.
+    const inputTokens = sumTokens([asNumber(usage.input_tokens), asNumber(usage.cache_creation_input_tokens)])
+    const outputTokens = asNumber(usage.output_tokens)
+    const cachedTokens = asNumber(usage.cache_read_input_tokens)
+    if (inputTokens !== null) state.inputTokens = inputTokens
+    // Output only grows within a response; a delayed snapshot must not replace message_delta's final count.
+    if (outputTokens !== null) {
+      state.outputTokens = state.emitted && state.outputTokens !== null ? Math.max(state.outputTokens, outputTokens) : outputTokens
+    }
+    if (cachedTokens !== null) state.cachedTokens = cachedTokens
+    if (completedAt !== undefined && state.timestamp === null) state.timestamp = completedAt ?? new Date().toISOString()
+  }
+
+  /** The response's item once anything is known. It keeps its id, so a later report replaces it in place. */
+  const emitClaudeUsage = (state: ResponseUsage): AgentItem | null => {
+    if (state.inputTokens === null && state.outputTokens === null && state.cachedTokens === null) return null
+    state.emitted = true
+    if (state.timestamp === null) state.timestamp = new Date().toISOString()
+    return usageItem(state)
+  }
+
+  /**
+   * Responses whose usage was held until their content finished. An open stream is left alone: its own
+   * `message_delta`/`message_stop` completes it, which keeps concurrent subagent streams from surfacing early.
+   */
+  const flushClaudeUsage = (keepKey?: string, force = false): AgentItem[] => {
+    const items: AgentItem[] = []
+    for (const [key, state] of claudeResponseUsage) {
+      if (key === keepKey || state.emitted || (!force && state.active)) continue
+      const item = emitClaudeUsage(state)
+      if (item !== null) items.push(item)
+    }
+    return items
+  }
+
   const claudeSystem = (line: Record<string, unknown>) => {
     switch (asString(line.subtype)) {
       case "init":
@@ -227,8 +339,9 @@ export const makeTranscript = (
     // Claude Code prints every content block of one API message as its own line with the same
     // message id, so ids must come from a counter, not the message id.
     const parentToolId = asString(line.parent_tool_use_id)
+    const messageUsage = isRecord(line.message.usage) ? line.message.usage : null
     // Subagents run in contexts of their own; only the main agent's calls fill the session.
-    const usage = parentToolId === null && isRecord(line.message.usage) ? line.message.usage : null
+    const usage = parentToolId === null ? messageUsage : null
     const used =
       usage === null
         ? null
@@ -242,9 +355,9 @@ export const makeTranscript = (
       usedTokens = used
       refreshContext()
     }
-    const items: AgentItem[] = []
     // A block that streamed in keeps the id it was shown under; the next streamed block of the same kind is this one.
     const messageId = asString(line.message.id)
+    const items: AgentItem[] = flushClaudeUsage(messageId === null ? undefined : claudeUsageKey(messageId, parentToolId))
     const streamed = messageId === null ? undefined : claudeStreams.get(messageId)
     const idFor = (kind: "text" | "thinking"): string => {
       const at = streamed?.findIndex((block) => block.kind === kind) ?? -1
@@ -280,12 +393,24 @@ export const makeTranscript = (
         items.push({ _tag: "tool", id, parentToolId, name, input, status: "running", output: null })
       }
     }
+    if (messageUsage !== null) {
+      const state = claudeUsageState(messageId, parentToolId)
+      // This line finished a message (or is one of its blocks), so a provider event time means completion.
+      recordClaudeUsage(state, messageUsage, eventTime(line))
+      // A stream already showed the response; its snapshot takes the same item, updating output (or vice versa).
+      // Without an id there is nothing to deduplicate against, so the usage shows at once.
+      if (state.emitted || messageId === null) {
+        const item = emitClaudeUsage(state)
+        if (item !== null) items.push(item)
+      }
+    }
     return items
   }
 
   const claudeUser = (line: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     if (!isRecord(line.message)) return []
-    const items: AgentItem[] = []
+    // A tool result answers a response that has finished, so its held usage shows before the result.
+    const items: AgentItem[] = flushClaudeUsage()
     for (const block of asArray(line.message.content)) {
       // Claude Code records an interrupt as a user text; the turn's result that follows is an error only by name.
       if (isRecord(block) && block.type === "text" && asString(block.text)?.startsWith("[Request interrupted by user") === true) {
@@ -320,7 +445,9 @@ export const makeTranscript = (
     const usage = isRecord(line.usage) ? line.usage : null
     windowTokens = claudeWindow(line.modelUsage, model) ?? windowTokens
     refreshContext()
+    // The run's result closes every response still held, including a stream whose stop line was lost.
     const items: AgentItem[] = [
+      ...flushClaudeUsage(undefined, true),
       {
         _tag: "turn",
         id: nextId(),
@@ -358,8 +485,16 @@ export const makeTranscript = (
     switch (asString(event.type)) {
       case "message_start": {
         const id = isRecord(event.message) ? asString(event.message.id) : null
-        if (id !== null) claudeStreaming.set(parentToolId, id)
-        return []
+        // A new response beginning says nothing about another stream still open; only finished held usage shows.
+        const items = flushClaudeUsage(id === null ? undefined : claudeUsageKey(id, parentToolId))
+        if (id !== null) {
+          claudeStreaming.set(parentToolId, id)
+          const state = claudeUsageState(id, parentToolId)
+          state.active = true
+          // Its input and cache reads are known now; output is not final until message_delta.
+          if (isRecord(event.message) && isRecord(event.message.usage)) recordClaudeUsage(state, event.message.usage)
+        }
+        return items
       }
       case "content_block_start": {
         const messageId = claudeStreaming.get(parentToolId)
@@ -381,6 +516,27 @@ export const makeTranscript = (
         block.text += piece
         if (block.text.trim() === "") return []
         return [{ _tag: block.kind, id: block.id, parentToolId, text: block.text }]
+      }
+      case "message_delta": {
+        const id = claudeStreaming.get(parentToolId) ?? asString(line.api_message_id)
+        if (id === null) return []
+        const state = claudeUsageState(id, parentToolId)
+        // The final output arrives after the assistant snapshot; the same item is updated, not added again.
+        if (isRecord(event.usage)) recordClaudeUsage(state, event.usage, eventTime(line, event))
+        else if (state.timestamp === null) state.timestamp = eventTime(line, event) ?? new Date().toISOString()
+        const item = emitClaudeUsage(state)
+        return item === null ? [] : [item]
+      }
+      case "message_stop": {
+        const id = claudeStreaming.get(parentToolId) ?? asString(line.api_message_id)
+        const state = id === null ? undefined : claudeResponseUsage.get(claudeUsageKey(id, parentToolId))
+        if (state !== undefined) {
+          state.active = false
+          if (state.timestamp === null) state.timestamp = eventTime(line, event) ?? new Date().toISOString()
+        }
+        const item = state === undefined || state.emitted ? null : emitClaudeUsage(state)
+        if (id !== null) claudeStreaming.delete(parentToolId)
+        return item === null ? [] : [item]
       }
       default:
         return []
@@ -542,12 +698,37 @@ export const makeTranscript = (
     return items
   }
 
-  const codexTokenUsage = (params: Record<string, unknown>) => {
+  /** One model call's usage from Codex's `last`: input already includes cache reads, so they are subtracted. */
+  const codexUsageItem = (
+    threadId: string | null,
+    turnId: string | null,
+    count: number,
+    last: Record<string, unknown>,
+    line: Record<string, unknown>,
+  ): AgentItem | null => {
+    const lastInput = asNumber(last.inputTokens)
+    const cachedTokens = asNumber(last.cachedInputTokens)
+    // Without both, the fresh prompt count is unknown; reporting the cached-inclusive input would overstate it.
+    const inputTokens = lastInput === null || cachedTokens === null ? null : Math.max(0, lastInput - cachedTokens)
+    const outputTokens = asNumber(last.outputTokens)
+    if (inputTokens === null && outputTokens === null && cachedTokens === null) return null
+    return {
+      _tag: "usage",
+      id: `usage-codex-${threadId ?? "thread"}-${turnId ?? "turn"}-${count}`,
+      parentToolId: null,
+      timestamp: eventTime(line) ?? new Date().toISOString(),
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+    }
+  }
+
+  const codexTokenUsage = (line: Record<string, unknown>, params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     const usage = isRecord(params.tokenUsage) ? params.tokenUsage : null
     const total = usage !== null && isRecord(usage.total) ? usage.total : null
     const last = usage !== null && isRecord(usage.last) ? usage.last : null
     const turnId = asString(params.turnId)
-    if (total === null || last === null) return
+    if (total === null || last === null) return []
     const input = asNumber(total.inputTokens)
     const output = asNumber(total.outputTokens)
     if (turnId !== null && input !== null && output !== null) {
@@ -568,6 +749,20 @@ export const makeTranscript = (
     usedTokens = asNumber(last.totalTokens)
     windowTokens = asNumber(usage?.modelContextWindow)
     refreshContext()
+
+    const threadId = asString(params.threadId)
+    const totalKey = [asNumber(total.inputTokens), asNumber(total.cachedInputTokens), asNumber(total.outputTokens)]
+      .map((count) => (count === null ? "?" : String(count)))
+      .join(":")
+    const responseKey = `${threadId ?? ""}\u0000${turnId ?? ""}`
+    const known = codexResponseUsage.get(responseKey) ?? { seen: new Set<string>(), count: 0 }
+    codexResponseUsage.set(responseKey, known)
+    // A repeated cumulative total is the same model call, even when another call had the same `last` counts.
+    if (known.seen.has(totalKey)) return []
+    known.seen.add(totalKey)
+    known.count += 1
+    const item = codexUsageItem(threadId, turnId, known.count, last, line)
+    return item === null ? [] : [item]
   }
 
   /** A Codex JSON-RPC message: notifications carry the run; a thread's model comes from its start/resume response. */
@@ -584,8 +779,7 @@ export const makeTranscript = (
         if (isRecord(params.threadSettings) && typeof params.threadSettings.model === "string") model = params.threadSettings.model
         return []
       case "thread/tokenUsage/updated":
-        codexTokenUsage(params)
-        return []
+        return codexTokenUsage(line, params)
       case "item/started":
       case "item/completed": {
         const item = codexItem(params.item, method === "item/completed")
@@ -848,7 +1042,8 @@ export const makeTranscript = (
 
   /**
    * Main-agent prose waiting for its moment. In `turn` mode one text item is held for the whole turn; in `paragraph`
-   * mode each text item is shown up to its last completed paragraph or fence. A turn's `turn` item flushes both.
+   * mode each text item is shown up to its last completed paragraph or fence. A `turn` or `usage` item flushes what
+   * precedes it, so usage never shows above the response it belongs to.
    */
   const turnProse = new Map<string, string>()
   const turnOrder: string[] = []
@@ -908,7 +1103,9 @@ export const makeTranscript = (
         }
         continue
       }
-      if (item._tag === "turn") items.push(...flushProse())
+      // Usage follows the response's prose: held main-agent text shows first, without the turn itself ending.
+      // A subagent's usage does not release prose the main agent is still holding.
+      if (item._tag === "turn" || (item._tag === "usage" && item.parentToolId === null)) items.push(...flushProse())
       items.push(item)
     }
     return items

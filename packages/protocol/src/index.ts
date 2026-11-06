@@ -247,6 +247,21 @@ export const AgentItem = Schema.Union(
      */
     images: Schema.optional(Schema.Array(Attachment)),
   }),
+  /**
+   * One finished assistant response: its token usage as the harness reported it, not the run's running totals.
+   * `timestamp` is when it finished. `inputTokens` excludes cache reads (cache writes count as input); `cachedTokens`
+   * is null when the harness did not report it, never an invented zero. It ends the stream it followed.
+   */
+  Schema.Struct({
+    _tag: Schema.Literal("usage"),
+    id: Schema.String,
+    /** Set when a subagent (e.g. Claude's Task tool) produced this response; the id of that Task call. */
+    parentToolId: Schema.NullOr(Schema.String),
+    timestamp: Schema.String,
+    inputTokens: Schema.NullOr(Schema.Number),
+    outputTokens: Schema.NullOr(Schema.Number),
+    cachedTokens: Schema.NullOr(Schema.Number),
+  }),
   /** End of one agent turn. Fields the harness does not report are null. */
   Schema.Struct({
     _tag: Schema.Literal("turn"),
