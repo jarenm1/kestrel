@@ -100,7 +100,7 @@ export class NestFleet {
   ) {}
 
   /** Inventory chunks and live reports seen since hello, held until the last chunk arrives. */
-  private readonly inventories = new Map<string, { vms: NestVmReport[]; updated: Set<string> }>()
+  private readonly inventories = new Map<string, { vms: NestVmReport[]; updated: Map<string, NestVmReport> }>()
 
   // ---------------------------------------------------------------------------
   // Host frames
@@ -119,7 +119,7 @@ export class NestFleet {
       capacity: frame.capacity,
       lastSeenAt: new Date(this.clock()).toISOString(),
     })
-    this.inventories.set(frame.hostId, { vms: [], updated: new Set() })
+    this.inventories.set(frame.hostId, { vms: [], updated: new Map() })
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
     this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
@@ -131,7 +131,7 @@ export class NestFleet {
    * the VMs applied, so no eviction rests on a partial list. A live report received during the snapshot takes priority.
    */
   inventory(hostId: string, vms: readonly NestVmReport[], last: boolean): void {
-    const inventory = this.inventories.get(hostId) ?? { vms: [], updated: new Set<string>() }
+    const inventory = this.inventories.get(hostId) ?? { vms: [], updated: new Map<string, NestVmReport>() }
     inventory.vms.push(...vms)
     if (!last) {
       this.inventories.set(hostId, inventory)
@@ -143,6 +143,7 @@ export class NestFleet {
       this.vm(hostId, vm)
       this.reconcileLimits(hostId, vm)
     }
+    for (const vm of inventory.updated.values()) this.reconcileLimits(hostId, vm)
   }
 
   /** A capacity report: stored, the lease renewed, and boxes that were waiting for room placed. */
@@ -156,7 +157,7 @@ export class NestFleet {
 
   /** A VM report from a host: the host's state is the truth for placement, state, size and GPUs. */
   vm(hostId: string, report: NestVmReport): void {
-    this.inventories.get(hostId)?.updated.add(report.boxId)
+    this.inventories.get(hostId)?.updated.set(report.boxId, report)
     const row = nestBox(this.sql, report.boxId)
     const decision = decideVm(row, hostId, report)
     if (decision._tag === "evict") {

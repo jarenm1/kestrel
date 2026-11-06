@@ -422,6 +422,24 @@ describe("VM reports and epochs", () => {
     await hello("host-a", [vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } })])
     expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: NEST_STANDARD_LIMITS })
   })
+
+  test("reconnect reconciles limits against the latest live report during inventory", async () => {
+    const vmId = await runningBox()
+    await hello("host-a")
+    fleet.inventory("host-a", [vmReport("box-1", vmId, 1, "running")], false)
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } }))
+    fleet.inventory("host-a", [], true)
+    expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: NEST_STANDARD_LIMITS })
+  })
+
+  test("reconnect does not reconcile stale inventory limits after a live report", async () => {
+    const vmId = await runningBox()
+    await hello("host-a")
+    fleet.inventory("host-a", [vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } })], false)
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "running"))
+    fleet.inventory("host-a", [], true)
+    expect(commandsTo("host-a").filter(({ command }) => command._tag === "setLimits")).toHaveLength(0)
+  })
 })
 
 describe("owner commands", () => {
