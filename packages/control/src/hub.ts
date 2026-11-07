@@ -1138,7 +1138,7 @@ export class Hub extends DurableObject<Env> {
     if (managed !== null) return this.directBoxCall(managed, login, method, path, payload)
     const box = this.ctx.getWebSockets(BOX_TAG)[0]
     if (!box) {
-      return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ message: "agent box is not connected" }) })
+      return Promise.resolve({ ok: false, status: 503, body: JSON.stringify({ _tag: "BoxOffline", message: "agent box is not connected" }) })
     }
     // Background work has no browser session; identify the explicitly configured dev login here as well.
     const creds = this.sessionCredentials({ login, dev: this.env.DEV_SESSION_LOGIN === login })
@@ -1169,7 +1169,7 @@ export class Hub extends DurableObject<Env> {
    */
   private async nestBoxCall(login: string, id: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
     if (!(await this.wakeNestBox(login, id))) {
-      return { ok: false, status: 503, body: JSON.stringify({ message: "Nest box did not wake" }) }
+      return { ok: false, status: 503, body: JSON.stringify({ _tag: "BoxOffline", message: "Nest box did not wake" }) }
     }
     const owned = this.ownedBox(login, id)
     if (!owned) return { ok: false, status: 404, body: JSON.stringify({ message: "no such box" }) }
@@ -1222,9 +1222,9 @@ export class Hub extends DurableObject<Env> {
       return { ok: res.ok, status: res.status, body: await res.text() }
     } catch (err) {
       if (err instanceof DOMException && err.name === "TimeoutError") {
-        return { ok: false, status: 504, body: JSON.stringify({ message: "agent box did not respond in time" }) }
+        return { ok: false, status: 504, body: JSON.stringify({ _tag: "BoxOffline", message: "agent box did not respond in time" }) }
       }
-      return { ok: false, status: 502, body: JSON.stringify({ message: "agent box is unreachable" }) }
+      return { ok: false, status: 502, body: JSON.stringify({ _tag: "BoxOffline", message: "agent box is unreachable" }) }
     }
   }
 
@@ -1849,7 +1849,7 @@ export class Hub extends DurableObject<Env> {
     const { promise, resolve } = Promise.withResolvers<Response>()
     const timer = setTimeout(() => {
       this.pending.delete(frame.id)
-      resolve(errorResponse(504, "GatewayTimeout", "agent box did not respond in time"))
+      resolve(errorResponse(504, "BoxOffline", "agent box did not respond in time"))
     }, HTTP_TIMEOUT_MS)
     this.pending.set(frame.id, { resolve, timer })
     try {
@@ -1857,7 +1857,7 @@ export class Hub extends DurableObject<Env> {
     } catch {
       clearTimeout(timer)
       this.pending.delete(frame.id)
-      resolve(errorResponse(502, "BadGateway", "agent box is unreachable"))
+      resolve(errorResponse(502, "BoxOffline", "agent box is unreachable"))
     }
     return promise
   }
@@ -1900,7 +1900,7 @@ export class Hub extends DurableObject<Env> {
     } catch {
       this.streams.delete(id)
       closeQuietly(server, 1000, "agent box unreachable")
-      return errorResponse(502, "BadGateway", "agent box is unreachable")
+      return errorResponse(502, "BoxOffline", "agent box is unreachable")
     }
     return new Response(null, {
       status: 101,
@@ -1999,7 +1999,7 @@ export class Hub extends DurableObject<Env> {
   private failAll(): void {
     for (const p of this.pending.values()) {
       clearTimeout(p.timer)
-      p.resolve(errorResponse(502, "BadGateway", "agent box disconnected"))
+      p.resolve(errorResponse(502, "BoxOffline", "agent box disconnected"))
     }
     this.pending.clear()
     for (const s of this.streams.values()) closeQuietly(s, BOX_GONE_CLOSE_CODE, "agent box disconnected")

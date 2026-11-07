@@ -154,6 +154,7 @@ function ThreadView({ taskId, box, boxName, bottomInset }: ThreadViewProps) {
               runs={state.runs}
               archivedTask={archivedTask}
               context={state.task?.context}
+              loadError={state.loadError}
               // The same swipes the chat's gestures handle: left opens the Desktop/Diff panel, right the threads.
               onSwipe={(direction) => (direction === "left" ? setOpen(true) : shell.openSidebar())}
             />

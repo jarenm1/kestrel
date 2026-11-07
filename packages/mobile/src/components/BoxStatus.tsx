@@ -3,23 +3,18 @@ import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-na
 import { useQuery } from "@tanstack/react-query";
 import { Server } from "lucide-react-native";
 import { useApiClient } from "@/hooks/useApiClient";
-import { ApiError } from "@/api/client";
 import { createQueries } from "@/api/queries";
 import { colors, radius, spacing } from "@/theme";
 
 /**
- * Whether the box answers; undefined while unknown. A failed control-plane request does not establish box status,
- * so transport failures stay unknown; only gateway failures establish an offline relayed box.
+ * Whether the box answers; undefined while unknown. A rejected health request does not establish box status: only the
+ * control plane's own answer does, so a network or gateway failure stays unknown.
  */
 export function useBoxOnline(): boolean | undefined {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
   const box = useQuery(queries.box());
-  if (box.isError) {
-    const error = box.error;
-    return error instanceof ApiError && [502, 503, 504].includes(error.status) ? false : undefined;
-  }
-  return box.data?.online;
+  return box.isError ? undefined : box.data?.online;
 }
 
 /**

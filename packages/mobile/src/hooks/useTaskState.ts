@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
-import { isUnreachableError } from "@/api/client";
 import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
-import { errorText } from "@/lib/format";
+import { threadErrors } from "@/hooks/threadErrors";
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
@@ -106,14 +105,8 @@ export function useTaskState(taskId: string) {
   }, [api, taskId, generation, queryClient]);
 
   const running = runs.data?.some((run) => run.status === "running") === true;
-  const failed = [task, messages, runs].find((q) => q.error);
-  const failure = failed?.error;
-  // Background reconnects and an unreachable box already show in the box indicator. Only an active turn is interrupted.
-  const error = disconnected && running
-    ? "The connection to this turn's box was lost. Reconnecting…"
-    : failure && !isUnreachableError(failure)
-      ? errorText(failure)
-      : null;
+  // A cold failure leaves content missing: the thread says so inline instead of showing an empty chat or a banner.
+  const { loadError, error } = threadErrors([task, messages, runs], disconnected, running);
 
   return {
     task: task.data ?? null,
@@ -123,5 +116,6 @@ export function useTaskState(taskId: string) {
     output,
     desktopOpens,
     error,
+    loadError,
   };
 }

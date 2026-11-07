@@ -2,7 +2,7 @@ import React from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useQueries } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
-import { isUnreachableError } from "@/api/client";
+import { isUnreachableError } from "@/api/errors";
 import { createQueries } from "@/api/queries";
 import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";

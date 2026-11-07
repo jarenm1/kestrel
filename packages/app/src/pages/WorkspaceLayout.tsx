@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Outlet } from "react-router-dom"
 import { PanelLeftOpen } from "lucide-react"
-import { ApiError } from "@/api/client"
+import { isUnreachableError } from "@/api/errors"
 import { queries } from "@/api/queries"
 import { FloatingNotices } from "@/components/FloatingNotice"
 import { ReconnectBanner } from "@/components/ReconnectBanner"
@@ -35,7 +35,7 @@ export function WorkspaceLayout() {
           <div className="flex min-h-0 flex-1 pt-3">
             <ThreadSidebar
               tasks={tasks.data}
-              error={tasks.error instanceof ApiError && [0, 502, 503, 504].includes(tasks.error.status) ? null : tasks.error}
+              error={isUnreachableError(tasks.error) ? null : tasks.error}
               collapsed={collapsed}
               onCollapse={() => setCollapsed(true)}
             />

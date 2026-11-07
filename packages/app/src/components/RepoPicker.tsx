@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
 import { BranchName } from "@cloudagents/protocol"
 import { ChevronDown, FolderGit2, GitBranch, Lock, User } from "lucide-react"
-import { ApiError } from "@/api/client"
+import { ApiError } from "@/api/errors"
 import { queries } from "@/api/queries"
 import { Button } from "@cloudagents/ui/button"
 import {

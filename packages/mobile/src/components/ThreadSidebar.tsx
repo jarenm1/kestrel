@@ -36,7 +36,8 @@ import {
   Workflow,
 } from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
-import { isUnreachableError, sameBox } from "@/api/client";
+import { sameBox } from "@/api/client";
+import { isUnreachableError } from "@/api/errors";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { KestrelMark } from "@/components/KestrelMark";

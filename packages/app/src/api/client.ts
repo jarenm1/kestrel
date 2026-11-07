@@ -64,13 +64,7 @@ import {
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
 import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
-
-export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-    this.name = "ApiError"
-  }
-}
+import { ApiError, responseError } from "./errors"
 
 type UnauthorizedListener = () => void
 const unauthorizedListeners = new Set<UnauthorizedListener>()
@@ -83,18 +77,6 @@ export function onUnauthorized(listener: UnauthorizedListener): () => void {
   }
 }
 
-function errorMessage(text: string, fallback: string): string {
-  try {
-    const body: unknown = JSON.parse(text)
-    if (typeof body === "object" && body !== null && "message" in body && typeof body.message === "string") {
-      return body.message
-    }
-  } catch {
-    // Body is not JSON; fall through to raw text.
-  }
-  return text || fallback
-}
-
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
 
 /** Decodes one exchange: a non-2xx status fails with the server's message; a 2xx body is decoded with `schema`. */
@@ -105,7 +87,7 @@ const decodeExchange = <A, I>(
   text: string,
 ): Effect.Effect<A, ApiError> =>
   Effect.gen(function* () {
-    if (status < 200 || status > 299) return yield* Effect.fail(new ApiError(status, errorMessage(text, statusText)))
+    if (status < 200 || status > 299) return yield* Effect.fail(responseError(status, text, statusText))
     // 204 and other empty bodies carry no JSON; they decode as `undefined`.
     const json = yield* Effect.try({
       try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),

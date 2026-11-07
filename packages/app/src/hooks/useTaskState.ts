@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
-import { ApiError } from "@/api/client"
 import { openTaskEvents } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
-import { errorText } from "@/util"
+import { threadErrors } from "./threadErrors"
 
 const MAX_LOG_LINES = 2000
 const RECONNECT_MS = 2000
@@ -121,15 +120,7 @@ export function useTaskState(taskId: string) {
   }, [taskId, generation, queryClient])
 
   const running = runs.data?.some((run) => run.status === "running") === true
-  const failed = [task, messages, runs].find((q) => q.error)
-  const failure = failed?.error
-  // Background reconnects are already visible in the box indicator. Only interrupt chat for an active turn.
-  const unreachable = failure instanceof ApiError && [0, 502, 503, 504].includes(failure.status)
-  const error = disconnected && running
-    ? "The connection to this turn's box was lost. Reconnecting…"
-    : failure && !unreachable
-      ? errorText(failure)
-      : null
+  const { error, loadError } = threadErrors([task, messages, runs], disconnected, running)
 
   return {
     task: task.data ?? null,
@@ -138,5 +129,6 @@ export function useTaskState(taskId: string) {
     output,
     desktopOpens,
     error,
+    loadError,
   }
 }

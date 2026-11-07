@@ -19,6 +19,8 @@ interface Props {
   taskStatus: TaskStatus | undefined
   messages: readonly Message[]
   runs: readonly Run[]
+  /** Failed initial snapshots replace the empty transcript, not the composer or its draft. */
+  loadError: string | null
   /** Set while the thread is archived: the composer is replaced by an unarchive notice. */
   archivedTask: Task | undefined
   /** Preview elements attached to the composer as context. */
@@ -185,7 +187,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
   )
 }
 
-export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, elements, onElementsChange, context }: Props) {
+export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archivedTask, elements, onElementsChange, context }: Props) {
   const queryClient = useQueryClient()
   // Keep `#` references scoped to the selected repository before the agent makes its first checkout.
   const task = useQuery(queries.task(taskId))
@@ -230,14 +232,20 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, archivedTask, el
         </div>
       )}
       {/* While the working indicator is up it covers the thread's last lines; the extra padding keeps them clear of it. */}
-      <Transcript
-        taskId={taskId}
-        messages={messages}
-        runs={runs}
-        runItems={runItems}
-        pendingAskId={pendingAsk?.id}
-        className={cn("px-5 pt-4", activeRun ? "pb-14" : "pb-4")}
-      />
+      {loadError ? (
+        <div role="alert" className="flex min-h-0 flex-1 items-center justify-center p-8 text-center text-sm text-muted-foreground">
+          {loadError}
+        </div>
+      ) : (
+        <Transcript
+          taskId={taskId}
+          messages={messages}
+          runs={runs}
+          runItems={runItems}
+          pendingAskId={pendingAsk?.id}
+          className={cn("px-5 pt-4", activeRun ? "pb-14" : "pb-4")}
+        />
+      )}
       <div className="relative flex flex-col items-center px-5 pt-2 pb-5">
         {activeRun && <WorkingIndicator run={activeRun} />}
         {/*

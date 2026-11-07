@@ -123,6 +123,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
           taskStatus={state.task?.status}
           messages={state.messages}
           runs={state.runs}
+          loadError={state.loadError}
           archivedTask={archivedTask}
           elements={elements}
           onElementsChange={setElements}

@@ -64,9 +64,12 @@ prompt submissions still show an error beside the composer and keep the draft av
 errors use the same frosted-glass warning style as the floating banners.
 Reconnecting refreshes the thread, messages and runs; fresh snapshots replace stale pre-disconnect state while
 preserving live events that arrive during the refresh.
-For relayed mobile boxes, a device/control-plane transport failure leaves availability unknown rather than declaring
-the box offline; new-thread sends attempt the request and report its network error. Gateway failures (502/503/504)
-still mark the relayed box offline.
+Relay connectivity failures carry the `BoxOffline` error tag; an application's 502/503/504 alone is not evidence
+that its box is down. Query-error selection preserves actionable failures even when another query is unreachable.
+If an essential initial snapshot fails with no cached data, the conversation shows an inline load-failure state
+instead of an empty transcript or a recurring offline banner.
+For relayed mobile boxes, failed health requests leave availability unknown; only a successful box-status response
+declares the relay offline. New-thread sends attempt the request when availability is unknown and report its error.
 
 In desktop Settings, Profile manages GitHub repository access, including connecting and reconnecting OAuth.
 The repository picker sends users without a GitHub connection to Profile to set up that access.
