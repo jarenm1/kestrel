@@ -328,7 +328,9 @@ export class Hub extends DurableObject<Env> {
       ensureNestTables(sql)
       ensureToolFailuresTable(sql)
       ensureBoxActivityTable(sql)
-      ensurePrWatchTables(sql)
+      // An interrupted rebuild must leave either the old tables or the new ones, never a renamed legacy table or a
+      // half-copied one; the transaction makes the rename/copy/drop sequence atomic.
+      ctx.storage.transactionSync(() => ensurePrWatchTables(sql))
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
