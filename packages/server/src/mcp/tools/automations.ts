@@ -2,14 +2,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import {
-  AgentModel,
   type Automation,
   type AutomationTrigger,
   GithubAutomationEvent,
   NotFound,
 } from "@cloudagents/protocol"
 import { type ControlClient, ControlError } from "../../control/client"
-import { type RunContext, guard, runTool, text, truncate } from "./common"
+import { type RunContext, agentModelInput, guard, runTool, text, truncate } from "./common"
 
 export interface AutomationToolDeps {
   readonly automations: {
@@ -128,7 +127,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       inputSchema: {
         name: z.string().min(1).describe("Short name shown in the app"),
         prompt: z.string().min(1).describe("Prompt the run's agent receives"),
-        model: z.enum(AgentModel.literals).nullable().optional().describe("Model for each run; omitted or null uses the box default"),
+        model: agentModelInput.nullable().optional().describe("Model for each run; omitted or null uses the box default"),
         repo: z.string().optional().describe("GitHub repository (owner/name) that runs check out; required for github triggers"),
         trigger: triggerSchema,
         enabled: z.boolean().optional().describe("Whether it fires (default true)"),
@@ -163,7 +162,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
         id: z.string().describe("Automation id from automation_list"),
         name: z.string().min(1).optional().describe("New name"),
         prompt: z.string().min(1).optional().describe("New prompt"),
-        model: z.enum(AgentModel.literals).nullable().optional().describe("New model; null restores the box default"),
+        model: agentModelInput.nullable().optional().describe("New model; null restores the box default"),
         trigger: triggerSchema.optional().describe("New trigger, replacing the old one"),
         enabled: z.boolean().optional().describe("Turn it on or off"),
       },

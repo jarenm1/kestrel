@@ -3,13 +3,14 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Check, ChevronDown, ChevronUp } from "lucide-react-native";
 import {
   baseModelId,
-  providerModels,
   type AgentModel,
   type ModelInfo,
   type ModelProviderInfo,
 } from "@cloudagents/protocol";
 import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models";
-import { setShownModels, useShownModels } from "@/hooks/useShownModels";
+import { setShownModels, storedShownModels, useShownModels } from "@/hooks/useShownModels";
+import { useModelCatalog } from "@/hooks/useModelCatalog";
+import { ErrorLine } from "@/components/ConnectionsShared";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { colors, spacing } from "@/theme";
@@ -29,14 +30,16 @@ function matches(model: ModelInfo, query: string): boolean {
  * appears once rather than once per harness.
  */
 export function ModelPicker({ provider }: { readonly provider: ModelProviderInfo }) {
-  const all = providerModels(provider.id);
-  const catalog = all.filter((model) => !isRouteModel(model));
+  const { catalog, error, refreshing, refresh } = useModelCatalog();
+  const models = catalog.models.filter(
+    (model) => model.provider === provider.id && !isRouteModel(model)
+  );
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const shown = useShownModels()[provider.id];
   const shownBase = new Set(shown.map((model) => baseModelId(model.id)));
-  const shownCount = catalog.filter((model) => shownBase.has(model.id)).length;
-  const visible = catalog.filter((model) => matches(model, query));
+  const shownCount = models.filter((model) => shownBase.has(model.id)).length;
+  const visible = models.filter((model) => matches(model, query));
 
   function setOpenState(next: boolean) {
     setOpen(next);
@@ -45,10 +48,10 @@ export function ModelPicker({ provider }: { readonly provider: ModelProviderInfo
 
   /** Writes the provider's whole picker list as base model ids; the chat expands each to its supported routes. */
   function toggle(id: AgentModel) {
-    const next = new Set(shownBase);
+    const next = new Set((storedShownModels(provider.id) ?? [...shownBase]).map(baseModelId));
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    setShownModels(provider.id, catalog.filter((model) => next.has(model.id)).map((model) => model.id));
+    setShownModels(provider.id, [...next]);
   }
 
   return (
@@ -62,11 +65,23 @@ export function ModelPicker({ provider }: { readonly provider: ModelProviderInfo
         accessibilityLabel={`${provider.name} models shown in the chat picker`}
         active={open}
       >
-        {`${shownCount} of ${catalog.length} shown`}
+        {`${shownCount} of ${models.length} shown`}
       </Button>
       {open ? (
         <View style={styles.list}>
-          <Text style={styles.listTitle}>{provider.name} models in chat</Text>
+          <View style={styles.listHead}>
+            <Text style={styles.listTitle}>{provider.name} models in chat</Text>
+            <Button
+              variant="soft"
+              size="sm"
+              disabled={refreshing}
+              onPress={() => void refresh()}
+              accessibilityLabel={`Refresh ${provider.name} models`}
+            >
+              {refreshing ? "Refreshing…" : "Refresh models"}
+            </Button>
+          </View>
+          {error ? <ErrorLine error={error} /> : null}
           <Input
             value={query}
             onChangeText={setQuery}
@@ -129,14 +144,8 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: colors.white03,
   },
-  listTitle: { color: colors.mutedForeground, fontSize: 12, marginBottom: spacing.xs },
-  groupTitle: {
-    color: colors.mutedForeground,
-    fontSize: 12,
-    fontWeight: "600",
-    marginTop: spacing.xs,
-    marginBottom: 2,
-  },
+  listTitle: { color: colors.mutedForeground, fontSize: 12 },
+  listHead: { flexDirection: "row", alignItems: "center", gap: spacing.sm },
   search: { minHeight: 36, paddingVertical: 6, fontSize: 14 },
   listScroll: { maxHeight: MODEL_LIST_MAX_HEIGHT },
   toggle: {

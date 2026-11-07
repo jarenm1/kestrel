@@ -35,6 +35,7 @@ import {
   FleetActivity,
   Me,
   Message,
+  ModelCatalog,
   type ModelProvider,
   NestHostList,
   Paths,
@@ -326,7 +327,7 @@ function onBox<A, I>(
 ): Promise<A> {
   const target = routeOf(boxId)
   return target === undefined
-    ? Promise.reject(new ApiError(404, "That box is no longer in your box list"))
+    ? Promise.reject(new ApiError(404, "That box is no longer in your box list", "BoxNotFound"))
     : run(boxCall(target, schema, method, path, body))
 }
 
@@ -600,6 +601,17 @@ export const api = {
   providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
   /** What the active box can run, as it found at startup. */
   capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
+  /**
+   * The active box's model catalog and the discovery sources behind it. `refresh` asks the box to bypass its cached
+   * discovery; `boxId` pins the read to the box a mounted picker was opened for, so a box switch mid-read cannot mix
+   * two catalogs.
+   */
+  models: (refresh = false, boxId?: string | null) => {
+    const path = `${Paths.models}${refresh ? "?refresh=1" : ""}`
+    return boxId === undefined
+      ? onActive(ModelCatalog, "GET", path)
+      : onBox(boxId, ModelCatalog, "GET", path)
+  },
   /**
    * The signed-in user's generated-text preferences. `boxId` pins the read to the box a settings form was opened for;
    * omitted, it reads the active box.

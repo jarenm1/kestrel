@@ -861,6 +861,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 export const Paths = {
   health: "/api/health",
   capabilities: "/api/capabilities",
+  /** GET -> ModelCatalog on the selected box; ?refresh=1 bypasses the owner's discovery cache. */
+  models: "/api/models",
   /** GET / PUT TextGenerationSettings: the signed-in user's preferences on this box. */
   textGenerationSettings: "/api/settings/text-generation",
   /** GET / PUT ThreadSettings: the signed-in user's thread preferences on this box. */

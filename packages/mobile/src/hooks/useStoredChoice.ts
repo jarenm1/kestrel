@@ -6,7 +6,7 @@ import { Schema } from "effect";
  * One pick (model or thinking level), remembered on the device so it survives switching threads and restarts.
  * `undefined` means the harness default and is stored as absence.
  */
-export function useStoredChoice<A extends string>(key: string, schema: Schema.Schema<A>) {
+export function useStoredChoice<A extends string, I>(key: string, schema: Schema.Schema<A, I>) {
   const [value, setValue] = useState<A | undefined>(undefined);
   const current = useRef<A | undefined>(undefined);
   const revision = useRef(0);

@@ -3,6 +3,7 @@ import {
   AGENT_MODELS,
   MODEL_PROVIDERS,
   modelInfo,
+  discoveredModel,
   type Connection,
   type ModelInfo,
   type ModelProvider,
@@ -112,6 +113,17 @@ describe("modelMentionOf", () => {
       expect(parseModelMentionMarkdown(modelMentionMarkdown(model))?.mention).toEqual(mention)
     }
   })
+})
+
+test("discovered model mentions retain their route and can be restored without a fetched catalog", () => {
+  const model = discoveredModel("openrouter", "vendor/future-model")!
+  const markdown = modelMentionMarkdown(model)
+  expect(parseModelMentionMarkdown(markdown)?.model).toEqual(model)
+  expect(modelMentionOf(model).slug).toBe("openrouter/vendor/future-model")
+  expect(parseModelMentionMarkdown(markdown.replace("provider=openrouter", "provider=anthropic"))).toBeUndefined()
+  expect(filterMentionModels([model], "vendor/future")).toEqual([model])
+  const typed = `@${model.id}`
+  expect(findModelMentionTrigger(typed, typed.length)).toEqual({ start: 0, end: typed.length, query: model.id })
 })
 
 describe("findModelMentionTrigger", () => {

@@ -7,6 +7,7 @@ import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
 import type { CliAuthShape } from "../cliauth"
 import type { CoreShape } from "../core/service"
+import type { ModelDiscoveryShape } from "../model-discovery"
 import { dayFormat } from "../core/activity"
 import { BOX_DEV_HEADER } from "../tunnel"
 
@@ -197,7 +198,7 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
+export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities, models: ModelDiscoveryShape) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
@@ -215,6 +216,19 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
           ),
         ),
       ),
+    ),
+    // The box's runtime model catalog: curated models plus what this owner's credentials/native logins enumerate.
+    // `?refresh=1` bypasses the owner's cache; per-source failures stay in `sources`, never a 5xx catalog.
+    HttpRouter.get(
+      Paths.models,
+      Effect.gen(function* () {
+        const user = yield* requestUser
+        if (user === null) {
+          return HttpServerResponse.unsafeJson({ _tag: "Unauthorized", message: "no signed-in user" }, { status: 401 })
+        }
+        const refresh = (yield* searchParams).get("refresh") === "1"
+        return HttpServerResponse.unsafeJson(yield* models.get(user, { refresh }))
+      }),
     ),
     HttpRouter.get(
       Paths.textGenerationSettings,
@@ -493,9 +507,9 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities) =>
+export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities, models: ModelDiscoveryShape) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities, models))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

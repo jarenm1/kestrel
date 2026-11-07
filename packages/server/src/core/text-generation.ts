@@ -516,7 +516,7 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
         }
         if (harness.conversation === "acp") {
           if (configured === "") return yield* Effect.fail(toInternal("no ACP command is configured for this provider"))
-          const acpModel = routed && harnessId === "opencode" ? opencodeRouteModel(modelId) : selected.model
+          const acpModel = routed && harnessId === "opencode" ? opencodeRouteModel(modelId) : modelId
           return yield* runAcp(yield* prepare(configured), prompt, acpModel, selected.effort)
         }
         const spec = oneShotCommand(harness, modelId, selected.effort, lastMessageInside, brokerEnv.OPENAI_BASE_URL, routed)

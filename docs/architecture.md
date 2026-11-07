@@ -77,7 +77,9 @@ Connections contains only model access: **Harnesses/Subscriptions** groups subsc
 harnesses, with each harness's model-visibility picker beside its name; **API keys** keeps key-based access and
 its model preferences together. A provider's picker lists each model once; enabling it enables that model under every
 harness it supports, so the same choice appears in each compatible harness tab of the chat picker. These pickers
-change which models appear in chat, not the box's installed models.
+change which models appear in chat. **Refresh models** reads the selected box's authenticated runtime catalog
+(`GET /api/models?refresh=1`); clients also poll hourly. See [model coverage](harnesses.md#third-party-model-coverage)
+for provider/CLI discovery, fallback behavior and curated compatibility metadata.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
 
 Settings › Threads (`/settings/threads`) groups thread preferences into sections. Its Text generation section stores
@@ -172,7 +174,8 @@ real API keys on the host; it does not translate unsupported APIs. See [harness 
 The box supports steering and interruption while a run is active. Native sessions are isolated by provider and
 harness; returning to one carries only messages from runs since that session last participated. Without a usable
 session, the run starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics
-never become portable conversation history. Catalog routes and shared types live in `packages/protocol`.
+never become portable conversation history. Catalog routes and validated provider-qualified runtime identities
+live in `packages/protocol`; discovery results remain scoped to the signed-in user and selected box.
 
 Claude Code and Codex responses carry a shared transcript usage strip: local completion time as a 12-hour
 clock with minutes, `in`, `out`, `cached`, and the response's output rate in `tok/s`. Each strip describes

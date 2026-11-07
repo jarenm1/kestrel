@@ -7,6 +7,9 @@ import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 /** Box health poll; keeps activity indicators and box settings current. */
 const BOX_POLL_MS = 10_000
 
+/** Model discovery polls once an hour while a picker is mounted. */
+const MODEL_POLL_MS = 60 * 60_000
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     // Box calls fail for reasons a retry would not fix (offline box, refused token); failures surface immediately.
@@ -49,6 +52,10 @@ export const keys = {
   cliAuth: ["cli-auth"] as const,
   /** What the active box can run (`BoxCapabilities`): which harnesses it has. */
   capabilities: ["capabilities"] as const,
+  /** Every active-box model catalog, for invalidating them after a credential change. */
+  allModels: ["models"] as const,
+  /** The active box's model catalog, keyed by its stable identity so another box's catalog cannot appear. */
+  models: (boxKey: string) => ["models", boxKey] as const,
   /** The signed-in user's generated-text preferences, keyed by the box route they were read from. */
   textGenerationSettings: (boxKey: string) => ["text-generation-settings", boxKey] as const,
   /** The signed-in user's thread preferences, keyed by the box route they were read from. */
@@ -88,6 +95,7 @@ const ACTIVE_BOX_ROOTS: Record<string, true> = {
   usageActivity: true,
   "cli-auth": true,
   capabilities: true,
+  models: true,
   "text-generation-settings": true,
   "thread-settings": true,
   box: true,
@@ -141,6 +149,31 @@ export async function applyBoxList(client: QueryClient, list: BoxList): Promise<
   const after = JSON.stringify(list.boxes.map((box) => [box.id, box.url]))
   if (before !== after || managedChanged) void client.invalidateQueries({ queryKey: keys.tasks })
   client.setQueryData(keys.boxes, list)
+}
+
+/**
+ * The active box a model catalog belongs to. `key` identifies the exact box and route (`managedBox` keeps its id and
+ * URL in the key, so a resumed box cannot serve an old catalog); `boxId` pins the box call to the same box. Kestrel's
+ * box is the managed box's id, or `null` for the legacy relay.
+ */
+export interface ModelBoxScope {
+  readonly key: string
+  readonly boxId: string | null
+}
+
+/** The active box's catalog scope from a box list; undefined until the list has loaded. */
+export function modelBoxScope(list: BoxList | undefined): ModelBoxScope | undefined {
+  if (list === undefined) return undefined
+  const active = list.activeBoxId
+  // Kestrel's box is the managed box, whose own id pins the read; null stays only for the legacy relay.
+  const box =
+    active === null || active === list.managedBox?.id
+      ? list.managedBox
+      : list.boxes.find((candidate) => candidate.id === active)
+  return {
+    key: JSON.stringify([active, box?.id ?? null, box?.url ?? null]),
+    boxId: active ?? box?.id ?? null,
+  }
 }
 
 export interface DesktopAsset {
@@ -208,6 +241,22 @@ export const queries = {
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),
   capabilities: () => queryOptions({ queryKey: keys.capabilities, queryFn: api.capabilities }),
+  /**
+   * The active box's merged model catalog, keyed by the box it was read from. A missing scope is the box list still
+   * loading. Polls hourly; connection changes invalidate `keys.allModels` so a new login appears without waiting.
+   */
+  models: (scope: ModelBoxScope | undefined) =>
+    queryOptions({
+      queryKey: keys.models(scope?.key ?? "unavailable"),
+      queryFn: () => {
+        if (scope === undefined) throw new Error("The active box is not loaded")
+        return api.models(false, scope.boxId)
+      },
+      enabled: scope !== undefined,
+      staleTime: MODEL_POLL_MS,
+      refetchInterval: MODEL_POLL_MS,
+      refetchIntervalInBackground: true,
+    }),
   textGenerationSettings: (boxKey: string, boxId: string | null) =>
     queryOptions({ queryKey: keys.textGenerationSettings(boxKey), queryFn: () => api.textGenerationSettings(boxId) }),
   threadSettings: (boxKey: string, boxId: string | null) =>

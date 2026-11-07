@@ -8,6 +8,7 @@ import {
   type ModelInfo,
   type ModelProvider,
 } from "@cloudagents/protocol";
+import { useModelCatalog } from "@/hooks/useModelCatalog";
 
 /** Per provider: the model ids the user keeps in the chat picker. Absent until they edit the list on Connections. */
 const storageKey = (provider: ModelProvider) => `kestrel.models.${provider}`;
@@ -72,18 +73,28 @@ export function setShownModels(provider: ModelProvider, ids: readonly AgentModel
   changed();
 }
 
+/** Keep saved ids even when an offline or different box cannot currently enumerate them. */
+export function storedShownModels(provider: ModelProvider): readonly AgentModel[] | null {
+  return chosen.get(provider) ?? null;
+}
+
 /**
  * The models each provider shows in the chat picker, kept current across screens: toggling a model on Connections
- * re-renders the composer's picker without a restart.
+ * re-renders the composer's picker without a restart. The selected box's runtime catalog supplies native models next
+ * to the built-in ones; the saved visibility lists stay per model and per provider.
  */
 export function useShownModels(): Record<ModelProvider, readonly ModelInfo[]> {
+  const { catalog } = useModelCatalog();
   // The version only says the stored lists changed; the lists themselves are read from `chosen`.
   const current = useSyncExternalStore(subscribe, () => version);
   return useMemo(
     () =>
       Object.fromEntries(
-        MODEL_PROVIDERS.map((provider) => [provider.id, shownModels(provider.id, chosen.get(provider.id) ?? null)])
+        MODEL_PROVIDERS.map((provider) => [
+          provider.id,
+          shownModels(provider.id, chosen.get(provider.id) ?? null, catalog.models),
+        ])
       ) as Record<ModelProvider, readonly ModelInfo[]>,
-    [current]
+    [current, catalog]
   );
 }
