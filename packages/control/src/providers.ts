@@ -111,6 +111,7 @@ export const PROVIDERS: readonly Provider[] = [
   { id: "antigravity-cli", label: "Google account (Antigravity)", kind: "cli" },
   { id: "opencode", label: "OpenCode", kind: "cli" },
   { id: "opencode-go", label: "OpenCode Go", kind: "cli" },
+  { id: "devin-cli", label: "Devin account", kind: "cli" },
 ]
 
 export const findProvider = (id: string): Provider | undefined => PROVIDERS.find((p) => p.id === id)

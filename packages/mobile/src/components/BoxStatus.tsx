@@ -4,31 +4,17 @@ import { useQuery } from "@tanstack/react-query";
 import { Server } from "lucide-react-native";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries } from "@/api/queries";
-import { Alert } from "@/components/ui/Alert";
-import { colors, fonts, radius, spacing } from "@/theme";
+import { colors, radius, spacing } from "@/theme";
 
-/** Warning shown only once the box is known to be offline, the web app's `BoxOfflineBanner`. */
-export function BoxOfflineBanner({ style }: { style?: StyleProp<ViewStyle> }) {
-  const offline = useBoxOffline();
-  if (!offline) return null;
-  return (
-    <Alert variant="warning" style={style}>
-      <Text style={styles.bannerText}>
-        Agent box offline. Start it with <Text style={styles.code}>nix run .#box</Text>
-      </Text>
-    </Alert>
-  );
-}
-
-export function useBoxOffline(): boolean {
-  return useBoxOnline() === false;
-}
-
-/** Whether the box the app talks to answers; undefined until it is known. */
+/**
+ * Whether the box answers; undefined while unknown. A rejected health request does not establish box status: only the
+ * control plane's own answer does, so a network or gateway failure stays unknown.
+ */
 export function useBoxOnline(): boolean | undefined {
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
-  return useQuery(queries.box()).data?.online;
+  const box = useQuery(queries.box());
+  return box.isError ? undefined : box.data?.online;
 }
 
 /**
@@ -57,15 +43,6 @@ export function ThreadBoxIndicator({ name, style }: { name: string; style?: Styl
 }
 
 const styles = StyleSheet.create({
-  bannerText: {
-    color: colors.warning,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  code: {
-    color: colors.foreground,
-    fontFamily: fonts.mono,
-  },
   indicator: {
     alignSelf: "flex-start",
     marginTop: spacing.sm,

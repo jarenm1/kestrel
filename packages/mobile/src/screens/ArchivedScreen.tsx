@@ -2,6 +2,7 @@ import React from "react";
 import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { useQueries } from "@tanstack/react-query";
 import type { Task } from "@cloudagents/protocol";
+import { isUnreachableError } from "@/api/errors";
 import { createQueries } from "@/api/queries";
 import { ThreadAvatar } from "@/components/ThreadAvatar";
 import { Alert } from "@/components/ui/Alert";
@@ -49,7 +50,10 @@ export function ArchivedScreen() {
           {sources.map((source, i) => {
             const query = tasksByBox[i];
             if (query.error) {
-              return <Alert key={source.api.boxScope}>{`${source.label}: ${errorText(query.error)}`}</Alert>;
+              // A box that is merely unreachable is already shown by its indicator; only a real refusal is worth a row.
+              return isUnreachableError(query.error) ? null : (
+                <Alert key={source.api.boxScope}>{`${source.label}: ${errorText(query.error)}`}</Alert>
+              );
             }
             if (query.isPending) {
               return (

@@ -37,7 +37,8 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
 `codex`, OpenCode 2.0.7+ as `opencode` from `npm i -g @opencode/cli` for its free-model account sign-in (2.1+ for a Go key), and Antigravity
-CLI as `agy` from `curl -fsSL https://antigravity.google/cli/install.sh | bash` for Google's) on the host; the desktop
+CLI as `agy` from `curl -fsSL https://antigravity.google/cli/install.sh | bash` for Google's, Devin CLI as `devin` from
+`curl -fsSL https://cli.devin.ai/install.sh | bash` for Devin's, with util-linux `script` for its sign-in) on the host; the desktop
 also needs weston 14 or newer, Xwayland, openbox, hsetroot, xterm, xdotool and ffmpeg.
 
 ### What a user's box runs with

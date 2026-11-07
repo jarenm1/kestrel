@@ -9,7 +9,7 @@ test("thread_spawn creates an owned thread, checks out the repository, and sends
   const calls: unknown[][] = []
   const deps = { threads: {
     owner: (id: string) => Effect.sync(() => { calls.push(["owner", id]); return "owner" }),
-    create: (owner: string, input: unknown) => Effect.sync(() => { calls.push(["create", owner, input]); return { id: "new", title: "Review" } }),
+    create: (owner: string, input: unknown, delegation: unknown, parent: string) => Effect.sync(() => { calls.push(["create", owner, input, delegation, parent]); return { id: "new", title: "Review" } }),
     send: (from: string, to: string, message: string) => Effect.sync(() => { calls.push(["send", from, to, message]); return { run: { id: "new-run" } } }),
   } } as unknown as ThreadToolDeps
   const server = new McpServer({ name: "test", version: "1" })
@@ -23,7 +23,7 @@ test("thread_spawn creates an owned thread, checks out the repository, and sends
     expect(JSON.stringify(result)).toContain("new-run")
     expect(calls).toEqual([
       ["owner", "current"],
-      ["create", "owner", { title: "Review", checkout: { repo: "jarenm1/kestrel", baseBranch: "main" } }],
+      ["create", "owner", { title: "Review", checkout: { repo: "jarenm1/kestrel", baseBranch: "main" } }, undefined, "current"],
       ["send", "current", "new", "Review this"],
     ])
     const invalid = await client.callTool({ name: "thread_spawn", arguments: { title: "Review", message: "Task", baseBranch: "main" } })
@@ -114,11 +114,13 @@ test("delegation_wait acknowledges only after regaining capacity and preserves r
   let acknowledged = false
   let failReacquisition = true
   let needsInput = false
+  let usageLimited = false
   const deps = { threads: {
     delegatedStatus: () => Effect.succeed({
-      task: { id: "child", title: "Child", status: needsInput ? "needs_input" : "completed" },
-      run: { id: "child-run", status: needsInput ? "failed" : "succeeded" },
+      task: { id: "child", title: "Child", status: needsInput ? "needs_input" : usageLimited ? "failed" : "completed" },
+      run: { id: "child-run", status: needsInput || usageLimited ? "failed" : "succeeded" },
       result: "Completed work", resultStatus: "succeeded", waitingForChildren: false,
+      usageLimit: usageLimited ? { resetsAt: "2026-11-08T12:00:00.000Z" } : null,
       usage: { inputTokens: null, outputTokens: null, costUsd: null }, structured: null,
     }),
     acknowledgeDelegation: () => Effect.sync(() => { acknowledged = true; return true }),
@@ -146,6 +148,13 @@ test("delegation_wait acknowledges only after regaining capacity and preserves r
     expect(JSON.stringify(question)).toContain("needs user input")
     expect(acknowledged).toBe(false)
     needsInput = false
+    // A child stopped by a usage limit resumes at the reset: waiting on it times out without taking its result.
+    usageLimited = true
+    const stalled = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child", timeoutSec: 1 } })
+    expect(JSON.stringify(stalled)).toContain("resumes automatically at 2026-11-08T12:00:00.000Z")
+    expect(JSON.stringify(stalled)).toContain("Wait timed out")
+    expect(acknowledged).toBe(false)
+    usageLimited = false
     const completed = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
     expect(completed.isError).not.toBe(true)
     expect(JSON.stringify(completed)).toContain("Completed work")

@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import type { CliAuthStatus } from "@cloudagents/protocol"
 import type { ServerConfig } from "./config"
 import { Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
+import { limitDiscovery } from "./harness-commands"
+import { findExecutable } from "./sandbox"
 
 const roots: string[] = []
 
@@ -95,6 +97,52 @@ describe("OpenCode status", () => {
   })
 })
 
+describe.skipIf(process.platform === "win32")("missing harness CLI", () => {
+  test("marks a CLI that is not on the box's PATH as unable to sign in", async () => {
+    const statuses = await statusesFor(rootFor())
+    expect(statuses.find((row) => row.provider === "codex-cli")).toMatchObject({
+      loggedIn: false,
+      cannotSignIn: true,
+    })
+    expect(statuses.find((row) => row.provider === "codex-cli")?.error).toContain("not installed")
+  })
+})
+
+describe.skipIf(process.platform === "win32")("CLI probe pool", () => {
+  test("a full discovery pool does not hold up a login status probe", async () => {
+    const root = rootFor()
+    const codex = join(root, "bin", "codex")
+    writeFileSync(
+      codex,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; fi',
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(codex, 0o755)
+    mkdirSync(join(root, "users", "alice", "codex"), { recursive: true })
+
+    // Hold every discovery slot: a probe sharing that pool could only answer after these are released.
+    const releases: Array<() => void> = []
+    const held = Array.from({ length: 4 }, () =>
+      limitDiscovery(() => {
+        const { promise, resolve } = Promise.withResolvers<void>()
+        releases.push(resolve)
+        return promise
+      }),
+    )
+    try {
+      const statuses = await statusesFor(root)
+      expect(statuses.find((row) => row.provider === "codex-cli")).toMatchObject({ loggedIn: true })
+    } finally {
+      for (const release of releases) release()
+      await Promise.all(held)
+    }
+  })
+})
+
 describe("Antigravity account label", () => {
   test("reports the signed-in Google email from the user's own login without exposing the credential", async () => {
     const root = rootFor()
@@ -140,5 +188,90 @@ describe("Antigravity account label", () => {
   test("reports signed out when the user has no token file", async () => {
     const root = rootFor()
     expect(antigravity(await statusesFor(root))).toEqual({ provider: "antigravity-cli", loggedIn: false, account: null })
+  })
+})
+
+/**
+ * A stand-in for `devin auth login --force-manual-token-flow`: like the real CLI it refuses to read the code without a
+ * terminal, prints the sign-in link, and stores its credentials file only for an accepted code.
+ */
+const FAKE_DEVIN = `#!/bin/sh
+if [ "$1 $2" = "auth login" ]; then
+  if [ ! -t 0 ]; then echo "Error: Failed to read code - user canceled"; exit 1; fi
+  echo "Visit https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1 to sign in, then copy the code and paste it below."
+  read code
+  if [ "$code" = "good-code" ]; then
+    mkdir -p "$XDG_DATA_HOME/devin"
+    printf 'api_key = "secret-devin-token"\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
+    exit 0
+  fi
+  echo "Error: Failed to exchange code for host https://app.devin.ai"
+  exit 1
+fi
+exit 0
+`
+
+// Terminal sign-in needs a real `script` to allocate the pseudo-terminal; skip where the host has none. Resolve it from
+// the test host's PATH (NixOS keeps it outside /usr/bin and /bin) so the shim below can exec the same binary production finds.
+const scriptPath = process.platform === "win32" ? null : findExecutable("script", process.env.PATH ?? "")
+const hasScript = scriptPath !== null
+
+describe.skipIf(!hasScript)("Devin sign-in", () => {
+  const runtimes: Array<ManagedRuntime.ManagedRuntime<CliAuth, never>> = []
+  afterEach(async () => {
+    for (const runtime of runtimes.splice(0)) await runtime.dispose()
+  })
+
+  const devinAuth = (root: string) => {
+    writeFileSync(join(root, "bin", "devin"), FAKE_DEVIN)
+    chmodSync(join(root, "bin", "devin"), 0o755)
+    if (scriptPath === null) throw new Error("script is not installed on this host")
+    // Record the SHELL `script` was given, then hand off to the real script resolved from the host PATH.
+    const script = join(root, "bin", "script")
+    writeFileSync(script, `#!/bin/sh\necho "SHELL=$SHELL" > "$HOME/script.log"\nexec '${scriptPath}' "$@"\n`)
+    chmodSync(script, 0o755)
+    const config = {
+      dataDir: root,
+      sandbox: "off",
+      sandboxPath: `${join(root, "bin")}:/usr/bin:/bin`,
+      sandboxSslCertFile: null,
+    } as unknown as ServerConfig
+    // One runtime for the whole sign-in: the pending CLI lives in the CliAuth instance that started it.
+    const runtime = ManagedRuntime.make(CliAuthLive.pipe(Layer.provide(Layer.succeed(Config, config))))
+    runtimes.push(runtime)
+    return <A, E>(f: (auth: Effect.Effect.Success<typeof CliAuth>) => Effect.Effect<A, E>) =>
+      runtime.runPromise(Effect.flatMap(CliAuth, f))
+  }
+
+  test("runs the CLI in a terminal, takes the pasted code and reads the stored credentials", async () => {
+    const run = devinAuth(rootFor())
+    const start = await run((auth) => auth.startLogin("alice", "devin-cli"))
+    expect(start).toMatchObject({
+      provider: "devin-cli",
+      url: "https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1",
+      userCode: null,
+      needsCode: true,
+    })
+    const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code"))
+    expect(status).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
+    expect(JSON.stringify(status)).not.toContain("secret-devin-token")
+  })
+
+  test("gives script a shell from the CLI toolchain, not the user's login shell", async () => {
+    const root = rootFor()
+    const run = devinAuth(root)
+    await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const shell = readFileSync(join(root, "users", "alice", "script.log"), "utf8").trim()
+    expect(shell).toMatch(/(^|\/)(bash|sh)$/)
+  })
+
+  test("reports the CLI's refusal of a code without echoing it", async () => {
+    const run = devinAuth(rootFor())
+    await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const failure = await run((auth) => Effect.flip(auth.submitCode("alice", "devin-cli", "bad-code-123")))
+    expect(failure.message).toContain("Failed to exchange code")
+    expect(failure.message).not.toContain("bad-code-123")
+    const statuses = await run((auth) => auth.status("alice"))
+    expect(statuses.find((row) => row.provider === "devin-cli")).toEqual({ provider: "devin-cli", loggedIn: false, account: null })
   })
 })

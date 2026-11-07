@@ -36,6 +36,18 @@ export interface PullRequest {
   readonly title: string
   readonly state: "open" | "closed" | "merged"
   readonly draft: boolean
+  /** Login of the account that opened it, or null when that account is gone. */
+  readonly author: string | null
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly mergedAt: string | null
+  readonly closedAt: string | null
+  readonly additions: number
+  readonly deletions: number
+  readonly changedFiles: number
+  readonly labels: readonly string[]
+  /** Logins of reviewers still asked for a review. */
+  readonly requestedReviewers: readonly string[]
   readonly headSha: string
   /** Branch the pull request merges into. */
   readonly baseRef: string
@@ -85,12 +97,15 @@ export interface ReferenceReview {
   readonly state: string
   readonly body: string
   readonly url: string
+  /** When GitHub recorded the review; null while it is still pending. */
+  readonly submittedAt: string | null
 }
 
 export interface ReferenceReviewComment {
   readonly author: string
   readonly body: string
   readonly url: string
+  readonly createdAt: string
   readonly path: string
   readonly line: number | null
 }
@@ -170,16 +185,26 @@ export interface NewReviewComment {
   readonly body: string
 }
 
-/** A review on a pull request. APPROVE is deliberately not offered to agents. */
+/** A review on a pull request. The MCP tools never send APPROVE; the pull request view does. */
 export interface NewReview {
   readonly body: string
-  readonly event: "COMMENT" | "REQUEST_CHANGES"
+  readonly event: "COMMENT" | "APPROVE" | "REQUEST_CHANGES"
   readonly comments: readonly NewReviewComment[]
 }
 
 export interface PostedReview {
   readonly url: string
   readonly state: string
+}
+
+/** One commit on a pull request's branch. */
+export interface PullRequestCommit {
+  readonly oid: string
+  /** The first line of the commit message. */
+  readonly headline: string
+  readonly committedAt: string
+  /** Login of the commit's GitHub author, or its Git author name, or null. */
+  readonly author: string | null
 }
 
 /** Fields of a pull request an agent may change. Omitted fields are left alone. */
@@ -266,6 +291,15 @@ export interface GitHubShape {
   readonly createReview: (token: string, repo: RepoSlug, number: number, review: NewReview) => Effect.Effect<PostedReview, GitHubError>
   /** Edits the given fields and returns the pull request as GitHub now has it. */
   readonly updatePullRequest: (token: string, repo: RepoSlug, number: number, changes: PullRequestChanges) => Effect.Effect<PullRequest, GitHubError>
+  /** The pull request's commits, in GitHub's order, up to its first page of 100. */
+  readonly pullRequestCommits: (token: string, repo: RepoSlug, number: number) => Effect.Effect<ReadonlyArray<PullRequestCommit>, GitHubError>
+  /** Merges the pull request with `method`; fails with GitHub's own reason when it will not merge. */
+  readonly mergePullRequest: (
+    token: string,
+    repo: RepoSlug,
+    number: number,
+    method: "merge" | "squash" | "rebase",
+  ) => Effect.Effect<void, GitHubError>
   readonly createComment: (token: string, repo: RepoSlug, number: number, body: string) => Effect.Effect<PostedComment, GitHubError>
   /** Replies in the thread of a review comment on the pull request's diff. */
   readonly replyToReviewComment: (token: string, repo: RepoSlug, number: number, commentId: number, body: string) => Effect.Effect<PostedComment, GitHubError>
@@ -305,6 +339,17 @@ const PullRequestBody = Schema.Struct({
   state: Schema.String,
   merged: Schema.Boolean,
   draft: Schema.Boolean,
+  user: Schema.optional(Schema.NullOr(Schema.Struct({ login: Schema.String }))),
+  created_at: Schema.optional(Schema.String),
+  updated_at: Schema.optional(Schema.String),
+  merged_at: Schema.optional(Schema.NullOr(Schema.String)),
+  closed_at: Schema.optional(Schema.NullOr(Schema.String)),
+  // The list endpoint omits these; the pull request endpoint reports them.
+  additions: Schema.optional(Schema.Number),
+  deletions: Schema.optional(Schema.Number),
+  changed_files: Schema.optional(Schema.Number),
+  labels: Schema.optional(Schema.Array(Schema.Struct({ name: Schema.String }))),
+  requested_reviewers: Schema.optional(Schema.Array(Schema.Struct({ login: Schema.String }))),
   mergeable: Schema.optional(Schema.NullOr(Schema.Boolean)),
   mergeable_state: Schema.optional(Schema.String),
   head: Schema.Struct({
@@ -332,6 +377,7 @@ const ReviewsBody = Schema.Array(
     state: Schema.String,
     body: Schema.optional(Schema.NullOr(Schema.String)),
     html_url: Schema.optional(Schema.String),
+    submitted_at: Schema.optional(Schema.NullOr(Schema.String)),
     user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
   }),
 )
@@ -344,6 +390,7 @@ const ReviewCommentsBody = Schema.Array(
     line: Schema.optional(Schema.NullOr(Schema.Number)),
     body: Schema.String,
     html_url: Schema.String,
+    created_at: Schema.optional(Schema.String),
     user: Schema.NullOr(Schema.Struct({ login: Schema.String })),
   }),
 )
@@ -389,6 +436,23 @@ const ReviewPostedBody = Schema.Struct({
 const CommentPostedBody = Schema.Struct({
   id: Schema.Number,
   html_url: Schema.String,
+})
+
+const PullCommitsBody = Schema.Array(
+  Schema.Struct({
+    sha: Schema.String,
+    commit: Schema.Struct({
+      message: Schema.String,
+      author: Schema.optional(Schema.NullOr(Schema.Struct({ name: Schema.String, date: Schema.String }))),
+      committer: Schema.optional(Schema.NullOr(Schema.Struct({ date: Schema.String }))),
+    }),
+    author: Schema.optional(Schema.NullOr(Schema.Struct({ login: Schema.String }))),
+  }),
+)
+
+const MergeBody = Schema.Struct({
+  merged: Schema.Boolean,
+  message: Schema.String,
 })
 
 /** Review comments carry `pull_request_url`; conversation comments carry `issue_url`. */
@@ -561,6 +625,16 @@ export const GitHubLive = Layer.effect(
       title: pr.title,
       state: pr.merged ? "merged" : pr.state === "open" ? "open" : "closed",
       draft: pr.draft,
+      author: pr.user?.login ?? null,
+      createdAt: pr.created_at ?? "",
+      updatedAt: pr.updated_at ?? "",
+      mergedAt: pr.merged_at ?? null,
+      closedAt: pr.closed_at ?? null,
+      additions: pr.additions ?? 0,
+      deletions: pr.deletions ?? 0,
+      changedFiles: pr.changed_files ?? 0,
+      labels: (pr.labels ?? []).map((label) => label.name),
+      requestedReviewers: (pr.requested_reviewers ?? []).map((reviewer) => reviewer.login),
       headSha: pr.head.sha,
       baseRef: pr.base.ref,
       headRef: pr.head.ref,
@@ -690,6 +764,7 @@ export const GitHubLive = Layer.effect(
               state: review.state,
               body: review.body ?? "",
               url: review.html_url ?? "",
+              submittedAt: review.submitted_at ?? null,
             }),
           ),
           reviewComments: reviewComments.map(
@@ -699,6 +774,7 @@ export const GitHubLive = Layer.effect(
               author: comment.user?.login ?? "ghost",
               body: comment.body,
               url: comment.html_url,
+              createdAt: comment.created_at ?? "",
             }),
           ),
           conversation,
@@ -916,6 +992,25 @@ export const GitHubLive = Layer.effect(
               )
         return patch.pipe(Effect.zipRight(draftChange), Effect.zipRight(getPullRequest(token, repo, number)))
       },
+      pullRequestCommits: (token, repo, number) =>
+        call(token, repo, "GET", `${repoPath(repo)}/pulls/${number}/commits?per_page=100`).pipe(
+          Effect.flatMap(decode(PullCommitsBody, "pull request commit list")),
+          Effect.map((commits): ReadonlyArray<PullRequestCommit> =>
+            commits.map((commit) => ({
+              oid: commit.sha,
+              headline: commit.commit.message.split("\n")[0] ?? "",
+              committedAt: commit.commit.author?.date ?? commit.commit.committer?.date ?? "",
+              author: commit.author?.login ?? commit.commit.author?.name ?? null,
+            })),
+          ),
+        ),
+      mergePullRequest: (token, repo, number, method) =>
+        call(token, repo, "PUT", `${repoPath(repo)}/pulls/${number}/merge`, { merge_method: method }).pipe(
+          Effect.flatMap(decode(MergeBody, "pull request merge")),
+          Effect.flatMap((answer) =>
+            answer.merged ? Effect.void : Effect.fail(new GitHubError({ message: answer.message })),
+          ),
+        ),
       createComment: (token, repo, number, body) => postComment(token, repo, `${repoPath(repo)}/issues/${number}/comments`, body),
       replyToReviewComment: (token, repo, number, commentId, body) =>
         postComment(token, repo, `${repoPath(repo)}/pulls/${number}/comments/${commentId}/replies`, body),

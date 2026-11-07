@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { harnessCommandPrefix, type HarnessCommand } from "@cloudagents/protocol"
-import { appCommandOf, matchAppCommand, withAppCommands } from "./commands"
+import type { HarnessCommand } from "@cloudagents/protocol"
+import {
+  appCommandOfHarness,
+  commandPrefixForHarness,
+  matchAppCommand,
+  withAppCommandsForHarness,
+} from "./commands"
 
 describe("app-command precedence", () => {
   test("shadows the harness slash action without hiding a same-named Codex skill", () => {
@@ -9,22 +14,41 @@ describe("app-command precedence", () => {
       { name: "usage", description: "A project skill", prefix: "$" },
       { name: "compact", description: "Summarize context", prefix: "/" },
     ]
-    const commands = withAppCommands(harness, "openai")
+    const commands = withAppCommandsForHarness(harness, "codex")
     expect(commands.map((command) => [command.prefix, command.name])).toEqual([
       ["/", "usage"], ["$", "usage"], ["/", "compact"],
     ])
-    expect(appCommandOf(harness[0]!, "openai")?.name).toBe("usage")
-    expect(appCommandOf(harness[1]!, "openai")).toBeUndefined()
-    expect(appCommandOf(harness[2]!, "openai")).toBeUndefined()
+    expect(appCommandOfHarness(harness[0]!, "codex")?.name).toBe("usage")
+    expect(appCommandOfHarness(harness[1]!, "codex")).toBeUndefined()
+    expect(appCommandOfHarness(harness[2]!, "codex")).toBeUndefined()
   })
 
-  test("respects old boxes' provider-specific implicit invocation prefix", () => {
+  test("uses each harness's implicit invocation prefix for an unprefixed command", () => {
     const legacy = { name: "usage", description: "Legacy command" }
-    expect(appCommandOf(legacy, "anthropic")?.name).toBe("usage")
-    expect(appCommandOf(legacy, undefined)?.name).toBe("usage")
-    expect(appCommandOf(legacy, "openai")).toBeUndefined()
-    expect(withAppCommands([legacy], "anthropic").map((command) => `${harnessCommandPrefix(command, "anthropic")}${command.name}`)).toEqual(["/usage"])
-    expect(withAppCommands([legacy], "openai").map((command) => `${harnessCommandPrefix(command, "openai")}${command.name}`)).toEqual(["/usage", "$usage"])
+    expect(appCommandOfHarness(legacy, "claude")?.name).toBe("usage")
+    expect(appCommandOfHarness(legacy, "opencode")?.name).toBe("usage")
+    expect(appCommandOfHarness(legacy, "codex")).toBeUndefined()
+    expect(withAppCommandsForHarness([legacy], "claude").map((command) => `${commandPrefixForHarness(command, "claude")}${command.name}`)).toEqual(["/usage"])
+    expect(withAppCommandsForHarness([legacy], "codex").map((command) => `${commandPrefixForHarness(command, "codex")}${command.name}`)).toEqual(["/usage", "$usage"])
+  })
+
+  test("uses the actual harness for a route, not its credential provider", () => {
+    const commands: readonly HarnessCommand[] = [
+      { name: "usage", description: "A command" },
+      { name: "usage", description: "A skill", prefix: "$" },
+    ]
+    expect(commandPrefixForHarness(commands[0]!, "codex")).toBe("$")
+    expect(commandPrefixForHarness(commands[0]!, "opencode")).toBe("/")
+    expect(appCommandOfHarness(commands[0]!, "codex")).toBeUndefined()
+    expect(appCommandOfHarness(commands[0]!, "opencode")?.name).toBe("usage")
+    expect(
+      withAppCommandsForHarness(commands, "codex").map((command) => [
+        commandPrefixForHarness(command, "codex"),
+        command.name,
+      ]),
+    ).toEqual([
+      ["/", "usage"], ["$", "usage"], ["$", "usage"],
+    ])
   })
 })
 

@@ -1,11 +1,12 @@
-import type { ModelProvider } from "@cloudagents/protocol"
-import { modelHarnessOf } from "@cloudagents/composer/models"
+import { DEFAULT_MODEL_HARNESS, type ModelInfo, type ModelProvider } from "@cloudagents/protocol"
+import { modelHarnessOf, type ModelMentionHarness } from "@cloudagents/composer/models"
 import claudeLogo from "@/assets/claude.svg"
 import openaiLogo from "@/assets/openai.svg"
 import antigravityLogo from "@/assets/antigravity.svg"
 import opencodeLogo from "@/assets/opencode.svg"
+import devinLogo from "@/assets/devin.svg"
 
-export type HarnessId = "claude" | "codex" | "opencode" | "antigravity"
+export type HarnessId = "claude" | "codex" | "opencode" | "antigravity" | "devin"
 
 /** An agent CLI the box runs models in, with the logo the connections page and the model picker show for it. */
 export interface Harness {
@@ -24,8 +25,18 @@ export const HARNESSES: readonly Harness[] = [
   { id: "codex", name: "Codex", logo: openaiLogo, monochrome: true, connection: "codex-cli" },
   { id: "opencode", name: "OpenCode", logo: opencodeLogo, monochrome: true, connection: "opencode" },
   { id: "antigravity", name: "Antigravity", logo: antigravityLogo, monochrome: false, connection: "antigravity-cli" },
+  { id: "devin", name: "Devin", logo: devinLogo, monochrome: true, connection: "devin-cli" },
 ]
 
+export const harnessById = (id: ModelMentionHarness): Harness =>
+  HARNESSES.find((harness) => harness.id === id)!
 
-export const harnessOf = (provider: ModelProvider): Harness =>
-  HARNESSES.find((harness) => harness.id === modelHarnessOf(provider).harness)!
+/** The harness a model's catalog route actually runs, not its credential provider's default. */
+export const harnessForModel = (model: ModelInfo): Harness => harnessById(modelHarnessOf(model).harness)
+
+/**
+ * The harness a provider ran before catalog routes existed. Only for runs recorded without a model (or route); every
+ * current pick reads the model's actual harness through `harnessForModel`.
+ */
+export const harnessForProvider = (provider: ModelProvider): Harness =>
+  harnessById(DEFAULT_MODEL_HARNESS[provider])

@@ -10,9 +10,9 @@ export { DesktopRtcSession, mintIceServers, type WebRtcSettings } from "./webrtc
 export {
   hasExplicitTurn,
   managedTurn,
-  viewerIceServers,
+  sessionIceServers,
   type ManagedTurn,
   type ManagedTurnResult,
-  type ViewerIceServers,
+  type SessionIceServers,
 } from "./turn"
 export * from "./rtp"

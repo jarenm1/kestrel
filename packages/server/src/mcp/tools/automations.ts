@@ -2,20 +2,25 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect } from "effect"
 import { z } from "zod"
 import {
-  AgentModel,
   type Automation,
   type AutomationTrigger,
   GithubAutomationEvent,
   NotFound,
 } from "@cloudagents/protocol"
 import { type ControlClient, ControlError } from "../../control/client"
-import { type RunContext, guard, runTool, text, truncate } from "./common"
+import { type RunContext, agentModelInput, guard, runTool, text, truncate } from "./common"
 
 export interface AutomationToolDeps {
   readonly automations: {
     /** Null when the box runs without a control plane: automations are managed there. */
     readonly control: ControlClient | null
     readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
+    /** Records a pull request as watched on the thread itself, for the app to show. */
+    readonly setWatching: (taskId: string, repo: string, number: number, watching: boolean) => Effect.Effect<unknown, unknown>
+    /** Clears one watch mark; a no-op when the thread's entry is already gone. */
+    readonly forgetWatching: (taskId: string, repo: string, number: number) => Effect.Effect<unknown, unknown>
+    /** Clears every watch mark of the thread. */
+    readonly clearWatching: (taskId: string) => Effect.Effect<unknown, unknown>
   }
 }
 
@@ -79,22 +84,43 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   server.registerTool(
     "github_pr_watch",
     {
-      description: "Watch one pull request from this thread. GitHub review comments and completed checks wake this thread so it can address actionable feedback. Requires exactly one checkout linked to the PR with repo_checkout (pullRequest), github_pr_create or github_pr_status. Use when the user asks you to babysit or follow a PR. Watching another PR replaces this thread's watch.",
+      description: "Watch a pull request from this thread; a thread can watch as many as it needs. GitHub review comments and completed checks wake this thread so it can address actionable feedback. The pull request is added to the thread's pull requests, so it works for a repository the thread has not checked out. Use when the user asks you to babysit or follow a PR.",
       inputSchema: { repo: z.string().describe("GitHub repository owner/name"), number: z.number().int().positive().describe("Pull request number") },
     },
     ({ repo, number }: { repo: string; number: number }) => guard(() => runTool(Effect.gen(function* () {
       const { control, owner } = yield* scope
+      // The control plane accepts the watch only when the pull request is visible to the owner's GitHub token. Recording
+      // it in the thread's registry first would let the request satisfy its own ownership check, so nothing is recorded
+      // until the watch succeeds.
       yield* control.watchPr(owner, ctx.taskId, repo, number)
+      yield* deps.automations.setWatching(ctx.taskId, repo, number, true)
       return text(`Watching ${repo}#${number} in this thread.`)
     }))),
   )
   server.registerTool(
     "github_pr_unwatch",
-    { description: "Stop watching a pull request in this thread.", inputSchema: {} },
-    () => guard(() => runTool(Effect.gen(function* () {
+    {
+      description: "Stop watching a pull request in this thread: name one by repo and number, or none to stop watching every pull request of the thread.",
+      inputSchema: {
+        repo: z.string().optional().describe("GitHub repository owner/name; omit to unwatch every pull request of this thread"),
+        number: z.number().int().positive().optional().describe("Pull request number; omit to unwatch every pull request of this thread"),
+      },
+    },
+    ({ repo, number }: { repo?: string; number?: number }) => guard(() => runTool(Effect.gen(function* () {
       const { control, owner } = yield* scope
+      if ((repo === undefined) !== (number === undefined)) {
+        return yield* Effect.fail(new Error("name both repo and number, or neither to unwatch every pull request"))
+      }
+      if (repo !== undefined && number !== undefined) {
+        // Control first, as with `github_pr_watch`: a refused unwatch must leave the thread's registry as it was.
+        yield* control.unwatchPr(owner, ctx.taskId, repo, number)
+        // Tolerant: the entry may already be gone (e.g. an earlier watch whose local record never landed).
+        yield* deps.automations.forgetWatching(ctx.taskId, repo, number)
+        return text(`Stopped watching ${repo}#${number}.`)
+      }
       yield* control.unwatchPr(owner, ctx.taskId)
-      return text("Stopped watching this thread's pull request.")
+      yield* deps.automations.clearWatching(ctx.taskId)
+      return text("Stopped watching this thread's pull requests.")
     }))),
   )
 
@@ -128,7 +154,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       inputSchema: {
         name: z.string().min(1).describe("Short name shown in the app"),
         prompt: z.string().min(1).describe("Prompt the run's agent receives"),
-        model: z.enum(AgentModel.literals).nullable().optional().describe("Model for each run; omitted or null uses the box default"),
+        model: agentModelInput.nullable().optional().describe("Model for each run; omitted or null uses the box default"),
         repo: z.string().optional().describe("GitHub repository (owner/name) that runs check out; required for github triggers"),
         trigger: triggerSchema,
         enabled: z.boolean().optional().describe("Whether it fires (default true)"),
@@ -163,7 +189,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
         id: z.string().describe("Automation id from automation_list"),
         name: z.string().min(1).optional().describe("New name"),
         prompt: z.string().min(1).optional().describe("New prompt"),
-        model: z.enum(AgentModel.literals).nullable().optional().describe("New model; null restores the box default"),
+        model: agentModelInput.nullable().optional().describe("New model; null restores the box default"),
         trigger: triggerSchema.optional().describe("New trigger, replacing the old one"),
         enabled: z.boolean().optional().describe("Turn it on or off"),
       },

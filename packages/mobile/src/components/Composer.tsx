@@ -10,13 +10,20 @@ import {
   type GithubReferenceKind,
 } from "@cloudagents/composer/reference";
 import {
-  appCommandOf,
+  appCommandOfHarness,
+  commandPrefixForHarness,
   matchAppCommand,
-  withAppCommands,
+  withAppCommandsForHarness,
   type AppCommand,
   type AppCommandHandlers,
 } from "@cloudagents/composer/commands";
-import { filterMentionModels, findModelMentionTrigger } from "@cloudagents/composer/models";
+import {
+  filterMentionModels,
+  findModelMentionTrigger,
+  isRouteModel,
+  modelRouteAvailable,
+  offeredModelSections,
+} from "@cloudagents/composer/models";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import {
@@ -24,12 +31,13 @@ import {
   GithubRepoSlug,
   EffortPick,
   connectedModelProviders,
-  harnessCommandPrefix,
+  modelInfo,
   Paths,
   resolveAgentChoice,
   type ContextUsage,
   type HarnessCommand,
   type Message,
+  type ModelHarness,
   type ModelInfo,
   type ModelProvider,
   type Run,
@@ -44,6 +52,7 @@ import { useStoredChoice } from "@/hooks/useStoredChoice";
 import { useStoredDraft } from "@/hooks/useStoredDraft";
 import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
+import { harnessForModel, harnessForProvider } from "@/lib/harnesses";
 import { colors, fonts, radius, shadows, spacing } from "@/theme";
 import { ContextBar } from "./ContextBar";
 import { Markdown } from "./Markdown";
@@ -69,6 +78,10 @@ interface ComposerProps {
   /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
   readonly lastRun?: Pick<Run, "model" | "effort"> | undefined;
   readonly activeRunProvider?: ModelProvider;
+  /** That turn's model, whose route names its actual harness (a provider can run under another harness). */
+  readonly activeRunModel?: AgentModel;
+  /** That turn's recorded harness; newer runs store it even when the model id would need parsing. */
+  readonly activeRunHarness?: ModelHarness;
   readonly repo?: string;
   readonly onRepoChange?: (repo: string) => void;
   readonly repos?: readonly string[];
@@ -147,6 +160,8 @@ export function Composer({
   context,
   activeRunId,
   activeRunProvider,
+  activeRunModel,
+  activeRunHarness,
   lastRun,
   below,
   repo,
@@ -157,6 +172,7 @@ export function Composer({
   const navigation = useNavigation();
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
   const shown = useShownModels();
   const [text, setText, draftReady] = useStoredDraft(taskId ?? "new");
   // Only the initial persisted draft crosses into the DOM. Echoing edits back would let a delayed native
@@ -201,13 +217,27 @@ export function Composer({
   const chosenOption = chosenIndex === undefined ? undefined : askOptions[chosenIndex];
 
   const connected = connections.data ? connectedModelProviders(connections.data) : [];
+  const modelHarnesses = capabilities.data?.modelHarnesses;
   const sections: readonly ModelSection[] | null = connections.data
-    ? connected
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((section) => section.models.length > 0)
+    ? offeredModelSections(connections.data, shown, modelHarnesses)
     : null;
   const offered = sections?.flatMap((section) => section.models) ?? [];
-  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort });
+  // A route whose credential or selected-box harness is gone cannot be restored; a merely hidden model still can.
+  const routeRunnable = (id: AgentModel | undefined): boolean =>
+    id === undefined ||
+    !isRouteModel({ id }) ||
+    modelRouteAvailable(modelInfo(id), connections.data ?? [], modelHarnesses);
+  const lastRunAvailable =
+    lastRun === undefined || lastRun.model === undefined || routeRunnable(lastRun.model);
+  const { model, effort } = resolveAgentChoice({
+    offered,
+    connected,
+    pickedModel: routeRunnable(pickedModel) ? pickedModel : undefined,
+    pickedEffort,
+    lastRun: lastRunAvailable ? lastRun : undefined,
+    defaultModel: routeRunnable(defaultModel) ? defaultModel : undefined,
+    defaultEffort,
+  });
   
 
   // Slash commands
@@ -215,11 +245,19 @@ export function Composer({
   const firstSpace = visible.search(/\s/);
   const commandTokenEnd = firstSpace === -1 ? visible.length : firstSpace;
   const trigger: "/" | "$" | undefined = visible.startsWith("/") ? "/" : visible.startsWith("$") ? "$" : undefined;
-  const expectedProvider = activeRunProvider ?? model?.provider;
+  const expectedHarness =
+    activeRunHarness ??
+    (activeRunModel !== undefined
+      ? harnessForModel(modelInfo(activeRunModel)).id
+      : activeRunProvider !== undefined
+        ? harnessForProvider(activeRunProvider).id
+        : model === undefined
+          ? undefined
+          : harnessForModel(model).id);
   const triggerAllowed =
     trigger === "/" ||
     (trigger === "$" &&
-      (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)));
+      (expectedHarness === "codex" || (activeRunId !== undefined && activeRunProvider === undefined)));
   const slashQuery =
     (taskId !== undefined || trigger === "/") &&
     trigger !== undefined &&
@@ -234,15 +272,15 @@ export function Composer({
     enabled: slashQuery !== undefined && taskId !== undefined && model !== undefined,
   });
 
-  const commandProvider = commandQuery.data?.provider ?? expectedProvider;
+  const commandHarness = commandQuery.data?.harness ?? expectedHarness;
   // Codex lists its commands and skills on `/`, and only its skills on their native `$`. App actions are always
   // listed and shadow same-named harness commands, but never a `$skill`.
   const commandMatches =
     slashQuery === undefined
       ? []
-      : withAppCommands(commandQuery.data?.commands ?? [], commandProvider).filter(
+      : withAppCommandsForHarness(commandQuery.data?.commands ?? [], commandHarness).filter(
           (c) =>
-            (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
+            (trigger !== "$" || commandPrefixForHarness(c, commandHarness) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase())
         );
 
@@ -251,7 +289,7 @@ export function Composer({
   // A new thread has no harness to ask, so nothing beyond the app's own commands can match there.
   const slashMenuOpen =
     slashQuery !== undefined &&
-    (trigger !== "$" || commandProvider === "openai") &&
+    (trigger !== "$" || commandHarness === "codex") &&
     (taskId !== undefined || commandMatches.length > 0) &&
     !dismissed;
   const selectedCommand = commandMatches[activeCommandIndex % commandMatches.length];
@@ -268,7 +306,7 @@ export function Composer({
   const menuOpen = slashMenuOpen || modelMenuOpen || referenceMenuOpen;
 
   useEffect(() => setActiveReferenceIndex(0), [referenceTrigger?.start, referenceTrigger?.number]);
-  useEffect(() => setActiveCommandIndex(0), [slashQuery, taskId, model?.id, activeRunId]);
+  useEffect(() => setActiveCommandIndex(0), [slashQuery, taskId, model?.id, activeRunId, activeRunHarness]);
   useEffect(() => setActiveModelIndex(0), [mentionTrigger?.start, mentionTrigger?.query]);
 
   function edit(next: ComposerEditorView) {
@@ -305,12 +343,12 @@ export function Composer({
 
   function chooseCommand(command: HarnessCommand) {
     // App actions run on selection instead of completing the draft; they win over a same-named harness command.
-    const appCommand = appCommandOf(command, commandProvider);
+    const appCommand = appCommandOfHarness(command, commandHarness);
     if (appCommand !== undefined) {
       editor.current?.requestAppCommand(appCommand.name);
       return;
     }
-    const prefix = harnessCommandPrefix(command, commandQuery.data?.provider);
+    const prefix = commandPrefixForHarness(command, commandHarness);
     const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0;
     editor.current?.replaceRange(0, commandTokenEnd + gap, `${prefix}${command.name} `);
     setDismissed(true);
@@ -409,7 +447,7 @@ export function Composer({
       {slashMenuOpen ? (
         <SlashCommands
           matches={commandMatches}
-          provider={commandProvider}
+          harness={commandHarness}
           pending={commandQuery.isPending}
           onSelect={chooseCommand}
           activeIndex={activeCommandIndex}

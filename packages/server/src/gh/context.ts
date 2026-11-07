@@ -200,7 +200,7 @@ export const findPullRequest = async (run: GhRun, repoFlag: string, opts: FindOp
 
   let branch = ""
   if (url === null && opts.selector === "") {
-    const linked = repo.checkout.checkout.pullRequest
+    const linked = repo.checkout.pullRequest
     if (linked !== undefined && opts.baseBranch === undefined) number = linked.number
     else branch = repo.checkout.checkout.branch
   } else if (url === null) {

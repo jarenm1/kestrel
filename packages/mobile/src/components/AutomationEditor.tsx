@@ -5,7 +5,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   View,
 } from "react-native";
@@ -14,7 +13,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown } from "lucide-react-native";
 import {
   GithubAutomationEvent,
-  connectedModelProviders,
   modelInfo,
   type AgentModel,
   type Automation,
@@ -22,15 +20,18 @@ import {
   type CreateAutomationBody,
   type GithubRepo,
 } from "@cloudagents/protocol";
+import { modelDisplayName, offeredModelSections } from "@cloudagents/composer/models";
 import { createQueries, keys } from "@/api/queries";
 import { ScreenHeader } from "@/components/ScreenHeader";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Input, Textarea } from "@/components/ui/Input";
 import { StatusIcon } from "@/components/ui/StatusIcon";
+import { Switch } from "@/components/ui/Switch";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { errorText } from "@/lib/format";
+import { harnessById } from "@/lib/harnesses";
 import { EVENT_LABELS, splitList } from "@/lib/automations";
 import { colors, fonts, radius, spacing } from "@/theme";
 
@@ -39,8 +40,6 @@ export type AutomationEditorTarget =
   | { readonly kind: "edit"; readonly automation: Automation };
 
 type TriggerKind = "schedule" | "github";
-
-const switchTrack = { false: colors.secondary, true: colors.primary };
 
 /**
  * Creates or edits an automation with the web dialog's fields and validation. Edit keeps the trigger kind and repo;
@@ -72,9 +71,12 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
   const [pickingModel, setPickingModel] = useState(false);
   const queries = useMemo(() => createQueries(api), [api]);
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
   const shown = useShownModels();
-  const providers = connectedModelProviders(connections.data ?? []);
-  const models = providers.flatMap((provider) => shown[provider.id]);
+  const sections = connections.data
+    ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
+    : null;
+  const models = sections?.flatMap((section) => section.models) ?? [];
   const selectedModel = model === null ? null : modelInfo(model);
   const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule");
   const [cron, setCron] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.cron : "");
@@ -159,7 +161,9 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
         </Field>
         <Field label="Model">
           <Pressable style={styles.select} onPress={() => setPickingModel(true)} accessibilityRole="button">
-            <Text style={styles.selectText}>{selectedModel?.name ?? "Default (box model)"}</Text>
+            <Text style={styles.selectText}>
+              {selectedModel === null ? "Default (box model)" : modelDisplayName(selectedModel)}
+            </Text>
             <ChevronDown size={16} color={colors.mutedForeground} strokeWidth={2} />
           </Pressable>
         </Field>
@@ -252,9 +256,6 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               <Switch
                 value={includeDrafts}
                 onValueChange={setIncludeDrafts}
-                trackColor={switchTrack}
-                thumbColor={includeDrafts ? colors.primaryForeground : colors.foreground}
-                ios_backgroundColor={colors.secondary}
               />
             </View>
           </>
@@ -266,9 +267,6 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             <Switch
               value={enabled}
               onValueChange={setEnabled}
-              trackColor={switchTrack}
-              thumbColor={enabled ? colors.primaryForeground : colors.foreground}
-              ios_backgroundColor={colors.secondary}
             />
           </View>
         ) : null}
@@ -305,15 +303,22 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               onPress={() => { setModel(null); setPickingModel(false); }}
             />
             {selectedModel !== null && !models.some((candidate) => candidate.id === model) ? (
-              <RepoOption label={selectedModel.name} detail="Saved model" selected onPress={() => setPickingModel(false)} />
+              <RepoOption
+                label={modelDisplayName(selectedModel)}
+                detail="Saved model"
+                selected
+                onPress={() => setPickingModel(false)}
+              />
             ) : null}
-            {providers.map((provider) => (
-              <React.Fragment key={provider.id}>
-                <Text style={styles.label}>{provider.name}</Text>
-                {shown[provider.id].map((candidate) => (
+            {sections?.map((section) => (
+              <React.Fragment key={`${section.harness}:${section.provider.id}`}>
+                <Text style={styles.label}>
+                  {harnessById(section.harness).name} · {section.provider.name}
+                </Text>
+                {section.models.map((candidate) => (
                   <RepoOption
                     key={candidate.id}
-                    label={candidate.name}
+                    label={modelDisplayName(candidate)}
                     selected={candidate.id === model}
                     onPress={() => { setModel(candidate.id); setPickingModel(false); }}
                   />
@@ -322,7 +327,7 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             ))}
             {connections.isPending ? <Text style={styles.emptyText}>Loading models…</Text> : null}
             {connections.error ? <Alert>{errorText(connections.error)}</Alert> : null}
-            {connections.isSuccess && providers.length === 0 ? (
+            {connections.isSuccess && sections !== null && sections.length === 0 ? (
               <Text style={styles.emptyText}>Connect Anthropic or OpenAI to choose a model.</Text>
             ) : null}
           </ScrollView>

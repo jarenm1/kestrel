@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { AGENT_CLIS } from "./agent-clis"
+import { AGENT_CLIS, MODEL_HARNESS } from "./agent-clis"
 
 const jwt = (claims: Record<string, unknown>): string =>
   `${Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.not-a-real-signature`
@@ -149,5 +149,33 @@ describe("stored identities", () => {
     expect(parse("not json")).toBeNull()
     expect(parse(JSON.stringify({ token: { access_token: "secret" }, id_token: "not.a.jwt" }))).toBeNull()
     expect(parse(JSON.stringify({ id_token: jwt({ email: "not-an-email" }) }))).toBeNull()
+  })
+})
+
+const devinLink = (text: string) => {
+  const signIn = AGENT_CLIS["devin-cli"].signIn
+  if (signIn.kind !== "page") throw new Error("devin does not sign in on a page")
+  return signIn.parseLoginLink(text)
+}
+
+describe("Devin CLI login", () => {
+  const url =
+    "https://app.devin.ai/auth/cli/continue?state=3be28d3b&prompt=select_account&code_challenge=RAH2Lr&code_challenge_method=S256&cli_pkce_marker=1"
+
+  test("reads the manual flow's link once its sentence is complete", () => {
+    expect(devinLink(`Visit ${url} to sign in, then copy the code and paste it below.\n`)).toEqual({ url, userCode: null })
+    expect(devinLink(`Visit ${url.slice(0, 60)}`)).toBeNull()
+    expect(devinLink(`Visit ${url}`)).toBeNull()
+  })
+
+  test("reads the link through the terminal's OSC 8 hyperlink", () => {
+    const printed = `\x1b7\r\nVisit \x1b]8;;${url}\x1b\\${url}\x1b]8;;\x1b\\ to sign in, then copy the code and paste it below.\r\n`
+    expect(devinLink(printed)).toEqual({ url, userCode: null })
+  })
+
+  test("signs in through a terminal and never resumes a session it cannot resume", () => {
+    const signIn = AGENT_CLIS["devin-cli"].signIn
+    expect(signIn.kind === "page" && signIn.needsCode && signIn.terminal).toBe(true)
+    expect(MODEL_HARNESS.devin).toMatchObject({ conversation: "acp", cli: "devin-cli", bin: "devin", broker: false, resume: false })
   })
 })

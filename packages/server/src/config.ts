@@ -1,7 +1,7 @@
 import { Context, Layer, Schema } from "effect"
 import { join, resolve } from "node:path"
 import { availableParallelism } from "node:os"
-import { DesktopRtcIceServer, NEST_BOX_ENV, type ModelProvider } from "@cloudagents/protocol"
+import { DesktopRtcIceServer, NEST_BOX_ENV, type ModelProvider, type RouteHarness } from "@cloudagents/protocol"
 import pkg from "../package.json"
 import type { WebRtcSettings } from "./desktop/webrtc"
 import type { SandboxLevel } from "./sandbox"
@@ -38,14 +38,66 @@ const DEFAULT_OPENAI_COMMAND =
   'codex app-server ${OPENAI_BASE_URL:+-c openai_base_url="$OPENAI_BASE_URL"} -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647'
 
 /**
- * OpenCode runs as an Agent Client Protocol server on stdio (`core/acp.ts`); the harness hands it the thread's MCP
- * server with the session. Its config keeps sessions unshared and the binary as installed, and lets an MCP call run
- * ~2^31 ms, so a `task_ask` waits as long as the user takes. The Go plan is OpenCode's own provider, reached through
- * the same binary and the same command.
+ * A routed provider reaches Codex through a custom Responses provider, not the built-in OpenAI one: the broker does
+ * not carry Codex's websocket upgrade, so the route disables websockets instead of failing one attempt at a time. The
+ * broker token is the provider's key (`OPENAI_API_KEY`, set by the lease); `base_url` is the broker's native
+ * `/openai/v1` path.
  */
-const DEFAULT_OPENCODE_COMMAND = `OPENCODE_CONFIG_CONTENT=${shellQuote(
-  JSON.stringify({ share: "disabled", update: "disable", mcp: { timeout: { execution: 2 ** 31 - 1 } } }),
-)} opencode acp`
+const DEFAULT_OPENAI_ROUTE_COMMAND =
+  'codex app-server -c model_provider="kestrel" -c model_providers.kestrel.name="Kestrel" -c model_providers.kestrel.base_url="$OPENAI_BASE_URL" -c model_providers.kestrel.env_key="OPENAI_API_KEY" -c model_providers.kestrel.wire_api="responses" -c model_providers.kestrel.supports_websockets=false -c mcp_servers.cloudagents.url="$CLOUDAGENTS_MCP_URL" -c mcp_servers.cloudagents.bearer_token_env_var="CLOUDAGENTS_MCP_TOKEN" -c mcp_servers.cloudagents.tool_timeout_sec=2147483.647'
+
+/**
+ * OpenCode runs as an Agent Client Protocol server on stdio (`core/acp.ts`); the harness hands it the thread's MCP
+ * server with the session. Its generated config (set as `OPENCODE_CONFIG_CONTENT` for each run) keeps sessions
+ * unshared, the binary as installed, and an MCP call running ~2^31 ms so a `task_ask` waits as long as the user takes.
+ * The Go plan is OpenCode's own provider, reached through the same binary and command.
+ */
+const DEFAULT_OPENCODE_COMMAND = "opencode acp"
+
+/** The OpenCode custom-provider id used for brokered API-provider routes, and its model reference prefix. */
+export const OPENCODE_ROUTE_PROVIDER = "kestrel"
+
+export interface OpencodeRouteConfig {
+  readonly baseURL: string
+  readonly api: "anthropic" | "openai"
+  readonly upstreamModel: string
+  readonly name: string
+}
+
+/**
+ * The OpenCode 2 `OPENCODE_CONFIG_CONTENT` for a run. Native OpenCode runs get only the base settings; a brokered
+ * route adds one custom provider whose credential is the per-run broker token and whose base URL is the broker's native
+ * API path. `providers` (plural), `env`, `package`, `settings.baseURL` and `models.modelID` are OpenCode 2's schema.
+ * No reasoning capability is declared: the openai-compatible package does not forward a selected level upstream.
+ */
+export const opencodeConfigContent = (route: OpencodeRouteConfig | null): string =>
+  JSON.stringify({
+    share: "disabled",
+    update: "disable",
+    mcp: { timeout: { execution: 2 ** 31 - 1 } },
+    ...(route === null
+      ? {}
+      : {
+          providers: {
+            [OPENCODE_ROUTE_PROVIDER]: {
+              name: route.name,
+              env: ["KESTREL_BROKER_TOKEN"],
+              package:
+                route.api === "anthropic"
+                  ? "@opencode/ai/providers/anthropic-compatible"
+                  : "@opencode/ai/providers/openai-compatible",
+              settings: { baseURL: route.baseURL },
+              // The OpenCode model id is the map key; modelID is what its API receives (same here, kept explicit).
+              models: {
+                [route.upstreamModel]: { name: route.name, modelID: route.upstreamModel },
+              },
+            },
+          },
+        }),
+  })
+
+/** The ACP `model` config value OpenCode selects for a brokered route. */
+export const opencodeRouteModel = (upstreamModel: string): string => `${OPENCODE_ROUTE_PROVIDER}/${upstreamModel}`
 
 /**
  * Antigravity CLI runs as an ACP server on stdio too. It keeps its sign-in and sessions under `--gemini-dir`: the
@@ -54,6 +106,13 @@ const DEFAULT_OPENCODE_COMMAND = `OPENCODE_CONFIG_CONTENT=${shellQuote(
  */
 const DEFAULT_GOOGLE_COMMAND =
   'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry'
+
+/**
+ * Devin CLI runs as an ACP server on stdio as well. It reads the API token `devin auth login` stored under
+ * `$XDG_DATA_HOME/devin`, the user's login directory when they are signed in (see `AGENT_CLIS`), which a Devin run
+ * needs, since its models are reached only through that account.
+ */
+const DEFAULT_DEVIN_COMMAND = "devin acp"
 
 export interface ServerConfig {
   readonly port: number
@@ -91,6 +150,15 @@ export interface ServerConfig {
    * and sends the prompt, model and effort over it. OpenCode runs its own models and gets no broker keys.
    */
   readonly agentCommands: Record<ModelProvider, string>
+  /**
+   * Canonical commands for a model whose route id names another harness. A provider-specific override above applies
+   * only to its current harness; these are shared by every provider routed to the same CLI:
+   * `CLOUDAGENTS_ANTHROPIC_COMMAND` for `@claude`, `CLOUDAGENTS_CODEX_COMMAND` for `@codex` (the native OpenAI command
+   * is not reused: a route needs the broker's Responses provider config) and `CLOUDAGENTS_OPENCODE_COMMAND` for
+   * `@opencode`. The OpenCode command must not inline `OPENCODE_CONFIG_CONTENT`: it would shadow the generated
+   * per-route provider config.
+   */
+  readonly agentRouteCommands: Record<RouteHarness, string>
   readonly fakeAgent: boolean
   /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
   readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
@@ -165,14 +233,15 @@ export const loadConfig = (): ServerConfig => {
     ? {
         anthropic: fakeCommand,
         openai: fakeCommand,
-        openrouter: "",
-        zai: "",
-        deepseek: "",
-        minimax: "",
-        moonshot: "",
+        openrouter: fakeCommand,
+        zai: fakeCommand,
+        deepseek: fakeCommand,
+        minimax: fakeCommand,
+        moonshot: fakeCommand,
         opencode: fakeCommand,
         "opencode-go": fakeCommand,
         google: fakeCommand,
+        devin: fakeCommand,
       }
     : {
         anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
@@ -186,7 +255,28 @@ export const loadConfig = (): ServerConfig => {
         opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
         "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
         google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
+        devin: process.env.CLOUDAGENTS_DEVIN_COMMAND ?? DEFAULT_DEVIN_COMMAND,
       }
+  // A routed model uses the canonical command for its harness, not the provider's current-harness override.
+  const agentRouteCommands: Record<RouteHarness, string> = fakeAgent
+    ? { claude: fakeCommand, codex: fakeCommand, opencode: fakeCommand }
+    : {
+        claude: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
+        // Its own variable: an operator's native `CLOUDAGENTS_OPENAI_COMMAND` may start a differently configured
+        // app-server, while a routed model needs this Responses-provider config.
+        codex: process.env.CLOUDAGENTS_CODEX_COMMAND ?? DEFAULT_OPENAI_ROUTE_COMMAND,
+        opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
+      }
+  // The old OpenCode default inlined `OPENCODE_CONFIG_CONTENT=... opencode acp`; an inline assignment in the
+  // configured command shadows the per-run generated config, silently disabling routed API providers.
+  for (const command of [agentCommands.opencode, agentCommands["opencode-go"], agentRouteCommands.opencode]) {
+    if (command.includes("OPENCODE_CONFIG_CONTENT")) {
+      console.warn(
+        "CLOUDAGENTS_OPENCODE_COMMAND/CLOUDAGENTS_OPENCODE_GO_COMMAND sets OPENCODE_CONFIG_CONTENT inline; it overrides the generated route config, so API-provider models routed through OpenCode will fail with \"model not found\". Remove the inline assignment.",
+      )
+      break
+    }
+  }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)
   if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")
@@ -242,6 +332,7 @@ export const loadConfig = (): ServerConfig => {
     attachmentsDir: join(dataDir, "attachments"),
     stateFile: join(dataDir, "state.json"),
     agentCommands,
+    agentRouteCommands,
     fakeAgent,
     homesDir: join(dataDir, "homes"),
     sandbox,

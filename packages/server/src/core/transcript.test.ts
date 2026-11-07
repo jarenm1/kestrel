@@ -136,6 +136,7 @@ describe("claude stream-json", () => {
       id: "usage-msg_dup",
       parentToolId: null,
       timestamp: new Date(at).toISOString(),
+      durationMs: null,
       inputTokens: 14,
       outputTokens: 7,
       cachedTokens: 20,
@@ -176,6 +177,7 @@ describe("claude stream-json", () => {
       id: "usage-msg_child",
       parentToolId: "toolu_task",
       timestamp: expect.any(String),
+      durationMs: null,
       inputTokens: 5,
       outputTokens: 7,
       cachedTokens: 5,
@@ -209,6 +211,7 @@ describe("claude stream-json", () => {
       {
         _tag: "turn",
         id: expect.any(String),
+        timestamp: expect.any(String),
         durationMs: 1234,
         inputTokens: 35,
         outputTokens: 7,
@@ -217,6 +220,13 @@ describe("claude stream-json", () => {
       },
     ])
     expect(transcript.finalText()).toBe("all done")
+  })
+
+  test("a turn's timestamp is its event's time when the harness reports one", () => {
+    const transcript = makeTranscript()
+    const at = Date.UTC(2026, 0, 2, 9, 15, 0)
+    const [turn] = valid(transcript.push({ type: "result", subtype: "success", is_error: false, emittedAtMs: at }))
+    expect(turn).toMatchObject({ _tag: "turn", timestamp: new Date(at).toISOString() })
   })
 
   test("a result without text uses the completed main-agent message, not a subagent or tool result", () => {
@@ -256,7 +266,7 @@ describe("claude stream-json", () => {
     const transcript = makeTranscript()
     transcript.push({ type: "user", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } })
     expect(valid(transcript.push({ type: "result", subtype: "error_during_execution", is_error: true }))).toEqual([
-      { _tag: "turn", id: expect.any(String), durationMs: null, inputTokens: null, outputTokens: null, costUsd: null, isError: false },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: null, inputTokens: null, outputTokens: null, costUsd: null, isError: false },
     ])
     const next = valid(transcript.push({ type: "result", subtype: "error_during_execution", is_error: true }))
     expect(next[0]).toMatchObject({ _tag: "turn", isError: true })
@@ -368,16 +378,18 @@ describe("claude partial messages", () => {
   test("a stream's usage takes message_delta's final output, once, after held prose", () => {
     const transcript = makeTranscript(null, null, "turn")
     const at = Date.UTC(2026, 0, 2, 5, 6, 7)
+    const startedAt = at - 900
     expect(
-      transcript.push(
-        streamEvent({
+      transcript.push({
+        ...streamEvent({
           type: "message_start",
           message: {
             id: "msg_s",
             usage: { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 16 },
           },
         }),
-      ),
+        emittedAtMs: startedAt,
+      }),
     ).toEqual([])
     transcript.push(blockStart(0, "text"))
     // Turn mode holds the prose; usage must not arrive above it.
@@ -396,12 +408,13 @@ describe("claude partial messages", () => {
 
     // message_delta reports the final output; the usage keeps one id and shows after the flushed prose.
     const finalized = valid(
-      transcript.push(
-        streamEvent({
+      transcript.push({
+        ...streamEvent({
           type: "message_delta",
           usage: { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 106 },
         }),
-      ),
+        emittedAtMs: at,
+      }),
     )
     expect(finalized.map((item) => item._tag)).toEqual(["text", "usage"])
     expect(finalized[0]).toMatchObject({ _tag: "text", text: "The answer." })
@@ -410,12 +423,110 @@ describe("claude partial messages", () => {
       id: "usage-msg_s",
       parentToolId: null,
       timestamp: new Date(at).toISOString(),
+      // From the stream's message_start to the block that completed the response.
+      durationMs: 900,
       inputTokens: 11_369,
       outputTokens: 106,
       cachedTokens: 14_517,
     })
     // The stream's stop has no further usage to add.
     expect(transcript.push(streamEvent({ type: "message_stop" }))).toEqual([])
+  })
+
+  test("a response's elapsed time is its own start to its completion; a replay moves neither", () => {
+    const transcript = makeTranscript()
+    const start = Date.UTC(2026, 0, 2, 6, 0, 0)
+    const at = (event: Record<string, unknown>, milliseconds: number) => ({ ...streamEvent(event), emittedAtMs: milliseconds })
+    const started = { type: "message_start", message: { id: "msg_t", usage: { input_tokens: 1, output_tokens: 0 } } }
+    transcript.push(at(started, start))
+    // A repeated start (the same message replayed) does not move the boundary.
+    transcript.push(at(started, start + 5_000))
+    const [usage] = valid(transcript.push(at({ type: "message_delta", usage: { output_tokens: 40 } }, start + 2_000)))
+    expect(usage).toMatchObject({
+      _tag: "usage",
+      id: "usage-msg_t",
+      timestamp: new Date(start + 2_000).toISOString(),
+      durationMs: 2_000,
+    })
+    // A later stop for the same response adds no item.
+    expect(transcript.push(at({ type: "message_stop" }, start + 9_000))).toEqual([])
+    // A replayed completion re-emits the same item, keeping the first elapsed time.
+    const replayed = valid(
+      transcript.push({
+        ...assistantUsage("msg_t", [{ type: "text", text: "again" }], { output_tokens: 40 }),
+        emittedAtMs: start + 9_000,
+      }),
+    )
+    expect(replayed.find((item) => item._tag === "usage")).toMatchObject({
+      _tag: "usage",
+      id: "usage-msg_t",
+      timestamp: new Date(start + 2_000).toISOString(),
+      durationMs: 2_000,
+    })
+  })
+
+  test("a later completion report extends the end, so an assistant snapshot cannot shorten the rate", () => {
+    const transcript = makeTranscript()
+    const start = Date.UTC(2026, 0, 2, 10, 0, 0)
+    const at = (event: Record<string, unknown>, milliseconds: number) => ({ ...streamEvent(event), emittedAtMs: milliseconds })
+    transcript.push(at({ type: "message_start", message: { id: "msg_o", usage: { input_tokens: 1, output_tokens: 0 } } }, start))
+    // The assistant snapshot reports completion first, with an output that is not final yet.
+    transcript.push({
+      ...assistantUsage("msg_o", [{ type: "text", text: "Answer." }], { input_tokens: 1, output_tokens: 12 }),
+      emittedAtMs: start + 900,
+    })
+    // message_delta carries the final output; the response ended then, not at the snapshot.
+    const [usage] = valid(transcript.push(at({ type: "message_delta", usage: { output_tokens: 90 } }, start + 1_500)))
+    expect(usage).toMatchObject({
+      _tag: "usage",
+      id: "usage-msg_o",
+      timestamp: new Date(start + 1_500).toISOString(),
+      durationMs: 1_500,
+      outputTokens: 90,
+    })
+  })
+
+  test("tool execution between responses is not part of either response's elapsed time", () => {
+    const transcript = makeTranscript()
+    const t0 = Date.UTC(2026, 0, 2, 8, 0, 0)
+    const at = (event: Record<string, unknown>, milliseconds: number) => ({ ...streamEvent(event), emittedAtMs: milliseconds })
+    transcript.push(at({ type: "message_start", message: { id: "msg_a", usage: { input_tokens: 1 } } }, t0))
+    const first = valid(transcript.push(at({ type: "message_delta", usage: { output_tokens: 10 } }, t0 + 1_000)))
+    expect(first[0]).toMatchObject({ _tag: "usage", id: "usage-msg_a", durationMs: 1_000 })
+    transcript.push(at({ type: "message_stop" }, t0 + 1_100))
+    // A tool runs for most of a minute before the next model call begins.
+    transcript.push(assistant([{ type: "tool_use", id: "toolu_t", name: "Bash", input: { command: "sleep 30" } }]))
+    transcript.push(toolResult("toolu_t", "done"))
+    transcript.push(at({ type: "message_start", message: { id: "msg_b", usage: { input_tokens: 2 } } }, t0 + 60_000))
+    const second = valid(transcript.push(at({ type: "message_delta", usage: { output_tokens: 5 } }, t0 + 61_500)))
+    expect(second[0]).toMatchObject({ _tag: "usage", id: "usage-msg_b", durationMs: 1_500 })
+  })
+
+  test("a provider start and an untimed completion are different clocks, so no rate is measured", () => {
+    const transcript = makeTranscript()
+    transcript.push({
+      ...streamEvent({ type: "message_start", message: { id: "msg_mix", usage: { input_tokens: 1 } } }),
+      emittedAtMs: Date.UTC(2026, 0, 2, 7, 30, 0),
+    })
+    // The completion carries no provider time, so the box's clock cannot be subtracted from the provider's.
+    const [usage] = valid(transcript.push(streamEvent({ type: "message_delta", usage: { output_tokens: 5 } })))
+    expect(usage).toMatchObject({ _tag: "usage", id: "usage-msg_mix", durationMs: null })
+  })
+
+  test("a response with no observed start keeps its elapsed time unknown, never an estimate", () => {
+    const transcript = makeTranscript()
+    const at = Date.UTC(2026, 0, 2, 7, 0, 0)
+    transcript.push({
+      ...assistantUsage("msg_n", [{ type: "text", text: "hi" }], { input_tokens: 1, output_tokens: 2 }),
+      emittedAtMs: at,
+    })
+    const items = valid(transcript.push({ type: "result", subtype: "success", is_error: false }))
+    expect(items.find((item) => item._tag === "usage")).toMatchObject({
+      _tag: "usage",
+      id: "usage-msg_n",
+      timestamp: new Date(at).toISOString(),
+      durationMs: null,
+    })
   })
 })
 
@@ -535,10 +646,17 @@ describe("codex app-server", () => {
     expect(transcript.context()).toEqual({ model: "gpt-6-luna", usedTokens: 4_200, windowTokens: 272_000 })
     transcript.push(usage([19_000, 1_500], [5_000, 300]))
     const [turn] = valid(transcript.push(turnCompleted("completed")))
-    expect(turn).toEqual({ _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: 9_000, outputTokens: 500, costUsd: null, isError: false })
+    expect(turn).toEqual({ _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: 9_000, outputTokens: 500, costUsd: null, isError: false })
     // After a compaction the next call reports the smaller size.
     transcript.push(usage([19_000, 1_500], [800, 100], 272_000, "tu2"))
     expect(transcript.context()).toEqual({ model: "gpt-6-luna", usedTokens: 900, windowTokens: 272_000 })
+  })
+
+  test("a turn's end time is its notification's when it carries one", () => {
+    const transcript = makeTranscript()
+    const at = Date.UTC(2026, 0, 2, 10, 30, 0)
+    const [turn] = valid(transcript.push({ ...turnCompleted("completed"), emittedAtMs: at }))
+    expect(turn).toMatchObject({ _tag: "turn", timestamp: new Date(at).toISOString(), durationMs: 1200 })
   })
 
   test("each cumulative total is one response's usage, even when two calls share last counts; a repeated update adds none", () => {
@@ -580,6 +698,7 @@ describe("codex app-server", () => {
         id: "usage-codex-th1-tu1-1",
         parentToolId: null,
         timestamp: new Date(firstAt).toISOString(),
+        durationMs: null,
         inputTokens: 1_897,
         outputTokens: 188,
         cachedTokens: 12_288,
@@ -598,6 +717,7 @@ describe("codex app-server", () => {
         id: "usage-codex-th1-tu1-2",
         parentToolId: null,
         timestamp: new Date(secondAt).toISOString(),
+        durationMs: null,
         inputTokens: 1_897,
         outputTokens: 188,
         cachedTokens: 12_288,
@@ -608,6 +728,7 @@ describe("codex app-server", () => {
     expect(turn).toEqual({
       _tag: "turn",
       id: expect.any(String),
+      timestamp: expect.any(String),
       durationMs: 1200,
       inputTokens: 28_370,
       outputTokens: 376,
@@ -640,6 +761,7 @@ describe("codex app-server", () => {
         id: "usage-codex-th1-tu1-1",
         parentToolId: null,
         timestamp: new Date(at).toISOString(),
+        durationMs: null,
         inputTokens: null,
         outputTokens: 2,
         cachedTokens: null,
@@ -654,11 +776,11 @@ describe("codex app-server", () => {
       { _tag: "error", id: expect.any(String), text: "usage limit reached" },
     ])
     expect(valid(transcript.push(turnCompleted("failed", { error: { message: "usage limit reached" } })))).toEqual([
-      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
     ])
     expect(valid(makeTranscript().push(turnCompleted("failed", { error: { message: "model refused" } })))).toEqual([
       { _tag: "error", id: expect.any(String), text: "model refused" },
-      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
     ])
   })
 
@@ -666,7 +788,7 @@ describe("codex app-server", () => {
     const transcript = makeTranscript()
     expect(valid(transcript.push(turnCompleted("failed")))).toEqual([
       { _tag: "error", id: expect.any(String), text: "codex turn failed" },
-      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
     ])
   })
 
@@ -674,11 +796,11 @@ describe("codex app-server", () => {
     const transcript = makeTranscript()
     transcript.push(note("error", { ...T, error: { message: "usage limit reached" }, willRetry: false }))
     expect(valid(transcript.push(turnCompleted("failed", { error: { message: "usage limit reached" } })))).toEqual([
-      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
     ])
     expect(valid(transcript.push(turnCompleted("failed", { id: "tu2", error: { message: "usage limit reached" } })))).toEqual([
       { _tag: "error", id: expect.any(String), text: "usage limit reached" },
-      { _tag: "turn", id: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
+      { _tag: "turn", id: expect.any(String), timestamp: expect.any(String), durationMs: 1200, inputTokens: null, outputTokens: null, costUsd: null, isError: true },
     ])
   })
 
@@ -836,5 +958,85 @@ describe("tool result images", () => {
       { base64: "QUJD", mimeType: "image/png" },
       { base64: "REVG", mimeType: "image/png" },
     ])
+  })
+})
+
+describe("persisted items", () => {
+  test("usage and turn items recorded before timing was kept still decode", () => {
+    const oldUsage = Schema.decodeUnknownSync(AgentItem)({
+      _tag: "usage",
+      id: "usage-msg_old",
+      parentToolId: null,
+      timestamp: "2026-01-02T03:04:05.000Z",
+      inputTokens: 10,
+      outputTokens: 2,
+      cachedTokens: null,
+    })
+    expect(oldUsage).toEqual({
+      _tag: "usage",
+      id: "usage-msg_old",
+      parentToolId: null,
+      timestamp: "2026-01-02T03:04:05.000Z",
+      inputTokens: 10,
+      outputTokens: 2,
+      cachedTokens: null,
+    })
+    const oldTurn = Schema.decodeUnknownSync(AgentItem)({
+      _tag: "turn",
+      id: "c1",
+      durationMs: 1_200,
+      inputTokens: 10,
+      outputTokens: 2,
+      costUsd: null,
+      isError: false,
+    })
+    expect(oldTurn).toEqual({
+      _tag: "turn",
+      id: "c1",
+      durationMs: 1_200,
+      inputTokens: 10,
+      outputTokens: 2,
+      costUsd: null,
+      isError: false,
+    })
+  })
+
+  test("timing decodes when it is present, including an unknown elapsed time", () => {
+    expect(
+      Schema.decodeUnknownSync(AgentItem)({
+        _tag: "usage",
+        id: "usage-msg_new",
+        parentToolId: null,
+        timestamp: "2026-01-02T03:04:05.000Z",
+        durationMs: 400,
+        inputTokens: 10,
+        outputTokens: 2,
+        cachedTokens: null,
+      }),
+    ).toMatchObject({ _tag: "usage", durationMs: 400 })
+    expect(
+      Schema.decodeUnknownSync(AgentItem)({
+        _tag: "usage",
+        id: "usage-msg_unknown",
+        parentToolId: null,
+        timestamp: "2026-01-02T03:04:05.000Z",
+        durationMs: null,
+        inputTokens: null,
+        outputTokens: null,
+        cachedTokens: null,
+      }),
+    ).toMatchObject({ _tag: "usage", durationMs: null })
+    expect(
+      Schema.decodeUnknownSync(AgentItem)({
+        _tag: "turn",
+        id: "c2",
+        timestamp: "2026-01-02T03:04:06.000Z",
+        durationMs: 1_200,
+        inputTokens: null,
+        outputTokens: null,
+        costUsd: null,
+        isError: false,
+      }),
+    ).toMatchObject({ _tag: "turn", timestamp: "2026-01-02T03:04:06.000Z" })
   })
 })
