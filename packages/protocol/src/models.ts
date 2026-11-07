@@ -653,10 +653,13 @@ export const modelHarness = (id: AgentModel): ModelHarness => {
 /** The model id to send to the routed harness's native API, never the protocol's route id. */
 export const modelUpstreamId = (id: AgentModel): string => {
   const info = modelInfo(id)
+  // Devin's third-party models carry a protocol-only `devin/` prefix; its ACP `model` option takes the family id.
+  // Runtime ids store the CLI's own value, so the strip must happen before an `upstreamModel` is returned as-is.
+  if (info.provider === "devin") {
+    return (info.upstreamModel ?? id.replace(/@(?:claude|codex|opencode)$/, "")).replace(/^devin\//, "")
+  }
   if (info.upstreamModel !== undefined) return info.upstreamModel
   const base = id.replace(/@(?:claude|codex|opencode)$/, "")
-  // Devin's third-party models carry a protocol-only `devin/` prefix; its ACP `model` option takes the family id.
-  if (info.provider === "devin") return base.replace(/^devin\//, "")
   // Native OpenCode/Claude refs keep their own decorations and provider prefix; only a Codex route drops `[1m]`.
   return modelHarness(id) === "codex" ? base.replace(/\[1m\]$/i, "") : base
 }
