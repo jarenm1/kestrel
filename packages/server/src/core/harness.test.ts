@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Effect, Either, Fiber, Layer } from "effect"
 import { createServer } from "node:http"
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, ModelProvider, Run, Task } from "@cloudagents/protocol"
@@ -897,6 +897,54 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
         yield* harness.stopAll()
         server.closeAllConnections()
         server.close()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 12_000)
+
+test("a Devin ACP run sets the upstream model id, without the protocol prefix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-devin-acp-model-"))
+  const cli = join(root, "devin-acp.ts")
+  const modelFile = join(root, "model.txt")
+  const { config, layer } = harnessLayer(root, cli)
+  config.agentCommands.devin = config.agentCommands.anthropic
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+import { writeFileSync } from "node:fs"
+const send = (id, result) => console.log(JSON.stringify({ jsonrpc: "2.0", id, result }))
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const req = JSON.parse(line)
+  if (req.method === "initialize") send(req.id, { protocolVersion: 1 })
+  if (req.method === "session/new") send(req.id, { sessionId: "devin-acp", configOptions: [] })
+  if (req.method === "session/set_config_option") {
+    if (req.params?.configId === "model") writeFileSync(${JSON.stringify(modelFile)}, String(req.params.value))
+    send(req.id, {})
+  }
+  if (req.method === "session/prompt") send(req.id, { stopReason: "end_turn" })
+}).on("close", () => process.exit(0))
+`)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      const { task, run: base } = runningTask("devin-acp-model")
+      const run: Run = { ...base, provider: "devin", model: "devin/claude-fable-5-1" }
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const finished = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, { model: "devin/claude-fable-5-1" })
+        yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        expect(yield* Effect.promise(() => readFile(modelFile, "utf8"))).toBe("claude-fable-5-1")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
       }
     }).pipe(Effect.provide(layer)))
   } finally {
