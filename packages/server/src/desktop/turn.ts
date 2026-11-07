@@ -8,7 +8,7 @@ import { Schema } from "effect"
 import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { ServerConfig } from "../config"
-import { mintIceServers, type WebRtcSettings } from "./webrtc"
+import { hasExplicitTurn, mintIceServers, type WebRtcSettings } from "./webrtc"
 
 /** Refresh this long before the provider expires credentials, so a viewer retry never receives stale ones. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000
@@ -170,11 +170,6 @@ export const managedTurn = (config: ServerConfig): ManagedTurn => {
   resolvers.set(config, resolver)
   return resolver
 }
-
-/** The operator configured TURN locally: its own static credentials or a REST secret. Both win over managed TURN. */
-export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
-  settings.turn !== null ||
-  settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
 
 export interface SessionIceServers {
   readonly iceServers: DesktopRtcIceServer[]

@@ -42,8 +42,9 @@ const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
 /**
- * Seconds a TURN allocation may take before the box answers without it. werift gathers inside `setLocalDescription`,
- * so an unreachable relay would otherwise hold the answer back for its 8s UDP and 8s TCP attempts.
+ * Seconds the control plane's relay may take before the box answers without it. werift gathers inside
+ * `setLocalDescription`, so an unreachable relay would otherwise hold the answer back for its 8s UDP and 8s TCP
+ * attempts. Operator-configured TURN keeps werift's default: its server may be far away or reached over TLS.
  */
 const TURN_CONNECT_TIMEOUT_S = 2
 const MAX_OFFER_CHARS = 64 * 1024
@@ -67,6 +68,11 @@ const H264_PROFILES: readonly { readonly prefix: string; readonly baselineOnly: 
 ]
 
 let peers = 0
+
+/** The operator configured TURN locally: its own static credentials or a REST secret. Both win over managed TURN. */
+export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
+  settings.turn !== null ||
+  settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
 
 /** The ICE servers one viewer may use: static ones, and short-lived credentials for the box's TURN, scoped to its thread. */
 export const mintIceServers = (
@@ -360,6 +366,9 @@ export class DesktopRtcSession {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
+    // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
+    // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
+    const managedRelay = !hasExplicitTurn(this.settings)
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
@@ -368,7 +377,7 @@ export class DesktopRtcSession {
     const pc = new RTCPeerConnection({
       iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
-      iceTurnConnectTimeout: TURN_CONNECT_TIMEOUT_S,
+      iceTurnConnectTimeout: managedRelay ? TURN_CONNECT_TIMEOUT_S : undefined,
       iceAdditionalHostAddresses: [...this.settings.hostAddresses],
       iceFilterCandidatePair: (pair) => isPeerAddressAllowed(pair.remoteCandidate.host, this.settings.hostAddresses, this.settings.denyPrivate),
       codecs: {

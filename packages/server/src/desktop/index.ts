@@ -6,9 +6,8 @@ export {
   type DesktopRegion,
   type DesktopSink,
 } from "./manager"
-export { DesktopRtcSession, mintIceServers, type WebRtcSettings } from "./webrtc"
+export { DesktopRtcSession, hasExplicitTurn, mintIceServers, type WebRtcSettings } from "./webrtc"
 export {
-  hasExplicitTurn,
   managedTurn,
   sessionIceServers,
   type ManagedTurn,

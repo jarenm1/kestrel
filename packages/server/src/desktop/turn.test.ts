@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { BOX_ID_HEADER, BOX_TURN_PATH, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import type { ServerConfig } from "../config"
 import { mintIceServers, type WebRtcSettings } from "./webrtc"
-import { hasExplicitTurn, managedTurn, sessionIceServers } from "./turn"
+import { managedTurn, sessionIceServers } from "./turn"
+import { hasExplicitTurn } from "./webrtc"
 
 const PROVIDER_STUN: DesktopRtcIceServer = { urls: ["stun:managed-stun.example.com:3478"] }
 const MANAGED_TURN: DesktopRtcIceServer = {

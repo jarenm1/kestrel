@@ -373,6 +373,19 @@ describe("DesktopRtcSession", () => {
     }
   }, 10_000)
 
+  test("an operator's own relay keeps werift's default allocation wait", async () => {
+    const { s } = session({ turn: { urls: ["turns:turn.example:443"], secret: "secret" } })
+    const browser = await remoteOffer()
+    closing.push(() => browser.close())
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const peer = peerOf(s)
+    expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
+    for (const transport of peer.pc.iceTransports) {
+      expect(transport.connection.turnServer).toEqual(["turn.example", 443])
+      expect(transport.connection.options.turnConnectTimeout).toBeUndefined()
+    }
+  }, 10_000)
+
   test("offers that wait on a slow relay fetch cannot exceed the viewer limit", async () => {
     const before = activeRtcPeers()
     // Every offer's credential fetch is held until all 17 have started, so each one passes the check on its own.
