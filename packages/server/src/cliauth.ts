@@ -262,9 +262,13 @@ export const CliAuthLive = Layer.effect(
         }
         const ssl = config.sandboxSslCertFile
         const own = AGENT_CLIS[provider]
+        // `script` runs its command through $SHELL; the user's login shell (for example NixOS' nu) is not in the
+        // sandbox, so terminal sign-ins get the toolchain's shell instead of inheriting an unavailable path.
+        const shellPath = findExecutable("bash", path) ?? findExecutable("sh", path) ?? "/bin/sh"
         return {
           ...(config.sandbox === "off" ? platformEnv() : {}),
           PATH: path,
+          SHELL: shellPath,
           HOME: root,
           ...Object.fromEntries(
             CLI_PROVIDERS.filter((candidate) => AGENT_CLIS[candidate].configEnv !== own.configEnv).map((candidate) => [

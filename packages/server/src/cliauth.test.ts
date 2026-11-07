@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -172,6 +172,10 @@ describe.skipIf(process.platform === "win32")("Devin sign-in", () => {
   const devinAuth = (root: string) => {
     writeFileSync(join(root, "bin", "devin"), FAKE_DEVIN)
     chmodSync(join(root, "bin", "devin"), 0o755)
+    // Record the SHELL `script` was given, then hand off to the real util-linux script.
+    const script = join(root, "bin", "script")
+    writeFileSync(script, '#!/bin/sh\necho "SHELL=$SHELL" > "$HOME/script.log"\nif [ -x /usr/bin/script ]; then exec /usr/bin/script "$@"; fi\nexec /bin/script "$@"\n')
+    chmodSync(script, 0o755)
     const config = {
       dataDir: root,
       sandbox: "off",
@@ -197,6 +201,15 @@ describe.skipIf(process.platform === "win32")("Devin sign-in", () => {
     const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code"))
     expect(status).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
     expect(JSON.stringify(status)).not.toContain("secret-devin-token")
+  })
+
+  test("gives script a shell from the CLI toolchain, not the user's login shell", async () => {
+    const root = rootFor()
+    const run = devinAuth(root)
+    await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const shell = readFileSync(join(root, "users", "alice", "script.log"), "utf8").trim()
+    expect(shell).not.toBe("SHELL=")
+    expect(shell).not.toContain("nu")
   })
 
   test("reports the CLI's refusal of a code without echoing it", async () => {

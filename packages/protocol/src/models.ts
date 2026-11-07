@@ -158,7 +158,44 @@ const BASE_MODEL_IDS = {
   ],
   devin: [
     "adaptive",
+    "fusion",
+    "swe-2",
+    "swe-2-flash",
+    "swe-1-7",
+    "swe-1-6",
     "swe-1-6-fast",
+    "devin/claude-fable-5-1",
+    "devin/claude-opus-5-5",
+    "devin/claude-sonnet-5-5",
+    "devin/claude-haiku-5-5",
+    "devin/claude-opus-5",
+    "devin/claude-sonnet-5",
+    "devin/claude-opus-4-8",
+    "devin/claude-opus-4-7",
+    "devin/claude-opus-4-6",
+    "devin/claude-sonnet-4-6",
+    "devin/gpt-6-astra",
+    "devin/gpt-6.1-sol",
+    "devin/gpt-6.1-terra",
+    "devin/gpt-6-luna",
+    "devin/gpt-6-sol",
+    "devin/gpt-5.6-sol",
+    "devin/gpt-5.6-terra",
+    "devin/gpt-5.6-luna",
+    "devin/gpt-5.5",
+    "devin/gemini-4-argon",
+    "devin/gemini-3.8-flash",
+    "devin/gemini-3.7-flash",
+    "devin/gemini-3.5-flash",
+    "devin/gemini-3.1-pro-preview",
+    "devin/gemini-3-flash-preview",
+    "devin/gemini-2.5-flash",
+    "devin/kimi-k3",
+    "devin/glm-5.3",
+    "devin/glm-5.3-flash",
+    "devin/glm-5.2",
+    "devin/deepseek-v4.1-flash",
+    "devin/deepseek-v4-pro",
   ],
 } as const satisfies Record<ModelProvider, readonly string[]>
 
@@ -301,9 +338,48 @@ const BASE_AGENT_MODELS: readonly ModelInfo[] = [
   { id: "opencode-go/mimo-v2.5", provider: "opencode-go", name: "MiMo V2.5", efforts: [], shownByDefault: false },
   // What a signed-in Google account's Antigravity CLI offers, with its `thought_level` option.
   { id: "gemini-3.8-flash", provider: "google", name: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"], shownByDefault: true },
-  // Values of Devin CLI's ACP `model` option for a signed-in Devin account: its Adaptive router and its own fast model.
+  // Family ids of Devin CLI's ACP `model` option for a signed-in account: its routers, Cognition SWE models, and the
+  // frontier/open-weight families Devin CLI serves. Devin's catalog is account-scoped, so the picker offers the
+  // families the CLI advertises; a plan without one rejects that choice.
   { id: "adaptive", provider: "devin", name: "Adaptive", efforts: [], shownByDefault: true },
+  { id: "fusion", provider: "devin", name: "Fusion", efforts: [], shownByDefault: true },
+  { id: "swe-2", provider: "devin", name: "SWE-2", efforts: [], shownByDefault: true },
+  { id: "swe-2-flash", provider: "devin", name: "SWE-2 Flash", efforts: [], shownByDefault: true },
+  { id: "swe-1-7", provider: "devin", name: "SWE-1.7", efforts: [], shownByDefault: true },
+  { id: "swe-1-6", provider: "devin", name: "SWE-1.6", efforts: [], shownByDefault: true },
   { id: "swe-1-6-fast", provider: "devin", name: "SWE-1.6 Fast", efforts: [], shownByDefault: true },
+  { id: "devin/claude-fable-5-1", provider: "devin", name: "Claude Fable 5.1", efforts: [], shownByDefault: true },
+  { id: "devin/claude-opus-5-5", provider: "devin", name: "Claude Opus 5.5", efforts: [], shownByDefault: true },
+  { id: "devin/claude-sonnet-5-5", provider: "devin", name: "Claude Sonnet 5.5", efforts: [], shownByDefault: true },
+  { id: "devin/claude-haiku-5-5", provider: "devin", name: "Claude Haiku 5.5", efforts: [], shownByDefault: true },
+  { id: "devin/claude-opus-5", provider: "devin", name: "Claude Opus 5", efforts: [], shownByDefault: true },
+  { id: "devin/claude-sonnet-5", provider: "devin", name: "Claude Sonnet 5", efforts: [], shownByDefault: true },
+  { id: "devin/claude-opus-4-8", provider: "devin", name: "Claude Opus 4.8", efforts: [], shownByDefault: true },
+  { id: "devin/claude-opus-4-7", provider: "devin", name: "Claude Opus 4.7", efforts: [], shownByDefault: true },
+  { id: "devin/claude-opus-4-6", provider: "devin", name: "Claude Opus 4.6", efforts: [], shownByDefault: true },
+  { id: "devin/claude-sonnet-4-6", provider: "devin", name: "Claude Sonnet 4.6", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-6-astra", provider: "devin", name: "GPT-6 Astra", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-6.1-sol", provider: "devin", name: "GPT-6.1 Sol", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-6.1-terra", provider: "devin", name: "GPT-6.1 Terra", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-6-luna", provider: "devin", name: "GPT-6 Luna", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-6-sol", provider: "devin", name: "GPT-6 Sol", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-5.6-sol", provider: "devin", name: "GPT-5.6 Sol", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-5.6-terra", provider: "devin", name: "GPT-5.6 Terra", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-5.6-luna", provider: "devin", name: "GPT-5.6 Luna", efforts: [], shownByDefault: true },
+  { id: "devin/gpt-5.5", provider: "devin", name: "GPT-5.5", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-4-argon", provider: "devin", name: "Gemini 4 Argon", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-3.8-flash", provider: "devin", name: "Gemini 3.8 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-3.7-flash", provider: "devin", name: "Gemini 3.7 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-3.5-flash", provider: "devin", name: "Gemini 3.5 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-3.1-pro-preview", provider: "devin", name: "Gemini 3.1 Pro Preview", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-3-flash-preview", provider: "devin", name: "Gemini 3 Flash Preview", efforts: [], shownByDefault: true },
+  { id: "devin/gemini-2.5-flash", provider: "devin", name: "Gemini 2.5 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/kimi-k3", provider: "devin", name: "Kimi K3", efforts: [], shownByDefault: true },
+  { id: "devin/glm-5.3", provider: "devin", name: "GLM-5.3", efforts: [], shownByDefault: true },
+  { id: "devin/glm-5.3-flash", provider: "devin", name: "GLM-5.3 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/glm-5.2", provider: "devin", name: "GLM-5.2", efforts: [], shownByDefault: true },
+  { id: "devin/deepseek-v4.1-flash", provider: "devin", name: "DeepSeek V4.1 Flash", efforts: [], shownByDefault: true },
+  { id: "devin/deepseek-v4-pro", provider: "devin", name: "DeepSeek V4 Pro", efforts: [], shownByDefault: true },
 ]
 
 /**
@@ -448,6 +524,8 @@ export const modelUpstreamId = (id: AgentModel): string => {
   const info = modelInfo(id)
   if (info.upstreamModel !== undefined) return info.upstreamModel
   const base = id.replace(/@(?:claude|codex|opencode)$/, "")
+  // Devin's third-party models carry a protocol-only `devin/` prefix; its ACP `model` option takes the family id.
+  if (info.provider === "devin") return base.replace(/^devin\//, "")
   // Native OpenCode/Claude refs keep their own decorations and provider prefix; only a Codex route drops `[1m]`.
   return modelHarness(id) === "codex" ? base.replace(/\[1m\]$/i, "") : base
 }

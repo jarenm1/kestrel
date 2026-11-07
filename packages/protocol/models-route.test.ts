@@ -45,6 +45,15 @@ test("a route keeps its provider and reports the native upstream model id", () =
   expect(modelUpstreamId("anthropic/claude-opus-5.5@codex")).toBe("anthropic/claude-opus-5.5")
 })
 
+test("Devin's protocol prefix is removed before ACP model selection", () => {
+  expect(modelInfo("devin/claude-fable-5-1").provider).toBe("devin")
+  expect(modelHarness("devin/claude-fable-5-1")).toBe("devin")
+  expect(modelUpstreamId("devin/claude-fable-5-1")).toBe("claude-fable-5-1")
+  expect(modelUpstreamId("devin/gpt-6.1-sol")).toBe("gpt-6.1-sol")
+  expect(modelUpstreamId("swe-2")).toBe("swe-2")
+  expect(modelUpstreamId("swe-1-6-fast")).toBe("swe-1-6-fast")
+})
+
 test("thinking levels follow the route, not the base Claude guide", () => {
   expect(modelInfo("deepseek-flash[1m]@codex").efforts).toEqual(["low", "high", "max"])
   expect(modelInfo("deepseek-v4-pro@codex").efforts).toEqual(["low", "high", "max"])

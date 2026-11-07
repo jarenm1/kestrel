@@ -995,8 +995,8 @@ export const AgentHarnessLive = Layer.effect(
                         choice.model === undefined
                           ? undefined
                           : routed && harnessId === "opencode"
-                            ? opencodeRouteModel(modelUpstreamId(choice.model))
-                            : choice.model,
+                            ? opencodeRouteModel(modelId as string)
+                            : modelId,
                       effort: choice.effort,
                       // The thread's tools, as the other harnesses get them from the run's MCP config.
                       mcpServers: [{ type: "http", name: "cloudagents", url: mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${lease.token}` }] }],
