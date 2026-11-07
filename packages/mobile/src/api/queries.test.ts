@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { connectedModelProviders, type Connection, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
+import { connectedModelProviders, type Connection, type Run, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
 import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
 import { trackSave, trackSaveQueue } from "@/lib/pendingSaves";
@@ -12,6 +12,42 @@ const task = (title: string): Task => ({
 });
 
 afterEach(() => queryClient.clear());
+
+const run = (id: string, status: Run["status"]): Run => ({
+  id, taskId: "same-id", prompt: "hi", status, startedAt: "2026-01-01T00:00:00Z",
+  endedAt: status === "running" ? null : "2026-01-01T00:01:00Z", exitCode: null,
+});
+
+test("a reconnect snapshot corrects a turn that ended while events were disconnected", async () => {
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: async () => [run("old", "succeeded"), run("new", "running")],
+  };
+  const query = createQueries(api).runs("same-id");
+  queryClient.setQueryData(query.queryKey, [run("old", "running")]);
+  const refreshed = await queryClient.fetchQuery(query);
+  expect(refreshed.map(({ id, status }) => [id, status])).toEqual([
+    ["old", "succeeded"], ["new", "running"],
+  ]);
+});
+
+test("a live turn ending during a reconnect fetch wins over its older snapshot", async () => {
+  const response = Promise.withResolvers<Run[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: () => { started.resolve(); return response.promise; },
+  };
+  const query = createQueries(api).runs("same-id");
+  queryClient.setQueryData(query.queryKey, [run("turn", "running")]);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  queryClient.setQueryData(query.queryKey, [run("turn", "succeeded"), run("new", "running")]);
+  response.resolve([run("turn", "running")]);
+  expect((await fetching).map(({ id, status }) => [id, status])).toEqual([
+    ["turn", "succeeded"], ["new", "running"],
+  ]);
+});
 
 test("box clients isolate caches even for identical task and run IDs", () => {
   const first = createApiClient("https://control.example", "session", { id: "first", url: "https://first.example" });

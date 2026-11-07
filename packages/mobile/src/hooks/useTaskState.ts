@@ -52,6 +52,7 @@ export function useTaskState(taskId: string) {
       close = openTaskEvents(url, {
         onOpen: () => {
           setDisconnected(false);
+          // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
         },
         onEvent: (event) => {

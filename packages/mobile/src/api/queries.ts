@@ -76,11 +76,15 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   return next;
 }
 
-/** Snapshot entries first; entries already in the cache from live events (newer) override them. */
-function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonly T[] | undefined): T[] {
+/** Fresh snapshots replace stale cache entries; only events written during the fetch override them. */
+async function mergeSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
+  const before = new Set(queryClient.getQueryData<readonly T[]>(key) ?? []);
+  const snapshot = await fetch();
   const byId = new Map<string, T>();
   for (const item of snapshot) byId.set(item.id, item);
-  for (const item of current ?? []) byId.set(item.id, item);
+  for (const item of queryClient.getQueryData<readonly T[]>(key) ?? []) {
+    if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item);
+  }
   return [...byId.values()];
 }
 
@@ -139,20 +143,17 @@ export function createQueries(api: ApiClient) {
     messages: (taskId: string) =>
       queryOptions({
         queryKey: scoped.messages(taskId),
-        queryFn: async (): Promise<Message[]> =>
-          mergeSnapshot(await api.listMessages(taskId), queryClient.getQueryData(scoped.messages(taskId))),
+        queryFn: () => mergeSnapshot(scoped.messages(taskId), () => api.listMessages(taskId)),
       }),
     runs: (taskId: string) =>
       queryOptions({
         queryKey: scoped.runs(taskId),
-        queryFn: async (): Promise<Run[]> =>
-          mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(scoped.runs(taskId))),
+        queryFn: () => mergeSnapshot(scoped.runs(taskId), () => api.listRuns(taskId)),
       }),
     runItems: (runId: string) =>
       queryOptions({
         queryKey: scoped.runItems(runId),
-        queryFn: async (): Promise<AgentItem[]> =>
-          mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(scoped.runItems(runId))),
+        queryFn: () => mergeSnapshot(scoped.runItems(runId), () => api.runItems(runId)),
       }),
     diff: (taskId: string, running = false) =>
       queryOptions({

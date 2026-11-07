@@ -61,6 +61,8 @@ surfaces without a protocol change. See [mobile references](../packages/mobile/R
 Chat box availability is shown by the box activity indicator, not a global offline banner or sidebar connectivity
 alert. Losing the live connection warns only while an agent turn is running; idle reconnects stay quiet. Failed
 prompt submissions still show an error beside the composer and keep the draft available to retry.
+Reconnecting refreshes the thread, messages and runs; fresh snapshots replace stale pre-disconnect state while
+preserving live events that arrive during the refresh.
 
 In desktop Settings, Profile manages GitHub repository access, including connecting and reconnecting OAuth.
 The repository picker sends users without a GitHub connection to Profile to set up that access.
