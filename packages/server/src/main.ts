@@ -141,7 +141,14 @@ const program = Effect.gen(function* () {
     harnesses: availableHarnesses(config),
     modelHarnesses: availableModelHarnesses(config),
   }
-  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities, models)
+  // One client for the control plane: the automations' watch tools and the pull request view's watch action share it.
+  const control = boxControl(config)
+  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities, models, {
+    watchPullRequest: control === null ? null : (user, taskId, repo, number, watching) =>
+      (watching ? control.watchPr(user, taskId, repo, number) : control.unwatchPr(user, taskId, repo, number)).pipe(
+        Effect.mapError((e) => new InternalError({ message: e.message })),
+      ),
+  })
   // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
   // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.
   const handle = (request: Request) => {
@@ -182,7 +189,7 @@ const program = Effect.gen(function* () {
     },
     ask: core.ask,
     automations: {
-      control: boxControl(config),
+      control,
       taskOwner: core.taskOwner,
       setWatching: core.setPullRequestWatching,
       forgetWatching: core.forgetPullRequestWatch,

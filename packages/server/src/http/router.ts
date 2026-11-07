@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
-import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadSettings } from "@cloudagents/protocol"
+import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -140,6 +140,61 @@ const fileRoot = (params: URLSearchParams): Effect.Effect<FileRoot, BadRequest> 
   return Effect.fail(new BadRequest({ message: "root must be workspace, home or checkout (with checkout=<id>)" }))
 }
 
+/** `?repo=` and `?number=` of a pull request route. */
+const pullRequestQuery = (params: URLSearchParams): Effect.Effect<{ readonly repo: string; readonly number: number }, BadRequest> => {
+  const repo = params.get("repo") ?? ""
+  if (repo === "") return Effect.fail(new BadRequest({ message: "repo is required" }))
+  const number = Number(params.get("number") ?? "")
+  if (!Number.isSafeInteger(number) || number <= 0) {
+    return Effect.fail(new BadRequest({ message: "number must be a positive integer" }))
+  }
+  return Effect.succeed({ repo, number })
+}
+
+/** What the REST API needs from outside the core, such as the control plane that routes a watched pull request's activity. */
+export interface RouterHooks {
+  /**
+   * Tells the control plane to route a pull request's activity to the thread, or to stop. Null on a box that has no
+   * control plane; watching then has nowhere to go.
+   */
+  readonly watchPullRequest:
+    | ((user: string, taskId: string, repo: string, number: number, watching: boolean) => Effect.Effect<void, { readonly message: string }>)
+    | null
+}
+
+const NO_HOOKS: RouterHooks = { watchPullRequest: null }
+
+/**
+ * Applies a view action; a watch also tells the control plane, when this box has one. Ownership is checked before the
+ * control plane is told, so a pull request the thread does not own never leaves a watch route behind. The control
+ * plane learns first and the registry second; a failed registry write puts back the watching state the registry had
+ * before the request and the original failure surfaces.
+ */
+const applyPullRequestAction = (core: CoreShape, hooks: RouterHooks, user: string, taskId: string, action: ThreadPullRequestAction) =>
+  action.action === "watch"
+    ? Effect.gen(function* () {
+        const watch = hooks.watchPullRequest
+        if (watch === null) {
+          return yield* Effect.fail(new BadRequest({ message: "this box has no control plane to watch pull requests with" }))
+        }
+        const before = yield* core.requireOwnedPullRequest(user, taskId, action.repo, action.number)
+        yield* watch(user, taskId, action.repo, action.number, action.watching).pipe(
+          Effect.mapError((e) => new InternalError({ message: e.message })),
+        )
+        return yield* core.actOnPullRequest(user, taskId, action).pipe(
+          // The registry still says what it said before the request, so the control plane must say that too: the
+          // watch is an idempotent upsert, and reverting to the request's own state would undo a watch the registry
+          // keeps (or re-add one it never had).
+          Effect.catchAll((e) =>
+            watch(user, taskId, action.repo, action.number, before.watching).pipe(
+              Effect.catchAll(() => Effect.void),
+              Effect.zipRight(Effect.fail(e)),
+            ),
+          ),
+        )
+      })
+    : core.actOnPullRequest(user, taskId, action)
+
 /**
  * Streams one of the thread's files as a download. The agent wrote it, so whatever it is, it never renders as a page
  * on the app's origin: always `application/octet-stream`, an attachment, in a sandbox. `headOnly` answers with the
@@ -198,7 +253,13 @@ const servePreview = (core: CoreShape, taskId: string) =>
     )
   })
 
-export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities, models: ModelDiscoveryShape) =>
+export const makeRouter = (
+  core: CoreShape,
+  cliAuth: CliAuthShape,
+  capabilities: BoxCapabilities,
+  models: ModelDiscoveryShape,
+  hooks: RouterHooks = NO_HOOKS,
+) =>
   HttpRouter.empty.pipe(
     HttpRouter.get(
       "/api/health",
@@ -420,6 +481,47 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
       }),
     ),
     HttpRouter.concat(downloadRoutes(core)),
+    // The pull request view of a thread: its list, one pull request, its diff, and the changes the view asks of it.
+    HttpRouter.get(
+      "/api/tasks/:id/pull-requests",
+      Effect.flatMap(pathId, (id) => respond(signedIn((user) => core.threadPullRequests(user, id)))),
+    ),
+    HttpRouter.get(
+      "/api/tasks/:id/pull-request/diff",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(searchParams, (params) =>
+              Effect.flatMap(pullRequestQuery(params), (pr) => core.threadPullRequestDiff(user, id, pr.repo, pr.number)),
+            ),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.get(
+      "/api/tasks/:id/pull-request",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(searchParams, (params) =>
+              Effect.flatMap(pullRequestQuery(params), (pr) => core.threadPullRequest(user, id, pr.repo, pr.number)),
+            ),
+          ),
+        ),
+      ),
+    ),
+    HttpRouter.post(
+      "/api/tasks/:id/pull-request/action",
+      Effect.flatMap(pathId, (id) =>
+        respond(
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(ThreadPullRequestAction), (action) =>
+              applyPullRequestAction(core, hooks, user, id, action),
+            ),
+          ),
+        ),
+      ),
+    ),
     // Bytes of a file attached to one of the owner's task messages; the MIME type is the content type. Users upload
     // any type, so the response may not run as a page on the app's origin (e.g. an uploaded text/html).
     HttpRouter.get(
@@ -520,9 +622,15 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
  * Builds a fetch-style handler for the REST API. Unknown routes return 404.
  * CORS is open to every origin (web and Electron clients).
  */
-export const makeWebHandler = (core: CoreShape, cliAuth: CliAuthShape, capabilities: BoxCapabilities, models: ModelDiscoveryShape) =>
+export const makeWebHandler = (
+  core: CoreShape,
+  cliAuth: CliAuthShape,
+  capabilities: BoxCapabilities,
+  models: ModelDiscoveryShape,
+  hooks: RouterHooks = NO_HOOKS,
+) =>
   Effect.gen(function* () {
-    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities, models))
+    const app = yield* HttpRouter.toHttpApp(makeRouter(core, cliAuth, capabilities, models, hooks))
     const notFound = HttpServerResponse.unsafeJson({ _tag: "NotFound", message: "no such route" }, { status: 404 })
     const withCors = HttpMiddleware.cors({
       allowedOrigins: () => true,

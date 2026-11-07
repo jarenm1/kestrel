@@ -23,6 +23,12 @@ import {
   Paths,
   Run,
   type ThreadPullRequest,
+  type ThreadPullRequestAction,
+  type ThreadPullRequestDetail,
+  type ThreadPullRequestDiff,
+  type ThreadPullRequestSnapshot,
+  type ThreadPullRequestSummary,
+  type ThreadPullRequests,
   threadPullRequestId,
   threadPullRequestsOf,
   type Usage,
@@ -504,6 +510,42 @@ export interface CoreShape {
     number?: number,
   ) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
   /**
+   * The pull request view's list: every pull request the thread owns, oldest first, each with GitHub's live view of it
+   * or the reason that view could not be read.
+   */
+  readonly threadPullRequests: (user: string, taskId: string) => Effect.Effect<ThreadPullRequests, NotFound | BadRequest>
+  /**
+   * Refuses unless the thread owns `repo#number` in its registry, answering whether the thread watched it before this
+   * request. Used before anything outside the thread's own state (such as a control-plane watch route) is told about
+   * the pull request, and to put that state back when the registry write fails.
+   */
+  readonly requireOwnedPullRequest: (
+    user: string,
+    taskId: string,
+    repo: string,
+    number: number,
+  ) => Effect.Effect<{ readonly watching: boolean }, NotFound>
+  /** The pull request view's detail of one of the thread's pull requests; one it does not own is NotFound. */
+  readonly threadPullRequest: (
+    user: string,
+    taskId: string,
+    repo: string,
+    number: number,
+  ) => Effect.Effect<ThreadPullRequestDetail, NotFound | BadRequest | InternalError>
+  /** The pull request view's diff of one of the thread's pull requests, cut short past 2 MiB. */
+  readonly threadPullRequestDiff: (
+    user: string,
+    taskId: string,
+    repo: string,
+    number: number,
+  ) => Effect.Effect<ThreadPullRequestDiff, NotFound | BadRequest | InternalError>
+  /** A change the pull request view asks of one of the thread's pull requests; returns the thread after it. */
+  readonly actOnPullRequest: (
+    user: string,
+    taskId: string,
+    action: ThreadPullRequestAction,
+  ) => Effect.Effect<Task, NotFound | BadRequest | InternalError>
+  /**
    * Used by the MCP handler's watch tools: records whether the thread watches a pull request (activity on it wakes the
    * thread), adding it to the thread's registry when it is not there yet. The control plane routes the activity itself.
    */
@@ -650,11 +692,59 @@ const pullRequestBranchBlocker = (pr: PullRequest, slug: RepoSlug, defaultBranch
 /** A repository's root files that Codex (AGENTS.md) and Claude Code (CLAUDE.md) load from their working directory. */
 const AGENT_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"]
 
+/** What the pull request view says for a GitHub-backed request made without one. */
+const NO_GITHUB_CONNECTION = "no GitHub connection for this account: connect GitHub under Connections, then retry"
+
 /** The registry with `entry`: the matching entry replaced in place, or a new one appended, so the oldest stay first. */
 const withThreadPullRequest = (registry: ReadonlyArray<ThreadPullRequest>, entry: ThreadPullRequest): ThreadPullRequest[] => {
   const index = registry.findIndex((pr) => pr.id === entry.id)
   return index === -1 ? [...registry, entry] : registry.map((pr, at) => (at === index ? entry : pr))
 }
+
+/** A registry entry as the view lists it, before GitHub's live view is asked for. */
+const registrySummary = (entry: ThreadPullRequest): ThreadPullRequestSummary => ({
+  id: entry.id,
+  repo: entry.repo,
+  number: entry.number,
+  url: entry.url,
+  source: entry.source,
+  ...(entry.checkoutId === undefined ? {} : { checkoutId: entry.checkoutId }),
+  ...(entry.branch === undefined ? {} : { branch: entry.branch }),
+  watching: entry.watching === true,
+  addedAt: entry.addedAt,
+})
+
+/** What the pull request view shows about GitHub's answer. */
+const snapshotOf = (status: PullRequestStatus): ThreadPullRequestSnapshot => ({
+  title: status.title,
+  state: status.state,
+  draft: status.draft,
+  author: status.author,
+  createdAt: status.createdAt,
+  updatedAt: status.updatedAt,
+  mergedAt: status.mergedAt,
+  closedAt: status.closedAt,
+  baseRef: status.baseRef,
+  headRef: status.headRef,
+  headRepo: status.headRepo,
+  mergeable: status.mergeable,
+  mergeableState: status.mergeableState,
+  reviewDecision: status.reviewDecision,
+  labels: [...status.labels],
+  reviewers: [...status.requestedReviewers],
+  additions: status.additions,
+  deletions: status.deletions,
+  changedFiles: status.changedFiles,
+  checks: status.checks,
+})
+
+/** A diff larger than this is cut before it reaches the browser; the view marks it `truncated`. */
+const MAX_DIFF_BYTES = 2 * 1024 * 1024
+
+const boundedDiff = (patch: string): ThreadPullRequestDiff =>
+  Buffer.byteLength(patch, "utf8") <= MAX_DIFF_BYTES
+    ? { patch, truncated: false }
+    : { patch: Buffer.from(patch, "utf8").subarray(0, MAX_DIFF_BYTES).toString("utf8"), truncated: true }
 
 /** The repository a stored checkout names. Stored values were validated on the way in. */
 const checkoutRepoRef = (checkout: Checkout): Effect.Effect<RepoRef, InternalError> => {
@@ -833,11 +923,7 @@ export const CoreLive = Layer.effect(
 
     const requiredGithubToken = (owner: string): Effect.Effect<string, BadRequest> =>
       Effect.flatMap(githubTokenOf(owner), (token) =>
-        token === undefined
-          ? Effect.fail(
-              new BadRequest({ message: "no GitHub connection for this account: connect GitHub under Connections, then retry" }),
-            )
-          : Effect.succeed(token),
+        token === undefined ? Effect.fail(new BadRequest({ message: NO_GITHUB_CONNECTION })) : Effect.succeed(token),
       )
 
     /** owner/name of a github.com repo plus the owner's token; pull request tools need both. */
@@ -952,6 +1038,29 @@ export const CoreLive = Layer.effect(
           .pushBranch({ ...spec, url: ref.url, branch, head, githubToken: token })
           .pipe(Effect.mapError(toInternal("push")))
       })
+
+    /** One of the thread's pull requests, or NotFound when the registry does not have it. */
+    const ownedPullRequest = (user: string, taskId: string, repo: string, number: number) =>
+      Effect.gen(function* () {
+        const task = yield* ownedTask(user, taskId)
+        const entry = threadPullRequestsOf(task).find((pr) => pr.id === threadPullRequestId(repo, number))
+        if (entry === undefined) return yield* Effect.fail(new NotFound({ message: `this thread does not own ${repo}#${number}` }))
+        const slug = parseRepoRef(entry.repo)?.github ?? null
+        if (slug === null) {
+          return yield* Effect.fail(new NotFound({ message: `${entry.repo}#${entry.number} is not a pull request of a github.com repository` }))
+        }
+        return { task, entry, slug }
+      })
+
+    /** One registry entry with GitHub's live view of it, or the reason that view could not be read. */
+    const summarizePullRequest = (entry: ThreadPullRequest, token: string): Effect.Effect<ThreadPullRequestSummary> => {
+      const slug = parseRepoRef(entry.repo)?.github ?? null
+      if (slug === null) return Effect.succeed({ ...registrySummary(entry), error: `${entry.repo} is not a github.com repository` })
+      return github.getPullRequestStatus(token, slug, entry.number).pipe(
+        Effect.map((status): ThreadPullRequestSummary => ({ ...registrySummary(entry), snapshot: snapshotOf(status) })),
+        Effect.catchAll((e) => Effect.succeed<ThreadPullRequestSummary>({ ...registrySummary(entry), error: e.message })),
+      )
+    }
 
     /**
      * Adds a pull request to the thread's registry, or refreshes the entry it already has. `announce` also posts a chat
@@ -2887,6 +2996,108 @@ export const CoreLive = Layer.effect(
           const { slug, token } = yield* githubAccess(task.owner, ref)
           const target = number ?? (yield* linkedPullRequestNumber(taskId, task, checkout, slug, token, true))
           return yield* github.getPullRequestStatus(token, slug, target).pipe(Effect.mapError(fromGitHub))
+        }),
+
+      threadPullRequests: (user, taskId) =>
+        Effect.gen(function* () {
+          const task = yield* ownedTask(user, taskId)
+          const entries = threadPullRequestsOf(task)
+          if (entries.length === 0) return { pullRequests: [] }
+          const token = yield* githubTokenOf(task.owner)
+          // Without a connection GitHub cannot be asked, but the registry still holds every link: list those, each
+          // carrying the reason its live view is missing, rather than failing the whole view.
+          if (token === undefined) {
+            return { pullRequests: entries.map((entry) => ({ ...registrySummary(entry), error: NO_GITHUB_CONNECTION })) }
+          }
+          const pullRequests = yield* Effect.all(
+            entries.map((entry) => summarizePullRequest(entry, token)),
+            { concurrency: 4 },
+          )
+          return { pullRequests }
+        }),
+
+      requireOwnedPullRequest: (user, taskId, repo, number) =>
+        Effect.map(ownedPullRequest(user, taskId, repo, number), ({ entry }) => ({ watching: entry.watching === true })),
+
+      threadPullRequest: (user, taskId, repo, number) =>
+        Effect.gen(function* () {
+          const { task, entry, slug } = yield* ownedPullRequest(user, taskId, repo, number)
+          const token = yield* requiredGithubToken(task.owner)
+          const [summary, reference, commits] = yield* Effect.all(
+            [
+              summarizePullRequest(entry, token),
+              github.readReference(token, slug, entry.number, "pr").pipe(Effect.mapError(fromGitHub)),
+              github.pullRequestCommits(token, slug, entry.number).pipe(Effect.mapError(fromGitHub)),
+            ],
+            { concurrency: "unbounded" },
+          )
+          if (reference.kind !== "pr") {
+            return yield* Effect.fail(new InternalError({ message: `GitHub has no pull request #${entry.number} in ${entry.repo}` }))
+          }
+          return {
+            summary,
+            body: reference.body,
+            reviews: reference.reviews,
+            comments: [
+              ...reference.conversation.map((comment) => ({
+                author: comment.author,
+                body: comment.body,
+                url: comment.url,
+                createdAt: comment.createdAt,
+                kind: "conversation" as const,
+                path: null,
+                line: null,
+              })),
+              ...reference.reviewComments.map((comment) => ({
+                author: comment.author,
+                body: comment.body,
+                url: comment.url,
+                createdAt: comment.createdAt,
+                kind: "review_comment" as const,
+                path: comment.path,
+                line: comment.line,
+              })),
+            ],
+            commits,
+            files: reference.files,
+          }
+        }),
+
+      threadPullRequestDiff: (user, taskId, repo, number) =>
+        Effect.gen(function* () {
+          const { task, entry, slug } = yield* ownedPullRequest(user, taskId, repo, number)
+          const token = yield* requiredGithubToken(task.owner)
+          const patch = yield* github.pullRequestDiff(token, slug, entry.number, "diff").pipe(Effect.mapError(fromGitHub))
+          return boundedDiff(patch)
+        }),
+
+      actOnPullRequest: (user, taskId, action) =>
+        Effect.gen(function* () {
+          const { task, entry, slug } = yield* ownedPullRequest(user, taskId, action.repo, action.number)
+          if (action.action === "watch") {
+            return yield* shape.setPullRequestWatching(taskId, entry.repo, entry.number, action.watching)
+          }
+          const token = yield* requiredGithubToken(task.owner)
+          switch (action.action) {
+            case "comment":
+              yield* github.createComment(token, slug, entry.number, action.body).pipe(Effect.mapError(fromGitHub))
+              break
+            case "review": {
+              const event = action.verdict === "approve" ? "APPROVE" : action.verdict === "request-changes" ? "REQUEST_CHANGES" : "COMMENT"
+              yield* github.createReview(token, slug, entry.number, { body: action.body, event, comments: [] }).pipe(Effect.mapError(fromGitHub))
+              break
+            }
+            case "merge":
+              yield* github.mergePullRequest(token, slug, entry.number, action.method).pipe(Effect.mapError(fromGitHub))
+              break
+            case "close":
+            case "reopen":
+              yield* github
+                .updatePullRequest(token, slug, entry.number, { state: action.action === "close" ? "closed" : "open" })
+                .pipe(Effect.mapError(fromGitHub))
+              break
+          }
+          return yield* requireTask(taskId)
         }),
 
       setPullRequestWatching: (taskId, repo, number, watching) =>

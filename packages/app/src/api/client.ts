@@ -52,6 +52,10 @@ import {
   type SetDesktopQualityBody,
   Task,
   TextGenerationSettings,
+  type ThreadPullRequestAction,
+  ThreadPullRequestDetail,
+  ThreadPullRequestDiff,
+  ThreadPullRequests,
   ThreadSettings,
   ToolFailureList,
   UpdateAutomationBody,
@@ -721,6 +725,16 @@ export const api = {
   setUsageLimitAutoResume: (taskId: string, autoResume: boolean) =>
     onTask(taskId, Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
+  /** Every pull request the thread owns or manages, with GitHub's live view of each. */
+  getThreadPullRequests: (taskId: string) =>
+    onTask(taskId, ThreadPullRequests, "GET", Paths.taskPullRequests(taskId)),
+  getThreadPullRequest: (taskId: string, repo: string, number: number) =>
+    onTask(taskId, ThreadPullRequestDetail, "GET", Paths.taskPullRequest(taskId, repo, number)),
+  getThreadPullRequestDiff: (taskId: string, repo: string, number: number) =>
+    onTask(taskId, ThreadPullRequestDiff, "GET", Paths.taskPullRequestDiff(taskId, repo, number)),
+  /** Comments, reviews, merges and the rest; the box answers with the thread as stored. */
+  actOnThreadPullRequest: (taskId: string, action: ThreadPullRequestAction) =>
+    onTask(taskId, Task, "POST", Paths.taskPullRequestAction(taskId), action),
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),
   /**

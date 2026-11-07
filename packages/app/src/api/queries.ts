@@ -1,6 +1,6 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import { Either, Schema } from "effect"
-import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task } from "@cloudagents/protocol"
+import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task, ThreadPullRequestAction } from "@cloudagents/protocol"
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
@@ -77,6 +77,13 @@ export const keys = {
     activeRunProvider: ModelProvider | undefined,
   ) => ["tasks", taskId, "commands", model, activeRunId, activeRunProvider] as const,
   diff: (taskId: string) => ["tasks", taskId, "diff"] as const,
+  /** The thread's pull request registry, each with GitHub's live view. */
+  pullRequests: (taskId: string) => ["tasks", taskId, "pull-requests"] as const,
+  /** Everything about one pull request of the thread, named by its repository and number. */
+  pullRequest: (taskId: string, repo: string, number: number) =>
+    ["tasks", taskId, "pull-requests", repo, number] as const,
+  pullRequestDiff: (taskId: string, repo: string, number: number) =>
+    ["tasks", taskId, "pull-requests", repo, number, "diff"] as const,
   /** Both listings of a thread's files (with and without hidden ones); invalidating this refetches either. */
   files: (taskId: string) => ["tasks", taskId, "files"] as const,
   desktop: (taskId: string) => ["tasks", taskId, "desktop"] as const,
@@ -211,6 +218,25 @@ const fetchDesktopRelease = async (): Promise<DesktopRelease> => {
   }
 }
 
+/**
+ * Sends one pull request action and adopts the thread the box answers with. The list, detail and diff are refetched
+ * because the action changes what GitHub reports; the panel keeps reading the same cache entries.
+ */
+export async function actOnPullRequest(
+  client: QueryClient,
+  taskId: string,
+  action: ThreadPullRequestAction,
+): Promise<Task> {
+  const task = await api.actOnThreadPullRequest(taskId, action)
+  storeTask(client, task)
+  await Promise.all([
+    client.invalidateQueries({ queryKey: keys.pullRequests(taskId), exact: true }),
+    client.invalidateQueries({ queryKey: keys.pullRequest(taskId, action.repo, action.number) }),
+    client.invalidateQueries({ queryKey: keys.pullRequestDiff(taskId, action.repo, action.number) }),
+  ])
+  return task
+}
+
 export const queries = {
   me: () => queryOptions({ queryKey: keys.me, queryFn: api.me }),
   publicMe: () => queryOptions({ queryKey: keys.publicMe, queryFn: signedInUser, staleTime: Infinity }),
@@ -310,6 +336,26 @@ export const queries = {
       enabled: taskId !== undefined && model !== undefined,
     }),
   diff: (taskId: string) => queryOptions({ queryKey: keys.diff(taskId), queryFn: () => api.getDiff(taskId) }),
+  /**
+   * The thread's pull requests. The interval lives on this observer, so GitHub is polled only while the panel is on
+   * screen (another sidebar tab or a collapsed sidebar stops it).
+   */
+  pullRequests: (taskId: string) =>
+    queryOptions({
+      queryKey: keys.pullRequests(taskId),
+      queryFn: () => api.getThreadPullRequests(taskId),
+      refetchInterval: 60_000,
+    }),
+  pullRequest: (taskId: string, repo: string, number: number) =>
+    queryOptions({
+      queryKey: keys.pullRequest(taskId, repo, number),
+      queryFn: () => api.getThreadPullRequest(taskId, repo, number),
+    }),
+  pullRequestDiff: (taskId: string, repo: string, number: number) =>
+    queryOptions({
+      queryKey: keys.pullRequestDiff(taskId, repo, number),
+      queryFn: () => api.getThreadPullRequestDiff(taskId, repo, number),
+    }),
   files: (taskId: string, hidden: boolean) =>
     queryOptions({ queryKey: [...keys.files(taskId), hidden] as const, queryFn: () => api.getFiles(taskId, hidden) }),
   desktop: (taskId: string) =>

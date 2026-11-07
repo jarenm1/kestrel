@@ -9,21 +9,22 @@ import {
   PanelRightOpen,
   type LucideIcon,
 } from "lucide-react"
+import { threadPullRequestsOf } from "@cloudagents/protocol"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { PreviewViewer } from "@/components/PreviewViewer"
 import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
+import { PullRequestsPanel } from "@/components/pullRequests/PullRequestPanel"
 import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
 import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
-import { repoShortName } from "@/util"
 
-type TabId = "desktop" | "preview" | "diff" | "files"
+type TabId = "desktop" | "preview" | "diff" | "files" | "pull-requests"
 
 // Add a sidebar tab by adding an entry here and a case in SidebarBody.
 const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
@@ -90,13 +91,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setSidebarShare((share) => clampShare(share + delta))
   }
 
-  // Every pull request the thread owns or manages gets its own link; with several, the link names its repository.
+  // Every pull request the thread owns or manages lives behind one button; the repo button stays checkout-based.
   const checkouts = state.task?.checkouts ?? []
-  const threadPullRequests = state.task?.pullRequests ?? []
-  const pullRequests = threadPullRequests.map((pr) => {
-    const repo = threadPullRequests.length > 1 ? `${repoShortName(pr.repo)} ` : ""
-    return { id: pr.id, url: pr.url, label: `${repo}PR #${pr.number}` }
-  })
+  const pullRequests = state.task === null ? [] : threadPullRequestsOf(state.task)
+  const [onlyPullRequest] = pullRequests
+  const pullRequestLabel =
+    pullRequests.length === 1 && onlyPullRequest !== undefined ? `PR #${onlyPullRequest.number}` : "Pull requests"
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined
 
@@ -174,14 +174,23 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 </Button>
               ))}
               <div className="ml-auto flex min-w-0 items-center gap-1">
-                {pullRequests.map((pr) => (
-                  <Button key={pr.id} asChild variant="ghost" size="sm">
-                    <a href={pr.url} target="_blank" rel="noreferrer">
-                      <GitPullRequest />
-                      {pr.label}
-                    </a>
+                {pullRequests.length > 0 && (
+                  <Button
+                    variant={tab === "pull-requests" ? "soft" : "ghost"}
+                    size="sm"
+                    aria-pressed={tab === "pull-requests"}
+                    title={pullRequestLabel}
+                    onClick={() => setTab("pull-requests")}
+                  >
+                    <GitPullRequest />
+                    {pullRequests.length === 1 ? pullRequestLabel : "Pull requests"}
+                    {pullRequests.length > 1 && (
+                      <span className="rounded-full bg-white/10 px-1.5 text-[10px] tabular-nums">
+                        {pullRequests.length}
+                      </span>
+                    )}
                   </Button>
-                ))}
+                )}
               </div>
               <ThreadRepoButton checkouts={checkouts} />
               <Button
@@ -219,13 +228,24 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <t.icon />
             </Button>
           ))}
-          {pullRequests.map((pr) => (
-            <Button key={pr.id} asChild variant="ghost" size="icon" title={pr.label}>
-              <a href={pr.url} target="_blank" rel="noreferrer" aria-label={pr.label}>
+          {pullRequests.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={pullRequestLabel}
+              title={pullRequestLabel}
+              onClick={() => openTab("pull-requests")}
+            >
+              <span className="relative inline-flex">
                 <GitPullRequest />
-              </a>
+                {pullRequests.length > 1 && (
+                  <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
+                    {pullRequests.length}
+                  </span>
+                )}
+              </span>
             </Button>
-          ))}
+          )}
           {/* Bottom of the rail, under the tabs and pull requests. */}
           <div className="mt-auto">
             <ThreadRepoButton checkouts={checkouts} />
@@ -264,5 +284,7 @@ function SidebarBody({
       return <DiffPanel taskId={taskId} />
     case "files":
       return <FilesPanel taskId={taskId} />
+    case "pull-requests":
+      return <PullRequestsPanel taskId={taskId} />
   }
 }
