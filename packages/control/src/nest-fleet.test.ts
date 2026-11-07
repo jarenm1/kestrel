@@ -221,6 +221,16 @@ describe("creating a box", () => {
     expect(fleet.placement(null)).not.toBeNull()
   })
 
+  test("a failed create with a running VM keeps its reservation until capacity accounts for it", async () => {
+    await hello("host-a", [], 2)
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    fleet.result("host-a", create.commandId, false, "guest configuration failed", vmReport("box-1", create.command.vmId, 1, "running"))
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(1), runningVmIds: [create.command.vmId] })
+    expect(fleet.placement(null)).toBeNull()
+  })
+
   test("capacity before result counts a boot only once, including after reconnect", async () => {
     await hello("host-a", [], 3)
     await placeBox("alice", "box-1")

@@ -193,7 +193,7 @@ export class NestFleet {
     if (row === null || row.hostId !== hostId) return
     const kind = row.pendingKind
     this.clearPending(row)
-    if (!ok && (kind === "create" || kind === "resume")) row.bootReserved = false
+    if (!ok && (kind === "create" || kind === "resume") && vm?.state !== "running") row.bootReserved = false
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
     if (kind === "create") row.createFailed = !ok
     if (kind === "destroy" && ok) {
