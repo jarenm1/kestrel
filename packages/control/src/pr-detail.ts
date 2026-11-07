@@ -10,6 +10,7 @@ const Pull = Schema.Struct({
   requested_teams: Schema.Array(Schema.Struct({ slug: Schema.String, name: Schema.String })),
 })
 const Comment = Schema.Struct({ id: Schema.Number, body: Schema.String, user: User, created_at: Schema.String, updated_at: Schema.String })
+const InlineComment = Schema.Struct({ id: Schema.Number, path: Schema.String, line: Schema.NullOr(Schema.Number), original_line: Schema.NullOr(Schema.Number), body: Schema.String, user: User, created_at: Schema.String, html_url: Schema.String })
 const Review = Schema.Struct({ id: Schema.Number, body: Schema.NullOr(Schema.String), user: User, state: Schema.String, submitted_at: Schema.NullOr(Schema.String) })
 const Commit = Schema.Struct({ author: User })
 const Check = Schema.Struct({ name: Schema.String, status: Schema.String, conclusion: Schema.NullOr(Schema.String), html_url: Schema.NullOr(Schema.String) })
@@ -54,9 +55,21 @@ export const pullRequestDetail = async (token: string, repo: string, number: num
   const pull = await get(`/pulls/${number}`, Pull)
   if (pull === null) return null
   if (!/^[0-9a-f]{40}$/i.test(pull.head.sha)) throw new UpstreamError("GitHub returned an invalid commit SHA")
-  const [comments, reviews, commits, checks, status] = await Promise.all([
-    pages(`/issues/${number}/comments`, Comment), pages(`/pulls/${number}/reviews`, Review),
-    pages(`/pulls/${number}/commits`, Commit),
+  const [comments, inlineComments, diff, reviews, commits, checks, status] = await Promise.all([
+    pages(`/issues/${number}/comments`, Comment), pages(`/pulls/${number}/comments`, InlineComment),
+    // GitHub returns the unified diff when requested with this media type.
+    (async () => {
+      let res: Response
+      try {
+        res = await fetch(`${root}/pulls/${number}`, { redirect: "error", headers: {
+          authorization: `Bearer ${token}`, accept: "application/vnd.github.v3.diff",
+          "x-github-api-version": "2022-11-28", "user-agent": "kestrel-control-plane",
+        } })
+      } catch { throw new UpstreamError("GitHub request failed") }
+      if (!res.ok) throw new UpstreamError(`GitHub responded ${res.status}`)
+      try { return await res.text() } catch { throw new UpstreamError("GitHub returned an unexpected response") }
+    })(),
+    pages(`/pulls/${number}/reviews`, Review), pages(`/pulls/${number}/commits`, Commit),
     (async () => {
       const items: (typeof Check.Type)[] = []
       for (let page = 1; page <= MAX_PAGES; page++) {
@@ -73,10 +86,12 @@ export const pullRequestDetail = async (token: string, repo: string, number: num
     number: pull.number, title: pull.title, body: pull.body, state: pull.merged ? "merged" : pull.state,
     draft: pull.draft, author: user(pull.user), head: { ref: pull.head.ref, sha: pull.head.sha }, base: { ref: pull.base.ref },
     comments: comments.items.map((c) => ({ id: c.id, body: c.body, author: user(c.user), createdAt: c.created_at, updatedAt: c.updated_at })),
+    diff,
+    inlineComments: inlineComments.items.map((c) => ({ id: c.id, path: c.path, line: c.line, originalLine: c.original_line, author: user(c.user), body: c.body, createdAt: c.created_at, url: c.html_url })),
     contributors, requestedReviewers: pull.requested_reviewers.map(user), requestedTeams: pull.requested_teams,
     reviews: reviews.items.map((r) => ({ id: r.id, body: r.body, author: user(r.user), state: r.state, submittedAt: r.submitted_at })),
     checks: { runs: checks.items.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion, url: c.html_url })),
       status: status.state, statuses: status.statuses.map((s) => ({ context: s.context, state: s.state, url: s.target_url, description: s.description })) },
-    truncated: { comments: comments.truncated, reviews: reviews.truncated, contributors: commits.truncated, checks: checks.truncated, statuses: status.statuses.length >= 100 },
+    truncated: { comments: comments.truncated, inlineComments: inlineComments.truncated, reviews: reviews.truncated, contributors: commits.truncated, checks: checks.truncated, statuses: status.statuses.length >= 100 },
   }
 }
