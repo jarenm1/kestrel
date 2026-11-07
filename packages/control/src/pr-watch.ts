@@ -32,7 +32,7 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)
-  if (task._tag === "Left" || task.right.checkouts.length !== 1 || task.right.checkouts[0]?.repo.toLowerCase() !== repo.toLowerCase() || task.right.checkouts[0]?.pullRequest?.number !== body.number) {
+  if (task._tag === "Left" || task.right.checkouts.length !== 1 || task.right.checkouts[0]?.repo.toLowerCase() !== repo.toLowerCase() || ![...(task.right.checkouts[0]?.pullRequests ?? []), ...(task.right.checkouts[0]?.pullRequest ? [task.right.checkouts[0].pullRequest] : [])].some((pr) => pr.number === body.number)) {
     return errorResponse(409, "Conflict", "thread must have one checkout linked to this pull request")
   }
   if (task.right.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")

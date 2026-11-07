@@ -12,7 +12,7 @@ export interface GitHubToolDeps {
       taskId: string,
       input: { readonly title: string; readonly body: string; readonly draft: boolean; readonly checkoutId?: string; readonly branch?: string },
     ) => Effect.Effect<{ readonly pullRequest: PullRequest; readonly created: boolean }, unknown>
-    readonly pullRequestStatus: (taskId: string, checkoutId?: string) => Effect.Effect<PullRequestStatus, unknown>
+    readonly pullRequestStatus: (taskId: string, checkoutId?: string, number?: number) => Effect.Effect<PullRequestStatus, unknown>
     readonly readReference: (
       taskId: string,
       input: { readonly repo: string; readonly number: number; readonly kind: "pr" | "issue" },
@@ -176,7 +176,7 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Open a GitHub pull request from a checkout's branch into its base branch. Pushes the branch first (commit " +
-        "your work before calling this). Pass branch for a linked worktree's local branch; such a PR is not linked to the checkout. If a pull request is already open for the branch, returns that one instead.",
+        "your work before calling this). Pass branch for a linked worktree's local branch. If a pull request is already open for the branch, returns that one instead.",
       inputSchema: {
         title: z.string().describe("Pull request title"),
         body: z.string().optional().describe("Pull request description"),
@@ -209,13 +209,13 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
       description:
         "Show the live GitHub status of this task's pull request: mergeability, review decision, check results and " +
         "recent review comments. Requires a pull request opened with github_pr_create or checked out with repo_checkout.",
-      inputSchema: { checkout: checkoutArg },
+      inputSchema: { checkout: checkoutArg, number: numberArg },
     },
-    ({ checkout }: { checkout?: string }) =>
+    ({ checkout, number }: { checkout?: string; number?: number }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const status = yield* deps.github.pullRequestStatus(ctx.taskId, checkout)
+            const status = yield* deps.github.pullRequestStatus(ctx.taskId, checkout, number)
             return text(truncate(formatStatus(status)))
           }),
         ),

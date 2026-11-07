@@ -1061,20 +1061,22 @@ const create = async (run: GhRun, argv: ReadonlyArray<string>): Promise<void> =>
   const repo = await resolveRepo(run, f.string("repo"))
   const checkout = repo.checkout.checkout
   const headFlag = f.string("head")
+  let head = checkout.branch
   if (headFlag !== "") {
     const colon = headFlag.indexOf(":")
     const owner = colon === -1 ? repo.owner : headFlag.slice(0, colon)
     const branch = colon === -1 ? headFlag : headFlag.slice(colon + 1)
-    if (owner.toLowerCase() !== repo.owner.toLowerCase() || branch !== checkout.branch) {
-      throw new CommandError(`gh in Kestrel opens pull requests from the checkout's branch (${checkout.branch}); --head cannot name another`)
+    if (owner.toLowerCase() !== repo.owner.toLowerCase() || branch === "") {
+      throw new CommandError("--head cannot name another repository or an empty branch")
     }
+    head = branch
   }
-  const head = checkout.branch
   const base = f.string("base") || checkout.baseBranch
   if (head === base) throw new CommandError(`head branch ${quote(head)} is the same as base branch ${quote(base)}, cannot create a pull request`)
 
   let state = { title: "", body: "" }
   if (fill || fillFirst || fillVerbose) {
+    if (head !== checkout.branch) throw new CommandError("--fill is unavailable for another branch; pass --title and --body")
     const commits = parseCommitLog(await run.backend.commitLog(checkout.id))
     if (commits.length === 0) {
       throw new CommandError(`could not compute title or body defaults: could not find any commits between origin/${base} and ${head}`)
@@ -1124,7 +1126,7 @@ const create = async (run: GhRun, argv: ReadonlyArray<string>): Promise<void> =>
 
   let opened
   try {
-    opened = await run.backend.openPullRequest({ title: state.title, body: state.body, draft, checkoutId: checkout.id, base })
+    opened = await run.backend.openPullRequest({ title: state.title, body: state.body, draft, checkoutId: checkout.id, base, ...(head === checkout.branch ? {} : { branch: head }) })
   } catch (error) {
     throw new CommandError(`pull request create failed: ${errorMessage(error)}`)
   }

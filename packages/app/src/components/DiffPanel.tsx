@@ -8,6 +8,7 @@ import { Button } from "@cloudagents/ui/button"
 import { type DiffFile, type DiffFileStatus, type DiffLine, displayPath, parseDiff } from "@/lib/diff"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
+import { PullRequestPanel, type SelectedPr } from "@/components/PullRequestPanel"
 
 /** Files with more changed lines than this start collapsed, so one huge file does not bury the rest. */
 const LARGE_FILE_LINES = 1500
@@ -27,17 +28,21 @@ const isLarge = (file: DiffFile): boolean => file.additions + file.deletions > L
  * The thread's changes, one section per checked-out repository: every change on that checkout's branch (commits,
  * uncommitted and untracked files) against its base branch. Refetched when the thread's run events invalidate it.
  */
-export function DiffPanel({ taskId }: { taskId: string }) {
+export function DiffPanel({ taskId, selectedPr }: { taskId: string; selectedPr?: SelectedPr }) {
+  const [view, setView] = useState<"pr" | "workspace">(selectedPr ? "pr" : "workspace")
   const diff = useQuery(queries.diff(taskId))
   const checkouts = diff.data?.checkouts ?? []
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {selectedPr && <div className="flex gap-1 px-3 pb-2"><Button variant={view === "pr" ? "soft" : "ghost"} size="sm" onClick={() => setView("pr")}>Pull request</Button><Button variant={view === "workspace" ? "soft" : "ghost"} size="sm" onClick={() => setView("workspace")}>Workspace changes</Button></div>}
+      {selectedPr && view === "pr" ? <PullRequestPanel key={`${selectedPr.repo}:${selectedPr.number}`} pr={selectedPr} /> : <>
       <div className="flex justify-end px-4 pb-2">
         <Button variant="soft" size="sm" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
           {diff.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
       </div>
+      </>}
       {diff.error && <Alert className="mx-3 mb-2 w-auto">{errorText(diff.error)}</Alert>}
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-3 pb-3">
         {diff.isPending && <p className="text-muted-foreground">Loading…</p>}
@@ -58,7 +63,7 @@ export function DiffPanel({ taskId }: { taskId: string }) {
  * One checkout's changes as a scrollable buffer with a collapsible section per file. Open/closed state lives here, not
  * in the panel, because the same file path can appear under two repositories.
  */
-function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
+export function CheckoutDiffSection({ checkout }: { checkout: CheckoutDiff }) {
   const files = useMemo(() => parseDiff(checkout.diff), [checkout.diff])
   // Explicit open/closed choices by file; files without one use their default (large files closed).
   const [collapsedByKey, setCollapsedByKey] = useState<ReadonlyMap<string, boolean>>(new Map())

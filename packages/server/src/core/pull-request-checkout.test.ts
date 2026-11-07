@@ -78,6 +78,7 @@ const withCore = async <A>(
   origin: string,
   root: string,
   body: (core: CoreService["Type"], threadDir: string) => Effect.Effect<A, unknown, never>,
+  githubOverrides: Record<string, unknown> = {},
 ): Promise<A> => {
   const config = {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
@@ -107,6 +108,7 @@ const withCore = async <A>(
       getPullRequestStatus: () => Effect.succeed(status),
       // Linked checkouts must never need the lookup by branch.
       findOpenPullRequest: () => Effect.succeed(null),
+      ...githubOverrides,
     } as never),
     Layer.succeed(CliAuth, {} as never),
     Layer.succeed(CredentialBroker, {} as never),
@@ -133,6 +135,27 @@ const newRoot = async (): Promise<string> => {
 }
 
 describe("repo_checkout with a pull request", () => {
+  test("records stacked and subsequent pull requests without losing the original", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    let next = 8
+    await withCore(prStatus({}), origin, root, (core, threadDir) =>
+      Effect.gen(function* () {
+        const { checkout } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        const dir = join(threadDir, checkout.dir)
+        const worktree = join(threadDir, "stack")
+        git(dir, ["worktree", "add", "-b", "stack", worktree])
+        yield* core.openPullRequest("t1", { title: "Stack", body: "", draft: false, branch: "stack", base: "topic" })
+        yield* core.openPullRequest("t1", { title: "Next", body: "", draft: false, branch: "stack", base: "main" })
+        const task = yield* core.getTask("owner", "t1")
+        expect(task.checkouts[0]?.pullRequest?.number).toBe(7)
+        expect(task.checkouts[0]?.pullRequests?.map((pr) => [pr.number, pr.headBranch, pr.baseBranch])).toEqual([
+          [7, "topic", "main"], [8, "stack", "topic"], [9, "stack", "main"],
+        ])
+      }),
+      { createPullRequest: (_token: unknown, _repo: unknown, input: { head: string; base: string }) => Effect.succeed(prStatus({ number: next++, headRef: input.head, baseRef: input.base })) },
+    )
+  })
   test("pushes an explicit worktree branch and refuses the default branch", async () => {
     const root = await newRoot()
     const { origin } = await makeOrigin(root, "topic")

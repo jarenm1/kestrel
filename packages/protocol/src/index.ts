@@ -26,6 +26,9 @@ export type TaskStatus = typeof TaskStatus.Type
 export const PullRequestLink = Schema.Struct({
   number: Schema.Number,
   url: Schema.String,
+  /** Head and base branches, when known. Older persisted links may omit them. */
+  headBranch: Schema.optional(Schema.String),
+  baseBranch: Schema.optional(Schema.String),
 })
 export type PullRequestLink = typeof PullRequestLink.Type
 
@@ -56,6 +59,8 @@ export const Checkout = Schema.Struct({
   createdAt: Schema.String,
   /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
   pullRequest: Schema.optional(PullRequestLink),
+  /** All pull requests associated with this checkout, including completed and stacked requests. */
+  pullRequests: Schema.optional(Schema.Array(PullRequestLink)),
   /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
   pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
