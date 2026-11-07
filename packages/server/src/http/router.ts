@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
 import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
-import { Paths, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadSettings } from "@cloudagents/protocol"
+import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
 import type { BoxCapabilities } from "@cloudagents/protocol"
@@ -356,13 +356,17 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
         (body) => core.githubActivity(user, id, body.repo, body.number, body.kind, body.deliveryId),
       )))),
     ),
-    // The control plane dropped a watch (its pull request closed on GitHub): clear the registry's watch mark. The entry
-    // itself stays, because the thread still manages the pull request.
+    // The control plane dropped a watch (its pull request closed on GitHub): clear the registry's watch mark. A late or
+    // repeated call is a no-op; the entry stays because the thread still manages the pull request.
     HttpRouter.post(
-      "/api/tasks/:id/pull-requests/unwatched",
+      "/api/tasks/:id/pull-request/watching",
       Effect.flatMap(pathId, (id) => noContent(signedIn((user) => Effect.flatMap(
-        jsonBody(Schema.Struct({ repo: Schema.String, number: Schema.Number })),
-        (body) => Effect.asVoid(Effect.zipRight(core.getTask(user, id), core.setPullRequestWatching(id, body.repo, body.number, false))),
+        jsonBody(SetPullRequestWatchingBody),
+        (body) => Effect.zipRight(
+          core.getTask(user, id),
+          // The control plane only sends `watching: false`; `true` is not this route's business.
+          body.watching ? Effect.void : core.forgetPullRequestWatch(id, body.repo, body.number),
+        ),
       )))),
     ),
     HttpRouter.post(

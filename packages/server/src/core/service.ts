@@ -514,6 +514,11 @@ export interface CoreShape {
   /** Stops the thread watching every pull request it watches. */
   readonly clearPullRequestWatching: (taskId: string) => Effect.Effect<Task, NotFound | InternalError>
   /**
+   * Used by the control plane when it drops a watch: clears the thread's watch mark for one pull request. A no-op when
+   * the entry is gone, so a late or repeated cleanup does not fail.
+   */
+  readonly forgetPullRequestWatch: (taskId: string, repo: string, number: number) => Effect.Effect<void, NotFound | InternalError>
+  /**
    * Used by the MCP handler (`github_reference_read`): reads an issue or pull request in an explicit repository with
    * the thread owner's GitHub token. No checkout is needed, and the token stays host-side.
    */
@@ -2923,6 +2928,24 @@ export const CoreLive = Layer.effect(
           })
           hub.publish({ _tag: "task.updated", task: updated })
           return updated
+        }),
+
+      forgetPullRequestWatch: (taskId, repo, number) =>
+        Effect.gen(function* () {
+          const id = threadPullRequestId(repo, number)
+          let changed = false
+          const updated = yield* store.update((s): Either.Either<Task, NotFound> => {
+            const found = findTask(s, taskId)
+            if (Either.isLeft(found)) return Either.left(found.left)
+            const stored = found.right
+            const entry = threadPullRequestsOf(stored).find((pr) => pr.id === id)
+            if (entry === undefined || entry.watching !== true) return Either.right({ ...stored })
+            stored.pullRequests = threadPullRequestsOf(stored).map((pr) => (pr.id === id ? { ...pr, watching: false } : pr))
+            stored.updatedAt = nowIso()
+            changed = true
+            return Either.right({ ...stored })
+          })
+          if (changed) hub.publish({ _tag: "task.updated", task: updated })
         }),
 
       readReference: (taskId, input) =>

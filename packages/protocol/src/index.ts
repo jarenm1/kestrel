@@ -615,6 +615,17 @@ export type CreateTaskBody = typeof CreateTaskBody.Type
 export const SetUsageLimitAutoResumeBody = Schema.Struct({ autoResume: Schema.Boolean })
 export type SetUsageLimitAutoResumeBody = typeof SetUsageLimitAutoResumeBody.Type
 
+/**
+ * The control plane's watch state for one pull request of a thread. The box uses `watching: false` when the control
+ * plane dropped the watch (the pull request closed), to clear the registry's mark; the entry itself stays.
+ */
+export const SetPullRequestWatchingBody = Schema.Struct({
+  repo: Schema.String,
+  number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  watching: Schema.Boolean,
+})
+export type SetPullRequestWatchingBody = typeof SetPullRequestWatchingBody.Type
+
 export const SendMessageBody = Schema.Struct({
   /** May be empty when `attachments` is not. */
   text: Schema.String,
@@ -904,10 +915,10 @@ export const Paths = {
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
   /**
-   * POST `{ repo, number }`: the control plane dropped this watch (the pull request closed on GitHub). Clears the
-   * thread's watch mark; the registry entry stays because the thread still manages the pull request.
+   * POST `SetPullRequestWatchingBody`: the control plane dropped this watch (the pull request closed). Clears the
+   * thread's watch mark; a late or repeated call is a no-op, and the registry entry stays.
    */
-  taskPullRequestUnwatched: (id: string) => `/api/tasks/${id}/pull-requests/unwatched`,
+  taskPullRequestWatching: (id: string) => `/api/tasks/${id}/pull-request/watching`,
   /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,

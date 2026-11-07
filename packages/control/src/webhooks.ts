@@ -51,9 +51,10 @@ export const handleGithubWebhook = async (request: Request, env: Env): Promise<R
     // Clear each box's watch mark too; the thread keeps the pull request in its registry. Best effort: a box that is
     // offline also misses the activity, and the delivery must not fail on it.
     for (const watch of cancelled) {
-      await hub(env).boxCall(watch.login, "POST", Paths.taskPullRequestUnwatched(watch.taskId), {
+      await hub(env).boxCall(watch.login, "POST", Paths.taskPullRequestWatching(watch.taskId), {
         repo: prEvent.repo,
         number: prEvent.pr.number,
+        watching: false,
       })
     }
   }

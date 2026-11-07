@@ -280,6 +280,29 @@ describe("repo_checkout with a pull request", () => {
     })
   }
 
+  test("a pull request on a thread branch is not the checkout's, so writes do not default to it", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    const writes: number[] = []
+    await withCore(
+      prStatus({ headRepo: "someone/widget" }),
+      origin,
+      root,
+      (core) =>
+        Effect.gen(function* () {
+          const { pullRequest } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+          expect(pullRequest?.checkoutId).toBeUndefined()
+          expect(pullRequest?.branch).toBeUndefined()
+          const failed = yield* Effect.either(core.updatePullRequest("t1", { state: "closed" }))
+          expect(Either.isLeft(failed)).toBe(true)
+        }),
+      [],
+      writes,
+    )
+    // Without a checkout link the write fails before GitHub is called.
+    expect(writes).toEqual([])
+  })
+
   test("detached starts a thread branch at the head, unlinked, as automations ask", async () => {
     const root = await newRoot()
     const { origin } = await makeOrigin(root, "topic")
@@ -432,5 +455,23 @@ describe("github_pr_status by number", () => {
       writes,
     )
     expect(writes).toEqual([])
+  })
+})
+
+describe("forgetPullRequestWatch", () => {
+  test("clears one mark and is a no-op when the entry is gone", async () => {
+    const root = await newRoot()
+    await withCore(prStatus({}), join(root, "origin"), root, (core) =>
+      Effect.gen(function* () {
+        yield* core.setPullRequestWatching("t1", "acme/other", 9, true)
+        yield* core.forgetPullRequestWatch("t1", "acme/other", 9)
+        const after = yield* core.getTask("owner", "t1")
+        expect(after.pullRequests?.find((pr) => pr.number === 9)?.watching).toBe(false)
+        // A repeated cleanup, or one for a pull request the thread never had, succeeds without changing the registry.
+        yield* core.forgetPullRequestWatch("t1", "acme/other", 9)
+        yield* core.forgetPullRequestWatch("t1", "acme/other", 404)
+        expect((yield* core.getTask("owner", "t1")).pullRequests).toHaveLength(1)
+      }),
+    )
   })
 })
