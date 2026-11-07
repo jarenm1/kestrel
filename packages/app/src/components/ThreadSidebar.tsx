@@ -328,10 +328,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   )
 }
 
-function hasActiveDescendant(id: string, childrenByParent: Map<string, Task[]>): boolean {
-  return (childrenByParent.get(id) ?? []).some((child) => child.status === "running" || child.status === "needs_input" || hasActiveDescendant(child.id, childrenByParent))
-}
-
 function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, archivingId, onArchive }: {
   task: Task
   sub?: boolean
@@ -342,13 +338,7 @@ function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, arc
   onArchive: (task: Task) => void
 }) {
   const children = childrenByParent.get(task.id) ?? []
-  const hasActive = hasActiveDescendant(task.id, childrenByParent)
-  const [expanded, setExpanded] = useState(hasActive)
-  const previousActive = useRef(hasActive)
-  useEffect(() => {
-    if (previousActive.current !== hasActive) setExpanded(hasActive)
-    previousActive.current = hasActive
-  }, [hasActive])
+  const [expanded, setExpanded] = useState(false)
   return (
     <div className="min-w-0">
       <div className="relative">
