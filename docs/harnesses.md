@@ -97,6 +97,9 @@ New models use stable `live/<provider>/<upstream-id>` identities, run only throu
 and expose no inferred thinking levels or alternate harness routes. These identities survive saved threads,
 automations and delegation without a process-global, per-user catalog registry. Compatibility metadata still
 requires review when adding effort levels, context hints or cross-harness routes; enumeration does not prove them.
+A runtime model's display name is derived from its own id (`anthropic/claude-opus-4-5` is **Claude Opus 4.5**,
+`gpt-5.6-sol` is **GPT-5.6 Sol**). It is deterministic, so a picker entry and a saved model mention agree on the name
+without a fetched catalog; the protocol id is never shown in the picker.
 
 Visibility is per model: enabling a model enables every curated harness route it supports. New models appear by
 default only while the provider follows its defaults. A saved custom visibility list is not expanded automatically;

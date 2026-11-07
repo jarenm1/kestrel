@@ -476,6 +476,19 @@ const liveModelParts = (id: string): { provider: ModelProvider; upstream: string
   return { provider, upstream }
 }
 
+/** Tokens model ids spell in capitals; everything else is capitalized as a word. */
+const NAME_ACRONYMS: Readonly<Record<string, string>> = {
+  gpt: "GPT",
+  glm: "GLM",
+  swe: "SWE",
+  ai: "AI",
+  llm: "LLM",
+  vl: "VL",
+  api: "API",
+  oss: "OSS",
+  mcp: "MCP",
+}
+
 /** Known curated routes plus bounded, shell-safe, provider-qualified native model identities. */
 export const AgentModel = Schema.String.pipe(
   Schema.filter((id): id is AgentModel => curatedModelIds.has(id) || liveModelParts(id) !== undefined),
@@ -524,6 +537,41 @@ export const mergeModelCatalog = (discovered: readonly ModelInfo[]): readonly Mo
   return [...models.values()]
 }
 
+/**
+ * A readable name for a runtime model, from its id's own words: `anthropic/claude-opus-4-5` becomes
+ * `Claude Opus 4.5`, `gpt-5.6-sol` becomes `GPT-5.6 Sol`. It is deterministic so a saved mention and every client
+ * agree on the name without carrying a per-user catalog.
+ */
+const humanizedModelName = (upstream: string): string => {
+  const leaf = upstream.slice(upstream.lastIndexOf("/") + 1).replace(/\[1m\]$/i, "")
+  const words: string[] = []
+  let afterAcronym = false
+  for (const token of leaf.split(/[-_]+/)) {
+    if (token === "") continue
+    const previous = words.at(-1)
+    // `5-1` in a version reads as `5.1`, not as two separate numbers.
+    if (/^\d+$/.test(token) && previous !== undefined && /^\d+(?:\.\d+)*$/.test(previous)) {
+      words[words.length - 1] = `${previous}.${token}`
+      afterAcronym = false
+      continue
+    }
+    // A version keeps the hyphen after an acronym: `gpt-5.6-sol` is `GPT-5.6 Sol`, not `GPT 5.6 Sol`.
+    if (afterAcronym && previous !== undefined && /^\d/.test(token)) {
+      words[words.length - 1] = `${previous}-${token}`
+      afterAcronym = false
+      continue
+    }
+    const acronym = NAME_ACRONYMS[token.toLowerCase()]
+    words.push(
+      acronym ??
+        // OpenAI's reasoning models are named in lowercase (`o3`), so keep that id's own spelling.
+        (/^o\d/.test(token) ? token : /[A-Z]/.test(token.slice(1)) ? token : `${token.charAt(0).toUpperCase()}${token.slice(1)}`),
+    )
+    afterAcronym = acronym !== undefined
+  }
+  return words.join(" ") || upstream
+}
+
 /** A source's native id, mapped back to curated metadata where it already exists. */
 export const discoveredModel = (provider: ModelProvider, upstream: string): ModelInfo | undefined => {
   const id = `live/${provider}/${upstream}`
@@ -531,10 +579,11 @@ export const discoveredModel = (provider: ModelProvider, upstream: string): Mode
   const known = BASE_AGENT_MODELS.find((model) =>
     model.provider === provider && (model.upstreamModel ?? model.id).replace(/\[1m\]$/i, "") === upstream.replace(/\[1m\]$/i, ""),
   )
-  return known ?? {
+  if (known !== undefined) return known
+  return {
     id: id as AgentModel,
     provider,
-    name: upstream,
+    name: humanizedModelName(upstream),
     efforts: [],
     shownByDefault: true,
     upstreamModel: upstream,
@@ -576,7 +625,12 @@ export const modelInfo = (id: AgentModel): ModelInfo => {
   if (info === undefined) {
     const live = liveModelParts(id)
     if (live !== undefined) return {
-      id, provider: live.provider, name: live.upstream, efforts: [], shownByDefault: true, upstreamModel: live.upstream,
+      id,
+      provider: live.provider,
+      name: humanizedModelName(live.upstream),
+      efforts: [],
+      shownByDefault: true,
+      upstreamModel: live.upstream,
     }
     throw new Error(`unknown model ${id}`)
   }

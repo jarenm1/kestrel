@@ -14,6 +14,31 @@ test("new provider models survive wire validation and stateless routing", () => 
   expect(Schema.is(SendMessageBody)({ text: "hello", model: model.id, effort: "high" })).toBe(false)
 })
 
+test("runtime ids get readable names from their own words, not the slug", () => {
+  const names = [
+    ["openai", "gpt-5.6-sol"],
+    ["openai", "gpt-unreleased-9"],
+    ["devin", "swe-2-high"],
+    ["devin", "claude-future-5-1"],
+    ["anthropic", "claude-opus-5-5-experimental"],
+    ["opencode", "opencode/big-pickle"],
+    ["opencode-go", "opencode-go/glm-5.3"],
+    ["zai", "glm-5.4-flash"],
+  ].map(([provider, upstream]) => discoveredModel(provider as Parameters<typeof discoveredModel>[0], upstream!)?.name)
+  expect(names).toEqual([
+    "GPT-5.6 Sol",
+    "GPT Unreleased 9",
+    "SWE-2 High",
+    "Claude Future 5.1",
+    "Claude Opus 5.5 Experimental",
+    "Big Pickle",
+    "GLM-5.3",
+    "GLM-5.4 Flash",
+  ])
+  // A saved mention names the model the same way without a fetched catalog, so its chip stays valid.
+  expect(modelInfo("live/openai/gpt-5.6-sol").name).toBe("GPT-5.6 Sol")
+})
+
 test("provider identities do not collide and native OpenCode prefixes reach the CLI", () => {
   const direct = discoveredModel("deepseek", "future-model")!
   const gateway = discoveredModel("openrouter", "future-model")!

@@ -114,7 +114,7 @@ describe("toModelInfos", () => {
       {
         id: "live/openai/gpt-unreleased-9",
         provider: "openai",
-        name: "gpt-unreleased-9",
+        name: "GPT Unreleased 9",
         efforts: [],
         shownByDefault: true,
         upstreamModel: "gpt-unreleased-9",
