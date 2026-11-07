@@ -36,7 +36,7 @@ import {
   Workflow,
 } from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
-import { sameBox } from "@/api/client";
+import { isUnreachableError, sameBox } from "@/api/client";
 import { createQueries } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";
 import { KestrelMark } from "@/components/KestrelMark";
@@ -425,7 +425,8 @@ export function ThreadSidebar({ bottomInset }: { bottomInset: number }) {
             {sources.map((source, i) => {
               const query = tasksByBox[i];
               if (query.error) {
-                return (
+                // A box that is merely unreachable is already shown by its indicator; only a real refusal is worth a row.
+                return isUnreachableError(query.error) ? null : (
                   <Alert key={source.api.boxScope} style={styles.alert}>
                     {`${source.label}: ${errorText(query.error)}`}
                   </Alert>

@@ -57,6 +57,14 @@ export class ApiError extends Error {
   }
 }
 
+/** Statuses that mean the box never answered: a failed connection (0) or a gateway that could not reach it. */
+const UNREACHABLE_STATUSES: readonly number[] = [0, 502, 503, 504];
+
+/** True when a failure is one of transport: the box is down or unreachable, rather than the request being refused. */
+export function isUnreachableError(error: unknown): boolean {
+  return error instanceof ApiError && UNREACHABLE_STATUSES.includes(error.status);
+}
+
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 function errorMessage(text: string, fallback: string): string {

@@ -58,6 +58,10 @@ implementation; Expo bundles that surface locally for native iOS/Android through
 as ordinary GitHub Markdown links with explicit repository, kind and number, so drafts and messages cross UI
 surfaces without a protocol change. See [mobile references](../packages/mobile/README.md#github-references).
 
+Chat box availability is shown by the box activity indicator, not a global offline banner or sidebar connectivity
+alert. Losing the live connection warns only while an agent turn is running; idle reconnects stay quiet. Failed
+prompt submissions still show an error beside the composer and keep the draft available to retry.
+
 In desktop Settings, Profile manages GitHub repository access, including connecting and reconnecting OAuth.
 The repository picker sends users without a GitHub connection to Profile to set up that access.
 Connections contains only model access: **Harnesses/Subscriptions** groups subscription sign-ins and installed

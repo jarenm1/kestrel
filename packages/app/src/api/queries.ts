@@ -4,7 +4,7 @@ import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task }
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
-/** Agent box status poll; it feeds the offline banner. */
+/** Box health poll; keeps activity indicators and box settings current. */
 const BOX_POLL_MS = 10_000
 
 export const queryClient = new QueryClient({

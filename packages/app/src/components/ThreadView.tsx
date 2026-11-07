@@ -17,7 +17,7 @@ import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
 import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
-import { Alert } from "@cloudagents/ui/alert"
+import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
@@ -113,7 +113,11 @@ export function ThreadView({ taskId }: { taskId: string }) {
     >
       <section className="relative flex min-h-0 min-w-0 flex-col">
         <ThreadBoxIndicator taskId={taskId} />
-        {state.error && <Alert className="mx-5 mt-3 w-auto">{state.error}</Alert>}
+        {state.error && (
+          <FloatingNotices>
+            <FloatingNotice>{state.error}</FloatingNotice>
+          </FloatingNotices>
+        )}
         <ChatPanel
           taskId={taskId}
           taskStatus={state.task?.status}

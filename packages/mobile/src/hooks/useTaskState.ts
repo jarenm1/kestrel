@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
+import { isUnreachableError } from "@/api/client";
 import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
+import { errorText } from "@/lib/format";
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
@@ -102,13 +104,14 @@ export function useTaskState(taskId: string) {
     };
   }, [api, taskId, generation, queryClient]);
 
+  const running = runs.data?.some((run) => run.status === "running") === true;
   const failed = [task, messages, runs].find((q) => q.error);
-  const error = disconnected
-    ? "Live updates disconnected; reconnecting…"
-    : failed?.error
-      ? failed.error instanceof Error
-        ? failed.error.message
-        : String(failed.error)
+  const failure = failed?.error;
+  // Background reconnects and an unreachable box already show in the box indicator. Only an active turn is interrupted.
+  const error = disconnected && running
+    ? "The connection to this turn's box was lost. Reconnecting…"
+    : failure && !isUnreachableError(failure)
+      ? errorText(failure)
       : null;
 
   return {
