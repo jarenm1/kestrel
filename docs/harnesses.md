@@ -15,6 +15,7 @@ per-thread harness picker. OMP, Pi and Hermes remain retired.
 | OpenCode Go key | OpenCode, Claude Code, Codex |
 | Claude / ChatGPT subscription | Its own native CLI only |
 | OpenCode free / Google sign-in | OpenCode / Antigravity respectively |
+| Devin account | Devin CLI |
 
 Only routes supported by the selected box and the connected credential are offered. Selecting an API provider
 under another harness does not authorize that harness to use a Claude or ChatGPT subscription.
@@ -52,6 +53,8 @@ Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/)
 - OpenCode Go requests retain session headers and carry a stable session identity and identifying user agent,
   as required by [Go's client policy](https://opencode.ai/docs/console/go/#where-can-i-use-it).
 - Google runs use the user's Antigravity login, not a Google API key. Its directory contains the sign-in token and sessions.
+- Devin runs use the user's Devin CLI login (`devin/credentials.toml` under its own `XDG_DATA_HOME`). `devin acp` cannot
+  resume a session, so each Devin run starts a new one carrying the thread's saved conversation.
 - Native sessions are isolated by both provider and harness. Switching harnesses cannot resume the other
   harness's session; returning to a route can resume its own usable session.
 - CLI login directories carry a persistent `.kestrel-session-generation` marker. Native sessions are resumed only
@@ -103,6 +106,7 @@ Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit
 | API providers in OpenCode | OpenCode 2.1+ | Thread-local sessions; broker token only | `CLOUDAGENTS_OPENCODE_COMMAND` |
 | Codex routes (`@codex`) | Codex CLI on PATH | Thread-local sessions; broker token only | `CLOUDAGENTS_CODEX_COMMAND` (native OpenAI runs keep `CLOUDAGENTS_OPENAI_COMMAND`) |
 | Google | Antigravity CLI 1.5+ (`agy`, pinned by the flake) | `<dataDir>/users/<login>/antigravity` | `CLOUDAGENTS_GOOGLE_COMMAND` |
+| Devin | Devin CLI (`devin`, pinned by the flake; `curl -fsSL https://cli.devin.ai/install.sh \| bash`) | `<dataDir>/users/<login>/devin` | `CLOUDAGENTS_DEVIN_COMMAND` |
 
 An OpenCode command override must not inline `OPENCODE_CONFIG_CONTENT`: the box sets that per run, and an inline
 assignment shadows the generated route provider. The box warns at startup if it sees one.
@@ -131,6 +135,11 @@ Google signs in through Settings › Connections: the box runs `agy acp --login 
 back the code shown by Google (or that page's URL). Antigravity 1.5 is required for terminal sign-in and `session/resume`.
 The Connections row shows the signed-in Google email when agy's stored token carries one; otherwise it stays blank.
 
+Devin signs in through Settings › Connections: the box runs `devin auth login --force-manual-token-flow` under
+`script`'s pseudo-terminal (the CLI reads the code only from a terminal), and the user sends back the code shown on the
+app.devin.ai page it links. The catalog offers Devin's Adaptive router and SWE-1.6 Fast, as values of `devin acp`'s
+`model` session option.
+
 ## Selected-box availability and installed clients
 
 The box reports runnable providers in `GET /api/capabilities` (`harnesses`). Both clients combine Worker-stored
@@ -150,7 +159,7 @@ providers, keeping new logins available without breaking an older decoder.
 
 - Capability probes use the configured `CLOUDAGENTS_*_COMMAND`, including native-binary overrides and minimum versions.
 - Each ACP launch rechecks only its selected provider's command/version, so a removed or downgraded CLI fails before launch.
-- With `CLOUDAGENTS_FAKE_AGENT=1`, the scripted agent supports Anthropic, OpenAI, free OpenCode, Go and Google; other
+- With `CLOUDAGENTS_FAKE_AGENT=1`, the scripted agent supports Anthropic, OpenAI, free OpenCode, Go, Google and Devin; other
   provider commands are unavailable in that mode.
 
 The ACP driver remains shared in `packages/server/src/core/acp.ts`; transcript items are decoded in `core/transcript.ts`.

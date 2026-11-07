@@ -234,7 +234,7 @@ export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.m
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
 /** Logins of the official agent CLIs, held per user on the box. */
-export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go", "opencode")
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go", "opencode", "devin-cli")
 export type CliProvider = typeof CliProvider.Type
 
 /**
@@ -247,6 +247,7 @@ export const CLI_SIGN_IN = {
   "antigravity-cli": "page",
   "opencode-go": "key",
   opencode: "page",
+  "devin-cli": "page",
 } as const satisfies Record<CliProvider, "page" | "key">
 export type CliSignIn = (typeof CLI_SIGN_IN)[CliProvider]
 
@@ -355,6 +356,7 @@ export type UseBankedResetResult = typeof UseBankedResetResult.Type
  * - claude-cli: open `url`, sign in, then send the code Anthropic shows to `cliLoginCode` (`needsCode`).
  * - codex-cli: open `url` and enter `userCode`; the box notices completion itself (poll `cliAuth`).
  * - antigravity-cli: open `url`, sign in with Google, then send the code the page shows (or its URL) to `cliLoginCode`.
+ * - devin-cli: open `url`, sign in to Devin, then send the code the page shows to `cliLoginCode`.
  */
 export const CliLoginStart = Schema.Struct({
   provider: CliProvider,

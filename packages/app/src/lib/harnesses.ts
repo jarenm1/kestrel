@@ -4,8 +4,9 @@ import claudeLogo from "@/assets/claude.svg"
 import openaiLogo from "@/assets/openai.svg"
 import antigravityLogo from "@/assets/antigravity.svg"
 import opencodeLogo from "@/assets/opencode.svg"
+import devinLogo from "@/assets/devin.svg"
 
-export type HarnessId = "claude" | "codex" | "opencode" | "antigravity"
+export type HarnessId = "claude" | "codex" | "opencode" | "antigravity" | "devin"
 
 /** An agent CLI the box runs models in, with the logo the connections page and the model picker show for it. */
 export interface Harness {
@@ -24,6 +25,7 @@ export const HARNESSES: readonly Harness[] = [
   { id: "codex", name: "Codex", logo: openaiLogo, monochrome: true, connection: "codex-cli" },
   { id: "opencode", name: "OpenCode", logo: opencodeLogo, monochrome: true, connection: "opencode" },
   { id: "antigravity", name: "Antigravity", logo: antigravityLogo, monochrome: false, connection: "antigravity-cli" },
+  { id: "devin", name: "Devin", logo: devinLogo, monochrome: true, connection: "devin-cli" },
 ]
 
 export const harnessById = (id: ModelMentionHarness): Harness =>

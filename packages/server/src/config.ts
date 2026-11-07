@@ -107,6 +107,13 @@ export const opencodeRouteModel = (upstreamModel: string): string => `${OPENCODE
 const DEFAULT_GOOGLE_COMMAND =
   'agy acp --gemini-dir "${AGY_GEMINI_DIR:-$HOME/.gemini}" --dangerously-skip-permissions --disable-telemetry'
 
+/**
+ * Devin CLI runs as an ACP server on stdio as well. It reads the API token `devin auth login` stored under
+ * `$XDG_DATA_HOME/devin`, the user's login directory when they are signed in (see `AGENT_CLIS`), which a Devin run
+ * needs, since its models are reached only through that account.
+ */
+const DEFAULT_DEVIN_COMMAND = "devin acp"
+
 export interface ServerConfig {
   readonly port: number
   readonly host: string
@@ -234,6 +241,7 @@ export const loadConfig = (): ServerConfig => {
         opencode: fakeCommand,
         "opencode-go": fakeCommand,
         google: fakeCommand,
+        devin: fakeCommand,
       }
     : {
         anthropic: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
@@ -247,6 +255,7 @@ export const loadConfig = (): ServerConfig => {
         opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
         "opencode-go": process.env.CLOUDAGENTS_OPENCODE_GO_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
         google: process.env.CLOUDAGENTS_GOOGLE_COMMAND ?? DEFAULT_GOOGLE_COMMAND,
+        devin: process.env.CLOUDAGENTS_DEVIN_COMMAND ?? DEFAULT_DEVIN_COMMAND,
       }
   // A routed model uses the canonical command for its harness, not the provider's current-harness override.
   const agentRouteCommands: Record<RouteHarness, string> = fakeAgent

@@ -2,7 +2,7 @@ import { Schema } from "effect"
 
 /**
  * Anthropic and the third-party gateways run through Claude Code, OpenAI through codex, and OpenCode (its free models
- * and its Go plan) and Antigravity CLI run their own providers' models over the Agent Client Protocol.
+ * and its Go plan), Antigravity CLI and Devin CLI run their own providers' models over the Agent Client Protocol.
  */
 export const ModelProvider = Schema.Literal(
   "anthropic",
@@ -15,6 +15,7 @@ export const ModelProvider = Schema.Literal(
   "opencode",
   "opencode-go",
   "google",
+  "devin",
 )
 export type ModelProvider = typeof ModelProvider.Type
 
@@ -36,10 +37,10 @@ export const EFFORT_LABELS: Record<AgentEffort, string> = {
 
 /**
  * The harness a model's route runs in. A base model id uses its provider's current harness; a route id names another
- * compatible harness explicitly (`${baseId}@${harness}`). Antigravity is not a route suffix: Google's models are only
- * available through that CLI.
+ * compatible harness explicitly (`${baseId}@${harness}`). Antigravity and Devin are not route suffixes: Google's and
+ * Devin's models are only available through their own CLIs.
  */
-export const ModelHarness = Schema.Literal("claude", "codex", "opencode", "antigravity")
+export const ModelHarness = Schema.Literal("claude", "codex", "opencode", "antigravity", "devin")
 export type ModelHarness = typeof ModelHarness.Type
 
 /** A harness a base model id can be routed to with an `@` suffix. */
@@ -58,6 +59,7 @@ export const DEFAULT_MODEL_HARNESS = {
   opencode: "opencode",
   "opencode-go": "opencode",
   google: "antigravity",
+  devin: "devin",
 } as const satisfies Record<ModelProvider, ModelHarness>
 
 /**
@@ -153,6 +155,10 @@ const BASE_MODEL_IDS = {
   ],
   google: [
     "gemini-3.8-flash",
+  ],
+  devin: [
+    "adaptive",
+    "swe-1-6-fast",
   ],
 } as const satisfies Record<ModelProvider, readonly string[]>
 
@@ -295,6 +301,9 @@ const BASE_AGENT_MODELS: readonly ModelInfo[] = [
   { id: "opencode-go/mimo-v2.5", provider: "opencode-go", name: "MiMo V2.5", efforts: [], shownByDefault: false },
   // What a signed-in Google account's Antigravity CLI offers, with its `thought_level` option.
   { id: "gemini-3.8-flash", provider: "google", name: "Gemini 3.8 Flash", efforts: ["low", "medium", "high"], shownByDefault: true },
+  // Values of Devin CLI's ACP `model` option for a signed-in Devin account: its Adaptive router and its own fast model.
+  { id: "adaptive", provider: "devin", name: "Adaptive", efforts: [], shownByDefault: true },
+  { id: "swe-1-6-fast", provider: "devin", name: "SWE-1.6 Fast", efforts: [], shownByDefault: true },
 ]
 
 /**
@@ -409,6 +418,7 @@ export const MODEL_PROVIDERS: readonly ModelProviderInfo[] = [
   // OpenCode Go runs on the same OpenCode CLI (2.1), but needs the Go plan's key.
   { id: "opencode-go", name: "OpenCode Go", connections: ["opencode-go"] },
   { id: "google", name: "Google", connections: ["antigravity-cli"] },
+  { id: "devin", name: "Devin", connections: ["devin-cli"] },
 ]
 
 /** The provider a message without a model runs on: the box's default harness. */

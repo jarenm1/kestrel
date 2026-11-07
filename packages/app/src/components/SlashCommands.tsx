@@ -17,6 +17,7 @@ const HARNESS_LABELS: Record<ModelMentionHarness, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   antigravity: "Antigravity",
+  devin: "Devin",
 }
 
 function StateLine({ children }: { children: ReactNode }) {

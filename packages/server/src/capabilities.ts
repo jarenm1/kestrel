@@ -202,7 +202,12 @@ export const availableModelHarnesses = (
   if (config.fakeAgent) return ModelHarness.literals
   return ModelHarness.literals.filter((actual) => {
     const definition = harnessForRoute(actual)
-    const command = actual === "antigravity" ? config.agentCommands?.google : config.agentRouteCommands?.[actual]
+    const command =
+      actual === "antigravity"
+        ? config.agentCommands?.google
+        : actual === "devin"
+          ? config.agentCommands?.devin
+          : config.agentRouteCommands?.[actual]
     const binary = command === undefined ? definition.bin : harnessBinary(command)
     if (binary === null) return false
     const path = probe.which(binary)

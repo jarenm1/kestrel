@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import type { CliAuthStatus } from "@cloudagents/protocol"
 import type { ServerConfig } from "./config"
 import { Config } from "./config"
@@ -140,5 +140,72 @@ describe("Antigravity account label", () => {
   test("reports signed out when the user has no token file", async () => {
     const root = rootFor()
     expect(antigravity(await statusesFor(root))).toEqual({ provider: "antigravity-cli", loggedIn: false, account: null })
+  })
+})
+
+/**
+ * A stand-in for `devin auth login --force-manual-token-flow`: like the real CLI it refuses to read the code without a
+ * terminal, prints the sign-in link, and stores its credentials file only for an accepted code.
+ */
+const FAKE_DEVIN = `#!/bin/sh
+if [ "$1 $2" = "auth login" ]; then
+  if [ ! -t 0 ]; then echo "Error: Failed to read code - user canceled"; exit 1; fi
+  echo "Visit https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1 to sign in, then copy the code and paste it below."
+  read code
+  if [ "$code" = "good-code" ]; then
+    mkdir -p "$XDG_DATA_HOME/devin"
+    printf 'api_key = "secret-devin-token"\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
+    exit 0
+  fi
+  echo "Error: Failed to exchange code for host https://app.devin.ai"
+  exit 1
+fi
+exit 0
+`
+
+describe.skipIf(process.platform === "win32")("Devin sign-in", () => {
+  const runtimes: Array<ManagedRuntime.ManagedRuntime<CliAuth, never>> = []
+  afterEach(async () => {
+    for (const runtime of runtimes.splice(0)) await runtime.dispose()
+  })
+
+  const devinAuth = (root: string) => {
+    writeFileSync(join(root, "bin", "devin"), FAKE_DEVIN)
+    chmodSync(join(root, "bin", "devin"), 0o755)
+    const config = {
+      dataDir: root,
+      sandbox: "off",
+      sandboxPath: `${join(root, "bin")}:/usr/bin:/bin`,
+      sandboxSslCertFile: null,
+    } as unknown as ServerConfig
+    // One runtime for the whole sign-in: the pending CLI lives in the CliAuth instance that started it.
+    const runtime = ManagedRuntime.make(CliAuthLive.pipe(Layer.provide(Layer.succeed(Config, config))))
+    runtimes.push(runtime)
+    return <A, E>(f: (auth: Effect.Effect.Success<typeof CliAuth>) => Effect.Effect<A, E>) =>
+      runtime.runPromise(Effect.flatMap(CliAuth, f))
+  }
+
+  test("runs the CLI in a terminal, takes the pasted code and reads the stored credentials", async () => {
+    const run = devinAuth(rootFor())
+    const start = await run((auth) => auth.startLogin("alice", "devin-cli"))
+    expect(start).toMatchObject({
+      provider: "devin-cli",
+      url: "https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1",
+      userCode: null,
+      needsCode: true,
+    })
+    const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code"))
+    expect(status).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
+    expect(JSON.stringify(status)).not.toContain("secret-devin-token")
+  })
+
+  test("reports the CLI's refusal of a code without echoing it", async () => {
+    const run = devinAuth(rootFor())
+    await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const failure = await run((auth) => Effect.flip(auth.submitCode("alice", "devin-cli", "bad-code-123")))
+    expect(failure.message).toContain("Failed to exchange code")
+    expect(failure.message).not.toContain("bad-code-123")
+    const statuses = await run((auth) => auth.status("alice"))
+    expect(statuses.find((row) => row.provider === "devin-cli")).toEqual({ provider: "devin-cli", loggedIn: false, account: null })
   })
 })

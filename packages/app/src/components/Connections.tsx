@@ -50,6 +50,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
   "opencode": "Sign in with OpenCode Console to use free models. The login stays in OpenCode on your box.",
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
+  "devin-cli": "Use your own Devin account through Devin CLI.",
 }
 
 /** Key-based CLI logins belong with API keys, but keep their box-local authentication. */

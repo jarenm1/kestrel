@@ -5,11 +5,11 @@ import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 
 /**
- * Providers Kestrel brokers model calls for. Free OpenCode and Antigravity are not broker providers: they reach their
+ * Providers Kestrel brokers model calls for. Free OpenCode, Antigravity and Devin are not broker providers: they reach their
  * own models only through the user's own sign-in. OpenCode Go is brokered when another harness runs its models
  * (`<id>@claude`, `<id>@codex`): its key lives in the user's OpenCode credential store, not in Kestrel's.
  */
-export type BrokerProvider = Exclude<ModelProvider, "opencode" | "google">
+export type BrokerProvider = Exclude<ModelProvider, "opencode" | "google" | "devin">
 
 /** A native model API a brokered request can speak. */
 export type BrokerApi = "anthropic" | "openai"
@@ -109,7 +109,7 @@ export const BROKER_UPSTREAMS: Record<BrokerProvider, BrokerUpstreams> = {
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>
 
 /** The harness a provider's models run in by default; a route id names a different one explicitly. */
-export type BrokerHarness = Exclude<ModelHarness, "antigravity">
+export type BrokerHarness = Exclude<ModelHarness, "antigravity" | "devin">
 
 /** The native API a harness speaks at the broker. Codex reads Responses (`wire_api = "responses"`). */
 export const brokerApiFor = (harness: BrokerHarness): BrokerApi => (harness === "codex" ? "openai" : "anthropic")

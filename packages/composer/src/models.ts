@@ -20,13 +20,14 @@ import {
 export type ModelMentionHarness = ModelHarness
 
 /** The picker rail's order, independent of the catalog's provider order. */
-const HARNESS_ORDER: readonly ModelMentionHarness[] = ["claude", "codex", "opencode", "antigravity"]
+const HARNESS_ORDER: readonly ModelMentionHarness[] = ["claude", "codex", "opencode", "antigravity", "devin"]
 
 const HARNESS_NAMES: Record<ModelMentionHarness, string> = {
   claude: "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
   antigravity: "Antigravity",
+  devin: "Devin",
 }
 
 /** One model as a mention: exactly what the harness needs to delegate to it, plus what the menu shows. */
@@ -200,10 +201,10 @@ export function modelMentionTypedText(mention: ModelMention): string {
 }
 
 const MODEL_MENTION_MARKDOWN =
-  /^\[@([^\]\n]+)\]\(model:([^)?\s]+)\?provider=([^&\s)]+)&harness=(claude|codex|opencode|antigravity)\)$/
+  /^\[@([^\]\n]+)\]\(model:([^)?\s]+)\?provider=([^&\s)]+)&harness=(claude|codex|opencode|antigravity|devin)\)$/
 
 const MODEL_MENTION_IN_DRAFT =
-  /\[@([^\]\n]+)\]\(model:([^)?\s]+)\?provider=([^&\s)]+)&harness=(claude|codex|opencode|antigravity)\)/g
+  /\[@([^\]\n]+)\]\(model:([^)?\s]+)\?provider=([^&\s)]+)&harness=(claude|codex|opencode|antigravity|devin)\)/g
 
 /** Validates the four fields against the catalog; a link naming an unknown model (or another provider/harness) is text. */
 function mentionFromParts(

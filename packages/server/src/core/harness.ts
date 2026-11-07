@@ -874,6 +874,7 @@ export const AgentHarnessLive = Layer.effect(
               ? "task-home"
               : yield* sessionGeneration.withPermits(1)(loginContinuation(login.dir))
             const resumed =
+              harness.resume &&
               start.resume !== null &&
               start.resume.continuation === continuation &&
               (start.resume.harness === undefined || start.resume.harness === harnessId)

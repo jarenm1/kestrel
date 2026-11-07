@@ -73,6 +73,7 @@ test("a fake-agent box plays every harness itself", () => {
     "opencode",
     "opencode-go",
     "google",
+    "devin",
   ])
 })
 
@@ -85,10 +86,12 @@ test("route harnesses need their own CLI and OpenCode route minimum", () => {
   expect(availableModelHarnesses(box, probe({ opencode: "opencode v2.0.7" }))).toEqual([])
   expect(availableModelHarnesses(box, probe({ opencode: "opencode v2.1.0" }))).toEqual(["opencode"])
   expect(availableModelHarnesses(box, probe({ agy: "1.5.0" }))).toEqual(["antigravity"])
+  expect(availableModelHarnesses(box, probe({ devin: "devin 3000.12.17 (d23bb600ed8f)" }))).toEqual(["devin"])
   expect(availableModelHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual([
     "claude",
     "codex",
     "opencode",
     "antigravity",
+    "devin",
   ])
 })

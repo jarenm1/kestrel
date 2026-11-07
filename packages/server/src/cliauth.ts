@@ -23,6 +23,14 @@ import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 /** POSIX quoting for one argv element run through `sh -c`. */
 const posixQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`
 
+/** `argv` under `script`'s pseudo-terminal, for a CLI that reads its input only from a terminal; null on Windows. */
+const terminalCommand = (argv: ReadonlyArray<string>): ReadonlyArray<string> | null => {
+  if (process.platform === "win32") return null
+  // BSD script takes the command as arguments; util-linux script takes one shell command line.
+  if (process.platform === "darwin") return ["script", "-q", "/dev/null", ...argv]
+  return ["script", "-qfec", argv.map(posixQuote).join(" "), "/dev/null"]
+}
+
 /*
  * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). Each signed-in user's
  * login is written by the unmodified CLI into `<dataDir>/users/<login>/<provider dir>`; the CLI
@@ -282,17 +290,22 @@ export const CliAuthLive = Layer.effect(
       provider: CliProvider,
       args: ReadonlyArray<string>,
       discovery?: { readonly workspacePath: string; readonly cwd: string },
+      terminal = false,
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
         const bin = AGENT_CLIS[provider].bin
         const env = yield* cliEnv(user, provider)
+        const command = terminal ? terminalCommand([bin, ...args]) : [bin, ...args]
+        if (command === null) {
+          return yield* Effect.fail(new InternalError({ message: `${bin} signs in only from a terminal, which this box cannot provide` }))
+        }
         if (config.sandbox === "off") {
           // Windows installs the CLIs as `.cmd` shims, which spawn cannot launch directly; the repo's POSIX shell
           // runs them like agent commands do, with SystemRoot and the rest of the platform env in place.
           if (process.platform === "win32") {
-            return { file: shell(), args: ["-c", [bin, ...args].map(posixQuote).join(" ")], env }
+            return { file: shell(), args: ["-c", command.map(posixQuote).join(" ")], env }
           }
-          return { file: bin, args, env }
+          return { file: command[0] as string, args: command.slice(1), env }
         }
         const bwrap = findExecutable("bwrap")
         if (bwrap === null) return yield* Effect.fail(new InternalError({ message: "bwrap (bubblewrap) not found on PATH" }))
@@ -304,7 +317,7 @@ export const CliAuthLive = Layer.effect(
         const level = config.sandbox === "strict" ? "strict" : "basic"
         return {
           file: bwrap,
-          args: cliBwrapArgs(root, env, [bin, ...args], {
+          args: cliBwrapArgs(root, env, command, {
             ...sandbox,
             level,
             homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
@@ -572,7 +585,7 @@ export const CliAuthLive = Layer.effect(
           killEntry(previous)
           yield* Effect.promise(() => previous.done)
         }
-        const inv = yield* invoke(user, provider, signIn.args(yield* providerDir(user, provider)))
+        const inv = yield* invoke(user, provider, signIn.args(yield* providerDir(user, provider)), undefined, signIn.terminal)
         const child = yield* Effect.try({
           try: () =>
             ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
@@ -629,7 +642,8 @@ export const CliAuthLive = Layer.effect(
       Effect.gen(function* () {
         yield* rootOf(user)
         const spec = AGENT_CLIS[provider]
-        if (spec.signIn.kind !== "page" || !spec.signIn.needsCode) {
+        const signIn = spec.signIn
+        if (signIn.kind !== "page" || !signIn.needsCode) {
           return yield* Effect.fail(
             new BadRequest({ message: `${provider} signs in with a device code on the provider's page; there is no code to submit` }),
           )
@@ -644,7 +658,8 @@ export const CliAuthLive = Layer.effect(
           return yield* Effect.fail(new BadRequest({ message: `no sign-in is pending for ${provider}; start one first` }))
         }
         const before = entry.output.length
-        entry.child.stdin?.write(`${text}\n`)
+        // A terminal's Enter is a carriage return.
+        entry.child.stdin?.write(`${text}${signIn.terminal ? "\r" : "\n"}`)
         // A rejected code gets the CLI's answer while the sign-in stays pending, so the user can retry;
         // the CLI does not exit on rejection.
         const rejection = yield* Effect.promise(() =>

@@ -126,6 +126,8 @@ interface PageSignIn {
   readonly parseLoginLink: (text: string) => { readonly url: string; readonly userCode: string | null } | null
   /** Sign-in ends with a code the user pastes back; otherwise it ends on the provider's page (a device code). */
   readonly needsCode: boolean
+  /** The CLI reads the pasted code only from a terminal, so the sign-in runs under `script`'s pseudo-terminal. */
+  readonly terminal: boolean
 }
 
 /** A sign-in with the user's API key, which the CLI stores itself. */
@@ -261,6 +263,16 @@ const parseOpenCodeDeviceLoginLink = (text: string): { readonly url: string; rea
   return url === null || userCode === null ? null : { url, userCode }
 }
 
+/**
+ * `devin auth login --force-manual-token-flow` prints `Visit <link> to sign in, then copy the code and paste it below.`;
+ * under a terminal the link is also an OSC 8 hyperlink. Only a link followed by the rest of the sentence is complete.
+ */
+const parseDevinLoginLink = (text: string): { readonly url: string; readonly userCode: null } | null => {
+  const plain = text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+  const url = /(https:\/\/[^\s/]+\/auth\/cli\/continue\?\S+)\s+to sign in\b/.exec(plain)?.[1]
+  return url === undefined ? null : { url, userCode: null }
+}
+
 export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIGN_IN)[P]> } = {
   "claude-cli": {
     bin: "claude",
@@ -278,6 +290,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
         return url === undefined ? null : { url, userCode: null }
       },
       needsCode: true,
+      terminal: false,
     },
     logout: ["auth", "logout"],
     probe: { args: CLAUDE_DISCOVERY_ARGS, discoverCommands: discoverClaudeCommands, probeUsage: probeClaudeUsage, useBankedReset: null },
@@ -301,6 +314,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
         return { url, userCode }
       },
       needsCode: false,
+      terminal: false,
     },
     logout: ["logout"],
     probe: { args: CODEX_DISCOVERY_ARGS, discoverCommands: discoverCodexCommands, probeUsage: probeCodexUsage, useBankedReset: useCodexBankedReset },
@@ -326,6 +340,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
         return url === undefined ? null : { url, userCode: null }
       },
       needsCode: true,
+      terminal: false,
     },
     logout: null,
     // Its commands and limits only show inside an ACP session.
@@ -348,6 +363,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
       args: () => ["auth", "login", OPENCODE, "--method", "device", "--standalone"],
       parseLoginLink: parseOpenCodeDeviceLoginLink,
       needsCode: false,
+      terminal: false,
     },
     logout: null,
     // No probe: the Console account reports no limits through the CLI, and OpenCode's slash commands do nothing over ACP.
@@ -376,6 +392,27 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     // `auth export` prints.
     probe: { args: ["auth", "export", "--standalone"], discoverCommands: async () => [], probeUsage: probeOpenCodeGoUsage, useBankedReset: null },
   },
+  // Devin CLI keeps its API token (`devin/credentials.toml`) and its sessions under `$XDG_DATA_HOME`, like OpenCode, so
+  // the shared variable names a directory of its own. The manual flow prints an app.devin.ai link whose page shows a
+  // code; the CLI reads it back only from a terminal and exits non-zero when the exchange fails. The credentials file
+  // names no account, and `/usage` and the commands are only offered inside a session.
+  "devin-cli": {
+    bin: "devin",
+    dir: "devin",
+    configEnv: "XDG_DATA_HOME",
+    brokerEnv: [],
+    status: { kind: "file", path: "devin/credentials.toml" },
+    identity: null,
+    signIn: {
+      kind: "page",
+      args: () => ["auth", "login", "--force-manual-token-flow"],
+      parseLoginLink: parseDevinLoginLink,
+      needsCode: true,
+      terminal: true,
+    },
+    logout: ["auth", "logout"],
+    probe: null,
+  },
 }
 
 /** Every agent CLI, in a fixed order. */
@@ -400,29 +437,36 @@ export interface Harness {
   /** The oldest version (`<bin> --version`) the harness works with; null when any will do. */
   readonly minVersion: HarnessMinimum | null
   /**
+   * Whether a run can continue the thread's previous session (`session/resume`, or the CLI's own resume). Without it
+   * every run opens a new session that carries the thread's saved conversation.
+   */
+  readonly resume: boolean
+  /**
    * Whether a run gets the broker's keys. A standalone harness reaches models through the broker like a vendor CLI;
-   * OpenCode (free or Go) and Antigravity run their own provider's models, so the broker's keys would only offer them
+   * OpenCode (free or Go), Antigravity and Devin run their own provider's models, so the broker's keys would only offer them
    * models they are not there for.
    */
   readonly broker: boolean
 }
 
 export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
-  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true },
+  anthropic: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  openai: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true, resume: true },
   // Anthropic-compatible gateways run through Claude Code.
-  openrouter: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  zai: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  deepseek: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  minimax: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  openrouter: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  zai: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  deepseek: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  minimax: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  moonshot: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
   // The ACP driver is built against OpenCode 2 (`session/resume`, session config options); OpenCode 1 is its own line.
   // The free models' Console sign-in (device flow, `auth login opencode`) arrived in 2.0.7.
-  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 0, 7], broker: false },
+  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 0, 7], broker: false, resume: true },
   // The Go plan's sign-in is a key in OpenCode's credential store, which `auth import` fills from 2.1.
-  "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false },
+  "opencode-go": { conversation: "acp", cli: "opencode-go", bin: "opencode", minVersion: [2, 1], broker: false, resume: true },
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
-  google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
+  google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false, resume: true },
+  // `devin acp` answers `session/resume` with "Method not found"; its `session/load` replays the whole history instead.
+  devin: { conversation: "acp", cli: "devin-cli", bin: "devin", minVersion: null, broker: false, resume: false },
 }
 
 /**
@@ -431,9 +475,9 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
  * OpenCode's custom provider overlay (and so the API-provider routes) needs 2.1; 2.0.x refuses the model.
  */
 const ROUTE_HARNESSES: Record<RouteHarness, Harness> = {
-  claude: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
-  codex: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true },
-  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 1], broker: true },
+  claude: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true, resume: true },
+  codex: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true, resume: true },
+  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 1], broker: true, resume: true },
 }
 
 /** The harness a run actually starts: the model's route when it names one, else the provider's current harness. */
@@ -446,4 +490,4 @@ export const harnessForModel = (model: AgentModel | undefined): Harness => {
 
 /** A harness kind's route definition, for capability checks of routes independent of a provider. */
 export const harnessForRoute = (harness: ModelHarness): Harness =>
-  harness === "antigravity" ? MODEL_HARNESS.google : ROUTE_HARNESSES[harness]
+  harness === "antigravity" ? MODEL_HARNESS.google : harness === "devin" ? MODEL_HARNESS.devin : ROUTE_HARNESSES[harness]

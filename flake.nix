@@ -121,6 +121,30 @@
           }.${system};
         });
 
+        # Devin CLI ships as one static binary per platform, from the manifest its installer reads.
+        devin = pkgs.stdenvNoCC.mkDerivation rec {
+          pname = "devin-cli";
+          version = "3000.12.17";
+          src = pkgs.fetchurl {
+            x86_64-linux = {
+              url = "https://static.devin.ai/cli/${version}/devin-${version}-x86_64-unknown-linux.tar.gz";
+              sha256 = "16b1414dcb50450e654954f10cd38107f93e450d76b0dea63d0b5a65ca600d45";
+            };
+            aarch64-linux = {
+              url = "https://static.devin.ai/cli/${version}/devin-${version}-aarch64-unknown-linux.tar.gz";
+              sha256 = "e98b39e71122c82a366fdaba99dc0b0531ab0fd6c95ec78031b57db7f9bd5093";
+            };
+            aarch64-darwin = {
+              url = "https://static.devin.ai/cli/${version}/devin-${version}-aarch64-apple-darwin.tar.gz";
+              sha256 = "7331731afa01db2c4848b9435e395e4bda534db4b100c188a7efe95173e6ccac";
+            };
+          }.${system};
+          sourceRoot = ".";
+          dontConfigure = true;
+          dontBuild = true;
+          installPhase = "install -Dm755 bin/devin $out/bin/devin";
+        };
+
         # Toolchain visible inside the agent sandbox; PATH inside the sandbox is exactly this.
         sandboxEnv = pkgs.buildEnv {
           name = "cloudagents-sandbox-env";
@@ -142,6 +166,8 @@
             codex
             opencode
             agy
+            devin
+            util-linux # `script`: Devin CLI reads its sign-in code only from a terminal
             sandboxXterm # the task desktop's terminal and what the agent launches on it run sandboxed
             sandboxFirefox # a browser for desktop_launch
           ];

@@ -59,6 +59,7 @@ const harnessLayer = (
       opencode: "",
       "opencode-go": "",
       google: "",
+      devin: "",
       ...Object.fromEntries((options.gateways ?? []).map((provider) => [provider, cliCommand] as const)),
     },
     agentRouteCommands: {

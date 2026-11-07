@@ -14,6 +14,7 @@ export const HARNESSES: readonly Harness[] = [
   { id: "codex", name: "Codex" },
   { id: "opencode", name: "OpenCode" },
   { id: "antigravity", name: "Antigravity" },
+  { id: "devin", name: "Devin" },
 ];
 
 export const harnessById = (id: ModelMentionHarness): Harness =>

@@ -45,6 +45,7 @@ const appServer =
 const acp =
   harness === "opencode" ||
   harness === "antigravity" ||
+  harness === "devin" ||
   (harness === undefined && (/^opencode(-go)?\//.test(model ?? "") || model?.startsWith("gemini-") === true))
 // A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
 // `thread/start` or `thread/resume` response, an ACP run's session in `session/new` (or the one `session/resume` names).
