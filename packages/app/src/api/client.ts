@@ -65,6 +65,7 @@ import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
 import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
 import { ApiError, responseError } from "./errors"
+import { PrDetail } from "./pr-detail"
 
 type UnauthorizedListener = () => void
 const unauthorizedListeners = new Set<UnauthorizedListener>()
@@ -530,6 +531,7 @@ export const api = {
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
   /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
+  pullRequestDetail: (repo: string, number: number) => run(request(PrDetail, "GET", `/api/github/repos/${repo.split("/").map(encodeURIComponent).join("/")}/pulls/${number}`)),
   /** Branch names of a repository ("owner/name") the GitHub connection can read, the default branch first. */
   githubBranches: (repo: string) => run(request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo))),
   updateAutomation: (id: string, body: UpdateAutomationBody) =>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
 import {
   AppWindow,
+  ChevronDown,
   FolderTree,
   GitCompare,
   GitPullRequest,
@@ -17,6 +18,7 @@ import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
 import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
@@ -55,6 +57,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<TabId>("desktop")
+  const [selectedPr, setSelectedPr] = useState<string | null>(null)
+  const [prOpenCount, setPrOpenCount] = useState(0)
   // Elements picked in the preview, waiting in the composer to go with the next message.
   const [elements, setElements] = useState<readonly ElementContext[]>([])
   const gridRef = useRef<HTMLDivElement>(null)
@@ -93,10 +97,16 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // A checkout with a pull request gets its own link; with several repos checked out, the link names its repo.
   const checkouts = state.task?.checkouts ?? []
   const pullRequests = checkouts.flatMap((checkout) => {
-    if (!checkout.pullRequest) return []
     const repo = checkouts.length > 1 ? `${repoShortName(checkout.repo)} ` : ""
-    return [{ id: checkout.id, url: checkout.pullRequest.url, label: `${repo}PR #${checkout.pullRequest.number}` }]
+    const links = checkout.pullRequests ?? (checkout.pullRequest ? [checkout.pullRequest] : [])
+    return links.map((pr) => ({ id: `${checkout.id}:${pr.number}`, repo: checkout.repo, number: pr.number, url: pr.url, label: `${repo}PR #${pr.number}` }))
   })
+  const activePr = pullRequests.find((pr) => pr.id === selectedPr) ?? pullRequests[0]
+  function openPr(id: string) {
+    setSelectedPr(id)
+    setPrOpenCount((count) => count + 1)
+    openTab("diff")
+  }
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined
 
@@ -174,13 +184,19 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 </Button>
               ))}
               <div className="ml-auto flex min-w-0 items-center gap-1">
-                {pullRequests.map((pr) => (
-                  <Button key={pr.id} asChild variant="ghost" size="sm">
-                    <a href={pr.url} target="_blank" rel="noreferrer">
-                      <GitPullRequest />
-                      {pr.label}
-                    </a>
+                {activePr && (pullRequests.length === 1 ? (
+                  <Button variant="ghost" size="sm" onClick={() => openPr(activePr.id)}>
+                    <GitPullRequest />{activePr.label}
                   </Button>
+                ) : (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="sm"><GitPullRequest />{activePr.label}<ChevronDown /></Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      {pullRequests.map((pr) => <DropdownMenuItem key={pr.id} onSelect={() => openPr(pr.id)}>{pr.label}</DropdownMenuItem>)}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 ))}
               </div>
               <ThreadRepoButton checkouts={checkouts} />
@@ -198,6 +214,8 @@ export function ThreadView({ taskId }: { taskId: string }) {
               taskId={taskId}
               archived={archivedTask !== undefined}
               previewPort={state.task?.previewPort}
+              selectedPr={activePr}
+              prOpenCount={prOpenCount}
               onSelectElement={(element) => setElements((current) => [...current, element])}
             />
           </aside>
@@ -219,13 +237,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <t.icon />
             </Button>
           ))}
-          {pullRequests.map((pr) => (
-            <Button key={pr.id} asChild variant="ghost" size="icon" title={pr.label}>
-              <a href={pr.url} target="_blank" rel="noreferrer" aria-label={pr.label}>
-                <GitPullRequest />
-              </a>
-            </Button>
-          ))}
+          {activePr && <Button variant="ghost" size="icon" title={activePr.label} aria-label={activePr.label} onClick={() => openPr(activePr.id)}><GitPullRequest /></Button>}
           {/* Bottom of the rail, under the tabs and pull requests. */}
           <div className="mt-auto">
             <ThreadRepoButton checkouts={checkouts} />
@@ -241,12 +253,16 @@ function SidebarBody({
   taskId,
   archived,
   previewPort,
+  selectedPr,
+  prOpenCount,
   onSelectElement,
 }: {
   tab: TabId
   taskId: string
   archived: boolean
   previewPort: number | undefined
+  selectedPr: { repo: string; number: number; url: string; label: string } | undefined
+  prOpenCount: number
   onSelectElement: (element: ElementContext) => void
 }) {
   switch (tab) {
@@ -261,7 +277,7 @@ function SidebarBody({
       }
       return <PreviewViewer taskId={taskId} port={previewPort} onSelect={onSelectElement} />
     case "diff":
-      return <DiffPanel taskId={taskId} />
+      return <DiffPanel key={prOpenCount} taskId={taskId} selectedPr={selectedPr} />
     case "files":
       return <FilesPanel taskId={taskId} />
   }
