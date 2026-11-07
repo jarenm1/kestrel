@@ -1915,6 +1915,8 @@ export const CoreLive = Layer.effect(
           const child = s.tasks.find((t) => t.id === childTaskId)
           if (child === undefined) return Either.right(null)
           if (child.usageLimitResume === undefined && child.autoRetry === undefined) return Either.right(null)
+          // The user decided this run: recovery must not examine it again (it would after a restart) and re-arm it.
+          if (child.usageLimitResume !== undefined) runRecovery.settle(child.usageLimitResume.runId)
           delete child.usageLimitResume
           delete child.autoRetry
           return Either.right({ ...child })

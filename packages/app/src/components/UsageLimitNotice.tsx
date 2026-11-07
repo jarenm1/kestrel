@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@cloudagents/ui/button"
 import { api } from "@/api/client"
 import { keys, upsert } from "@/api/queries"
+import { errorText } from "@/util"
 
 /** When a usage-limit arm resets, in the user's locale ("Nov 7, 3:00 PM"). */
 export const resetLabel = (resetsAt: string): string => {
@@ -65,18 +66,19 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
           Return to parent now
         </Button>
       )}
-      {/* Once a delegated child's result has gone to its parent, resuming it could never reach the parent (the box refuses). */}
-      {(parentTaskId === undefined || !paused) && (
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={toggle.isPending}
-          onClick={() => toggle.mutate(paused)}
-        >
-          {paused ? "Resume at reset" : "Cancel auto-resume"}
-        </Button>
-      )}
-      {toggle.error && <span className="text-xs text-destructive">Could not change auto-resume.</span>}
+      {/*
+        A paused delegated child can resume for its parent only while its failed result has not reached the parent yet
+        (it waits while the parent is on a usage limit too). The app cannot tell, so the box decides and says why.
+      */}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={toggle.isPending}
+        onClick={() => toggle.mutate(paused)}
+      >
+        {paused ? "Resume at reset" : "Cancel auto-resume"}
+      </Button>
+      {toggle.error && <span className="text-xs text-destructive">{errorText(toggle.error)}</span>}
       {returnEarly.error && <span className="text-xs text-destructive">Could not return the task to its parent.</span>}
     </div>
   )

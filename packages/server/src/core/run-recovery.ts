@@ -372,5 +372,13 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
     Date.now() - Date.parse(run.endedAt) <= ARM_WINDOW_MS &&
     !examined.has(run.id)
 
-  return { sweep, deciding }
+  /**
+   * Marks a failed run decided by someone else: the user dropped its arm ("Return to parent now"). The look is kept in
+   * memory only, so after a restart the sweep would otherwise examine the run again and write the same arm back.
+   */
+  const settle = (runId: string): void => {
+    examined.add(runId)
+  }
+
+  return { sweep, deciding, settle }
 }

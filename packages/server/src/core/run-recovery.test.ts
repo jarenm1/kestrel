@@ -237,6 +237,17 @@ test("a failed usage probe is retried on the next sweep", async () => {
   expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
 })
 
+test("a run the user returned early is not re-armed, even by a sweep that never saw it (a restart)", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  // A fresh recovery has no record of the run, as after a box restart; the arm was already dropped by the user.
+  const { recovery, state } = setup({ state: stateWith({ runs: [failedRun(endedAt)] }), usage: usage(new Date(Date.now() + 3_600_000).toISOString()) })
+  recovery.settle("run")
+
+  expect(recovery.deciding(state.tasks[0]!, state.runs[0]!)).toBe(false)
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+})
+
 test("a failure stays undecided until its arm is written, so a delegated child's result is held meanwhile", async () => {
   const endedAt = new Date(Date.now() - 60_000).toISOString()
   const resetsAt = new Date(Date.now() + 3_600_000).toISOString()
