@@ -186,6 +186,44 @@ describe("ACP driver", () => {
     expect(h.last().method).toBe("session/prompt")
   })
 
+  test("model variant resolution is Devin-only", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-high",
+        options: [{ value: "swe-2-medium" }, { value: "swe-2-high" }, { value: "swe-2-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "opencode", model: "swe-2", effort: "max" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2" } })
+  })
+
+  test("Devin falls back to the session's current variant when the effort is not advertised", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-high",
+        options: [{ value: "swe-2-medium" }, { value: "swe-2-high" }, { value: "swe-2-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "devin", model: "swe-2", effort: "low" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-high" } })
+    h.reply({ configOptions })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
   test("an agent that exits mid-turn fails the run", () => {
     const h = harness()
     h.driver.start()
