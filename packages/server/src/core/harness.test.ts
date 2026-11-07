@@ -112,6 +112,7 @@ const harnessLayer = (
       submitKey: () => Effect.die("unused"),
       logout: () => Effect.void,
       discoverCommands: () => Effect.succeed([]),
+      discoverModels: () => Effect.succeed({ models: [], sources: [] }),
       providerUsage: () => Effect.succeed([]),
       useBankedReset: () => Effect.die("unused"),
       shutdown: () => Effect.void,

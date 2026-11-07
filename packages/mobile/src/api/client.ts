@@ -25,6 +25,7 @@ import {
   HarnessCommands,
   Me,
   Message,
+  ModelCatalog,
   type ModelProvider,
   Paths,
   PreviewSession,
@@ -144,6 +145,8 @@ export interface ApiClient {
   providerUsage(): Promise<readonly ProviderUsage[]>;
   /** What the active box can run, as it found at startup. */
   capabilities(): Promise<BoxCapabilities>;
+  /** The selected box's runtime model catalog; `refresh` bypasses the box's discovery cache. */
+  models(refresh?: boolean): Promise<ModelCatalog>;
   useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
   /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
   usageActivity(): Promise<UsageActivity>;
@@ -436,6 +439,8 @@ export function createApiClient(
     usage: () => boxRequest(Usage, "GET", Paths.usage),
     providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
     capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
+    models: (refresh = false) =>
+      boxRequest(ModelCatalog, "GET", refresh ? `${Paths.models}?refresh=1` : Paths.models),
     textGenerationSettings: () => boxRequest(TextGenerationSettings, "GET", Paths.textGenerationSettings),
     saveTextGenerationSettings: (settings) =>
       boxRequest(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),

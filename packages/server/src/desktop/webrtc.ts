@@ -41,6 +41,13 @@ export const TURN_CREDENTIAL_TTL_S = 60 * 60
 const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
+/**
+ * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. The UDP attempt is not
+ * covered: it fails under STUN retransmissions (50ms doubling over seven sends, about 6.3s) before that fallback starts,
+ * so an unreachable managed relay can hold the answer for roughly eight seconds. Operator-configured TURN keeps the
+ * default, since its server may be far away or reached over TLS.
+ */
+const TURN_TCP_CONNECT_TIMEOUT_S = 2
 const MAX_OFFER_CHARS = 64 * 1024
 const INPUT_CHANNEL = "input"
 const POINTER_CHANNEL = "pointer"
@@ -245,12 +252,28 @@ export class DesktopRtcSession {
   /** Signaling runs in order: a candidate that follows an offer needs that offer applied first. */
   private signaling: Promise<void> = Promise.resolve()
 
+  /**
+   * The stream's resolved ICE servers, set before it offers. Resolving them here instead would gate the answer on the
+   * control plane; until they arrive, the peer uses the box's own configuration.
+   */
+  private relayServers: ReadonlyArray<DesktopRtcIceServer> | null = null
+  private managedRelay = false
+
   constructor(
     private readonly settings: WebRtcSettings,
     private readonly taskId: string,
     private readonly tap: MediaTap,
     private readonly handlers: DesktopRtcHandlers,
   ) {}
+
+  /**
+   * The ICE servers the box's own peer uses: the box's configuration plus any managed TURN the viewer just received, so
+   * a box without a candidate the viewer can reach still connects through both relays.
+   */
+  setIceServers(servers: ReadonlyArray<DesktopRtcIceServer>, managed: boolean): void {
+    this.relayServers = servers
+    this.managedRelay = managed
+  }
 
   /** Signaling from the viewer. Never rejects: what goes wrong is told to the viewer, which can retry. */
   handle(message: DesktopRtcSignal): Promise<void> {
@@ -344,7 +367,7 @@ export class DesktopRtcSession {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
-    const servers = mintIceServers(this.settings, this.taskId)
+    const servers = this.relayServers ?? mintIceServers(this.settings, this.taskId)
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
@@ -353,6 +376,9 @@ export class DesktopRtcSession {
     const pc = new RTCPeerConnection({
       iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
+      // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
+      // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
+      iceTurnConnectTimeout: this.managedRelay ? TURN_TCP_CONNECT_TIMEOUT_S : undefined,
       iceAdditionalHostAddresses: [...this.settings.hostAddresses],
       iceFilterCandidatePair: (pair) => isPeerAddressAllowed(pair.remoteCandidate.host, this.settings.hostAddresses, this.settings.denyPrivate),
       codecs: {

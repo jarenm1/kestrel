@@ -1,6 +1,7 @@
 import { useMemo, useSyncExternalStore } from "react"
 import { Schema } from "effect"
 import { AgentModel, MODEL_PROVIDERS, shownModels, type ModelInfo, type ModelProvider } from "@cloudagents/protocol"
+import { useModelCatalog } from "@/hooks/useModelCatalog"
 
 /** Per provider: the model ids the user keeps in the chat picker. Absent until they edit the list on Connections. */
 const storageKey = (provider: ModelProvider) => `kestrel.models.${provider}`
@@ -44,16 +45,25 @@ export function setShownModels(provider: ModelProvider, ids: readonly AgentModel
   changed()
 }
 
-/** The models each provider shows in the chat picker, kept current across components and tabs. */
+/**
+ * The provider's saved picker list, or null when it follows the catalog defaults. Editing the list must keep ids the
+ * current catalog does not offer (an unavailable discovery source, an offline box), so it is read here unsigned.
+ */
+export function storedShownModels(provider: ModelProvider): readonly AgentModel[] | null {
+  return readChosen(provider)
+}
+
+/** The models each provider shows in the chat picker, from the active box's catalog and kept current across tabs. */
 export function useShownModels(): Record<ModelProvider, readonly ModelInfo[]> {
   // The version only says the stored lists changed; the lists themselves are re-read from storage.
   const current = useSyncExternalStore(subscribe, () => version)
+  const { models } = useModelCatalog()
   return useMemo(
     () =>
-      Object.fromEntries(MODEL_PROVIDERS.map((p) => [p.id, shownModels(p.id, readChosen(p.id))])) as Record<
+      Object.fromEntries(MODEL_PROVIDERS.map((p) => [p.id, shownModels(p.id, readChosen(p.id), models)])) as Record<
         ModelProvider,
         readonly ModelInfo[]
       >,
-    [current],
+    [current, models],
   )
 }

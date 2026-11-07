@@ -71,6 +71,7 @@ import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullR
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
+import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, type Env } from "./env"
 import {
@@ -327,6 +328,9 @@ export class Hub extends DurableObject<Env> {
       ensureNestTables(sql)
       ensureToolFailuresTable(sql)
       ensureBoxActivityTable(sql)
+      // An interrupted rebuild must leave either the old tables or the new ones, never a renamed legacy table or a
+      // half-copied one; the transaction makes the rename/copy/drop sequence atomic.
+      ctx.storage.transactionSync(() => ensurePrWatchTables(sql))
       sql.exec(`CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         login TEXT NOT NULL,
@@ -383,15 +387,6 @@ export class Hub extends DurableObject<Env> {
         repo TEXT PRIMARY KEY,
         hook_id INTEGER NOT NULL,
         secret TEXT NOT NULL
-      )`)
-      sql.exec(`CREATE TABLE IF NOT EXISTS pr_watches (
-        login TEXT NOT NULL, task_id TEXT NOT NULL, repo TEXT NOT NULL COLLATE NOCASE, pr_number INTEGER NOT NULL,
-        PRIMARY KEY (login, task_id)
-      )`)
-      sql.exec(`CREATE TABLE IF NOT EXISTS pr_activity_queue (
-        login TEXT NOT NULL, task_id TEXT NOT NULL, repo TEXT NOT NULL, pr_number INTEGER NOT NULL,
-        kind TEXT NOT NULL, delivery_id TEXT NOT NULL, due_at INTEGER NOT NULL,
-        PRIMARY KEY (login, task_id)
       )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS webhook_deliveries (
         delivery_id TEXT PRIMARY KEY,
@@ -1371,29 +1366,34 @@ export class Hub extends DurableObject<Env> {
     return { duplicate: false, matched }
   }
 
-  /** Associate a thread with one PR. Replacing the watch never creates another thread. */
+  /** Watch one pull request of a thread. Watching the same one again is a no-op; others stay watched. */
   watchPullRequest(login: string, taskId: string, repo: string, number: number): void {
-    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ?", login, taskId)
     this.ctx.storage.sql.exec(
-      "INSERT INTO pr_watches (login, task_id, repo, pr_number) VALUES (?, ?, ?, ?) ON CONFLICT(login, task_id) DO UPDATE SET repo = excluded.repo, pr_number = excluded.pr_number",
+      "INSERT INTO pr_watches (login, task_id, repo, pr_number) VALUES (?, ?, ?, ?) ON CONFLICT(login, task_id, repo, pr_number) DO UPDATE SET repo = excluded.repo",
       login, taskId, repo, number,
     )
   }
 
-  watchedRepository(login: string, taskId: string): string | null {
-    return this.ctx.storage.sql.exec<{ repo: string }>("SELECT repo FROM pr_watches WHERE login = ? AND task_id = ?", login, taskId).toArray()[0]?.repo ?? null
+  /** Stops watching one pull request, or every one of the thread when no repository and number are named. Returns the repositories involved. */
+  unwatchPullRequests(login: string, taskId: string, repo?: string, number?: number): string[] {
+    const sql = this.ctx.storage.sql
+    const where = repo === undefined || number === undefined
+      ? "login = ? AND task_id = ?"
+      : "login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?"
+    const args = repo === undefined || number === undefined ? [login, taskId] : [login, taskId, repo, number]
+    const repos = sql.exec<{ repo: string }>(`SELECT DISTINCT repo FROM pr_watches WHERE ${where}`, ...args).toArray().map((row) => row.repo)
+    sql.exec(`DELETE FROM pr_activity_queue WHERE ${where}`, ...args)
+    sql.exec(`DELETE FROM pr_watches WHERE ${where}`, ...args)
+    return repos
   }
 
-  unwatchPullRequest(login: string, taskId: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ?", login, taskId)
-    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ?", login, taskId)
-  }
-
-  closePullRequestWatches(repo: string, number: number): string[] {
-    const owners = this.ctx.storage.sql.exec<{ login: string }>("SELECT DISTINCT login FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number).toArray().map((row) => row.login)
+  closePullRequestWatches(repo: string, number: number): Array<{ readonly login: string; readonly taskId: string }> {
+    const watches = this.ctx.storage.sql
+      .exec<{ login: string; taskId: string }>("SELECT DISTINCT login, task_id AS taskId FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
+      .toArray()
     this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
     this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
-    return owners
+    return watches
   }
 
   async githubActivity(deliveryId: string, activity: { repo: string; numbers: readonly number[]; kind: string; headSha?: string }): Promise<{ duplicate: boolean; queued: number }> {
@@ -1421,8 +1421,7 @@ export class Hub extends DurableObject<Env> {
         if (!stillWatching) continue
         sql.exec(
         `INSERT INTO pr_activity_queue (login, task_id, repo, pr_number, kind, delivery_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(login, task_id) DO UPDATE SET repo = excluded.repo, pr_number = excluded.pr_number,
-         kind = excluded.kind, delivery_id = excluded.delivery_id, due_at = excluded.due_at`,
+         ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET delivery_id = excluded.delivery_id, due_at = excluded.due_at`,
         row.login, row.taskId, activity.repo, row.number, activity.kind, deliveryId, now + 3000,
         )
       }
@@ -1480,12 +1479,14 @@ export class Hub extends DurableObject<Env> {
     for (const row of pending) {
       const result = await this.boxCall(row.login, "POST", `/api/tasks/${encodeURIComponent(row.taskId)}/github-activity`, row)
       // A newer event can replace the row during the box call. Never delete or postpone that event.
-      if (result.ok) this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
+      const key = "login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ? AND kind = ?"
+      const keyArgs = [row.login, row.taskId, row.repo, row.number, row.kind]
+      if (result.ok) this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
       else if (result.status === 404 || result.status === 409) {
         this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
-        this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND delivery_id = ?", row.login, row.taskId, row.deliveryId)
+        this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
       }
-      else this.ctx.storage.sql.exec("UPDATE pr_activity_queue SET due_at = ? WHERE login = ? AND task_id = ? AND delivery_id = ?", Date.now() + 60000, row.login, row.taskId, row.deliveryId)
+      else this.ctx.storage.sql.exec(`UPDATE pr_activity_queue SET due_at = ? WHERE ${key} AND delivery_id = ?`, Date.now() + 60000, ...keyArgs, row.deliveryId)
     }
     await this.rearm()
   }

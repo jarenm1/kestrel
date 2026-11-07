@@ -1,5 +1,12 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
+import { AgentModel } from "@cloudagents/protocol"
+import { z } from "zod"
+
+/** Tool arguments use the same runtime/curated identity boundary as REST, not a frozen enum. */
+export const agentModelInput = z.string()
+  .refine(Schema.is(AgentModel), "Unknown model identity")
+  .transform((id) => id as AgentModel)
 
 /** The run an MCP session speaks for: its tools act on this task and this run only. */
 export interface RunContext {

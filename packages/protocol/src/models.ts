@@ -225,10 +225,10 @@ type RouteAgentModel = {
 }[BaseAgentModel]
 
 /**
- * A base model id, or a route id that runs that model in another compatible harness. The schema below is generated
- * from the catalog's supported routes, so no arbitrary `@harness` string is accepted.
+ * Curated routes or a provider-qualified runtime model. Live ids are self-describing so persisted runs can be
+ * decoded after a restart without sharing one user's discovered catalog with another user.
  */
-export type AgentModel = BaseAgentModel | RouteAgentModel
+export type AgentModel = BaseAgentModel | RouteAgentModel | `live/${ModelProvider}/${string}`
 
 export interface ModelInfo {
   readonly id: AgentModel
@@ -466,9 +466,129 @@ export const AGENT_MODELS: readonly ModelInfo[] = BASE_AGENT_MODELS.flatMap((bas
   return [base, ...routes.map((harness) => routeModel(base, harness))]
 })
 
-/** Model ids accepted by the protocol: every base id plus the supported route ids generated above. */
-const AGENT_MODEL_IDS = AGENT_MODELS.map((model) => model.id) as [AgentModel, ...AgentModel[]]
-export const AgentModel = Schema.Literal(...AGENT_MODEL_IDS)
+const curatedModelIds = new Set<string>(AGENT_MODELS.map((model) => model.id))
+const liveModelParts = (id: string): { provider: ModelProvider; upstream: string } | undefined => {
+  const match = /^live\/([^/]+)\/([A-Za-z0-9][A-Za-z0-9._:/+-]{0,199})$/.exec(id)
+  if (match === null || !Schema.is(ModelProvider)(match[1])) return undefined
+  const provider = match[1]
+  const upstream = match[2]!
+  if ((provider === "opencode" || provider === "opencode-go") && !upstream.startsWith(`${provider}/`)) return undefined
+  return { provider, upstream }
+}
+
+/** Tokens model ids spell in capitals; everything else is capitalized as a word. */
+const NAME_ACRONYMS: Readonly<Record<string, string>> = {
+  gpt: "GPT",
+  glm: "GLM",
+  swe: "SWE",
+  ai: "AI",
+  llm: "LLM",
+  vl: "VL",
+  api: "API",
+  oss: "OSS",
+  mcp: "MCP",
+}
+
+/** Known curated routes plus bounded, shell-safe, provider-qualified native model identities. */
+export const AgentModel = Schema.String.pipe(
+  Schema.filter((id): id is AgentModel => curatedModelIds.has(id) || liveModelParts(id) !== undefined),
+)
+
+export const ModelInfo = Schema.Struct({
+  id: AgentModel,
+  provider: ModelProvider,
+  name: Schema.String,
+  efforts: Schema.Array(AgentEffort),
+  defaultEffort: Schema.optional(AgentEffort),
+  shownByDefault: Schema.Boolean,
+  compactWindow: Schema.optional(Schema.Number),
+  harness: Schema.optional(ModelHarness),
+  upstreamModel: Schema.optional(Schema.String),
+}).pipe(Schema.filter((model) => {
+  const live = liveModelParts(model.id)
+  return live === undefined || (
+    live.provider === model.provider &&
+    model.efforts.length === 0 &&
+    model.defaultEffort === undefined &&
+    (model.harness === undefined || model.harness === DEFAULT_MODEL_HARNESS[live.provider]) &&
+    (model.upstreamModel === undefined || model.upstreamModel === live.upstream)
+  )
+}))
+
+export const ModelDiscoverySource = Schema.Struct({
+  provider: ModelProvider,
+  source: Schema.String,
+  status: Schema.Literal("ok", "unsupported", "error"),
+  message: Schema.optional(Schema.String),
+  checkedAt: Schema.String,
+})
+export type ModelDiscoverySource = typeof ModelDiscoverySource.Type
+
+export const ModelCatalog = Schema.Struct({
+  models: Schema.Array(ModelInfo),
+  sources: Schema.Array(ModelDiscoverySource),
+})
+export type ModelCatalog = typeof ModelCatalog.Type
+
+/** Retain curated metadata and supported routes; live models never acquire speculative effort levels or routes. */
+export const mergeModelCatalog = (discovered: readonly ModelInfo[]): readonly ModelInfo[] => {
+  const models = new Map(AGENT_MODELS.map((model) => [model.id, model]))
+  for (const model of discovered) if (!models.has(model.id)) models.set(model.id, model)
+  return [...models.values()]
+}
+
+/**
+ * A readable name for a runtime model, from its id's own words: `anthropic/claude-opus-4-5` becomes
+ * `Claude Opus 4.5`, `gpt-5.6-sol` becomes `GPT-5.6 Sol`. It is deterministic so a saved mention and every client
+ * agree on the name without carrying a per-user catalog.
+ */
+const humanizedModelName = (upstream: string): string => {
+  const leaf = upstream.slice(upstream.lastIndexOf("/") + 1).replace(/\[1m\]$/i, "")
+  const words: string[] = []
+  let afterAcronym = false
+  for (const token of leaf.split(/[-_]+/)) {
+    if (token === "") continue
+    const previous = words.at(-1)
+    // `5-1` in a version reads as `5.1`, not as two separate numbers.
+    if (/^\d+$/.test(token) && previous !== undefined && /^\d+(?:\.\d+)*$/.test(previous)) {
+      words[words.length - 1] = `${previous}.${token}`
+      afterAcronym = false
+      continue
+    }
+    // A version keeps the hyphen after an acronym: `gpt-5.6-sol` is `GPT-5.6 Sol`, not `GPT 5.6 Sol`.
+    if (afterAcronym && previous !== undefined && /^\d/.test(token)) {
+      words[words.length - 1] = `${previous}-${token}`
+      afterAcronym = false
+      continue
+    }
+    const acronym = NAME_ACRONYMS[token.toLowerCase()]
+    words.push(
+      acronym ??
+        // OpenAI's reasoning models are named in lowercase (`o3`), so keep that id's own spelling.
+        (/^o\d/.test(token) ? token : /[A-Z]/.test(token.slice(1)) ? token : `${token.charAt(0).toUpperCase()}${token.slice(1)}`),
+    )
+    afterAcronym = acronym !== undefined
+  }
+  return words.join(" ") || upstream
+}
+
+/** A source's native id, mapped back to curated metadata where it already exists. */
+export const discoveredModel = (provider: ModelProvider, upstream: string): ModelInfo | undefined => {
+  const id = `live/${provider}/${upstream}`
+  if (liveModelParts(id) === undefined) return undefined
+  const known = BASE_AGENT_MODELS.find((model) =>
+    model.provider === provider && (model.upstreamModel ?? model.id).replace(/\[1m\]$/i, "") === upstream.replace(/\[1m\]$/i, ""),
+  )
+  if (known !== undefined) return known
+  return {
+    id: id as AgentModel,
+    provider,
+    name: humanizedModelName(upstream),
+    efforts: [],
+    shownByDefault: true,
+    upstreamModel: upstream,
+  }
+}
 
 export interface ModelProviderInfo {
   readonly id: ModelProvider
@@ -502,7 +622,18 @@ export const DEFAULT_MODEL_PROVIDER: ModelProvider = "anthropic"
 
 export const modelInfo = (id: AgentModel): ModelInfo => {
   const info = AGENT_MODELS.find((m) => m.id === id)
-  if (info === undefined) throw new Error(`model ${id} is missing from AGENT_MODELS`)
+  if (info === undefined) {
+    const live = liveModelParts(id)
+    if (live !== undefined) return {
+      id,
+      provider: live.provider,
+      name: humanizedModelName(live.upstream),
+      efforts: [],
+      shownByDefault: true,
+      upstreamModel: live.upstream,
+    }
+    throw new Error(`unknown model ${id}`)
+  }
   return info
 }
 
@@ -511,7 +642,7 @@ export const modelInfo = (id: AgentModel): ModelInfo => {
  * model id, so a client never turns an unsupported route into the bare `Error` from `modelInfo`.
  */
 export const parseAgentModel = (id: string): AgentModel | undefined =>
-  AGENT_MODELS.some((model) => model.id === id) ? (id as AgentModel) : undefined
+  Schema.is(AgentModel)(id) ? id as AgentModel : undefined
 
 /** The harness a model runs in: the route's explicit choice, else its provider's current harness. */
 export const modelHarness = (id: AgentModel): ModelHarness => {
@@ -522,10 +653,13 @@ export const modelHarness = (id: AgentModel): ModelHarness => {
 /** The model id to send to the routed harness's native API, never the protocol's route id. */
 export const modelUpstreamId = (id: AgentModel): string => {
   const info = modelInfo(id)
+  // Devin's third-party models carry a protocol-only `devin/` prefix; its ACP `model` option takes the family id.
+  // Runtime ids store the CLI's own value, so the strip must happen before an `upstreamModel` is returned as-is.
+  if (info.provider === "devin") {
+    return (info.upstreamModel ?? id.replace(/@(?:claude|codex|opencode)$/, "")).replace(/^devin\//, "")
+  }
   if (info.upstreamModel !== undefined) return info.upstreamModel
   const base = id.replace(/@(?:claude|codex|opencode)$/, "")
-  // Devin's third-party models carry a protocol-only `devin/` prefix; its ACP `model` option takes the family id.
-  if (info.provider === "devin") return base.replace(/^devin\//, "")
   // Native OpenCode/Claude refs keep their own decorations and provider prefix; only a Codex route drops `[1m]`.
   return modelHarness(id) === "codex" ? base.replace(/\[1m\]$/i, "") : base
 }
@@ -553,11 +687,17 @@ export const baseModelId = (id: AgentModel): AgentModel =>
  * (from the connections page), or null before they edited it. A saved list is compared by base model id, so a model
  * selected once appears under every supported harness.
  */
-export const shownModels = (provider: ModelProvider, chosen: ReadonlyArray<AgentModel> | null): readonly ModelInfo[] => {
+export const shownModels = (
+  provider: ModelProvider,
+  chosen: ReadonlyArray<AgentModel> | null,
+  catalog: readonly ModelInfo[] = AGENT_MODELS,
+): readonly ModelInfo[] => {
   const chosenBase = chosen === null ? null : new Set(chosen.map(baseModelId))
-  return providerModels(provider).filter((m) => {
+  const bases = new Map(catalog.map((model) => [model.id, model]))
+  return catalog.filter((m) => {
+    if (m.provider !== provider) return false
     const base = baseModelId(m.id)
-    return chosenBase === null ? modelInfo(base).shownByDefault : chosenBase.has(base)
+    return chosenBase === null ? (bases.get(base) ?? modelInfo(base)).shownByDefault : chosenBase.has(base)
   })
 }
 

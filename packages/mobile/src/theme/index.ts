@@ -59,13 +59,13 @@ export const radius = {
   full: 999,
 } as const;
 
-/** The web app's depth: `shadow-soft` (raised) and `shadow-well` (inset panels, approximated with a dark fill). */
+/**
+ * The web app's depth: the two layers of `--shadow-soft` in packages/ui/src/theme.css (rgba spelling, which the
+ * React Native parser accepts). The old `shadow*`/`elevation` pair could not express the 24px blur or -12px spread
+ * and drew a dark halo on every side; `boxShadow` keeps both, so the depth matches the desktop's 1:1.
+ */
 export const shadows = {
   soft: {
-    shadowColor: "#000",
-    shadowOpacity: 0.7,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 4,
+    boxShadow: "inset 0 1px 0 0 rgba(255,255,255,0.04), 0 8px 24px -12px rgba(0,0,0,0.7)",
   } satisfies ViewStyle,
 } as const;

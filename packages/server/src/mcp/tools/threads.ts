@@ -1,11 +1,11 @@
-import { AgentModel, CheckoutRequest, type CreateTaskBody, type Message, type SendMessageResponse, type Task } from "@cloudagents/protocol"
+import { CheckoutRequest, type CreateTaskBody, type Message, type ModelCatalog, type SendMessageResponse, type Task } from "@cloudagents/protocol"
 import { randomUUID } from "node:crypto"
 import Ajv from "ajv"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect, Schema } from "effect"
 import { z } from "zod"
 import type { DelegateInput, DelegatedStatus } from "../../core/service"
-import { type RunContext, describeError, guard, runTool, text, truncate } from "./common"
+import { type RunContext, agentModelInput, describeError, guard, runTool, text, truncate } from "./common"
 
 const DEFAULT_READ_LIMIT = 20
 const MAX_READ_LIMIT = 100
@@ -15,11 +15,14 @@ const outputSchema = z.record(z.string(), z.unknown()).refine((schema) => {
 }, "Must be a valid JSON Schema of at most 16000 characters")
 
 export interface ThreadToolDeps {
+  readonly models: {
+    readonly list: (user: string) => Effect.Effect<ModelCatalog, unknown>
+  }
   readonly threads: {
     readonly maxConcurrentRuns: number
     /** The user a thread belongs to: the tools reach that user's threads only. */
     readonly owner: (taskId: string) => Effect.Effect<string, unknown>
-    readonly create: (user: string, input: CreateTaskBody) => Effect.Effect<Task, unknown>
+    readonly create: (user: string, input: CreateTaskBody, delegation?: undefined, spawnedByTaskId?: string) => Effect.Effect<Task, unknown>
     readonly archive: (user: string, taskId: string) => Effect.Effect<Task, unknown>
     readonly list: (user: string) => Effect.Effect<ReadonlyArray<Task>, unknown>
     readonly messages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, unknown>
@@ -68,7 +71,11 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
   server.registerTool("delegation_capabilities", {
     description: "Show delegation limits and accepted models. Model names are supported by Kestrel but may require the user's provider credentials.",
     inputSchema: {},
-  }, () => Promise.resolve(text(`Models: ${AgentModel.literals.join(", ")}\nConcurrent runs on this box: ${deps.threads.maxConcurrentRuns === 0 ? "unlimited" : deps.threads.maxConcurrentRuns}\nMaximum delegation depth: 4\nMaximum batch size: 10\nMaximum wait: 30 seconds\nModel credentials are checked when the child starts.`)))
+  }, () => guard(() => runTool(Effect.gen(function* () {
+    const user = yield* deps.threads.owner(ctx.taskId)
+    const catalog = yield* deps.models.list(user)
+    return text(`Models: ${catalog.models.map((model) => model.id).join(", ")}\nConcurrent runs on this box: ${deps.threads.maxConcurrentRuns === 0 ? "unlimited" : deps.threads.maxConcurrentRuns}\nMaximum delegation depth: 4\nMaximum batch size: 10\nMaximum wait: 30 seconds\nModel credentials are checked when the child starts.`)
+  }))))
   server.registerTool("delegate_task", {
     description: "Start durable delegated work in a separate Kestrel thread and workspace. Supply all context needed; conversation and files are not inherited. The result is automatically delivered when the original run ends. A requestId names one task for this whole thread: reuse it on retries, including from a later run, to get the existing child instead of a duplicate. A child needing input must be answered by the user in its thread.",
     inputSchema: {
@@ -76,7 +83,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
       message: z.string().trim().min(1).describe("Complete task and context for the child"),
       role: z.enum(["general", "implementation", "research", "review", "design", "test"]).optional().describe("Optional role guidance for the child"),
       requestId: z.string().trim().min(1).max(200).optional().describe("Stable key for this request, unique within this thread; reuse on retries"),
-      model: z.enum(AgentModel.literals).optional().describe("Model for the child; omitted inherits the parent's model when known"),
+      model: agentModelInput.optional().describe("Model for the child; omitted inherits the parent's model when known"),
       outputSchema: outputSchema.optional().describe("Optional JSON Schema for the child's final response; validation is reported with the result"),
       repo: z.string().optional().describe("Repository to check out in the child workspace"),
       baseBranch: z.string().optional().describe("Branch to fork from; requires repo"),
@@ -100,7 +107,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
         title: z.string().trim().min(1),
         message: z.string().trim().min(1),
         role: z.enum(["general", "implementation", "research", "review", "design", "test"]).optional(),
-        model: z.enum(AgentModel.literals).optional(),
+        model: agentModelInput.optional(),
         outputSchema: outputSchema.optional(),
         repo: z.string().optional(),
         baseBranch: z.string().optional(),
@@ -182,7 +189,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
           Effect.mapError((e) => new Error(`invalid checkout arguments: ${e.message}`)),
         )
         const owner = yield* deps.threads.owner(ctx.taskId)
-        const task = yield* deps.threads.create(owner, { title, ...(checkout === undefined ? {} : { checkout }) })
+        const task = yield* deps.threads.create(owner, { title, ...(checkout === undefined ? {} : { checkout }) }, undefined, ctx.taskId)
         const sent = yield* deps.threads.send(ctx.taskId, task.id, message).pipe(
           Effect.mapError((e) => new Error(`Created thread ${task.id}, but could not start its agent: ${describeError(e)}. Inspect the thread before retrying.`)),
         )

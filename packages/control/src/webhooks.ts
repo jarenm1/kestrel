@@ -1,3 +1,4 @@
+import { Paths } from "@cloudagents/protocol"
 import { releaseHook } from "./automations"
 import { pullRequestActivity } from "./pr-activity"
 import { Schema } from "effect"
@@ -11,7 +12,7 @@ const RepoOnly = Schema.Struct({ repository: Schema.Struct({ full_name: Schema.S
  * `POST /webhooks/github`: unauthenticated, verified by the per-repo HMAC secret. Only `pull_request` deliveries
  * do anything; the Hub dedupes by `X-GitHub-Delivery` and fires the matching automations in the background.
  */
-export const handleGithubWebhook = async (request: Request, env: Env): Promise<Response> => {
+export const handleGithubWebhook = async (request: Request, env: Env, ctx: ExecutionContext): Promise<Response> => {
   const raw = await request.text()
   let payload: unknown
   try {
@@ -45,8 +46,24 @@ export const handleGithubWebhook = async (request: Request, env: Env): Promise<R
   const prEvent = pullRequestEventOf(hookPayload.right)
   const result = await hub(env).githubDelivery(deliveryId, prEvent)
   if (!result.duplicate && prEvent.action === "closed") {
-    const owners = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
-    for (const owner of owners) await releaseHook(env, owner, prEvent.repo)
+    const cancelled = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
+    for (const login of new Set(cancelled.map((watch) => watch.login))) await releaseHook(env, login, prEvent.repo)
+    // Clear each box's watch mark after the response. Awaiting here would wake sleeping Nest boxes (up to a minute)
+    // and can outlast GitHub's delivery timeout; the delivery is already recorded, so a redelivery is a duplicate and
+    // never retries this. Each call stays best-effort: the box may be offline.
+    ctx.waitUntil(
+      Promise.all(
+        cancelled.map((watch) =>
+          hub(env)
+            .boxCall(watch.login, "POST", Paths.taskPullRequestWatching(watch.taskId), {
+              repo: prEvent.repo,
+              number: prEvent.pr.number,
+              watching: false,
+            })
+            .catch((err: unknown) => console.warn(`clearing the watch mark of ${watch.taskId} failed: ${err instanceof Error ? err.message : String(err)}`)),
+        ),
+      ),
+    )
   }
   return json(result, 202)
 }

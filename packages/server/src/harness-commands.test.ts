@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { limitDiscovery, parseClaudeCommands, parseCodexSkills } from "./harness-commands"
+import { limitCliProbe, limitDiscovery, parseClaudeCommands, parseCodexSkills } from "./harness-commands"
 
 describe("parseClaudeCommands", () => {
   test("normalizes the CLI's command metadata and drops unusable rows", () => {
@@ -53,6 +53,24 @@ describe("limitDiscovery", () => {
     }
     expect(await Promise.all(admitted)).toEqual(Array.from({ length: total }, () => 1))
     expect(peak).toBe(4)
+  })
+
+  test("keeps probe slots free while every discovery slot is held", async () => {
+    const releases: Array<() => void> = []
+    const held = Array.from({ length: 4 }, () =>
+      limitDiscovery(() => {
+        const { promise, resolve } = Promise.withResolvers<void>()
+        releases.push(resolve)
+        return promise
+      }),
+    )
+    try {
+      // A sign-in status probe (and the commands the user waits on) must not queue behind discovery children.
+      await expect(limitCliProbe(async () => "ran")).resolves.toBe("ran")
+    } finally {
+      for (const release of releases) release()
+      await Promise.all(held)
+    }
   })
 })
 

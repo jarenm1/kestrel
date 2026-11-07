@@ -64,12 +64,56 @@ Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/)
 
 ## Third-party model coverage
 
-The shared catalog in `packages/protocol/src/models.ts` drives desktop and mobile model lists. Settings ›
-Connections exposes the full curated list; chat initially shows current flagship/fast choices. Visibility is per
-model: the picker lists each model once, and enabling it enables that model under every harness it supports.
-A saved custom list remains unchanged when the catalog grows and is compared by base model id, so lists saved before
-routes existed keep working; select additional models there or use **Reset to defaults**.
+The selected box's runtime catalog drives desktop, phone and delegation model lists. Settings › Connections
+includes **Refresh models**; mounted clients also poll hourly. Model toggle menus show only the models and controls,
+not source diagnostics. `GET /api/models` includes source results and check times for API diagnostics.
+The box caches discovery for one hour per user and credential/login identity. Connecting, replacing or removing
+a credential invalidates the client catalog, and an explicit refresh bypasses the box cache. Keys stay on the host.
+
+| Connection | Discovery source |
+|---|---|
+| Anthropic API | Paginated Anthropic Models API |
+| OpenAI API | OpenAI Models API, restricted to modern GPT/o-series and Codex text-model families |
+| OpenRouter API | OpenRouter Models API, restricted to tool-capable Anthropic text models; batch-only variants excluded |
+| Z.ai API | Best-effort Coding Plan `/models` endpoint (undocumented) |
+| DeepSeek, MiniMax, Moonshot API | Each provider's Models API, with non-text/incompatible models filtered |
+| Claude subscription | Claude Code's stream-json initialize model list |
+| ChatGPT subscription | Codex app-server's paginated `model/list` |
+| OpenCode free / Go | The installed CLI's native model catalog in the corresponding login home |
+| Google / Devin | ACP session model options, without starting a model turn |
+
+Claude/ChatGPT subscription logins take precedence over their API keys for native runs, so discovery uses the
+subscription's list rather than advertising API-only models through that login. A CLI that is not installed, or is
+too old to sign in, rules out a subscription instead: its provider's API models stay listed and the native source
+says the CLI is absent. Only a status probe that actually failed leaves the login state unknown and withholds the
+API-only models. Lists describe provider/CLI availability, not a guarantee of quota, credits, regional access or
+inference success. Missing credentials, unsupported installed CLI versions and failed sources have explicit API
+statuses. One source failing does not discard the other sources; the curated catalog remains available when
+discovery or the box is unavailable. Source errors never include upstream response bodies, tokens or local
+credential paths.
+
+Known models retain the compatibility metadata and routes in `packages/protocol/src/models.ts`.
+New models use stable `live/<provider>/<upstream-id>` identities, run only through that provider's native harness,
+and expose no inferred thinking levels or alternate harness routes. These identities survive saved threads,
+automations and delegation without a process-global, per-user catalog registry. Compatibility metadata still
+requires review when adding effort levels, context hints or cross-harness routes; enumeration does not prove them.
+A runtime model's display name is derived from its own id (`anthropic/claude-opus-4-5` is **Claude Opus 4.5**,
+`gpt-5.6-sol` is **GPT-5.6 Sol**). It is deterministic, so a picker entry and a saved model mention agree on the name
+without a fetched catalog; the protocol id is never shown in the picker.
+
+Visibility is per model: enabling a model enables every curated harness route it supports. New models appear by
+default only while the provider follows its defaults. A saved custom visibility list is not expanded automatically;
+enable additional models or use **Reset to defaults**. Temporarily missing models remain in saved lists.
 The `[1m]` suffix is a Claude Code context hint, not a separate upstream model version.
+
+Discovery references: [Anthropic](https://platform.claude.com/docs/en/api/models/list),
+[OpenAI](https://developers.openai.com/api/reference/resources/models/methods/list),
+[OpenRouter variants](https://openrouter.ai/docs/guides/routing/model-variants/overview),
+[DeepSeek](https://api-docs.deepseek.com/api/list-models/),
+[MiniMax](https://platform.minimax.io/docs/api-reference/models/openai/list-models),
+[Moonshot](https://platform.moonshot.ai/docs/api/list-models),
+[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/typescript) and
+[Codex app-server](https://developers.openai.com/codex/app-server).
 
 Coverage checked against provider documentation on November 4, 2026:
 

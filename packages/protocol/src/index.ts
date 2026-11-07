@@ -22,12 +22,182 @@ import { BranchName, RepoRef } from "./refs"
 export const TaskStatus = Schema.Literal("idle", "running", "needs_input", "done", "failed")
 export type TaskStatus = typeof TaskStatus.Type
 
-/** The GitHub pull request opened for a checkout's branch (see the `github_pr_create` MCP tool). */
-export const PullRequestLink = Schema.Struct({
-  number: Schema.Number,
+/**
+ * A GitHub pull request a thread owns or manages: one it opened or took over, or one it watches (see the
+ * `github_pr_create` and `github_pr_watch` MCP tools). A thread has as many as it needs, in any repository.
+ */
+export const ThreadPullRequest = Schema.Struct({
+  /** Stable within the thread: the repository and number, e.g. `owner/name#12`. */
+  id: Schema.String,
+  /** GitHub "owner/name". */
+  repo: Schema.String,
+  number: Schema.Number.pipe(Schema.int(), Schema.positive()),
   url: Schema.String,
+  /**
+   * The checkout the pull request is shown on. Its pushes update the pull request only once the entry is verified as
+   * the checkout's own — a takeover, or a branch equal to the checkout's; an entry migrated from the old per-checkout
+   * link carries this before that check. Absent for a pull request the thread only watches.
+   */
+  checkoutId: Schema.optional(Schema.String),
+  /** The pull request's head branch, when it was known as the thread came to own it. */
+  branch: Schema.optional(Schema.String),
+  /** How the thread came to own it: opened from a checkout, taken over at checkout, or linked without a checkout. */
+  source: Schema.Literal("opened", "takeover", "linked"),
+  /** Activities (checks, reviews, comments) on it wake this thread, via the control plane's GitHub webhooks. */
+  watching: Schema.optional(Schema.Boolean),
+  addedAt: Schema.String,
 })
-export type PullRequestLink = typeof PullRequestLink.Type
+export type ThreadPullRequest = typeof ThreadPullRequest.Type
+
+/** The thread's pull requests, oldest first; empty for a thread that owns none. */
+export const threadPullRequestsOf = (task: Pick<Task, "pullRequests">): ReadonlyArray<ThreadPullRequest> =>
+  task.pullRequests ?? []
+
+/** The registry id of a pull request, so the same repository and number never appear twice. */
+export const threadPullRequestId = (repo: string, number: number): string => `${repo.toLowerCase()}#${number}`
+
+/** The review verdict GitHub reports for a pull request, or `none` before anyone reviewed it. */
+export const PullRequestReviewDecision = Schema.Literal("approved", "changes_requested", "commented", "none")
+
+/** Counts of a pull request's check runs, as GitHub summarises them. */
+export const PullRequestChecks = Schema.Struct({
+  total: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  passed: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  failing: Schema.Array(Schema.String),
+  pending: Schema.Array(Schema.String),
+})
+
+/** What GitHub says about one pull request right now. Absent when the last ask failed (see `ThreadPullRequestSummary.error`). */
+export const ThreadPullRequestSnapshot = Schema.Struct({
+  title: Schema.String,
+  state: Schema.Literal("open", "closed", "merged"),
+  draft: Schema.Boolean,
+  author: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  mergedAt: Schema.NullOr(Schema.String),
+  closedAt: Schema.NullOr(Schema.String),
+  baseRef: Schema.String,
+  headRef: Schema.String,
+  /** owner/name the head branch lives in; a fork's for a pull request from one, null when that repository is gone. */
+  headRepo: Schema.NullOr(Schema.String),
+  /** null while GitHub is still computing mergeability. */
+  mergeable: Schema.NullOr(Schema.Boolean),
+  mergeableState: Schema.String,
+  reviewDecision: PullRequestReviewDecision,
+  labels: Schema.Array(Schema.String),
+  /** Logins of reviewers still requested, or of those whose review GitHub counts. */
+  reviewers: Schema.Array(Schema.String),
+  additions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  deletions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  changedFiles: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  checks: PullRequestChecks,
+})
+export type ThreadPullRequestSnapshot = typeof ThreadPullRequestSnapshot.Type
+
+/** One pull request of a thread, with GitHub's live view of it when it could be read. */
+export const ThreadPullRequestSummary = Schema.Struct({
+  id: Schema.String,
+  repo: Schema.String,
+  number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  url: Schema.String,
+  source: Schema.Literal("opened", "takeover", "linked"),
+  checkoutId: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  watching: Schema.Boolean,
+  addedAt: Schema.String,
+  /** Absent while the box could not reach GitHub for it; `error` then says why. */
+  snapshot: Schema.optional(ThreadPullRequestSnapshot),
+  error: Schema.optional(Schema.String),
+})
+export type ThreadPullRequestSummary = typeof ThreadPullRequestSummary.Type
+
+/** The pull requests of one thread, oldest first. */
+export const ThreadPullRequests = Schema.Struct({ pullRequests: Schema.Array(ThreadPullRequestSummary) })
+export type ThreadPullRequests = typeof ThreadPullRequests.Type
+
+/** A review someone submitted on a pull request. */
+export const PullRequestReview = Schema.Struct({
+  author: Schema.String,
+  state: Schema.String,
+  body: Schema.String,
+  url: Schema.String,
+  submittedAt: Schema.NullOr(Schema.String),
+})
+export type PullRequestReview = typeof PullRequestReview.Type
+
+/** A comment in a pull request's conversation, on its diff, or in a review's body. */
+export const PullRequestComment = Schema.Struct({
+  author: Schema.String,
+  body: Schema.String,
+  url: Schema.String,
+  createdAt: Schema.String,
+  kind: Schema.Literal("conversation", "review", "review_comment"),
+  /** The diff file a review comment is on; null for conversation comments. */
+  path: Schema.NullOr(Schema.String),
+  line: Schema.NullOr(Schema.Number),
+})
+export type PullRequestComment = typeof PullRequestComment.Type
+
+/** One commit on a pull request's branch. */
+export const PullRequestCommit = Schema.Struct({
+  oid: Schema.String,
+  headline: Schema.String,
+  committedAt: Schema.String,
+  author: Schema.NullOr(Schema.String),
+})
+export type PullRequestCommit = typeof PullRequestCommit.Type
+
+/** A file a pull request changes; its patch text is in `ThreadPullRequestDiff`. */
+export const PullRequestFile = Schema.Struct({
+  path: Schema.String,
+  status: Schema.String,
+  additions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+  deletions: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
+})
+export type PullRequestFile = typeof PullRequestFile.Type
+
+/** Everything the pull request view shows about one pull request. */
+export const ThreadPullRequestDetail = Schema.Struct({
+  summary: ThreadPullRequestSummary,
+  body: Schema.String,
+  reviews: Schema.Array(PullRequestReview),
+  comments: Schema.Array(PullRequestComment),
+  commits: Schema.Array(PullRequestCommit),
+  files: Schema.Array(PullRequestFile),
+})
+export type ThreadPullRequestDetail = typeof ThreadPullRequestDetail.Type
+
+/** A pull request's unified diff, as GitHub renders it; `truncated` when it was too large and was cut short. */
+export const ThreadPullRequestDiff = Schema.Struct({ patch: Schema.String, truncated: Schema.Boolean })
+export type ThreadPullRequestDiff = typeof ThreadPullRequestDiff.Type
+
+/** A change the pull request view asks of one pull request of the thread. */
+export const ThreadPullRequestAction = Schema.Union(
+  Schema.Struct({ action: Schema.Literal("comment"), repo: Schema.String, number: Schema.Number.pipe(Schema.int(), Schema.positive()), body: Schema.String }),
+  Schema.Struct({
+    action: Schema.Literal("review"),
+    repo: Schema.String,
+    number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+    body: Schema.String,
+    verdict: Schema.Literal("comment", "approve", "request-changes"),
+  }),
+  Schema.Struct({
+    action: Schema.Literal("merge"),
+    repo: Schema.String,
+    number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+    method: Schema.Literal("merge", "squash", "rebase"),
+  }),
+  Schema.Struct({ action: Schema.Literal("close"), repo: Schema.String, number: Schema.Number.pipe(Schema.int(), Schema.positive()) }),
+  Schema.Struct({ action: Schema.Literal("reopen"), repo: Schema.String, number: Schema.Number.pipe(Schema.int(), Schema.positive()) }),
+  Schema.Struct({
+    action: Schema.Literal("watch"),
+    repo: Schema.String,
+    number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+    watching: Schema.Boolean,
+  }),
+)
+export type ThreadPullRequestAction = typeof ThreadPullRequestAction.Type
 
 /** The repository's own favicon/app icon, found in the checkout's starting commit. Bytes are served by `Paths.taskCheckoutIcon`. */
 export const CheckoutIcon = Schema.Struct({
@@ -54,8 +224,6 @@ export const Checkout = Schema.Struct({
   /** Branch the checkout forked from and pull requests target. */
   baseBranch: Schema.String,
   createdAt: Schema.String,
-  /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
-  pullRequest: Schema.optional(PullRequestLink),
   /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
   pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
@@ -135,6 +303,8 @@ export const Task = Schema.Struct({
   updatedAt: Schema.String,
   /** Oldest first. Empty until the agent checks a repository out. */
   checkouts: Schema.Array(Checkout),
+  /** Pull requests the thread owns or manages, oldest first; absent in threads that own none. */
+  pullRequests: Schema.optional(Schema.Array(ThreadPullRequest)),
   /** Repository the user started the thread on without naming a branch; its agent picks what to check out. */
   pickedRepo: Schema.optional(RepoRef),
   /** Port of the task's dev server, registered by its agent for the browser preview. */
@@ -145,6 +315,8 @@ export const Task = Schema.Struct({
   context: Schema.optional(ContextUsage),
   /** Present for a thread created as delegated work. */
   delegation: Schema.optional(Delegation),
+  /** Parent of a thread created with thread_spawn; peer messages do not set this. */
+  spawnedByTaskId: Schema.optional(Schema.String),
   /** Present while a usage-limit failure is waiting for its provider window to reset. */
   usageLimitResume: Schema.optional(UsageLimitResume),
   /** Present while an automatic retry of the thread's failed run waits for its backoff. */
@@ -589,6 +761,17 @@ export type CreateTaskBody = typeof CreateTaskBody.Type
 export const SetUsageLimitAutoResumeBody = Schema.Struct({ autoResume: Schema.Boolean })
 export type SetUsageLimitAutoResumeBody = typeof SetUsageLimitAutoResumeBody.Type
 
+/**
+ * The control plane's watch state for one pull request of a thread. The box uses `watching: false` when the control
+ * plane dropped the watch (the pull request closed), to clear the registry's mark; the entry itself stays.
+ */
+export const SetPullRequestWatchingBody = Schema.Struct({
+  repo: Schema.String,
+  number: Schema.Number.pipe(Schema.int(), Schema.positive()),
+  watching: Schema.Boolean,
+})
+export type SetPullRequestWatchingBody = typeof SetPullRequestWatchingBody.Type
+
 export const SendMessageBody = Schema.Struct({
   /** May be empty when `attachments` is not. */
   text: Schema.String,
@@ -861,6 +1044,8 @@ export class InternalError extends Schema.TaggedError<InternalError>()("Internal
 export const Paths = {
   health: "/api/health",
   capabilities: "/api/capabilities",
+  /** GET -> ModelCatalog on the selected box; ?refresh=1 bypasses the owner's discovery cache. */
+  models: "/api/models",
   /** GET / PUT TextGenerationSettings: the signed-in user's preferences on this box. */
   textGenerationSettings: "/api/settings/text-generation",
   /** GET / PUT ThreadSettings: the signed-in user's thread preferences on this box. */
@@ -877,6 +1062,11 @@ export const Paths = {
   /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
+  /**
+   * POST `SetPullRequestWatchingBody`: the control plane dropped this watch (the pull request closed). Clears the
+   * thread's watch mark; a late or repeated call is a no-op, and the registry entry stays.
+   */
+  taskPullRequestWatching: (id: string) => `/api/tasks/${id}/pull-request/watching`,
   /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,
@@ -885,6 +1075,16 @@ export const Paths = {
   /** PUT SetUsageLimitAutoResumeBody -> Task: turns the thread's armed auto-resume on or off. */
   taskUsageLimit: (id: string) => `/api/tasks/${id}/usage-limit`,
   taskDiff: (id: string) => `/api/tasks/${id}/diff`,
+  /** GET -> ThreadPullRequests: every pull request the thread owns or manages, with GitHub's live view of each. */
+  taskPullRequests: (id: string) => `/api/tasks/${id}/pull-requests`,
+  /** GET -> ThreadPullRequestDetail for one of the thread's pull requests (name it by `repo` and `number`). */
+  taskPullRequest: (id: string, repo: string, number: number) =>
+    `/api/tasks/${id}/pull-request?${new URLSearchParams({ repo, number: String(number) }).toString()}`,
+  /** GET -> ThreadPullRequestDiff: the pull request's unified diff. */
+  taskPullRequestDiff: (id: string, repo: string, number: number) =>
+    `/api/tasks/${id}/pull-request/diff?${new URLSearchParams({ repo, number: String(number) }).toString()}`,
+  /** POST a ThreadPullRequestAction -> Task: comments, reviews, merging, closing, reopening, watching. */
+  taskPullRequestAction: (id: string) => `/api/tasks/${id}/pull-request/action`,
   taskFiles: (id: string) => `/api/tasks/${id}/files`,
   /**
    * GET -> the bytes of one file of the thread as a download (`Content-Disposition: attachment`). `path` is relative to

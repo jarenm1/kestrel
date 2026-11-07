@@ -10,6 +10,7 @@ import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
+import { groupSubThreads } from "@/lib/subThreads"
 import { cn } from "@/lib/utils"
 import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
@@ -123,8 +124,9 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
-  const threads = active.filter((task) => task.status !== "running")
-  const working = active.filter((task) => task.status === "running")
+  const { roots, children } = groupSubThreads(active)
+  const threads = roots.filter((task) => task.status !== "running")
+  const working = roots.filter((task) => task.status === "running")
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -163,13 +165,14 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   function threadTab(task: Task) {
     return (
-      <ThreadTab
+      <ThreadGroup
         key={task.id}
         task={task}
         now={now}
-        isOpen={task.id === openTaskId}
-        archiving={archive.isPending && archive.variables === task.id}
-        onArchive={() => archiveThread(task)}
+        openTaskId={openTaskId}
+        childrenByParent={children}
+        archivingId={archive.isPending ? archive.variables : undefined}
+        onArchive={archiveThread}
       />
     )
   }
@@ -325,6 +328,46 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   )
 }
 
+function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, archivingId, onArchive }: {
+  task: Task
+  sub?: boolean
+  now: number
+  openTaskId: string | undefined
+  childrenByParent: Map<string, Task[]>
+  archivingId: string | undefined
+  onArchive: (task: Task) => void
+}) {
+  const children = childrenByParent.get(task.id) ?? []
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="min-w-0">
+      <div className="relative">
+        {sub ? (
+          <SubThreadTab task={task} hasChildren={children.length > 0} />
+        ) : (
+          <ThreadTab task={task} now={now} isOpen={task.id === openTaskId} archiving={archivingId === task.id} onArchive={() => onArchive(task)} hasChildren={children.length > 0} />
+        )}
+        {children.length > 0 && (
+          <button
+            type="button"
+            aria-label={`${expanded ? "Collapse" : "Expand"} sub-threads for ${task.title || "Untitled thread"}`}
+            aria-expanded={expanded}
+            onClick={() => setExpanded(!expanded)}
+            className="absolute left-1 bottom-1 flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+          >
+            <ChevronDown aria-hidden="true" className={cn("size-3.5 transition-transform", !expanded && "-rotate-90")} />
+          </button>
+        )}
+      </div>
+      {children.length > 0 && expanded && (
+        <div className="ml-4 border-l border-border/70 pl-2">
+          {children.map((child) => <ThreadGroup key={child.id} sub task={child} now={now} openTaskId={openTaskId} childrenByParent={childrenByParent} archivingId={archivingId} onArchive={onArchive} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Rows fade in and out as they join or leave a list; `layout` slides the rest into place. */
 const FADE = { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } } as const
 /**
@@ -359,14 +402,16 @@ interface ThreadTabProps {
   isOpen: boolean
   archiving: boolean
   onArchive: () => void
+  hasChildren: boolean
 }
 
 /**
  * One thread in the expanded sidebar: repo and age, title, branch and status, with an archive button on hover.
  * Takes a `ref` because `AnimatePresence`'s `popLayout` measures the row it lifts out.
  */
-function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabProps) {
+function ThreadTab({ ref, task, now, isOpen, archiving, onArchive, hasChildren }: ThreadTabProps) {
   const [checkout, ...otherCheckouts] = task.checkouts
+  const pullRequest = checkout === undefined ? undefined : (task.pullRequests ?? []).filter((pr) => pr.checkoutId === checkout.id).at(-1)
   return (
     <motion.div
       ref={ref}
@@ -397,17 +442,17 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabPr
           </span>
         </span>
         <FadingTitle text={task.title} working={task.status === "running"} />
-        <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+        <span className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", hasChildren && "pl-6")}>
           {checkout ? (
             <>
-              {checkout.pullRequest ? (
+              {pullRequest ? (
                 <GitPullRequest aria-hidden="true" className="size-3.5 shrink-0" />
               ) : (
                 <GitBranch aria-hidden="true" className="size-3.5 shrink-0" />
               )}
               <span className="min-w-0 flex-1 truncate">
                 {checkout.branch}
-                {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                {pullRequest ? ` #${pullRequest.number}` : null}
               </span>
             </>
           ) : (
@@ -431,6 +476,21 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabPr
         <ArchiveBoxIcon />
       </Button>
     </motion.div>
+  )
+}
+
+/** A sub-thread under its parent: only the title and its status, so the list stays short while work runs. */
+function SubThreadTab({ task, hasChildren }: { task: Task; hasChildren: boolean }) {
+  const title = task.title || "Untitled thread"
+  return (
+    <NavLink
+      to={threadPath(task.id)}
+      title={`${title}\n${STATUS_LABEL[task.status]}`}
+      className={(s) => cn(tabClass(s), "items-center py-1.5 pr-2.5 text-xs", hasChildren ? "pl-8" : "pl-2")}
+    >
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <StatusIcon status={task.status} className="shrink-0 [&>svg]:size-3.5" />
+    </NavLink>
   )
 }
 

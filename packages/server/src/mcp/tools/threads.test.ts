@@ -9,7 +9,7 @@ test("thread_spawn creates an owned thread, checks out the repository, and sends
   const calls: unknown[][] = []
   const deps = { threads: {
     owner: (id: string) => Effect.sync(() => { calls.push(["owner", id]); return "owner" }),
-    create: (owner: string, input: unknown) => Effect.sync(() => { calls.push(["create", owner, input]); return { id: "new", title: "Review" } }),
+    create: (owner: string, input: unknown, delegation: unknown, parent: string) => Effect.sync(() => { calls.push(["create", owner, input, delegation, parent]); return { id: "new", title: "Review" } }),
     send: (from: string, to: string, message: string) => Effect.sync(() => { calls.push(["send", from, to, message]); return { run: { id: "new-run" } } }),
   } } as unknown as ThreadToolDeps
   const server = new McpServer({ name: "test", version: "1" })
@@ -23,7 +23,7 @@ test("thread_spawn creates an owned thread, checks out the repository, and sends
     expect(JSON.stringify(result)).toContain("new-run")
     expect(calls).toEqual([
       ["owner", "current"],
-      ["create", "owner", { title: "Review", checkout: { repo: "jarenm1/kestrel", baseBranch: "main" } }],
+      ["create", "owner", { title: "Review", checkout: { repo: "jarenm1/kestrel", baseBranch: "main" } }, undefined, "current"],
       ["send", "current", "new", "Review this"],
     ])
     const invalid = await client.callTool({ name: "thread_spawn", arguments: { title: "Review", message: "Task", baseBranch: "main" } })

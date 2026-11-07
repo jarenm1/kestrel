@@ -5,7 +5,6 @@ import {
   CliProvider,
   baseModelId,
   MODEL_PROVIDERS,
-  providerModels,
 
   type CliLoginStart,
   type Connection,
@@ -13,7 +12,7 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
-import { ChevronDown, Plus } from "lucide-react"
+import { ChevronDown, Plus, RefreshCw } from "lucide-react"
 import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -32,7 +31,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 
-import { setShownModels, useShownModels } from "@/hooks/useShownModels"
+import { setShownModels, storedShownModels, useShownModels } from "@/hooks/useShownModels"
+import { useModelCatalog } from "@/hooks/useModelCatalog"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"
 import { HarnessLogo } from "@/components/HarnessLogo"
@@ -62,15 +62,36 @@ function isApiKeyConnection(connection: Connection) {
 /** Model subscriptions, installed harnesses, and API keys with their chat model preferences. */
 export function Connections() {
   const connections = useQuery(queries.connections())
+  const catalog = useModelCatalog()
   const list = connections.data
 
   return (
     <>
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-      {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
-      {list && (
-        <div className="flex flex-col gap-2">
+      {catalog.isError && (
+        <Alert>
+          {catalog.isFallback
+            ? "Model discovery is unavailable; showing the built-in catalog. "
+            : "The last model refresh failed; showing the catalog read earlier. "}
+          {errorText(catalog.error)}
+        </Alert>
+      )}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
           <h2 className="font-semibold tracking-tight">Harnesses/Subscriptions</h2>
+          <Button
+            variant="soft"
+            size="sm"
+            disabled={!catalog.canRefresh}
+            onClick={catalog.refresh}
+            aria-label="Refresh the models each provider offers"
+          >
+            <RefreshCw className={catalog.isRefreshing ? "animate-spin" : undefined} />
+            {catalog.isRefreshing ? "Refreshing…" : "Refresh models"}
+          </Button>
+        </div>
+        {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
+        {list && (
           <Card className="py-0">
             <CardContent className="divide-y divide-white/[0.04] px-0">
               {list.filter((connection) => connection.kind === "cli" && !isApiKeyConnection(connection)).map((connection) =>
@@ -82,8 +103,8 @@ export function Connections() {
               )}
             </CardContent>
           </Card>
-        </div>
-      )}
+        )}
+      </div>
       {list && <ApiKeysCard connections={list} />}
     </>
   )
@@ -173,22 +194,24 @@ function HarnessRow({ connection, children }: { connection: Connection; children
 }
 
 /**
- * Height of the model list: ten items (2rem each), scrolling past that, less only when the window has less room. Fixed
- * for longer lists so the menu keeps its size while searching; shorter lists take their own height.
+ * Height of the model list: ten items (2rem each), scrolling past that, less only when the window has less room. The
+ * subtraction leaves room for the label, discovery status, search box and footer; the list stays fixed for longer
+ * lists so the menu keeps its size while searching, and shorter lists take their own height.
  */
 const MODEL_LIST_ROWS = 10
-const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 7rem))"
+const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 9rem))"
 
 /**
  * Toggles which of the provider's models the chat's model picker offers, with a search box over the list. Routes appear
  * under the harness they run; a subscription row may only pick its native models, and a route the selected box cannot
- * launch is not offered at all.
+ * launch is not offered at all. The models come from the active box's runtime catalog.
  */
 function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
-  const all = providerModels(provider.id)
+  const discovery = useModelCatalog()
   // Visibility is per model, not per route: one toggle covers every harness the model supports.
-  const catalog = all.filter((m) => !isRouteModel(m))
+  const catalog = discovery.models.filter((model) => model.provider === provider.id && !isRouteModel(model))
   const shown = useShownModels()[provider.id]
+  const chosen = storedShownModels(provider.id)
   const shownBase = new Set(shown.map((m) => baseModelId(m.id)))
   const shownCount = catalog.filter((m) => shownBase.has(m.id)).length
   const menu = useFilterMenu(
@@ -199,11 +222,14 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
   )
 
   function toggle(id: AgentModel, on: boolean) {
-    const next = new Set(shownBase)
+    // Keep ids the current catalog does not offer (an offline box, an unsupported source) until they are toggled off.
+    const next = new Set((chosen ?? shown.map((m) => baseModelId(m.id))).map(baseModelId))
     if (on) next.add(id)
     else next.delete(id)
+    const offered = catalog.filter((m) => next.has(m.id)).map((m) => m.id)
+    const kept = [...next].filter((candidate) => !catalog.some((m) => baseModelId(m.id) === candidate))
     // Store base ids only; the chat picker expands each one to its supported routes.
-    setShownModels(provider.id, catalog.filter((m) => next.has(m.id)).map((m) => m.id))
+    setShownModels(provider.id, [...offered, ...kept])
   }
 
   return (
@@ -374,6 +400,7 @@ function ConnectionHeader({
  */
 function invalidateConnections(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: keys.connections })
+  void queryClient.invalidateQueries({ queryKey: keys.allModels })
   void queryClient.invalidateQueries({ queryKey: keys.usage })
   void queryClient.invalidateQueries({ queryKey: keys.providerUsage })
   void queryClient.invalidateQueries({ queryKey: keys.usageActivity })

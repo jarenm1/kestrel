@@ -64,6 +64,27 @@ describe("ACP driver", () => {
     expect(h.outcomes).toEqual([{ status: "completed" }])
   })
 
+  test("selects a discovered model using the agent's model-category option before prompting", () => {
+    const h = harness({ model: "gemini-future" })
+    h.driver.start()
+    h.reply({ protocolVersion: 1 })
+    h.reply({
+      sessionId: "s-new",
+      configOptions: [{
+        id: "llm", category: "model", type: "select",
+        options: [{ value: "gemini-future" }],
+      }],
+    })
+    expect(h.last()).toMatchObject({
+      method: "session/set_config_option",
+      params: { configId: "llm", value: "gemini-future" },
+    })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+    h.reply({ stopReason: "end_turn" })
+    expect(h.outcomes).toEqual([{ status: "completed" }])
+  })
+
   test("a resumed run resumes its session without replay; a refused resume fails the run", () => {
     const h = harness({ resumeSession: "s-old" })
     h.driver.start()

@@ -96,9 +96,9 @@ const selectValues = (node: unknown): string[] => {
 const findConfigOption = (configOptions: unknown, category: string): { readonly id: string; readonly currentValue: string | null; readonly values: string[] } | null => {
   if (!Array.isArray(configOptions)) return null
   const option = configOptions.find((item) => isRecord(item) && (item.category === category || item.id === category))
-  if (!isRecord(option) || typeof option.id !== "string") return null
+  if (!isRecord(option)) return null
   return {
-    id: option.id,
+    id: typeof option.id === "string" ? option.id : category,
     currentValue: typeof option.currentValue === "string" ? option.currentValue : null,
     values: selectValues(option.options),
   }
@@ -233,10 +233,11 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
       setEffort(opened.configOptions)
       return
     }
+    const configId = findConfigOption(opened.configOptions, "model")?.id ?? "model"
     request(
       "session/set_config_option",
-      { sessionId, configId: input.provider === "devin" ? findConfigOption(opened.configOptions, "model")?.id ?? "model" : "model", value: model },
-      orFail("session/set_config_option model", (result) => setEffort(result.configOptions)),
+      { sessionId, configId, value: model },
+      orFail(`session/set_config_option ${configId}`, (result) => setEffort(result.configOptions)),
     )
   }
 
