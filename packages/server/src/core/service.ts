@@ -1773,7 +1773,7 @@ export const CoreLive = Layer.effect(
       const arm = child.usageLimitResume
       if (arm !== undefined) return resumesAtReset(child, run) ? { resetsAt: arm.resetsAt } : null
       const latest = [...state.runs].reverse().find((r) => r.taskId === child.id)
-      return latest?.id === run.id && runRecovery.deciding(child, run) ? { resetsAt: null } : null
+      return latest?.id === run.id && runRecovery.deciding(state, child, run) ? { resetsAt: null } : null
     }
 
     const delegatedStatus: CoreShape["delegatedStatus"] = (parentTaskId, childTaskId) =>
@@ -1915,8 +1915,11 @@ export const CoreLive = Layer.effect(
           const child = s.tasks.find((t) => t.id === childTaskId)
           if (child === undefined) return Either.right(null)
           if (child.usageLimitResume === undefined && child.autoRetry === undefined) return Either.right(null)
-          // The user decided this run: recovery must not examine it again (it would after a restart) and re-arm it.
-          if (child.usageLimitResume !== undefined) runRecovery.settle(child.usageLimitResume.runId)
+          // The user decided this run: recording it with the state keeps recovery from examining it again and
+          // re-arming it, after a restart too (its own record of looked-at runs lives in memory).
+          if (child.usageLimitResume !== undefined && !s.settledRuns.includes(child.usageLimitResume.runId)) {
+            s.settledRuns.push(child.usageLimitResume.runId)
+          }
           delete child.usageLimitResume
           delete child.autoRetry
           return Either.right({ ...child })
@@ -1947,7 +1950,7 @@ export const CoreLive = Layer.effect(
     const holdsDelegationMail = (state: Readonly<StoreState>, parent: Task): boolean => {
       const latest = [...state.runs].reverse().find((r) => r.taskId === parent.id)
       if (latest === undefined || latest.status !== "failed") return false
-      return parent.usageLimitResume?.runId === latest.id || runRecovery.deciding(parent, latest)
+      return parent.usageLimitResume?.runId === latest.id || runRecovery.deciding(state, parent, latest)
     }
 
     // Recover undelivered completions after a restart as well as delivering live completions. The stable message id

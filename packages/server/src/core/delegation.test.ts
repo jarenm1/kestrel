@@ -262,7 +262,7 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(disk).toContain('"requestId":"retry-key"')
     })), 20_000)
 
-test("a usage limit holds delegated results until the work resumes or returns early", () => withCore(({ store, core }) =>
+test("a usage limit holds delegated results until the work resumes or returns early", () => withCore(({ store, core, config }) =>
   Effect.gen(function* () {
     const now = new Date().toISOString()
     const later = new Date(Date.now() + 3_600_000).toISOString()
@@ -312,8 +312,10 @@ test("a usage limit holds delegated results until the work resumes or returns ea
     const returned = yield* core.delegate("parent", "parent-run", { title: "Returned", message: "work", requestId: "returned" })
     yield* stall(returned.id)
     yield* core.cancelDelegation("parent", returned.id)
-    // The arm here was set by hand, so recovery has not looked at the run yet: its first sweep (5 s) settles that.
-    yield* Effect.sleep("7500 millis")
+    // The user's decision is written to the state file, so a restarted box does not arm that run again.
+    const settledRun = returned.delegation!.runId!
+    expect(yield* Effect.promise(() => readFile(config.stateFile, "utf8"))).toContain(`"settledRuns":["${settledRun}"]`)
+    yield* Effect.sleep("2500 millis")
     expect((yield* results(returned.id))[0]?.text).toContain("finished with status failed")
 
     // An archived child is never resumed, so its arm must not hold the result.

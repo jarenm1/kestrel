@@ -156,7 +156,7 @@ describe("retired harness state", () => {
 
   test("a missing state file starts empty and legacy records load unchanged", async () => {
     expect(await loadState(root)).toEqual({
-      tasks: [], messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
+      tasks: [], messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [], settledRuns: [],
     })
     expect(existsSync(join(root, "state.json"))).toBe(false)
 
@@ -172,6 +172,7 @@ describe("retired harness state", () => {
     const state = await loadState(root)
     expect(state.runs[0]!.provider).toBeUndefined()
     expect(state.runSessions[0]!.provider).toBe("anthropic")
+    expect(state.settledRuns).toEqual([])
     expect(await readFile(file, "utf8")).toBe(JSON.stringify(legacy))
   })
 })

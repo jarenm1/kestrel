@@ -35,6 +35,7 @@ const stateWith = (overrides: Partial<StoreState> = {}): StoreState => ({
   pendingAsks: [],
   uploads: [],
   runSessions: [],
+  settledRuns: [],
   ...overrides,
 })
 
@@ -237,15 +238,27 @@ test("a failed usage probe is retried on the next sweep", async () => {
   expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
 })
 
-test("a run the user returned early is not re-armed, even by a sweep that never saw it (a restart)", async () => {
+test("a run the user settled is not re-armed by a recovery that never saw it, as after a restart", async () => {
   const endedAt = new Date(Date.now() - 60_000).toISOString()
-  // A fresh recovery has no record of the run, as after a box restart; the arm was already dropped by the user.
-  const { recovery, state } = setup({ state: stateWith({ runs: [failedRun(endedAt)] }), usage: usage(new Date(Date.now() + 3_600_000).toISOString()) })
-  recovery.settle("run")
+  const later = usage(new Date(Date.now() + 3_600_000).toISOString())
+  // Each `setup` is a fresh recovery with no memory of looked-at runs, as a restarted box has; only the store persists.
+  const settled = setup({ state: stateWith({ runs: [failedRun(endedAt)], settledRuns: ["run"] }), usage: later })
+  expect(settled.recovery.deciding(settled.state, settled.state.tasks[0]!, settled.state.runs[0]!)).toBe(false)
+  await Effect.runPromise(settled.recovery.sweep)
+  expect(settled.state.tasks[0]!.usageLimitResume).toBeUndefined()
 
-  expect(recovery.deciding(state.tasks[0]!, state.runs[0]!)).toBe(false)
+  // The same failure without the record is armed again: that is what the record prevents.
+  const unsettled = setup({ state: stateWith({ runs: [failedRun(endedAt)] }), usage: later })
+  await Effect.runPromise(unsettled.recovery.sweep)
+  expect(unsettled.state.tasks[0]!.usageLimitResume?.runId).toBe("run")
+})
+
+test("settled runs are forgotten once they stop being their thread's latest", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const later = { ...failedRun(endedAt), id: "later", status: "succeeded" as const }
+  const { recovery, state } = setup({ state: stateWith({ runs: [failedRun(endedAt), later], settledRuns: ["run"] }) })
   await Effect.runPromise(recovery.sweep)
-  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+  expect(state.settledRuns).toEqual([])
 })
 
 test("a failure stays undecided until its arm is written, so a delegated child's result is held meanwhile", async () => {
@@ -260,7 +273,7 @@ test("a failure stays undecided until its arm is written, so a delegated child's
       update: (f) => (++writes === 1 ? Effect.fail(new InternalError({ message: "disk full" })) : store.update(f)),
     }),
   })
-  const decidingNow = () => recovery.deciding(state.tasks[0]!, state.runs[0]!)
+  const decidingNow = () => recovery.deciding(state, state.tasks[0]!, state.runs[0]!)
 
   expect(decidingNow()).toBe(true)
   await Effect.runPromise(recovery.sweep)

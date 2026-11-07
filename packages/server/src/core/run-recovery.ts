@@ -148,6 +148,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
           stored.archivedAt !== undefined ||
           stored.usageLimitResume !== undefined ||
           stored.autoRetry !== undefined ||
+          s.settledRuns.includes(run.id) ||
           last?.id !== run.id
         ) {
           return Either.right(null)
@@ -265,6 +266,16 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
     // Only a thread's latest run can ever be armed, so older ids would otherwise accumulate for the box's lifetime.
     const latestIds = new Set([...latest.values()].map((run) => run.id))
     for (const id of examined) if (!latestIds.has(id)) examined.delete(id)
+    if (state.settledRuns.some((id) => !latestIds.has(id))) {
+      yield* deps.store.update((s) => {
+        const latestRunIds = new Set<string>()
+        const seen = new Map<string, string>()
+        for (const run of s.runs) seen.set(run.taskId, run.id)
+        for (const id of seen.values()) latestRunIds.add(id)
+        s.settledRuns = s.settledRuns.filter((id) => latestRunIds.has(id))
+        return Either.right(undefined)
+      })
+    }
 
     // A reply, a resumed run, or a cancelled delegation leaves a pending recovery with nothing to do.
     const stale = state.tasks.filter((task) => {
@@ -350,7 +361,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       // Only a failure this box saw recently, and that is still the thread's latest run, can be armed or retried.
       if (run.status !== "failed" || run.endedAt === null) continue
       const endedAt = Date.parse(run.endedAt)
-      if (now - endedAt > ARM_WINDOW_MS || examined.has(run.id)) continue
+      if (now - endedAt > ARM_WINDOW_MS || examined.has(run.id) || current.settledRuns.includes(run.id)) continue
       yield* examine(task, run, endedAt, autoResumeByOwner)
     }
   })
@@ -359,9 +370,9 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
    * Whether the sweep has yet to decide what a thread's latest run, failed, gets: a usage-limit arm, a retry, or nothing.
    * Callers pass the thread's latest run. Reporting a delegated child's failure before this verdict would announce as
    * final a run the box may be about to resume; a probe that keeps failing holds it at most `ARM_WINDOW_MS`. A run a
-   * restart interrupted left no failure to read, so it can never be a usage limit.
+   * restart interrupted left no failure to read, so it can never be a usage limit; a run the user settled is decided.
    */
-  const deciding = (task: Task, run: Run): boolean =>
+  const deciding = (state: Readonly<StoreState>, task: Task, run: Run): boolean =>
     task.archivedAt === undefined &&
     task.delegation?.cancelledAt === undefined &&
     run.status === "failed" &&
@@ -370,15 +381,8 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
     task.usageLimitResume === undefined &&
     task.autoRetry === undefined &&
     Date.now() - Date.parse(run.endedAt) <= ARM_WINDOW_MS &&
-    !examined.has(run.id)
+    !examined.has(run.id) &&
+    !state.settledRuns.includes(run.id)
 
-  /**
-   * Marks a failed run decided by someone else: the user dropped its arm ("Return to parent now"). The look is kept in
-   * memory only, so after a restart the sweep would otherwise examine the run again and write the same arm back.
-   */
-  const settle = (runId: string): void => {
-    examined.add(runId)
-  }
-
-  return { sweep, deciding, settle }
+  return { sweep, deciding }
 }

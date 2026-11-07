@@ -39,6 +39,7 @@ const PersistedState = Schema.Struct({
   pendingAsks: Schema.optional(Schema.Array(PendingAskRecord)),
   uploads: Schema.optional(Schema.Array(PendingUploadRecord)),
   runSessions: Schema.optional(Schema.Array(RunSessionRecord)),
+  settledRuns: Schema.optional(Schema.Array(Schema.String)),
 })
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -79,6 +80,11 @@ export interface StoreState {
   pendingAsks: PendingAsk[]
   uploads: PendingUpload[]
   runSessions: RunSession[]
+  /**
+   * Failed runs whose recovery the user already decided (they returned a usage-stopped child to its parent): the
+   * recovery sweep never arms them again, across restarts too. Pruned once a run stops being its thread's latest.
+   */
+  settledRuns: string[]
 }
 
 export interface StoreShape {
@@ -165,7 +171,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
           : Effect.fail(new InternalError({ message: `cannot read ${file}: ${String(e)}` })),
       ),
     )
-    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [] }
+    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [], settledRuns: [] }
     const parsed = yield* Schema.decodeUnknown(Schema.parseJson())(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
@@ -187,6 +193,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
       pendingAsks: [...(decoded.pendingAsks ?? [])],
       uploads: [...(decoded.uploads ?? [])],
       runSessions: [...(decoded.runSessions ?? [])],
+      settledRuns: [...(decoded.settledRuns ?? [])],
     }
   })
 
