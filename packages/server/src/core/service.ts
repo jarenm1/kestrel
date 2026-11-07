@@ -69,7 +69,7 @@ import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type RunSession, type StoreState } from "./state"
-import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
+import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
@@ -150,6 +150,7 @@ export interface AttachmentInput {
 export interface UploadInput {
   readonly mimeType: string
   readonly name?: string | undefined
+  readonly operationId?: string | undefined
   readonly bytes: Uint8Array
 }
 
@@ -823,6 +824,7 @@ export const CoreLive = Layer.effect(
     const textGenerator = makeTextGenerator({ config, cliAuth, broker })
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
+    const uploadLock = yield* Effect.makeSemaphore(1)
     const delegationLock = yield* Effect.makeSemaphore(1)
     const delegationDeliveryLock = yield* Effect.makeSemaphore(1)
 
@@ -2414,7 +2416,7 @@ export const CoreLive = Layer.effect(
 
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
-      Effect.gen(function* () {
+      uploadLock.withPermits(1)(Effect.gen(function* () {
         yield* ownedTask(user, taskId)
         if (input.bytes.byteLength === 0) return yield* Effect.fail(new BadRequest({ message: "upload is empty" }))
         if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
@@ -2422,8 +2424,23 @@ export const CoreLive = Layer.effect(
             new BadRequest({ message: `upload is ${input.bytes.byteLength} bytes; the limit is ${MAX_ATTACHMENT_BYTES}` }),
           )
         }
-        const id = newId()
+        const id = input.operationId === undefined ? newId() : uploadOperationId(user, taskId, input.operationId)
+        if (id === undefined) return yield* Effect.fail(new BadRequest({ message: "invalid upload operation ID" }))
         const name = sanitizeUploadName(input.name)
+        const existing = yield* Effect.map(store.read, (s) =>
+          s.uploads.find((u) => u.taskId === taskId && u.id === id) ??
+          s.messages.filter((m) => m.taskId === taskId).flatMap((m) => m.attachments ?? []).find((a) => a.id === id),
+        )
+        if (existing) {
+          const bytes = yield* Effect.tryPromise({
+            try: () => readFile(join(config.attachmentsDir, id)),
+            catch: (e) => new InternalError({ message: `read upload: ${String(e)}` }),
+          })
+          if (existing.mimeType !== input.mimeType || existing.name !== name || !bytes.equals(input.bytes)) {
+            return yield* Effect.fail(new Conflict({ message: "upload operation ID was already used for different content" }))
+          }
+          return { id, mimeType: existing.mimeType, name: existing.name }
+        }
         // The upload's bytes count against the thread now, not at the next storage check, so a burst of uploads between
         // checks cannot pass the limit. Refused like a full disk: the bytes that would cross it are not written.
         const before = storageUsed.get(taskId) ?? 0
@@ -2464,7 +2481,7 @@ export const CoreLive = Layer.effect(
             ),
           )
         return { id, mimeType: input.mimeType, name }
-      })
+      }))
 
     // First check at startup, then every STORAGE_CHECK_MS; a failed check is logged and the next one runs anyway.
     yield* Effect.forkDaemon(

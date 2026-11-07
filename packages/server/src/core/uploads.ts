@@ -1,4 +1,5 @@
 import { join } from "node:path"
+import { createHash } from "node:crypto"
 import type { Attachment } from "@cloudagents/protocol"
 
 const EXTENSIONS: Record<string, string> = {
@@ -8,6 +9,12 @@ const EXTENSIONS: Record<string, string> = {
   "image/webp": ".webp",
   "application/pdf": ".pdf",
   "text/plain": ".txt",
+}
+
+/** A client operation is scoped to its owner and thread; only UUIDs are accepted from clients. */
+export const uploadOperationId = (user: string, taskId: string, key: string): string | undefined => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(key)) return undefined
+  return createHash("sha256").update(JSON.stringify(["upload", user, taskId, key.toLowerCase()])).digest("hex")
 }
 
 /** The file name an attachment is written under: the user's name, else its id plus an extension for its type. */

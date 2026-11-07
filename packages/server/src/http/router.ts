@@ -69,8 +69,10 @@ const uploadInput = Effect.gen(function* () {
     return yield* Effect.fail(new BadRequest({ message: "content-type is required" }))
   }
   const bytes = yield* req.arrayBuffer.pipe(Effect.mapError(() => new BadRequest({ message: "cannot read request body" })))
-  const name = new URL(req.url, "http://localhost").searchParams.get("name") ?? undefined
-  return { mimeType, name, bytes: new Uint8Array(bytes) }
+  const params = new URL(req.url, "http://localhost").searchParams
+  const name = params.get("name") ?? undefined
+  const operationId = params.get("operationId") ?? undefined
+  return { mimeType, name, operationId, bytes: new Uint8Array(bytes) }
 })
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")

@@ -146,6 +146,11 @@ The authenticated `GET /api/capabilities` reports a versioned snapshot of platfo
 
 ## Agent execution and data
 
+Upload requests may carry an `operationId` UUID. Retrying the same bytes, MIME type and sanitized name for the same
+owner and thread returns the original attachment, including after it has been attached to a message. Reusing the key
+with different content is rejected. The record lasts for the lifetime of the pending upload or its message, until the
+thread is deleted. The web client keeps the key in memory while retrying a file; a page reload starts a new operation.
+
 A thread has a workspace, messages and runs. Repositories are checked out on demand, each on a thread branch. The box maintains per-user repository mirrors, fetching with the user's GitHub credentials on the host. Host-side Git operations use a separate shadow repository so agent-writable repository configuration cannot direct host commands. Thread data, workspaces and mirrors live on the box.
 
 Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop terminal and launched apps) receives

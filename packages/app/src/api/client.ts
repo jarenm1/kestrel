@@ -498,20 +498,26 @@ export async function signedInUser(): Promise<Me | null> {
  * Pending upload id of each `File` already stored on a task. A failed send leaves its uploads pending on the box (they
  * are consumed only with the message), so a resend of the same `File` reuses the id instead of storing it again.
  */
-const pendingUploads = new WeakMap<File, { readonly taskId: string; readonly id: string }>()
+const pendingUploads = new WeakMap<File, { readonly taskId: string; readonly operationId: string; readonly id?: string }>()
 
 /** Uploads `file` to the task unless it already waits there; the id is kept as soon as its own upload succeeds. */
 const uploadOnce = async (taskId: string, file: File): Promise<string> => {
   const pending = pendingUploads.get(file)
-  if (pending?.taskId === taskId) return pending.id
+  if (pending?.taskId === taskId) return pending.id ?? uploadWithOperation(taskId, file, pending.operationId)
+  const operationId = crypto.randomUUID()
+  pendingUploads.set(file, { taskId, operationId })
+  return uploadWithOperation(taskId, file, operationId)
+}
+
+const uploadWithOperation = async (taskId: string, file: File, operationId: string): Promise<string> => {
   const { id } = await onTask(
     taskId,
     Attachment,
     "POST",
-    `${Paths.taskUploads(taskId)}?name=${encodeURIComponent(file.name)}`,
+    `${Paths.taskUploads(taskId)}?name=${encodeURIComponent(file.name)}&operationId=${encodeURIComponent(operationId)}`,
     file,
   )
-  pendingUploads.set(file, { taskId, id })
+  pendingUploads.set(file, { taskId, operationId, id })
   return id
 }
 
