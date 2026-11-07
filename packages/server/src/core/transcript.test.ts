@@ -502,6 +502,17 @@ describe("claude partial messages", () => {
     expect(second[0]).toMatchObject({ _tag: "usage", id: "usage-msg_b", durationMs: 1_500 })
   })
 
+  test("a provider start and an untimed completion are different clocks, so no rate is measured", () => {
+    const transcript = makeTranscript()
+    transcript.push({
+      ...streamEvent({ type: "message_start", message: { id: "msg_mix", usage: { input_tokens: 1 } } }),
+      emittedAtMs: Date.UTC(2026, 0, 2, 7, 30, 0),
+    })
+    // The completion carries no provider time, so the box's clock cannot be subtracted from the provider's.
+    const [usage] = valid(transcript.push(streamEvent({ type: "message_delta", usage: { output_tokens: 5 } })))
+    expect(usage).toMatchObject({ _tag: "usage", id: "usage-msg_mix", durationMs: null })
+  })
+
   test("a response with no observed start keeps its elapsed time unknown, never an estimate", () => {
     const transcript = makeTranscript()
     const at = Date.UTC(2026, 0, 2, 7, 0, 0)

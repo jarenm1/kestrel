@@ -108,6 +108,8 @@ interface ResponseUsage {
   timestamp: string | null
   /** Epoch milliseconds the response began (its `message_start`), once observed. */
   startMs: number | null
+  /** That start came from a provider event time, not the box's clock. */
+  startFromEvent: boolean
   /** Epoch milliseconds of its latest completion report while the stream is open; frozen after its stop. */
   endMs: number | null
   /** That end came from a provider event time, not the box's clock: an untimed report cannot move it. */
@@ -292,6 +294,7 @@ export const makeTranscript = (
       cachedTokens: null,
       timestamp: null,
       startMs: null,
+      startFromEvent: false,
       endMs: null,
       endFromEvent: false,
       durationMs: null,
@@ -320,7 +323,10 @@ export const makeTranscript = (
       state.endMs = state.endMs === null ? Date.now() : Math.max(state.endMs, Date.now())
     }
     state.timestamp = new Date(state.endMs).toISOString()
-    if (state.startMs !== null) state.durationMs = Math.max(0, Math.round(state.endMs - state.startMs))
+    // Only one clock can measure an interval: a provider time and the box's own clock are not comparable.
+    if (state.startMs !== null && state.startFromEvent === state.endFromEvent) {
+      state.durationMs = Math.max(0, Math.round(state.endMs - state.startMs))
+    }
   }
 
   /** Merge the buckets a Claude event reports; a missing bucket leaves the value already known. */
@@ -535,7 +541,11 @@ export const makeTranscript = (
           state.active = true
           // The response begins here: its elapsed time runs from this boundary to its latest completion report.
           // A replayed start does not move it.
-          state.startMs ??= eventMillis(line, event) ?? Date.now()
+          if (state.startMs === null) {
+            const eventStart = eventMillis(line, event)
+            state.startMs = eventStart ?? Date.now()
+            state.startFromEvent = eventStart !== null
+          }
           // Its input and cache reads are known now; output is not final until message_delta.
           if (isRecord(event.message) && isRecord(event.message.usage)) recordClaudeUsage(state, event.message.usage)
         }
