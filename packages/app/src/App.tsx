@@ -9,6 +9,7 @@ import { ArchivedPanel } from "@/components/ArchivedPanel"
 import { AutomationsPanel } from "@/components/AutomationsPanel"
 import { PublicShell } from "@/components/PublicShell"
 import { Alert } from "@cloudagents/ui/alert"
+import { AutomationImportPage } from "@/pages/AutomationImportPage"
 import { DesktopEmbedPage } from "@/pages/DesktopEmbedPage"
 import { DownloadPage } from "@/pages/DownloadPage"
 import { LandingPage } from "@/pages/LandingPage"
@@ -57,6 +58,7 @@ export function App() {
           <Route path={APP_HOME} element={<NewThreadPage />} />
           <Route path="/c/:taskId" element={<ThreadPage />} />
           <Route path="/automations" element={<AutomationsPanel />} />
+          <Route path="/automations/import" element={<AutomationImportPage />} />
           <Route path="/archived" element={<ArchivedPanel />} />
           <Route path={ControlPaths.pairPage} element={<PairPage />} />
           <Route path="/settings" element={<SettingsLayout />}>

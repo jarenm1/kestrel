@@ -4,6 +4,7 @@ import type { Automation } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { AutomationEditDialog } from "@/components/AutomationEditDialog"
+import { ShareAutomationDialog } from "@/components/ShareAutomationDialog"
 import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
@@ -19,6 +20,7 @@ export function AutomationsPanel() {
   const automations = useQuery(queries.automations())
   const activeBoxId = useActiveBoxId()
   const [editing, setEditing] = useState<Automation | null>(null)
+  const [sharing, setSharing] = useState<Automation | null>(null)
   // Automations only fire on Kestrel's box, so their enabled state can't change while a user box is active.
   const onUserBox = typeof activeBoxId === "string"
 
@@ -74,6 +76,7 @@ export function AutomationsPanel() {
                 toggleDisabled={onUserBox}
                 removing={remove.isPending && remove.variables === automation.id}
                 onEdit={() => setEditing(automation)}
+                onShare={() => setSharing(automation)}
                 onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
                 onRemove={() => remove.mutate(automation.id)}
               />
@@ -83,6 +86,7 @@ export function AutomationsPanel() {
       )}
 
       <AutomationEditDialog automation={editing} onClose={() => setEditing(null)} />
+      {sharing && <ShareAutomationDialog automation={sharing} onClose={() => setSharing(null)} />}
     </div>
   )
 }
@@ -93,6 +97,7 @@ function AutomationRow({
   toggleDisabled,
   removing,
   onEdit,
+  onShare,
   onToggle,
   onRemove,
 }: {
@@ -101,6 +106,7 @@ function AutomationRow({
   toggleDisabled: boolean
   removing: boolean
   onEdit: () => void
+  onShare: () => void
   onToggle: (enabled: boolean) => void
   onRemove: () => void
 }) {
@@ -134,6 +140,9 @@ function AutomationRow({
       <div className="flex items-center gap-1 text-xs text-muted-foreground">
         {automation.nextRunAt !== null && <span>Next run {formatNextRun(automation.nextRunAt)}</span>}
         <div className="ml-auto flex items-center gap-1">
+          <Button variant="ghost" size="sm" aria-label={`Share: ${automation.name}`} onClick={onShare}>
+            Share
+          </Button>
           <Button variant="ghost" size="sm" onClick={onEdit}>
             Edit
           </Button>

@@ -717,6 +717,21 @@ export const Automation = Schema.Struct({
 })
 export type Automation = typeof Automation.Type
 
+/**
+ * The portable part of an automation, as carried by a share link. It holds what decides how the imported copy runs,
+ * never the owner's id, run history, timestamps or enabled state: the recipient imports a disabled copy of their own.
+ */
+export const AutomationShare = Schema.Struct({
+  version: Schema.Literal(1),
+  name: Schema.String.pipe(Schema.minLength(1)),
+  /** The sharer's repository; the recipient may only use it if their GitHub connection can read it. */
+  repo: Schema.NullOr(GithubRepoSlug),
+  prompt: Schema.String.pipe(Schema.minLength(1)),
+  model: Schema.optionalWith(Schema.NullOr(AgentModel), { default: () => null, exact: true }),
+  trigger: AutomationTrigger,
+})
+export type AutomationShare = typeof AutomationShare.Type
+
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),
   /** GitHub "owner/name" the owner's GitHub connection can read. Required for github triggers, optional for schedules. */

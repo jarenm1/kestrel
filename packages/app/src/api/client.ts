@@ -19,6 +19,7 @@ import {
   CreateBoxBody,
   CreateFleetBoxBody,
   CreateNestBoxBody,
+  CreateAutomationBody,
   CreatedBox,
   CreatedFleetBox,
   CreateTaskBody,
@@ -528,6 +529,8 @@ export const api = {
   deleteConnection: (provider: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
+  createAutomation: (body: CreateAutomationBody) =>
+    run(request(Automation, "POST", ControlPaths.automations, body)),
   /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
   /** Branch names of a repository ("owner/name") the GitHub connection can read, the default branch first. */
