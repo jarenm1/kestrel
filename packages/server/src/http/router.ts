@@ -356,6 +356,15 @@ export const makeRouter = (core: CoreShape, cliAuth: CliAuthShape, capabilities:
         (body) => core.githubActivity(user, id, body.repo, body.number, body.kind, body.deliveryId),
       )))),
     ),
+    // The control plane dropped a watch (its pull request closed on GitHub): clear the registry's watch mark. The entry
+    // itself stays, because the thread still manages the pull request.
+    HttpRouter.post(
+      "/api/tasks/:id/pull-requests/unwatched",
+      Effect.flatMap(pathId, (id) => noContent(signedIn((user) => Effect.flatMap(
+        jsonBody(Schema.Struct({ repo: Schema.String, number: Schema.Number })),
+        (body) => Effect.asVoid(Effect.zipRight(core.getTask(user, id), core.setPullRequestWatching(id, body.repo, body.number, false))),
+      )))),
+    ),
     HttpRouter.post(
       "/api/tasks/:id/uploads",
       Effect.flatMap(pathId, (id) =>

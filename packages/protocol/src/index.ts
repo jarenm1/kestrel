@@ -903,6 +903,11 @@ export const Paths = {
   /** POST archives the thread (tears down its desktop and sandbox, keeps history); DELETE unarchives it. Both return the Task. */
   taskArchive: (id: string) => `/api/tasks/${id}/archive`,
   taskMessages: (id: string) => `/api/tasks/${id}/messages`,
+  /**
+   * POST `{ repo, number }`: the control plane dropped this watch (the pull request closed on GitHub). Clears the
+   * thread's watch mark; the registry entry stays because the thread still manages the pull request.
+   */
+  taskPullRequestUnwatched: (id: string) => `/api/tasks/${id}/pull-requests/unwatched`,
   /** GET `?model=<AgentModel>` -> HarnessCommands of the thread's next harness (active run wins). Names omit prefixes. */
   taskCommands: (id: string) => `/api/tasks/${id}/commands`,
   taskRuns: (id: string) => `/api/tasks/${id}/runs`,

@@ -1374,8 +1374,10 @@ export const CoreLive = Layer.effect(
                 repo: ref.repo,
                 number: link.number,
                 url: link.url,
-                checkoutId: id,
-                branch: fork.takeover ? checkout.branch : threadBranch,
+                // Only a takeover makes the checkout's pushes update the pull request; in the blocked case the checkout
+                // is on its own thread branch, so recording the checkout here would let writes default to a pull
+                // request this checkout does not push to.
+                ...(fork.takeover ? { checkoutId: id, branch: checkout.branch } : {}),
                 source: previous?.source ?? (fork.takeover ? "takeover" : "linked"),
                 addedAt: previous?.addedAt ?? checkout.createdAt,
               }

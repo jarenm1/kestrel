@@ -1388,11 +1388,13 @@ export class Hub extends DurableObject<Env> {
     return repos
   }
 
-  closePullRequestWatches(repo: string, number: number): string[] {
-    const owners = this.ctx.storage.sql.exec<{ login: string }>("SELECT DISTINCT login FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number).toArray().map((row) => row.login)
+  closePullRequestWatches(repo: string, number: number): Array<{ readonly login: string; readonly taskId: string }> {
+    const watches = this.ctx.storage.sql
+      .exec<{ login: string; taskId: string }>("SELECT DISTINCT login, task_id AS taskId FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
+      .toArray()
     this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
     this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE repo = ? COLLATE NOCASE AND pr_number = ?", repo, number)
-    return owners
+    return watches
   }
 
   async githubActivity(deliveryId: string, activity: { repo: string; numbers: readonly number[]; kind: string; headSha?: string }): Promise<{ duplicate: boolean; queued: number }> {

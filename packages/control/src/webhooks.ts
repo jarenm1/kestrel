@@ -1,3 +1,4 @@
+import { Paths } from "@cloudagents/protocol"
 import { releaseHook } from "./automations"
 import { pullRequestActivity } from "./pr-activity"
 import { Schema } from "effect"
@@ -45,8 +46,16 @@ export const handleGithubWebhook = async (request: Request, env: Env): Promise<R
   const prEvent = pullRequestEventOf(hookPayload.right)
   const result = await hub(env).githubDelivery(deliveryId, prEvent)
   if (!result.duplicate && prEvent.action === "closed") {
-    const owners = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
-    for (const owner of owners) await releaseHook(env, owner, prEvent.repo)
+    const cancelled = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
+    for (const login of new Set(cancelled.map((watch) => watch.login))) await releaseHook(env, login, prEvent.repo)
+    // Clear each box's watch mark too; the thread keeps the pull request in its registry. Best effort: a box that is
+    // offline also misses the activity, and the delivery must not fail on it.
+    for (const watch of cancelled) {
+      await hub(env).boxCall(watch.login, "POST", Paths.taskPullRequestUnwatched(watch.taskId), {
+        repo: prEvent.repo,
+        number: prEvent.pr.number,
+      })
+    }
   }
   return json(result, 202)
 }

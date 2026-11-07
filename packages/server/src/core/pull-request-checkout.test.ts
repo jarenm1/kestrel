@@ -270,6 +270,9 @@ describe("repo_checkout with a pull request", () => {
           const { checkout, pullRequest, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
           expect(checkout.branch).toStartWith("cloudagents/")
           expect(pullRequest?.number).toBe(7)
+          // The checkout sits on its own branch, so it is not the checkout whose pushes update the pull request.
+          expect(pullRequest?.checkoutId).toBeUndefined()
+          expect(pullRequest?.branch).toBeUndefined()
           expect(note).toContain("do not update pull request #7")
           expect(note).toContain(reason)
         }),
@@ -309,6 +312,12 @@ describe("repo_checkout with a pull request", () => {
         // Re-watching refreshes the entry in place instead of adding a duplicate.
         yield* core.setPullRequestWatching("t1", REPO, 9, true)
         expect((yield* core.getTask("owner", "t1")).pullRequests?.filter((pr) => pr.number === 9)).toHaveLength(1)
+        // Dropping one watch (the control plane's, e.g. when the pull request closed) clears its mark but keeps the entry.
+        yield* core.setPullRequestWatching("t1", REPO, 9, false)
+        const partly = yield* core.getTask("owner", "t1")
+        expect(partly.pullRequests?.find((pr) => pr.number === 9)?.watching).toBe(false)
+        expect(partly.pullRequests).toHaveLength(3)
+        yield* core.setPullRequestWatching("t1", REPO, 9, true)
         yield* core.clearPullRequestWatching("t1")
         const cleared = yield* core.getTask("owner", "t1")
         expect(cleared.pullRequests?.filter((pr) => pr.watching === true)).toEqual([])
