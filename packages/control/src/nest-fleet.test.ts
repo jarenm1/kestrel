@@ -272,6 +272,15 @@ describe("VM reports and epochs", () => {
     expect(lastCommand("host-a", "evict").command).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 1 })
   })
 
+  test("a live report after hello is not overwritten by an older inventory chunk", async () => {
+    const vmId = await runningBox()
+    await hello("host-a")
+    fleet.inventory("host-a", [vmReport("box-1", vmId, 1, "running")], false)
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "suspended"))
+    fleet.inventory("host-a", [], true)
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "suspended" })
+  })
+
   test("a suspended box resumes on the same host with the same epoch and VM id", async () => {
     const vmId = await runningBox()
     fleet.suspend("alice", "box-1")
@@ -413,6 +422,24 @@ describe("VM reports and epochs", () => {
     await hello("host-a", [vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } })])
     expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: NEST_STANDARD_LIMITS })
   })
+
+  test("reconnect reconciles limits against the latest live report during inventory", async () => {
+    const vmId = await runningBox()
+    await hello("host-a")
+    fleet.inventory("host-a", [vmReport("box-1", vmId, 1, "running")], false)
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } }))
+    fleet.inventory("host-a", [], true)
+    expect(lastCommand("host-a", "setLimits").command).toMatchObject({ limits: NEST_STANDARD_LIMITS })
+  })
+
+  test("reconnect does not reconcile stale inventory limits after a live report", async () => {
+    const vmId = await runningBox()
+    await hello("host-a")
+    fleet.inventory("host-a", [vmReport("box-1", vmId, 1, "running", { limits: { ...NEST_STANDARD_LIMITS, maxVcpus: 2 } })], false)
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "running"))
+    fleet.inventory("host-a", [], true)
+    expect(commandsTo("host-a").filter(({ command }) => command._tag === "setLimits")).toHaveLength(0)
+  })
 })
 
 describe("owner commands", () => {
@@ -511,6 +538,17 @@ describe("park and GPU", () => {
     await fleet.wakeRequest("host-a", "box-1")
     const resume = [...commandsTo("host-a"), ...commandsTo("host-b")].find((entry) => entry.command._tag === "resume")
     expect(resume?.command).toMatchObject({ _tag: "resume", ownerEpoch: 2 })
+  })
+
+  test("a parked report followed by a lost park result releases the claim at timeout", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    disconnect("host-a")
+    await fleet.expire(now + 20 * MINUTE)
+    await hello("host-b")
+    await fleet.resume("alice", "box-1")
+    expect(lastCommand("host-b", "resume").command).toMatchObject({ ownerEpoch: 2, volumeRef: "vol-1" })
   })
 
   test("a resume that succeeds with a running VM keeps the claim for the VM report that follows", async () => {

@@ -99,8 +99,8 @@ export class NestFleet {
     private readonly clock: () => number = Date.now,
   ) {}
 
-  /** Inventory chunks held per host until the last one arrives. */
-  private readonly inventories = new Map<string, NestVmReport[]>()
+  /** Inventory chunks and live reports seen since hello, held until the last chunk arrives. */
+  private readonly inventories = new Map<string, { vms: NestVmReport[]; updated: Map<string, NestVmReport> }>()
 
   // ---------------------------------------------------------------------------
   // Host frames
@@ -119,7 +119,7 @@ export class NestFleet {
       capacity: frame.capacity,
       lastSeenAt: new Date(this.clock()).toISOString(),
     })
-    this.inventories.delete(frame.hostId)
+    this.inventories.set(frame.hostId, { vms: [], updated: new Map() })
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
     this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
@@ -128,19 +128,22 @@ export class NestFleet {
 
   /**
    * One chunk of the host's VM inventory, sent after `hello`. Chunks are held until the last one arrives: only then are
-   * the VMs applied, so no eviction rests on a partial list.
+   * the VMs applied, so no eviction rests on a partial list. A live report received during the snapshot takes priority.
    */
   inventory(hostId: string, vms: readonly NestVmReport[], last: boolean): void {
-    const held = [...(this.inventories.get(hostId) ?? []), ...vms]
+    const inventory = this.inventories.get(hostId) ?? { vms: [], updated: new Map<string, NestVmReport>() }
+    inventory.vms.push(...vms)
     if (!last) {
-      this.inventories.set(hostId, held)
+      this.inventories.set(hostId, inventory)
       return
     }
     this.inventories.delete(hostId)
-    for (const vm of held) {
+    for (const vm of inventory.vms) {
+      if (inventory.updated.has(vm.boxId)) continue
       this.vm(hostId, vm)
       this.reconcileLimits(hostId, vm)
     }
+    for (const vm of inventory.updated.values()) this.reconcileLimits(hostId, vm)
   }
 
   /** A capacity report: stored, the lease renewed, and boxes that were waiting for room placed. */
@@ -154,6 +157,7 @@ export class NestFleet {
 
   /** A VM report from a host: the host's state is the truth for placement, state, size and GPUs. */
   vm(hostId: string, report: NestVmReport): void {
+    this.inventories.get(hostId)?.updated.set(report.boxId, report)
     const row = nestBox(this.sql, report.boxId)
     const decision = decideVm(row, hostId, report)
     if (decision._tag === "evict") {
@@ -227,7 +231,7 @@ export class NestFleet {
   /**
    * Drops in-flight markers whose deadline passed. The host's VM reports stay the truth: an expired `create` marks the
    * box failed, so the owner can delete it; an expired `resume` is retried on the same host while that host holds the
-   * box's claim; a destroy of a parked box releases the claim it took, so a retry can go to any connected host; other
+   * box's claim; a parked report releases the claim after a park or destroy expires; other
    * commands are the owner's to retry. A late `result` for an expired command finds no marker and is ignored.
    */
   async expire(now: number): Promise<void> {
@@ -237,7 +241,7 @@ export class NestFleet {
       this.clearPending(row)
       if (kind === "create") row.createFailed = true
       if (kind === "resume") row.wakeWanted = true
-      if (kind === "destroy" && row.state === "parked") row.hostId = null
+      if ((kind === "park" || kind === "destroy") && row.state === "parked") row.hostId = null
       saveNestBox(this.sql, row)
     }
     await this.wakeWanted()
