@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -163,7 +163,10 @@ fi
 exit 0
 `
 
-describe.skipIf(process.platform === "win32")("Devin sign-in", () => {
+// Terminal sign-in needs a real `script` to allocate the pseudo-terminal; skip where the host has none.
+const hasScript = process.platform !== "win32" && (existsSync("/usr/bin/script") || existsSync("/bin/script"))
+
+describe.skipIf(!hasScript)("Devin sign-in", () => {
   const runtimes: Array<ManagedRuntime.ManagedRuntime<CliAuth, never>> = []
   afterEach(async () => {
     for (const runtime of runtimes.splice(0)) await runtime.dispose()
