@@ -12,7 +12,7 @@ import { formatElapsed } from "@/util"
 import { ArchivedNotice } from "./ArchivedNotice"
 import { Composer, type ElementContext } from "./Composer"
 import { StatusIcon } from "./StatusIcon"
-import { UsageLimitNotice } from "./UsageLimitNotice"
+import { resetLabel, UsageLimitNotice } from "./UsageLimitNotice"
 
 interface Props {
   taskId: string
@@ -153,9 +153,12 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
     const latest = latestRuns[index]
     const cancelled = child.delegation?.cancelledAt !== undefined
     const working = isWorking(child)
-    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && isWorking(task))
+    // A child stopped by a usage limit is not done while the box will resume it at the provider's reset.
+    const arm = working ? undefined : child.usageLimitResume
+    const resuming = arm?.autoResume === true
+    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && (isWorking(task) || task.usageLimitResume?.autoResume === true))
     const starting = runId === undefined && child.status !== "failed"
-    const active = !cancelled && (working || nestedActive || starting)
+    const active = !cancelled && (working || resuming || nestedActive || starting)
     // A finished child whose polled runs still say "running" is labelled from its live status until the refetch lands.
     const ended = delegated !== undefined && delegated.status !== "running" ? delegated.status : child.status === "failed" ? "failed" : "succeeded"
     const label = cancelled
@@ -164,14 +167,18 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
         ? "Needs input"
         : working
           ? delegated?.status === "succeeded" ? "Continuing" : "Running"
-          : nestedActive
-            ? "Waiting for children"
-            : starting
-              ? "Starting"
-              : runId === undefined
-                ? "Failed to start"
-                : ended
-    const icon = cancelled ? "cancelled" : child.status === "needs_input" ? "needs_input" : active ? "running" : runId === undefined ? "failed" : ended
+          : arm !== undefined && resuming
+            ? `Usage limit · resumes ${resetLabel(arm.resetsAt)}`
+            : nestedActive
+              ? "Waiting for children"
+              : starting
+                ? "Starting"
+                : runId === undefined
+                  ? "Failed to start"
+                  : arm !== undefined
+                    ? "Usage limit"
+                    : ended
+    const icon = cancelled ? "cancelled" : child.status === "needs_input" || arm !== undefined ? "needs_input" : active ? "running" : runId === undefined ? "failed" : ended
     const activity = working && latest?.status === "running" ? latestActivity(items[index]?.data, child.id) : undefined
     return { task: child, run: latest, icon, label, active, activity }
   })

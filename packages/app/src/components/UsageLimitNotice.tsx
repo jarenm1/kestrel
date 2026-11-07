@@ -4,7 +4,8 @@ import { Button } from "@cloudagents/ui/button"
 import { api } from "@/api/client"
 import { keys, upsert } from "@/api/queries"
 
-const resetLabel = (resetsAt: string): string => {
+/** When a usage-limit arm resets, in the user's locale ("Nov 7, 3:00 PM"). */
+export const resetLabel = (resetsAt: string): string => {
   const at = Date.parse(resetsAt)
   return Number.isNaN(at)
     ? "when the limit resets"
