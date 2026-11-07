@@ -1368,7 +1368,6 @@ export class Hub extends DurableObject<Env> {
 
   /** Watch one pull request of a thread. Watching the same one again is a no-op; others stay watched. */
   watchPullRequest(login: string, taskId: string, repo: string, number: number): void {
-    this.ctx.storage.sql.exec("DELETE FROM pr_activity_queue WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", login, taskId, repo, number)
     this.ctx.storage.sql.exec(
       "INSERT INTO pr_watches (login, task_id, repo, pr_number) VALUES (?, ?, ?, ?) ON CONFLICT(login, task_id, repo, pr_number) DO UPDATE SET repo = excluded.repo",
       login, taskId, repo, number,
