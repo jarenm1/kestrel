@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ChevronRight, X } from "lucide-react"
@@ -105,29 +105,41 @@ function DelegatedCard({ child, onCancel, cancelling }: { child: ChildView; onCa
   )
 }
 
+/** A thread's runs and reports go on while it is running or waiting for the user to answer. */
+const isWorking = (task: Task) => task.status === "running" || task.status === "needs_input"
+
 /**
  * Delegated threads are independent conversations; their original run stays linked even after follow-ups. One header
  * line sums them up; open, active ones show as cards with their latest activity and finished ones as compact rows. It
  * opens by itself while any is active and closes when all finish, until the user toggles it.
+ *
+ * Whether a child is active comes from its task status, which the thread list streams live. Its runs are only polled
+ * (its events stream to its own view alone), so they decide labels, times and activity, never whether it is done.
  */
 function DelegatedTasks({ taskId }: { taskId: string }) {
   const tasks = useQuery(queries.tasks()).data ?? []
   const children = tasks.filter((task) => task.delegation?.parentTaskId === taskId)
   const runs = useQueries({
-    queries: children.map((task) => ({
-      ...queries.runs(task.id),
-      refetchInterval: (query: { state: { data: readonly Run[] | undefined } }) =>
-        task.status === "running" || task.status === "needs_input" || query.state.data?.some((r) => r.status === "running") ? DELEGATION_POLL_MS : false,
-    })),
+    queries: children.map((task) => ({ ...queries.runs(task.id), refetchInterval: isWorking(task) ? DELEGATION_POLL_MS : false })),
   })
   const latestRuns = runs.map((query) => query.data?.reduce<Run | undefined>((latest, r) => (latest === undefined || r.startedAt > latest.startedAt ? r : latest), undefined))
   const items = useQueries({
     queries: children.map((task, index) => {
       const run = latestRuns[index]
-      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
+      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: isWorking(task) && run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
     }),
   })
   const queryClient = useQueryClient()
+  // A status change (started, finished, failed) means the polled runs are out of date: refetch that child's runs at once.
+  const statuses = useRef(new Map<string, TaskStatus>())
+  const statusKey = children.map((child) => `${child.id}:${child.status}`).join(",")
+  useEffect(() => {
+    for (const child of children) {
+      const previous = statuses.current.get(child.id)
+      if (previous !== undefined && previous !== child.status) void queryClient.invalidateQueries({ queryKey: keys.runs(child.id), exact: true })
+      statuses.current.set(child.id, child.status)
+    }
+  }, [statusKey, queryClient])
   const cancel = useMutation({
     mutationFn: (childId: string) => api.cancelDelegation(taskId, childId),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
@@ -136,15 +148,31 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
   if (children.length === 0) return null
 
   const views: ChildView[] = children.map((child, index) => {
-    const delegated = runs[index]?.data?.find((r) => r.id === child.delegation?.runId)
+    const runId = child.delegation?.runId
+    const delegated = runs[index]?.data?.find((r) => r.id === runId)
     const latest = latestRuns[index]
     const cancelled = child.delegation?.cancelledAt !== undefined
-    const nestedActive = tasks.some((task) => task.delegation?.parentRunId === delegated?.id && task.delegation?.cancelledAt === undefined && (task.status === "running" || task.status === "needs_input"))
-    const continuing = delegated?.status === "succeeded" && child.status === "running"
-    const label = cancelled ? "Cancelled" : child.status === "needs_input" ? "Needs input" : delegated?.status === "succeeded" && nestedActive ? "Waiting for children" : continuing ? "Continuing" : delegated?.status ?? (child.status === "failed" ? "Failed to start" : "Starting")
-    const active = !cancelled && (delegated === undefined ? child.status !== "failed" : delegated.status === "running" || nestedActive || continuing || child.status === "needs_input")
-    const icon = cancelled ? "cancelled" : child.status === "needs_input" ? "needs_input" : active ? "running" : delegated?.status ?? "failed"
-    const activity = latest?.status === "running" ? latestActivity(items[index]?.data, child.id) : undefined
+    const working = isWorking(child)
+    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && isWorking(task))
+    const starting = runId === undefined && child.status !== "failed"
+    const active = !cancelled && (working || nestedActive || starting)
+    // A finished child whose polled runs still say "running" is labelled from its live status until the refetch lands.
+    const ended = delegated !== undefined && delegated.status !== "running" ? delegated.status : child.status === "failed" ? "failed" : "succeeded"
+    const label = cancelled
+      ? "Cancelled"
+      : child.status === "needs_input"
+        ? "Needs input"
+        : working
+          ? delegated?.status === "succeeded" ? "Continuing" : "Running"
+          : nestedActive
+            ? "Waiting for children"
+            : starting
+              ? "Starting"
+              : runId === undefined
+                ? "Failed to start"
+                : ended
+    const icon = cancelled ? "cancelled" : child.status === "needs_input" ? "needs_input" : active ? "running" : runId === undefined ? "failed" : ended
+    const activity = working && latest?.status === "running" ? latestActivity(items[index]?.data, child.id) : undefined
     return { task: child, run: latest, icon, label, active, activity }
   })
   const active = views.filter((v) => v.active)
