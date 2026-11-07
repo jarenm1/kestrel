@@ -1444,8 +1444,10 @@ export const CoreLive = Layer.effect(
             .fetchPullRequest({ ...target, githubToken: access.token, number: pullRequestNumber })
             .pipe(Effect.mapError(toInternal("fetch pull request")))
           const baseBranch = request.baseBranch ?? status.baseRef
-          if (request.detached === true) return { baseBranch, startSha: sha, branch: threadBranch, note: null }
           const link = { number: status.number, url: status.url }
+          // Detached (automations): the pull request is still recorded on the thread, but the checkout stays on its
+          // own branch with no link to it, so nothing the run pushes can move it — a push would fire the automation again.
+          if (request.detached === true) return { baseBranch, startSha: sha, branch: threadBranch, link, note: null }
           const blocker = pullRequestBranchBlocker(status, access.slug, defaultBranch)
           if (blocker === null) return { baseBranch, startSha: sha, branch: status.headRef, link, takeover: true, note: null }
           return {
