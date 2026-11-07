@@ -123,8 +123,16 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
-  const threads = active.filter((task) => task.status !== "running")
-  const working = active.filter((task) => task.status === "running")
+  const activeIds = new Set(active.map((task) => task.id))
+  const children = new Map<string, Task[]>()
+  const roots = active.filter((task) => {
+    const parent = task.delegation?.parentTaskId ?? task.spawnedByTaskId
+    if (!parent || parent === task.id || !activeIds.has(parent)) return true
+    children.set(parent, [...(children.get(parent) ?? []), task])
+    return false
+  })
+  const threads = roots.filter((task) => task.status !== "running")
+  const working = roots.filter((task) => task.status === "running")
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -163,13 +171,14 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   function threadTab(task: Task) {
     return (
-      <ThreadTab
+      <ThreadGroup
         key={task.id}
         task={task}
         now={now}
-        isOpen={task.id === openTaskId}
-        archiving={archive.isPending && archive.variables === task.id}
-        onArchive={() => archiveThread(task)}
+        openTaskId={openTaskId}
+        childrenByParent={children}
+        archivingId={archive.isPending ? archive.variables : undefined}
+        onArchive={archiveThread}
       />
     )
   }
@@ -325,6 +334,47 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   )
 }
 
+function hasActiveDescendant(id: string, childrenByParent: Map<string, Task[]>): boolean {
+  return (childrenByParent.get(id) ?? []).some((child) => child.status === "running" || child.status === "needs_input" || hasActiveDescendant(child.id, childrenByParent))
+}
+
+function ThreadGroup({ task, sub = false, now, openTaskId, childrenByParent, archivingId, onArchive }: {
+  task: Task
+  sub?: boolean
+  now: number
+  openTaskId: string | undefined
+  childrenByParent: Map<string, Task[]>
+  archivingId: string | undefined
+  onArchive: (task: Task) => void
+}) {
+  const children = childrenByParent.get(task.id) ?? []
+  const hasActive = hasActiveDescendant(task.id, childrenByParent)
+  const [expanded, setExpanded] = useState(hasActive)
+  const previousActive = useRef(hasActive)
+  useEffect(() => {
+    if (previousActive.current !== hasActive) setExpanded(hasActive)
+    previousActive.current = hasActive
+  }, [hasActive])
+  return (
+    <div className="min-w-0">
+      {sub ? (
+        <SubThreadTab task={task} />
+      ) : (
+        <ThreadTab task={task} now={now} isOpen={task.id === openTaskId} archiving={archivingId === task.id} onArchive={() => onArchive(task)} />
+      )}
+      {children.length > 0 && (
+        <div className="ml-4 border-l border-border/70 pl-2">
+          <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="flex w-full items-center gap-1 rounded px-1 py-1 text-left text-xs text-muted-foreground hover:text-foreground">
+            <ChevronDown aria-hidden="true" className={cn("size-3 transition-transform", !expanded && "-rotate-90")} />
+            {children.length} {children.length === 1 ? "sub-thread" : "sub-threads"}
+          </button>
+          {expanded && children.map((child) => <ThreadGroup key={child.id} sub task={child} now={now} openTaskId={openTaskId} childrenByParent={childrenByParent} archivingId={archivingId} onArchive={onArchive} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Rows fade in and out as they join or leave a list; `layout` slides the rest into place. */
 const FADE = { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } } as const
 /**
@@ -431,6 +481,21 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabPr
         <ArchiveBoxIcon />
       </Button>
     </motion.div>
+  )
+}
+
+/** A sub-thread under its parent: only the title and its status, so the list stays short while work runs. */
+function SubThreadTab({ task }: { task: Task }) {
+  const title = task.title || "Untitled thread"
+  return (
+    <NavLink
+      to={threadPath(task.id)}
+      title={`${title}\n${STATUS_LABEL[task.status]}`}
+      className={(s) => cn(tabClass(s), "items-center py-1.5 pr-2.5 pl-2 text-xs")}
+    >
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <StatusIcon status={task.status} className="shrink-0 [&>svg]:size-3.5" />
+    </NavLink>
   )
 }
 
