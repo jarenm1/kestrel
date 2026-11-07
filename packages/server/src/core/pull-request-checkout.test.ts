@@ -13,7 +13,7 @@ import { GitHub, type PullRequestStatus } from "../github/api"
 import { EventHubLive } from "./events"
 import { AgentHarness } from "./harness"
 import { CoreLive, CoreService } from "./service"
-import { StateLive, StateStore } from "./state"
+import { StateLive, StateStore, type StoreShape } from "./state"
 import { WorkspaceLive, WorkspaceService, type WorkspaceShape } from "./workspace"
 
 const roots: string[] = []
@@ -77,9 +77,10 @@ const withCore = async <A>(
   status: PullRequestStatus,
   origin: string,
   root: string,
-  body: (core: CoreService["Type"], threadDir: string) => Effect.Effect<A, unknown, never>,
+  body: (core: CoreService["Type"], threadDir: string, store: StoreShape) => Effect.Effect<A, unknown, never>,
   statusCalls: Array<{ readonly slug: string; readonly number: number }> = [],
   writeCalls: number[] = [],
+  openPullRequest: { readonly number: number; readonly url: string } | null = null,
 ): Promise<A> => {
   const config = {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
@@ -114,8 +115,8 @@ const withCore = async <A>(
         writeCalls.push(number)
         return Effect.succeed({ number } as never)
       },
-      // Linked checkouts must never need the lookup by branch.
-      findOpenPullRequest: () => Effect.succeed(null),
+      // The branch lookup: null unless a test supplies an open pull request for the checkout's branch.
+      findOpenPullRequest: () => Effect.succeed(openPullRequest as never),
     } as never),
     Layer.succeed(CliAuth, {} as never),
     Layer.succeed(CredentialBroker, {} as never),
@@ -130,7 +131,7 @@ const withCore = async <A>(
         s.tasks.push({ id: "t1", owner: "owner", title: "Babysit", status: "idle", createdAt: now, updatedAt: now, checkouts: [] })
         return Either.right(undefined)
       })
-      return yield* body(core, join(config.threadsDir, "t1"))
+      return yield* body(core, join(config.threadsDir, "t1"), store)
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))) as Effect.Effect<A, unknown, never>,
   )
 }
@@ -300,6 +301,62 @@ describe("repo_checkout with a pull request", () => {
       writes,
     )
     // Without a checkout link the write fails before GitHub is called.
+    expect(writes).toEqual([])
+  })
+
+  test("a migrated own-branch link re-links through the branch before a write", async () => {
+    const root = await newRoot()
+    const writes: number[] = []
+    await withCore(
+      prStatus({}),
+      join(root, "origin"),
+      root,
+      (core, _threadDir, store) =>
+        Effect.gen(function* () {
+          yield* store.update((s) => {
+            const task = s.tasks.find((t) => t.id === "t1")
+            if (task === undefined) return Either.right(undefined)
+            const now = new Date().toISOString()
+            task.checkouts = [...task.checkouts, { id: "c1", repo: REPO, dir: "widget", branch: "topic", baseBranch: "main", createdAt: now }]
+            task.pullRequests = [{ id: `${REPO}#9`, repo: REPO, number: 9, url: `https://github.com/${REPO}/pull/9`, checkoutId: "c1", source: "linked", addedAt: now }]
+            return Either.right(undefined)
+          })
+          yield* core.updatePullRequest("t1", { state: "closed" })
+          // The branch lookup found the open pull request, so the entry is re-recorded as the checkout's own.
+          const entry = (yield* core.getTask("owner", "t1")).pullRequests?.find((pr) => pr.number === 9)
+          expect(entry?.branch).toBe("topic")
+        }),
+      [],
+      writes,
+      { number: 9, url: `https://github.com/${REPO}/pull/9` },
+    )
+    expect(writes).toEqual([9])
+  })
+
+  test("a migrated blocked link is not used for a write", async () => {
+    const root = await newRoot()
+    const writes: number[] = []
+    await withCore(
+      prStatus({}),
+      join(root, "origin"),
+      root,
+      (core, _threadDir, store) =>
+        Effect.gen(function* () {
+          yield* store.update((s) => {
+            const task = s.tasks.find((t) => t.id === "t1")
+            if (task === undefined) return Either.right(undefined)
+            const now = new Date().toISOString()
+            task.checkouts = [...task.checkouts, { id: "c1", repo: REPO, dir: "widget", branch: "topic", baseBranch: "main", createdAt: now }]
+            task.pullRequests = [{ id: `${REPO}#9`, repo: REPO, number: 9, url: `https://github.com/${REPO}/pull/9`, checkoutId: "c1", source: "linked", addedAt: now }]
+            return Either.right(undefined)
+          })
+          // No open pull request for the checkout's branch: the migrated link is not the checkout's own.
+          const failed = yield* Effect.either(core.updatePullRequest("t1", { state: "closed" }))
+          expect(Either.isLeft(failed)).toBe(true)
+        }),
+      [],
+      writes,
+    )
     expect(writes).toEqual([])
   })
 

@@ -178,16 +178,16 @@ const migrateCheckoutPullRequests = (data: Record<string, unknown>): boolean => 
       if (repo === null) continue
       const id = `${repo.toLowerCase()}#${link.number}`
       if (!registry.some((entry) => isObject(entry) && entry.id === id)) {
-        // A legacy link with `pullRequestTakeover` is the checkout's own pull request; without it the checkout was
-        // blocked on its own branch (a fork or a closed PR), so it must not be recorded as pushing to the PR.
+        // Every legacy link keeps its checkout association, which the app and the `gh` shim show. No branch is recorded:
+        // the old state has no head ref, so a write resolves the pull request through the checkout's branch and records
+        // it once verified. A takeover is its own marker; a blocked fork/closed-PR link finds no open PR for the branch.
         const takeover = checkout.pullRequestTakeover === true
         registry.push({
           id,
           repo,
           number: link.number,
           url: link.url,
-          ...(takeover && typeof checkout.id === "string" ? { checkoutId: checkout.id } : {}),
-          ...(takeover && typeof checkout.branch === "string" ? { branch: checkout.branch } : {}),
+          ...(typeof checkout.id === "string" ? { checkoutId: checkout.id } : {}),
           source: takeover ? "takeover" : "linked",
           ...(typeof checkout.createdAt === "string" ? { addedAt: checkout.createdAt } : {}),
         })

@@ -186,7 +186,7 @@ describe("legacy checkout pull requests", () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  test("only a takeover becomes the checkout's pull request", async () => {
+  test("migrated links keep the checkout and record no branch", async () => {
     const file = join(root, "state.json")
     await writeFile(file, JSON.stringify({
       tasks: [{
@@ -201,6 +201,10 @@ describe("legacy checkout pull requests", () => {
             id: "c2", repo: "acme/other", dir: "other", branch: "cloudagents/fix-abc", baseBranch: "main", createdAt: NOW,
             pullRequest: { number: 9, url: "https://github.com/acme/other/pull/9" },
           },
+          {
+            id: "c3", repo: "acme/third", dir: "third", branch: "cloudagents/read-abc", baseBranch: "main", createdAt: NOW,
+            pullRequest: { number: 11, url: "https://github.com/acme/third/pull/11" },
+          },
         ],
       }],
       messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
@@ -208,11 +212,13 @@ describe("legacy checkout pull requests", () => {
 
     const state = await loadState(root)
     const entries = state.tasks[0]?.pullRequests ?? []
-    expect(entries.map((pr) => `${pr.repo}#${pr.number}`)).toEqual(["acme/widget#7", "acme/other#9"])
-    // The takeover's pushes update #7; the blocked checkout sits on its own branch and does not push to #9.
-    expect(entries[0]).toMatchObject({ checkoutId: "c1", branch: "topic", source: "takeover" })
-    expect(entries[1]?.checkoutId).toBeUndefined()
-    expect(entries[1]?.branch).toBeUndefined()
-    expect(entries[1]?.source).toBe("linked")
+    expect(entries.map((pr) => `${pr.repo}#${pr.number}`)).toEqual(["acme/widget#7", "acme/other#9", "acme/third#11"])
+    // Every link keeps its checkout association (the app and `gh` show it), takeover or not, and no branch: the old
+    // state has no head ref, so a write verifies it through the checkout's branch. A blocked link looks the same here
+    // and simply finds no open pull request for its branch.
+    expect(entries[0]).toMatchObject({ checkoutId: "c1", source: "takeover" })
+    expect(entries[1]).toMatchObject({ checkoutId: "c2", source: "linked" })
+    expect(entries[2]).toMatchObject({ checkoutId: "c3", source: "linked" })
+    for (const entry of entries) expect(entry.branch).toBeUndefined()
   })
 })

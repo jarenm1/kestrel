@@ -34,8 +34,9 @@ export const ThreadPullRequest = Schema.Struct({
   number: Schema.Number.pipe(Schema.int(), Schema.positive()),
   url: Schema.String,
   /**
-   * The checkout whose pushes update it. Absent for a pull request the thread manages without pushing from a
-   * checkout of its own (for example one it only watches, or one opened from another branch).
+   * The checkout the pull request is shown on. Its pushes update the pull request only once the entry is verified as
+   * the checkout's own — a takeover, or a branch equal to the checkout's; an entry migrated from the old per-checkout
+   * link carries this before that check. Absent for a pull request the thread only watches.
    */
   checkoutId: Schema.optional(Schema.String),
   /** The pull request's head branch, when it was known as the thread came to own it. */

@@ -847,10 +847,20 @@ export const CoreLive = Layer.effect(
         return { slug: ref.github, token: yield* requiredGithubToken(owner) }
       })
 
-    /** The pull request a checkout's pushes update: the last entry recorded for that checkout. */
-    const checkoutPullRequest = (task: Task, checkoutId: string): ThreadPullRequest | undefined =>
+    /**
+     * The pull request a checkout's pushes update: a takeover, or an entry whose branch is the checkout's branch. A
+     * migrated legacy link carries `checkoutId` for display but no branch, so writes resolve it through the branch
+     * lookup in `linkedPullRequestNumber` instead of acting on it.
+     */
+    const checkoutPullRequest = (task: Task, checkout: Checkout): ThreadPullRequest | undefined =>
       threadPullRequestsOf(task)
-        .filter((pr) => pr.checkoutId === checkoutId)
+        .filter((pr) => pr.checkoutId === checkout.id && (pr.source === "takeover" || pr.branch === checkout.branch))
+        .at(-1)
+
+    /** The pull request shown on a checkout: any registry entry associated with it, verified for pushes or not. */
+    const checkoutLinkedPullRequest = (task: Task, checkout: Checkout): ThreadPullRequest | undefined =>
+      threadPullRequestsOf(task)
+        .filter((pr) => pr.checkoutId === checkout.id)
         .at(-1)
 
     /**
@@ -867,7 +877,7 @@ export const CoreLive = Layer.effect(
       registryFallback: boolean,
     ) =>
       Effect.gen(function* () {
-        const recorded = checkoutPullRequest(task, checkout.id)
+        const recorded = checkoutPullRequest(task, checkout)
         if (recorded !== undefined) return recorded.number
         const found = yield* github.findOpenPullRequest(token, slug, checkout.branch).pipe(Effect.mapError(fromGitHub))
         if (found !== null) {
@@ -922,7 +932,7 @@ export const CoreLive = Layer.effect(
         const ref = yield* checkoutRepoRef(checkout)
         const token = ref.github === null ? undefined : yield* requiredGithubToken(task.owner)
         const branch = requestedBranch ?? checkout.branch
-        const linked = branch === checkout.branch ? checkoutPullRequest(task, checkout.id) : undefined
+        const linked = branch === checkout.branch ? checkoutPullRequest(task, checkout) : undefined
         if (requestedBranch !== undefined && branch !== checkout.branch) {
           const defaultBranch = yield* workspace.syncMirror({ mirrorPath: join(config.mirrorsDir, task.owner, ref.mirrorRel), url: ref.url, githubToken: token }).pipe(Effect.mapError(toInternal("fetch repo")))
           if (branch === checkout.baseBranch || branch === defaultBranch) return yield* Effect.fail(new BadRequest({ message: `cannot push base or default branch ${branch}` }))
@@ -1231,7 +1241,7 @@ export const CoreLive = Layer.effect(
               (pr) => pr.repo.toLowerCase() === ref.repo.toLowerCase() && pr.number === request.pullRequest,
             )
             if (owned === undefined) {
-              const linked = checkoutPullRequest(task, existing.id)
+              const linked = checkoutLinkedPullRequest(task, existing)
               return yield* Effect.fail(
                 new BadRequest({
                   message:
@@ -3025,7 +3035,7 @@ export const CoreLive = Layer.effect(
       ghCheckouts: (taskId) =>
         Effect.map(requireTask(taskId), (task) =>
           task.checkouts.map((checkout): GhCheckout => {
-            const pullRequest = checkoutPullRequest(task, checkout.id)
+            const pullRequest = checkoutLinkedPullRequest(task, checkout)
             return {
               checkout,
               ...(pullRequest === undefined ? {} : { pullRequest }),
