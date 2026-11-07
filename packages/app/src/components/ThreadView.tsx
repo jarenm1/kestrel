@@ -90,12 +90,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setSidebarShare((share) => clampShare(share + delta))
   }
 
-  // A checkout with a pull request gets its own link; with several repos checked out, the link names its repo.
+  // Every pull request the thread owns or manages gets its own link; with several, the link names its repository.
   const checkouts = state.task?.checkouts ?? []
-  const pullRequests = checkouts.flatMap((checkout) => {
-    if (!checkout.pullRequest) return []
-    const repo = checkouts.length > 1 ? `${repoShortName(checkout.repo)} ` : ""
-    return [{ id: checkout.id, url: checkout.pullRequest.url, label: `${repo}PR #${checkout.pullRequest.number}` }]
+  const threadPullRequests = state.task?.pullRequests ?? []
+  const pullRequests = threadPullRequests.map((pr) => {
+    const repo = threadPullRequests.length > 1 ? `${repoShortName(pr.repo)} ` : ""
+    return { id: pr.id, url: pr.url, label: `${repo}PR #${pr.number}` }
   })
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined

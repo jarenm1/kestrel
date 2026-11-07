@@ -140,6 +140,7 @@ function ThreadRow({
 }) {
   const nav = useNavigation();
   const [checkout, ...otherCheckouts] = task.checkouts;
+  const pullRequest = checkout === undefined ? undefined : (task.pullRequests ?? []).filter((pr) => pr.checkoutId === checkout.id).at(-1);
   const checkoutsLabel = task.checkouts.map((c) => `${c.repo}, ${c.branch}`).join("; ");
   return (
     <Pressable
@@ -169,14 +170,14 @@ function ThreadRow({
         <View style={styles.threadLine}>
           {checkout ? (
             <>
-              {checkout.pullRequest ? (
+              {pullRequest ? (
                 <GitPullRequest size={14} color={colors.mutedForeground} />
               ) : (
                 <GitBranch size={14} color={colors.mutedForeground} />
               )}
               <Text style={styles.threadMeta} numberOfLines={1}>
                 {checkout.branch}
-                {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                {pullRequest ? ` #${pullRequest.number}` : null}
               </Text>
             </>
           ) : (

@@ -367,6 +367,7 @@ interface ThreadTabProps {
  */
 function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabProps) {
   const [checkout, ...otherCheckouts] = task.checkouts
+  const pullRequest = checkout === undefined ? undefined : (task.pullRequests ?? []).filter((pr) => pr.checkoutId === checkout.id).at(-1)
   return (
     <motion.div
       ref={ref}
@@ -400,14 +401,14 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive }: ThreadTabPr
         <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           {checkout ? (
             <>
-              {checkout.pullRequest ? (
+              {pullRequest ? (
                 <GitPullRequest aria-hidden="true" className="size-3.5 shrink-0" />
               ) : (
                 <GitBranch aria-hidden="true" className="size-3.5 shrink-0" />
               )}
               <span className="min-w-0 flex-1 truncate">
                 {checkout.branch}
-                {checkout.pullRequest ? ` #${checkout.pullRequest.number}` : null}
+                {pullRequest ? ` #${pullRequest.number}` : null}
               </span>
             </>
           ) : (

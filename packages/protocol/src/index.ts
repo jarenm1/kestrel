@@ -22,12 +22,38 @@ import { BranchName, RepoRef } from "./refs"
 export const TaskStatus = Schema.Literal("idle", "running", "needs_input", "done", "failed")
 export type TaskStatus = typeof TaskStatus.Type
 
-/** The GitHub pull request opened for a checkout's branch (see the `github_pr_create` MCP tool). */
-export const PullRequestLink = Schema.Struct({
-  number: Schema.Number,
+/**
+ * A GitHub pull request a thread owns or manages: one it opened or took over, or one it watches (see the
+ * `github_pr_create` and `github_pr_watch` MCP tools). A thread has as many as it needs, in any repository.
+ */
+export const ThreadPullRequest = Schema.Struct({
+  /** Stable within the thread: the repository and number, e.g. `owner/name#12`. */
+  id: Schema.String,
+  /** GitHub "owner/name". */
+  repo: Schema.String,
+  number: Schema.Number.pipe(Schema.int(), Schema.positive()),
   url: Schema.String,
+  /**
+   * The checkout whose pushes update it. Absent for a pull request the thread manages without pushing from a
+   * checkout of its own (for example one it only watches, or one opened from another branch).
+   */
+  checkoutId: Schema.optional(Schema.String),
+  /** The pull request's head branch, when it was known as the thread came to own it. */
+  branch: Schema.optional(Schema.String),
+  /** How the thread came to own it: opened from a checkout, taken over at checkout, or linked without a checkout. */
+  source: Schema.Literal("opened", "takeover", "linked"),
+  /** Activities (checks, reviews, comments) on it wake this thread, via the control plane's GitHub webhooks. */
+  watching: Schema.optional(Schema.Boolean),
+  addedAt: Schema.String,
 })
-export type PullRequestLink = typeof PullRequestLink.Type
+export type ThreadPullRequest = typeof ThreadPullRequest.Type
+
+/** The thread's pull requests, oldest first; empty for a thread that owns none. */
+export const threadPullRequestsOf = (task: Pick<Task, "pullRequests">): ReadonlyArray<ThreadPullRequest> =>
+  task.pullRequests ?? []
+
+/** The registry id of a pull request, so the same repository and number never appear twice. */
+export const threadPullRequestId = (repo: string, number: number): string => `${repo.toLowerCase()}#${number}`
 
 /** The repository's own favicon/app icon, found in the checkout's starting commit. Bytes are served by `Paths.taskCheckoutIcon`. */
 export const CheckoutIcon = Schema.Struct({
@@ -54,8 +80,6 @@ export const Checkout = Schema.Struct({
   /** Branch the checkout forked from and pull requests target. */
   baseBranch: Schema.String,
   createdAt: Schema.String,
-  /** Set once a pull request has been opened for `branch` or checked out; absent before that. */
-  pullRequest: Schema.optional(PullRequestLink),
   /** The checkout uses a pull request's existing branch rather than a branch created for the thread. */
   pullRequestTakeover: Schema.optional(Schema.Boolean),
   /** Absent when the repository has no icon, or for checkouts made before icons were looked up. */
@@ -135,6 +159,8 @@ export const Task = Schema.Struct({
   updatedAt: Schema.String,
   /** Oldest first. Empty until the agent checks a repository out. */
   checkouts: Schema.Array(Checkout),
+  /** Pull requests the thread owns or manages, oldest first; absent in threads that own none. */
+  pullRequests: Schema.optional(Schema.Array(ThreadPullRequest)),
   /** Repository the user started the thread on without naming a branch; its agent picks what to check out. */
   pickedRepo: Schema.optional(RepoRef),
   /** Port of the task's dev server, registered by its agent for the browser preview. */

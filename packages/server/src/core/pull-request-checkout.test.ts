@@ -159,10 +159,11 @@ describe("repo_checkout with a pull request", () => {
     const prHead = git(origin, ["rev-parse", "refs/pull/7/head"])
     await withCore(prStatus({}), origin, root, (core, threadDir) =>
       Effect.gen(function* () {
-        const { checkout, note, path, instructionFiles } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        const { checkout, pullRequest, note, path, instructionFiles } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
         expect(checkout.branch).toBe("topic")
         expect(checkout.baseBranch).toBe("main")
-        expect(checkout.pullRequest?.number).toBe(7)
+        expect(pullRequest?.number).toBe(7)
+        expect(pullRequest?.source).toBe("takeover")
         expect(note).toBeNull()
         const dir = join(threadDir, checkout.dir)
         expect(path).toBe(dir)
@@ -236,7 +237,7 @@ describe("repo_checkout with a pull request", () => {
     await withCore(prStatus({}), origin, root, (core) =>
       Effect.gen(function* () {
         const first = yield* core.checkout("t1", { repo: REPO } as never)
-        expect(first.checkout.pullRequest).toBeUndefined()
+        expect(first.pullRequest).toBeUndefined()
         const refused = yield* Effect.either(core.checkout("t1", { repo: REPO, pullRequest: 7 } as never))
         expect(Either.isLeft(refused)).toBe(true)
         if (Either.isLeft(refused)) expect(String((refused.left as { message: string }).message)).toContain("start a new thread")
@@ -257,9 +258,9 @@ describe("repo_checkout with a pull request", () => {
       const { origin } = await makeOrigin(root, "topic")
       await withCore(prStatus(overrides), origin, root, (core) =>
         Effect.gen(function* () {
-          const { checkout, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+          const { checkout, pullRequest, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
           expect(checkout.branch).toStartWith("cloudagents/")
-          expect(checkout.pullRequest?.number).toBe(7)
+          expect(pullRequest?.number).toBe(7)
           expect(note).toContain("do not update pull request #7")
           expect(note).toContain(reason)
         }),
@@ -273,11 +274,36 @@ describe("repo_checkout with a pull request", () => {
     const prHead = git(origin, ["rev-parse", "refs/pull/7/head"])
     await withCore(prStatus({}), origin, root, (core, threadDir) =>
       Effect.gen(function* () {
-        const { checkout, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7, detached: true } as never)
+        const { checkout, pullRequest, note } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7, detached: true } as never)
         expect(checkout.branch).toStartWith("cloudagents/")
-        expect(checkout.pullRequest).toBeUndefined()
+        expect(pullRequest).toBeUndefined()
         expect(note).toBeNull()
         expect(git(join(threadDir, checkout.dir), ["rev-parse", "HEAD"])).toBe(prHead)
+      }),
+    )
+  })
+
+  test("a thread owns as many pull requests as it needs, watched ones included", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    await withCore(prStatus({}), origin, root, (core) =>
+      Effect.gen(function* () {
+        yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        yield* core.setPullRequestWatching("t1", REPO, 9, true)
+        yield* core.setPullRequestWatching("t1", "acme/other", 3, true)
+        const owned = yield* core.getTask("owner", "t1")
+        expect(owned.pullRequests?.map((pr) => `${pr.repo}#${pr.number}`)).toEqual([`${REPO}#7`, `${REPO}#9`, "acme/other#3"])
+        const watched = owned.pullRequests?.find((pr) => pr.number === 9)
+        expect(watched?.watching).toBe(true)
+        expect(watched?.source).toBe("linked")
+        expect(watched?.checkoutId).toBeUndefined()
+        // Re-watching refreshes the entry in place instead of adding a duplicate.
+        yield* core.setPullRequestWatching("t1", REPO, 9, true)
+        expect((yield* core.getTask("owner", "t1")).pullRequests?.filter((pr) => pr.number === 9)).toHaveLength(1)
+        yield* core.clearPullRequestWatching("t1")
+        const cleared = yield* core.getTask("owner", "t1")
+        expect(cleared.pullRequests?.filter((pr) => pr.watching === true)).toEqual([])
+        expect(cleared.pullRequests?.map((pr) => pr.number)).toEqual([7, 9, 3])
       }),
     )
   })

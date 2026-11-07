@@ -8,7 +8,12 @@ import { registerAutomationTools } from "./automations"
 const withClient = async (run: (client: Client) => Promise<void>): Promise<void> => {
   const server = new McpServer({ name: "automation-test", version: "1" })
   registerAutomationTools(server, { taskId: "task", runId: "run" }, {
-    automations: { control: null, taskOwner: () => Effect.succeed("owner") },
+    automations: {
+      control: null,
+      taskOwner: () => Effect.succeed("owner"),
+      setWatching: () => Effect.succeed(undefined),
+      clearWatching: () => Effect.succeed(undefined),
+    },
   })
   const client = new Client({ name: "automation-test", version: "1" })
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair()

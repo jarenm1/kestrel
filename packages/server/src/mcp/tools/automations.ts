@@ -16,6 +16,10 @@ export interface AutomationToolDeps {
     /** Null when the box runs without a control plane: automations are managed there. */
     readonly control: ControlClient | null
     readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
+    /** Records a pull request as watched (or no longer watched) on the thread itself, for the app to show. */
+    readonly setWatching: (taskId: string, repo: string, number: number, watching: boolean) => Effect.Effect<unknown, unknown>
+    /** Clears every watch mark of the thread. */
+    readonly clearWatching: (taskId: string) => Effect.Effect<unknown, unknown>
   }
 }
 
@@ -79,22 +83,41 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
   server.registerTool(
     "github_pr_watch",
     {
-      description: "Watch one pull request from this thread. GitHub review comments and completed checks wake this thread so it can address actionable feedback. Requires exactly one checkout linked to the PR with repo_checkout (pullRequest), github_pr_create or github_pr_status. Use when the user asks you to babysit or follow a PR. Watching another PR replaces this thread's watch.",
+      description: "Watch a pull request from this thread; a thread can watch as many as it needs. GitHub review comments and completed checks wake this thread so it can address actionable feedback. The pull request is added to the thread's pull requests, so it works for a repository the thread has not checked out. Use when the user asks you to babysit or follow a PR.",
       inputSchema: { repo: z.string().describe("GitHub repository owner/name"), number: z.number().int().positive().describe("Pull request number") },
     },
     ({ repo, number }: { repo: string; number: number }) => guard(() => runTool(Effect.gen(function* () {
       const { control, owner } = yield* scope
-      yield* control.watchPr(owner, ctx.taskId, repo, number)
+      // Recorded first: the control plane checks that the thread owns the pull request before routing its activity.
+      yield* deps.automations.setWatching(ctx.taskId, repo, number, true)
+      yield* control.watchPr(owner, ctx.taskId, repo, number).pipe(
+        Effect.catchAll((e) => Effect.zipRight(deps.automations.setWatching(ctx.taskId, repo, number, false), Effect.fail(e))),
+      )
       return text(`Watching ${repo}#${number} in this thread.`)
     }))),
   )
   server.registerTool(
     "github_pr_unwatch",
-    { description: "Stop watching a pull request in this thread.", inputSchema: {} },
-    () => guard(() => runTool(Effect.gen(function* () {
+    {
+      description: "Stop watching a pull request in this thread: name one by repo and number, or none to stop watching every pull request of the thread.",
+      inputSchema: {
+        repo: z.string().optional().describe("GitHub repository owner/name; omit to unwatch every pull request of this thread"),
+        number: z.number().int().positive().optional().describe("Pull request number; omit to unwatch every pull request of this thread"),
+      },
+    },
+    ({ repo, number }: { repo?: string; number?: number }) => guard(() => runTool(Effect.gen(function* () {
       const { control, owner } = yield* scope
+      if ((repo === undefined) !== (number === undefined)) {
+        return yield* Effect.fail(new Error("name both repo and number, or neither to unwatch every pull request"))
+      }
+      if (repo !== undefined && number !== undefined) {
+        yield* deps.automations.setWatching(ctx.taskId, repo, number, false)
+        yield* control.unwatchPr(owner, ctx.taskId, repo, number)
+        return text(`Stopped watching ${repo}#${number}.`)
+      }
+      yield* deps.automations.clearWatching(ctx.taskId)
       yield* control.unwatchPr(owner, ctx.taskId)
-      return text("Stopped watching this thread's pull request.")
+      return text("Stopped watching this thread's pull requests.")
     }))),
   )
 

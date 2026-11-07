@@ -177,7 +177,12 @@ const program = Effect.gen(function* () {
       changeLabels: core.changeLabels,
     },
     ask: core.ask,
-    automations: { control: boxControl(config), taskOwner: core.taskOwner },
+    automations: {
+      control: boxControl(config),
+      taskOwner: core.taskOwner,
+      setWatching: core.setPullRequestWatching,
+      clearWatching: core.clearPullRequestWatching,
+    },
     inbox: core.inbox,
     threads: { maxConcurrentRuns: config.maxConcurrentRuns, owner: core.taskOwner, create: core.createTask, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread, delegate: core.delegate, delegatedStatus: core.delegatedStatus, cancelDelegation: core.cancelDelegation, acknowledgeDelegation: core.acknowledgeDelegation, withSlotReleased: harness.withSlotReleased },
     previewOpen: core.previewOpen,
