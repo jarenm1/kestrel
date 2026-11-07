@@ -9,6 +9,7 @@ import { externalClick, isPlainClick, threadHref, useTranscriptHost } from "./ho
 import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
 import { RunTranscript } from "./RunTranscript"
+import { formatMessageTime } from "./time"
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
 
@@ -17,15 +18,9 @@ const STICK_PX = 80
 
 const NO_ITEMS: readonly AgentItem[] = []
 
-/** Time of day only (e.g. "14:05"). */
-function formatClock(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
 /** Under an agent reply: the time it was sent. */
 function MessageTime({ iso }: { iso: string }) {
-  return <div className="mt-1.5 text-[11px] text-muted-foreground">{formatClock(iso)}</div>
+  return <div className="mt-1.5 text-[11px] text-muted-foreground"><time dateTime={iso}>{formatMessageTime(iso)}</time></div>
 }
 
 /** Sent messages preserve plain text while displaying both reference and model tokens as their composed chips. */
@@ -101,11 +96,13 @@ function ThreadLink({ taskId, children }: { taskId: string; children: ReactNode 
 function ThreadItem({
   message,
   hideText = false,
+  hideTime = false,
   children,
 }: {
   message: Message
   /** The run transcript already renders this text; only what hangs off the message stays. */
   hideText?: boolean
+  hideTime?: boolean
   children?: ReactNode
 }) {
   switch (message.role) {
@@ -128,13 +125,13 @@ function ThreadItem({
         </div>
       )
     case "agent": {
-      // A duplicated message only keeps its attachments: the transcript already shows its text.
-      if (hideText && (children === undefined || children === null)) return null
+      // Keep the message clock unless the run transcript already supplies one.
+      if (hideText && hideTime && (children === undefined || children === null)) return null
       return (
         <div className={ENTER_CLASS}>
           {!hideText && <Markdown text={message.text} />}
           {children}
-          {!hideText && <MessageTime iso={message.createdAt} />}
+          {!hideTime && <MessageTime iso={message.createdAt} />}
         </div>
       )
     }
@@ -216,7 +213,11 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
           const attachments = pending ? [] : (m.attachments ?? [])
           return (
             <Fragment key={m.id}>
-              <ThreadItem message={m} hideText={duplicate || pending}>
+              <ThreadItem
+                message={m}
+                hideText={duplicate || pending}
+                hideTime={pending || (duplicate && (runItems[m.runId!]?.some((item) => item._tag === "usage" || item._tag === "turn") ?? false))}
+              >
                 {attachments.length > 0 ? (
                   <MessageAttachments
                     taskId={taskId}
@@ -233,6 +234,7 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
                   running={runs.some((run) => run.id === segment.runId && run.status === "running")}
                   from={segment.from}
                   to={segment.to}
+                  fallbackTimestamp={m.createdAt}
                 />
               )}
             </Fragment>

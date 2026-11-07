@@ -193,10 +193,25 @@ describe("ACP transcript", () => {
     t.push(update({ sessionUpdate: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "Done" } }))
     t.push(update({ sessionUpdate: "usage_update", used: 9000, size: 200000 }))
     expect(t.takeContext()).toEqual({ model: "opencode/big-pickle", usedTokens: 9000, windowTokens: 200000 })
-    const end = t.push({ jsonrpc: "2.0", id: 5, result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } } })
+    const at = Date.UTC(2026, 0, 2, 11, 0, 0)
+    const end = t.push({
+      jsonrpc: "2.0",
+      id: 5,
+      emittedAtMs: at,
+      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } },
+    })
     expect(end).toEqual([
       { _tag: "tool", id: "c2", parentToolId: null, name: "write", input: { path: "a.txt" }, status: "error", output: null },
-      { _tag: "turn", id: expect.any(String), durationMs: null, inputTokens: 9100, outputTokens: 7, costUsd: null, isError: false },
+      {
+        _tag: "turn",
+        id: expect.any(String),
+        timestamp: new Date(at).toISOString(),
+        durationMs: null,
+        inputTokens: 9100,
+        outputTokens: 7,
+        costUsd: null,
+        isError: false,
+      },
     ])
     expect(t.finalText()).toBe("Done")
   })

@@ -152,17 +152,22 @@ setting.
 
 The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
 
-Claude Code and Codex responses carry a shared transcript usage strip: local completion time, `in`, `out`,
-and `cached`. Each strip describes one model response, including intermediate tool-calling responses, not
-the whole agent turn. Input includes fresh and cache-write tokens but excludes cache reads; `cached` shows
-cache reads separately. Counts are compact, with exact values on hover; unreported buckets display `?`.
-Repeated Claude content blocks and Codex usage notifications do not create duplicate response strips.
-The context meter remains a separate current-context measurement. Historical runs without response usage and
-ACP agents reporting only prompt/session totals retain a compact `Turn total` input/output footer. Its input
-includes cached tokens; the label's tooltip makes that distinction explicit, and no cache split is guessed.
-Each turn with main-agent response strips suppresses its aggregate footer, without suppressing totals for
-other turns in the same run. Subagent strips do not suppress the main turn's footer. Duration and cost are
-not displayed; failures remain visible with either usage format.
+Claude Code and Codex responses carry a shared transcript usage strip: local completion time as a 12-hour
+clock with minutes, `in`, `out`, `cached`, and the response's output rate in `tok/s`. Each strip describes
+one model response, including intermediate tool-calling responses, not the whole agent turn. Input includes
+fresh and cache-write tokens but excludes cache reads; `cached` shows cache reads separately. Counts are
+compact, with exact values on hover; unreported buckets display `?`. Repeated Claude content blocks and Codex
+usage notifications do not create duplicate response strips.
+The rate divides output tokens by the response's own elapsed time, measured from its start to its completion,
+so tool execution between responses is excluded; without both boundaries it shows `?`. The context meter
+remains a separate current-context measurement. Historical runs without response usage and ACP agents
+reporting only prompt/session totals retain a compact input/output footer with the same clock and rate, using
+the turn's reported duration because no per-response timing exists. Its input includes cached tokens, and no
+cache split is guessed. Each turn with main-agent response strips suppresses its aggregate footer, without
+suppressing totals for other turns in the same run. Subagent strips do not suppress the main turn's footer.
+Cost is not displayed; failures remain visible with either usage format. An agent reply always shows its
+message time, on the same clock, unless the run transcript directly below it already dates the response; old
+turns recorded without their own timestamp fall back to the reply's message time.
 
 OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
 Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX

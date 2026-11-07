@@ -249,8 +249,9 @@ export const AgentItem = Schema.Union(
   }),
   /**
    * One finished assistant response: its token usage as the harness reported it, not the run's running totals.
-   * `timestamp` is when it finished. `inputTokens` excludes cache reads (cache writes count as input); `cachedTokens`
-   * is null when the harness did not report it, never an invented zero. It ends the stream it followed.
+   * `timestamp` is when it finished, `durationMs` how long the response itself took. `inputTokens` excludes cache
+   * reads (cache writes count as input); `cachedTokens` is null when the harness did not report it, never an invented
+   * zero. It ends the stream it followed.
    */
   Schema.Struct({
     _tag: Schema.Literal("usage"),
@@ -258,6 +259,12 @@ export const AgentItem = Schema.Union(
     /** Set when a subagent (e.g. Claude's Task tool) produced this response; the id of that Task call. */
     parentToolId: Schema.NullOr(Schema.String),
     timestamp: Schema.String,
+    /**
+     * The response's elapsed time, from its first token request to its completion. Tool execution between responses
+     * is not part of it. Null when the harness reported no start (or no end) to measure, never an estimate; absent on
+     * responses recorded before it was kept.
+     */
+    durationMs: Schema.optional(Schema.NullOr(Schema.Number)),
     inputTokens: Schema.NullOr(Schema.Number),
     outputTokens: Schema.NullOr(Schema.Number),
     cachedTokens: Schema.NullOr(Schema.Number),
@@ -266,6 +273,11 @@ export const AgentItem = Schema.Union(
   Schema.Struct({
     _tag: Schema.Literal("turn"),
     id: Schema.String,
+    /**
+     * When the turn ended: its event's time when the harness reports one, else when the box saw it. Absent on turns
+     * recorded before it was kept.
+     */
+    timestamp: Schema.optional(Schema.String),
     durationMs: Schema.NullOr(Schema.Number),
     inputTokens: Schema.NullOr(Schema.Number),
     outputTokens: Schema.NullOr(Schema.Number),
