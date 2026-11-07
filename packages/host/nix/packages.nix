@@ -1,6 +1,6 @@
 # Packages for the Nest: the Bun services (box, host agent) and the Rust crates (guest agent, volume, ingress,
 # depcache). Consumed by flake.nix (`packages.<system>.kestrel-*`) and guest.nix.
-{ pkgs, lib, root }:
+{ pkgs, lib, root, boxRuntime ? [ ] }:
 
 let
   # Workspace manifests only: `bun install` resolves from these, so the dependency closure does not change
@@ -46,7 +46,7 @@ let
 
   # A Bun service run from its source tree: `bun run <entry>` in `<package>`, with node_modules from `nodeModulesFor`.
   # `sources` are the workspace paths the service needs (its own source, the workspace packages it imports).
-  bunApp = { name, package, filter, hash, sources, entry }:
+  bunApp = { name, package, filter, hash, sources, entry, wrapperArgs ? "" }:
     let
       deps = nodeModulesFor { inherit name filter hash; };
       tree = lib.fileset.toSource {
@@ -66,7 +66,7 @@ let
         cp -r --no-preserve=mode ${deps}/. $app/
         makeWrapper ${pkgs.bun}/bin/bun $out/bin/${name} \
           --chdir $app/packages/${package} \
-          --add-flags "run ${entry}"
+          --add-flags "run ${entry}" ${wrapperArgs}
         runHook postInstall
       '';
     };
@@ -78,6 +78,21 @@ let
     hash = "sha256-ZAvSjA/bznNIY+Xk1jZbac2JjKeKfd8ykugFKJRfV3Y=";
     sources = [ "packages/protocol" "packages/server" ];
     entry = "src/main.ts";
+    # The default server data directory is relative to its source tree, which is read-only in the Nix store.
+    # Keep explicit data directories (including the Nest guest's) intact.
+    wrapperArgs = ''--run 'export CLOUDAGENTS_DATA_DIR="''${CLOUDAGENTS_DATA_DIR:-''${XDG_DATA_HOME:-$HOME/.local/share}/kestrel/box}"' '';
+  };
+
+  # The Nest guest uses `box` directly. This separate entry point provides the user-facing
+  # login/install/run commands without relying on a precompiled generic Linux executable.
+  box-cli = bunApp {
+    name = "kestrel-box";
+    package = "server";
+    filter = "@cloudagents/server";
+    hash = "sha256-ZAvSjA/bznNIY+Xk1jZbac2JjKeKfd8ykugFKJRfV3Y=";
+    sources = [ "packages/protocol" "packages/server" ];
+    entry = "src/cli/main.ts";
+    wrapperArgs = ''--set KESTREL_BOX_NIX_LAUNCHER "$out/bin/kestrel-box" --prefix PATH : ${lib.makeBinPath ([ pkgs.bubblewrap pkgs.git pkgs.systemd ] ++ boxRuntime)}'';
   };
 
   host = bunApp {
@@ -103,7 +118,7 @@ let
     };
 in
 {
-  inherit box host;
+  inherit box box-cli host;
   guest-agent = crate { name = "guest-agent"; static = true; };
   volume = crate { name = "volume"; bindgen = true; };
   ingress = crate { name = "ingress"; };

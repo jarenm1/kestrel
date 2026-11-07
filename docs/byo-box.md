@@ -22,6 +22,7 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
 | OS | Install |
 |---|---|
 | Linux, WSL2 | `curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh \| sh` or `npx kestrel-box login && npx kestrel-box install` |
+| NixOS | From a Kestrel checkout: `nix profile install .#kestrel-box-cli`, then `kestrel-box login` and `kestrel-box install` |
 | Windows | WSL2 only: `irm https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.ps1 \| iex` checks WSL2 and systemd, then runs the Linux installer inside it |
 | macOS | `brew install lima`, then the same `curl … \| sh` (or `npx`): `install` creates the `kestrel-box` VM (Apple virtualization, Ubuntu LTS, half the CPUs and memory by default; `--cpus`, `--memory`), provisions it, and forwards port 8787 to the Mac |
 
@@ -33,6 +34,14 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
    user unit `kestrel-box.service`, and enables linger so it outlives logout. On macOS it does the same inside the VM.
 3. The box listens on `127.0.0.1:8787` and is used from the same machine at `http://localhost:8787`. To use it from
    elsewhere (the mobile app, another computer), make that port reachable over HTTPS: a Cloudflare Tunnel, a reverse proxy on your own domain, or [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve). Those forward every path they are given, so do not point them at the box port directly. Point them at a local proxy that answers `/mcp` and `/broker` with 404 (the rules in `deploy/box-ingress.nix`; Caddy does this in a few lines). Then set that proxy's URL on the box in Settings › Boxes.
+
+On NixOS the CLI and its desktop tools come from the Nix store. Install an agent CLI separately and ensure it is on
+your PATH before running `kestrel-box install`; the doctor checks it can run in the sandbox. Keep the package installed in a profile: the user
+service points to that store version. After upgrading the profile, run `kestrel-box install` again to update and restart
+the service. This uses the basic sandbox; the Nest host module is a separate service. The existing `.#kestrel-box`
+package is the server entry point, not the pairing CLI; when run directly it defaults to
+`${XDG_DATA_HOME:-$HOME/.local/share}/kestrel/box` rather than writing inside the Nix store. Set
+`CLOUDAGENTS_DATA_DIR` to select a different directory.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
