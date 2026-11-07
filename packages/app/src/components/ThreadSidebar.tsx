@@ -10,6 +10,7 @@ import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
+import { groupSubThreads } from "@/lib/subThreads"
 import { cn } from "@/lib/utils"
 import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
@@ -123,14 +124,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   const byRecent = [...(tasks ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
-  const activeIds = new Set(active.map((task) => task.id))
-  const children = new Map<string, Task[]>()
-  const roots = active.filter((task) => {
-    const parent = task.delegation?.parentTaskId ?? task.spawnedByTaskId
-    if (!parent || parent === task.id || !activeIds.has(parent)) return true
-    children.set(parent, [...(children.get(parent) ?? []), task])
-    return false
-  })
+  const { roots, children } = groupSubThreads(active)
   const threads = roots.filter((task) => task.status !== "running")
   const working = roots.filter((task) => task.status === "running")
 
