@@ -326,6 +326,8 @@ export interface CoreShape {
   readonly createTask: (
     user: string,
     input: CreateTaskBody,
+    delegation?: Delegation,
+    spawnedByTaskId?: string,
   ) => Effect.Effect<Task, BadRequest | Conflict | NotFound | InternalError>
   readonly getTask: (user: string, id: string) => Effect.Effect<Task, NotFound>
   /**
@@ -1259,7 +1261,7 @@ export const CoreLive = Layer.effect(
       }).pipe(Effect.tapError(() => removeOnFailure))
     }
 
-    const createTask = (user: string, input: CreateTaskBody, delegation?: Delegation) =>
+    const createTask = (user: string, input: CreateTaskBody, delegation?: Delegation, spawnedByTaskId?: string) =>
       Effect.gen(function* () {
         const title = input.title?.trim() || "Untitled task"
         const request = input.checkout
@@ -1267,7 +1269,7 @@ export const CoreLive = Layer.effect(
         const picked = input.pickedRepo === undefined ? null : yield* parseCheckoutRequest({ repo: input.pickedRepo })
         const id = newId()
         const now = nowIso()
-        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(input.generateTitle === true ? { generateTitle: true } : {}), ...(picked === null ? {} : { pickedRepo: picked.repo }), ...(delegation === undefined ? {} : { delegation }) }
+        const task: Task = { id, owner: user, title, status: "idle", createdAt: now, updatedAt: now, checkouts: [], ...(input.generateTitle === true ? { generateTitle: true } : {}), ...(picked === null ? {} : { pickedRepo: picked.repo }), ...(delegation === undefined ? {} : { delegation }), ...(spawnedByTaskId === undefined ? {} : { spawnedByTaskId }) }
         yield* Effect.tryPromise({
           try: () => mkdir(threadDirOf(id), { recursive: true }),
           catch: (e) => new InternalError({ message: `create workspace: ${String(e)}` }),

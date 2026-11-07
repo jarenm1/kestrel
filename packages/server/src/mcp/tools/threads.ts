@@ -19,7 +19,7 @@ export interface ThreadToolDeps {
     readonly maxConcurrentRuns: number
     /** The user a thread belongs to: the tools reach that user's threads only. */
     readonly owner: (taskId: string) => Effect.Effect<string, unknown>
-    readonly create: (user: string, input: CreateTaskBody) => Effect.Effect<Task, unknown>
+    readonly create: (user: string, input: CreateTaskBody, delegation?: undefined, spawnedByTaskId?: string) => Effect.Effect<Task, unknown>
     readonly archive: (user: string, taskId: string) => Effect.Effect<Task, unknown>
     readonly list: (user: string) => Effect.Effect<ReadonlyArray<Task>, unknown>
     readonly messages: (user: string, taskId: string) => Effect.Effect<ReadonlyArray<Message>, unknown>
@@ -182,7 +182,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
           Effect.mapError((e) => new Error(`invalid checkout arguments: ${e.message}`)),
         )
         const owner = yield* deps.threads.owner(ctx.taskId)
-        const task = yield* deps.threads.create(owner, { title, ...(checkout === undefined ? {} : { checkout }) })
+        const task = yield* deps.threads.create(owner, { title, ...(checkout === undefined ? {} : { checkout }) }, undefined, ctx.taskId)
         const sent = yield* deps.threads.send(ctx.taskId, task.id, message).pipe(
           Effect.mapError((e) => new Error(`Created thread ${task.id}, but could not start its agent: ${describeError(e)}. Inspect the thread before retrying.`)),
         )

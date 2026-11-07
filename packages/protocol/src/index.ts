@@ -145,6 +145,8 @@ export const Task = Schema.Struct({
   context: Schema.optional(ContextUsage),
   /** Present for a thread created as delegated work. */
   delegation: Schema.optional(Delegation),
+  /** Parent of a thread created with thread_spawn; peer messages do not set this. */
+  spawnedByTaskId: Schema.optional(Schema.String),
   /** Present while a usage-limit failure is waiting for its provider window to reset. */
   usageLimitResume: Schema.optional(UsageLimitResume),
   /** Present while an automatic retry of the thread's failed run waits for its backoff. */
