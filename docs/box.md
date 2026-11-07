@@ -4,21 +4,51 @@ How the agent box (`packages/server`) runs agents. For the big picture see [arch
 
 ## Models and harnesses
 
-Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. OpenCode's free models require a Console account: use **OpenCode › Sign in** in Connections and authorize the displayed device code in your browser. OpenCode 2.0.7+ is required; its credentials stay on the box (see [harness authentication](harnesses.md#on-the-box)). Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort), OpenCode models through `opencode acp` (the Agent Client Protocol on stdio, `core/acp.ts`); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` override each command (the OpenAI one must start app-server on stdio, the OpenCode one an ACP server). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. An OpenCode run streams its text, thinking and tool calls the same way; a message sent while it runs waits in its `task_inbox` (ACP has no way into a running turn), and Stop sends `session/cancel`. OpenCode runs with sessions unshared, updates off and no broker keys; OpenCode limits how much its free models are used. Streamed items are published at most every 100 ms each, so a token stream is not one relay message per token. The thinking picker offers only the levels the chosen model supports. A message sent with no model (nothing connected) runs on Claude Code's default.
+Each message runs on the catalog route picked in the composer. Compatible API-key models are offered under multiple
+harnesses; the provider still selects the credential and quota. Settings › Connections controls visible models per
+browser. See [the compatibility matrix](harnesses.md#harness-compatibility). Subscription logins retain their native
+harness. OpenCode's free models require a Console account and OpenCode 2.0.7+; their credentials stay on the box.
+
+Claude Code uses stream-JSON on stdin (`core/claude-stream.ts`); Codex uses app-server JSON-RPC on stdio
+(`core/codex-app-server.ts`); OpenCode uses ACP (`core/acp.ts`). The native command overrides remain
+`CLOUDAGENTS_ANTHROPIC_COMMAND`, `CLOUDAGENTS_OPENAI_COMMAND` and `CLOUDAGENTS_OPENCODE_COMMAND`.
+Codex opens or resumes the thread with the selected model and starts the turn with its effort. Without a ChatGPT
+login, the box signs app-server in with the run's broker token, stored in the task's `CODEX_HOME`.
+
+Claude streams partial text and thinking, and reports tool results as they finish. New messages are written into
+its running session; Stop sends an interrupt control request. After the first result, the box closes stdin, but
+Claude still answers messages it already accepted before exiting. Codex messages join the active turn through
+`turn/steer`; Stop uses `turn/interrupt`. OpenCode streams text, thinking and tools, but new messages wait in
+`task_inbox` because ACP cannot steer an active turn; Stop uses `session/cancel`.
+
+OpenCode runs with sessions unshared and updates disabled. Its native free/Go routes use their own credentials;
+other API providers use per-run broker tokens, never real keys. Free models retain OpenCode's usage limits.
+Streamed items are published at most every 100 ms each. The thinking picker offers only supported levels.
+A message with no model uses Claude Code's default.
 
 The OpenCode account uses the existing **Connect** button; the device authorization then opens through **Open sign-in page**.
 
 Google's models run through Antigravity CLI as an ACP server (`agy acp --gemini-dir … --dangerously-skip-permissions`, same driver as OpenCode; `CLOUDAGENTS_GOOGLE_COMMAND` overrides it). They need the user's Google sign-in (below): `agy` reaches them only through it, so a Google run gets no broker keys. Its thinking level is the session's `thought_level` option. agy offers its commands and limits only inside a session, so the composer lists no Google commands and the usage panel shows none.
 
-OpenCode Go is a separate connection and model group from OpenCode's free models. Paste a Go API key under Settings › Connections; the box imports it over stdin into OpenCode's own credential database under `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode-go/opencode`. It is not stored in the Hub or passed on a command line. Go needs OpenCode 2.1 or newer; its runs use `opencode-go/*` models over the same ACP driver (`CLOUDAGENTS_OPENCODE_GO_COMMAND` overrides the command). The catalog omits Go's Claude, GPT and Gemini models, leaving those to their native harnesses, and omits its free/contributor variants.
+OpenCode Go is a separate connection and model group from OpenCode's free models. Paste a Go API key under
+Settings › Connections; the box imports it over stdin into OpenCode's credential database under
+`<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode-go/opencode`, never into the Hub or command-line arguments.
+Its native OpenCode ACP route needs OpenCode 2.1+ (`CLOUDAGENTS_OPENCODE_GO_COMMAND` overrides it).
+Go models can also run through Claude Code or Codex using the same host-held key through the broker.
+The catalog continues to omit Go's Claude, GPT, Gemini and free/contributor variants.
 
-Go runs bind that login directory into the sandbox as `XDG_DATA_HOME`, so OpenCode can read its credential and keep its sessions there. Free OpenCode runs instead use `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode`, with a separate Console account and sessions. Disconnect deletes only the selected provider's login directory, including its sessions. Go's 5-hour, weekly and monthly limits come from `https://opencode.ai/zen/go/v1/usage`: the box reads the active Go key using `opencode auth export --standalone` and makes the authenticated request itself; neither the key nor the export is returned to the app. Saving a key connects its local credential; if OpenCode rejects the key, usage reports the error and model calls cannot run.
+Native Go runs bind that login directory as `XDG_DATA_HOME`; Go runs in Claude Code or Codex do not mount it.
+Free OpenCode runs use a separate `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode` directory and Console account.
+Disconnect deletes only the selected provider's login directory and its sessions. The host reads the active Go key
+with `opencode auth export --standalone` for usage and alternate-harness requests; neither key nor export reaches
+the app. Go usage comes from `https://opencode.ai/zen/go/v1/usage`. A saved but rejected key cannot run models and
+reports an error in usage.
 
-A thread retains each provider's native session across switches. Returning to a provider resumes its newest usable
-session and carries only messages from subsequent runs, rather than replaying that session's own conversation.
-If that provider has no usable session, the run starts fresh with conversation history. A failed run that never
-recorded a session invalidates older sessions of the same provider (except restart interruptions); recovery carries
-history instead of silently losing it. A session is also recorded with where its CLI kept it: the thread's home (broker
+A thread retains native sessions separately for each provider and harness. Returning to a route resumes its newest
+usable session and carries only messages from subsequent runs. Without one, the run starts fresh with conversation
+history. A failed run that never recorded a session invalidates older sessions of the same route (except restart
+interruptions); recovery carries history instead of silently losing it.
+A session is also recorded with where its CLI kept it: the thread's home (broker
 keys) or the user's own CLI login directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`). After the user connects or disconnects
 that CLI login, the CLI no longer finds sessions from before, so the next run starts fresh with conversation history
 instead of failing to resume. A session recorded without its place (before this was tracked) also starts fresh, once.

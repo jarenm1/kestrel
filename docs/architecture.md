@@ -163,7 +163,14 @@ pushed. Explicit Git authorship (for example `git commit --author` or a cherry-p
 contributor. Commit-message co-author trailers are not rewritten, and existing commits are not repaired by this
 setting.
 
-The harness starts the selected provider's agent CLI. The box supports steering and interruption while a run is active. Each provider retains its native session across switches; returning to one carries only messages from runs since that session last participated. A provider without a usable session starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics never become portable conversation history. Model definitions and shared types live in `packages/protocol`.
+The harness starts the CLI selected by the model's catalog route. API access and harness identity are independent:
+compatible API-key models can run in Claude Code, Codex or OpenCode without changing the credential provider.
+Subscription logins remain native-only. The broker forwards the harness's supported upstream protocol and keeps
+real API keys on the host; it does not translate unsupported APIs. See [harness compatibility](harnesses.md#harness-compatibility).
+The box supports steering and interruption while a run is active. Native sessions are isolated by provider and
+harness; returning to one carries only messages from runs since that session last participated. Without a usable
+session, the run starts fresh with bounded conversation history. Prompts travel on stdin, and raw CLI diagnostics
+never become portable conversation history. Catalog routes and shared types live in `packages/protocol`.
 
 Claude Code and Codex responses carry a shared transcript usage strip: local completion time as a 12-hour
 clock with minutes, `in`, `out`, `cached`, and the response's output rate in `tok/s`. Each strip describes
@@ -183,11 +190,8 @@ failures remain visible with either usage format. An agent reply always shows it
 clock, unless the run transcript directly below it already dates the response; old turns recorded without
 their own timestamp fall back to the reply's message time.
 
-OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
-Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX
-complexity without a current need. Pi may be reconsidered later, but Kestrel's constrained customization would
-limit its value. Model selection continues to choose the existing provider's CLI; OpenCode, Antigravity and the
-separately added third-party API-key providers remain supported.
+OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
+providers through the model picker rather than introducing a separate per-thread harness control.
 
 At startup, historical runs from the retired harnesses retain their tasks, messages and run records, but lose
 obsolete provider/model/harness routing metadata; their unusable resume targets are discarded before state

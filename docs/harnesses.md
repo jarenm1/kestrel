@@ -1,8 +1,43 @@
 # Agent harnesses
 
-A thread's model selects its provider's CLI: Claude Code for Anthropic and Anthropic-compatible gateways, Codex for
-OpenAI, OpenCode for its free and Go models, and Antigravity CLI for Google. There is no separate per-thread harness
-picker. OMP, Pi and Hermes are retired; see [the scope decision and historical-state migration](architecture.md#agent-execution-and-data).
+A thread's model selection includes its provider and harness. The same API-key model can appear under more than
+one harness in the picker; its provider still determines whose key and quota the run uses. There is no separate
+per-thread harness picker. OMP, Pi and Hermes remain retired.
+
+## Harness compatibility
+
+| Connection | Supported harnesses |
+|---|---|
+| Anthropic API key | Claude Code, OpenCode |
+| OpenAI API key | Codex, OpenCode |
+| OpenRouter, Z.ai, DeepSeek, MiniMax API key | Claude Code, Codex, OpenCode |
+| Moonshot Platform API key | Claude Code, OpenCode; Codex for K3.1 Pro, K3.1 Pro Highspeed and K3 |
+| OpenCode Go key | OpenCode, Claude Code, Codex |
+| Claude / ChatGPT subscription | Its own native CLI only |
+| OpenCode free / Google sign-in | OpenCode / Antigravity respectively |
+
+Only routes supported by the selected box and the connected credential are offered. Selecting an API provider
+under another harness does not authorize that harness to use a Claude or ChatGPT subscription.
+Antigravity exposes no custom-provider integration. OpenCode explicitly restricts its free-tier models to OpenCode
+itself. Kimi K2.7 Code is not supported by Moonshot's Responses endpoint and therefore has no Codex route.
+Z.ai's [key classification and billing rules](https://docs.z.ai/devpack/notice/api-key-management) still apply:
+the Messages, Coding Chat and general Responses endpoints used here preserve its documented key/plan billing.
+FlashX remains unavailable to Coding Plan keys even when its harness route is offered.
+
+Existing model IDs keep their original harness. Additional catalog IDs append `@opencode`, `@codex` or
+`@claude`; the suffix identifies Kestrel's route and is never sent as part of the upstream model name.
+Claude Code's `[1m]` hint is likewise removed for native API model IDs in the other harnesses.
+Routes run in OpenCode through its custom-provider API, which does not forward a selected thinking level to the
+provider; those models therefore offer no thinking picker rather than silently running at OpenCode's default.
+Claude Code and Codex routes keep the levels their provider documents.
+
+Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/),
+[OpenRouter Codex](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli),
+[Z.ai Codex](https://docs.z.ai/devpack/tool/codex),
+[DeepSeek Codex](https://api-docs.deepseek.com/quick_start/agent_integrations/codex/),
+[MiniMax Codex](https://platform.minimax.io/docs/m-plan/codex),
+[Kimi Codex and supported Responses models](https://platform.kimi.ai/docs/guide/codex-kimi), and
+[OpenCode Console harnesses and Go endpoints](https://opencode.ai/docs/console/harnesses/).
 
 ## Credentials and sessions
 
@@ -10,13 +45,15 @@ picker. OMP, Pi and Hermes are retired; see [the scope decision and historical-s
   CLI login. Gateway runs use only their selected provider's broker route, not the user's Claude or ChatGPT login.
 - OpenCode's free models require an OpenCode Console sign-in. Its tokens and sessions live in the user's `opencode`
   data directory on the box, not in the Hub or browser.
-- OpenCode Go uses its own saved key and credential/session directory. Only a Go run mounts that directory and receives
-  its `XDG_DATA_HOME`; native vendor, Google and free OpenCode runs do not receive the Go login.
-- Free OpenCode, Go and Google runs receive MCP-only run tokens: no vendor broker environment and no vendor-authorized
-  broker grant. Go and free OpenCode keep separate sessions.
+- OpenCode Go keeps its saved key in its own box-local credential directory. Its native OpenCode route mounts
+  that directory; Claude Code and Codex routes use a host-side broker and do not mount the Go credential.
+- Free OpenCode, native Go and Google runs receive MCP-only run tokens. Other API-key routes receive broker
+  grants scoped to the selected provider, with real upstream keys remaining on the host.
+- OpenCode Go requests retain session headers and carry a stable session identity and identifying user agent,
+  as required by [Go's client policy](https://opencode.ai/docs/console/go/#where-can-i-use-it).
 - Google runs use the user's Antigravity login, not a Google API key. Its directory contains the sign-in token and sessions.
-- Session records retain their actual model provider, even when multiple providers run Claude Code. Switching providers
-  cannot resume another provider's session; returning to a provider can resume its own usable session.
+- Native sessions are isolated by both provider and harness. Switching harnesses cannot resume the other
+  harness's session; returning to a route can resume its own usable session.
 - CLI login directories carry a persistent `.kestrel-session-generation` marker. Native sessions are resumed only
   within that directory generation. Disconnect deletes the marker with the database; reconnecting at the same path
   starts a fresh native session with the thread's saved conversation, rather than resuming a deleted session ID.
@@ -61,6 +98,7 @@ Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit
 |---|---|---|---|
 | OpenCode free | OpenCode 2.0.7+ (`npm i -g @opencode/cli`) | `<dataDir>/users/<login>/opencode`, isolated from Go | `CLOUDAGENTS_OPENCODE_COMMAND` |
 | OpenCode Go | OpenCode 2.1+ | `<dataDir>/users/<login>/opencode-go`, isolated from free models | `CLOUDAGENTS_OPENCODE_GO_COMMAND` |
+| API providers in OpenCode | OpenCode 2.1+ | Thread-local sessions; broker token only | `CLOUDAGENTS_OPENCODE_COMMAND` |
 | Google | Antigravity CLI 1.5+ (`agy`, pinned by the flake) | `<dataDir>/users/<login>/antigravity` | `CLOUDAGENTS_GOOGLE_COMMAND` |
 
 `dataDir` is `CLOUDAGENTS_DATA_DIR`, or `.data` under the repository by default. `opencode-ai` and
@@ -75,8 +113,8 @@ See [OpenCode authentication](https://opencode.ai/v2/docs/cli/providers).
 
 Go signs in through Settings › Connections › **API keys**: choose **Add API key › OpenCode Go**.
 Its connected row supports replacing the key and choosing which Go models appear in chat; Go is not listed again
-under Accounts and subscriptions or Models. This settings placement does not change its OpenCode ACP harness or
-box-local credential storage. The box passes the key to
+under Accounts and subscriptions or Models. Its native route uses OpenCode ACP; alternate Claude Code and Codex
+routes use the same box-local credential through the broker. The box passes the key to
 `opencode auth import --standalone` over stdin, not argv or Hub storage. Replacing the named credential preserves
 sessions; Disconnect removes the Go login directory. Its quota panel reports five-hour, weekly and monthly usage.
 If the selected box is unavailable or has not reported Go auth, its API-key row stays visible with the error and

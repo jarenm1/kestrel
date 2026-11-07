@@ -16,7 +16,7 @@
 
 Kestrel runs Claude Code or Codex on a box you own, driven from a chat in the browser or on your phone. Each thread gets its own workspace, sandbox and, when it needs one, a live desktop you can watch and take over. Close the laptop; the agent keeps going.
 
-- **Your harness, your account.** Claude Code or Codex, signed in with your own subscription or API key. Switch models mid-thread.
+- **Your harness, your account.** Use your own subscription or API key. Compatible API-key models work across Claude Code, Codex and OpenCode; choose their route in the model picker and switch mid-thread. See [harness compatibility](docs/harnesses.md#harness-compatibility).
 - **Your repos, your branches.** The agent checks out what it needs and works on its own branch. Review the diff in the thread, or let it open the PR.
 - **Live desktop.** Browsers, Blender, Roblox Studio: watch the GUI apps the agent drives and take control.
 - **Sandboxed by default.** Every run is locked into bubblewrap with per-thread CPU, memory and disk limits and its own network namespace. Model keys stay on the host; agents only get short-lived tokens.
