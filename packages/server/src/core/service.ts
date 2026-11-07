@@ -255,10 +255,12 @@ const isDelegationResult = (messageId: string, childId: string): boolean =>
 
 /**
  * A delegated run stopped by a usage limit is not final while its thread is armed to resume it at the reset: the
- * resumed run takes over the delegation (see `deliverMessage`) and its result is the one the parent gets.
+ * resumed run takes over the delegation (see `deliverMessage`) and its result is the one the parent gets. An archived
+ * thread is never resumed (the recovery sweep skips it), so its arm holds nothing.
  */
 const resumesAtReset = (child: Task, run: Run): boolean =>
-  run.status === "failed" && child.usageLimitResume?.autoResume === true && child.usageLimitResume.runId === run.id
+  run.status === "failed" && child.archivedAt === undefined &&
+  child.usageLimitResume?.autoResume === true && child.usageLimitResume.runId === run.id
 
 /** A run is not done delegating until every child launched by that run has settled recursively. */
 const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): boolean =>
@@ -1532,11 +1534,12 @@ export const CoreLive = Layer.effect(
               // work, rather than leaving its result attached to the interrupted run.
               task.delegation = { ...task.delegation, runId: run.id }
             } else if (task.delegation?.runId !== undefined && task.delegation.cancelledAt === undefined &&
-              !task.delegation.resultAcknowledged && supersededArm?.autoResume === true &&
+              !task.delegation.resultAcknowledged && supersededArm !== undefined &&
               supersededArm.runId === task.delegation.runId &&
               !s.messages.some((m) => m.id === `delegation-result:${taskId}`)) {
-              // The delegated run stopped on a usage limit, and its result was held for the resume. Whatever continues
-              // it now (the resume at the reset, or the user handing the work to another model) carries the delegation.
+              // The delegated run stopped on a usage limit and its result has not gone up yet (held for the resume, or
+              // queued while the parent waits on its own limit). Whatever continues it now, the resume at the reset or
+              // the user handing the work to another model, carries the delegation, auto-resume on or off.
               task.delegation = { ...task.delegation, runId: run.id }
             }
             // The prompt is what the run starts with, not mail for its inbox.
@@ -1818,7 +1821,17 @@ export const CoreLive = Layer.effect(
         if (existing) {
           if (existing.delegation?.fingerprint !== fingerprint) return yield* Effect.fail(new Conflict({ message: "requestId was already used for a different task" }))
           if (existing.delegation?.runId === undefined && existing.status === "failed") return yield* Effect.fail(new Conflict({ message: `Delegated thread ${existing.id} failed before its run was reserved. Inspect it; use a new requestId to start a new task.` }))
-          return { ...existing }
+          if (existing.delegation?.parentRunId === parentRunId) return { ...existing }
+          // A run that repeats an earlier run's request takes the child over: it waits for it (`hasPendingDelegations`)
+          // and cancelling it reaches the child, instead of both staying on a run that already ended.
+          const relinked = yield* store.update((s) => {
+            const child = s.tasks.find((t) => t.id === existing.id)!
+            child.delegation = { ...child.delegation!, parentRunId }
+            child.updatedAt = nowIso()
+            return Either.right({ ...child })
+          })
+          hub.publish({ _tag: "task.updated", task: relinked })
+          return relinked
         }
         let ancestor: Task | undefined = parent
         let depth = 0

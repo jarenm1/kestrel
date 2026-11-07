@@ -127,34 +127,36 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       const provider = run.provider ?? DEFAULT_MODEL_PROVIDER
       const cli = MODEL_USAGE_CLI[provider]
       const usage = (yield* deps.providerUsage(task.owner, true)).find((entry) => entry.provider === cli)
-      // The probe is the only part that can fail transiently; do not consume this run's one look until it answered.
-      // The look is recorded only once the arm is written (or ruled out), so `deciding` never reports a verdict the
-      // store does not show yet: a delegated child's failure must not be delivered while its arm is still on the way.
-      yield* Effect.gen(function* () {
-        const resetsAt = usageLimitResetAt(usage, endedAt)
-        if (resetsAt === null) return
-        let autoResume = autoResumeByOwner.get(task.owner)
-        if (autoResume === undefined) {
-          autoResume = (yield* settingsOf(task.owner)).autoResumeAfterUsageLimits
-          autoResumeByOwner.set(task.owner, autoResume)
+      // The look is recorded only once its verdict is in the store: no reset to wait for, or the arm written (or ruled
+      // out by the thread moving on). Until then `deciding` holds a delegated child's failure; a probe or a write that
+      // fails leaves the run for the next sweep instead of letting that failure go up as final.
+      const resetsAt = usageLimitResetAt(usage, endedAt)
+      if (resetsAt === null) {
+        examined.add(run.id)
+        return
+      }
+      let autoResume = autoResumeByOwner.get(task.owner)
+      if (autoResume === undefined) {
+        autoResume = (yield* settingsOf(task.owner)).autoResumeAfterUsageLimits
+        autoResumeByOwner.set(task.owner, autoResume)
+      }
+      const armed = yield* deps.store.update((s) => {
+        const stored = s.tasks.find((t) => t.id === task.id)
+        const last = [...s.runs].reverse().find((r) => r.taskId === task.id)
+        if (
+          stored === undefined ||
+          stored.archivedAt !== undefined ||
+          stored.usageLimitResume !== undefined ||
+          stored.autoRetry !== undefined ||
+          last?.id !== run.id
+        ) {
+          return Either.right(null)
         }
-        const armed = yield* deps.store.update((s) => {
-          const stored = s.tasks.find((t) => t.id === task.id)
-          const last = [...s.runs].reverse().find((r) => r.taskId === task.id)
-          if (
-            stored === undefined ||
-            stored.archivedAt !== undefined ||
-            stored.usageLimitResume !== undefined ||
-            stored.autoRetry !== undefined ||
-            last?.id !== run.id
-          ) {
-            return Either.right(null)
-          }
-          stored.usageLimitResume = { runId: run.id, resetsAt, autoResume }
-          return Either.right({ ...stored })
-        })
-        if (armed !== null) deps.publish(armed)
-      }).pipe(Effect.ensuring(Effect.sync(() => examined.add(run.id))))
+        stored.usageLimitResume = { runId: run.id, resetsAt, autoResume }
+        return Either.right({ ...stored })
+      })
+      examined.add(run.id)
+      if (armed !== null) deps.publish(armed)
     }).pipe(
       Effect.catchAllCause((cause) =>
         Effect.logWarning(`task ${task.id}: usage-limit check failed: ${Cause.pretty(cause)}`),

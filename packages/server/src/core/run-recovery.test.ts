@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Either } from "effect"
-import { Conflict, type AgentItem, type ProviderUsage, type Run, type Task, type ThreadSettings } from "@cloudagents/protocol"
+import { Conflict, InternalError, type AgentItem, type ProviderUsage, type Run, type Task, type ThreadSettings } from "@cloudagents/protocol"
 import type { StoreShape, StoreState } from "./state"
 import { makeRunRecovery, AUTO_RETRY_LIMIT, autoRetryDelay } from "./run-recovery"
 
@@ -70,8 +70,12 @@ const setup = (input: {
   providerUsage?: () => Effect.Effect<ReadonlyArray<ProviderUsage>, unknown>
   deliver?: () => Effect.Effect<void, unknown>
   retry?: () => Effect.Effect<void, unknown>
+  /** Wraps the in-memory store, e.g. to make a write fail. */
+  wrapStore?: (store: StoreShape) => StoreShape
 }) => {
-  const { store, state } = memoryStore(input.state)
+  const memory = memoryStore(input.state)
+  const { state } = memory
+  const store = input.wrapStore?.(memory.store) ?? memory.store
   const delivered: string[] = []
   const retried: { readonly deliveryId: string; readonly attempt: number }[] = []
   const published: Task[] = []
@@ -231,6 +235,29 @@ test("a failed usage probe is retried on the next sweep", async () => {
   expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
   await Effect.runPromise(recovery.sweep)
   expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
+})
+
+test("a failure stays undecided until its arm is written, so a delegated child's result is held meanwhile", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString()
+  let writes = 0
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedRun(endedAt)] }),
+    usage: usage(resetsAt),
+    wrapStore: (store) => ({
+      ...store,
+      update: (f) => (++writes === 1 ? Effect.fail(new InternalError({ message: "disk full" })) : store.update(f)),
+    }),
+  })
+  const decidingNow = () => recovery.deciding(state.tasks[0]!, state.runs[0]!)
+
+  expect(decidingNow()).toBe(true)
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+  expect(decidingNow()).toBe(true)
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
+  expect(decidingNow()).toBe(false)
 })
 
 test("does not arm another failure, agent prose, or a provider whose limits the box cannot read", async () => {

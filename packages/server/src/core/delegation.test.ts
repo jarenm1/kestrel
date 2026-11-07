@@ -275,13 +275,13 @@ test("a usage limit holds delegated results until the work resumes or returns ea
       return Either.right(undefined)
     })
     /** The child's delegated run fails on a usage limit and recovery arms it to resume at `later`. */
-    const stall = (childId: string) => store.update((s) => {
+    const stall = (childId: string, autoResume = true) => store.update((s) => {
       const child = s.tasks.find((t) => t.id === childId)!
       const run = s.runs.find((r) => r.id === child.delegation!.runId)!
       run.status = "failed"
       run.endedAt = now
       child.status = "failed"
-      child.usageLimitResume = { runId: run.id, resetsAt: later, autoResume: true }
+      child.usageLimitResume = { runId: run.id, resetsAt: later, autoResume }
       return Either.right(undefined)
     })
     const finish = (taskId: string, runId: string, text: string) => store.update((s) => {
@@ -316,9 +316,20 @@ test("a usage limit holds delegated results until the work resumes or returns ea
     yield* Effect.sleep("7500 millis")
     expect((yield* results(returned.id))[0]?.text).toContain("finished with status failed")
 
+    // An archived child is never resumed, so its arm must not hold the result.
+    const archived = yield* core.delegate("parent", "parent-run", { title: "Archived", message: "work", requestId: "archived" })
+    yield* stall(archived.id)
+    yield* store.update((s) => {
+      s.tasks.find((t) => t.id === archived.id)!.archivedAt = now
+      return Either.right(undefined)
+    })
+    yield* Effect.sleep("2500 millis")
+    expect((yield* results(archived.id))[0]?.text).toContain("finished with status failed")
+
     // A parent stopped by a usage limit queues its children's results instead of starting a failing run for each.
     const input = { title: "Queued", message: "work", requestId: "queued" }
     const queued = yield* core.delegate("held", "held-run", input)
+    const paused = yield* core.delegate("held", "held-run", { title: "Paused", message: "work", requestId: "paused" })
     yield* store.update((s) => {
       const held = s.tasks.find((t) => t.id === "held")!
       const run = s.runs.find((r) => r.id === "held-run")!
@@ -329,12 +340,18 @@ test("a usage limit holds delegated results until the work resumes or returns ea
       return Either.right(undefined)
     })
     yield* finish(queued.id, queued.delegation!.runId!, "Queued answer")
+    // With auto-resume off nothing holds the child, but its queued result has not gone up: the user continuing it
+    // carries the delegation, so the parent never gets the stale failure while the new run works.
+    yield* stall(paused.id, false)
+    const continued = yield* core.sendMessage("owner", paused.id, "Carry on", choice, [], false)
+    expect((yield* core.delegatedStatus("held", paused.id)).run?.id).toBe(continued.run.id)
     yield* Effect.sleep("2500 millis")
     expect(yield* results(queued.id)).toHaveLength(0)
     expect((yield* store.read).runs.filter((r) => r.taskId === "held")).toHaveLength(1)
     const resumed = yield* core.sendMessage("owner", "held", "Continue where you left off.", choice, [], false)
     yield* Effect.sleep("2500 millis")
     expect((yield* core.inbox("held", resumed.run.id)).join("\n")).toContain("Queued answer")
-    // The resumed parent repeating its delegate call gets the same child back.
+    // The resumed parent repeating its delegate call gets the same child back, now waited on by the resumed run.
     expect((yield* core.delegate("held", resumed.run.id, input)).id).toBe(queued.id)
+    expect((yield* store.read).tasks.find((t) => t.id === queued.id)?.delegation?.parentRunId).toBe(resumed.run.id)
   })), 30_000)
