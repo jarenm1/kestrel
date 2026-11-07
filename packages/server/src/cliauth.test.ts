@@ -149,13 +149,20 @@ describe("Antigravity account label", () => {
  * terminal, prints the sign-in link, and stores its credentials file only for an accepted code.
  */
 const FAKE_DEVIN = `#!/bin/sh
+if [ "$1 $2" = "auth status" ]; then
+  if [ -f "$XDG_DATA_HOME/devin/credentials.toml" ] && read credential < "$XDG_DATA_HOME/devin/credentials.toml" && [ "$credential" = 'valid' ]; then
+    echo 'Logged in (via test)'
+  else
+    echo 'Not logged in.'
+  fi
+  exit 0
+fi
 if [ "$1 $2" = "auth login" ]; then
   if [ ! -t 0 ]; then echo "Error: Failed to read code - user canceled"; exit 1; fi
   echo "Visit https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1 to sign in, then copy the code and paste it below."
   read code
   if [ "$code" = "good-code" ]; then
-    mkdir -p "$XDG_DATA_HOME/devin"
-    printf 'api_key = "secret-devin-token"\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
+    printf 'valid\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
     exit 0
   fi
   echo "Error: Failed to exchange code for host https://app.devin.ai"
@@ -197,7 +204,9 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
   }
 
   test("runs the CLI in a terminal, takes the pasted code and reads the stored credentials", async () => {
-    const run = devinAuth(rootFor())
+    const root = rootFor()
+    mkdirSync(join(root, "users", "alice", "devin", "devin"), { recursive: true })
+    const run = devinAuth(root)
     const start = await run((auth) => auth.startLogin("alice", "devin-cli"))
     expect(start).toMatchObject({
       provider: "devin-cli",
@@ -224,6 +233,17 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
     const failure = await run((auth) => Effect.flip(auth.submitCode("alice", "devin-cli", "bad-code-123")))
     expect(failure.message).toContain("Failed to exchange code")
     expect(failure.message).not.toContain("bad-code-123")
+    const statuses = await run((auth) => auth.status("alice"))
+    expect(statuses.find((row) => row.provider === "devin-cli")).toEqual({ provider: "devin-cli", loggedIn: false, account: null })
+  })
+
+  test("does not treat an existing credentials file as a login", async () => {
+    const root = rootFor()
+    const run = devinAuth(root)
+    await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const dir = join(root, "users", "alice", "devin", "devin")
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, "credentials.toml"), "")
     const statuses = await run((auth) => auth.status("alice"))
     expect(statuses.find((row) => row.provider === "devin-cli")).toEqual({ provider: "devin-cli", loggedIn: false, account: null })
   })

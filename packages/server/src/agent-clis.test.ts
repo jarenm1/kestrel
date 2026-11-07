@@ -159,6 +159,15 @@ const devinLink = (text: string) => {
 }
 
 describe("Devin CLI login", () => {
+  test("recognises status output and rejects unreadable credentials without exposing it", () => {
+    const status = AGENT_CLIS["devin-cli"].status
+    if (status.kind !== "command") throw new Error("devin status is not a command")
+    const parse = (stdout: string) => Effect.runSync(status.parse({ stdout, stderr: "" }))
+    expect(parse("Not logged in.\n  Credentials path: /tmp/credentials.toml\n")).toEqual({ provider: "devin-cli", loggedIn: false, account: null })
+    expect(parse("Logged in (via browser)\n")).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
+    expect(() => parse("Failed to load credentials: secret-token\n")).toThrow("devin auth status: unexpected output")
+    expect(() => parse("unrecognised output\n")).toThrow("devin auth status: unexpected output")
+  })
   const url =
     "https://app.devin.ai/auth/cli/continue?state=3be28d3b&prompt=select_account&code_challenge=RAH2Lr&code_challenge_method=S256&cli_pkce_marker=1"
 
