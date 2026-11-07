@@ -16,8 +16,10 @@ export interface AutomationToolDeps {
     /** Null when the box runs without a control plane: automations are managed there. */
     readonly control: ControlClient | null
     readonly taskOwner: (taskId: string) => Effect.Effect<string, NotFound>
-    /** Records a pull request as watched (or no longer watched) on the thread itself, for the app to show. */
+    /** Records a pull request as watched on the thread itself, for the app to show. */
     readonly setWatching: (taskId: string, repo: string, number: number, watching: boolean) => Effect.Effect<unknown, unknown>
+    /** Clears one watch mark; a no-op when the thread's entry is already gone. */
+    readonly forgetWatching: (taskId: string, repo: string, number: number) => Effect.Effect<unknown, unknown>
     /** Clears every watch mark of the thread. */
     readonly clearWatching: (taskId: string) => Effect.Effect<unknown, unknown>
   }
@@ -113,7 +115,8 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       if (repo !== undefined && number !== undefined) {
         // Control first, as with `github_pr_watch`: a refused unwatch must leave the thread's registry as it was.
         yield* control.unwatchPr(owner, ctx.taskId, repo, number)
-        yield* deps.automations.setWatching(ctx.taskId, repo, number, false)
+        // Tolerant: the entry may already be gone (e.g. an earlier watch whose local record never landed).
+        yield* deps.automations.forgetWatching(ctx.taskId, repo, number)
         return text(`Stopped watching ${repo}#${number}.`)
       }
       yield* control.unwatchPr(owner, ctx.taskId)

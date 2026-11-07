@@ -181,6 +181,7 @@ const program = Effect.gen(function* () {
       control: boxControl(config),
       taskOwner: core.taskOwner,
       setWatching: core.setPullRequestWatching,
+      forgetWatching: core.forgetPullRequestWatch,
       clearWatching: core.clearPullRequestWatching,
     },
     inbox: core.inbox,

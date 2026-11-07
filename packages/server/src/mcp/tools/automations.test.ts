@@ -46,6 +46,11 @@ const withClient = async (
         Effect.sync(() => {
           calls.push(`setWatching ${repo}#${number} ${watching}`)
         }),
+      // A no-op that records the call: the real one tolerates a missing entry, which is the case these tests exercise.
+      forgetWatching: (_taskId, repo, number) =>
+        Effect.sync(() => {
+          calls.push(`forgetWatching ${repo}#${number}`)
+        }),
       clearWatching: () =>
         Effect.sync(() => {
           calls.push("clearWatching")
@@ -130,12 +135,22 @@ describe("github_pr_watch ownership", () => {
       {},
     ))
 
-  test("unwatching reaches the control plane before the thread forgets the pull request", () =>
+  test("unwatching succeeds even when the thread's registry entry is already gone", () =>
     withClient(
       async (client, calls) => {
         const result = await client.callTool({ name: "github_pr_unwatch", arguments: { repo: "acme/app", number: 9 } })
         expect(result.isError).toBeUndefined()
-        expect(calls).toEqual(["control.unwatchPr", "setWatching acme/app#9 false"])
+        expect(calls).toEqual(["control.unwatchPr", "forgetWatching acme/app#9"])
+      },
+      {},
+    ))
+
+  test("unwatching every pull request still clears all marks", () =>
+    withClient(
+      async (client, calls) => {
+        const result = await client.callTool({ name: "github_pr_unwatch", arguments: {} })
+        expect(result.isError).toBeUndefined()
+        expect(calls).toEqual(["control.unwatchPr", "clearWatching"])
       },
       {},
     ))
