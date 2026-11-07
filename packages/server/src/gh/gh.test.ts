@@ -91,12 +91,15 @@ describe("gh pr create", () => {
     ])
   })
 
-  test("--head can only name the checkout's own branch", async () => {
+  test("--head supports another local branch but refuses a different owner", async () => {
     const [fake, recorded] = backend(() => noPullRequests)
     const result = await gh(fake, ["pr", "create", "-t", "t", "-b", "b", "--head", "someone:other"])
     expect(result.exitCode).toBe(1)
-    expect(result.stderr).toContain("--head cannot name another")
+    expect(result.stderr).toContain("--head cannot name another repository")
     expect(recorded.opened).toEqual([])
+    const stacked = await gh(fake, ["pr", "create", "-t", "t", "-b", "b", "--head", "stack", "--base", "fix-login_bug"])
+    expect(stacked.exitCode).toBe(0)
+    expect(recorded.opened[0]?.branch).toBe("stack")
   })
 })
 

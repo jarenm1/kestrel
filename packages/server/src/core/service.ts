@@ -491,6 +491,7 @@ export interface CoreShape {
   readonly pullRequestStatus: (
     taskId: string,
     checkoutId?: string,
+    number?: number,
   ) => Effect.Effect<PullRequestStatus, NotFound | BadRequest | InternalError>
   /**
    * Used by the MCP handler (`github_reference_read`): reads an issue or pull request in an explicit repository with
@@ -821,7 +822,7 @@ export const CoreLive = Layer.effect(
         if (found === null) {
           return yield* Effect.fail(new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }))
         }
-        yield* recordPullRequest(taskId, checkout.id, { number: found.number, url: found.url }, false)
+        yield* recordPullRequest(taskId, checkout.id, { number: found.number, url: found.url, headBranch: found.headRef, baseBranch: found.baseRef }, false)
         return found.number
       })
 
@@ -871,7 +872,13 @@ export const CoreLive = Layer.effect(
             const checkout = task.checkouts.find((c) => c.id === checkoutId)
             if (!checkout) return Either.left(new NotFound({ message: `checkout ${checkoutId} not found in this thread` }))
             const now = nowIso()
-            task.checkouts = task.checkouts.map((c) => (c.id === checkoutId ? { ...c, pullRequest: link } : c))
+            const previous = checkout.pullRequests ?? (checkout.pullRequest === undefined ? [] : [checkout.pullRequest])
+            const links = [...previous.filter((pr) => pr.number !== link.number), link]
+            task.checkouts = task.checkouts.map((c) => c.id !== checkoutId ? c : {
+              ...c,
+              pullRequests: links,
+              ...(link.headBranch === undefined || link.headBranch === c.branch ? { pullRequest: link } : {}),
+            })
             task.updatedAt = now
             let message: Message | null = null
             if (announce) {
@@ -1124,7 +1131,7 @@ export const CoreLive = Layer.effect(
           const existing = task.checkouts.find((c) => c.repo === ref.repo)
           if (existing) {
             if (request.pullRequest === undefined) return { checkout: existing, note: null, instructionFiles: [] }
-            if (existing.pullRequest?.number !== request.pullRequest) {
+            if (existing.pullRequest?.number !== request.pullRequest && !existing.pullRequests?.some((pr) => pr.number === request.pullRequest)) {
               return yield* Effect.fail(
                 new BadRequest({
                   message:
@@ -1213,7 +1220,7 @@ export const CoreLive = Layer.effect(
             .pipe(Effect.mapError(toInternal("fetch pull request")))
           const baseBranch = request.baseBranch ?? status.baseRef
           if (request.detached === true) return { baseBranch, startSha: sha, branch: threadBranch, note: null }
-          const link = { number: status.number, url: status.url }
+          const link = { number: status.number, url: status.url, headBranch: status.headRef, baseBranch: status.baseRef }
           const blocker = pullRequestBranchBlocker(status, access.slug, defaultBranch)
           if (blocker === null) return { baseBranch, startSha: sha, branch: status.headRef, link, takeover: true, note: null }
           return {
@@ -1251,7 +1258,7 @@ export const CoreLive = Layer.effect(
           branch,
           baseBranch: fork.baseBranch,
           createdAt: nowIso(),
-          ...(fork.link === undefined ? {} : { pullRequest: fork.link }),
+          ...(fork.link === undefined ? {} : { pullRequest: fork.link, pullRequests: [fork.link] }),
           ...(fork.takeover ? { pullRequestTakeover: true } : {}),
           ...(icon === null ? {} : { icon }),
         }
@@ -2025,7 +2032,7 @@ export const CoreLive = Layer.effect(
       Effect.gen(function* () {
         const state = yield* store.read
         const task = yield* ownedTask(user, taskId)
-        if (task.checkouts.length !== 1 || task.checkouts[0]?.repo.toLowerCase() !== repo.toLowerCase() || task.checkouts[0]?.pullRequest?.number !== number) {
+        if (task.checkouts.length !== 1 || task.checkouts[0]?.repo.toLowerCase() !== repo.toLowerCase() || ![...(task.checkouts[0]?.pullRequests ?? []), ...(task.checkouts[0]?.pullRequest ? [task.checkouts[0].pullRequest] : [])].some((pr) => pr.number === number)) {
           return yield* Effect.fail(new Conflict({ message: "thread no longer matches watched repository" }))
         }
         const marker = `GitHub delivery: ${deliveryId}`
@@ -2715,17 +2722,17 @@ export const CoreLive = Layer.effect(
                 draft: input.draft,
               })
               .pipe(Effect.mapError(fromGitHub)))
-          if (branch === checkout.branch) yield* recordPullRequest(taskId, checkout.id, { number: pullRequest.number, url: pullRequest.url }, existing === null)
+          yield* recordPullRequest(taskId, checkout.id, { number: pullRequest.number, url: pullRequest.url, headBranch: pullRequest.headRef, baseBranch: pullRequest.baseRef }, existing === null)
           return { pullRequest, created: existing === null }
         }),
 
-      pullRequestStatus: (taskId, checkoutId) =>
+      pullRequestStatus: (taskId, checkoutId, requestedNumber) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
           const checkout = yield* pickCheckout(task, checkoutId)
           const ref = yield* checkoutRepoRef(checkout)
           const { slug, token } = yield* githubAccess(task.owner, ref)
-          const number = yield* linkedPullRequestNumber(taskId, checkout, slug, token)
+          const number = requestedNumber ?? (yield* linkedPullRequestNumber(taskId, checkout, slug, token))
           return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
         }),
 

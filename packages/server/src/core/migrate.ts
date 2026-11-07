@@ -135,7 +135,7 @@ const migrateCheckout = (
       branch: task.branch,
       baseBranch: task.baseBranch,
       createdAt: task.createdAt,
-      ...(task.pullRequest === undefined ? {} : { pullRequest: task.pullRequest }),
+      ...(task.pullRequest === undefined ? {} : { pullRequest: task.pullRequest, pullRequests: [task.pullRequest] }),
     }
   })
 
