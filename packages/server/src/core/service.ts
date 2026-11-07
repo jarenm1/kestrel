@@ -1457,12 +1457,14 @@ export const CoreLive = Layer.effect(
             for (let i = taskRuns.length - 1; i >= 0; i--) {
               const previous = taskRuns[i]!
               const session = s.runSessions.find((x) => x.runId === previous.id)
-              const recordedProvider = session?.provider ?? previous.provider ?? DEFAULT_MODEL_PROVIDER
+              // The run record is what actually ran; a session record written before model routing defaults its provider
+              // to the box's default, so it must not make another provider's session look like this provider's.
+              const recordedProvider = previous.provider ?? session?.provider ?? DEFAULT_MODEL_PROVIDER
               if (recordedProvider !== provider) continue
               // A native session is only valid in the same provider and harness: routes have separate session stores.
               const recordedHarness =
-                session?.harness ??
                 previous.harness ??
+                session?.harness ??
                 (previous.model === undefined
                   ? DEFAULT_MODEL_HARNESS[recordedProvider]
                   : modelHarness(previous.model))

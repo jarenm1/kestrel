@@ -255,3 +255,51 @@ test("resume is partitioned by provider and harness, not only by provider", asyn
   }))
 }, 20_000)
 
+
+test("a failed run in a sibling harness does not invalidate this harness's session", async () => {
+  await withCore((core, store, spawned) => Effect.gen(function* () {
+    const now = new Date().toISOString()
+    yield* store.update((s) => {
+      s.tasks.push({ id: "sibling", owner: "owner", title: "Sibling", status: "idle", createdAt: now, updatedAt: now, checkouts: [] })
+      s.runs.push(
+        { id: "claude-work", taskId: "sibling", prompt: "claude work", status: "succeeded", startedAt: now, endedAt: now, exitCode: 0, provider: "anthropic", model: "claude-opus-5-5", harness: "claude" },
+        // Same provider, other harness, and it never named a session: a broken OpenCode resume says nothing about the
+        // Claude Code session, so that one is still good.
+        { id: "opencode-failed", taskId: "sibling", prompt: "opencode work", status: "failed", startedAt: now, endedAt: now, exitCode: 1, provider: "anthropic", model: "claude-opus-5-5@opencode", harness: "opencode" },
+      )
+      s.runSessions.push({ runId: "claude-work", sessionId: "claude-session", provider: "anthropic", harness: "claude" })
+      s.messages.push(
+        { id: "claude-message", taskId: "sibling", runId: "claude-work", role: "user", text: "Claude context", createdAt: now },
+        { id: "opencode-message", taskId: "sibling", runId: "opencode-failed", role: "user", text: "OpenCode attempt", createdAt: now },
+      )
+      return Either.right(undefined)
+    })
+
+    yield* core.sendMessage("owner", "sibling", "Back on Claude", { model: "claude-opus-5-5" }, [], false)
+    const back = spawned.at(-1)!
+    expect(back.resumeSession).toBe("claude-session")
+    expect(back.prompt).toContain("OpenCode attempt")
+    expect(back.prompt).not.toContain("Claude context")
+  }))
+}, 20_000)
+
+test("a run's own provider wins over a session record that disagrees with it", async () => {
+  await withCore((core, store, spawned) => Effect.gen(function* () {
+    const now = new Date().toISOString()
+    yield* store.update((s) => {
+      s.tasks.push({ id: "defaulted", owner: "owner", title: "Defaulted", status: "idle", createdAt: now, updatedAt: now, checkouts: [] })
+      s.runs.push({ id: "openai-run", taskId: "defaulted", prompt: "openai work", status: "succeeded", startedAt: now, endedAt: now, exitCode: 0, provider: "openai" })
+      // A session record written before model routing defaulted its provider to the box's default (Anthropic), so it
+      // says nothing about which provider the run actually ran on. The run record does.
+      s.runSessions.push({ runId: "openai-run", sessionId: "openai-only-session", provider: "anthropic" })
+      s.messages.push({ id: "openai-message", taskId: "defaulted", runId: "openai-run", role: "user", text: "OpenAI-era context", createdAt: now })
+      return Either.right(undefined)
+    })
+
+    yield* core.sendMessage("owner", "defaulted", "Back on Claude", { model: "claude-opus-5-5" }, [], false)
+    const back = spawned.at(-1)!
+    // An OpenAI session id handed to Claude Code resumes nothing, so the run starts fresh with the conversation.
+    expect(back.resumeSession).toBeNull()
+    expect(back.prompt).toContain("OpenAI-era context")
+  }))
+}, 20_000)
