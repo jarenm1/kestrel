@@ -42,11 +42,12 @@ const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
 /**
- * Seconds each transport attempt may take for the control plane's relay before the box answers without it. werift
- * gathers inside `setLocalDescription` and tries UDP then TCP, so at most two of these delay the answer; its default is
- * eight seconds per attempt. Operator-configured TURN keeps that default: its server may be far away or reached by TLS.
+ * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. The UDP attempt is not
+ * covered: it fails under STUN retransmissions (50ms doubling over seven sends, about 6.3s) before that fallback starts,
+ * so an unreachable managed relay can hold the answer for roughly eight seconds. Operator-configured TURN keeps the
+ * default, since its server may be far away or reached over TLS.
  */
-const TURN_CONNECT_TIMEOUT_S = 2
+const TURN_TCP_CONNECT_TIMEOUT_S = 2
 const MAX_OFFER_CHARS = 64 * 1024
 const INPUT_CHANNEL = "input"
 const POINTER_CHANNEL = "pointer"
@@ -377,7 +378,7 @@ export class DesktopRtcSession {
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
       // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
       // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
-      iceTurnConnectTimeout: this.managedRelay ? TURN_CONNECT_TIMEOUT_S : undefined,
+      iceTurnConnectTimeout: this.managedRelay ? TURN_TCP_CONNECT_TIMEOUT_S : undefined,
       iceAdditionalHostAddresses: [...this.settings.hostAddresses],
       iceFilterCandidatePair: (pair) => isPeerAddressAllowed(pair.remoteCandidate.host, this.settings.hostAddresses, this.settings.denyPrivate),
       codecs: {
