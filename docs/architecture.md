@@ -60,7 +60,8 @@ surfaces without a protocol change. See [mobile references](../packages/mobile/R
 
 Chat box availability is shown by the box activity indicator, not a global offline banner or sidebar connectivity
 alert. Losing the live connection warns only while an agent turn is running; idle reconnects stay quiet. Failed
-prompt submissions still show an error beside the composer and keep the draft available to retry.
+prompt submissions still show an error beside the composer and keep the draft available to retry. Desktop send
+errors use the same frosted-glass warning style as the floating banners.
 Reconnecting refreshes the thread, messages and runs; fresh snapshots replace stale pre-disconnect state while
 preserving live events that arrive during the refresh.
 

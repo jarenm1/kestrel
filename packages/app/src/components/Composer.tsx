@@ -30,6 +30,7 @@ import {
 } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
+import { FloatingNotice } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
 import { ModelPicker, ThinkingPicker, effortOptions, type ModelSection } from "@/components/AgentPickers"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
@@ -661,7 +662,11 @@ export function Composer({
 
   return (
     <div className={cn("w-full max-w-3xl", className)}>
-      {Boolean(error) && <Alert className="mb-2">{errorText(error)}</Alert>}
+      {Boolean(error) && (
+        <div className="mb-2 flex justify-center">
+          <FloatingNotice>{errorText(error)}</FloatingNotice>
+        </div>
+      )}
       {fileError && <Alert className="mb-2">{fileError}</Alert>}
       <form
         className={cn(

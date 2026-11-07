@@ -1,10 +1,7 @@
 import type { ReactNode } from "react"
 import { TriangleAlert } from "lucide-react"
 
-/**
- * A workspace-wide warning that floats over the page on frosted glass instead of pushing the layout down. Render it
- * inside `FloatingNotices`.
- */
+/** Frosted-glass warning; use `FloatingNotices` to float it over a page, or render inline beside a blocked action. */
 export function FloatingNotice({ children }: { children: ReactNode }) {
   return (
     <div
