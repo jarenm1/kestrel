@@ -491,7 +491,11 @@ export interface CoreShape {
     taskId: string,
     input: OpenPullRequestInput,
   ) => Effect.Effect<OpenedPullRequest, NotFound | BadRequest | InternalError>
-  /** Used by the MCP handler: live GitHub status of one pull request of a checkout's GitHub repository. */
+  /**
+   * Used by the MCP handler: live GitHub status of one pull request the thread manages, by number, or of a checkout's
+   * pull request when no number is given. The number resolves from the thread's registry first, so a watched pull
+   * request needs no checkout.
+   */
   readonly pullRequestStatus: (
     taskId: string,
     checkoutId?: string,
@@ -864,6 +868,26 @@ export const CoreLive = Layer.effect(
         }
         return yield* Effect.fail(new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }))
       })
+
+    /**
+     * The repository of the thread's registered pull request `number`, when the call names no checkout: the only entry
+     * with that number, or the thread's only checkout's repository when several entries share the number.
+     */
+    const registeredRepoByNumber = (task: Task, number: number): Effect.Effect<string | undefined, BadRequest> => {
+      const matches = threadPullRequestsOf(task).filter((pr) => pr.number === number)
+      if (matches.length === 0) return Effect.succeed(undefined)
+      if (matches.length === 1 && matches[0] !== undefined) return Effect.succeed(matches[0].repo)
+      const [only] = task.checkouts
+      const preferred =
+        task.checkouts.length === 1 && only !== undefined
+          ? matches.find((pr) => pr.repo.toLowerCase() === only.repo.toLowerCase())
+          : undefined
+      if (preferred !== undefined) return Effect.succeed(preferred.repo)
+      const candidates = matches.map((pr) => pr.repo).join(", ")
+      return Effect.fail(
+        new BadRequest({ message: `pull request #${number} is registered in several repositories (${candidates}); pass the checkout of the one to check` }),
+      )
+    }
 
     /** The repository and token a pull request tool acts with, and the pull request it means. */
     const pullRequestTarget = (taskId: string, input: PullRequestTarget) =>
@@ -2811,6 +2835,17 @@ export const CoreLive = Layer.effect(
       pullRequestStatus: (taskId, checkoutId, number) =>
         Effect.gen(function* () {
           const task = yield* requireTask(taskId)
+          // A watched or opened pull request need not have a checkout of its own, so a named number is resolved from
+          // the thread's registry first; without a number the status is the checkout's pull request.
+          if (checkoutId === undefined && number !== undefined) {
+            const repo = yield* registeredRepoByNumber(task, number)
+            if (repo !== undefined) {
+              const ref = parseRepoRef(repo)
+              if (ref === null) return yield* Effect.fail(new InternalError({ message: `pull request #${number} has an invalid repo ${repo}` }))
+              const { slug, token } = yield* githubAccess(task.owner, ref)
+              return yield* github.getPullRequestStatus(token, slug, number).pipe(Effect.mapError(fromGitHub))
+            }
+          }
           const checkout = yield* pickCheckout(task, checkoutId)
           const ref = yield* checkoutRepoRef(checkout)
           const { slug, token } = yield* githubAccess(task.owner, ref)

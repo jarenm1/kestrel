@@ -208,9 +208,9 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Show the live GitHub status of a pull request this thread manages: mergeability, review decision, check results " +
-        "and recent review comments. Defaults to the checkout's pull request; name `number` for another pull request of " +
-        "the same repository. Requires a pull request opened with github_pr_create, checked out with repo_checkout, or " +
-        "watched with github_pr_watch.",
+        "and recent review comments. Defaults to the checkout's pull request; name `number` for a pull request the " +
+        "thread registered, including one it watches in a repository it has not checked out. Requires a pull request " +
+        "opened with github_pr_create, checked out with repo_checkout, or watched with github_pr_watch.",
       inputSchema: { checkout: checkoutArg, number: numberArg },
     },
     ({ checkout, number }: { checkout?: string; number?: number }) =>

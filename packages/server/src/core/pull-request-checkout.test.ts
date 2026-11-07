@@ -78,6 +78,7 @@ const withCore = async <A>(
   origin: string,
   root: string,
   body: (core: CoreService["Type"], threadDir: string) => Effect.Effect<A, unknown, never>,
+  statusCalls: Array<{ readonly slug: string; readonly number: number }> = [],
 ): Promise<A> => {
   const config = {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
@@ -104,7 +105,10 @@ const withCore = async <A>(
     workspaceLayer,
     Layer.succeed(CredentialStore, { get: () => Effect.succeed({ github: "token" }) } as never),
     Layer.succeed(GitHub, {
-      getPullRequestStatus: () => Effect.succeed(status),
+      getPullRequestStatus: (_token: string, repo: { owner: string; name: string }, number: number) => {
+        statusCalls.push({ slug: `${repo.owner}/${repo.name}`, number })
+        return Effect.succeed(status)
+      },
       // Linked checkouts must never need the lookup by branch.
       findOpenPullRequest: () => Effect.succeed(null),
     } as never),
@@ -306,5 +310,69 @@ describe("repo_checkout with a pull request", () => {
         expect(cleared.pullRequests?.map((pr) => pr.number)).toEqual([7, 9, 3])
       }),
     )
+  })
+})
+
+describe("github_pr_status by number", () => {
+  test("checks a watched pull request in a repository the thread never checked out", async () => {
+    const root = await newRoot()
+    const calls: Array<{ slug: string; number: number }> = []
+    await withCore(
+      prStatus({ number: 9 }),
+      join(root, "origin"),
+      root,
+      (core) =>
+        Effect.gen(function* () {
+          yield* core.setPullRequestWatching("t1", "acme/other", 9, true)
+          const status = yield* core.pullRequestStatus("t1", undefined, 9)
+          expect(status.number).toBe(9)
+        }),
+      calls,
+    )
+    expect(calls).toEqual([{ slug: "acme/other", number: 9 }])
+  })
+
+  test("a number registered in several repositories is refused by name", async () => {
+    const root = await newRoot()
+    const calls: Array<{ slug: string; number: number }> = []
+    await withCore(
+      prStatus({}),
+      join(root, "origin"),
+      root,
+      (core) =>
+        Effect.gen(function* () {
+          yield* core.setPullRequestWatching("t1", "acme/widget", 9, true)
+          yield* core.setPullRequestWatching("t1", "acme/other", 9, true)
+          const failed = yield* Effect.either(core.pullRequestStatus("t1", undefined, 9))
+          expect(Either.isLeft(failed)).toBe(true)
+          if (Either.isLeft(failed) && "message" in failed.left && typeof failed.left.message === "string") {
+            expect(failed.left.message).toContain("several repositories")
+            expect(failed.left.message).toContain("acme/widget, acme/other")
+          }
+          expect(calls).toEqual([])
+        }),
+      calls,
+    )
+  })
+
+  test("a number registered in several repositories prefers the thread's only checkout", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    const calls: Array<{ slug: string; number: number }> = []
+    await withCore(
+      prStatus({ number: 9 }),
+      origin,
+      root,
+      (core) =>
+        Effect.gen(function* () {
+          yield* core.checkout("t1", { repo: REPO } as never)
+          yield* core.setPullRequestWatching("t1", REPO, 9, true)
+          yield* core.setPullRequestWatching("t1", "acme/other", 9, true)
+          const status = yield* core.pullRequestStatus("t1", undefined, 9)
+          expect(status.number).toBe(9)
+        }),
+      calls,
+    )
+    expect(calls).toEqual([{ slug: REPO, number: 9 }])
   })
 })
