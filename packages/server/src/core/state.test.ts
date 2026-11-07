@@ -176,3 +176,43 @@ describe("retired harness state", () => {
     expect(await readFile(file, "utf8")).toBe(JSON.stringify(legacy))
   })
 })
+
+describe("legacy checkout pull requests", () => {
+  let root: string
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "kestrel-state-"))
+  })
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  test("only a takeover becomes the checkout's pull request", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify({
+      tasks: [{
+        ...task("legacy"),
+        checkouts: [
+          {
+            id: "c1", repo: "acme/widget", dir: "widget", branch: "topic", baseBranch: "main", createdAt: NOW,
+            pullRequestTakeover: true,
+            pullRequest: { number: 7, url: "https://github.com/acme/widget/pull/7" },
+          },
+          {
+            id: "c2", repo: "acme/other", dir: "other", branch: "cloudagents/fix-abc", baseBranch: "main", createdAt: NOW,
+            pullRequest: { number: 9, url: "https://github.com/acme/other/pull/9" },
+          },
+        ],
+      }],
+      messages: [], runs: [], pendingAsks: [], uploads: [], runSessions: [],
+    }))
+
+    const state = await loadState(root)
+    const entries = state.tasks[0]?.pullRequests ?? []
+    expect(entries.map((pr) => `${pr.repo}#${pr.number}`)).toEqual(["acme/widget#7", "acme/other#9"])
+    // The takeover's pushes update #7; the blocked checkout sits on its own branch and does not push to #9.
+    expect(entries[0]).toMatchObject({ checkoutId: "c1", branch: "topic", source: "takeover" })
+    expect(entries[1]?.checkoutId).toBeUndefined()
+    expect(entries[1]?.branch).toBeUndefined()
+    expect(entries[1]?.source).toBe("linked")
+  })
+})
