@@ -6,15 +6,22 @@ import type { RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 import {
+  BROKER_PROVIDERS,
   BROKER_UPSTREAMS,
+  brokerApiFor,
+  brokerEnv,
   credentialFor,
   CredentialBroker,
   CredentialBrokerLive,
+  DEFAULT_BROKER_API,
+  DEFAULT_BROKER_HARNESS,
   type BrokerGrant,
   type BrokerProvider,
   type CredentialBrokerShape,
 } from "./index"
 import { brokerTarget, handleBroker } from "./handler"
+
+const BASE = "http://127.0.0.1:8787/broker/run-token"
 
 const grant = (providers: readonly BrokerProvider[], extra: Partial<BrokerGrant> = {}): BrokerGrant => ({
   runId: "run",
@@ -74,6 +81,59 @@ describe("broker provider mapping", () => {
     expect(brokerTarget("anthropic", "anthropic", "/v1/messages")?.path).toBe("/v1/messages")
     expect(brokerTarget("anthropic", "openai", "/v1/responses")).toBeNull()
     expect(brokerTarget("openai", "anthropic", "/v1/messages")).toBeNull()
+  })
+})
+
+describe("broker env", () => {
+  const harnesses = ["claude", "codex", "opencode"] as const
+  const gateways = ["openrouter", "zai", "deepseek", "minimax", "moonshot"] as const
+  const pairs: ReadonlyArray<readonly [BrokerProvider, (typeof harnesses)[number]]> = [
+    ["anthropic", "claude"],
+    ["anthropic", "opencode"],
+    ["openai", "codex"],
+    ["openai", "opencode"],
+    ...gateways.flatMap((provider) => harnesses.map((harness) => [provider, harness] as const)),
+    ["opencode-go", "opencode"],
+    ["opencode-go", "claude"],
+    ["opencode-go", "codex"],
+  ]
+
+  const expected = (provider: BrokerProvider, harness: (typeof harnesses)[number]): Record<string, string> => {
+    if (harness === "opencode") return { KESTREL_BROKER_TOKEN: "t" }
+    const nativeVendor =
+      (provider === "anthropic" && harness === "claude") || (provider === "openai" && harness === "codex")
+    if (nativeVendor) {
+      return {
+        ANTHROPIC_BASE_URL: `${BASE}/anthropic`,
+        ANTHROPIC_API_KEY: "t",
+        OPENAI_BASE_URL: `${BASE}/openai/v1`,
+        OPENAI_API_KEY: "t",
+      }
+    }
+    if (harness === "codex") {
+      return { OPENAI_BASE_URL: `${BASE}/${provider}/openai/v1`, OPENAI_API_KEY: "t" }
+    }
+    return {
+      // Only the Go gateway has no legacy `/provider` Anthropic path.
+      ANTHROPIC_BASE_URL: provider === "opencode-go" ? `${BASE}/opencode-go/anthropic` : `${BASE}/${provider}`,
+      ANTHROPIC_AUTH_TOKEN: "t",
+      ANTHROPIC_API_KEY: "",
+    }
+  }
+
+  test("every producible provider×harness gets the env its own CLI reads", () => {
+    for (const [provider, harness] of pairs) {
+      expect(brokerEnv(provider, BASE, "t", harness)).toEqual(expected(provider, harness))
+      if (DEFAULT_BROKER_HARNESS[provider] === harness) {
+        expect(brokerEnv(provider, BASE, "t")).toEqual(expected(provider, harness))
+      }
+    }
+  })
+
+  test("the legacy API is derived from the one provider→harness table", () => {
+    for (const provider of BROKER_PROVIDERS) {
+      expect(DEFAULT_BROKER_API[provider]).toBe(brokerApiFor(DEFAULT_BROKER_HARNESS[provider]))
+    }
   })
 })
 

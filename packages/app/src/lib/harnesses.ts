@@ -1,4 +1,4 @@
-import type { ModelInfo, ModelProvider } from "@cloudagents/protocol"
+import { DEFAULT_MODEL_HARNESS, type ModelInfo, type ModelProvider } from "@cloudagents/protocol"
 import { modelHarnessOf, type ModelMentionHarness } from "@cloudagents/composer/models"
 import claudeLogo from "@/assets/claude.svg"
 import openaiLogo from "@/assets/openai.svg"
@@ -36,18 +36,5 @@ export const harnessForModel = (model: ModelInfo): Harness => harnessById(modelH
  * The harness a provider ran before catalog routes existed. Only for runs recorded without a model (or route); every
  * current pick reads the model's actual harness through `harnessForModel`.
  */
-const LEGACY_PROVIDER_HARNESS: Record<ModelProvider, ModelMentionHarness> = {
-  anthropic: "claude",
-  openai: "codex",
-  openrouter: "claude",
-  zai: "claude",
-  deepseek: "claude",
-  minimax: "claude",
-  moonshot: "claude",
-  opencode: "opencode",
-  "opencode-go": "opencode",
-  google: "antigravity",
-}
-
 export const harnessForProvider = (provider: ModelProvider): Harness =>
-  harnessById(LEGACY_PROVIDER_HARNESS[provider])
+  harnessById(DEFAULT_MODEL_HARNESS[provider])

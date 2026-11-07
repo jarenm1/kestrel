@@ -397,6 +397,10 @@ export const CliAuthLive = Layer.effect(
     /** Providers throttle these reads, so a panel left open or several open tabs share one answer. */
     const USAGE_CACHE_MS = 60_000
     const USAGE_CACHE_MAX = 64
+    /** `opencode auth export` is a process launch per Go-routed run; one turn reuses a bit-identical answer. */
+    const goKeyCache = new Map<string, { readonly at: number; readonly key: string | null }>()
+    const GO_KEY_CACHE_MS = 30_000
+    const GO_KEY_CACHE_MAX = 64
 
     /**
      * Asks the provider's CLI for `user`'s limits. It runs like a status check, in the user's own home with no thread
@@ -670,6 +674,7 @@ export const CliAuthLive = Layer.effect(
       Effect.gen(function* () {
         yield* rootOf(user)
         usageCache.delete(keyOf(user, provider))
+        if (provider === "opencode-go") goKeyCache.delete(user)
         const current = pending.get(keyOf(user, provider))
         if (current) {
           killEntry(current)
@@ -712,6 +717,7 @@ export const CliAuthLive = Layer.effect(
         const stored = yield* runCli(inv, `${spec.bin} key import`, signIn.stdin(key), true)
         if (stored === null) return yield* Effect.fail(new InternalError({ message: `${spec.bin} is not installed` }))
         usageCache.delete(keyOf(user, provider))
+        goKeyCache.delete(user)
         usageEpochs.set(keyOf(user, provider), (usageEpochs.get(keyOf(user, provider)) ?? 0) + 1)
         const result = yield* readStatus(user, provider)
         if (!result.loggedIn) return yield* Effect.fail(new InternalError({ message: `${spec.bin} did not store the key` }))
@@ -746,14 +752,34 @@ export const CliAuthLive = Layer.effect(
 
     const opencodeGoKey = (user: string): Effect.Effect<string | null, BadRequest | InternalError> =>
       Effect.gen(function* () {
+        // Every Go-routed chat run and text generation asks for this key; a short cache keeps one turn from paying an
+        // extra CLI launch each time. Saving or disconnecting a key clears the entry immediately.
+        const cached = goKeyCache.get(user)
+        if (cached !== undefined && Date.now() - cached.at < GO_KEY_CACHE_MS) return cached.key
         const inv = yield* invoke(user, "opencode-go", ["auth", "export", "--standalone"])
         const output = yield* runCli(inv, "opencode auth export", undefined, true)
         if (output === null) return null
+        let printed: unknown
         try {
-          return parseOpenCodeGoKey(JSON.parse(output.stdout))
+          printed = JSON.parse(output.stdout)
         } catch {
-          return null
+          return yield* Effect.fail(
+            new InternalError({ message: "opencode auth export did not print JSON; cannot read the OpenCode Go credential" }),
+          )
         }
+        if (!Array.isArray(printed)) {
+          return yield* Effect.fail(
+            new InternalError({ message: "opencode auth export printed an unexpected shape; cannot read the OpenCode Go credential" }),
+          )
+        }
+        const key = parseOpenCodeGoKey(printed)
+        goKeyCache.set(user, { at: Date.now(), key })
+        while (goKeyCache.size > GO_KEY_CACHE_MAX) {
+          const oldest = goKeyCache.keys().next().value
+          if (oldest === undefined) break
+          goKeyCache.delete(oldest)
+        }
+        return key
       })
 
     return {

@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import type { ModelProvider, RelayCredentials } from "@cloudagents/protocol"
+import { DEFAULT_MODEL_HARNESS, type ModelHarness, type ModelProvider, type RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 
@@ -108,31 +108,24 @@ export const BROKER_UPSTREAMS: Record<BrokerProvider, BrokerUpstreams> = {
 
 export const BROKER_PROVIDERS = Object.keys(BROKER_UPSTREAMS) as ReadonlyArray<BrokerProvider>
 
-/** The API a provider's legacy (unsuffixed) broker path speaks: `openai` for Codex, Anthropic Messages otherwise. */
-export const DEFAULT_BROKER_API: Record<BrokerProvider, BrokerApi> = {
-  anthropic: "anthropic",
-  openai: "openai",
-  openrouter: "anthropic",
-  zai: "anthropic",
-  deepseek: "anthropic",
-  minimax: "anthropic",
-  moonshot: "anthropic",
-  "opencode-go": "anthropic",
-}
-
 /** The harness a provider's models run in by default; a route id names a different one explicitly. */
-export type BrokerHarness = "claude" | "codex" | "opencode"
+export type BrokerHarness = Exclude<ModelHarness, "antigravity">
 
-export const DEFAULT_BROKER_HARNESS: Record<BrokerProvider, BrokerHarness> = {
-  anthropic: "claude",
-  openai: "codex",
-  openrouter: "claude",
-  zai: "claude",
-  deepseek: "claude",
-  minimax: "claude",
-  moonshot: "claude",
-  "opencode-go": "opencode",
-}
+/** The native API a harness speaks at the broker. Codex reads Responses (`wire_api = "responses"`). */
+export const brokerApiFor = (harness: BrokerHarness): BrokerApi => (harness === "codex" ? "openai" : "anthropic")
+
+/** Every brokered provider's current harness, from the protocol's single provider→harness table. */
+export const DEFAULT_BROKER_HARNESS: Record<BrokerProvider, BrokerHarness> = Object.fromEntries(
+  BROKER_PROVIDERS.map((provider) => [provider, DEFAULT_MODEL_HARNESS[provider] as BrokerHarness]),
+) as Record<BrokerProvider, BrokerHarness>
+
+/**
+ * The API a provider's legacy (unsuffixed) broker path speaks, derived from the same harness table: a provider whose
+ * current harness is Codex gets Responses, every other one Anthropic Messages.
+ */
+export const DEFAULT_BROKER_API: Record<BrokerProvider, BrokerApi> = Object.fromEntries(
+  BROKER_PROVIDERS.map((provider) => [provider, brokerApiFor(DEFAULT_BROKER_HARNESS[provider])]),
+) as Record<BrokerProvider, BrokerApi>
 
 /**
  * The base a CLI reads for one provider's native API, e.g. `http://box/broker/<token>/openrouter/openai/v1`. It is
@@ -232,8 +225,9 @@ export interface BrokerIssueOptions {
   /** `opencode auth export`'s Go key; required to broker `opencode-go` models. */
   readonly opencodeGoKey?: string | null
   /**
-   * A stable conversation identity (the task id, or provider + harness + task id when a thread may route to the same
-   * gateway from more than one harness). Go's session header is derived from it, so a resumed thread keeps it.
+   * A stable conversation identity: the task id. Every call site passes just that, deliberately harness-independent, so
+   * OpenCode Go can reuse one prompt cache for a thread even when the user switches between `@claude` and `@codex`.
+   * Go's session header is derived from it, so a resumed thread keeps it.
    */
   readonly sessionId?: string
 }

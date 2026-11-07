@@ -97,9 +97,13 @@ Install the CLI on the box user's PATH (sandboxed runs use the box's Nix/toolkit
 | Provider | Required CLI | Login/session storage | Command override |
 |---|---|---|---|
 | OpenCode free | OpenCode 2.0.7+ (`npm i -g @opencode/cli`) | `<dataDir>/users/<login>/opencode`, isolated from Go | `CLOUDAGENTS_OPENCODE_COMMAND` |
-| OpenCode Go | OpenCode 2.1+ | `<dataDir>/users/<login>/opencode-go`, isolated from free models | `CLOUDAGENTS_OPENCODE_GO_COMMAND` |
+| OpenCode Go | OpenCode 2.1+ | `<dataDir>/users/<login>/opencode-go`, isolated from free models | `CLOUDAGENTS_OPENCODE_GO_COMMAND` (native route), `CLOUDAGENTS_OPENCODE_COMMAND` (`@claude`/`@codex`) |
 | API providers in OpenCode | OpenCode 2.1+ | Thread-local sessions; broker token only | `CLOUDAGENTS_OPENCODE_COMMAND` |
+| Codex routes (`@codex`) | Codex CLI on PATH | Thread-local sessions; broker token only | `CLOUDAGENTS_CODEX_COMMAND` (native OpenAI runs keep `CLOUDAGENTS_OPENAI_COMMAND`) |
 | Google | Antigravity CLI 1.5+ (`agy`, pinned by the flake) | `<dataDir>/users/<login>/antigravity` | `CLOUDAGENTS_GOOGLE_COMMAND` |
+
+An OpenCode command override must not inline `OPENCODE_CONFIG_CONTENT`: the box sets that per run, and an inline
+assignment shadows the generated route provider. The box warns at startup if it sees one.
 
 `dataDir` is `CLOUDAGENTS_DATA_DIR`, or `.data` under the repository by default. `opencode-ai` and
 opencode.ai/install are OpenCode 1 and do not satisfy these requirements.

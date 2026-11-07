@@ -12,6 +12,12 @@ harness. OpenCode's free models require a Console account and OpenCode 2.0.7+; t
 Claude Code uses stream-JSON on stdin (`core/claude-stream.ts`); Codex uses app-server JSON-RPC on stdio
 (`core/codex-app-server.ts`); OpenCode uses ACP (`core/acp.ts`). The native command overrides remain
 `CLOUDAGENTS_ANTHROPIC_COMMAND`, `CLOUDAGENTS_OPENAI_COMMAND` and `CLOUDAGENTS_OPENCODE_COMMAND`.
+Routed models use canonical commands instead: `CLOUDAGENTS_ANTHROPIC_COMMAND` for `@claude`,
+`CLOUDAGENTS_CODEX_COMMAND` for `@codex` (the native OpenAI command is not reused, because a route needs the broker's
+Responses provider config) and `CLOUDAGENTS_OPENCODE_COMMAND` for `@opencode`. The OpenCode command must not inline
+`OPENCODE_CONFIG_CONTENT=…`: the box sets that per run, and an inline assignment in the command would shadow the
+generated provider config, failing routed API models with `model not found`. The box warns at startup when a
+configured OpenCode command contains it.
 Codex opens or resumes the thread with the selected model and starts the turn with its effort. Without a ChatGPT
 login, the box signs app-server in with the run's broker token, stored in the task's `CODEX_HOME`.
 

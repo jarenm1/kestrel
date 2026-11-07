@@ -703,10 +703,6 @@ export const HarnessCommand = Schema.Struct({
 })
 export type HarnessCommand = typeof HarnessCommand.Type
 
-/** How `command` is typed in the composer: its own prefix, or the provider's default from boxes that send none. */
-export const harnessCommandPrefix = (command: HarnessCommand, provider: ModelProvider | undefined): "/" | "$" =>
-  command.prefix ?? (provider === "openai" ? "$" : "/")
-
 /**
  * The commands of the harness the thread's next message will run on. `provider` is authoritative: while a run is
  * active the message joins that run, so the box answers for the run's provider even if the composer picked another.

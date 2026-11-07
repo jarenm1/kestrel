@@ -21,7 +21,7 @@ import {
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, harnessForModel, type Harness } from "../agent-clis"
 import type { CliAuthShape } from "../cliauth"
-import { brokerApiBase, type BrokerApi, type BrokerProvider, type CredentialBrokerShape } from "../broker"
+import { brokerApiBase, DEFAULT_BROKER_API, type BrokerProvider, type CredentialBrokerShape } from "../broker"
 import { loginsForModel, claudeTierEnv } from "./harness"
 import { makeTranscript } from "./transcript"
 import { makeAcpDriver } from "./acp"
@@ -459,15 +459,15 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
       const brokerEnv = Object.fromEntries(Object.entries(lease?.env ?? {}).filter(([key]) => !dropped.has(key)))
       const loginEnv = Object.fromEntries(loginDirs.map((dir) => [AGENT_CLIS[dir.provider].configEnv, dir.inside]))
       const modelId = modelUpstreamId(selected.model)
-      const opencodeApi: BrokerApi = provider === "openai" ? "openai" : "anthropic"
       const opencodeEnv: Record<string, string> =
         harness.conversation === "acp" && harness.bin === "opencode"
           ? {
               OPENCODE_CONFIG_CONTENT: opencodeConfigContent(
-                lease !== null && harnessId === "opencode"
+                lease !== null && harnessId === "opencode" && channel !== null
                   ? {
-                      baseURL: brokerApiBase(lease.base, channel as BrokerProvider, opencodeApi),
-                      api: opencodeApi,
+                      // The config's base must be the API `brokerTarget` resolves for this provider.
+                      baseURL: brokerApiBase(lease.base, channel, DEFAULT_BROKER_API[channel]),
+                      api: DEFAULT_BROKER_API[channel],
                       upstreamModel: modelId,
                       name: provider,
                     }

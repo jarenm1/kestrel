@@ -145,7 +145,11 @@ export interface ServerConfig {
   readonly agentCommands: Record<ModelProvider, string>
   /**
    * Canonical commands for a model whose route id names another harness. A provider-specific override above applies
-   * only to its current harness; these are shared by every provider routed to the same CLI.
+   * only to its current harness; these are shared by every provider routed to the same CLI:
+   * `CLOUDAGENTS_ANTHROPIC_COMMAND` for `@claude`, `CLOUDAGENTS_CODEX_COMMAND` for `@codex` (the native OpenAI command
+   * is not reused: a route needs the broker's Responses provider config) and `CLOUDAGENTS_OPENCODE_COMMAND` for
+   * `@opencode`. The OpenCode command must not inline `OPENCODE_CONFIG_CONTENT`: it would shadow the generated
+   * per-route provider config.
    */
   readonly agentRouteCommands: Record<RouteHarness, string>
   readonly fakeAgent: boolean
@@ -249,9 +253,21 @@ export const loadConfig = (): ServerConfig => {
     ? { claude: fakeCommand, codex: fakeCommand, opencode: fakeCommand }
     : {
         claude: process.env.CLOUDAGENTS_ANTHROPIC_COMMAND ?? DEFAULT_ANTHROPIC_COMMAND,
-        codex: DEFAULT_OPENAI_ROUTE_COMMAND,
+        // Its own variable: an operator's native `CLOUDAGENTS_OPENAI_COMMAND` may start a differently configured
+        // app-server, while a routed model needs this Responses-provider config.
+        codex: process.env.CLOUDAGENTS_CODEX_COMMAND ?? DEFAULT_OPENAI_ROUTE_COMMAND,
         opencode: process.env.CLOUDAGENTS_OPENCODE_COMMAND ?? DEFAULT_OPENCODE_COMMAND,
       }
+  // The old OpenCode default inlined `OPENCODE_CONFIG_CONTENT=... opencode acp`; an inline assignment in the
+  // configured command shadows the per-run generated config, silently disabling routed API providers.
+  for (const command of [agentCommands.opencode, agentCommands["opencode-go"], agentRouteCommands.opencode]) {
+    if (command.includes("OPENCODE_CONFIG_CONTENT")) {
+      console.warn(
+        "CLOUDAGENTS_OPENCODE_COMMAND/CLOUDAGENTS_OPENCODE_GO_COMMAND sets OPENCODE_CONFIG_CONTENT inline; it overrides the generated route config, so API-provider models routed through OpenCode will fail with \"model not found\". Remove the inline assignment.",
+      )
+      break
+    }
+  }
   const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH?.trim() || null
   const sandbox = sandboxLevel(sandboxPath)
   if (sandbox === "off") console.warn("CLOUDAGENTS_SANDBOX=off: agent runs are NOT sandboxed")

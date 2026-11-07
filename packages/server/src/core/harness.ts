@@ -28,7 +28,7 @@ import {
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, MODEL_HARNESS, harnessForModel, type ConversationKind } from "../agent-clis"
 import { CliAuth } from "../cliauth"
-import { CredentialBroker, brokerApiBase, type BrokerApi, type BrokerProvider } from "../broker"
+import { CredentialBroker, brokerApiBase, DEFAULT_BROKER_API, type BrokerProvider } from "../broker"
 import { boxControl } from "../control/client"
 import { Config, VERSION, opencodeConfigContent, opencodeRouteModel } from "../config"
 import { harnessAvailability, harnessProbe } from "../capabilities"
@@ -888,7 +888,6 @@ export const AgentHarnessLive = Layer.effect(
                   Effect.mapError((e) => new InternalError({ message: `cannot resolve Git commit identity: ${e.message}` })),
                 )
             const modelId = choice.model === undefined ? undefined : modelUpstreamId(choice.model)
-            const opencodeApi: BrokerApi = provider === "openai" ? "openai" : "anthropic"
             // An OpenCode route reads its one provider from generated config; native OpenCode gets only base settings.
             const opencodeEnv: Record<string, string> =
               harness.conversation === "acp" && harness.bin === "opencode"
@@ -896,8 +895,9 @@ export const AgentHarnessLive = Layer.effect(
                     OPENCODE_CONFIG_CONTENT: opencodeConfigContent(
                       channel !== null && harnessId === "opencode" && choice.model !== undefined
                         ? {
-                            baseURL: brokerApiBase(lease.base, channel, opencodeApi),
-                            api: opencodeApi,
+                            // The config's base must be the API `brokerTarget` resolves for this provider.
+                            baseURL: brokerApiBase(lease.base, channel, DEFAULT_BROKER_API[channel]),
+                            api: DEFAULT_BROKER_API[channel],
                             upstreamModel: modelId ?? modelUpstreamId(choice.model),
                             name: MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider,
                           }

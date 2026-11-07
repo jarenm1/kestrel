@@ -1,8 +1,21 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
-import { AgentModel, modelHarness, modelInfo, modelUpstreamId } from "./src/models"
+import { AGENT_MODELS, AgentModel, modelHarness, modelInfo, modelUpstreamId, parseAgentModel } from "./src/models"
 
 const accepts = Schema.is(AgentModel)
+
+test("the catalog and the AgentModel type promise the same ids", () => {
+  for (const model of AGENT_MODELS) {
+    expect(accepts(model.id)).toBe(true)
+    expect(parseAgentModel(model.id)).toBe(model.id)
+  }
+  expect(parseAgentModel("claude-opus-5-5@anything")).toBeUndefined()
+  // @ts-expect-error Anthropic models never route to Codex.
+  const wrongHarness: AgentModel = "claude-opus-5-5@codex"
+  // @ts-expect-error Free OpenCode models stay on their own harness.
+  const nativeOnly: AgentModel = "opencode/big-pickle@claude"
+  expect([wrongHarness, nativeOnly].every((id) => !accepts(id))).toBe(true)
+})
 
 test("route ids are the catalog's supported harnesses only", () => {
   expect(accepts("claude-opus-5-5")).toBe(true)
