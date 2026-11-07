@@ -164,6 +164,28 @@ describe("ACP driver", () => {
     expect(h.last()).toEqual({ jsonrpc: "2.0", id: 12, result: { outcome: { outcome: "cancelled" } } })
   })
 
+  test("Devin resolves the advertised model variant and still sets thought_level", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-flash-medium",
+        options: [{ value: "swe-2-flash-medium" }, { value: "swe-2-flash-high" }, { value: "swe-2-flash-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "devin", model: "swe-2-flash", effort: "max" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash-max" } })
+    h.reply({ configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "thought_level", value: "max" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
   test("an agent that exits mid-turn fails the run", () => {
     const h = harness()
     h.driver.start()

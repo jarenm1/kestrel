@@ -23,6 +23,7 @@ export interface AcpRunInput {
   readonly cwd: string
   /** The thread's previous session of this agent, or null for a fresh one. */
   readonly resumeSession: string | null
+  readonly provider?: string
   readonly model?: string
   readonly effort?: string
   readonly mcpServers: ReadonlyArray<AcpMcpServer>
@@ -73,6 +74,84 @@ const denyOption = (options: unknown): string | null => {
   const ids = (kind: string) =>
     options.flatMap((o) => (isRecord(o) && o.kind === kind && typeof o.optionId === "string" ? [o.optionId] : []))
   return ids("reject_always")[0] ?? ids("reject_once")[0] ?? null
+}
+
+type DevinCandidate = { readonly value: string; readonly level: string; readonly paid: boolean }
+
+const selectValues = (node: unknown): string[] => {
+  const values: string[] = []
+  const visit = (item: unknown): void => {
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child)
+      return
+    }
+    if (!isRecord(item)) return
+    if (typeof item.value === "string") values.push(item.value)
+    visit(item.options)
+  }
+  visit(node)
+  return values
+}
+
+const findConfigOption = (configOptions: unknown, category: string): { readonly currentValue: string | null; readonly values: string[] } | null => {
+  if (!Array.isArray(configOptions)) return null
+  const option = configOptions.find((item) => isRecord(item) && (item.category === category || item.id === category))
+  if (!isRecord(option)) return null
+  return {
+    currentValue: typeof option.currentValue === "string" ? option.currentValue : null,
+    values: selectValues(option.options),
+  }
+}
+
+const DEVIN_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const
+const DEVIN_TIER_SUFFIXES = ["ultrafast", "priority", "lightning", "fast", "flex", "usa", "1m"] as const
+
+/** The thinking level a Devin variant uid encodes, ignoring paid tier and region suffixes; null for anchors and non-effort ids. */
+const devinThinkingLevel = (value: string, family: string): string | null => {
+  for (const prefix of new Set([family, family.replaceAll(".", "-")])) {
+    if (!value.startsWith(`${prefix}-`)) continue
+    let rest = value.slice(prefix.length + 1)
+    for (;;) {
+      const tier = DEVIN_TIER_SUFFIXES.find((suffix) => rest.endsWith(`-${suffix}`))
+      if (tier === undefined) break
+      rest = rest.slice(0, -(tier.length + 1))
+    }
+    if (rest === "no-thinking" || rest === "off") return "none"
+    if ((DEVIN_LEVELS as readonly string[]).includes(rest)) return rest
+    return null
+  }
+  return null
+}
+
+const devinPaidTier = (value: string): boolean => /-(?:ultrafast|priority|lightning|fast|flex|usa|1m)$/.test(value)
+
+/**
+ * Devin's ACP `model` option is account-scoped and has shipped both family anchors and concrete variant uids. Pick the
+ * advertised value for the requested family: the anchor when offered, else the variant for the chosen effort, else the
+ * session's current variant for that family. Thinking itself stays on the separate `thought_level` option.
+ */
+const resolveDevinModel = (configOptions: unknown, model: string, effort: string | undefined): string => {
+  const option = findConfigOption(configOptions, "model")
+  if (option === null || option.values.length === 0 || option.values.includes(model)) return model
+  const candidates: DevinCandidate[] = option.values.flatMap((value) => {
+    const level = devinThinkingLevel(value, model)
+    return level === null ? [] : [{ value, level, paid: devinPaidTier(value) }]
+  })
+  if (candidates.length === 0) return model
+  const first = (list: ReadonlyArray<DevinCandidate>): string | undefined => {
+    const plain = list.filter((candidate) => !candidate.paid)
+    return (plain.length > 0 ? plain : list)[0]?.value
+  }
+  if (effort !== undefined) {
+    const exact = first(candidates.filter((candidate) => candidate.level === effort))
+    if (exact !== undefined) return exact
+  }
+  if (option.currentValue !== null && candidates.some((candidate) => candidate.value === option.currentValue)) return option.currentValue
+  for (const level of ["high", "medium", "max", "xhigh", "low", "none"]) {
+    const value = first(candidates.filter((candidate) => candidate.level === level))
+    if (value !== undefined) return value
+  }
+  return first(candidates) ?? model
 }
 
 export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver => {
@@ -140,13 +219,16 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
   }
 
   const configure = (opened: Record<string, unknown>) => {
-    if (input.model === undefined) {
+    const model = input.provider === "devin" && input.model !== undefined
+      ? resolveDevinModel(opened.configOptions, input.model, input.effort)
+      : input.model
+    if (model === undefined) {
       setEffort(opened.configOptions)
       return
     }
     request(
       "session/set_config_option",
-      { sessionId, configId: "model", value: input.model },
+      { sessionId, configId: "model", value: model },
       orFail("session/set_config_option model", (result) => setEffort(result.configOptions)),
     )
   }

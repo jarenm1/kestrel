@@ -994,6 +994,7 @@ export const AgentHarnessLive = Layer.effect(
                       prompt,
                       cwd,
                       resumeSession,
+                      provider,
                       model:
                         choice.model === undefined
                           ? undefined

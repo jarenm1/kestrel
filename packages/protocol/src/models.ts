@@ -343,8 +343,8 @@ const BASE_AGENT_MODELS: readonly ModelInfo[] = [
   // are shown by default; the third-party families stay available on the Connections page but off the initial picker.
   { id: "adaptive", provider: "devin", name: "Adaptive", efforts: [], shownByDefault: true },
   { id: "fusion", provider: "devin", name: "Fusion", efforts: [], shownByDefault: true },
-  { id: "swe-2", provider: "devin", name: "SWE-2", efforts: [], shownByDefault: true },
-  { id: "swe-2-flash", provider: "devin", name: "SWE-2 Flash", efforts: [], shownByDefault: true },
+  { id: "swe-2", provider: "devin", name: "SWE-2", efforts: ["medium", "high", "max"], defaultEffort: "high", shownByDefault: true },
+  { id: "swe-2-flash", provider: "devin", name: "SWE-2 Flash", efforts: ["medium", "high", "max"], defaultEffort: "medium", shownByDefault: true },
   { id: "swe-1-7", provider: "devin", name: "SWE-1.7", efforts: [], shownByDefault: true },
   { id: "swe-1-6", provider: "devin", name: "SWE-1.6", efforts: [], shownByDefault: true },
   { id: "swe-1-6-fast", provider: "devin", name: "SWE-1.6 Fast", efforts: [], shownByDefault: true },
