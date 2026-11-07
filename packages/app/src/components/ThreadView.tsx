@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
 import {
   AppWindow,
-  ChevronDown,
   FolderTree,
   GitCompare,
   GitPullRequest,
@@ -10,22 +9,22 @@ import {
   PanelRightOpen,
   type LucideIcon,
 } from "lucide-react"
+import { threadPullRequestsOf } from "@cloudagents/protocol"
 import { ChatPanel } from "@/components/ChatPanel"
 import { DesktopViewer } from "@/components/DesktopViewer"
 import { PreviewViewer } from "@/components/PreviewViewer"
 import type { ElementContext } from "@/components/Composer"
 import { DiffPanel } from "@/components/DiffPanel"
 import { FilesPanel } from "@/components/FilesPanel"
+import { PullRequestsPanel } from "@/components/pullRequests/PullRequestPanel"
 import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
-import { repoShortName } from "@/util"
 
-type TabId = "desktop" | "preview" | "diff" | "files"
+type TabId = "desktop" | "preview" | "diff" | "files" | "pull-requests"
 
 // Add a sidebar tab by adding an entry here and a case in SidebarBody.
 const SIDEBAR_TABS: readonly { id: TabId; label: string; icon: LucideIcon }[] = [
@@ -57,8 +56,6 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<TabId>("desktop")
-  const [selectedPr, setSelectedPr] = useState<string | null>(null)
-  const [prOpenCount, setPrOpenCount] = useState(0)
   // Elements picked in the preview, waiting in the composer to go with the next message.
   const [elements, setElements] = useState<readonly ElementContext[]>([])
   const gridRef = useRef<HTMLDivElement>(null)
@@ -94,19 +91,12 @@ export function ThreadView({ taskId }: { taskId: string }) {
     setSidebarShare((share) => clampShare(share + delta))
   }
 
-  // A checkout with a pull request gets its own link; with several repos checked out, the link names its repo.
+  // Every pull request the thread owns or manages lives behind one button; the repo button stays checkout-based.
   const checkouts = state.task?.checkouts ?? []
-  const pullRequests = checkouts.flatMap((checkout) => {
-    const repo = checkouts.length > 1 ? `${repoShortName(checkout.repo)} ` : ""
-    const links = checkout.pullRequests ?? (checkout.pullRequest ? [checkout.pullRequest] : [])
-    return links.map((pr) => ({ id: `${checkout.id}:${pr.number}`, repo: checkout.repo, number: pr.number, url: pr.url, label: `${repo}PR #${pr.number}` }))
-  })
-  const activePr = pullRequests.find((pr) => pr.id === selectedPr) ?? pullRequests[0]
-  function openPr(id: string) {
-    setSelectedPr(id)
-    setPrOpenCount((count) => count + 1)
-    openTab("diff")
-  }
+  const pullRequests = state.task === null ? [] : threadPullRequestsOf(state.task)
+  const [onlyPullRequest] = pullRequests
+  const pullRequestLabel =
+    pullRequests.length === 1 && onlyPullRequest !== undefined ? `PR #${onlyPullRequest.number}` : "Pull requests"
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined
 
@@ -184,20 +174,23 @@ export function ThreadView({ taskId }: { taskId: string }) {
                 </Button>
               ))}
               <div className="ml-auto flex min-w-0 items-center gap-1">
-                {activePr && (pullRequests.length === 1 ? (
-                  <Button variant="ghost" size="sm" onClick={() => openPr(activePr.id)}>
-                    <GitPullRequest />{activePr.label}
+                {pullRequests.length > 0 && (
+                  <Button
+                    variant={tab === "pull-requests" ? "soft" : "ghost"}
+                    size="sm"
+                    aria-pressed={tab === "pull-requests"}
+                    title={pullRequestLabel}
+                    onClick={() => setTab("pull-requests")}
+                  >
+                    <GitPullRequest />
+                    {pullRequests.length === 1 ? pullRequestLabel : "Pull requests"}
+                    {pullRequests.length > 1 && (
+                      <span className="rounded-full bg-white/10 px-1.5 text-[10px] tabular-nums">
+                        {pullRequests.length}
+                      </span>
+                    )}
                   </Button>
-                ) : (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="sm"><GitPullRequest />{activePr.label}<ChevronDown /></Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      {pullRequests.map((pr) => <DropdownMenuItem key={pr.id} onSelect={() => openPr(pr.id)}>{pr.label}</DropdownMenuItem>)}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ))}
+                )}
               </div>
               <ThreadRepoButton checkouts={checkouts} />
               <Button
@@ -214,8 +207,6 @@ export function ThreadView({ taskId }: { taskId: string }) {
               taskId={taskId}
               archived={archivedTask !== undefined}
               previewPort={state.task?.previewPort}
-              selectedPr={activePr}
-              prOpenCount={prOpenCount}
               onSelectElement={(element) => setElements((current) => [...current, element])}
             />
           </aside>
@@ -237,7 +228,24 @@ export function ThreadView({ taskId }: { taskId: string }) {
               <t.icon />
             </Button>
           ))}
-          {activePr && <Button variant="ghost" size="icon" title={activePr.label} aria-label={activePr.label} onClick={() => openPr(activePr.id)}><GitPullRequest /></Button>}
+          {pullRequests.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={pullRequestLabel}
+              title={pullRequestLabel}
+              onClick={() => openTab("pull-requests")}
+            >
+              <span className="relative inline-flex">
+                <GitPullRequest />
+                {pullRequests.length > 1 && (
+                  <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
+                    {pullRequests.length}
+                  </span>
+                )}
+              </span>
+            </Button>
+          )}
           {/* Bottom of the rail, under the tabs and pull requests. */}
           <div className="mt-auto">
             <ThreadRepoButton checkouts={checkouts} />
@@ -253,16 +261,12 @@ function SidebarBody({
   taskId,
   archived,
   previewPort,
-  selectedPr,
-  prOpenCount,
   onSelectElement,
 }: {
   tab: TabId
   taskId: string
   archived: boolean
   previewPort: number | undefined
-  selectedPr: { repo: string; number: number; url: string; label: string } | undefined
-  prOpenCount: number
   onSelectElement: (element: ElementContext) => void
 }) {
   switch (tab) {
@@ -277,8 +281,10 @@ function SidebarBody({
       }
       return <PreviewViewer taskId={taskId} port={previewPort} onSelect={onSelectElement} />
     case "diff":
-      return <DiffPanel key={prOpenCount} taskId={taskId} selectedPr={selectedPr} />
+      return <DiffPanel taskId={taskId} />
     case "files":
       return <FilesPanel taskId={taskId} />
+    case "pull-requests":
+      return <PullRequestsPanel taskId={taskId} />
   }
 }

@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect"
+import { Context, Effect, Layer, Option } from "effect"
 import { execFile, spawn, type ChildProcess } from "node:child_process"
 import { chmod, lstat, mkdir, readFile, rm, stat } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
@@ -9,13 +9,21 @@ import {
   type CliLoginStart,
   type CliProvider,
   type HarnessCommand,
+  type ModelDiscoverySource,
+  type ModelInfo,
   type ProviderUsage,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type AgentCli, type CliOutput, type HarnessMinimum } from "./agent-clis"
 import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
-import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
+import { killActiveDiscovery, limitCliProbe, limitDiscovery } from "./harness-commands"
+import {
+  NATIVE_MODEL_PROVIDER,
+  discoverNativeModels,
+  nativeDiscoveryArgs,
+  type HarnessModelDiscovery,
+} from "./harness-model-discovery"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
 import { openCodeGoKey as parseOpenCodeGoKey } from "./provider-usage"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
@@ -44,6 +52,10 @@ const LINK_TIMEOUT_MS = 20_000
 const CODE_TIMEOUT_MS = 60_000
 /** A sign-in that is not finished within this is killed. */
 const PENDING_TTL_MS = 15 * 60_000
+/** Native model discovery's whole answer must fit the relay's request budget; each child is bounded below this too. */
+const NATIVE_DISCOVERY_BUDGET_MS = 17_000
+/** One CLI's model-discovery child, before the remaining overall budget shortens it. */
+const PER_CLI_DISCOVERY_TIMEOUT_MS = 15_000
 const CODE_MAX = 512
 /**
  * The CLI's reply to a code it will not accept (it asks again instead of exiting). Observed: "Invalid code. Please make
@@ -118,6 +130,12 @@ export interface CliAuthShape {
     cwd: string,
   ) => Effect.Effect<ReadonlyArray<HarnessCommand>, BadRequest | InternalError>
   /**
+   * The models `user`'s native CLI logins can run, with one source status per CLI. Each CLI starts in an isolated,
+   * box-owned empty workspace with the user's own login home and its provider's network; it never starts a model turn
+   * or writes a thread. A signed-out or non-enumerating CLI reports that in its source rather than failing the catalog.
+   */
+  readonly discoverModels: (user: string) => Effect.Effect<HarnessModelDiscovery, BadRequest | InternalError>
+  /**
    * The subscription limits each provider's CLI reports for `user`. One provider failing leaves the other's intact.
    * `fresh` skips the short cache: a just-failed run needs the window it exhausted, not a read from before it.
    */
@@ -143,16 +161,28 @@ interface Invocation {
 
 /** Runs a CLI. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
 const runCli = (inv: Invocation, label: string, input?: string, requireSuccess = false): Effect.Effect<CliOutput | null, InternalError> =>
-  Effect.async<CliOutput | null, InternalError>((resume) => {
-    const child = execFile(inv.file, [...inv.args], { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS }, (err, stdout, stderr) => {
-      if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return resume(Effect.succeed(null))
-      if (err && err.killed) return resume(Effect.fail(new InternalError({ message: `${label}: timed out` })))
-      if (err && requireSuccess) return resume(Effect.fail(new InternalError({ message: `${label}: command failed` })))
-      resume(Effect.succeed({ stdout, stderr }))
-    })
-    child.stdin?.on("error", () => {})
-    child.stdin?.end(input)
-    return Effect.sync(() => child.kill())
+  Effect.tryPromise({
+    try: (signal) => limitCliProbe(() => {
+      // A cancelled catalog read may still be queued. Never start its probe after it loses its budget.
+      if (signal.aborted) return Promise.reject(signal.reason)
+      const { promise, resolve, reject } = Promise.withResolvers<CliOutput | null>()
+      const child = execFile(
+        inv.file, [...inv.args],
+        { env: { ...inv.env }, timeout: STATUS_TIMEOUT_MS, signal },
+        (err, stdout, stderr) => {
+          if (err && (err as NodeJS.ErrnoException).code === "ENOENT") return resolve(null)
+          if (err && err.killed) return reject(new InternalError({ message: `${label}: timed out` }))
+          if (err && requireSuccess) return reject(new InternalError({ message: `${label}: command failed` }))
+          resolve({ stdout, stderr })
+        },
+      )
+      child.stdin?.on("error", () => {})
+      child.stdin?.end(input)
+      return promise
+    }),
+    catch: (cause) => cause instanceof InternalError
+      ? cause
+      : new InternalError({ message: `${label}: CLI probe unavailable` }),
   })
 
 const stripAnsi = (text: string): string => text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
@@ -286,14 +316,16 @@ export const CliAuthLive = Layer.effect(
     /**
      * How to run `provider`'s CLI `args` for `user`: inside bwrap with only the user's dir writable, so it dies with
      * the box and sees nothing else of the host; directly (or through POSIX sh for Windows `.cmd` shims) only when the
-     * sandbox is disabled (local debugging). Sign-in keeps the box network; discovery runs in its thread workspace with
-     * no network at all, so repo-controlled config cannot reach the box's loopback services.
+     * sandbox is disabled (local debugging). Sign-in keeps the box network; command discovery runs in its thread
+     * workspace with no network at all, so repo-controlled config cannot reach the box's loopback services. Model
+     * discovery needs its provider's network (the CLI fetches its own catalog), so it asks for it explicitly and keeps
+     * the same empty workspace isolation.
      */
     const invoke = (
       user: string,
       provider: CliProvider,
       args: ReadonlyArray<string>,
-      discovery?: { readonly workspacePath: string; readonly cwd: string },
+      discovery?: { readonly workspacePath: string; readonly cwd: string; readonly network?: "host" | "none" },
       terminal = false,
     ): Effect.Effect<Invocation, BadRequest | InternalError> =>
       Effect.gen(function* () {
@@ -317,7 +349,11 @@ export const CliAuthLive = Layer.effect(
         const sandbox =
           discovery === undefined
             ? { network: "host" as const }
-            : { network: "none" as const, workspacePath: discovery.workspacePath, cwd: discovery.cwd }
+            : {
+                network: discovery.network ?? ("none" as const),
+                workspacePath: discovery.workspacePath,
+                cwd: discovery.cwd,
+              }
         const level = config.sandbox === "strict" ? "strict" : "basic"
         return {
           file: bwrap,
@@ -522,7 +558,13 @@ export const CliAuthLive = Layer.effect(
         const env = yield* cliEnv(user, provider)
         // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
-          return { provider, loggedIn: false, account: null, error: `${spec.bin} is not installed on the box (not on its PATH)` }
+          return {
+            provider,
+            loggedIn: false,
+            account: null,
+            error: `${spec.bin} is not installed on the box (not on its PATH)`,
+            cannotSignIn: true,
+          }
         }
         // The Go plan signs in by importing its key, which OpenCode 2.1 adds, and the free models sign in through the
         // Console device flow, which 2.0.7 adds: an older CLI reports why here, so the Connections page never offers a
@@ -540,6 +582,7 @@ export const CliAuthLive = Layer.effect(
               loggedIn: false,
               account: null,
               error: `${spec.bin} must be version ${minimum.join(".")} or newer${provider === "opencode-go" ? " for OpenCode Go" : " for the OpenCode Console sign-in"}`,
+              cannotSignIn: true,
             }
           }
         }
@@ -558,7 +601,8 @@ export const CliAuthLive = Layer.effect(
         }
         const inv = yield* invoke(user, provider, spec.status.args)
         const out = yield* runCli(inv, `${spec.bin} status`)
-        if (out === null) return { provider, loggedIn: false, account: null }
+        // The status command itself was missing (a Windows shim that no longer exists): no login can exist.
+        if (out === null) return { provider, loggedIn: false, account: null, cannotSignIn: true }
         const parsed = yield* spec.status.parse(out)
         // Status commands report how the CLI signed in, not who; the CLI's own stored login names the user, when it has
         // one. The account label is an email, never a method or token; null when no stored identity names one.
@@ -576,6 +620,121 @@ export const CliAuthLive = Layer.effect(
         CLI_PROVIDERS.map((provider) => readStatus(user, provider)),
         { concurrency: "unbounded" },
       )
+
+    /** A fixed, path-free reason a source failed: a CLI's output and the box's paths never reach the catalog. */
+    const discoveryFailure = (message: string): string => {
+      if (message.includes("timed out")) return "model discovery timed out"
+      if (message.includes("printed too much")) return "the CLI printed too much"
+      if (message.includes("could not be started")) return "the CLI could not be started"
+      if (message.includes("exited before answering")) return "the CLI exited before answering"
+      if (message.includes("refused") || message.includes("could not initialize")) return "the CLI refused model discovery"
+      return "model discovery failed"
+    }
+
+    /**
+     * One CLI's models and its source entry. A signed-out CLI is not spawned; one that fails or runs out of the
+     * overall budget becomes an `error` source, so the other providers' models still reach the picker.
+     */
+    const discoverProviderModels = (
+      user: string,
+      provider: CliProvider,
+      workspace: string,
+      deadline: number,
+    ): Effect.Effect<{ readonly models: ReadonlyArray<ModelInfo>; readonly source: ModelDiscoverySource }, BadRequest> =>
+      Effect.gen(function* () {
+        const spec = AGENT_CLIS[provider]
+        const source = (status: ModelDiscoverySource["status"], message?: string): ModelDiscoverySource => ({
+          provider: NATIVE_MODEL_PROVIDER[provider],
+          source: provider,
+          status,
+          ...(message === undefined ? {} : { message }),
+          checkedAt: new Date().toISOString(),
+        })
+        const timedOut = (): {
+          readonly models: ReadonlyArray<ModelInfo>
+          readonly source: ModelDiscoverySource
+        } => ({ models: [], source: source("error", "model discovery timed out") })
+        const login = yield* readStatus(user, provider)
+        if (!login.loggedIn) {
+          return {
+            models: [],
+            source: source("unsupported", login.error === undefined ? "not signed in" : `${spec.bin} is not signed in or unavailable`),
+          }
+        }
+        // A status probe can consume the budget (OpenCode checks its version first); do not start a child after it.
+        if (Date.now() >= deadline) return timedOut()
+        return yield* Effect.gen(function* () {
+          // The CLI refuses to start without its config home; it is still the user's own, never the box's.
+          yield* ensureUserDirs(user, provider)
+          const inv = yield* invoke(user, provider, nativeDiscoveryArgs(provider, yield* providerDir(user, provider)), {
+            workspacePath: workspace,
+            cwd: workspace,
+            network: "host",
+          })
+          const found = yield* Effect.tryPromise({
+            try: () =>
+              limitDiscovery(() => {
+                // A queued child that only gets a slot after the budget must not start at all.
+                const left = deadline - Date.now()
+                if (left <= 0) return Promise.reject(new Error(`${provider} model discovery timed out`))
+                return discoverNativeModels(
+                  provider,
+                  { file: inv.file, args: inv.args, env: inv.env, cwd: workspace },
+                  Math.min(PER_CLI_DISCOVERY_TIMEOUT_MS, left),
+                )
+              }),
+            catch: (e) => new InternalError({ message: e instanceof Error ? e.message : `${spec.bin} model discovery failed` }),
+          })
+          return { models: found.models, source: source(found.status, found.message) }
+        }).pipe(
+          Effect.catchTag("InternalError", (e) =>
+            Effect.succeed<{
+              readonly models: ReadonlyArray<ModelInfo>
+              readonly source: ModelDiscoverySource
+            }>({ models: [], source: source("error", discoveryFailure(e.message)) }),
+          ),
+        )
+      })
+
+    /**
+     * Every native CLI's models for `user`. The CLIs run in one box-owned, empty workspace per user (never a thread
+     * workspace), read-only inside their sandbox, so no project config, thread or checkout is read or written; each
+     * child is bounded and killed with its process group, and the whole load fits NATIVE_DISCOVERY_BUDGET_MS so a slow
+     * provider becomes its own source status instead of starving the catalog response.
+     */
+    const discoverModels = (user: string): Effect.Effect<HarnessModelDiscovery, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        yield* rootOf(user)
+        const scratch = join(config.dataDir, "discovery")
+        const workspace = join(scratch, user)
+        yield* ensureDir(scratch)
+        yield* ensureDir(workspace)
+        const deadline = Date.now() + NATIVE_DISCOVERY_BUDGET_MS
+        const timedOut = (
+          provider: CliProvider,
+        ): { readonly models: ReadonlyArray<ModelInfo>; readonly source: ModelDiscoverySource } => ({
+          models: [],
+          source: {
+            provider: NATIVE_MODEL_PROVIDER[provider],
+            source: provider,
+            status: "error",
+            message: "model discovery timed out",
+            checkedAt: new Date().toISOString(),
+          },
+        })
+        const found = yield* Effect.all(
+          CLI_PROVIDERS.map((provider) =>
+            discoverProviderModels(user, provider, workspace, deadline).pipe(
+              Effect.timeoutOption(NATIVE_DISCOVERY_BUDGET_MS),
+              Effect.map(Option.getOrElse(() => timedOut(provider))),
+            ),
+          ),
+          { concurrency: "unbounded" },
+        )
+        const models = new Map<string, ModelInfo>()
+        for (const entry of found) for (const model of entry.models) models.set(model.id, model)
+        return { models: [...models.values()], sources: found.map((entry) => entry.source) }
+      })
 
     const startLogin = (user: string, provider: CliProvider): Effect.Effect<CliLoginStart, BadRequest | InternalError> =>
       Effect.gen(function* () {
@@ -810,6 +969,7 @@ export const CliAuthLive = Layer.effect(
       loggedInDirs,
       opencodeGoKey,
       discoverCommands,
+      discoverModels,
       providerUsage,
       useBankedReset,
       shutdown,

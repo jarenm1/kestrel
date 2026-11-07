@@ -57,6 +57,7 @@ export function harnessForConnection(provider: string): HarnessId | undefined {
 export function invalidateConnections(queryClient: QueryClient, scope: string): void {
   void queryClient.invalidateQueries({ queryKey: keys.connections });
   const scoped = boxKeys(scope);
+  void queryClient.invalidateQueries({ queryKey: scoped.models });
   void queryClient.invalidateQueries({ queryKey: scoped.usage });
   void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
   void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });

@@ -52,6 +52,12 @@ test("Devin's protocol prefix is removed before ACP model selection", () => {
   expect(modelUpstreamId("devin/gpt-6.1-sol")).toBe("gpt-6.1-sol")
   expect(modelUpstreamId("swe-2")).toBe("swe-2")
   expect(modelUpstreamId("swe-1-6-fast")).toBe("swe-1-6-fast")
+  // A model discovery found uses the CLI's own value, which still carries the protocol-only prefix in its id.
+  expect(accepts("live/devin/devin/claude-foo-9")).toBe(true)
+  expect(modelUpstreamId("live/devin/devin/claude-foo-9")).toBe("claude-foo-9")
+  expect(modelUpstreamId("live/devin/swe-2-high")).toBe("swe-2-high")
+  // Other providers keep the prefix their native API expects.
+  expect(modelUpstreamId("live/openrouter/anthropic/claude-opus-5")).toBe("anthropic/claude-opus-5")
 })
 
 test("thinking levels follow the route, not the base Claude guide", () => {

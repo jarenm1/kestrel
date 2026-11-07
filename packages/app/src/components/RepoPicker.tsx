@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { Schema } from "effect"
-import { BranchName } from "@cloudagents/protocol"
+import { BranchName, type GithubRepo } from "@cloudagents/protocol"
 import { ChevronDown, FolderGit2, GitBranch, Lock, User } from "lucide-react"
 import { ApiError } from "@/api/errors"
 import { queries } from "@/api/queries"
@@ -29,19 +29,27 @@ const FILTER_LIST_CLASS =
 
 /**
  * Menu of the GitHub repositories the user can read, with a filter box; `undefined` leaves the choice to the agent.
- * Without a GitHub connection it points to Profile instead.
+ * Without a GitHub connection it points to Profile instead. `extraRepo` pins a repository outside the listed page,
+ * such as one an import link verified directly.
  */
 export function RepoPicker({
   value,
   onChange,
   disabled,
+  extraRepo,
 }: {
   value: string | undefined
   onChange: (repo: string | undefined) => void
   disabled?: boolean
+  extraRepo?: GithubRepo
 }) {
   const repos = useQuery(queries.githubRepos())
-  const menu = useFilterMenu(repos.data ?? [], (repo) => repo.fullName, (repo) => onChange(repo.fullName))
+  const listed = repos.data ?? []
+  const options =
+    extraRepo === undefined || listed.some((repo) => repo.fullName.toLowerCase() === extraRepo.fullName.toLowerCase())
+      ? listed
+      : [extraRepo, ...listed]
+  const menu = useFilterMenu(options, (repo) => repo.fullName, (repo) => onChange(repo.fullName))
   const notConnected = repos.error instanceof ApiError && repos.error.status === 404
 
   return (

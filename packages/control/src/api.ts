@@ -41,7 +41,6 @@ import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
 import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
-import { pullRequestDetail } from "./pr-detail"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -139,26 +138,41 @@ const githubGet = (token: string, url: string): Promise<Response> =>
     },
   })
 
+const GithubRepoJson = Schema.Struct({
+  full_name: Schema.String,
+  clone_url: Schema.String,
+  private: Schema.Boolean,
+  default_branch: Schema.String,
+  updated_at: Schema.String,
+})
+
+const githubRepoView = (raw: typeof GithubRepoJson.Type): GithubRepo => ({
+  fullName: raw.full_name,
+  cloneUrl: raw.clone_url,
+  private: raw.private,
+  defaultBranch: raw.default_branch,
+  updatedAt: raw.updated_at,
+})
+
 const listRepos = async (env: Env, login: string): Promise<Response> => {
   const creds = await hub(env).credentials(login)
   if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
   const res = await githubGet(creds.github, "https://api.github.com/user/repos?per_page=100&sort=updated")
   if (!res.ok) throw new UpstreamError(`GitHub repos responded ${res.status}`)
-  const raw = (await res.json()) as {
-    full_name: string
-    clone_url: string
-    private: boolean
-    default_branch: string
-    updated_at: string
-  }[]
-  const repos: GithubRepo[] = raw.map((r) => ({
-    fullName: r.full_name,
-    cloneUrl: r.clone_url,
-    private: r.private,
-    defaultBranch: r.default_branch,
-    updatedAt: r.updated_at,
-  }))
-  return json(repos)
+  return json((await decodeGithub(res, Schema.Array(GithubRepoJson))).map(githubRepoView))
+}
+
+/**
+ * One repository by its "owner/name", independent of `listRepos`'s single page. Import links use this to tell an
+ * unreadable repository from one that merely falls outside the first page.
+ */
+const getRepo = async (env: Env, login: string, repo: GithubRepoSlug): Promise<Response> => {
+  const creds = await hub(env).credentials(login)
+  if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
+  const res = await githubGet(creds.github, `https://api.github.com/repos/${repo}`)
+  if (res.status === 404) return errorResponse(404, "NotFound", `${repo} is not visible to your GitHub connection`)
+  if (!res.ok) throw new UpstreamError(`GitHub repository responded ${res.status}`)
+  return json(githubRepoView(await decodeGithub(res, GithubRepoJson)))
 }
 
 /** Branch pages read per request: GitHub lists 100 per page, alphabetically; larger repositories are cut off here. */
@@ -247,7 +261,7 @@ const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
 const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
-const GITHUB_PULL_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/pulls\/([^/]+)$/
+const GITHUB_REPO_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
@@ -258,8 +272,8 @@ const isWorkerRoute = (path: string, method: string): boolean =>
   (path === ControlPaths.connections && method === "GET") ||
   CONNECTION_PATH.test(path) ||
   (path === ControlPaths.githubRepos && method === "GET") ||
+  (GITHUB_REPO_PATH.test(path) && method === "GET") ||
   (GITHUB_BRANCHES_PATH.test(path) && method === "GET") ||
-  (GITHUB_PULL_PATH.test(path) && method === "GET") ||
   path === ControlPaths.automations ||
   path.startsWith(`${ControlPaths.automations}/`)
 
@@ -557,24 +571,18 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     return listRepos(env, login)
   }
 
+  const repoPath = GITHUB_REPO_PATH.exec(path)?.[1]
+  if (repoPath !== undefined && method === "GET") {
+    const repo = decodeURIComponent(repoPath)
+    if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
+    return getRepo(env, login, repo)
+  }
+
   const branches = GITHUB_BRANCHES_PATH.exec(path)?.[1]
   if (branches !== undefined && method === "GET") {
     const repo = decodeURIComponent(branches)
     if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
     return listBranches(env, login, repo)
-  }
-
-  const pull = GITHUB_PULL_PATH.exec(path)
-  if (pull && method === "GET") {
-    let repo: string
-    try { repo = decodeURIComponent(pull[1]!) } catch { return errorResponse(400, "BadRequest", "invalid repository") }
-    if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
-    const number = Number(pull[2])
-    if (!/^[1-9][0-9]*$/.test(pull[2]!) || !Number.isSafeInteger(number)) return errorResponse(400, "BadRequest", "invalid pull request number")
-    const creds = await hub(env).credentials(login)
-    if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
-    const detail = await pullRequestDetail(creds.github, repo, number)
-    return detail === null ? errorResponse(404, "NotFound", "pull request not found") : json(detail)
   }
 
   return handleAutomations(request, env, login, url, ControlPaths.automations)

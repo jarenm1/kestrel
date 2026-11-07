@@ -5,7 +5,6 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   View,
 } from "react-native";
@@ -28,6 +27,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Input, Textarea } from "@/components/ui/Input";
 import { StatusIcon } from "@/components/ui/StatusIcon";
+import { Switch } from "@/components/ui/Switch";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { errorText } from "@/lib/format";
@@ -40,8 +40,6 @@ export type AutomationEditorTarget =
   | { readonly kind: "edit"; readonly automation: Automation };
 
 type TriggerKind = "schedule" | "github";
-
-const switchTrack = { false: colors.secondary, true: colors.primary };
 
 /**
  * Creates or edits an automation with the web dialog's fields and validation. Edit keeps the trigger kind and repo;
@@ -258,9 +256,6 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
               <Switch
                 value={includeDrafts}
                 onValueChange={setIncludeDrafts}
-                trackColor={switchTrack}
-                thumbColor={includeDrafts ? colors.primaryForeground : colors.foreground}
-                ios_backgroundColor={colors.secondary}
               />
             </View>
           </>
@@ -272,9 +267,6 @@ function AutomationEditorForm({ target, onClose }: { target: AutomationEditorTar
             <Switch
               value={enabled}
               onValueChange={setEnabled}
-              trackColor={switchTrack}
-              thumbColor={enabled ? colors.primaryForeground : colors.foreground}
-              ios_backgroundColor={colors.secondary}
             />
           </View>
         ) : null}

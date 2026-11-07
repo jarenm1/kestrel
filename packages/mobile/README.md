@@ -94,6 +94,9 @@ screen, and `/settings/usage` is Quotas.
   period dates, plan list and payment/invoice rows.
 - The desktop's browser-only turn-sound preference is not ported: the mobile app has no turn-sound playback or
   notification to control, so the card would be a setting with no effect.
+- Switches use `components/ui/Switch` instead of React Native's platform switch: the web app's 36×20 input well and
+  16px thumb, primary when on, animated over 200ms (reduced motion honoured). It is used by Settings › Threads and the
+  automation toggles.
 
 ## Shared desktop components
 

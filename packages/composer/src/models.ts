@@ -3,6 +3,9 @@ import {
   MODEL_PROVIDERS,
   connectedModelProviders,
   modelHarness,
+  modelInfo,
+  modelUpstreamId,
+  parseAgentModel,
   type AgentModel,
   type Connection,
   type ModelHarness,
@@ -48,8 +51,8 @@ export const isRouteModel = (model: Pick<ModelInfo, "id">): boolean => model.id.
 /** A route's display name without the catalog's "via <Harness>" suffix; the picker groups by harness already. */
 export const modelDisplayName = (model: ModelInfo): string => {
   if (!isRouteModel(model)) return model.name
-  const base = AGENT_MODELS.find((candidate) => candidate.id === model.id.slice(0, model.id.lastIndexOf("@")))
-  return base?.name ?? model.name
+  const base = parseAgentModel(model.id.slice(0, model.id.lastIndexOf("@")))
+  return base === undefined ? model.name : modelInfo(base).name
 }
 
 /** The harness a model's route runs, with the name the picker and mention chips show. */
@@ -61,11 +64,12 @@ export function modelHarnessOf(model: ModelInfo): { readonly harness: ModelMenti
 /** `opencode/big-pickle` is already provider-qualified; `claude-opus-5` gains its provider. */
 export const modelMentionOf = (model: ModelInfo): ModelMention => {
   const harness = modelHarnessOf(model)
+  const upstream = model.id.startsWith("live/") ? modelUpstreamId(model.id) : model.id
   return {
     id: model.id,
     provider: model.provider,
     name: modelDisplayName(model),
-    slug: model.id.startsWith(`${model.provider}/`) ? model.id : `${model.provider}/${model.id}`,
+    slug: upstream.startsWith(`${model.provider}/`) ? upstream : `${model.provider}/${upstream}`,
     harness: harness.harness,
     harnessName: harness.name,
   }
@@ -143,7 +147,7 @@ export const offeredModelSections = (
  * route separator (`base@harness`), so a typed or backspaced route id stays one token. Whitespace and punctuation end
  * the token, so `@claude,` still offers Claude models and an email address never opens the menu.
  */
-const MENTION_TOKEN = /[\p{L}\p{N}._/[\]@-]/u
+const MENTION_TOKEN = /[\p{L}\p{N}._/[\]@:+-]/u
 
 /**
  * The `@query` token under the caret. `start` is the `@`, `end` the token's end even when the caret is inside it (so
@@ -213,8 +217,10 @@ function mentionFromParts(
   provider: string,
   harness: string,
 ): { readonly model: ModelInfo; readonly mention: ModelMention } | undefined {
-  const model = AGENT_MODELS.find((candidate) => candidate.id === id)
-  if (model === undefined || model.provider !== provider) return undefined
+  const parsed = parseAgentModel(id)
+  if (parsed === undefined) return undefined
+  const model = modelInfo(parsed)
+  if (model.provider !== provider) return undefined
   const mention = modelMentionOf(model)
   if (mention.harness !== harness || mention.name !== label) return undefined
   return { model, mention }

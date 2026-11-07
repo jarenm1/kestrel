@@ -18,6 +18,8 @@ const BOX_POLL_MS = 10_000;
 const TASK_POLL_MS = 2000;
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000;
+/** Runtime model catalogs change rarely; a mounted picker re-reads one hourly. */
+const MODEL_CATALOG_POLL_MS = 60 * 60 * 1000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +46,8 @@ export const boxKeys = (scope: string) => ({
   providerUsage: ["box-data", scope, "provider-usage"] as const,
   /** What the box can run (`BoxCapabilities`): which harnesses it has. */
   capabilities: ["box-data", scope, "capabilities"] as const,
+  /** The box's runtime model catalog (`ModelCatalog`), resolved for its owner's credentials. */
+  models: ["box-data", scope, "models"] as const,
   /** Generated-text preferences of this box's user (title, model, streaming). */
   textGenerationSettings: ["box-data", scope, "text-generation-settings"] as const,
   /** Thread-run preferences of this box's user (usage-limit auto-resume). */
@@ -166,6 +170,13 @@ export function createQueries(api: ApiClient) {
     usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
     providerUsage: () => queryOptions({ queryKey: scoped.providerUsage, queryFn: () => api.providerUsage() }),
     capabilities: () => queryOptions({ queryKey: scoped.capabilities, queryFn: () => api.capabilities() }),
+    models: () =>
+      queryOptions({
+        queryKey: scoped.models,
+        queryFn: () => api.models(),
+        staleTime: MODEL_CATALOG_POLL_MS,
+        refetchInterval: MODEL_CATALOG_POLL_MS,
+      }),
     textGenerationSettings: () =>
       queryOptions({
         queryKey: scoped.textGenerationSettings,

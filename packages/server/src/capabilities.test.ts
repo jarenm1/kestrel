@@ -66,8 +66,13 @@ test("old or unknown Weston versions are unavailable", () => {
 
 test("capability discovery needs a signed-in user and preserves health and unknown-route behavior", async () => {
   const capabilities = boxCapabilities("off", linux)
-  const handler = await Effect.runPromise(makeWebHandler({} as never, {} as never, capabilities))
+  const models = {
+    get: () => Effect.succeed({ models: [], sources: [] }),
+    list: () => Effect.succeed({ models: [], sources: [] }),
+  }
+  const handler = await Effect.runPromise(makeWebHandler({} as never, {} as never, capabilities, models))
   expect((await handler(new Request(`http://box.test${Paths.capabilities}`))).status).toBe(401)
+  expect((await handler(new Request(`http://box.test${Paths.models}`))).status).toBe(401)
   const signedIn = await handler(new Request(`http://box.test${Paths.capabilities}`, { headers: { [BOX_USER_HEADER]: "alice" } }))
   expect(signedIn.status).toBe(200)
   expect(Schema.decodeUnknownSync(BoxCapabilities)(await signedIn.json())).toEqual(capabilities)

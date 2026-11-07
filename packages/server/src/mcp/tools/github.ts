@@ -176,7 +176,7 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     {
       description:
         "Open a GitHub pull request from a checkout's branch into its base branch. Pushes the branch first (commit " +
-        "your work before calling this). Pass branch for a linked worktree's local branch. If a pull request is already open for the branch, returns that one instead.",
+        "your work before calling this). Pass branch for a linked worktree's local branch; such a PR is not linked to the checkout. If a pull request is already open for the branch, returns that one instead.",
       inputSchema: {
         title: z.string().describe("Pull request title"),
         body: z.string().optional().describe("Pull request description"),
@@ -207,8 +207,10 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     "github_pr_status",
     {
       description:
-        "Show the live GitHub status of this task's pull request: mergeability, review decision, check results and " +
-        "recent review comments. Requires a pull request opened with github_pr_create or checked out with repo_checkout.",
+        "Show the live GitHub status of a pull request this thread manages: mergeability, review decision, check results " +
+        "and recent review comments. Defaults to the checkout's pull request; name `number` for a pull request the " +
+        "thread registered, including one it watches in a repository it has not checked out. Requires a pull request " +
+        "opened with github_pr_create, checked out with repo_checkout, or watched with github_pr_watch.",
       inputSchema: { checkout: checkoutArg, number: numberArg },
     },
     ({ checkout, number }: { checkout?: string; number?: number }) =>

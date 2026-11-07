@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
-import type { DesktopStatus, Message, Run, RunItems } from "@cloudagents/protocol"
+import type { DesktopStatus, Message, Run, RunItems, Task } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
 import { threadErrors } from "./threadErrors"
@@ -9,6 +9,10 @@ const MAX_LOG_LINES = 2000
 const RECONNECT_MS = 2000
 /** Items arrive far faster than the diff is worth fetching; one invalidation per window bounds that traffic. */
 const DIFF_INVALIDATE_MS = 3000
+
+/** What the pull request panel shows of the registry: adding, dropping or toggling a watch changes it. */
+const registrySignature = (task: Task | undefined): string =>
+  (task?.pullRequests ?? []).map((pr) => `${pr.id}:${pr.watching === true ? 1 : 0}`).join(",")
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -63,9 +67,16 @@ export function useTaskState(taskId: string) {
       },
       onEvent: (event) => {
         switch (event._tag) {
-          case "task.updated":
+          case "task.updated": {
+            const before = registrySignature(queryClient.getQueryData<Task>(keys.task(taskId)))
             storeTask(queryClient, event.task)
+            // The pull request panel polls GitHub on its own; refetch it only when the registry itself changed
+            // (a pull request was opened, linked or watched), not on every task update of a run.
+            if (before !== registrySignature(event.task)) {
+              void queryClient.invalidateQueries({ queryKey: keys.pullRequests(taskId), exact: true })
+            }
             break
+          }
           case "task.deleted":
             // The thread list stream drops the thread; nothing else in this view needs to hear about it.
             break

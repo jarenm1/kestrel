@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type AgentEffort,
@@ -17,6 +17,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Textarea } from "@/components/ui/Input";
+import { Switch } from "@/components/ui/Switch";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
 import { offeredModelSections } from "@cloudagents/composer/models";
@@ -198,9 +199,6 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
             accessibilityLabel="Enable text generation"
             value={form.enabled}
             onValueChange={(enabled) => update({ enabled })}
-            trackColor={switchTrack}
-            thumbColor={form.enabled ? colors.primaryForeground : colors.foreground}
-            ios_backgroundColor={colors.secondary}
           />
         </View>
         <Text style={styles.description}>
@@ -372,9 +370,6 @@ function UsageLimitsCard({ api }: { api: ApiClient }) {
               if (settings.data === undefined) return;
               save.mutate({ ...settings.data, autoResumeAfterUsageLimits: next });
             }}
-            trackColor={switchTrack}
-            thumbColor={enabled ? colors.primaryForeground : colors.foreground}
-            ios_backgroundColor={colors.secondary}
           />
         </View>
         {save.isPending ? <Text style={styles.helper}>Saving…</Text> : null}
@@ -384,8 +379,6 @@ function UsageLimitsCard({ api }: { api: ApiClient }) {
     </>
   );
 }
-
-const switchTrack = { false: colors.secondary, true: colors.primary };
 
 const styles = StyleSheet.create({
   body: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, gap: spacing.lg },

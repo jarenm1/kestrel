@@ -16,6 +16,7 @@ import { coreGhBackend } from "./gh/backend"
 import { createGhHandler, GH_PREFIX } from "./gh/handler"
 import { boxControl } from "./control/client"
 import { CredentialStore, CredentialStoreLive } from "./credentials"
+import { makeModelDiscovery } from "./model-discovery"
 import { GitHubLive } from "./github/api"
 import { DesktopManager, DesktopManagerLive, type DesktopRegion } from "./desktop"
 import { createMcpHandler } from "./mcp"
@@ -130,6 +131,8 @@ const program = Effect.gen(function* () {
   const broker = yield* CredentialBroker
   const cliAuth = yield* CliAuth
   const harness = yield* AgentHarness
+  const credentials = yield* CredentialStore
+  const models = yield* makeModelDiscovery({ credentials, native: cliAuth, dataDir: config.dataDir })
   const platform = yield* BoxPlatform
   const tracker = yield* ActivityTracker
   // The box's startup snapshot: which harness CLIs it found.
@@ -138,7 +141,14 @@ const program = Effect.gen(function* () {
     harnesses: availableHarnesses(config),
     modelHarnesses: availableModelHarnesses(config),
   }
-  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
+  // One client for the control plane: the automations' watch tools and the pull request view's watch action share it.
+  const control = boxControl(config)
+  const webHandler = yield* makeWebHandler(core, cliAuth, capabilities, models, {
+    watchPullRequest: control === null ? null : (user, taskId, repo, number, watching) =>
+      (watching ? control.watchPr(user, taskId, repo, number) : control.unwatchPr(user, taskId, repo, number)).pipe(
+        Effect.mapError((e) => new InternalError({ message: e.message })),
+      ),
+  })
   // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
   // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.
   const handle = (request: Request) => {
@@ -148,6 +158,7 @@ const program = Effect.gen(function* () {
 
   const mcpHandler = createMcpHandler({
     auth: { grantFor: broker.grantForToken, runFor: core.runFor, onRevoke: broker.onRevoke },
+    models: { list: (user) => models.list(user) },
     desktop: {
       open: (taskId) => core.desktopOpen(taskId),
       status: (taskId) => desktop.status(taskId),
@@ -177,7 +188,13 @@ const program = Effect.gen(function* () {
       changeLabels: core.changeLabels,
     },
     ask: core.ask,
-    automations: { control: boxControl(config), taskOwner: core.taskOwner },
+    automations: {
+      control,
+      taskOwner: core.taskOwner,
+      setWatching: core.setPullRequestWatching,
+      forgetWatching: core.forgetPullRequestWatch,
+      clearWatching: core.clearPullRequestWatching,
+    },
     inbox: core.inbox,
     threads: { maxConcurrentRuns: config.maxConcurrentRuns, owner: core.taskOwner, create: core.createTask, archive: core.archiveTask, list: core.listTasks, messages: core.listMessages, send: core.sendToThread, delegate: core.delegate, delegatedStatus: core.delegatedStatus, cancelDelegation: core.cancelDelegation, acknowledgeDelegation: core.acknowledgeDelegation, withSlotReleased: harness.withSlotReleased },
     previewOpen: core.previewOpen,

@@ -37,7 +37,7 @@ const backend = (answer: (query: string, variables: Readonly<Record<string, unkn
       recorded.opened.push(input)
       return {
         created: true,
-        pullRequest: { number: 8, nodeId: "PR_8", url: "https://github.com/acme/widget/pull/8", title: input.title, state: "open", draft: input.draft, headSha: "abc", baseRef: input.base ?? "main", headRef: "fix-login_bug", headRepo: "acme/widget", mergeable: null, mergeableState: "unknown" },
+        pullRequest: { number: 8, nodeId: "PR_8", url: "https://github.com/acme/widget/pull/8", title: input.title, state: "open", draft: input.draft, author: "alice", createdAt: "2025-12-30T00:00:00Z", updatedAt: "2025-12-31T00:00:00Z", mergedAt: null, closedAt: null, additions: 1, deletions: 0, changedFiles: 1, labels: [], requestedReviewers: [], headSha: "abc", baseRef: input.base ?? "main", headRef: "fix-login_bug", headRepo: "acme/widget", mergeable: null, mergeableState: "unknown" },
       }
     },
     updatePullRequest: reject,

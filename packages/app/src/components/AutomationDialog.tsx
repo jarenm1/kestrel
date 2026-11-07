@@ -8,6 +8,7 @@ import {
   modelInfo,
   type Automation,
   type AutomationTrigger,
+  type CreateAutomationBody,
 } from "@cloudagents/protocol"
 import { modelDisplayName, offeredModelSections } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
@@ -35,64 +36,69 @@ import { errorText } from "@/util"
 
 const TIMEZONES = Intl.supportedValuesOf("timeZone")
 
+export type AutomationDialogTarget =
+  | { readonly kind: "create" }
+  | { readonly kind: "edit"; readonly automation: Automation }
+
+type TriggerKind = AutomationTrigger["_tag"]
+
 /**
- * Edits an automation's name, prompt, model and trigger settings. The trigger kind (schedule or GitHub) stays as it is;
- * the server validates the rest and its messages (e.g. a bad cron) show inline.
+ * Creates an automation, or edits one's name, prompt, model and trigger settings. Editing keeps the trigger kind and
+ * repository; creating also picks them together with the enabled state. The server validates everything and its
+ * messages (e.g. a bad cron) show inline.
  */
-export function AutomationEditDialog({ automation, onClose }: { automation: Automation | null; onClose: () => void }) {
+export function AutomationDialog({ target, onClose }: { target: AutomationDialogTarget | null; onClose: () => void }) {
   return (
     <Dialog
-      open={automation !== null}
+      open={target !== null}
       onOpenChange={(open) => {
         if (!open) onClose()
       }}
     >
       <DialogContent>
-        {automation && <AutomationEditForm key={automation.id} automation={automation} onDone={onClose} />}
+        {target && (
+          <AutomationForm key={target.kind === "edit" ? target.automation.id : "create"} target={target} onDone={onClose} />
+        )}
       </DialogContent>
     </Dialog>
   )
 }
 
-function AutomationEditForm({ automation, onDone }: { automation: Automation; onDone: () => void }) {
+function AutomationForm({ target, onDone }: { target: AutomationDialogTarget; onDone: () => void }) {
   const queryClient = useQueryClient()
+  const seed = target.kind === "edit" ? target.automation : null
+  const seedTrigger = seed?.trigger
   const connections = useQuery(queries.connections())
   const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
   const sections = connections.data
     ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
     : null
-  const [model, setModel] = useState<AgentModel | null>(automation.model)
+  const [model, setModel] = useState<AgentModel | null>(seed?.model ?? null)
   const selected = model === null ? null : modelInfo(model)
   const selectionListed =
     selected !== null &&
     sections?.some((section) => section.models.some((candidate) => candidate.id === selected.id)) === true
-  const trigger = automation.trigger
-  const [name, setName] = useState(automation.name)
-  const [prompt, setPrompt] = useState(automation.prompt)
-  const [cron, setCron] = useState(trigger._tag === "schedule" ? trigger.cron : "")
-  const [timezone, setTimezone] = useState(trigger._tag === "schedule" ? trigger.timezone : "")
+  const [name, setName] = useState(seed?.name ?? "")
+  const [prompt, setPrompt] = useState(seed?.prompt ?? "")
+  const [kind, setKind] = useState<TriggerKind>(seedTrigger?._tag ?? "schedule")
+  const [cron, setCron] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.cron : "")
+  const [timezone, setTimezone] = useState(seedTrigger?._tag === "schedule" ? seedTrigger.timezone : "")
   const [events, setEvents] = useState<readonly GithubAutomationEvent[]>(
-    trigger._tag === "github" ? trigger.events : [],
+    seedTrigger?._tag === "github" ? seedTrigger.events : [],
   )
-  const [reviewers, setReviewers] = useState(trigger._tag === "github" ? (trigger.reviewers ?? []).join(", ") : "")
+  const [reviewers, setReviewers] = useState(seedTrigger?._tag === "github" ? (seedTrigger.reviewers ?? []).join(", ") : "")
   const [baseBranches, setBaseBranches] = useState(
-    trigger._tag === "github" ? (trigger.baseBranches ?? []).join(", ") : "",
+    seedTrigger?._tag === "github" ? (seedTrigger.baseBranches ?? []).join(", ") : "",
   )
-  const [includeDrafts, setIncludeDrafts] = useState(trigger._tag === "github" && trigger.includeDrafts === true)
-
-  const save = useMutation({
-    mutationFn: () =>
-      api.updateAutomation(automation.id, { name: name.trim(), prompt: prompt.trim(), model, trigger: buildTrigger() }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: keys.automations })
-      onDone()
-    },
-  })
+  const [includeDrafts, setIncludeDrafts] = useState(seedTrigger?._tag === "github" && seedTrigger.includeDrafts === true)
+  const [repo, setRepo] = useState<string | null>(seed?.repo ?? null)
+  const [enabled, setEnabled] = useState(true)
+  const repos = useQuery({ ...queries.githubRepos(), enabled: target.kind === "create" })
 
   /** Throws (shown as the save error) when a GitHub automation has no event picked. */
   function buildTrigger(): AutomationTrigger {
-    if (trigger._tag === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() }
+    if (kind === "schedule") return { _tag: "schedule", cron: cron.trim(), timezone: timezone.trim() }
     const [first, ...rest] = events
     if (first === undefined) throw new Error("Pick at least one pull request event.")
     return {
@@ -104,16 +110,41 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
     }
   }
 
-  const canSave =
-    name.trim() !== "" &&
-    prompt.trim() !== "" &&
-    (trigger._tag === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0)
+  const save = useMutation({
+    mutationFn: (): Promise<Automation> => {
+      if (target.kind === "edit") {
+        return api.updateAutomation(target.automation.id, {
+          name: name.trim(),
+          prompt: prompt.trim(),
+          model,
+          trigger: buildTrigger(),
+        })
+      }
+      const body: CreateAutomationBody = {
+        name: name.trim(),
+        prompt: prompt.trim(),
+        model,
+        trigger: buildTrigger(),
+        enabled,
+        ...(repo === null ? {} : { repo }),
+      }
+      return api.createAutomation(body)
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: keys.automations })
+      onDone()
+    },
+  })
+
+  const repoRequired = target.kind === "create" && kind === "github"
+  const triggerReady = kind === "schedule" ? cron.trim() !== "" && timezone.trim() !== "" : events.length > 0
+  const canSave = name.trim() !== "" && prompt.trim() !== "" && triggerReady && (!repoRequired || repo !== null)
 
   return (
     <>
-      <DialogTitle>Edit automation</DialogTitle>
+      <DialogTitle>{target.kind === "edit" ? "Edit automation" : "New automation"}</DialogTitle>
       <DialogDescription>
-        {trigger._tag === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
+        {kind === "schedule" ? "Runs on a schedule." : "Runs on pull request events."}
       </DialogDescription>
       <form
         className="flex flex-col gap-4"
@@ -171,7 +202,67 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
           </DropdownMenu>
         </Field>
 
-        {trigger._tag === "schedule" ? (
+        {target.kind === "create" && (
+          <div className="flex flex-col gap-1.5" role="group" aria-labelledby="automation-trigger">
+            <span id="automation-trigger" className="text-xs text-muted-foreground">
+              Trigger
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                type="button"
+                variant={kind === "schedule" ? "secondary" : "ghost"}
+                aria-pressed={kind === "schedule"}
+                onClick={() => setKind("schedule")}
+              >
+                Schedule
+              </Button>
+              <Button
+                type="button"
+                variant={kind === "github" ? "secondary" : "ghost"}
+                aria-pressed={kind === "github"}
+                onClick={() => setKind("github")}
+              >
+                Pull requests
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <Field label="Repository">
+          {target.kind === "edit" ? (
+            <span className="font-mono text-xs text-muted-foreground">{target.automation.repo ?? "No repository"}</span>
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="secondary" className="justify-between">
+                  {repo ?? (kind === "schedule" ? "No repository" : "Select a repository")}
+                  <ChevronDown />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
+                <DropdownMenuRadioGroup
+                  value={repo ?? ""}
+                  onValueChange={(value) => setRepo(value === "" ? null : value)}
+                >
+                  <DropdownMenuRadioItem value="">No repository</DropdownMenuRadioItem>
+                  {repos.data?.map((candidate) => (
+                    <DropdownMenuRadioItem key={candidate.fullName} value={candidate.fullName}>
+                      {candidate.fullName}
+                      {candidate.private ? " (private)" : ""}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+                {repos.isPending && <DropdownMenuLabel>Loading repositories…</DropdownMenuLabel>}
+                {repos.error && <DropdownMenuLabel>Could not load repositories. Connect GitHub to choose one.</DropdownMenuLabel>}
+                {repos.isSuccess && repos.data.length === 0 && (
+                  <DropdownMenuLabel>No repositories found.</DropdownMenuLabel>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </Field>
+
+        {kind === "schedule" ? (
           <>
             <Field label="Cron (minute hour day-of-month month day-of-week)">
               <Input
@@ -222,6 +313,13 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
               <Switch checked={includeDrafts} onCheckedChange={setIncludeDrafts} />
             </label>
           </>
+        )}
+
+        {target.kind === "create" && (
+          <label className="flex items-center justify-between gap-3">
+            Enabled
+            <Switch checked={enabled} onCheckedChange={setEnabled} />
+          </label>
         )}
 
         {save.error && <Alert>{errorText(save.error)}</Alert>}

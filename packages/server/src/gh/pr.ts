@@ -825,7 +825,7 @@ const status = async (run: GhRun, argv: ReadonlyArray<string>): Promise<void> =>
 
   const checkout = repo.checkout.checkout
   const currentBranch = override ? "" : checkout.branch
-  const currentNumber = override ? 0 : (checkout.pullRequest?.number ?? 0)
+  const currentNumber = override ? 0 : (repo.checkout.pullRequest?.number ?? 0)
   const currentHeadRef = override || currentNumber > 0 ? "" : checkout.branch
 
   let fragments: string
