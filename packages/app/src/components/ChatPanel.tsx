@@ -261,8 +261,12 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
             activeRun ? "h-14 from-60%" : "h-5",
           )}
         />
-        {/* Above the composer, clear of the context bar's labels on its top edge. */}
-        <DelegatedTasks key={taskId} taskId={taskId} />
+        {/*
+          Above the composer, clear of the context bar's labels on its top edge. No key: ThreadPage remounts the panel
+          per thread, and the Composer sibling already uses `taskId` as its key; a duplicate key makes React leave
+          stale copies of the strip behind each time the working indicator comes and goes.
+        */}
+        <DelegatedTasks taskId={taskId} />
         {archivedTask ? (
           <ArchivedNotice task={archivedTask} />
         ) : (
