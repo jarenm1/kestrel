@@ -1,9 +1,10 @@
 import { useState } from "react"
+import { Plus } from "lucide-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { Automation } from "@cloudagents/protocol"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
-import { AutomationEditDialog } from "@/components/AutomationEditDialog"
+import { AutomationDialog, type AutomationDialogTarget } from "@/components/AutomationDialog"
 import { ShareAutomationDialog } from "@/components/ShareAutomationDialog"
 import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -19,7 +20,7 @@ export function AutomationsPanel() {
   const queryClient = useQueryClient()
   const automations = useQuery(queries.automations())
   const activeBoxId = useActiveBoxId()
-  const [editing, setEditing] = useState<Automation | null>(null)
+  const [dialog, setDialog] = useState<AutomationDialogTarget | null>(null)
   const [sharing, setSharing] = useState<Automation | null>(null)
   // Automations only fire on Kestrel's box, so their enabled state can't change while a user box is active.
   const onUserBox = typeof activeBoxId === "string"
@@ -38,11 +39,21 @@ export function AutomationsPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
-        <p className="text-muted-foreground">
-          Tasks the agent starts on a schedule or when a pull request changes.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Automations</h1>
+          <p className="text-muted-foreground">
+            Tasks the agent starts on a schedule or when a pull request changes.
+          </p>
+        </div>
+        <Button
+          disabled={onUserBox}
+          title={onUserBox ? "Switch to Kestrel's box to create automations." : undefined}
+          onClick={() => setDialog({ kind: "create" })}
+        >
+          <Plus />
+          New automation
+        </Button>
       </div>
 
       {error && <Alert>{errorText(error)}</Alert>}
@@ -75,7 +86,7 @@ export function AutomationsPanel() {
                 toggling={toggle.isPending && toggle.variables?.id === automation.id}
                 toggleDisabled={onUserBox}
                 removing={remove.isPending && remove.variables === automation.id}
-                onEdit={() => setEditing(automation)}
+                onEdit={() => setDialog({ kind: "edit", automation })}
                 onShare={() => setSharing(automation)}
                 onToggle={(enabled) => toggle.mutate({ id: automation.id, enabled })}
                 onRemove={() => remove.mutate(automation.id)}
@@ -85,7 +96,7 @@ export function AutomationsPanel() {
         </Card>
       )}
 
-      <AutomationEditDialog automation={editing} onClose={() => setEditing(null)} />
+      <AutomationDialog target={dialog} onClose={() => setDialog(null)} />
       {sharing && <ShareAutomationDialog automation={sharing} onClose={() => setSharing(null)} />}
     </div>
   )
