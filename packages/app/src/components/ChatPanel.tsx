@@ -163,7 +163,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
       {open && (
         <div className="space-y-2 px-2 pb-2">
           {active.length > 0 && (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-1.5">
+            <div className="grid max-h-40 grid-cols-[repeat(auto-fill,minmax(14rem,1fr))] gap-1.5 overflow-y-auto">
               {active.map((v) => <DelegatedCard key={v.task.id} child={v} cancelling={cancel.isPending} onCancel={() => cancel.mutate(v.task.id)} />)}
             </div>
           )}
