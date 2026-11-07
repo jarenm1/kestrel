@@ -141,32 +141,22 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
       if (!socketClosed) socket.sendText(JSON.stringify(message))
     }
     const managed = managedTurn(config)
-    const rtc = new DesktopRtcSession(
-      config.webrtc,
-      taskId,
-      tap,
-      {
-        send: sendSignal,
-        onInput: (raw, channel) =>
-          fork(
-            Effect.gen(function* () {
-              const input = yield* decodeInput(raw)
-              if (channel === "pointer" && input._tag !== "mouse.move") {
-                yield* Effect.logWarning(`desktop pointer channel carried ${input._tag}`)
-                return
-              }
-              yield* desktop.streamInput(taskId, input)
-            }).pipe(Effect.catchAll((e) => Effect.logWarning(`desktop input failed: ${e.message}`))),
-          ),
-        profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
-        debug: (message) => fork(Effect.logDebug(message)),
-      },
-      (settings, sessionTaskId) =>
-        sessionIceServers(settings, managed, sessionTaskId).then((servers) => {
-          if (servers.warning !== null) fork(Effect.logWarning(servers.warning))
-          return servers.iceServers
-        }),
-    )
+    const rtc = new DesktopRtcSession(config.webrtc, taskId, tap, {
+      send: sendSignal,
+      onInput: (raw, channel) =>
+        fork(
+          Effect.gen(function* () {
+            const input = yield* decodeInput(raw)
+            if (channel === "pointer" && input._tag !== "mouse.move") {
+              yield* Effect.logWarning(`desktop pointer channel carried ${input._tag}`)
+              return
+            }
+            yield* desktop.streamInput(taskId, input)
+          }).pipe(Effect.catchAll((e) => Effect.logWarning(`desktop input failed: ${e.message}`))),
+        ),
+      profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
+      debug: (message) => fork(Effect.logDebug(message)),
+    })
     // A status or a config must not outpace the one before it: a slow credential fetch may not deliver its config after
     // a later status. Closing the socket also ends the queue: nothing is written to a socket the browser left.
     let signalQueue: Promise<void> = Promise.resolve()
@@ -190,6 +180,9 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
       const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
       if (resolved.warning !== null) fork(Effect.logWarning(resolved.warning))
+      // Resolved here, on the config path, so the box's own answer never waits on the control plane. A failed fetch
+      // leaves both peers on the box's own configuration.
+      rtc.setIceServers(resolved.iceServers, resolved.managed)
       sendSignal({
         _tag: "rtc.config",
         iceServers: resolved.iceServers,

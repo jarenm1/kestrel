@@ -69,11 +69,6 @@ const H264_PROFILES: readonly { readonly prefix: string; readonly baselineOnly: 
 
 let peers = 0
 
-/** The operator configured TURN locally: its own static credentials or a REST secret. Both win over managed TURN. */
-export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
-  settings.turn !== null ||
-  settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
-
 /** The ICE servers one viewer may use: static ones, and short-lived credentials for the box's TURN, scoped to its thread. */
 export const mintIceServers = (
   settings: WebRtcSettings,
@@ -256,20 +251,28 @@ export class DesktopRtcSession {
   /** Signaling runs in order: a candidate that follows an offer needs that offer applied first. */
   private signaling: Promise<void> = Promise.resolve()
 
+  /**
+   * The stream's resolved ICE servers, set before it offers. Resolving them here instead would gate the answer on the
+   * control plane; until they arrive, the peer uses the box's own configuration.
+   */
+  private relayServers: ReadonlyArray<DesktopRtcIceServer> | null = null
+  private managedRelay = false
+
   constructor(
     private readonly settings: WebRtcSettings,
     private readonly taskId: string,
     private readonly tap: MediaTap,
     private readonly handlers: DesktopRtcHandlers,
-    /**
-     * The ICE servers this peer gets. The control plane's managed TURN is appended here as well as to the viewer's
-     * config, so a box without a candidate the viewer can reach still connects through both relays.
-     */
-    private readonly iceServers: (
-      settings: WebRtcSettings,
-      taskId: string,
-    ) => Promise<ReadonlyArray<DesktopRtcIceServer>> = async (settings, taskId) => mintIceServers(settings, taskId),
   ) {}
+
+  /**
+   * The ICE servers the box's own peer uses: the box's configuration plus any managed TURN the viewer just received, so
+   * a box without a candidate the viewer can reach still connects through both relays.
+   */
+  setIceServers(servers: ReadonlyArray<DesktopRtcIceServer>, managed: boolean): void {
+    this.relayServers = servers
+    this.managedRelay = managed
+  }
 
   /** Signaling from the viewer. Never rejects: what goes wrong is told to the viewer, which can retry. */
   handle(message: DesktopRtcSignal): Promise<void> {
@@ -359,18 +362,11 @@ export class DesktopRtcSession {
     }
     const { fmtp, baselineOnly } = picked
     if (!/^m=video /m.test(offer)) throw new Error("offer has no video section")
-    const servers = await this.iceServers(this.settings, this.taskId)
-    // The viewer may have left during the fetch: an abandoned offer must not build a peer or allocate a relay.
-    if (this.closed) return
-    // Counted after the only await on this path: offers that arrive while the credentials are fetched must not all pass
-    // a limit check made before it.
     if (peers >= MAX_PEERS) {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
-    // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
-    // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
-    const managedRelay = !hasExplicitTurn(this.settings)
+    const servers = this.relayServers ?? mintIceServers(this.settings, this.taskId)
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
@@ -379,7 +375,9 @@ export class DesktopRtcSession {
     const pc = new RTCPeerConnection({
       iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
-      iceTurnConnectTimeout: managedRelay ? TURN_CONNECT_TIMEOUT_S : undefined,
+      // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
+      // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
+      iceTurnConnectTimeout: this.managedRelay ? TURN_CONNECT_TIMEOUT_S : undefined,
       iceAdditionalHostAddresses: [...this.settings.hostAddresses],
       iceFilterCandidatePair: (pair) => isPeerAddressAllowed(pair.remoteCandidate.host, this.settings.hostAddresses, this.settings.denyPrivate),
       codecs: {

@@ -8,7 +8,7 @@ import { Schema } from "effect"
 import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { ServerConfig } from "../config"
-import { hasExplicitTurn, mintIceServers, type WebRtcSettings } from "./webrtc"
+import { mintIceServers, type WebRtcSettings } from "./webrtc"
 
 /** Refresh this long before the provider expires credentials, so a viewer retry never receives stale ones. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000
@@ -171,9 +171,16 @@ export const managedTurn = (config: ServerConfig): ManagedTurn => {
   return resolver
 }
 
+/** The operator configured TURN locally: its own static credentials or a REST secret. Both win over managed TURN. */
+export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
+  settings.turn !== null ||
+  settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
+
 export interface SessionIceServers {
   readonly iceServers: DesktopRtcIceServer[]
   readonly warning: string | null
+  /** Whether `iceServers` carries provider-issued TURN, which is the box's to use with a shorter allocation wait. */
+  readonly managed: boolean
 }
 
 /**
@@ -188,10 +195,11 @@ export const sessionIceServers = async (
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<SessionIceServers> => {
   const local = mintIceServers(settings, taskId, nowSeconds)
-  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null }
+  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null, managed: false }
   const result = await managed.servers()
   return {
     iceServers: result.iceServers === null ? local : [...local, ...result.iceServers],
     warning: result.warning,
+    managed: result.iceServers !== null,
   }
 }

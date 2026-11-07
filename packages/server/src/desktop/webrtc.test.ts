@@ -248,28 +248,17 @@ describe("DesktopRtcSession", () => {
     for (const close of closing.splice(0)) await close()
   })
 
-  const session = (
-    over: Partial<WebRtcSettings> = {},
-    iceServers?: (settings: WebRtcSettings, taskId: string) => Promise<readonly DesktopRtcIceServer[]>,
-  ) => {
+  const session = (over: Partial<WebRtcSettings> = {}) => {
     const sent: DesktopRtcServerMessage[] = []
     const inputs: string[] = []
-    // The session reports a profile change once a peer exists, so a count above zero means one was built.
-    const profiles: number[] = []
-    const s = new DesktopRtcSession(
-      { ...settings, ...over },
-      "thread-1",
-      new MediaTap(),
-      {
-        send: (m) => sent.push(m),
-        onInput: (raw) => inputs.push(raw),
-        profileChanged: () => profiles.push(profiles.length),
-        debug: () => {},
-      },
-      iceServers,
-    )
+    const s = new DesktopRtcSession({ ...settings, ...over }, "thread-1", new MediaTap(), {
+      send: (m) => sent.push(m),
+      onInput: (raw) => inputs.push(raw),
+      profileChanged: () => {},
+      debug: () => {},
+    })
     closing.push(() => s.close())
-    return { s, sent, inputs, profiles }
+    return { s, sent, inputs }
   }
 
   test("an offer without H.264 is refused and takes no peer", async () => {
@@ -348,22 +337,17 @@ describe("DesktopRtcSession", () => {
     }
   })
 
-  test("the box's own peer takes the relay servers it is given, with a bounded allocation wait", async () => {
-    const asked: { settings: WebRtcSettings; taskId: string }[] = []
+  test("the box's own peer takes the resolved managed relay, with a bounded allocation wait", async () => {
     const relay: DesktopRtcIceServer = {
       urls: ["turn:turn.example:3478?transport=udp"],
       username: "managed-user",
       credential: "managed-pass",
     }
-    const { s } = session({}, async (given, taskId) => {
-      asked.push({ settings: given, taskId })
-      return [...mintIceServers(given, taskId), relay]
-    })
+    const { s } = session()
+    s.setIceServers([...mintIceServers(settings, "thread-1"), relay], true)
     const browser = await remoteOffer()
     closing.push(() => browser.close())
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-    expect(asked).toHaveLength(1)
-    expect(asked[0]?.taskId).toBe("thread-1")
     const peer = peerOf(s)
     expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
     for (const transport of peer.pc.iceTransports) {
@@ -376,7 +360,9 @@ describe("DesktopRtcSession", () => {
   }, 10_000)
 
   test("an operator's own relay keeps werift's default allocation wait", async () => {
-    const { s } = session({ turn: { urls: ["turns:turn.example:443"], secret: "secret" } })
+    const own: WebRtcSettings = { ...settings, turn: { urls: ["turns:turn.example:443"], secret: "secret" } }
+    const { s } = session({ turn: own.turn })
+    s.setIceServers(mintIceServers(own, "thread-1"), false)
     const browser = await remoteOffer()
     closing.push(() => browser.close())
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
@@ -388,46 +374,16 @@ describe("DesktopRtcSession", () => {
     }
   }, 10_000)
 
-  test("an offer abandoned during its relay fetch builds no peer", async () => {
+  test("the viewer limit holds when every offer is answered at once", async () => {
     const before = activeRtcPeers()
-    const started = Promise.withResolvers<void>()
-    const gate = Promise.withResolvers<void>()
-    const { s, sent, profiles } = session({}, async (given, taskId) => {
-      started.resolve()
-      await gate.promise
-      return mintIceServers(given, taskId)
-    })
-    const browser = await remoteOffer()
-    closing.push(() => browser.close())
-    const answered = s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-    await started.promise
-    s.close()
-    gate.resolve()
-    await answered
-    // A peer built for the abandoned offer would report its profile and gather a relay for nobody.
-    expect(profiles).toHaveLength(0)
-    expect(sent).toHaveLength(0)
-    expect(activeRtcPeers()).toBe(before)
-  }, 10_000)
-
-  test("offers that wait on a slow relay fetch cannot exceed the viewer limit", async () => {
-    const before = activeRtcPeers()
-    // Every offer's credential fetch is held until all 17 have started, so each one passes the check on its own.
-    const gate = Promise.withResolvers<void>()
-    const started = Promise.all(
+    const offers = await Promise.all(
       Array.from({ length: 17 }, async () => {
-        const { s, sent } = session({}, async (given, taskId) => {
-          await gate.promise
-          return mintIceServers(given, taskId)
-        })
+        const { s, sent } = session()
         const browser = await remoteOffer()
         closing.push(() => browser.close())
-        const answered = s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-        return { answered, sent }
+        return { answered: s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp }), sent }
       }),
     )
-    const offers = await started
-    gate.resolve()
     await Promise.all(offers.map(({ answered }) => answered))
     expect(activeRtcPeers() - before).toBe(16)
     expect(offers.filter(({ sent }) => sent.some((m) => m._tag === "rtc.answer"))).toHaveLength(16)

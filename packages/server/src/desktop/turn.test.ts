@@ -2,8 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { BOX_ID_HEADER, BOX_TURN_PATH, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import type { ServerConfig } from "../config"
 import { mintIceServers, type WebRtcSettings } from "./webrtc"
-import { managedTurn, sessionIceServers } from "./turn"
-import { hasExplicitTurn } from "./webrtc"
+import { hasExplicitTurn, managedTurn, sessionIceServers } from "./turn"
 
 const PROVIDER_STUN: DesktopRtcIceServer = { urls: ["stun:managed-stun.example.com:3478"] }
 const MANAGED_TURN: DesktopRtcIceServer = {
@@ -72,6 +71,8 @@ describe("managedTurn", () => {
     const directViewer = await sessionIceServers(settings(), managedTurn(config(direct(controlUrl))), "thread-direct", NOW_S)
     expect(directViewer.warning).toBeNull()
     expect(directViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    // The box's own peer takes the same list, and knows the relay is the control plane's.
+    expect(directViewer.managed).toBe(true)
 
     const relayViewer = await sessionIceServers(
       settings(),
@@ -81,13 +82,16 @@ describe("managedTurn", () => {
     )
     expect(relayViewer.warning).toBeNull()
     expect(relayViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    expect(relayViewer.managed).toBe(true)
   })
 
   test("a standalone box has no control-plane identity and keeps its own servers", async () => {
     const turn = managedTurn(config())
 
     expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
-    expect((await sessionIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual(STUN)
+    const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+    expect(servers.iceServers).toEqual(STUN)
+    expect(servers.managed).toBe(false)
   })
 
   test("rejects expired credentials and does not cache the rejection", async () => {
@@ -232,7 +236,9 @@ describe("managedTurn", () => {
     const turn = managedTurn(config(direct(controlUrl)))
 
     expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
-    expect((await sessionIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual(STUN)
+    const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+    expect(servers.iceServers).toEqual(STUN)
+    expect(servers.managed).toBe(false)
   })
 
   test("a malformed answer is a sanitized warning, not a crash or a fabricated relay", async () => {
