@@ -18,6 +18,7 @@ import { startDesktopAudio, type DesktopAudio } from "./audio"
 import { FlvDemuxer, type FlvEvent } from "./flv"
 import { type AvcConfig, type H264Unit, parseAvcConfig } from "./rtp"
 import { type H264EncoderProfile, WEBRTC_H264_LEVEL } from "./h264"
+import { profileFor, profileRestartNeeded } from "./profile"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
 import { isWsl } from "./platform"
@@ -718,9 +719,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     /** NVENC when it is usable, libx264 otherwise. */
     const preferredEncoder = (): EncoderKind => (!wsl && !nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
 
-    /** Constrained Baseline while a connected viewer decodes only Baseline; High otherwise (see h264.ts). */
-    const profileFor = (s: Session): H264EncoderProfile =>
-      [...s.sinks].some((sink) => sink.baselineOnly) ? "baseline" : "high"
+    /** Constrained Baseline while a connected viewer decodes only Baseline; High otherwise (see profile.ts). */
+    const profileOf = (s: Session): H264EncoderProfile => profileFor(s.sinks)
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
@@ -730,7 +730,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
       s.gop = null
       s.gopBytes = 0
       s.awaiting = new Set(s.sinks)
-      s.profile = profileFor(s)
+      s.profile = profileOf(s)
       const capture = [String(WIDTH), String(HEIGHT), String(fps), "ffmpeg", ...ffmpegArgs(kind, s.quality, s.profile, !cudaFiltersMissing)]
       enc.child = spawnTracked(s, "xdamage-capture", capture, {
         critical: false,
@@ -793,8 +793,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
      */
     const applyProfile = (s: Session) => {
       const enc = s.encoder
-      if (enc === null || (s.state !== "starting" && s.state !== "running") || s.sinks.size === 0) return
-      if (profileFor(s) === s.profile) return
+      if (enc === null || (s.state !== "starting" && s.state !== "running")) return
+      if (!profileRestartNeeded(s.sinks, s.profile)) return
       stopEncoder(s)
       launchEncoder(s, enc.kind)
     }
@@ -1157,6 +1157,10 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         sink.onStatus(toStatus(taskId, s))
         cancelLinger(s)
         listenToAudio(s)
+        // The viewer's payload decides the stream's profile. A Baseline-only viewer on a live High encoder would be
+        // handed its config and GOP and then drop every frame (rtp.ts checks the profile idc), so restart the encoder
+        // in the viewer's profile first: this viewer waits for the new keyframe instead.
+        applyProfile(s)
         if (s.encoder === null && s.state === "running") {
           // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
           yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(
@@ -1177,6 +1181,8 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           if (current === undefined) return
           current.sinks.delete(sink)
           current.awaiting.delete(sink)
+          // The last Baseline-only viewer leaving lets the remaining viewers have High back.
+          applyProfile(current)
           scheduleStop(current)
         })
       })
