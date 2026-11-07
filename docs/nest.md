@@ -389,6 +389,11 @@ key and cache.nixos.org.
 - Hosts are the existing meter host registrations (id and secret). A host dials `nestHostConnect`; the Hub accepts it
   as a hibernatable WebSocket, sends `refused` and closes on a bad secret or protocol, and answers `hello` and every
   `capacity` with a `lease`.
+- **Adding a Nest host**: (1) in Settings › Fleet › Nest hosts, register it with a name (`POST /api/meter/hosts`, operators
+  only); the id and secret are shown once, so copy both. (2) On the host, set `services.kestrel-nest.hostId` to the id,
+  `slug`, and `domain`, and write the secret to `/etc/kestrel-host/host-secret` (the default `hostSecretFile`, root only).
+  (3) DNS: create `*.<slug>.<domain>` A/AAAA records to the host (see Operations). (4) Set `KESTREL_NEST_DOMAIN` to the
+  same domain on the control plane; without it every Nest route answers 404.
 - A Nest box is a `UserBox` with a `nest` record (host, `ownerEpoch`, state, limits, `volumeRef`, image). Its URL is
   `https://<boxId>.<host slug>.<nest domain>` and changes when it moves hosts; the apps refetch the box list when a box
   stops answering.
