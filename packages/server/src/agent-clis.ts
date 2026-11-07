@@ -211,6 +211,16 @@ const parseCodexStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
     return { provider: "codex-cli", loggedIn: true, account: null }
   })
 
+const parseDevinStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
+  Effect.gen(function* () {
+    const text = `${out.stdout}\n${out.stderr}`
+    if (/^Not logged in\.$/m.test(text)) return { provider: "devin-cli", loggedIn: false, account: null }
+    if (/^Logged in \(via [^)\r\n]+\)/m.test(text) && !/^Failed to load credentials:/m.test(text)) {
+      return { provider: "devin-cli", loggedIn: true, account: null }
+    }
+    return yield* Effect.fail(new InternalError({ message: "devin auth status: unexpected output" }))
+  })
+
 /** OpenCode's own ids for the Console (free models) and Go plan integrations, and the credential Kestrel keeps in Go. */
 const OPENCODE = "opencode"
 const OPENCODE_GO = "opencode-go"
@@ -401,7 +411,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     dir: "devin",
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
-    status: { kind: "file", path: "devin/credentials.toml" },
+    status: { kind: "command", args: ["auth", "status"], parse: parseDevinStatus },
     identity: null,
     signIn: {
       kind: "page",
