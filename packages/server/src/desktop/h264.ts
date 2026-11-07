@@ -10,3 +10,13 @@
  */
 export type H264EncoderProfile = "baseline" | "high"
 export const WEBRTC_H264_LEVEL = "4.0"
+
+/**
+ * The one profile every viewer decodes: Constrained Baseline while any connected viewer decodes only Baseline, High
+ * otherwise. A viewer's `baselineOnly` can change while it stays connected (its offer is negotiated after it
+ * subscribes), so this is re-evaluated on every viewer change, not captured at attach time.
+ */
+export const profileForSinks = (sinks: Iterable<{ readonly baselineOnly: boolean }>): H264EncoderProfile => {
+  for (const sink of sinks) if (sink.baselineOnly) return "baseline"
+  return "high"
+}

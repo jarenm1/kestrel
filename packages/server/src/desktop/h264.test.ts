@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DESKTOP_QUALITIES, type DesktopQuality } from "@cloudagents/protocol"
-import { type H264EncoderProfile, WEBRTC_H264_LEVEL } from "./h264"
+import { type H264EncoderProfile, WEBRTC_H264_LEVEL, profileForSinks } from "./h264"
 import { ffmpegArgs } from "./manager"
 
 // H.264 level 4.0 limits (Table A-1): macroblocks per frame and macroblocks per second.
@@ -14,6 +14,29 @@ const argAfter = (args: readonly string[], flag: string): string | undefined => 
 const QUALITIES = Object.keys(DESKTOP_QUALITIES) as DesktopQuality[]
 const KINDS = ["nvenc", "x264"] as const
 const PROFILES: readonly H264EncoderProfile[] = ["high", "baseline"]
+
+describe("profileForSinks", () => {
+  const viewer = (baselineOnly: boolean) => ({ baselineOnly })
+
+  test("encodes High with no viewers and with High-only viewers", () => {
+    expect(profileForSinks([])).toBe("high")
+    expect(profileForSinks([viewer(false), viewer(false)])).toBe("high")
+  })
+
+  test("encodes Baseline while any connected viewer decodes only Baseline", () => {
+    expect(profileForSinks([viewer(false), viewer(true)])).toBe("baseline")
+  })
+
+  test("re-picks the profile when one viewer's payload changes without detaching", () => {
+    const changing = { baselineOnly: false }
+    const viewers = [viewer(false), changing]
+    expect(profileForSinks(viewers)).toBe("high")
+    changing.baselineOnly = true
+    expect(profileForSinks(viewers)).toBe("baseline")
+    changing.baselineOnly = false
+    expect(profileForSinks(viewers)).toBe("high")
+  })
+})
 
 describe("WebRTC H.264 profile", () => {
   test("the encoder is level 4.0, High or Constrained Baseline", () => {
