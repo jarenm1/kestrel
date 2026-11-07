@@ -46,7 +46,7 @@ import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
 import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
-import { writeAtomic } from "./atomic"
+import { sessionGeneration } from "./session-generation"
 
 export interface AgentHarnessShape {
   /**
@@ -116,15 +116,7 @@ export type SessionContinuation = "task-home" | `cli-login:${string}`
 const loginContinuation = (dir: string): Effect.Effect<SessionContinuation, InternalError> =>
   Effect.tryPromise({
     try: async () => {
-      const path = join(dir, ".kestrel-session-generation")
-      let generation: string
-      try {
-        generation = await readFile(path, "utf8")
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
-        generation = newId()
-        await writeAtomic(path, generation)
-      }
+      const generation = await sessionGeneration(dir)
       return `cli-login:${generation}` as const
     },
     catch: () => new InternalError({ message: "cannot read the CLI session generation" }),
