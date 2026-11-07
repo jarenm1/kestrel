@@ -1497,6 +1497,11 @@ export const CoreLive = Layer.effect(
               ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
             }
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
+            // The new run replaces what the thread was waiting for. Drop the previous failure's arms in this same
+            // update, not on the next recovery sweep, so a running thread never advertises a usage-limit resume or
+            // retry that the sweep would discard a few seconds later.
+            delete task.autoRetry
+            delete task.usageLimitResume
             task.status = "running"
             task.updatedAt = now
             s.runs.push(run)
@@ -2323,7 +2328,21 @@ export const CoreLive = Layer.effect(
           }
           const task = state.tasks.find((t) => t.id === run.taskId)
           if (task?.delegation?.runId === runId) yield* cancelDelegatedTree(runId)
-          else yield* harness.cancel(runId)
+          else {
+            yield* harness.cancel(runId)
+            // A cancelled run must not leave its thread armed to retry or resume: the user stopped it, so waiting
+            // for a reset or a backoff only to start another run would undo that.
+            const cleared = yield* store.update((s) => {
+              const stored = s.tasks.find((t) => t.id === run.taskId)
+              if (stored === undefined || (stored.autoRetry === undefined && stored.usageLimitResume === undefined)) {
+                return Either.right(null)
+              }
+              delete stored.autoRetry
+              delete stored.usageLimitResume
+              return Either.right({ ...stored })
+            })
+            if (cleared !== null) hub.publish({ _tag: "task.updated", task: cleared })
+          }
           return yield* requireRun(runId)
         }),
 
