@@ -75,7 +75,9 @@ In desktop Settings, Profile manages GitHub repository access, including connect
 The repository picker sends users without a GitHub connection to Profile to set up that access.
 Connections contains only model access: **Harnesses/Subscriptions** groups subscription sign-ins and installed
 harnesses, with each harness's model-visibility picker beside its name; **API keys** keeps key-based access and
-its model preferences together. These pickers change which models appear in chat, not the box's installed models.
+its model preferences together. A provider's picker lists each model once; enabling it enables that model under every
+harness it supports, so the same choice appears in each compatible harness tab of the chat picker. These pickers
+change which models appear in chat, not the box's installed models.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
 
 Settings › Threads (`/settings/threads`) groups thread preferences into sections. Its Text generation section stores

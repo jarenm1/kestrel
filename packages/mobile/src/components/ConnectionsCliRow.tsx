@@ -219,7 +219,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
       error={error}
       harness={harness}
       showAccount={false}
-      headerExtra={modelProvider ? <ModelPicker provider={modelProvider} allowRoutes={false} /> : undefined}
+      headerExtra={modelProvider ? <ModelPicker provider={modelProvider} /> : undefined}
     >
       {stepContent()}
     </ConnectionRowFrame>

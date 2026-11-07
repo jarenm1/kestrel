@@ -1,20 +1,17 @@
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Check, ChevronDown, ChevronUp } from "lucide-react-native";
-import { useQuery } from "@tanstack/react-query";
 import {
+  baseModelId,
   providerModels,
   type AgentModel,
   type ModelInfo,
   type ModelProviderInfo,
 } from "@cloudagents/protocol";
-import { isRouteModel, modelDisplayName, modelHarnessOf } from "@cloudagents/composer/models";
-import { createQueries } from "@/api/queries";
-import { useApiClient } from "@/hooks/useApiClient";
+import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models";
 import { setShownModels, useShownModels } from "@/hooks/useShownModels";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { HARNESSES } from "@/lib/harnesses";
 import { colors, spacing } from "@/theme";
 
 /** The model list scrolls past this many rows; shorter lists take their own height, as in the web menu. */
@@ -28,48 +25,30 @@ function matches(model: ModelInfo, query: string): boolean {
 
 /**
  * Toggles which of the provider's models the chat's model picker offers, with a search box and a reset, matching the
- * web Connections menu. Routes appear under the harness they run; a subscription row only picks native models, and a
- * route the selected box cannot launch is not offered.
+ * web Connections menu. Visibility is per model: one toggle covers every harness the model supports, so the list
+ * appears once rather than once per harness.
  */
-export function ModelPicker({
-  provider,
-  allowRoutes = true,
-}: {
-  readonly provider: ModelProviderInfo;
-  readonly allowRoutes?: boolean;
-}) {
-  const { api } = useApiClient();
-  const queries = useMemo(() => createQueries(api), [api]);
-  const capabilities = useQuery(queries.capabilities());
-  const modelHarnesses = capabilities.data?.modelHarnesses;
+export function ModelPicker({ provider }: { readonly provider: ModelProviderInfo }) {
+  const all = providerModels(provider.id);
+  const catalog = all.filter((model) => !isRouteModel(model));
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const all = providerModels(provider.id);
-  const offerable = all.filter(
-    (model) =>
-      (allowRoutes || !isRouteModel(model)) &&
-      (!isRouteModel(model) || modelHarnesses?.some((harness) => harness === modelHarnessOf(model).harness) === true)
-  );
   const shown = useShownModels()[provider.id];
-  const shownIds = new Set(shown.map((m) => m.id));
-  const shownCount = offerable.filter((model) => shownIds.has(model.id)).length;
-  const visible = offerable.filter((model) => matches(model, query));
-  const groups = HARNESSES.map((harness) => ({
-    harness,
-    models: visible.filter((model) => modelHarnessOf(model).harness === harness.id),
-  })).filter((group) => group.models.length > 0);
+  const shownBase = new Set(shown.map((model) => baseModelId(model.id)));
+  const shownCount = catalog.filter((model) => shownBase.has(model.id)).length;
+  const visible = catalog.filter((model) => matches(model, query));
 
   function setOpenState(next: boolean) {
     setOpen(next);
     if (!next) setQuery("");
   }
 
-  /** Writes the provider's whole picker list, keeping the catalog order and any route this row cannot show. */
+  /** Writes the provider's whole picker list as base model ids; the chat expands each to its supported routes. */
   function toggle(id: AgentModel) {
-    setShownModels(
-      provider.id,
-      all.filter((m) => (m.id === id ? !shownIds.has(id) : shownIds.has(m.id))).map((m) => m.id)
-    );
+    const next = new Set(shownBase);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setShownModels(provider.id, catalog.filter((model) => next.has(model.id)).map((model) => model.id));
   }
 
   return (
@@ -83,7 +62,7 @@ export function ModelPicker({
         accessibilityLabel={`${provider.name} models shown in the chat picker`}
         active={open}
       >
-        {`${shownCount} of ${offerable.length} shown`}
+        {`${shownCount} of ${catalog.length} shown`}
       </Button>
       {open ? (
         <View style={styles.list}>
@@ -102,31 +81,26 @@ export function ModelPicker({
             nestedScrollEnabled
             keyboardShouldPersistTaps="handled"
           >
-            {groups.map((group) => (
-              <View key={group.harness.id}>
-                <Text style={styles.groupTitle}>{group.harness.name}</Text>
-                {group.models.map((m) => {
-                  const checked = shownIds.has(m.id);
-                  return (
-                    <Pressable
-                      key={m.id}
-                      style={styles.toggle}
-                      onPress={() => toggle(m.id)}
-                      accessibilityRole="checkbox"
-                      accessibilityState={{ checked }}
-                      accessibilityLabel={`${modelDisplayName(m)}, ${group.harness.name}`}
-                    >
-                      <Text style={[styles.toggleText, checked && styles.toggleChecked]}>
-                        {modelDisplayName(m)}
-                      </Text>
-                      <View style={[styles.box, checked && styles.boxChecked]}>
-                        {checked ? <Check size={12} color={colors.primaryForeground} /> : null}
-                      </View>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            ))}
+            {visible.map((model) => {
+              const checked = shownBase.has(model.id);
+              return (
+                <Pressable
+                  key={model.id}
+                  style={styles.toggle}
+                  onPress={() => toggle(model.id)}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked }}
+                  accessibilityLabel={modelDisplayName(model)}
+                >
+                  <Text style={[styles.toggleText, checked && styles.toggleChecked]}>
+                    {modelDisplayName(model)}
+                  </Text>
+                  <View style={[styles.box, checked && styles.boxChecked]}>
+                    {checked ? <Check size={12} color={colors.primaryForeground} /> : null}
+                  </View>
+                </Pressable>
+              );
+            })}
             {visible.length === 0 ? (
               <Text style={styles.empty}>{`No model matches “${query.trim()}”.`}</Text>
             ) : null}

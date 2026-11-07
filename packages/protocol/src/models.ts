@@ -454,11 +454,24 @@ export const connectedModelProviders = (
   )
 
 /**
- * The provider's models in the chat picker, in catalog order. `chosen` is the user's saved list for the provider
- * (from the connections page), or null before they edited it.
+ * The catalog model a route id belongs to: its base id without the `@harness` suffix. Visibility is stored per model,
+ * not per route, so enabling a model enables it in every harness it supports.
  */
-export const shownModels = (provider: ModelProvider, chosen: ReadonlyArray<AgentModel> | null): readonly ModelInfo[] =>
-  providerModels(provider).filter((m) => (chosen === null ? m.shownByDefault : chosen.includes(m.id)))
+export const baseModelId = (id: AgentModel): AgentModel =>
+  id.replace(/@(?:claude|codex|opencode)$/, "") as AgentModel
+
+/**
+ * The provider's models in the chat picker, in catalog order. `chosen` is the user's saved list for the provider
+ * (from the connections page), or null before they edited it. A saved list is compared by base model id, so a model
+ * selected once appears under every supported harness.
+ */
+export const shownModels = (provider: ModelProvider, chosen: ReadonlyArray<AgentModel> | null): readonly ModelInfo[] => {
+  const chosenBase = chosen === null ? null : new Set(chosen.map(baseModelId))
+  return providerModels(provider).filter((m) => {
+    const base = baseModelId(m.id)
+    return chosenBase === null ? modelInfo(base).shownByDefault : chosenBase.has(base)
+  })
+}
 
 /** A stored thinking-level pick. "default" is an explicit pick of the model's default level, unlike having no pick. */
 export const EffortPick = Schema.Union(AgentEffort, Schema.Literal("default"))

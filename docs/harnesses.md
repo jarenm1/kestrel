@@ -62,8 +62,10 @@ Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/)
 ## Third-party model coverage
 
 The shared catalog in `packages/protocol/src/models.ts` drives desktop and mobile model lists. Settings ›
-Connections exposes the full curated list; chat initially shows current flagship/fast choices. A saved custom
-list remains unchanged when the catalog grows; select additional models there or use **Reset to defaults**.
+Connections exposes the full curated list; chat initially shows current flagship/fast choices. Visibility is per
+model: the picker lists each model once, and enabling it enables that model under every harness it supports.
+A saved custom list remains unchanged when the catalog grows and is compared by base model id, so lists saved before
+routes existed keep working; select additional models there or use **Reset to defaults**.
 The `[1m]` suffix is a Claude Code context hint, not a separate upstream model version.
 
 Coverage checked against provider documentation on November 4, 2026:

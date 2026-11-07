@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Schema } from "effect"
-import { AGENT_MODELS, AgentModel, modelHarness, modelInfo, modelUpstreamId, parseAgentModel } from "./src/models"
+import { AGENT_MODELS, AgentModel, baseModelId, modelHarness, modelInfo, modelUpstreamId, parseAgentModel, shownModels } from "./src/models"
 
 const accepts = Schema.is(AgentModel)
 
@@ -51,4 +51,32 @@ test("thinking levels follow the route, not the base Claude guide", () => {
   // OpenCode's compatibility package does not forward the ACP level upstream, so its routes expose no thinking.
   expect(modelInfo("deepseek-flash[1m]@opencode").efforts).toEqual([])
   expect(modelInfo("claude-opus-5-5@opencode").efforts).toEqual([])
+})
+
+test("model visibility is per model, so one choice covers every supported harness", () => {
+  const ids = (models: readonly { id: string }[]) => models.map((m) => m.id)
+  // Defaults: a model shown by default brings its routes with it.
+  const defaults = ids(shownModels("anthropic", null))
+  expect(defaults).toContain("claude-opus-5-5")
+  expect(defaults).toContain("claude-opus-5-5@opencode")
+  expect(defaults).not.toContain("claude-opus-4-7@opencode")
+  // A saved base id selects the model in every harness it supports, not just its native one.
+  expect(ids(shownModels("deepseek", ["deepseek-flash[1m]"]))).toEqual([
+    "deepseek-flash[1m]",
+    "deepseek-flash[1m]@codex",
+    "deepseek-flash[1m]@opencode",
+  ])
+  // A list saved while visibility was per route still means the whole model.
+  expect(ids(shownModels("deepseek", ["deepseek-flash[1m]@codex"]))).toEqual([
+    "deepseek-flash[1m]",
+    "deepseek-flash[1m]@codex",
+    "deepseek-flash[1m]@opencode",
+  ])
+  // A model with no route keeps its single entry.
+  expect(ids(shownModels("moonshot", ["kimi-k3.1-pro-highspeed"]))).toEqual([
+    "kimi-k3.1-pro-highspeed",
+    "kimi-k3.1-pro-highspeed@codex",
+    "kimi-k3.1-pro-highspeed@opencode",
+  ])
+  expect(baseModelId("kimi-k2.7-code@opencode")).toBe("kimi-k2.7-code")
 })
