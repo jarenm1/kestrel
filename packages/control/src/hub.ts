@@ -1500,8 +1500,15 @@ export class Hub extends DurableObject<Env> {
       "SELECT id, automation_json AS automationJson, reason, pr_json AS prJson FROM automation_jobs WHERE due_at <= ? ORDER BY due_at, rowid", now,
     ).toArray()
     for (const job of jobs) {
-      await this.fire(JSON.parse(job.automationJson) as AutomationRow, job.reason, job.prJson === null ? null : JSON.parse(job.prJson) as PullRequestInfo)
-      this.ctx.storage.sql.exec("DELETE FROM automation_jobs WHERE id = ?", job.id)
+      // Delay the next attempt before dispatch so an exception or restart does not
+      // repeatedly invoke the alarm for the same job without a pause.
+      this.ctx.storage.sql.exec("UPDATE automation_jobs SET due_at = ? WHERE id = ?", Date.now() + 60000, job.id)
+      try {
+        await this.fire(JSON.parse(job.automationJson) as AutomationRow, job.reason, job.prJson === null ? null : JSON.parse(job.prJson) as PullRequestInfo)
+        this.ctx.storage.sql.exec("DELETE FROM automation_jobs WHERE id = ?", job.id)
+      } catch (error) {
+        console.error("Automation job dispatch failed", job.id, error)
+      }
     }
     const pending = this.ctx.storage.sql.exec<{ login: string; taskId: string; repo: string; number: number; kind: string; deliveryId: string }>(
       "SELECT login, task_id AS taskId, repo, pr_number AS number, kind, delivery_id AS deliveryId FROM pr_activity_queue WHERE due_at <= ?", now,

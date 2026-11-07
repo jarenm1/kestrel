@@ -39,11 +39,12 @@ test("a due schedule survives dispatch interruption and an unrelated edit", asyn
   expect(db.query("SELECT next_run_at AS at FROM automations").get()).toEqual({ at: due })
   const target = hub as unknown as { fire: (...args: unknown[]) => Promise<unknown> }
   target.fire = async () => { throw new Error("interrupted") }
-  await expect(hub.alarm()).rejects.toThrow("interrupted")
+  await hub.alarm()
   expect(db.query("SELECT count(*) AS n FROM automation_jobs").get()).toEqual({ n: 1 })
-  expect(alarm()).not.toBeNull()
+  expect(alarm()).toBeGreaterThan(Date.now())
   let calls = 0
   target.fire = async () => { calls++; return {} }
+  db.run("UPDATE automation_jobs SET due_at = ?", Date.now() - 1)
   await hub.alarm()
   expect(calls).toBe(1)
   expect(db.query("SELECT count(*) AS n FROM automation_jobs").get()).toEqual({ n: 0 })
@@ -65,4 +66,23 @@ test("webhook deduplication retains a queued job until dispatch", async () => {
   await hub.alarm()
   expect(calls).toBe(1)
   expect(db.query("SELECT count(*) AS n FROM automation_jobs").get()).toEqual({ n: 0 })
+})
+
+test("a failed dispatch does not block later jobs", async () => {
+  const { hub, db, alarm } = setup()
+  await hub.createAutomation("octo", {
+    name: "Review", repo: "octo/repo", prompt: "Review", trigger: { _tag: "github", events: ["pull_request.opened"] },
+  })
+  const event = { repo: "octo/repo", action: "opened", requestedReviewer: null, pr: { number: 1, baseRef: "main", draft: false } }
+  await hub.githubDelivery("first", event as never)
+  await hub.githubDelivery("second", event as never)
+  let calls = 0
+  ;(hub as unknown as { fire: () => Promise<unknown> }).fire = async () => {
+    if (++calls === 1) throw new Error("interrupted")
+    return {}
+  }
+  await hub.alarm()
+  expect(calls).toBe(2)
+  expect(db.query("SELECT count(*) AS n FROM automation_jobs").get()).toEqual({ n: 1 })
+  expect(alarm()).toBeGreaterThan(Date.now())
 })
