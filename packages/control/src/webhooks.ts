@@ -44,8 +44,8 @@ export const handleGithubWebhook = async (request: Request, env: Env): Promise<R
   if (deliveryId === null) return errorResponse(400, "BadRequest", "missing X-GitHub-Delivery")
   const prEvent = pullRequestEventOf(hookPayload.right)
   const result = await hub(env).githubDelivery(deliveryId, prEvent)
-  if (!result.duplicate && prEvent.action === "closed") {
-    const owners = await hub(env).closePullRequestWatches(prEvent.repo, prEvent.pr.number)
+  if (prEvent.action === "closed") {
+    const owners = await hub(env).closePullRequestWatches(deliveryId, prEvent.repo, prEvent.pr.number)
     for (const owner of owners) await releaseHook(env, owner, prEvent.repo)
   }
   return json(result, 202)
