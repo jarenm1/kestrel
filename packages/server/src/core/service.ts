@@ -1499,6 +1499,11 @@ export const CoreLive = Layer.effect(
             const message: Message = { id: messageId, taskId, role: "user", text, runId: run.id, createdAt: now, ...attached, ...sent }
             task.status = "running"
             task.updatedAt = now
+            // The new run supersedes whatever the failed run armed: a usage-limit notice or a retry timer is about a
+            // run that no longer is the thread's latest. Clearing them here keeps the notice off a running thread
+            // instead of waiting for the next recovery sweep to drop them.
+            delete task.usageLimitResume
+            delete task.autoRetry
             s.runs.push(run)
             s.messages.push(message)
             if (task.delegation !== undefined && task.delegation.runId === undefined) {
@@ -2324,6 +2329,17 @@ export const CoreLive = Layer.effect(
           const task = state.tasks.find((t) => t.id === run.taskId)
           if (task?.delegation?.runId === runId) yield* cancelDelegatedTree(runId)
           else yield* harness.cancel(runId)
+          // Cancelling is the user calling the run off: a recovery armed for an earlier failure has nothing left to
+          // resume or retry, so drop it now rather than leaving the notice up until the next sweep.
+          const cleared = yield* store.update((s) => {
+            const stored = s.tasks.find((t) => t.id === run.taskId)
+            if (stored === undefined) return Either.right(null)
+            if (stored.usageLimitResume === undefined && stored.autoRetry === undefined) return Either.right(null)
+            delete stored.usageLimitResume
+            delete stored.autoRetry
+            return Either.right({ ...stored })
+          })
+          if (cleared !== null) hub.publish({ _tag: "task.updated", task: cleared })
           return yield* requireRun(runId)
         }),
 
