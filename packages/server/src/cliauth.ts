@@ -17,7 +17,7 @@ import {
 import { AGENT_CLIS, CLI_PROVIDERS, MODEL_HARNESS, type AgentCli, type CliOutput, type HarnessMinimum } from "./agent-clis"
 import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
-import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
+import { killActiveDiscovery, limitCliProbe, limitDiscovery } from "./harness-commands"
 import {
   NATIVE_MODEL_PROVIDER,
   discoverNativeModels,
@@ -162,7 +162,7 @@ interface Invocation {
 /** Runs a CLI. Non-zero exits still yield output (both CLIs exit 1 when logged out); null when not installed. */
 const runCli = (inv: Invocation, label: string, input?: string, requireSuccess = false): Effect.Effect<CliOutput | null, InternalError> =>
   Effect.tryPromise({
-    try: (signal) => limitDiscovery(() => {
+    try: (signal) => limitCliProbe(() => {
       // A cancelled catalog read may still be queued. Never start its probe after it loses its budget.
       if (signal.aborted) return Promise.reject(signal.reason)
       const { promise, resolve, reject } = Promise.withResolvers<CliOutput | null>()

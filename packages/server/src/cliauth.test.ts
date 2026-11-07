@@ -7,6 +7,7 @@ import type { CliAuthStatus } from "@cloudagents/protocol"
 import type { ServerConfig } from "./config"
 import { Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
+import { limitDiscovery } from "./harness-commands"
 import { findExecutable } from "./sandbox"
 
 const roots: string[] = []
@@ -104,6 +105,41 @@ describe.skipIf(process.platform === "win32")("missing harness CLI", () => {
       cannotSignIn: true,
     })
     expect(statuses.find((row) => row.provider === "codex-cli")?.error).toContain("not installed")
+  })
+})
+
+describe.skipIf(process.platform === "win32")("CLI probe pool", () => {
+  test("a full discovery pool does not hold up a login status probe", async () => {
+    const root = rootFor()
+    const codex = join(root, "bin", "codex")
+    writeFileSync(
+      codex,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; fi',
+        "exit 0",
+        "",
+      ].join("\n"),
+    )
+    chmodSync(codex, 0o755)
+    mkdirSync(join(root, "users", "alice", "codex"), { recursive: true })
+
+    // Hold every discovery slot: a probe sharing that pool could only answer after these are released.
+    const releases: Array<() => void> = []
+    const held = Array.from({ length: 4 }, () =>
+      limitDiscovery(() => {
+        const { promise, resolve } = Promise.withResolvers<void>()
+        releases.push(resolve)
+        return promise
+      }),
+    )
+    try {
+      const statuses = await statusesFor(root)
+      expect(statuses.find((row) => row.provider === "codex-cli")).toMatchObject({ loggedIn: true })
+    } finally {
+      for (const release of releases) release()
+      await Promise.all(held)
+    }
   })
 })
 

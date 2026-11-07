@@ -68,32 +68,47 @@ export const killActiveDiscovery = (): void => {
   }
 }
 
-/** Discovery children allowed to run at once on the box; more wait in a queue, and a full queue fails fast. */
+/**
+ * A bounded process pool: a start runs at once while a slot is free, otherwise it waits in FIFO order. A finished
+ * child hands its slot straight to the next waiter; a full queue fails fast.
+ */
+const processSlots = (
+  maxRunning: number,
+  maxQueued: number,
+  busy: string,
+): (<A>(start: () => Promise<A>) => Promise<A>) => {
+  let running = 0
+  const queued: Array<() => void> = []
+  return <A>(start: () => Promise<A>): Promise<A> => {
+    const run = () =>
+      start().finally(() => {
+        const next = queued.shift()
+        if (next === undefined) running--
+        else next()
+      })
+    if (running < maxRunning) {
+      running++
+      return run()
+    }
+    if (queued.length >= maxQueued) return Promise.reject(new Error(busy))
+    const turn = Promise.withResolvers<void>()
+    queued.push(() => turn.resolve())
+    return turn.promise.then(run)
+  }
+}
+
+/** Processes allowed to run at once in each pool; more wait in a queue, and a full queue fails fast. */
 const MAX_RUNNING = 4
 const MAX_QUEUED = 32
-let running = 0
-const queued: Array<() => void> = []
+
+/** Discovery children: no more than MAX_RUNNING exist at once, whichever user or thread asked for them. */
+export const limitDiscovery = processSlots(MAX_RUNNING, MAX_QUEUED, "command discovery is busy; try again")
 
 /**
- * Runs `start` in a discovery slot. A finished child hands its slot straight to the next waiter, so no more than
- * MAX_RUNNING children exist at once, whichever user or thread asked for them.
+ * Status probes and the sign-in commands the user waits on (sign-out, key import, credential export). Their own
+ * pool keeps a discovery child from delaying them, while still bounding how many such CLIs run at once.
  */
-export const limitDiscovery = <A>(start: () => Promise<A>): Promise<A> => {
-  const run = () =>
-    start().finally(() => {
-      const next = queued.shift()
-      if (next === undefined) running--
-      else next()
-    })
-  if (running < MAX_RUNNING) {
-    running++
-    return run()
-  }
-  if (queued.length >= MAX_QUEUED) return Promise.reject(new Error("command discovery is busy; try again"))
-  const turn = Promise.withResolvers<void>()
-  queued.push(() => turn.resolve())
-  return turn.promise.then(run)
-}
+export const limitCliProbe = processSlots(MAX_RUNNING, MAX_QUEUED, "CLI probes are busy; try again")
 
 const cleanText = (value: unknown, max: number): string =>
   typeof value === "string"
