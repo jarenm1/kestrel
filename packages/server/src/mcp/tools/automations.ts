@@ -88,11 +88,11 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
     },
     ({ repo, number }: { repo: string; number: number }) => guard(() => runTool(Effect.gen(function* () {
       const { control, owner } = yield* scope
-      // Recorded first: the control plane checks that the thread owns the pull request before routing its activity.
+      // The control plane accepts the watch only when the pull request is visible to the owner's GitHub token. Recording
+      // it in the thread's registry first would let the request satisfy its own ownership check, so nothing is recorded
+      // until the watch succeeds.
+      yield* control.watchPr(owner, ctx.taskId, repo, number)
       yield* deps.automations.setWatching(ctx.taskId, repo, number, true)
-      yield* control.watchPr(owner, ctx.taskId, repo, number).pipe(
-        Effect.catchAll((e) => Effect.zipRight(deps.automations.setWatching(ctx.taskId, repo, number, false), Effect.fail(e))),
-      )
       return text(`Watching ${repo}#${number} in this thread.`)
     }))),
   )
@@ -111,12 +111,13 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
         return yield* Effect.fail(new Error("name both repo and number, or neither to unwatch every pull request"))
       }
       if (repo !== undefined && number !== undefined) {
-        yield* deps.automations.setWatching(ctx.taskId, repo, number, false)
+        // Control first, as with `github_pr_watch`: a refused unwatch must leave the thread's registry as it was.
         yield* control.unwatchPr(owner, ctx.taskId, repo, number)
+        yield* deps.automations.setWatching(ctx.taskId, repo, number, false)
         return text(`Stopped watching ${repo}#${number}.`)
       }
-      yield* deps.automations.clearWatching(ctx.taskId)
       yield* control.unwatchPr(owner, ctx.taskId)
+      yield* deps.automations.clearWatching(ctx.taskId)
       return text("Stopped watching this thread's pull requests.")
     }))),
   )
