@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -7,6 +7,7 @@ import type { CliAuthStatus } from "@cloudagents/protocol"
 import type { ServerConfig } from "./config"
 import { Config } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
+import { findExecutable } from "./sandbox"
 
 const roots: string[] = []
 
@@ -163,8 +164,10 @@ fi
 exit 0
 `
 
-// Terminal sign-in needs a real `script` to allocate the pseudo-terminal; skip where the host has none.
-const hasScript = process.platform !== "win32" && (existsSync("/usr/bin/script") || existsSync("/bin/script"))
+// Terminal sign-in needs a real `script` to allocate the pseudo-terminal; skip where the host has none. Resolve it from
+// the test host's PATH (NixOS keeps it outside /usr/bin and /bin) so the shim below can exec the same binary production finds.
+const scriptPath = process.platform === "win32" ? null : findExecutable("script", process.env.PATH ?? "")
+const hasScript = scriptPath !== null
 
 describe.skipIf(!hasScript)("Devin sign-in", () => {
   const runtimes: Array<ManagedRuntime.ManagedRuntime<CliAuth, never>> = []
@@ -175,9 +178,10 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
   const devinAuth = (root: string) => {
     writeFileSync(join(root, "bin", "devin"), FAKE_DEVIN)
     chmodSync(join(root, "bin", "devin"), 0o755)
-    // Record the SHELL `script` was given, then hand off to the real util-linux script.
+    if (scriptPath === null) throw new Error("script is not installed on this host")
+    // Record the SHELL `script` was given, then hand off to the real script resolved from the host PATH.
     const script = join(root, "bin", "script")
-    writeFileSync(script, '#!/bin/sh\necho "SHELL=$SHELL" > "$HOME/script.log"\nif [ -x /usr/bin/script ]; then exec /usr/bin/script "$@"; fi\nexec /bin/script "$@"\n')
+    writeFileSync(script, `#!/bin/sh\necho "SHELL=$SHELL" > "$HOME/script.log"\nexec '${scriptPath}' "$@"\n`)
     chmodSync(script, 0o755)
     const config = {
       dataDir: root,
@@ -211,8 +215,7 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
     const run = devinAuth(root)
     await run((auth) => auth.startLogin("alice", "devin-cli"))
     const shell = readFileSync(join(root, "users", "alice", "script.log"), "utf8").trim()
-    expect(shell).not.toBe("SHELL=")
-    expect(shell).not.toContain("nu")
+    expect(shell).toMatch(/(^|\/)(bash|sh)$/)
   })
 
   test("reports the CLI's refusal of a code without echoing it", async () => {
