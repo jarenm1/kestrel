@@ -353,11 +353,13 @@ export class DesktopRtcSession {
     }
     const { fmtp, baselineOnly } = picked
     if (!/^m=video /m.test(offer)) throw new Error("offer has no video section")
+    const servers = await this.iceServers(this.settings, this.taskId)
+    // Counted after the only await on this path: offers that arrive while the credentials are fetched must not all pass
+    // a limit check made before it.
     if (peers >= MAX_PEERS) {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
-    const servers = await this.iceServers(this.settings, this.taskId)
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.

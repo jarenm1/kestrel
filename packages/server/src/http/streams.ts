@@ -161,7 +161,11 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
         debug: (message) => fork(Effect.logDebug(message)),
       },
-      (settings, sessionTaskId) => sessionIceServers(settings, managed, sessionTaskId).then((servers) => servers.iceServers),
+      (settings, sessionTaskId) =>
+        sessionIceServers(settings, managed, sessionTaskId).then((servers) => {
+          if (servers.warning !== null) fork(Effect.logWarning(servers.warning))
+          return servers.iceServers
+        }),
     )
     // A status or a config must not outpace the one before it: a slow credential fetch may not deliver its config after
     // a later status. Closing the socket also ends the queue: nothing is written to a socket the browser left.

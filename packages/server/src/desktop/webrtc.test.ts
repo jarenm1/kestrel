@@ -373,6 +373,30 @@ describe("DesktopRtcSession", () => {
     }
   }, 10_000)
 
+  test("offers that wait on a slow relay fetch cannot exceed the viewer limit", async () => {
+    const before = activeRtcPeers()
+    // Every offer's credential fetch is held until all 17 have started, so each one passes the check on its own.
+    const gate = Promise.withResolvers<void>()
+    const started = Promise.all(
+      Array.from({ length: 17 }, async () => {
+        const { s, sent } = session({}, async (given, taskId) => {
+          await gate.promise
+          return mintIceServers(given, taskId)
+        })
+        const browser = await remoteOffer()
+        closing.push(() => browser.close())
+        const answered = s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+        return { answered, sent }
+      }),
+    )
+    const offers = await started
+    gate.resolve()
+    await Promise.all(offers.map(({ answered }) => answered))
+    expect(activeRtcPeers() - before).toBe(16)
+    expect(offers.filter(({ sent }) => sent.some((m) => m._tag === "rtc.answer"))).toHaveLength(16)
+    expect(offers.filter(({ sent }) => sent.some((m) => m._tag === "rtc.unavailable"))).toHaveLength(1)
+  }, 20_000)
+
   test("inbound STUN is authenticated and address-filtered before werift responds or probes", async () => {
     const browser = await remoteOffer()
     closing.push(() => browser.close())
