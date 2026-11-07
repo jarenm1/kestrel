@@ -243,7 +243,7 @@ describe("ACP driver", () => {
     expect(h.last().method).toBe("session/prompt")
   })
 
-  test("Devin keeps the requested id when no advertised variant matches", () => {
+  test("Devin fails clearly when the requested model is not advertised", () => {
     const configOptions = [
       {
         id: "model",
@@ -257,9 +257,23 @@ describe("ACP driver", () => {
     h.driver.start()
     h.reply({})
     h.reply({ sessionId: "s1", configOptions })
-    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash" } })
-    h.reply({ configOptions: [] })
-    expect(h.last().method).toBe("session/prompt")
+    expect(h.outcomes).toEqual([{ status: "failed", error: "Devin does not advertise the requested model: swe-2-flash" }])
+  })
+
+  test("Devin uses the exact advertised spelling and config id", () => {
+    const h = harness({ provider: "devin", model: "gpt-6.1-sol" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions: [{ id: "model_id", category: "model", options: [{ group: "Models", options: [{ value: "gpt-6-1-sol" }] }] }] })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { configId: "model_id", value: "gpt-6-1-sol" } })
+  })
+
+  test("Devin does not silently select a paid variant", () => {
+    const h = harness({ provider: "devin", model: "swe-2", effort: "high" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions: [{ id: "model", category: "model", currentValue: "swe-2-high-priority", options: [{ value: "swe-2-high-priority" }] }] })
+    expect(h.outcomes).toEqual([{ status: "failed", error: "Devin does not advertise the requested model: swe-2" }])
   })
 
   test("an agent that exits mid-turn fails the run", () => {

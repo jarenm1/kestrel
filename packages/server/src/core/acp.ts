@@ -93,11 +93,12 @@ const selectValues = (node: unknown): string[] => {
   return values
 }
 
-const findConfigOption = (configOptions: unknown, category: string): { readonly currentValue: string | null; readonly values: string[] } | null => {
+const findConfigOption = (configOptions: unknown, category: string): { readonly id: string; readonly currentValue: string | null; readonly values: string[] } | null => {
   if (!Array.isArray(configOptions)) return null
   const option = configOptions.find((item) => isRecord(item) && (item.category === category || item.id === category))
-  if (!isRecord(option)) return null
+  if (!isRecord(option) || typeof option.id !== "string") return null
   return {
+    id: option.id,
     currentValue: typeof option.currentValue === "string" ? option.currentValue : null,
     values: selectValues(option.options),
   }
@@ -130,28 +131,30 @@ const devinPaidTier = (value: string): boolean => /-(?:ultrafast|priority|lightn
  * advertised value for the requested family: the anchor when offered, else the variant for the chosen effort, else the
  * session's current variant for that family. Thinking itself stays on the separate `thought_level` option.
  */
-const resolveDevinModel = (configOptions: unknown, model: string, effort: string | undefined): string => {
+const resolveDevinModel = (configOptions: unknown, model: string, effort: string | undefined): string | null => {
   const option = findConfigOption(configOptions, "model")
   if (option === null || option.values.length === 0 || option.values.includes(model)) return model
+  const normalized = model.replaceAll(".", "-")
+  const anchor = option.values.find((value) => value.replaceAll(".", "-") === normalized)
+  if (anchor !== undefined) return anchor
   const candidates: DevinCandidate[] = option.values.flatMap((value) => {
     const level = devinThinkingLevel(value, model)
     return level === null ? [] : [{ value, level, paid: devinPaidTier(value) }]
   })
-  if (candidates.length === 0) return model
+  if (candidates.length === 0) return null
   const first = (list: ReadonlyArray<DevinCandidate>): string | undefined => {
-    const plain = list.filter((candidate) => !candidate.paid)
-    return (plain.length > 0 ? plain : list)[0]?.value
+    return list.find((candidate) => !candidate.paid)?.value
   }
   if (effort !== undefined) {
     const exact = first(candidates.filter((candidate) => candidate.level === effort))
     if (exact !== undefined) return exact
   }
-  if (option.currentValue !== null && candidates.some((candidate) => candidate.value === option.currentValue)) return option.currentValue
+  if (option.currentValue !== null && candidates.some((candidate) => candidate.value === option.currentValue && !candidate.paid)) return option.currentValue
   for (const level of ["high", "medium", "max", "xhigh", "low", "none"]) {
     const value = first(candidates.filter((candidate) => candidate.level === level))
     if (value !== undefined) return value
   }
-  return first(candidates) ?? model
+  return first(candidates) ?? null
 }
 
 export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver => {
@@ -222,13 +225,17 @@ export const makeAcpDriver = (input: AcpRunInput, io: AcpDriverIo): RunDriver =>
     const model = input.provider === "devin" && input.model !== undefined
       ? resolveDevinModel(opened.configOptions, input.model, input.effort)
       : input.model
+    if (model === null) {
+      finish({ status: "failed", error: `Devin does not advertise the requested model: ${input.model}` })
+      return
+    }
     if (model === undefined) {
       setEffort(opened.configOptions)
       return
     }
     request(
       "session/set_config_option",
-      { sessionId, configId: "model", value: model },
+      { sessionId, configId: input.provider === "devin" ? findConfigOption(opened.configOptions, "model")?.id ?? "model" : "model", value: model },
       orFail("session/set_config_option model", (result) => setEffort(result.configOptions)),
     )
   }
