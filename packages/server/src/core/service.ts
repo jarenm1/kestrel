@@ -1516,6 +1516,7 @@ export const CoreLive = Layer.effect(
             // The new run supersedes whatever the failed run armed: a usage-limit notice or a retry timer is about a
             // run that no longer is the thread's latest. Clearing them here keeps the notice off a running thread
             // instead of waiting for the next recovery sweep to drop them.
+            const supersededArm = task.usageLimitResume
             delete task.usageLimitResume
             delete task.autoRetry
             s.runs.push(run)
@@ -1531,8 +1532,8 @@ export const CoreLive = Layer.effect(
               // work, rather than leaving its result attached to the interrupted run.
               task.delegation = { ...task.delegation, runId: run.id }
             } else if (task.delegation?.runId !== undefined && task.delegation.cancelledAt === undefined &&
-              !task.delegation.resultAcknowledged && task.usageLimitResume?.autoResume === true &&
-              task.usageLimitResume.runId === task.delegation.runId &&
+              !task.delegation.resultAcknowledged && supersededArm?.autoResume === true &&
+              supersededArm.runId === task.delegation.runId &&
               !s.messages.some((m) => m.id === `delegation-result:${taskId}`)) {
               // The delegated run stopped on a usage limit, and its result was held for the resume. Whatever continues
               // it now (the resume at the reset, or the user handing the work to another model) carries the delegation.
