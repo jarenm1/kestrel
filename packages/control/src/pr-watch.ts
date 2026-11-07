@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { BOX_USER_HEADER, ControlPaths, Task, threadPullRequestsOf } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, ControlPaths, Task } from "@cloudagents/protocol"
 import { ensureHook, releaseHook } from "./automations"
 import { hub, type Env } from "./env"
 import { enablePullRequestActivity, fetchPullRequest, fetchRepository } from "./github"
@@ -13,8 +13,13 @@ const Unwatch = Schema.Struct({
 })
 
 /**
- * Authenticated box calls only. A thread may watch any number of pull requests; each must be one the thread itself
- * owns (in `Task.pullRequests`), and the caller must be its owner.
+ * Authenticated box calls only. A thread may watch any number of pull requests, each in any repository its owner can
+ * see; the caller must own the thread and the thread must not be archived.
+ *
+ * Ownership is the owner's GitHub access plus the box's own registry: a watch names a pull request the owner's GitHub
+ * token can read (`fetchRepository`/`fetchPullRequest`), and the box records it in `Task.pullRequests` only once this
+ * route accepts it. The control plane does not re-check that registry: it is written after the decision, so a check
+ * here would reject every new watch — or, if the box recorded it first, be satisfied by the watch request itself.
  */
 export const handlePrWatch = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const login = request.headers.get(BOX_USER_HEADER) ?? ""
@@ -41,14 +46,6 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)
-  // Boxes that predate the thread registry keep the single link on their checkout; accept either shape while they update.
-  const legacyOwned = task._tag === "Right" && (task.right.checkouts as ReadonlyArray<{ repo: string; pullRequest?: { number: number } }>).some(
-    (checkout) => checkout.repo.toLowerCase() === repo.toLowerCase() && checkout.pullRequest?.number === body.number,
-  )
-  const owned = legacyOwned || (task._tag === "Right" && threadPullRequestsOf(task.right).some(
-    (pr) => pr.repo.toLowerCase() === repo.toLowerCase() && pr.number === body.number,
-  ))
-  if (!owned) return errorResponse(409, "Conflict", "the thread does not own this pull request")
   if (task._tag === "Right" && task.right.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
   await ensureHook(env, token, repo, new URL(ControlPaths.githubWebhook, url.origin).toString())
   const hook = await hub(env).githubHook(repo.toLowerCase())
