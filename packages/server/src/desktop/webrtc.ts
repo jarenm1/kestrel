@@ -41,6 +41,11 @@ export const TURN_CREDENTIAL_TTL_S = 60 * 60
 const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
+/**
+ * Seconds a TURN allocation may take before the box answers without it. werift gathers inside `setLocalDescription`,
+ * so an unreachable relay would otherwise hold the answer back for its 8s UDP and 8s TCP attempts.
+ */
+const TURN_CONNECT_TIMEOUT_S = 2
 const MAX_OFFER_CHARS = 64 * 1024
 const INPUT_CHANNEL = "input"
 const POINTER_CHANNEL = "pointer"
@@ -250,6 +255,14 @@ export class DesktopRtcSession {
     private readonly taskId: string,
     private readonly tap: MediaTap,
     private readonly handlers: DesktopRtcHandlers,
+    /**
+     * The ICE servers this peer gets. The control plane's managed TURN is appended here as well as to the viewer's
+     * config, so a box without a candidate the viewer can reach still connects through both relays.
+     */
+    private readonly iceServers: (
+      settings: WebRtcSettings,
+      taskId: string,
+    ) => Promise<ReadonlyArray<DesktopRtcIceServer>> = async (settings, taskId) => mintIceServers(settings, taskId),
   ) {}
 
   /** Signaling from the viewer. Never rejects: what goes wrong is told to the viewer, which can retry. */
@@ -344,7 +357,7 @@ export class DesktopRtcSession {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
-    const servers = mintIceServers(this.settings, this.taskId)
+    const servers = await this.iceServers(this.settings, this.taskId)
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
@@ -353,6 +366,7 @@ export class DesktopRtcSession {
     const pc = new RTCPeerConnection({
       iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
+      iceTurnConnectTimeout: TURN_CONNECT_TIMEOUT_S,
       iceAdditionalHostAddresses: [...this.settings.hostAddresses],
       iceFilterCandidatePair: (pair) => isPeerAddressAllowed(pair.remoteCandidate.host, this.settings.hostAddresses, this.settings.denyPrivate),
       codecs: {

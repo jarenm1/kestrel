@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { createSocket } from "node:dgram"
 import { classes, Message, methods, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
-import type { DesktopRtcServerMessage } from "@cloudagents/protocol"
+import type { DesktopRtcIceServer, DesktopRtcServerMessage } from "@cloudagents/protocol"
 import { MediaTap } from "./rtp"
 import {
   DesktopRtcSession,
@@ -210,6 +210,9 @@ const remoteOffer = async (codec = "video/H264", profiles: readonly string[] = [
   return Object.assign(pc, { channel })
 }
 
+/** The session's live peer is private; tests read the werift connection it built. */
+const peerOf = (session: DesktopRtcSession) => (session as unknown as { peer: { pc: RTCPeerConnection } }).peer
+
 describe("withoutDefaultStun", () => {
   const answerer = async () => {
     const browser = await remoteOffer()
@@ -245,15 +248,24 @@ describe("DesktopRtcSession", () => {
     for (const close of closing.splice(0)) await close()
   })
 
-  const session = (over: Partial<WebRtcSettings> = {}) => {
+  const session = (
+    over: Partial<WebRtcSettings> = {},
+    iceServers?: (settings: WebRtcSettings, taskId: string) => Promise<readonly DesktopRtcIceServer[]>,
+  ) => {
     const sent: DesktopRtcServerMessage[] = []
     const inputs: string[] = []
-    const s = new DesktopRtcSession({ ...settings, ...over }, "thread-1", new MediaTap(), {
-      send: (m) => sent.push(m),
-      onInput: (raw) => inputs.push(raw),
-      profileChanged: () => {},
-      debug: () => {},
-    })
+    const s = new DesktopRtcSession(
+      { ...settings, ...over },
+      "thread-1",
+      new MediaTap(),
+      {
+        send: (m) => sent.push(m),
+        onInput: (raw) => inputs.push(raw),
+        profileChanged: () => {},
+        debug: () => {},
+      },
+      iceServers,
+    )
     closing.push(() => s.close())
     return { s, sent, inputs }
   }
@@ -319,7 +331,7 @@ describe("DesktopRtcSession", () => {
     const browser = await remoteOffer()
     closing.push(() => browser.close())
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-    const peer = (s as unknown as { peer: { pc: RTCPeerConnection } }).peer
+    const peer = peerOf(s)
     expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
     for (const transport of peer.pc.iceTransports) {
       // werift keeps the options each connection was built with, and the session's filter is among them.
@@ -334,6 +346,33 @@ describe("DesktopRtcSession", () => {
     }
   })
 
+  test("the box's own peer takes the relay servers it is given, with a bounded allocation wait", async () => {
+    const asked: { settings: WebRtcSettings; taskId: string }[] = []
+    const relay: DesktopRtcIceServer = {
+      urls: ["turn:turn.example:3478?transport=udp"],
+      username: "managed-user",
+      credential: "managed-pass",
+    }
+    const { s } = session({}, async (given, taskId) => {
+      asked.push({ settings: given, taskId })
+      return [...mintIceServers(given, taskId), relay]
+    })
+    const browser = await remoteOffer()
+    closing.push(() => browser.close())
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.taskId).toBe("thread-1")
+    const peer = peerOf(s)
+    expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
+    for (const transport of peer.pc.iceTransports) {
+      // werift allocates from the first TURN URL it was given, and the session caps how long that may hold the answer.
+      expect(transport.connection.turnServer).toEqual(["turn.example", 3478])
+      expect(transport.connection.options.turnUsername).toBe("managed-user")
+      expect(transport.connection.options.turnPassword).toBe("managed-pass")
+      expect(transport.connection.options.turnConnectTimeout).toBe(2)
+    }
+  }, 10_000)
+
   test("inbound STUN is authenticated and address-filtered before werift responds or probes", async () => {
     const browser = await remoteOffer()
     closing.push(() => browser.close())
@@ -347,7 +386,7 @@ describe("DesktopRtcSession", () => {
     for (const denyPrivate of [false, true]) {
       const { s } = session({ denyPrivate })
       await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-      const peer = (s as unknown as { peer: { pc: RTCPeerConnection } }).peer
+      const peer = peerOf(s)
       const connection = peer.pc.iceTransports[0]!.connection
       const candidate = connection.localCandidates.find((c) => c.host === "127.0.0.1" && c.transport === "udp")
       if (!candidate) throw new Error("no loopback candidate")
@@ -397,7 +436,7 @@ describe("DesktopRtcSession", () => {
     expect(browser.connectionState).toBe("connected")
     expect(s.hasPeer).toBe(true)
     // Simulate an ICE implementation rejecting a late candidate after a pair has already connected.
-    const peer = (s as unknown as { peer: { pc: RTCPeerConnection } }).peer
+    const peer = peerOf(s)
     const addCandidate = peer.pc.addIceCandidate.bind(peer.pc)
     peer.pc.addIceCandidate = async () => { throw new Error("invalid candidate") }
     await s.handle({ _tag: "rtc.candidate", candidate: "garbage", sdpMid: null, sdpMLineIndex: null })

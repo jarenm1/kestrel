@@ -3,7 +3,7 @@ import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage, ty
 import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, viewerIceServers } from "../desktop"
+import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers } from "../desktop"
 import { TaskStatsService } from "../stats"
 import { ActivityTracker } from "../platform/tracker"
 
@@ -140,23 +140,29 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     const sendSignal = (message: DesktopRtcServerMessage) => {
       if (!socketClosed) socket.sendText(JSON.stringify(message))
     }
-    const rtc = new DesktopRtcSession(config.webrtc, taskId, tap, {
-      send: sendSignal,
-      onInput: (raw, channel) =>
-        fork(
-          Effect.gen(function* () {
-            const input = yield* decodeInput(raw)
-            if (channel === "pointer" && input._tag !== "mouse.move") {
-              yield* Effect.logWarning(`desktop pointer channel carried ${input._tag}`)
-              return
-            }
-            yield* desktop.streamInput(taskId, input)
-          }).pipe(Effect.catchAll((e) => Effect.logWarning(`desktop input failed: ${e.message}`))),
-        ),
-      profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
-      debug: (message) => fork(Effect.logDebug(message)),
-    })
     const managed = managedTurn(config)
+    const rtc = new DesktopRtcSession(
+      config.webrtc,
+      taskId,
+      tap,
+      {
+        send: sendSignal,
+        onInput: (raw, channel) =>
+          fork(
+            Effect.gen(function* () {
+              const input = yield* decodeInput(raw)
+              if (channel === "pointer" && input._tag !== "mouse.move") {
+                yield* Effect.logWarning(`desktop pointer channel carried ${input._tag}`)
+                return
+              }
+              yield* desktop.streamInput(taskId, input)
+            }).pipe(Effect.catchAll((e) => Effect.logWarning(`desktop input failed: ${e.message}`))),
+          ),
+        profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
+        debug: (message) => fork(Effect.logDebug(message)),
+      },
+      (settings, sessionTaskId) => sessionIceServers(settings, managed, sessionTaskId).then((servers) => servers.iceServers),
+    )
     // A status or a config must not outpace the one before it: a slow credential fetch may not deliver its config after
     // a later status. Closing the socket also ends the queue: nothing is written to a socket the browser left.
     let signalQueue: Promise<void> = Promise.resolve()
@@ -177,7 +183,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
     let configSent = false
     const sendConfig = async (): Promise<void> => {
-      const resolved = await viewerIceServers(config.webrtc, managed, taskId)
+      const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
       if (resolved.warning !== null) fork(Effect.logWarning(resolved.warning))
       sendSignal({
