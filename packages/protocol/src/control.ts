@@ -258,6 +258,11 @@ export const CliAuthStatus = Schema.Struct({
   account: Schema.NullOr(Schema.String),
   /** Why the box could not read this CLI's login (not installed, or it failed); `loggedIn` is then false. */
   error: Schema.optional(Schema.String),
+  /**
+   * The CLI cannot hold a login on this box at all: it is not installed, or its version cannot sign in. Distinct from
+   * `error`, which may also describe a probe that failed while a login could still exist.
+   */
+  cannotSignIn: Schema.optional(Schema.Boolean),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
 

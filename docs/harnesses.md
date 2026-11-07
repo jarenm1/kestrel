@@ -83,11 +83,14 @@ a credential invalidates the client catalog, and an explicit refresh bypasses th
 | Google / Devin | ACP session model options, without starting a model turn |
 
 Claude/ChatGPT subscription logins take precedence over their API keys for native runs, so discovery uses the
-subscription's list rather than advertising API-only models through that login. Lists describe provider/CLI
-availability, not a guarantee of quota, credits, regional access or inference success. Missing credentials,
-unsupported installed CLI versions and failed sources have explicit API statuses. One source failing does not
-discard the other sources; the curated catalog remains available when discovery or the box is unavailable.
-Source errors never include upstream response bodies, tokens or local credential paths.
+subscription's list rather than advertising API-only models through that login. A CLI that is not installed, or is
+too old to sign in, rules out a subscription instead: its provider's API models stay listed and the native source
+says the CLI is absent. Only a status probe that actually failed leaves the login state unknown and withholds the
+API-only models. Lists describe provider/CLI availability, not a guarantee of quota, credits, regional access or
+inference success. Missing credentials, unsupported installed CLI versions and failed sources have explicit API
+statuses. One source failing does not discard the other sources; the curated catalog remains available when
+discovery or the box is unavailable. Source errors never include upstream response bodies, tokens or local
+credential paths.
 
 Known models retain the compatibility metadata and routes in `packages/protocol/src/models.ts`.
 New models use stable `live/<provider>/<upstream-id>` identities, run only through that provider's native harness,

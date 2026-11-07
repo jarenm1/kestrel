@@ -96,6 +96,17 @@ describe("OpenCode status", () => {
   })
 })
 
+describe.skipIf(process.platform === "win32")("missing harness CLI", () => {
+  test("marks a CLI that is not on the box's PATH as unable to sign in", async () => {
+    const statuses = await statusesFor(rootFor())
+    expect(statuses.find((row) => row.provider === "codex-cli")).toMatchObject({
+      loggedIn: false,
+      cannotSignIn: true,
+    })
+    expect(statuses.find((row) => row.provider === "codex-cli")?.error).toContain("not installed")
+  })
+})
+
 describe("Antigravity account label", () => {
   test("reports the signed-in Google email from the user's own login without exposing the credential", async () => {
     const root = rootFor()

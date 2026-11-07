@@ -558,7 +558,13 @@ export const CliAuthLive = Layer.effect(
         const env = yield* cliEnv(user, provider)
         // Windows runs `.cmd` shims through sh, which this lookup cannot see; there the CLI's own exit tells.
         if (process.platform !== "win32" && findExecutable(spec.bin, env.PATH ?? "") === null) {
-          return { provider, loggedIn: false, account: null, error: `${spec.bin} is not installed on the box (not on its PATH)` }
+          return {
+            provider,
+            loggedIn: false,
+            account: null,
+            error: `${spec.bin} is not installed on the box (not on its PATH)`,
+            cannotSignIn: true,
+          }
         }
         // The Go plan signs in by importing its key, which OpenCode 2.1 adds, and the free models sign in through the
         // Console device flow, which 2.0.7 adds: an older CLI reports why here, so the Connections page never offers a
@@ -576,6 +582,7 @@ export const CliAuthLive = Layer.effect(
               loggedIn: false,
               account: null,
               error: `${spec.bin} must be version ${minimum.join(".")} or newer${provider === "opencode-go" ? " for OpenCode Go" : " for the OpenCode Console sign-in"}`,
+              cannotSignIn: true,
             }
           }
         }
@@ -594,7 +601,8 @@ export const CliAuthLive = Layer.effect(
         }
         const inv = yield* invoke(user, provider, spec.status.args)
         const out = yield* runCli(inv, `${spec.bin} status`)
-        if (out === null) return { provider, loggedIn: false, account: null }
+        // The status command itself was missing (a Windows shim that no longer exists): no login can exist.
+        if (out === null) return { provider, loggedIn: false, account: null, cannotSignIn: true }
         const parsed = yield* spec.status.parse(out)
         // Status commands report how the CLI signed in, not who; the CLI's own stored login names the user, when it has
         // one. The account label is an email, never a method or token; null when no stored identity names one.

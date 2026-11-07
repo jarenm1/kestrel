@@ -70,13 +70,17 @@ const nativeFor = (options: {
   readonly onDiscover?: () => void
   readonly onLoginProbe?: () => void
   readonly statusErrors?: ReadonlyArray<CliProvider>
+  /** CLIs the box cannot run at all; the real status also carries an error, as a missing binary does. */
+  readonly cannotSignIn?: ReadonlyArray<CliProvider>
 }): NativeModelDiscovery => ({
   status: () => Effect.sync(() => {
     options.onLoginProbe?.()
     const logins = options.logins?.() ?? []
     return CLI_PROVIDERS.map((provider) => ({
       provider, loggedIn: logins.some((login) => login.provider === provider), account: null,
-      ...(options.statusErrors?.includes(provider) ? { error: "CLI probe unavailable" } : {}),
+      ...(options.cannotSignIn?.includes(provider)
+        ? { error: `${provider} is not installed on the box`, cannotSignIn: true }
+        : options.statusErrors?.includes(provider) ? { error: "CLI probe unavailable" } : {}),
     }))
   }),
   discoverModels: () => Effect.sync(() => {
@@ -404,4 +408,25 @@ test("a failed native status suppresses only that vendor's API-only models", asy
   expect(idSet(catalog.models)).toContain("live/anthropic/claude-future")
   expect(catalog.sources.find((source) => source.source === "OpenAI API")?.status).toBe("error")
   expect(catalog.sources.find((source) => source.source === "Anthropic API")?.status).toBe("ok")
+})
+
+test("a CLI that cannot sign in keeps its vendor's API models and is reported as absent", async () => {
+  const dataDir = await tempDataDir()
+  await loginDir(dataDir, "alice", "codex")
+  const credentials = credentialStore({ alice: { user: "alice", providers: { openai: "api-key" } } })
+  const { fetch, calls } = fakeFetch(() => json({ data: [{ id: "gpt-9" }] }))
+  const discovery = await Effect.runPromise(makeModelDiscovery({
+    credentials: credentials.shape, dataDir, fetch,
+    native: nativeFor({ cannotSignIn: ["codex-cli"] }),
+  }))
+
+  const catalog = await Effect.runPromise(discovery.get("alice"))
+  // A missing CLI rules out a subscription, so it must not stand in front of the user's API key.
+  expect(idSet(catalog.models)).toContain("live/openai/gpt-9")
+  expect(catalog.sources.find((source) => source.source === "OpenAI API")?.status).toBe("ok")
+  expect(catalog.sources.find((source) => source.source === "codex-cli")?.message)
+    .toBe("the CLI is not installed or cannot sign in")
+  // Nothing was uncertain, so the answer is not the short degraded cache.
+  await Effect.runPromise(discovery.get("alice"))
+  expect(calls).toHaveLength(1)
 })

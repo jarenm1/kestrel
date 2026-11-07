@@ -538,19 +538,31 @@ export const makeModelDiscovery = (
         Effect.timeoutFail({ duration: LOGIN_TIMEOUT, onTimeout: () => "timeout" as const }),
         Effect.map((statuses) => {
           const uncertain = new Set<ModelProvider>()
-          for (const [cli, provider] of [["claude-cli", "anthropic"], ["codex-cli", "openai"]] as const) {
-            const status = statuses.find((entry) => entry.provider === cli)
-            if (status === undefined || status.error !== undefined) uncertain.add(provider)
+          const unavailable = new Set<CliProvider>()
+          for (const status of statuses) {
+            // A CLI that cannot hold a login here (missing, or a version that cannot sign in) does not make a
+            // subscription possible: a native login's precedence over an API key then cannot apply.
+            if (status.cannotSignIn === true) {
+              unavailable.add(status.provider)
+              continue
+            }
+            // Only a status probe that failed leaves the answer open.
+            if (status.error !== undefined) uncertain.add(nativeProviderOfCli[status.provider])
+          }
+          for (const cli of ["claude-cli", "codex-cli"] as const) {
+            if (!statuses.some((entry) => entry.provider === cli)) uncertain.add(nativeProviderOfCli[cli])
           }
           return {
             logins: statuses.filter((status) => status.loggedIn).map((status) => status.provider),
             uncertain,
+            unavailable,
           }
         }),
         // A failed status probe cannot rule out a subscription; never advertise API-only models through it.
         Effect.catchAll(() => Effect.succeed({
           logins: [] as ReadonlyArray<CliProvider>,
           uncertain: new Set<ModelProvider>(["anthropic", "openai"]),
+          unavailable: new Set<CliProvider>(),
         })),
       )
 
@@ -559,6 +571,7 @@ export const makeModelDiscovery = (
       credentials: RelayCredentials | null,
       logins: ReadonlyArray<CliProvider>,
       uncertain: ReadonlySet<ModelProvider>,
+      unavailable: ReadonlySet<CliProvider>,
     ): Effect.Effect<ModelCatalog> =>
       Effect.gen(function* () {
         const checkedAt = new Date(now()).toISOString()
@@ -650,7 +663,9 @@ export const makeModelDiscovery = (
             provider,
             source: cli,
             status: uncertain.has(provider) ? "error" : "unsupported",
-            message: uncertain.has(provider) ? "native login state could not be checked" : "not signed in",
+            message: uncertain.has(provider)
+              ? "native login state could not be checked"
+              : unavailable.has(cli) ? "the CLI is not installed or cannot sign in" : "not signed in",
             checkedAt,
           })
         }
@@ -686,9 +701,12 @@ export const makeModelDiscovery = (
             }
 
             const login = directory.present ? yield* probeLogins(user) : {
-              logins: [] as ReadonlyArray<CliProvider>, uncertain: new Set<ModelProvider>(),
+              logins: [] as ReadonlyArray<CliProvider>,
+              uncertain: new Set<ModelProvider>(),
+              // No login directory has ever existed, so no CLI status was probed; nothing is known to be missing.
+              unavailable: new Set<CliProvider>(),
             }
-            const catalog = yield* loadCatalog(user, credentials, login.logins, login.uncertain)
+            const catalog = yield* loadCatalog(user, credentials, login.logins, login.uncertain, login.unavailable)
             cache.set(user, {
               fingerprint,
               at: now(),
