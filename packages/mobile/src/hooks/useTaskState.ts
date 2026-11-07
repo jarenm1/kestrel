@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
 import { openTaskEvents } from "@/api/events";
-import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
+import { createQueries, boxKeys, invalidateRunItems, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 
 const MAX_LOG_LINES = 2000;
@@ -50,7 +50,9 @@ export function useTaskState(taskId: string) {
       close = openTaskEvents(url, {
         onOpen: () => {
           setDisconnected(false);
+          void queryClient.cancelQueries({ queryKey: keys.task(taskId) });
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
+          invalidateRunItems(queryClient, api.boxScope);
         },
         onEvent: (event) => {
           switch (event._tag) {

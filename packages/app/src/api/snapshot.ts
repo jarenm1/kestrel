@@ -1,5 +1,14 @@
-import type { QueryClient, QueryKey } from "@tanstack/react-query"
+import type { QueryClient, QueryFilters, QueryKey } from "@tanstack/react-query"
 import type { Task } from "@cloudagents/protocol"
+
+/** Run item keys are outside the task key prefix, so a reconnect must invalidate them separately. */
+export function invalidateRunItems(client: QueryClient): void {
+  const filters: QueryFilters = {
+    predicate: ({ queryKey }) => queryKey.length === 3 && queryKey[0] === "runs" && queryKey[2] === "items",
+  }
+  void client.cancelQueries(filters)
+  void client.invalidateQueries(filters)
+}
 
 /**
  * Fetches a list snapshot, keeping entries live events wrote while it was in flight: those are newer than the snapshot.

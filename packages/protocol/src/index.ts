@@ -476,6 +476,10 @@ export const DesktopRtcServerMessage = Schema.Union(
 )
 export type DesktopRtcServerMessage = typeof DesktopRtcServerMessage.Type
 
+/** Sent after an event stream is subscribed. Older clients ignore this control frame. */
+export const EventsSubscribed = Schema.Struct({ _tag: Schema.Literal("events.subscribed") })
+export type EventsSubscribed = typeof EventsSubscribed.Type
+
 /** Server -> client events over the task event WebSocket (JSON text frames). */
 export const ServerEvent = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("task.updated"), task: Task }),

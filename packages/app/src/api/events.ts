@@ -2,6 +2,7 @@ import { Either, Schema } from "effect"
 import {
   DesktopRtcServerMessage,
   DesktopStatus,
+  EventsSubscribed,
   Paths,
   ServerEvent,
   TaskStats,
@@ -60,6 +61,10 @@ function openEvents(
       socket.onopen = handlers.onOpen
       socket.onmessage = (msg: MessageEvent<unknown>) => {
         if (typeof msg.data !== "string") return
+        if (decodeText(EventsSubscribed, msg.data)) {
+          handlers.onOpen()
+          return
+        }
         const event = decodeText(ServerEvent, msg.data)
         if (event) handlers.onEvent(event)
       }
@@ -70,7 +75,8 @@ function openEvents(
 }
 
 /**
- * Subscribes to a task's ServerEvent stream, on the box the thread lives on. Callers re-snapshot over REST in `onOpen`;
+ * Subscribes to a task's ServerEvent stream, on the box the thread lives on. Callers re-snapshot over REST in `onOpen`
+ * both at socket open (for older boxes) and after the server acknowledges subscription;
  * events that race the snapshot are reconciled by id. Returns a function that closes the socket.
  */
 export function openTaskEvents(

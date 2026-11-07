@@ -76,7 +76,10 @@ const serveEvents = (socket: StreamSocket, user: string, taskId: string): Effect
     }
     yield* Effect.acquireUseRelease(
       Effect.sync(() => hub.subscribe(taskId, (event) => socket.sendText(JSON.stringify(event)))),
-      () => Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void))),
+      () => Effect.zipRight(
+        Effect.sync(() => socket.sendText(JSON.stringify({ _tag: "events.subscribed" }))),
+        Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void))),
+      ),
       (unsubscribe) => Effect.sync(unsubscribe),
     )
   })
@@ -94,7 +97,10 @@ const serveUserEvents = (socket: StreamSocket, user: string): Effect.Effect<void
           if (mine) socket.sendText(JSON.stringify(event))
         }),
       ),
-      () => Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void))),
+      () => Effect.zipRight(
+        Effect.sync(() => socket.sendText(JSON.stringify({ _tag: "events.subscribed" }))),
+        Effect.async<void>((resume) => socket.onClose(() => resume(Effect.void))),
+      ),
       (unsubscribe) => Effect.sync(unsubscribe),
     )
   })
