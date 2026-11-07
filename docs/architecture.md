@@ -158,16 +158,17 @@ one model response, including intermediate tool-calling responses, not the whole
 fresh and cache-write tokens but excludes cache reads; `cached` shows cache reads separately. Counts are
 compact, with exact values on hover; unreported buckets display `?`. Repeated Claude content blocks and Codex
 usage notifications do not create duplicate response strips.
-The rate divides output tokens by the response's own elapsed time, measured from its start to its completion,
-so tool execution between responses is excluded; without both boundaries it shows `?`. The context meter
-remains a separate current-context measurement. Historical runs without response usage and ACP agents
-reporting only prompt/session totals retain a compact input/output footer with the same clock and rate, using
-the turn's reported duration because no per-response timing exists. Its input includes cached tokens, and no
-cache split is guessed. Each turn with main-agent response strips suppresses its aggregate footer, without
-suppressing totals for other turns in the same run. Subagent strips do not suppress the main turn's footer.
-Cost is not displayed; failures remain visible with either usage format. An agent reply always shows its
-message time, on the same clock, unless the run transcript directly below it already dates the response; old
-turns recorded without their own timestamp fall back to the reply's message time.
+The rate divides output tokens by the response's own elapsed time, measured from its start to its latest
+completion report, so tool execution between responses is excluded; without both boundaries it shows `?`.
+The context meter remains a separate current-context measurement. Historical runs without response usage and
+ACP agents reporting only prompt/session totals retain a compact input/output footer with the same clock and
+rate, labelled `turn … tok/s` because it divides by the whole turn's reported duration, tool execution
+included; no per-response timing exists for them. Its input includes cached tokens, and no cache split is
+guessed. Each turn with main-agent response strips suppresses its aggregate footer, without suppressing totals
+for other turns in the same run. Subagent strips do not suppress the main turn's footer. Cost is not displayed;
+failures remain visible with either usage format. An agent reply always shows its message time, on the same
+clock, unless the run transcript directly below it already dates the response; old turns recorded without
+their own timestamp fall back to the reply's message time.
 
 OMP, Pi and Hermes, and a separate per-thread harness picker, are deliberately out of the current product scope.
 Their integration from #217 is reverted: extra harness setup and bundled key-dependent model choices added UX

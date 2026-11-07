@@ -22,7 +22,7 @@ test("saved turns retain their completion time and throughput without response u
   expect(html).toContain(`dateTime="${timestamp}"`)
   expect(html).toContain("1.2K in")
   expect(html).toContain("56 out")
-  expect(html).toContain("28 tok/s")
+  expect(html).toContain("turn 28 tok/s")
 })
 
 test("response usage replaces only its own turn aggregate, including across message slices", () => {
@@ -30,9 +30,10 @@ test("response usage replaces only its own turn aggregate, including across mess
   const html = render(items)
   expect(html).toContain("100 in")
   expect(html).toContain("50 tok/s")
+  expect(html).not.toContain("turn 50 tok/s")
   expect(html).not.toContain("10K in")
   expect(html).toContain("42 in")
-  expect(html).toContain("3.5 tok/s")
+  expect(html).toContain("turn 3.5 tok/s")
   expect(render(items, 2, 3)).not.toContain("<time")
 })
 
@@ -40,7 +41,7 @@ test("child usage does not hide main completion time, including unknown token co
   const html = render([usage("child-tool"), turn("main", null, 0)])
   expect(html.match(/<time /g)?.length).toBe(2)
   expect(html).toContain("? in")
-  expect(html).toContain("0 tok/s")
+  expect(html).toContain("turn 0 tok/s")
   expect(render([turn("unknown", null, null)])).toContain("<time")
   expect(render([turn("unknown", null, null)])).not.toContain("? in")
   expect(render([{ ...turn("failed"), isError: true } as AgentItem])).toContain("failed")

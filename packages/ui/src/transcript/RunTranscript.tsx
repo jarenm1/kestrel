@@ -62,12 +62,20 @@ function TokenCount({ value, label }: { value: number | null; label: string }) {
   return <span title={text === exact ? undefined : exact}>{text} {label}</span>
 }
 
-/** Unknown or nonpositive elapsed time cannot produce a meaningful throughput. */
-function Throughput({ output, durationMs }: { output: number | null; durationMs: number | null | undefined }) {
+/**
+ * Output tokens per second over a measured duration. A response's rate covers that response; a turn's covers the
+ * whole turn, tool execution included, so it says so.
+ */
+function Throughput({ output, durationMs, turn = false }: { output: number | null; durationMs: number | null | undefined; turn?: boolean }) {
   const rate = output !== null && durationMs != null && durationMs > 0
     ? output * 1000 / durationMs
     : null
-  return <span title="Output tokens per second of the measured response or turn duration">{rate !== null && Number.isFinite(rate) ? rate.toLocaleString("en-US", { maximumFractionDigits: 1 }) : "?"} tok/s</span>
+  return (
+    <span title={turn ? "Output tokens per second over the whole turn, including tool execution" : "Output tokens per second of this response"}>
+      {turn && "turn "}
+      {rate !== null && Number.isFinite(rate) ? rate.toLocaleString("en-US", { maximumFractionDigits: 1 }) : "?"} tok/s
+    </span>
+  )
 }
 
 /** One response's usage: when it finished, and its own tokens — never the run's totals. */
@@ -139,7 +147,7 @@ function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx 
                   <span aria-hidden="true">·</span>
                   <TokenCount value={item.outputTokens} label="out" />
                   <span aria-hidden="true">·</span>
-                  <Throughput output={item.outputTokens} durationMs={item.durationMs} />
+                  <Throughput output={item.outputTokens} durationMs={item.durationMs} turn />
                 </>
               )}
             </div>

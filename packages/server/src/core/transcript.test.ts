@@ -408,12 +408,13 @@ describe("claude partial messages", () => {
 
     // message_delta reports the final output; the usage keeps one id and shows after the flushed prose.
     const finalized = valid(
-      transcript.push(
-        streamEvent({
+      transcript.push({
+        ...streamEvent({
           type: "message_delta",
           usage: { input_tokens: 2, cache_creation_input_tokens: 11_367, cache_read_input_tokens: 14_517, output_tokens: 106 },
         }),
-      ),
+        emittedAtMs: at,
+      }),
     )
     expect(finalized.map((item) => item._tag)).toEqual(["text", "usage"])
     expect(finalized[0]).toMatchObject({ _tag: "text", text: "The answer." })
@@ -461,6 +462,27 @@ describe("claude partial messages", () => {
       id: "usage-msg_t",
       timestamp: new Date(start + 2_000).toISOString(),
       durationMs: 2_000,
+    })
+  })
+
+  test("a later completion report extends the end, so an assistant snapshot cannot shorten the rate", () => {
+    const transcript = makeTranscript()
+    const start = Date.UTC(2026, 0, 2, 10, 0, 0)
+    const at = (event: Record<string, unknown>, milliseconds: number) => ({ ...streamEvent(event), emittedAtMs: milliseconds })
+    transcript.push(at({ type: "message_start", message: { id: "msg_o", usage: { input_tokens: 1, output_tokens: 0 } } }, start))
+    // The assistant snapshot reports completion first, with an output that is not final yet.
+    transcript.push({
+      ...assistantUsage("msg_o", [{ type: "text", text: "Answer." }], { input_tokens: 1, output_tokens: 12 }),
+      emittedAtMs: start + 900,
+    })
+    // message_delta carries the final output; the response ended then, not at the snapshot.
+    const [usage] = valid(transcript.push(at({ type: "message_delta", usage: { output_tokens: 90 } }, start + 1_500)))
+    expect(usage).toMatchObject({
+      _tag: "usage",
+      id: "usage-msg_o",
+      timestamp: new Date(start + 1_500).toISOString(),
+      durationMs: 1_500,
+      outputTokens: 90,
     })
   })
 

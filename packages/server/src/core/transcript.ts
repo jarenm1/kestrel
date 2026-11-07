@@ -108,11 +108,17 @@ interface ResponseUsage {
   timestamp: string | null
   /** Epoch milliseconds the response began (its `message_start`), once observed. */
   startMs: number | null
-  /** Elapsed milliseconds from that start to its completion, computed once; null while either is unknown. */
+  /** Epoch milliseconds of its latest completion report while the stream is open; frozen after its stop. */
+  endMs: number | null
+  /** That end came from a provider event time, not the box's clock: an untimed report cannot move it. */
+  endFromEvent: boolean
+  /** Elapsed milliseconds from that start to that end; null while either is unknown. */
   durationMs: number | null
   emitted: boolean
   /** A stream for this response is open (`message_start` without its `message_stop` yet). */
   active: boolean
+  /** The stream's stop arrived: duplicate completions after it cannot move the response's end. */
+  stopped: boolean
 }
 
 /** Epoch milliseconds of a provider event: its `emittedAtMs` or `timestamp`, when valid. */
@@ -286,24 +292,35 @@ export const makeTranscript = (
       cachedTokens: null,
       timestamp: null,
       startMs: null,
+      endMs: null,
+      endFromEvent: false,
       durationMs: null,
       emitted: false,
       active: false,
+      stopped: false,
     }
     claudeResponseUsage.set(key ?? state.id, state)
     return state
   }
 
   /**
-   * Marks a response complete: its timestamp (the event's time, or now when it reported none) and, once both
-   * boundaries are known, its elapsed time. A duplicate or replayed completion keeps the first one.
+   * Records a completion report: its time (the event's time, or now when it gave none) and, once both boundaries
+   * are known, the response's elapsed time. A response reports completion more than once — its assistant snapshot,
+   * then `message_delta` with the final output — so the end follows the latest report. After `message_stop` the
+   * response is closed and repeated reports cannot move it.
    */
   const completeClaudeResponse = (state: ResponseUsage, atMs: number | null) => {
-    const endMs = atMs ?? Date.now()
-    if (state.timestamp === null) state.timestamp = new Date(endMs).toISOString()
-    if (state.durationMs === null && state.startMs !== null) {
-      state.durationMs = Math.max(0, Math.round(endMs - state.startMs))
+    if (state.stopped) return
+    if (atMs !== null) {
+      // A provider event time is authoritative; a later event always advances the end.
+      state.endMs = state.endMs === null ? atMs : Math.max(state.endMs, atMs)
+      state.endFromEvent = true
+    } else if (state.endMs === null || !state.endFromEvent) {
+      // Otherwise the box's own clock; it advances only a turn of observed times, never a provider's.
+      state.endMs = state.endMs === null ? Date.now() : Math.max(state.endMs, Date.now())
     }
+    state.timestamp = new Date(state.endMs).toISOString()
+    if (state.startMs !== null) state.durationMs = Math.max(0, Math.round(state.endMs - state.startMs))
   }
 
   /** Merge the buckets a Claude event reports; a missing bucket leaves the value already known. */
@@ -516,8 +533,8 @@ export const makeTranscript = (
           claudeStreaming.set(parentToolId, id)
           const state = claudeUsageState(id, parentToolId)
           state.active = true
-          // The response begins here: its elapsed time runs from this boundary to its completion. A replayed
-          // start does not move it, and a repeated completion does not recompute it.
+          // The response begins here: its elapsed time runs from this boundary to its latest completion report.
+          // A replayed start does not move it.
           state.startMs ??= eventMillis(line, event) ?? Date.now()
           // Its input and cache reads are known now; output is not final until message_delta.
           if (isRecord(event.message) && isRecord(event.message.usage)) recordClaudeUsage(state, event.message.usage)
@@ -560,7 +577,9 @@ export const makeTranscript = (
         const state = id === null ? undefined : claudeResponseUsage.get(claudeUsageKey(id, parentToolId))
         if (state !== undefined) {
           state.active = false
-          completeClaudeResponse(state, eventMillis(line, event))
+          // The stop closes the response. It supplies an end only when no completion report did.
+          if (state.endMs === null) completeClaudeResponse(state, eventMillis(line, event))
+          state.stopped = true
         }
         const item = state === undefined || state.emitted ? null : emitClaudeUsage(state)
         if (id !== null) claudeStreaming.delete(parentToolId)
