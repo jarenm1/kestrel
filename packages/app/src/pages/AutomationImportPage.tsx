@@ -42,11 +42,13 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
   const [repo, setRepo] = useState<string | undefined>(shared.repo ?? undefined)
 
   const sharedRepo = shared.repo
-  const sharedRepoListed =
-    sharedRepo !== null &&
-    repos.data?.some((candidate) => candidate.fullName.toLowerCase() === sharedRepo.toLowerCase()) === true
-  // The sender's repository is only a default: if the recipient cannot read it, never create with it.
-  const sharedRepoUnavailable = sharedRepo !== null && !repos.isPending && !sharedRepoListed
+  // GitHub's repository list is one page sorted by update time, so ask about the shared repository directly.
+  const repoAccess = useQuery({
+    ...queries.githubRepo(sharedRepo ?? ""),
+    enabled: sharedRepo !== null,
+  })
+  // The sender's repository is only a default: if the recipient cannot access it, never create with it.
+  const sharedRepoUnavailable = sharedRepo !== null && repoAccess.isError
   useEffect(() => {
     if (sharedRepoUnavailable && repo === sharedRepo) setRepo(undefined)
   }, [repo, sharedRepo, sharedRepoUnavailable])
@@ -67,7 +69,7 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
     },
   })
 
-  const repoCheckPending = sharedRepo !== null && repos.isPending
+  const repoCheckPending = sharedRepo !== null && repoAccess.isPending
   const repoRequired = shared.trigger._tag === "github"
   const canImport =
     name.trim() !== "" && !repoCheckPending && (!repoRequired || repo !== undefined)
@@ -92,7 +94,12 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
 
           <div className="flex flex-col items-start gap-1.5">
             <span className="text-xs text-muted-foreground">Repository</span>
-            <RepoPicker value={repo} onChange={setRepo} disabled={repos.isPending} />
+            <RepoPicker
+              value={repo}
+              onChange={setRepo}
+              disabled={repos.isPending}
+              extraRepo={repoAccess.data}
+            />
             <span className="text-xs text-muted-foreground">
               {repoRequired
                 ? "GitHub automations need one of your repositories."
@@ -119,8 +126,8 @@ function AutomationImportForm({ shared }: { shared: AutomationShare }) {
 
           {sharedRepoUnavailable && (
             <Alert variant="warning">
-              The shared automation uses <span className="font-mono">{sharedRepo}</span>, which your GitHub connection
-              cannot read. Pick one of your repositories
+              Kestrel could not confirm that your GitHub connection can read{" "}
+              <span className="font-mono">{sharedRepo}</span>. Pick one of your repositories
               {repoRequired ? "." : " or import without one."}
             </Alert>
           )}

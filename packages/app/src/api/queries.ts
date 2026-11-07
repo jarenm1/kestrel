@@ -44,6 +44,7 @@ export const keys = {
   usageActivity: ["usageActivity"] as const,
   automations: ["automations"] as const,
   githubRepos: ["github-repos"] as const,
+  githubRepo: (repo: string) => ["github-repo", repo] as const,
   githubBranches: (repo: string) => ["github-branches", repo] as const,
   /** CLI sign-ins on the box the apps talk to. */
   cliAuth: ["cli-auth"] as const,
@@ -204,6 +205,8 @@ export const queries = {
   usageActivity: () => queryOptions({ queryKey: keys.usageActivity, queryFn: api.usageActivity }),
   automations: () => queryOptions({ queryKey: keys.automations, queryFn: api.listAutomations }),
   githubRepos: () => queryOptions({ queryKey: keys.githubRepos, queryFn: api.githubRepos }),
+  githubRepo: (repo: string) =>
+    queryOptions({ queryKey: keys.githubRepo(repo), queryFn: () => api.githubRepo(repo) }),
   githubBranches: (repo: string) =>
     queryOptions({ queryKey: keys.githubBranches(repo), queryFn: () => api.githubBranches(repo) }),
   cliAuth: () => queryOptions({ queryKey: keys.cliAuth, queryFn: api.cliAuth }),

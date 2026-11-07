@@ -40,6 +40,11 @@ export const ControlPaths = {
   /** GET -> GithubRepo[] for the signed-in user's GitHub connection. */
   githubRepos: "/api/github/repos",
   /**
+   * GET -> GithubRepo for one "owner/name"; 404 when GitHub is not connected or the repository is not visible. Unlike
+   * `githubRepos` (GitHub's first page, sorted by update time), this answers for any repository the connection can read.
+   */
+  githubRepo: (repo: string) => `/api/github/repos/${repo}`,
+  /**
    * GET -> string[]: branch names of a repository the signed-in user's GitHub connection can read ("owner/name"),
    * the default branch first. 404 when GitHub is not connected or the repository is not visible.
    */
