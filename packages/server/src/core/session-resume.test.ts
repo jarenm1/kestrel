@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { modelInfo } from "@cloudagents/protocol"
+import { modelHarness, modelInfo } from "@cloudagents/protocol"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -20,6 +20,8 @@ import { WorkspaceService } from "./workspace"
 interface Spawned {
   readonly prompt: string
   readonly resumeSession: string | null
+  readonly resumeHarness: string | undefined
+  readonly resumeContinuation: string | undefined
   readonly fresh: string
   readonly choice: AgentChoice
 }
@@ -52,7 +54,14 @@ const withCore = async (
     Layer.succeed(AgentHarness, {
       spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
         Effect.sync(() => {
-          spawned.push({ prompt: start.resume?.prompt ?? start.fresh, resumeSession: start.resume?.sessionId ?? null, fresh: start.fresh, choice })
+          spawned.push({
+            prompt: start.resume?.prompt ?? start.fresh,
+            resumeSession: start.resume?.sessionId ?? null,
+            resumeHarness: start.resume?.harness,
+            resumeContinuation: start.resume?.continuation,
+            fresh: start.fresh,
+            choice,
+          })
         }),
       steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
       cancel: (id: string) => testStore!.update((s) => {
@@ -255,3 +264,170 @@ test("resume is partitioned by provider and harness, not only by provider", asyn
   }))
 }, 20_000)
 
+
+test("a failed run invalidates only its own harness, and a restart interruption does not invalidate", async () => {
+  await withCore((core, store, spawned) => Effect.gen(function* () {
+    const now = new Date().toISOString()
+    yield* store.update((s) => {
+      const task = (id: string) => ({ id, owner: "owner", title: id, status: "idle" as const, createdAt: now, updatedAt: now, checkouts: [] })
+      s.tasks.push(task("other-harness-failure"), task("failed-harness"), task("return-to-failed"), task("restart-interrupted"), task("failed-with-session"))
+      type Status = "succeeded" | "failed" | "running"
+      const run = (id: string, taskId: string, harness: "claude" | "opencode", status: Status, extra: { interruptedByRestart?: boolean } = {}) => ({
+        id, taskId, prompt: id, status, startedAt: now, endedAt: status === "running" ? null : now,
+        exitCode: status === "failed" ? 1 : 0, provider: "anthropic" as const,
+        model: harness === "opencode" ? "claude-opus-5-5@opencode" as const : "claude-opus-5-5" as const,
+        harness, ...extra,
+      })
+      s.runs.push(
+        // A Claude session survives a later OpenCode failure; the failure still invalidates OpenCode's own resume.
+        run("C1", "other-harness-failure", "claude", "succeeded"),
+        run("O1", "other-harness-failure", "opencode", "succeeded"),
+        run("O2", "other-harness-failure", "opencode", "failed"),
+        // A Claude failure cannot have broken the OpenCode session.
+        run("O3", "failed-harness", "opencode", "succeeded"),
+        run("C2", "failed-harness", "claude", "failed"),
+        // Switching harnesses after a failed resume does not make that harness resumable again.
+        run("C3", "return-to-failed", "claude", "succeeded"),
+        run("C4", "return-to-failed", "claude", "failed"),
+        run("O4", "return-to-failed", "opencode", "succeeded"),
+        // A run stopped by a box restart never got to prove the session broken.
+        run("C5", "restart-interrupted", "claude", "succeeded"),
+        run("C6", "restart-interrupted", "claude", "failed", { interruptedByRestart: true }),
+        // A failure that happened after the CLI named its session can still be continued (usage-limit retries rely on it).
+        run("C7", "failed-with-session", "claude", "succeeded"),
+        run("C8", "failed-with-session", "claude", "failed"),
+      )
+      s.runSessions.push(
+        { runId: "C1", sessionId: "claude-C1", provider: "anthropic", harness: "claude", continuation: "cli-login:generation-1" },
+        { runId: "O1", sessionId: "opencode-O1", provider: "anthropic", harness: "opencode" },
+        { runId: "O3", sessionId: "opencode-O3", provider: "anthropic", harness: "opencode" },
+        { runId: "C3", sessionId: "claude-C3", provider: "anthropic", harness: "claude" },
+        { runId: "O4", sessionId: "opencode-O4", provider: "anthropic", harness: "opencode" },
+        { runId: "C5", sessionId: "claude-C5", provider: "anthropic", harness: "claude", continuation: "cli-login:generation-1" },
+        { runId: "C7", sessionId: "claude-C7", provider: "anthropic", harness: "claude" },
+        { runId: "C8", sessionId: "claude-C8", provider: "anthropic", harness: "claude" },
+      )
+      const message = (id: string, taskId: string, runId: string, text: string) =>
+        ({ id, taskId, runId, role: "user" as const, text, createdAt: now })
+      s.messages.push(
+        message("c1-user", "other-harness-failure", "C1", "Claude opening"),
+        message("o1-user", "other-harness-failure", "O1", "OpenCode work"),
+        message("o2-user", "other-harness-failure", "O2", "OpenCode failed resume"),
+        message("o3-user", "failed-harness", "O3", "OpenCode opening"),
+        message("c2-user", "failed-harness", "C2", "Claude failed resume"),
+        message("c3-user", "return-to-failed", "C3", "Claude opening"),
+        message("c4-user", "return-to-failed", "C4", "Claude failed resume"),
+        message("o4-user", "return-to-failed", "O4", "OpenCode work since"),
+        message("c5-user", "restart-interrupted", "C5", "Claude opening"),
+        message("c6-user", "restart-interrupted", "C6", "Interrupted by restart"),
+        message("c7-user", "failed-with-session", "C7", "Claude opening"),
+        message("c8-user", "failed-with-session", "C8", "Failed after naming a session"),
+      )
+      return Either.right(undefined)
+    })
+
+    const claude = { model: "claude-opus-5-5" as const }
+    const opencode = { model: "claude-opus-5-5@opencode" as const }
+    const finish = (taskId: string) => store.update((s) => {
+      for (const run of s.runs) if (run.taskId === taskId && run.status === "running") { run.status = "succeeded"; run.endedAt = now }
+      const task = s.tasks.find((t) => t.id === taskId)
+      if (task) task.status = "idle"
+      return Either.right(undefined)
+    })
+
+    // OpenCode failing to resume its own session invalidates only OpenCode: Claude's session still resumes.
+    yield* core.sendMessage("owner", "other-harness-failure", "Back on Claude", claude, [], false)
+    const survived = spawned.at(-1)!
+    expect(survived.resumeSession).toBe("claude-C1")
+    expect(survived.resumeHarness).toBe("claude")
+    expect(survived.resumeContinuation).toBe("cli-login:generation-1")
+    expect(survived.prompt).toContain("OpenCode work")
+    expect(survived.prompt).toContain("OpenCode failed resume")
+    expect(survived.prompt).not.toContain("Claude opening")
+
+    // A Claude failure does not poison the provider's OpenCode session.
+    yield* core.sendMessage("owner", "failed-harness", "Continue on OpenCode", opencode, [], false)
+    const isolated = spawned.at(-1)!
+    expect(isolated.resumeSession).toBe("opencode-O3")
+    expect(isolated.resumeHarness).toBe("opencode")
+    expect(isolated.prompt).toContain("Claude failed resume")
+    expect(isolated.prompt).not.toContain("OpenCode opening")
+
+    // Returning to the harness whose resume failed starts fresh with the whole conversation...
+    yield* core.sendMessage("owner", "return-to-failed", "Back on Claude", claude, [], false)
+    const fresh = spawned.at(-1)!
+    expect(fresh.resumeSession).toBeNull()
+    expect(fresh.prompt).toContain("Claude opening")
+    expect(fresh.prompt).toContain("Claude failed resume")
+    expect(fresh.prompt).toContain("OpenCode work since")
+    yield* finish("return-to-failed")
+    // ...while the other harness still resumes its own later session, unpoisoned.
+    yield* core.sendMessage("owner", "return-to-failed", "Continue on OpenCode", opencode, [], false)
+    const other = spawned.at(-1)!
+    expect(other.resumeSession).toBe("opencode-O4")
+    expect(other.resumeHarness).toBe("opencode")
+    expect(other.prompt).not.toContain("Claude failed resume")
+
+    // A restart interruption is not evidence that the session is broken.
+    yield* core.sendMessage("owner", "restart-interrupted", "After the restart", claude, [], false)
+    const restarted = spawned.at(-1)!
+    expect(restarted.resumeSession).toBe("claude-C5")
+    expect(restarted.resumeContinuation).toBe("cli-login:generation-1")
+    expect(restarted.prompt).toContain("Interrupted by restart")
+    expect(restarted.prompt).not.toContain("Claude opening")
+
+    // A failed run that had already named a session resumes it: that is how automatic retries continue.
+    yield* core.sendMessage("owner", "failed-with-session", "Retry the failed turn", claude, [], false)
+    const retried = spawned.at(-1)!
+    expect(retried.resumeSession).toBe("claude-C8")
+    expect(retried.resumeHarness).toBe("claude")
+    // That session already holds the failed turn, so only the new message is handed over.
+    expect(retried.prompt).not.toContain("Failed after naming a session")
+    expect(retried.prompt).toContain("Retry the failed turn")
+  }))
+}, 20_000)
+
+test("an automatic delivery keeps the thread's harness, and starts fresh when that harness's resume failed", async () => {
+  await withCore((core, store, spawned) => Effect.gen(function* () {
+    const now = new Date().toISOString()
+    yield* store.update((s) => {
+      const task = (id: string, status: "running" | "idle") => ({ id, owner: "owner", title: id, status, createdAt: now, updatedAt: now, checkouts: [] })
+      s.tasks.push(task("sender", "running"), task("switched", "idle"), task("failed-resume", "idle"))
+      s.runs.push(
+        { id: "sender-run", taskId: "sender", prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "openai" },
+        { id: "claude-run", taskId: "switched", prompt: "claude", status: "succeeded", startedAt: now, endedAt: now, exitCode: 0, provider: "anthropic", model: "claude-opus-5-5", harness: "claude" },
+        { id: "opencode-run", taskId: "switched", prompt: "opencode", status: "succeeded", startedAt: now, endedAt: now, exitCode: 0, provider: "anthropic", model: "claude-opus-5-5@opencode", harness: "opencode" },
+        { id: "opencode-old", taskId: "failed-resume", prompt: "opencode", status: "succeeded", startedAt: now, endedAt: now, exitCode: 0, provider: "anthropic", model: "claude-opus-5-5@opencode", harness: "opencode" },
+        { id: "opencode-broken", taskId: "failed-resume", prompt: "broken", status: "failed", startedAt: now, endedAt: now, exitCode: 1, provider: "anthropic", model: "claude-opus-5-5@opencode", harness: "opencode" },
+      )
+      s.runSessions.push(
+        { runId: "claude-run", sessionId: "claude-session", provider: "anthropic", harness: "claude" },
+        { runId: "opencode-run", sessionId: "opencode-session", provider: "anthropic", harness: "opencode" },
+        { runId: "opencode-old", sessionId: "opencode-old-session", provider: "anthropic", harness: "opencode" },
+      )
+      s.messages.push(
+        { id: "claude-message", taskId: "switched", runId: "claude-run", role: "user", text: "Claude context", createdAt: now },
+        { id: "opencode-message", taskId: "switched", runId: "opencode-run", role: "user", text: "OpenCode context", createdAt: now },
+        { id: "old-message", taskId: "failed-resume", runId: "opencode-old", role: "user", text: "OpenCode earlier", createdAt: now },
+        { id: "broken-message", taskId: "failed-resume", runId: "opencode-broken", role: "user", text: "OpenCode broken resume", createdAt: now },
+      )
+      return Either.right(undefined)
+    })
+
+    yield* core.sendToThread("sender", "switched", "Peer follow-up")
+    const switched = spawned.at(-1)!
+    // Dropping the route would silently hand the thread back to Claude Code's session store.
+    expect(modelHarness(switched.choice.model!)).toBe("opencode")
+    expect(switched.resumeSession).toBe("opencode-session")
+    expect(switched.resumeHarness).toBe("opencode")
+    expect(switched.prompt).not.toContain("OpenCode context")
+
+    yield* core.sendToThread("sender", "failed-resume", "Peer follow-up")
+    const failed = spawned.at(-1)!
+    // The harness stays OpenCode (the conversation ran there), but the failed resume is not retried.
+    expect(modelHarness(failed.choice.model!)).toBe("opencode")
+    expect(failed.resumeSession).toBeNull()
+    expect(failed.prompt).toContain("OpenCode earlier")
+    expect(failed.prompt).toContain("OpenCode broken resume")
+  }))
+}, 20_000)
