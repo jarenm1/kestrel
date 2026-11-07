@@ -277,6 +277,8 @@ export function ChatPanel({ taskId, taskStatus, messages, runs, loadError, archi
             repos={referenceRepos}
             activeRunId={activeRun?.id}
             activeRunProvider={activeRun?.provider}
+            activeRunModel={activeRun?.model}
+            activeRunHarness={activeRun?.harness}
             lastRun={threadChoiceRun(sortedRuns, messages)}
             onSend={(body, files) => send.mutateAsync({ body, files })}
             pending={send.isPending}

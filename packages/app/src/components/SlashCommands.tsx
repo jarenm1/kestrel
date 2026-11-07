@@ -1,6 +1,8 @@
 import { Loader2 } from "lucide-react"
 import { useEffect, useRef, type ReactNode } from "react"
-import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol"
+import type { HarnessCommand } from "@cloudagents/protocol"
+import { commandPrefixForHarness } from "@cloudagents/composer/commands"
+import type { ModelMentionHarness } from "@cloudagents/composer/models"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 
@@ -10,17 +12,11 @@ export const slashListboxId = (baseId: string) => `${baseId}-listbox`
 /** Id of one option; the active one goes in the textarea's `aria-activedescendant`. */
 export const slashOptionId = (baseId: string, index: number) => `${baseId}-option-${index}`
 
-const PROVIDER_LABELS: Record<ModelProvider, string> = {
-  anthropic: "Claude Code",
-  openai: "Codex",
-  openrouter: "Claude Code via OpenRouter",
-  zai: "Claude Code via Z.ai",
-  deepseek: "Claude Code via DeepSeek",
-  minimax: "Claude Code via MiniMax",
-  moonshot: "Claude Code via Kimi",
+const HARNESS_LABELS: Record<ModelMentionHarness, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
   opencode: "OpenCode",
-  "opencode-go": "OpenCode Go",
-  google: "Antigravity",
+  antigravity: "Antigravity",
 }
 
 function StateLine({ children }: { children: ReactNode }) {
@@ -47,7 +43,7 @@ export function SlashCommands({
   id,
   query,
   trigger,
-  provider,
+  harness,
   matches,
   chosenModel,
   pending,
@@ -63,7 +59,7 @@ export function SlashCommands({
   /** Text after the leading trigger, used in the empty state. */
   query: string
   /** Harness of the loaded list; determines invocation syntax and its accessible label. */
-  provider: ModelProvider | undefined
+  harness: ModelMentionHarness | undefined
   matches: readonly HarnessCommand[]
   /** False before a model is on offer: no harness exists to ask. */
   chosenModel: boolean
@@ -76,8 +72,8 @@ export function SlashCommands({
   const listboxId = slashListboxId(id)
   const selectedIndex = matches.length === 0 ? -1 : Math.min(activeIndex, matches.length - 1)
   const activeOption = useRef<HTMLDivElement>(null)
-  // Each command shows how it is typed: `/` for commands, `$` for Codex skills.
-  const noun = provider !== "openai" ? "slash commands" : trigger === "$" ? "skills" : "commands or skills"
+  // Each command shows how it is typed under this harness: `/` for commands, `$` for Codex skills.
+  const noun = harness !== "codex" ? "slash commands" : trigger === "$" ? "skills" : "commands or skills"
 
   // Keyboard navigation past the fold must bring the active option into the menu's view.
   useEffect(() => {
@@ -91,12 +87,12 @@ export function SlashCommands({
         <div
           id={listboxId}
           role="listbox"
-          aria-label={provider === undefined ? "Slash commands" : `${PROVIDER_LABELS[provider]} ${noun}`}
+          aria-label={harness === undefined ? "Slash commands" : `${HARNESS_LABELS[harness]} ${noun}`}
           className="max-h-72 overflow-y-auto"
         >
           {matches.map((command, index) => {
             const selected = index === selectedIndex
-            const prefix = harnessCommandPrefix(command, provider)
+            const prefix = commandPrefixForHarness(command, harness)
             return (
               <div
                 key={`${prefix}${command.name}`}

@@ -5,13 +5,14 @@ import { Schema } from "effect"
 import {
   GithubAutomationEvent,
   AgentModel,
-  connectedModelProviders,
   modelInfo,
   type Automation,
   type AutomationTrigger,
 } from "@cloudagents/protocol"
+import { modelDisplayName, offeredModelSections } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
+import { harnessById } from "@/lib/harnesses"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -56,13 +57,16 @@ export function AutomationEditDialog({ automation, onClose }: { automation: Auto
 function AutomationEditForm({ automation, onDone }: { automation: Automation; onDone: () => void }) {
   const queryClient = useQueryClient()
   const connections = useQuery(queries.connections())
+  const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
-  const providers = connectedModelProviders(connections.data ?? [])
+  const sections = connections.data
+    ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
+    : null
   const [model, setModel] = useState<AgentModel | null>(automation.model)
   const selected = model === null ? null : modelInfo(model)
-  const selectionListed = selected !== null && providers.some(
-    (provider) => shown[provider.id].some((candidate) => candidate.id === selected.id),
-  )
+  const selectionListed =
+    selected !== null &&
+    sections?.some((section) => section.models.some((candidate) => candidate.id === selected.id)) === true
   const trigger = automation.trigger
   const [name, setName] = useState(automation.name)
   const [prompt, setPrompt] = useState(automation.prompt)
@@ -128,11 +132,11 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button type="button" variant="secondary" className="justify-between">
-                {selected?.name ?? "Default (box model)"}
+                {selected === null ? "Default (box model)" : modelDisplayName(selected)}
                 <ChevronDown />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent className="max-h-(--radix-dropdown-menu-content-available-height) min-w-56 overflow-y-auto">
+            <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
               <DropdownMenuRadioGroup
                 value={model ?? ""}
                 onValueChange={(value) => {
@@ -142,15 +146,17 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
               >
                 <DropdownMenuRadioItem value="">Default (box model)</DropdownMenuRadioItem>
                 {selected !== null && !selectionListed && (
-                  <DropdownMenuRadioItem value={selected.id}>{selected.name} (saved)</DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value={selected.id}>{modelDisplayName(selected)} (saved)</DropdownMenuRadioItem>
                 )}
-                {providers.map((provider) => (
-                  <Fragment key={provider.id}>
+                {sections?.map((section) => (
+                  <Fragment key={`${section.harness}:${section.provider.id}`}>
                     <DropdownMenuSeparator />
-                    <DropdownMenuLabel>{provider.name}</DropdownMenuLabel>
-                    {shown[provider.id].map((candidate) => (
+                    <DropdownMenuLabel>
+                      {harnessById(section.harness).name} · {section.provider.name}
+                    </DropdownMenuLabel>
+                    {section.models.map((candidate) => (
                       <DropdownMenuRadioItem key={candidate.id} value={candidate.id}>
-                        {candidate.name}
+                        {modelDisplayName(candidate)}
                       </DropdownMenuRadioItem>
                     ))}
                   </Fragment>
@@ -158,7 +164,7 @@ function AutomationEditForm({ automation, onDone }: { automation: Automation; on
               </DropdownMenuRadioGroup>
               {connections.isPending && <DropdownMenuLabel>Loading models…</DropdownMenuLabel>}
               {connections.error && <DropdownMenuLabel>Could not load connected models.</DropdownMenuLabel>}
-              {connections.isSuccess && providers.length === 0 && (
+              {connections.isSuccess && sections !== null && sections.length === 0 && (
                 <DropdownMenuLabel>Connect Anthropic or OpenAI to choose a model.</DropdownMenuLabel>
               )}
             </DropdownMenuContent>

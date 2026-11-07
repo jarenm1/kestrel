@@ -4,7 +4,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type AgentEffort,
   type AgentModel,
-  connectedModelProviders,
   modelInfo,
   type TextGenerationSettings,
   type ThreadSettings,
@@ -20,6 +19,7 @@ import { Card } from "@/components/ui/Card";
 import { Textarea } from "@/components/ui/Input";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
+import { offeredModelSections } from "@cloudagents/composer/models";
 import { errorText } from "@/lib/format";
 import { pendingSaves, trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
@@ -79,6 +79,7 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
   const queries = useMemo(() => createQueries(api), [api]);
   const client = useQueryClient();
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
   const settings = useQuery(queries.textGenerationSettings());
   const shown = useShownModels();
   const [form, setForm] = useState<TextGenerationSettings>();
@@ -156,11 +157,8 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
     trackSaveQueue(api.boxScope, queue);
   }
 
-  const connected = connections.data ? connectedModelProviders(connections.data) : [];
   const modelSections = connections.data
-    ? connected
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((section) => section.models.length > 0)
+    ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
     : null;
   const model = form ? (form.model === null ? undefined : modelInfo(form.model)) : undefined;
   const effort = form === undefined ? undefined : form.effort ?? model?.defaultEffort ?? model?.efforts[0];

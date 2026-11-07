@@ -196,6 +196,8 @@ export function ChatPanel({ taskId, box, taskStatus, messages, runs, archivedTas
           context={context}
           activeRunId={activeRun?.id}
           activeRunProvider={activeRun?.provider}
+          activeRunModel={activeRun?.model}
+          activeRunHarness={activeRun?.harness}
           lastRun={threadChoiceRun(sortedRuns, messages)}
           onSend={(body) => send.mutateAsync({ api, taskId, body })}
           pending={send.isPending}

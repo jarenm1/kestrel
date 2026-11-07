@@ -1,4 +1,5 @@
-import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol"
+import { type HarnessCommand } from "@cloudagents/protocol"
+import type { ModelMentionHarness } from "./models"
 
 /** App actions run on selection or submission; harness commands only complete the draft on selection. */
 export const APP_COMMANDS = [
@@ -9,16 +10,30 @@ export type AppCommand = (typeof APP_COMMANDS)[number]
 /** Adding an app action requires an implementation on every composer host. */
 export type AppCommandHandlers = Record<AppCommand["name"], () => void>
 
-/** Resolve by invocation, not object identity: a harness's /usage is the same app-owned action. */
-export function appCommandOf(command: HarnessCommand, provider: ModelProvider | undefined): AppCommand | undefined {
-  if (harnessCommandPrefix(command, provider) !== "/") return undefined
+/**
+ * How a command is typed under its actual harness. A catalog route can run a provider's models in another harness, so
+ * the harness — not the credential provider — decides an unprefixed command's invocation.
+ */
+export const commandPrefixForHarness = (
+  command: HarnessCommand,
+  harness: ModelMentionHarness | undefined,
+): "/" | "$" => command.prefix ?? (harness === "codex" ? "$" : "/")
+
+export function appCommandOfHarness(
+  command: HarnessCommand,
+  harness: ModelMentionHarness | undefined,
+): AppCommand | undefined {
+  if (commandPrefixForHarness(command, harness) !== "/") return undefined
   const name = command.name.toLowerCase()
   return APP_COMMANDS.find((candidate) => candidate.name === name)
 }
 
 /** App actions are always available and take precedence over same-named slash commands, but not $skills. */
-export function withAppCommands(commands: readonly HarnessCommand[], provider: ModelProvider | undefined): readonly HarnessCommand[] {
-  return [...APP_COMMANDS, ...commands.filter((command) => appCommandOf(command, provider) === undefined)]
+export function withAppCommandsForHarness(
+  commands: readonly HarnessCommand[],
+  harness: ModelMentionHarness | undefined,
+): readonly HarnessCommand[] {
+  return [...APP_COMMANDS, ...commands.filter((command) => appCommandOfHarness(command, harness) === undefined)]
 }
 
 /** Consume the leading token and gap. A menu selection may complete a prefix, but must still match the live token. */

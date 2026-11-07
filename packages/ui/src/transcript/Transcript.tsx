@@ -34,7 +34,7 @@ function UserMessageText({ text }: { text: string }) {
         if (segment.type === "text") return <Fragment key={index}>{segment.text}</Fragment>
         if (segment.type === "model") {
           const mention = segment.mention
-          const logo = MODEL_LOGOS[mention.provider]
+          const logo = MODEL_LOGOS[mention.harness]
           return (
             <span
               key={index}

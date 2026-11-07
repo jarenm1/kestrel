@@ -1,9 +1,14 @@
 import {
   AGENT_MODELS,
   MODEL_PROVIDERS,
+  connectedModelProviders,
+  modelHarness,
   type AgentModel,
+  type Connection,
+  type ModelHarness,
   type ModelInfo,
   type ModelProvider,
+  type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import {
   githubReferenceLabel,
@@ -11,14 +16,24 @@ import {
   type GithubDraftSegment,
 } from "./reference/githubReference"
 
-/** The agent CLI a provider's models run in. */
-export type ModelMentionHarness = "claude" | "codex" | "opencode" | "antigravity"
+/** The agent CLI a model's catalog route runs in. */
+export type ModelMentionHarness = ModelHarness
+
+/** The picker rail's order, independent of the catalog's provider order. */
+const HARNESS_ORDER: readonly ModelMentionHarness[] = ["claude", "codex", "opencode", "antigravity"]
+
+const HARNESS_NAMES: Record<ModelMentionHarness, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  opencode: "OpenCode",
+  antigravity: "Antigravity",
+}
 
 /** One model as a mention: exactly what the harness needs to delegate to it, plus what the menu shows. */
 export interface ModelMention {
   readonly id: AgentModel
   readonly provider: ModelProvider
-  /** Display name, as the picker shows it. */
+  /** Display name, without a route suffix; the harness and credential are shown beside it. */
   readonly name: string
   /** Provider-qualified id (`anthropic/claude-opus-5`), with any provider prefix already in the id kept once. */
   readonly slug: string
@@ -26,47 +41,113 @@ export interface ModelMention {
   readonly harnessName: string
 }
 
-/** A model's provider decides which harness runs it: gateways run through Claude Code, OpenAI through codex. */
-const PROVIDER_HARNESS: Record<ModelProvider, { readonly harness: ModelMentionHarness; readonly name: string }> = {
-  anthropic: { harness: "claude", name: "Claude Code" },
-  openai: { harness: "codex", name: "Codex" },
-  openrouter: { harness: "claude", name: "Claude Code" },
-  zai: { harness: "claude", name: "Claude Code" },
-  deepseek: { harness: "claude", name: "Claude Code" },
-  minimax: { harness: "claude", name: "Claude Code" },
-  moonshot: { harness: "claude", name: "Claude Code" },
-  opencode: { harness: "opencode", name: "OpenCode" },
-  "opencode-go": { harness: "opencode", name: "OpenCode" },
-  google: { harness: "antigravity", name: "Antigravity" },
+/** Whether an id names an explicit non-default harness route (`base@harness`) rather than a base catalog entry. */
+export const isRouteModel = (model: Pick<ModelInfo, "id">): boolean => model.id.includes("@")
+
+/** A route's display name without the catalog's "via <Harness>" suffix; the picker groups by harness already. */
+export const modelDisplayName = (model: ModelInfo): string => {
+  if (!isRouteModel(model)) return model.name
+  const base = AGENT_MODELS.find((candidate) => candidate.id === model.id.slice(0, model.id.lastIndexOf("@")))
+  return base?.name ?? model.name
 }
 
-/** The harness that runs a provider's models, with the name the picker and mention chips show. */
-export function modelHarnessOf(provider: ModelProvider): { readonly harness: ModelMentionHarness; readonly name: string } {
-  return PROVIDER_HARNESS[provider]
+/** The harness a model's route runs, with the name the picker and mention chips show. */
+export function modelHarnessOf(model: ModelInfo): { readonly harness: ModelMentionHarness; readonly name: string } {
+  const harness = modelHarness(model.id) as ModelMentionHarness
+  return { harness, name: HARNESS_NAMES[harness] }
 }
 
 /** `opencode/big-pickle` is already provider-qualified; `claude-opus-5` gains its provider. */
 export const modelMentionOf = (model: ModelInfo): ModelMention => {
-  const harness = modelHarnessOf(model.provider)
+  const harness = modelHarnessOf(model)
   return {
     id: model.id,
     provider: model.provider,
-    name: model.name,
+    name: modelDisplayName(model),
     slug: model.id.startsWith(`${model.provider}/`) ? model.id : `${model.provider}/${model.id}`,
     harness: harness.harness,
     harnessName: harness.name,
   }
 }
 
+/** A connected credential with its models under the actual harness they run (a provider may appear more than once). */
+export interface ModelSection {
+  readonly provider: ModelProviderInfo
+  readonly harness: ModelMentionHarness
+  readonly models: readonly ModelInfo[]
+}
+
 /**
- * Characters a `@` token continues through. Model ids and slugs use letters, digits and these marks; whitespace and
- * punctuation end the token, so `@claude,` still offers Claude models and an email address never opens the menu.
+ * Connections a route may use for its credential. A vendor API key may run its provider's models in another harness;
+ * a Claude or ChatGPT subscription is native-only. Every other provider's route uses the connection that unlocks it
+ * (the gateway key, or OpenCode Go's saved key).
  */
-const MENTION_TOKEN = /[\p{L}\p{N}._/[\]-]/u
+const routeConnectionIds = (provider: ModelProvider): readonly string[] => {
+  if (provider === "anthropic" || provider === "openai") return [provider]
+  return MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.connections ?? []
+}
+
+/**
+ * Whether a catalog route is offered. Base ids depend on their provider's connection (as before). A route needs the
+ * selected box to launch its harness (`modelHarnesses`, absent on boxes too old to route) and a credential that may
+ * use it: an API key for Anthropic/OpenAI, never their subscription logins.
+ */
+export const modelRouteAvailable = (
+  model: ModelInfo,
+  connections: readonly Connection[],
+  modelHarnesses: readonly ModelMentionHarness[] | undefined,
+): boolean => {
+  if (!isRouteModel(model)) return true
+  const harness = modelHarness(model.id)
+  if (modelHarnesses === undefined || !modelHarnesses.some((candidate) => candidate === harness)) return false
+  const required = routeConnectionIds(model.provider)
+  if (required.length === 0) return false
+  if (model.provider === "anthropic" || model.provider === "openai") {
+    return connections.some(
+      (connection) =>
+        connection.provider === model.provider &&
+        connection.kind === "apikey" &&
+        connection.connected &&
+        connection.available !== false,
+    )
+  }
+  return connections.some(
+    (connection) =>
+      required.includes(connection.provider) && connection.connected && connection.available !== false,
+  )
+}
+
+/**
+ * The connected providers' shown models, split by the harness each model's route runs. `modelHarnesses` is the box's
+ * launchable harness list; route entries stay hidden until the box reports the harness and the credential may use it.
+ */
+export const offeredModelSections = (
+  connections: readonly Connection[],
+  shown: Readonly<Record<ModelProvider, readonly ModelInfo[]>>,
+  modelHarnesses: readonly ModelMentionHarness[] | undefined,
+): readonly ModelSection[] => {
+  const sections: ModelSection[] = []
+  for (const provider of connectedModelProviders(connections)) {
+    const models = shown[provider.id].filter((model) => modelRouteAvailable(model, connections, modelHarnesses))
+    for (const harness of HARNESS_ORDER) {
+      const harnessModels = models.filter((model) => modelHarness(model.id) === harness)
+      if (harnessModels.length > 0) sections.push({ provider, harness, models: harnessModels })
+    }
+  }
+  return sections
+}
+
+/**
+ * Characters a `@` token continues through. Model ids and slugs use letters, digits and these marks; `@` is also the
+ * route separator (`base@harness`), so a typed or backspaced route id stays one token. Whitespace and punctuation end
+ * the token, so `@claude,` still offers Claude models and an email address never opens the menu.
+ */
+const MENTION_TOKEN = /[\p{L}\p{N}._/[\]@-]/u
 
 /**
  * The `@query` token under the caret. `start` is the `@`, `end` the token's end even when the caret is inside it (so
- * picking replaces the whole token). The `@` has to begin a word: `me@example.com` and `word@x` are not mentions.
+ * picking replaces the whole token). The `@` has to begin a word: `me@example.com` and `word@x` are not mentions, and
+ * a second `@` immediately after the marker (`@@opus`) is not one either.
  */
 export function findModelMentionTrigger(
   text: string,
@@ -74,11 +155,16 @@ export function findModelMentionTrigger(
 ): { readonly start: number; readonly end: number; readonly query: string } | undefined {
   if (!Number.isInteger(caret) || caret < 1 || caret > text.length) return undefined
   let start = caret
-  while (start > 0 && MENTION_TOKEN.test(text[start - 1]!)) start--
+  while (start > 0) {
+    const character = text[start - 1]!
+    // The marker itself is not part of the token body; a route's trailing `@harness` is.
+    if (character === "@" && (start - 1 === 0 || /\s/.test(text[start - 2]!))) break
+    if (!MENTION_TOKEN.test(character)) break
+    start--
+  }
   // `@` sits immediately before the token; an empty query is the bare `@`.
   const hash = start - 1
-  if (hash < 0 || text[hash] !== "@") return undefined
-  if (hash > 0 && !/\s/.test(text[hash - 1]!)) return undefined
+  if (hash < 0 || text[hash] !== "@" || text[hash + 1] === "@") return undefined
   let end = caret
   while (end < text.length && MENTION_TOKEN.test(text[end]!)) end++
   return { start: hash, end, query: text.slice(start, end) }

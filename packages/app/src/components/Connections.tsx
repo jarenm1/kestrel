@@ -13,6 +13,7 @@ import {
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
 import { ChevronDown, Plus } from "lucide-react"
+import { isRouteModel, modelDisplayName, modelHarnessOf } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -161,7 +162,7 @@ function HarnessRow({ connection, children }: { connection: Connection; children
             connected={connection.connected}
             expired={connection.expired === true}
           />
-          {modelProvider && <ModelPicker provider={modelProvider} />}
+          {modelProvider && <ModelPicker provider={modelProvider} allowRoutes={isApiKeyConnection(connection)} />}
         </div>
         {children}
       </div>
@@ -176,16 +177,36 @@ function HarnessRow({ connection, children }: { connection: Connection; children
 const MODEL_LIST_ROWS = 10
 const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 7rem))"
 
-/** Toggles which of the provider's models the chat's model picker offers, with a search box over the list. */
-function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
+/**
+ * Toggles which of the provider's models the chat's model picker offers, with a search box over the list. Routes appear
+ * under the harness they run; a subscription row may only pick its native models, and a route the selected box cannot
+ * launch is not offered at all.
+ */
+function ModelPicker({ provider, allowRoutes }: { provider: ModelProviderInfo; allowRoutes: boolean }) {
+  const capabilities = useQuery(queries.capabilities())
+  const modelHarnesses = capabilities.data?.modelHarnesses
   const all = providerModels(provider.id)
+  const offerable = all.filter(
+    (m) =>
+      (allowRoutes || !isRouteModel(m)) &&
+      (!isRouteModel(m) || modelHarnesses?.some((harness) => harness === modelHarnessOf(m).harness) === true),
+  )
   const shown = useShownModels()[provider.id]
   const shownIds = new Set(shown.map((m) => m.id))
-  const menu = useFilterMenu(all, (m) => `${m.name} ${m.id}`, (m) => toggle(m.id, !shownIds.has(m.id)), {
-    keepOpen: true,
-  })
+  const shownCount = offerable.filter((m) => shownIds.has(m.id)).length
+  const menu = useFilterMenu(
+    offerable,
+    (m) => `${modelDisplayName(m)} ${m.name} ${m.id}`,
+    (m) => toggle(m.id, !shownIds.has(m.id)),
+    { keepOpen: true },
+  )
+  const groups = HARNESSES.map((harness) => ({
+    harness,
+    models: menu.matches.filter((m) => modelHarnessOf(m).harness === harness.id),
+  })).filter((group) => group.models.length > 0)
 
   function toggle(id: AgentModel, on: boolean) {
+    // Write the full list, so a route hidden by the other connection row keeps its stored choice.
     setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
   }
 
@@ -198,7 +219,7 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
           className="ml-auto"
           aria-label={`Choose ${provider.name} models shown in chat`}
         >
-          {shown.length} of {all.length} shown
+          {shownCount} of {offerable.length} shown
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
@@ -216,19 +237,24 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
         <div
           ref={menu.listRef}
           className="overflow-y-auto"
-          style={all.length > MODEL_LIST_ROWS ? { height: MODEL_LIST_HEIGHT } : { maxHeight: MODEL_LIST_HEIGHT }}
+          style={offerable.length > MODEL_LIST_ROWS ? { height: MODEL_LIST_HEIGHT } : { maxHeight: MODEL_LIST_HEIGHT }}
         >
-          {menu.matches.map((m) => (
-            <DropdownMenuCheckboxItem
-              key={m.id}
-              checked={shownIds.has(m.id)}
-              // Keeps the menu open so several models can be toggled in one go.
-              onSelect={(e) => e.preventDefault()}
-              onCheckedChange={(on) => toggle(m.id, on)}
-              {...filterItemProps}
-            >
-              <span className="min-w-0 flex-1 truncate">{m.name}</span>
-            </DropdownMenuCheckboxItem>
+          {groups.map((group) => (
+            <div key={group.harness.id}>
+              <DropdownMenuLabel className="text-muted-foreground">{group.harness.name}</DropdownMenuLabel>
+              {group.models.map((m) => (
+                <DropdownMenuCheckboxItem
+                  key={m.id}
+                  checked={shownIds.has(m.id)}
+                  // Keeps the menu open so several models can be toggled in one go.
+                  onSelect={(e) => e.preventDefault()}
+                  onCheckedChange={(on) => toggle(m.id, on)}
+                  {...filterItemProps}
+                >
+                  <span className="min-w-0 flex-1 truncate">{modelDisplayName(m)}</span>
+                </DropdownMenuCheckboxItem>
+              ))}
+            </div>
           ))}
           {menu.matches.length === 0 && <DropdownMenuLabel>No model matches “{menu.query}”.</DropdownMenuLabel>}
         </div>
@@ -292,7 +318,7 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
           <Button variant="soft" onClick={onSuccess}>Check again</Button>
-          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
+          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} allowRoutes />}
         </div>
       ) : (
         <form className="flex flex-wrap items-center gap-2" onSubmit={submit}>
@@ -319,7 +345,7 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
               Remove
             </Button>
           )}
-          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} />}
+          {connection.connected && modelProvider && <ModelPicker provider={modelProvider} allowRoutes />}
         </form>
       )}
       {error && <Alert>{errorText(error)}</Alert>}

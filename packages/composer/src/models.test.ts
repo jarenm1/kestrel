@@ -1,11 +1,22 @@
 import { describe, expect, test } from "bun:test"
-import { AGENT_MODELS, modelInfo } from "@cloudagents/protocol"
+import {
+  AGENT_MODELS,
+  MODEL_PROVIDERS,
+  modelInfo,
+  type Connection,
+  type ModelInfo,
+  type ModelProvider,
+} from "@cloudagents/protocol"
 import {
   filterMentionModels,
   findModelMentionTrigger,
+  isRouteModel,
+  modelDisplayName,
   modelHarnessOf,
   modelMentionMarkdown,
   modelMentionOf,
+  modelRouteAvailable,
+  offeredModelSections,
   parseComposerDraft,
   parseModelMentionMarkdown,
 } from "./models"
@@ -14,11 +25,44 @@ import { composerViewOf } from "./view"
 
 const reference: GithubReference = { repo: "acme/kestrel", kind: "pr", number: 123 }
 
+const apiKey = (provider: string, connected = true): Connection => ({
+  provider,
+  label: provider,
+  kind: "apikey",
+  connected,
+  account: null,
+  available: true,
+})
+
+const cli = (provider: string, connected = true, available = true): Connection => ({
+  provider,
+  label: provider,
+  kind: "cli",
+  connected,
+  account: null,
+  available,
+})
+
+/** A catalog route, which CoreRouting adds for every documented provider/harness pair. */
+const routeOf = (predicate: (model: ModelInfo) => boolean): ModelInfo => {
+  const route = AGENT_MODELS.find((model) => isRouteModel(model) && predicate(model))
+  if (route === undefined) throw new Error("expected a catalog route")
+  return route
+}
+
+const allShown = (): Record<ModelProvider, readonly ModelInfo[]> =>
+  Object.fromEntries(
+    MODEL_PROVIDERS.map((provider) => [
+      provider.id,
+      AGENT_MODELS.filter((model) => model.provider === provider.id),
+    ]),
+  ) as unknown as Record<ModelProvider, readonly ModelInfo[]>
+
 describe("modelMentionOf", () => {
   test("names the model, its provider-qualified slug and the harness that runs it", () => {
-    expect(modelHarnessOf("anthropic")).toEqual({ harness: "claude", name: "Claude Code" })
-    expect(modelHarnessOf("opencode-go")).toEqual({ harness: "opencode", name: "OpenCode" })
-    expect(modelHarnessOf("google")).toEqual({ harness: "antigravity", name: "Antigravity" })
+    expect(modelHarnessOf(modelInfo("claude-opus-5"))).toEqual({ harness: "claude", name: "Claude Code" })
+    expect(modelHarnessOf(modelInfo("opencode-go/kimi-k3.1-pro"))).toEqual({ harness: "opencode", name: "OpenCode" })
+    expect(modelHarnessOf(modelInfo("gemini-3.8-flash"))).toEqual({ harness: "antigravity", name: "Antigravity" })
     expect(modelMentionOf(modelInfo("claude-opus-5"))).toEqual({
       id: "claude-opus-5",
       provider: "anthropic",
@@ -32,6 +76,18 @@ describe("modelMentionOf", () => {
       harness: "antigravity",
       harnessName: "Antigravity",
     }))
+  })
+
+  test("uses a route's actual harness and its base display name", () => {
+    const route = routeOf((model) => model.provider === "anthropic")
+    const base = modelInfo(route.id.slice(0, route.id.lastIndexOf("@")) as typeof route.id)
+    const mention = modelMentionOf(route)
+    expect(mention.id).toBe(route.id)
+    expect(mention.harness).toBe(modelHarnessOf(route).harness)
+    expect(mention.name).toBe(base.name)
+    expect(modelDisplayName(route)).toBe(base.name)
+    expect(mention.slug).toBe(`anthropic/${route.id}`)
+    expect(parseModelMentionMarkdown(modelMentionMarkdown(route))?.mention).toEqual(mention)
   })
 
   test("keeps an id's own provider prefix instead of repeating it", () => {
@@ -73,6 +129,24 @@ describe("findModelMentionTrigger", () => {
     expect(findModelMentionTrigger("Pick @glm-5.3[1m] now", 11)).toEqual({ start: 5, end: 17, query: "glm-5.3[1m]" })
     // Query comes from the whole token, not just the part before the caret.
     expect(findModelMentionTrigger("@open/go", 6)).toEqual({ start: 0, end: 8, query: "open/go" })
+  })
+
+  test("keeps a route id's @harness suffix in one typed or backspaced token", () => {
+    const route = routeOf((model) => model.provider === "anthropic")
+    const typed = `@${route.id}`
+    expect(findModelMentionTrigger(typed, typed.length)).toEqual({
+      start: 0,
+      end: typed.length,
+      query: route.id,
+    })
+    expect(findModelMentionTrigger(`Ask ${typed}`, 4 + typed.length)).toEqual({
+      start: 4,
+      end: 4 + typed.length,
+      query: route.id,
+    })
+    // The suffix is part of the token, but the marker still has to begin a word.
+    expect(findModelMentionTrigger(`me@${route.id}`, 3 + route.id.length)).toBeUndefined()
+    expect(findModelMentionTrigger(`@@${route.id}`, 2 + route.id.length)).toBeUndefined()
   })
 
   test("never treats an email address or a word-embedded @ as a mention", () => {
@@ -138,6 +212,47 @@ describe("filterMentionModels", () => {
     expect(filterMentionModels(models, "claude codex")).toEqual([])
     expect(filterMentionModels(models, "nothing-like-this")).toEqual([])
     expect(filterMentionModels([models[3]!], "opus")).toEqual([])
+  })
+})
+
+describe("catalog route availability", () => {
+  const anthropicRoute = routeOf((model) => model.provider === "anthropic" && modelHarnessOf(model).harness === "opencode")
+
+  test("routes need the selected box's launchable harness list", () => {
+    expect(modelRouteAvailable(modelInfo("claude-opus-5"), [], undefined)).toBe(true)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic")], undefined)).toBe(false)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic")], ["claude"])).toBe(false)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic")], ["claude", "opencode"])).toBe(true)
+  })
+
+  test("Anthropic and OpenAI routes require their own API key, never a subscription login", () => {
+    expect(modelRouteAvailable(anthropicRoute, [cli("claude-cli")], ["opencode"])).toBe(false)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic", false)], ["opencode"])).toBe(false)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic")], ["opencode"])).toBe(true)
+    expect(modelRouteAvailable(anthropicRoute, [apiKey("anthropic"), cli("claude-cli")], ["opencode"])).toBe(true)
+  })
+
+  test("gateway and OpenCode Go routes use their own credential connection", () => {
+    const gatewayRoute = routeOf(
+      (model) => model.provider === "openrouter" && modelHarnessOf(model).harness === "codex",
+    )
+    expect(modelRouteAvailable(gatewayRoute, [apiKey("openrouter")], ["codex"])).toBe(true)
+    expect(modelRouteAvailable(gatewayRoute, [], ["codex"])).toBe(false)
+    const goRoute = routeOf((model) => model.provider === "opencode-go")
+    expect(modelRouteAvailable(goRoute, [cli("opencode-go")], [modelHarnessOf(goRoute).harness])).toBe(true)
+  })
+
+  test("sections split a provider by actual harness and hide unavailable routes", () => {
+    const sections = offeredModelSections(
+      [apiKey("anthropic")],
+      allShown(),
+      ["claude", "opencode"],
+    )
+    expect(sections.every((section) => section.provider.id === "anthropic")).toBe(true)
+    expect(sections.find((section) => section.harness === "claude")).toBeDefined()
+    expect(sections.find((section) => section.harness === "opencode")?.models ?? []).toContainEqual(anthropicRoute)
+    const restricted = offeredModelSections([cli("claude-cli")], allShown(), ["claude", "opencode"])
+    expect(restricted.every((section) => section.harness === "claude")).toBe(true)
   })
 })
 

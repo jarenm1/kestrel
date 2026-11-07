@@ -1,5 +1,5 @@
-import { modelHarnessOf } from "@cloudagents/composer/models";
-import type { ModelProvider } from "@cloudagents/protocol";
+import type { ModelInfo, ModelProvider } from "@cloudagents/protocol";
+import { modelHarnessOf, type ModelMentionHarness } from "@cloudagents/composer/models";
 import type { HarnessId } from "@cloudagents/ui/harness-logos";
 
 /** An agent CLI the box runs models in, as the model picker's rail and search labels show it. */
@@ -16,5 +16,28 @@ export const HARNESSES: readonly Harness[] = [
   { id: "antigravity", name: "Antigravity" },
 ];
 
-export const harnessOf = (provider: ModelProvider): Harness =>
-  HARNESSES.find((harness) => harness.id === modelHarnessOf(provider).harness)!;
+export const harnessById = (id: ModelMentionHarness): Harness =>
+  HARNESSES.find((harness) => harness.id === id)!;
+
+/** The harness a model's catalog route actually runs, not its credential provider's default. */
+export const harnessForModel = (model: ModelInfo): Harness => harnessById(modelHarnessOf(model).harness);
+
+/**
+ * The harness a provider ran before catalog routes existed. Only for runs recorded without a model (or route); every
+ * current pick reads the model's actual harness through `harnessForModel`.
+ */
+const LEGACY_PROVIDER_HARNESS: Record<ModelProvider, ModelMentionHarness> = {
+  anthropic: "claude",
+  openai: "codex",
+  openrouter: "claude",
+  zai: "claude",
+  deepseek: "claude",
+  minimax: "claude",
+  moonshot: "claude",
+  opencode: "opencode",
+  "opencode-go": "opencode",
+  google: "antigravity",
+};
+
+export const harnessForProvider = (provider: ModelProvider): Harness =>
+  harnessById(LEGACY_PROVIDER_HARNESS[provider]);

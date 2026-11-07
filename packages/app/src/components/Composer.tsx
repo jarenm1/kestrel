@@ -18,11 +18,12 @@ import {
   GithubRepoSlug,
   MAX_ATTACHMENT_BYTES,
   connectedModelProviders,
-  harnessCommandPrefix,
+  modelInfo,
   resolveAgentChoice,
   type ContextUsage,
   type HarnessCommand,
   type Message,
+  type ModelHarness,
   type ModelInfo,
   type Run,
   type SendMessageBody,
@@ -35,9 +36,10 @@ import { Button } from "@cloudagents/ui/button"
 import { ModelPicker, ThinkingPicker, effortOptions, type ModelSection } from "@/components/AgentPickers"
 import { SlashCommands, slashListboxId, slashOptionId } from "@/components/SlashCommands"
 import {
-  appCommandOf,
+  appCommandOfHarness,
+  commandPrefixForHarness,
   matchAppCommand,
-  withAppCommands,
+  withAppCommandsForHarness,
   type AppCommand,
   type AppCommandHandlers,
 } from "@cloudagents/composer/commands"
@@ -47,7 +49,13 @@ import {
   type ComposerEditorHandle,
   type ComposerEditorView,
 } from "@cloudagents/composer/editor"
-import { findModelMentionTrigger, filterMentionModels } from "@cloudagents/composer/models"
+import {
+  filterMentionModels,
+  findModelMentionTrigger,
+  isRouteModel,
+  modelRouteAvailable,
+  offeredModelSections,
+} from "@cloudagents/composer/models"
 import { ModelMentions } from "@/components/ModelMentions"
 import { GithubReferenceMenu } from "@/components/GithubReferenceMenu"
 import { useOpenUsagePanel } from "@/components/UsagePanel"
@@ -59,17 +67,16 @@ import { useShownModels } from "@/hooks/useShownModels"
 import { useStoredChoice } from "@/hooks/useStoredChoice"
 import { useStoredDraft } from "@/hooks/useStoredDraft"
 import { usePromptHistory } from "@/hooks/usePromptHistory"
-import { harnessOf } from "@/lib/harnesses"
+import { HARNESSES, harnessForModel, harnessForProvider } from "@/lib/harnesses"
 import { cn } from "@/lib/utils"
 import { errorText } from "@/util"
 import { ContextBar } from "./ContextBar"
 import { Markdown } from "@cloudagents/ui/markdown"
 import { MessageAttachments } from "@cloudagents/ui/message-attachments"
 
-const MODEL_LOGOS = Object.fromEntries(ModelProvider.literals.map((provider) => {
-  const harness = harnessOf(provider)
-  return [provider, { src: harness.logo, monochrome: harness.monochrome }]
-}))
+const MODEL_LOGOS = Object.fromEntries(
+  HARNESSES.map((harness) => [harness.id, { src: harness.logo, monochrome: harness.monochrome }]),
+)
 
 /** A file waiting to go with the next message: a thumbnail for images, else its name; the cross removes it. */
 function PendingFile({ file, onRemove }: { file: File; onRemove: () => void }) {
@@ -222,6 +229,10 @@ interface Props {
   activeRunId?: string | undefined
   /** That turn's provider; authoritative over the picker, including for the `$` trigger. */
   activeRunProvider?: ModelProvider | undefined
+  /** That turn's model, whose route names its actual harness (a provider can run under another harness). */
+  activeRunModel?: AgentModel | undefined
+  /** That turn's recorded harness; newer runs store it even when the model id would need parsing. */
+  activeRunHarness?: ModelHarness | undefined
   /** The run from `threadChoiceRun`: the pickers show its choice until a different one is picked. */
   lastRun?: Pick<Run, "model" | "effort"> | undefined
   placeholder?: string
@@ -256,6 +267,8 @@ export function Composer({
   taskId,
   activeRunId,
   activeRunProvider,
+  activeRunModel,
+  activeRunHarness,
   lastRun,
   placeholder,
   autoFocus,
@@ -301,6 +314,7 @@ export function Composer({
   const [defaultModel] = useStoredChoice("kestrel.model", AgentModel)
   const [defaultEffort] = useStoredChoice("kestrel.effort", EffortPick)
   const connections = useQuery(queries.connections())
+  const capabilities = useQuery(queries.capabilities())
   const shown = useShownModels()
   // The reference repository picker's choice. A page-level pick (the new thread's repository) wins when set.
   const [pickedReferenceRepo, setPickedReferenceRepo] = useState<string>()
@@ -309,11 +323,27 @@ export function Composer({
   const referenceRepo = pickedReferenceRepo ?? repo ?? soleCheckout
   useEffect(() => setPickedReferenceRepo(undefined), [repo])
   const connected = connections.data ? connectedModelProviders(connections.data) : []
+  const modelHarnesses = capabilities.data?.modelHarnesses
   const sections: readonly ModelSection[] | null = connections.data
-    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((s) => s.models.length > 0)
+    ? offeredModelSections(connections.data, shown, modelHarnesses)
     : null
   const offered = sections?.flatMap((s) => s.models) ?? []
-  const { model, effort } = resolveAgentChoice({ offered, connected, pickedModel, pickedEffort, lastRun, defaultModel, defaultEffort })
+  // A route whose credential or selected-box harness is gone cannot be restored; a merely hidden model still can.
+  const routeRunnable = (id: AgentModel | undefined): boolean =>
+    id === undefined ||
+    !isRouteModel({ id }) ||
+    modelRouteAvailable(modelInfo(id), connections.data ?? [], modelHarnesses)
+  const lastRunAvailable =
+    lastRun === undefined || lastRun.model === undefined || routeRunnable(lastRun.model)
+  const { model, effort } = resolveAgentChoice({
+    offered,
+    connected,
+    pickedModel: routeRunnable(pickedModel) ? pickedModel : undefined,
+    pickedEffort,
+    lastRun: lastRunAvailable ? lastRun : undefined,
+    defaultModel: routeRunnable(defaultModel) ? defaultModel : undefined,
+    defaultEffort,
+  })
   const empty = text.trim() === "" && files.length === 0 && elements.length === 0 && chosenOption === undefined
 
   // Slash autocomplete begins with a leading trigger at the start of the message. Claude Code's trigger is `/`;
@@ -323,12 +353,20 @@ export function Composer({
   const firstSpace = visible.search(/\s/)
   const commandTokenEnd = firstSpace === -1 ? visible.length : firstSpace
   const trigger: "/" | "$" | undefined = visible.startsWith("/") ? "/" : visible.startsWith("$") ? "$" : undefined
-  const expectedProvider = activeRunProvider ?? model?.provider
-  // The running turn's provider wins over the picker. An older run without a stored provider is probed once.
+  const expectedHarness =
+    activeRunHarness ??
+    (activeRunModel !== undefined
+      ? harnessForModel(modelInfo(activeRunModel)).id
+      : activeRunProvider !== undefined
+        ? harnessForProvider(activeRunProvider).id
+        : model === undefined
+          ? undefined
+          : harnessForModel(model).id)
+  // The running turn's harness wins over the picker. An older run without a stored provider is probed once.
   const triggerAllowed =
     trigger === "/" ||
     (trigger === "$" &&
-      (expectedProvider === "openai" || (activeRunId !== undefined && activeRunProvider === undefined)))
+      (expectedHarness === "codex" || (activeRunId !== undefined && activeRunProvider === undefined)))
   // A new thread has no harness to ask, so only Kestrel's own `/` commands list there.
   const slashQuery =
     (taskId !== undefined || trigger === "/") &&
@@ -344,20 +382,20 @@ export function Composer({
     ...queries.commands(taskId, model?.id, activeRunId, activeRunProvider),
     enabled: slashQuery !== undefined && taskId !== undefined && model !== undefined,
   })
-  // The response is authoritative (an active run may use another provider than the picker); `$` only belongs to Codex.
-  const commandProvider = commandQuery.data?.provider ?? expectedProvider
+  // The response is authoritative (an active run may use another harness than the picker); `$` only belongs to Codex.
+  const commandHarness = commandQuery.data?.harness ?? expectedHarness
   const commandMatches =
     slashQuery === undefined
       ? []
-      : withAppCommands(commandQuery.data?.commands ?? [], commandProvider).filter(
+      : withAppCommandsForHarness(commandQuery.data?.commands ?? [], commandHarness).filter(
           (c) =>
-            (trigger !== "$" || harnessCommandPrefix(c, commandProvider) === "$") &&
+            (trigger !== "$" || commandPrefixForHarness(c, commandHarness) === "$") &&
             c.name.toLowerCase().startsWith(slashQuery.toLowerCase()),
         )
   // On a new thread nothing but those commands can match, and any other `/text` is an ordinary first message to send.
   const slashMenuOpen =
     slashQuery !== undefined &&
-    (trigger !== "$" || commandProvider === "openai") &&
+    (trigger !== "$" || commandHarness === "codex") &&
     (taskId !== undefined || commandMatches.length > 0) &&
     composerFocused &&
     !autocompleteDismissed
@@ -382,7 +420,7 @@ export function Composer({
   // A shorter prefix or a different harness reorders what is active; start at the top again.
   useEffect(() => {
     setActiveCommandIndex(0)
-  }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider])
+  }, [slashQuery, taskId, model?.id, activeRunId, activeRunProvider, activeRunHarness])
 
   useEffect(() => {
     setActiveReferenceIndex(0)
@@ -405,13 +443,13 @@ export function Composer({
   /** Writes the command into the leading token, keeps any argument text, and leaves the caret ready for arguments. */
   function chooseCommand(command: HarnessCommand) {
     // App actions send nothing, so picking one runs it and only its invocation and gap leave the draft.
-    const app = appCommandOf(command, commandProvider)
+    const app = appCommandOfHarness(command, commandHarness)
     if (app !== undefined) {
       runAppCommand(app, matchAppCommand(visible)?.consumed ?? commandTokenEnd)
       return
     }
     // Each command carries its invocation syntax: `/name` for commands, `$name` for Codex skills.
-    const prefix = harnessCommandPrefix(command, commandQuery.data?.provider)
+    const prefix = commandPrefixForHarness(command, commandHarness)
     // Replace the token and the whitespace after it; anything typed after (including reference chips) stays.
     const gap = /^\s*/.exec(visible.slice(commandTokenEnd))?.[0].length ?? 0
     editor.current?.replaceRange(0, commandTokenEnd + gap, `${prefix}${command.name} `)
@@ -749,7 +787,7 @@ export function Composer({
               id={slashMenuId}
               query={slashQuery ?? ""}
               trigger={trigger ?? "/"}
-              provider={commandQuery.data?.provider ?? expectedProvider}
+              harness={commandHarness}
               matches={commandMatches}
               chosenModel={taskId === undefined || model !== undefined}
               pending={taskId !== undefined && commandQuery.isPending}

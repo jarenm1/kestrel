@@ -10,11 +10,13 @@ import {
   type KeyboardEvent,
 } from "react"
 import {
+  modelHarnessOf,
   modelMentionMarkdown,
   modelMentionOf,
   modelMentionTypedText,
   parseComposerDraft,
   parseModelMentionMarkdown,
+  type ModelMentionHarness,
 } from "../models"
 import {
   githubReferenceLabel,
@@ -26,17 +28,17 @@ import {
 } from "../reference/githubReference"
 import { COMPOSER_CHIP_PLACEHOLDER, composerViewOf, type ComposerEditorView } from "../view"
 import { cn } from "../lib/cn"
-import type { ModelInfo, ModelProvider } from "@cloudagents/protocol"
+import type { ModelInfo } from "@cloudagents/protocol"
 
 export { composerViewOf, type ComposerEditorView } from "../view"
 
-/** A harness logo for a mention chip: the same asset the model picker draws for the provider. */
+/** A harness logo for a mention chip: the same asset the model picker draws for the model's actual harness. */
 export interface ComposerModelLogo {
   readonly src: string
   readonly monochrome: boolean
 }
 
-export type ComposerModelLogos = Partial<Record<ModelProvider, ComposerModelLogo>>
+export type ComposerModelLogos = Partial<Record<ModelMentionHarness, ComposerModelLogo>>
 
 export interface ComposerEditorHandle {
   focus(): void
@@ -62,8 +64,8 @@ interface Props {
   placeholder: string
   autoFocus?: boolean
   className?: string
-  /** Harness logos for model-mention chips, by the mentioned model's provider. Hosts pass every provider they know,
-   * so a mention restored from a draft keeps its icon even if that provider is no longer connected. */
+  /** Harness logos for model-mention chips, by the harness the mentioned model's route runs. Hosts pass every harness
+   * they know, so a mention restored from a draft keeps its icon even if that route is no longer connected. */
   modelLogos?: ComposerModelLogos
   onChange: (view: ComposerEditorView) => void
   onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void
@@ -291,7 +293,7 @@ const MODEL_CHIP_CLASS =
 
 /** The provider's harness logo, drawn as a mask when the asset is monochrome, exactly as the model picker draws it. */
 function createModelLogo(model: ModelInfo, logos: ComposerModelLogos | undefined): HTMLElement | undefined {
-  const logo = logos?.[model.provider]
+  const logo = logos?.[modelHarnessOf(model).harness]
   if (logo === undefined) return undefined
   if (logo.monochrome) {
     const mask = document.createElement("span")
@@ -322,7 +324,7 @@ function createModelMentionToken(model: ModelInfo, logos: ComposerModelLogos | u
   token.contentEditable = "false"
   token.className = MODEL_CHIP_CLASS
   token.title = `${mention.slug} · ${mention.harnessName}`
-  drawnModelLogos.set(token, logos?.[model.provider] ?? null)
+  drawnModelLogos.set(token, logos?.[modelHarnessOf(model).harness] ?? null)
   const icon = createModelLogo(model, logos)
   if (icon !== undefined) token.append(icon)
   token.append(document.createTextNode(mention.name))
@@ -359,7 +361,7 @@ function syncModelMentionIcons(root: HTMLElement, logos: ComposerModelLogos | un
     const markdown = token.dataset.modelMention
     const parsed = markdown === undefined ? undefined : parseModelMentionMarkdown(markdown)
     if (parsed === undefined || !isIntactModelChip(token, parsed.model)) continue
-    const logo = logos?.[parsed.model.provider] ?? null
+    const logo = logos?.[modelHarnessOf(parsed.model).harness] ?? null
     const drawn = drawnModelLogos.get(token)
     const same =
       drawn !== undefined &&

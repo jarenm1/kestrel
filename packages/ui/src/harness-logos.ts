@@ -1,5 +1,4 @@
-import { modelHarnessOf, type ModelMention } from "@cloudagents/composer/models";
-import { MODEL_PROVIDERS, type ModelProvider } from "@cloudagents/protocol";
+import type { ModelMention } from "@cloudagents/composer/models";
 
 /** The harness marks desktop's picker rail uses, kept here as XML so Expo needs no SVG asset transformer. */
 export type HarnessId = ModelMention["harness"];
@@ -36,11 +35,13 @@ export function harnessLogoSrc(harness: HarnessId): string {
 }
 
 /**
- * Logos for every catalog provider, connected or not: a draft restored from another box still draws its chips.
+ * Logos for every harness, connected or not: a draft restored from another box still draws its chips. Keyed by the
+ * harness a model's route actually runs, so a provider's model under another harness draws that harness's mark.
  * Built once, so the DOM bridge sees the same prop value on every keystroke.
  */
-export const MODEL_LOGOS: Partial<Record<ModelProvider, { readonly src: string; readonly monochrome: boolean }>> = {};
-for (const provider of MODEL_PROVIDERS) {
-  const { harness } = modelHarnessOf(provider.id);
-  MODEL_LOGOS[provider.id] = { src: harnessLogoSrc(harness), monochrome: HARNESS_LOGOS[harness].monochrome };
-}
+export const MODEL_LOGOS = Object.fromEntries(
+  (Object.keys(HARNESS_LOGOS) as HarnessId[]).map((harness) => [
+    harness,
+    { src: harnessLogoSrc(harness), monochrome: HARNESS_LOGOS[harness].monochrome },
+  ]),
+) as Record<HarnessId, { readonly src: string; readonly monochrome: boolean }>;
