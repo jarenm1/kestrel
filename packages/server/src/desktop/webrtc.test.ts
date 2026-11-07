@@ -254,6 +254,8 @@ describe("DesktopRtcSession", () => {
   ) => {
     const sent: DesktopRtcServerMessage[] = []
     const inputs: string[] = []
+    // The session reports a profile change once a peer exists, so a count above zero means one was built.
+    const profiles: number[] = []
     const s = new DesktopRtcSession(
       { ...settings, ...over },
       "thread-1",
@@ -261,13 +263,13 @@ describe("DesktopRtcSession", () => {
       {
         send: (m) => sent.push(m),
         onInput: (raw) => inputs.push(raw),
-        profileChanged: () => {},
+        profileChanged: () => profiles.push(profiles.length),
         debug: () => {},
       },
       iceServers,
     )
     closing.push(() => s.close())
-    return { s, sent, inputs }
+    return { s, sent, inputs, profiles }
   }
 
   test("an offer without H.264 is refused and takes no peer", async () => {
@@ -384,6 +386,28 @@ describe("DesktopRtcSession", () => {
       expect(transport.connection.turnServer).toEqual(["turn.example", 443])
       expect(transport.connection.options.turnConnectTimeout).toBeUndefined()
     }
+  }, 10_000)
+
+  test("an offer abandoned during its relay fetch builds no peer", async () => {
+    const before = activeRtcPeers()
+    const started = Promise.withResolvers<void>()
+    const gate = Promise.withResolvers<void>()
+    const { s, sent, profiles } = session({}, async (given, taskId) => {
+      started.resolve()
+      await gate.promise
+      return mintIceServers(given, taskId)
+    })
+    const browser = await remoteOffer()
+    closing.push(() => browser.close())
+    const answered = s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    await started.promise
+    s.close()
+    gate.resolve()
+    await answered
+    // A peer built for the abandoned offer would report its profile and gather a relay for nobody.
+    expect(profiles).toHaveLength(0)
+    expect(sent).toHaveLength(0)
+    expect(activeRtcPeers()).toBe(before)
   }, 10_000)
 
   test("offers that wait on a slow relay fetch cannot exceed the viewer limit", async () => {

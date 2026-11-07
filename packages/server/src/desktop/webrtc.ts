@@ -360,6 +360,8 @@ export class DesktopRtcSession {
     const { fmtp, baselineOnly } = picked
     if (!/^m=video /m.test(offer)) throw new Error("offer has no video section")
     const servers = await this.iceServers(this.settings, this.taskId)
+    // The viewer may have left during the fetch: an abandoned offer must not build a peer or allocate a relay.
+    if (this.closed) return
     // Counted after the only await on this path: offers that arrive while the credentials are fetched must not all pass
     // a limit check made before it.
     if (peers >= MAX_PEERS) {
