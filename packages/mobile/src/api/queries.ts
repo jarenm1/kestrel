@@ -1,4 +1,4 @@
-import { QueryClient, queryOptions, type QueryKey } from "@tanstack/react-query";
+import { QueryClient, queryOptions, type QueryFilters, type QueryKey } from "@tanstack/react-query";
 import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 import { pendingSaves } from "@/lib/pendingSaves";
@@ -88,9 +88,15 @@ export async function fetchSnapshot<T extends Keyed>(key: QueryKey, fetch: () =>
   return [...byId.values()];
 }
 
+/** Cancel even initial reads with no cached data before requesting a post-subscription snapshot. */
+export function refreshSnapshots(client: QueryClient, filters: QueryFilters): void {
+  void client.cancelQueries(filters);
+  void client.invalidateQueries(filters);
+}
+
 /** Run item keys are outside the task key prefix; keep invalidation within the connected box. */
 export function invalidateRunItems(client: QueryClient, scope: string): void {
-  void client.invalidateQueries({
+  refreshSnapshots(client, {
     predicate: ({ queryKey }) => queryKey.length === 5 && queryKey[0] === "box-data" &&
       queryKey[1] === scope && queryKey[2] === "runs" && queryKey[4] === "items",
   });
