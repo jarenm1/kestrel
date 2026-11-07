@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
-import { ChevronRight, X } from "lucide-react"
+import { ChevronRight, CornerUpLeft, X } from "lucide-react"
 import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type Message, type Run, type SendMessageBody, type Task, type TaskStatus } from "@cloudagents/protocol"
 import { Transcript } from "@cloudagents/ui/transcript"
 import { api } from "@/api/client"
@@ -86,6 +86,8 @@ interface ChildView {
   icon: string
   label: string
   active: boolean
+  /** Stopped by a usage limit, waiting for the reset: its action returns it to the parent now instead of cancelling. */
+  resuming: boolean
   activity: string | undefined
 }
 
@@ -96,8 +98,15 @@ function DelegatedCard({ child, onCancel, cancelling }: { child: ChildView; onCa
         <StatusIcon status={child.icon} />
         <Link to={threadPath(child.task.id)} className="min-w-0 flex-1 truncate font-medium hover:underline">{child.task.title}</Link>
         {child.run && <span className="font-mono text-[11px] text-muted-foreground"><Elapsed startedAt={child.run.startedAt} endedAt={child.run.endedAt} /></span>}
-        <button type="button" aria-label={`Cancel ${child.task.title}`} title="Cancel" className="rounded text-muted-foreground hover:text-foreground disabled:opacity-50" disabled={cancelling} onClick={onCancel}>
-          <X />
+        <button
+          type="button"
+          aria-label={child.resuming ? `Return ${child.task.title} to its parent now` : `Cancel ${child.task.title}`}
+          title={child.resuming ? "Return to parent now" : "Cancel"}
+          className="rounded text-muted-foreground hover:text-foreground disabled:opacity-50"
+          disabled={cancelling}
+          onClick={onCancel}
+        >
+          {child.resuming ? <CornerUpLeft /> : <X />}
         </button>
       </div>
       <div className="line-clamp-2 text-muted-foreground">{child.activity ?? child.label}</div>
@@ -180,7 +189,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
                     : ended
     const icon = cancelled ? "cancelled" : child.status === "needs_input" || arm !== undefined ? "needs_input" : active ? "running" : runId === undefined ? "failed" : ended
     const activity = working && latest?.status === "running" ? latestActivity(items[index]?.data, child.id) : undefined
-    return { task: child, run: latest, icon, label, active, activity }
+    return { task: child, run: latest, icon, label, active, resuming: !cancelled && resuming, activity }
   })
   const active = views.filter((v) => v.active)
   const finished = views.filter((v) => !v.active)
@@ -215,7 +224,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
               ))}
             </div>
           )}
-          {cancel.isError && <div role="alert" className="px-1 text-destructive">Could not cancel the task.</div>}
+          {cancel.isError && <div role="alert" className="px-1 text-destructive">Could not cancel the task or return it to its parent.</div>}
         </div>
       )}
     </section>

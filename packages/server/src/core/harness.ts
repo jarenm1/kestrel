@@ -469,8 +469,11 @@ export const AgentHarnessLive = Layer.effect(
           run.status = ok ? "succeeded" : "failed"
           run.exitCode = exitCode
           run.endedAt = now
-          // An agent that asked for input keeps that state until the user answers.
-          if (task.status !== "needs_input") task.status = ok ? "done" : "failed"
+          // An agent that asked for input keeps that state until the user answers. A delegated child's parent is waiting on
+          // its result, so only a question still pending holds it there; a reported "needs input" ends with its run.
+          const holdsInput = task.status === "needs_input" &&
+            (task.delegation === undefined || task.delegation.cancelledAt !== undefined || s.pendingAsks.some((ask) => ask.taskId === task.id))
+          if (!holdsInput) task.status = ok ? "done" : "failed"
           task.updatedAt = now
           const failure = spawnError ?? (turn?.status === "failed" ? turn.error : null)
           // Diagnostics stay in output.log and agent.output, never in portable conversation history:

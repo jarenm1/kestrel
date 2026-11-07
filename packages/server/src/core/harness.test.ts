@@ -207,6 +207,56 @@ test("Claude error results report the specific error rather than the result subt
   }
 }, 12_000)
 
+test("a delegated child's reported 'needs input' ends with its run unless a question is still pending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-needs-input-"))
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, 'process.stdin.once("data", () => console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "Done." })))')
+  const { config, layer } = harnessLayer(root, cli)
+  const delegation = { parentTaskId: "parent", parentRunId: "parent-run", requestId: "r", fingerprint: "f" }
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      /** Runs `id` to completion with its task in `needs_input`, and returns the status the run leaves it in. */
+      const finish = (id: string, setup: (task: Task, run: Run) => Partial<Task>, ask: boolean) => Effect.gen(function* () {
+        const { task: base, run } = runningTask(id)
+        const task = { ...base, ...setup(base, run), status: "needs_input" as const }
+        yield* store.update((state) => {
+          state.tasks.push(task)
+          state.runs.push(run)
+          if (ask) state.pendingAsks.push({ taskId: id, runId: run.id, messageId: `question:${id}` })
+          return Either.right(null)
+        })
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, id), { recursive: true }))
+        const finished = Promise.withResolvers<void>()
+        const unsubscribe = hub.subscribe(id, (event) => {
+          if (event._tag === "run.updated" && event.run.status !== "running") finished.resolve()
+        })
+        try {
+          yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+          yield* Effect.promise(() => finished.promise).pipe(Effect.timeout("8 seconds"))
+        } finally {
+          unsubscribe()
+        }
+        return (yield* store.read).tasks.find((t) => t.id === id)?.status
+      })
+      try {
+        // The parent is waiting on the child's result; a report alone must not park the child after its run.
+        expect(yield* finish("reported-child", (_, run) => ({ delegation: { ...delegation, runId: run.id } }), false)).toBe("done")
+        // A question the user has not answered yet still holds it.
+        expect(yield* finish("asking-child", (_, run) => ({ delegation: { ...delegation, runId: run.id } }), true)).toBe("needs_input")
+        // A thread of the user's own keeps the state its agent reported until the user replies.
+        expect(yield* finish("top-level", () => ({}), false)).toBe("needs_input")
+      } finally {
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test("Claude finishes a queued turn after EOF without the process-exit grace killing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-queued-turn-"))
   const cli = join(root, "cli.ts")

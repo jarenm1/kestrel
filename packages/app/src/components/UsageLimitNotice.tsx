@@ -22,15 +22,24 @@ export function UsageLimitNotice({ task }: { task: Task | undefined }) {
 /**
  * The box will send "Continue where you left off." when the provider's window resets. Cancelling keeps the notice, so
  * the user can turn it back on for this thread.
+ *
+ * A delegated thread's parent waits for it while it is armed: its result goes up after the resumed run. "Return to
+ * parent now" ends that wait (the box drops the arm and sends the parent the failed run's result).
  */
 function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
   const queryClient = useQueryClient()
+  const stored = (updated: Task) => {
+    queryClient.setQueryData(keys.task(updated.id), updated)
+    queryClient.setQueryData(keys.tasks, (list: Task[] | undefined) => upsert(list, updated))
+  }
   const toggle = useMutation({
     mutationFn: (autoResume: boolean) => api.setUsageLimitAutoResume(task.id, autoResume),
-    onSuccess: (updated) => {
-      queryClient.setQueryData(keys.task(updated.id), updated)
-      queryClient.setQueryData(keys.tasks, (list: Task[] | undefined) => upsert(list, updated))
-    },
+    onSuccess: stored,
+  })
+  const parentTaskId = task.delegation?.cancelledAt === undefined ? task.delegation?.parentTaskId : undefined
+  const returnEarly = useMutation({
+    mutationFn: (parentId: string) => api.cancelDelegation(parentId, task.id),
+    onSuccess: stored,
   })
   const paused = !arm.autoResume
   const at = resetLabel(arm.resetsAt)
@@ -45,8 +54,14 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
           {paused
             ? `Auto-resume is off for this thread. The limit resets ${at}.`
             : `This thread resumes automatically ${at}, when the provider's limit resets.`}
+          {parentTaskId !== undefined && (paused ? " Its parent already has its result." : " Its parent gets the result after that.")}
         </p>
       </div>
+      {parentTaskId !== undefined && !paused && (
+        <Button size="sm" variant="ghost" disabled={returnEarly.isPending} onClick={() => returnEarly.mutate(parentTaskId)}>
+          Return to parent now
+        </Button>
+      )}
       <Button
         size="sm"
         variant="ghost"
@@ -56,6 +71,7 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
         {paused ? "Resume at reset" : "Cancel auto-resume"}
       </Button>
       {toggle.error && <span className="text-xs text-destructive">Could not change auto-resume.</span>}
+      {returnEarly.error && <span className="text-xs text-destructive">Could not return the task to its parent.</span>}
     </div>
   )
 }

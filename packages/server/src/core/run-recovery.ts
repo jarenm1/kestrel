@@ -350,5 +350,22 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
     }
   })
 
-  return { sweep }
+  /**
+   * Whether the sweep has yet to decide what a thread's latest run, failed, gets: a usage-limit arm, a retry, or nothing.
+   * Callers pass the thread's latest run. Reporting a delegated child's failure before this verdict would announce as
+   * final a run the box may be about to resume; a probe that keeps failing holds it at most `ARM_WINDOW_MS`. A run a
+   * restart interrupted left no failure to read, so it can never be a usage limit.
+   */
+  const deciding = (task: Task, run: Run): boolean =>
+    task.archivedAt === undefined &&
+    task.delegation?.cancelledAt === undefined &&
+    run.status === "failed" &&
+    run.interruptedByRestart !== true &&
+    run.endedAt !== null &&
+    task.usageLimitResume === undefined &&
+    task.autoRetry === undefined &&
+    Date.now() - Date.parse(run.endedAt) <= ARM_WINDOW_MS &&
+    !examined.has(run.id)
+
+  return { sweep, deciding }
 }

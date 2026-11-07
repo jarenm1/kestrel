@@ -114,11 +114,13 @@ test("delegation_wait acknowledges only after regaining capacity and preserves r
   let acknowledged = false
   let failReacquisition = true
   let needsInput = false
+  let usageLimited = false
   const deps = { threads: {
     delegatedStatus: () => Effect.succeed({
-      task: { id: "child", title: "Child", status: needsInput ? "needs_input" : "completed" },
-      run: { id: "child-run", status: needsInput ? "failed" : "succeeded" },
+      task: { id: "child", title: "Child", status: needsInput ? "needs_input" : usageLimited ? "failed" : "completed" },
+      run: { id: "child-run", status: needsInput || usageLimited ? "failed" : "succeeded" },
       result: "Completed work", resultStatus: "succeeded", waitingForChildren: false,
+      usageLimit: usageLimited ? { resetsAt: "2026-11-08T12:00:00.000Z" } : null,
       usage: { inputTokens: null, outputTokens: null, costUsd: null }, structured: null,
     }),
     acknowledgeDelegation: () => Effect.sync(() => { acknowledged = true; return true }),
@@ -146,6 +148,13 @@ test("delegation_wait acknowledges only after regaining capacity and preserves r
     expect(JSON.stringify(question)).toContain("needs user input")
     expect(acknowledged).toBe(false)
     needsInput = false
+    // A child stopped by a usage limit resumes at the reset: waiting on it times out without taking its result.
+    usageLimited = true
+    const stalled = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child", timeoutSec: 1 } })
+    expect(JSON.stringify(stalled)).toContain("resumes automatically at 2026-11-08T12:00:00.000Z")
+    expect(JSON.stringify(stalled)).toContain("Wait timed out")
+    expect(acknowledged).toBe(false)
+    usageLimited = false
     const completed = await client.callTool({ name: "delegation_wait", arguments: { threadId: "child" } })
     expect(completed.isError).not.toBe(true)
     expect(JSON.stringify(completed)).toContain("Completed work")

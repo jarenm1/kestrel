@@ -57,6 +57,7 @@ const formatDelegation = (status: DelegatedStatus): string => {
   const run = status.run
   return [`thread ${status.task.id} "${status.task.title}"`, `run: ${run?.id ?? "not started"}`, `status: ${status.task.delegation?.cancelledAt ? "cancelled" : status.resultStatus ?? (status.task.status === "failed" ? "failed to start" : "starting")}`,
     ...(status.waitingForChildren ? ["work state: waiting for delegated children"] : []),
+    ...(status.usageLimit === null ? [] : [`work state: stopped by a provider usage limit; ${status.usageLimit.resetsAt === null ? "checking when it resets" : `resumes automatically at ${status.usageLimit.resetsAt}`}. Its result arrives after it resumes, unless the user returns it early.`]),
     ...(status.usage.inputTokens === null && status.usage.outputTokens === null && status.usage.costUsd === null ? [] : [`usage: input tokens ${status.usage.inputTokens ?? "unknown"}, output tokens ${status.usage.outputTokens ?? "unknown"}, cost USD ${status.usage.costUsd ?? "unknown"}`]),
     ...(status.structured === null ? [] : [`structured output: ${status.structured.valid ? "valid" : `invalid (${status.structured.error ?? "schema validation failed"})`}`]),
     ...(status.task.status === "needs_input" ? ["The child needs user input; open its thread."] : []),
@@ -69,12 +70,12 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
     inputSchema: {},
   }, () => Promise.resolve(text(`Models: ${AgentModel.literals.join(", ")}\nConcurrent runs on this box: ${deps.threads.maxConcurrentRuns === 0 ? "unlimited" : deps.threads.maxConcurrentRuns}\nMaximum delegation depth: 4\nMaximum batch size: 10\nMaximum wait: 30 seconds\nModel credentials are checked when the child starts.`)))
   server.registerTool("delegate_task", {
-    description: "Start durable delegated work in a separate Kestrel thread and workspace. Supply all context needed; conversation and files are not inherited. The result is automatically delivered when the original run ends. Reuse requestId on retries to avoid duplicates. A child needing input must be answered by the user in its thread.",
+    description: "Start durable delegated work in a separate Kestrel thread and workspace. Supply all context needed; conversation and files are not inherited. The result is automatically delivered when the original run ends. A requestId names one task for this whole thread: reuse it on retries, including from a later run, to get the existing child instead of a duplicate. A child needing input must be answered by the user in its thread.",
     inputSchema: {
       title: z.string().trim().min(1).describe("Short title for the delegated task"),
       message: z.string().trim().min(1).describe("Complete task and context for the child"),
       role: z.enum(["general", "implementation", "research", "review", "design", "test"]).optional().describe("Optional role guidance for the child"),
-      requestId: z.string().trim().min(1).max(200).optional().describe("Stable unique key for retries of this request"),
+      requestId: z.string().trim().min(1).max(200).optional().describe("Stable key for this request, unique within this thread; reuse on retries"),
       model: z.enum(AgentModel.literals).optional().describe("Model for the child; omitted inherits the parent's model when known"),
       outputSchema: outputSchema.optional().describe("Optional JSON Schema for the child's final response; validation is reported with the result"),
       repo: z.string().optional().describe("Repository to check out in the child workspace"),
@@ -91,9 +92,9 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
   }))))
 
   server.registerTool("delegate_batch", {
-    description: "Delegate up to 10 tasks with shared context. Provide a stable requestId for safe retries. All arguments are validated before dispatch; if a later checkout or launch fails, earlier children remain running and a retry with the same requestId resumes the batch.",
+    description: "Delegate up to 10 tasks with shared context. Provide a stable requestId for safe retries. All arguments are validated before dispatch; if a later checkout or launch fails, earlier children remain running and a retry with the same requestId (from this run or a later one) resumes the batch.",
     inputSchema: {
-      requestId: z.string().trim().min(1).max(160).describe("Stable unique batch key; reuse on retry"),
+      requestId: z.string().trim().min(1).max(160).describe("Stable batch key, unique within this thread; reuse on retry"),
       context: z.string().trim().min(1).describe("Background shared with every child"),
       tasks: z.array(z.object({
         title: z.string().trim().min(1),
@@ -136,7 +137,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
     while (true) {
       const status = yield* deps.threads.delegatedStatus(ctx.taskId, threadId)
       if (status.task.status === "needs_input" && !status.task.delegation?.cancelledAt) return { status, finished: false, timedOut: false }
-      const finished = status.task.delegation?.cancelledAt || (status.run !== null && status.run.status !== "running" && !status.waitingForChildren) || (status.run === null && status.task.status === "failed")
+      const finished = status.task.delegation?.cancelledAt || (status.run !== null && status.run.status !== "running" && !status.waitingForChildren && status.usageLimit === null) || (status.run === null && status.task.status === "failed")
       if (finished) return { status, finished: true, timedOut: false }
       if (Date.now() >= deadline) return { status, finished: false, timedOut: true }
       yield* Effect.sleep("1 second")

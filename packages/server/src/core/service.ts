@@ -239,6 +239,11 @@ export interface DelegatedStatus {
   readonly run: Run | null
   readonly result: string | null
   readonly waitingForChildren: boolean
+  /**
+   * Set while the delegated run failed on a usage limit that is not final: the box is still checking the provider's
+   * reset (`resetsAt` null) or will resume the child at `resetsAt`. Its result reaches the parent after that resumed run.
+   */
+  readonly usageLimit: { readonly resetsAt: string | null } | null
   readonly resultStatus: Run["status"] | null
   readonly usage: { readonly inputTokens: number | null; readonly outputTokens: number | null; readonly costUsd: number | null }
   readonly structured: { readonly valid: boolean; readonly data?: unknown; readonly error?: string } | null
@@ -248,6 +253,13 @@ const schemaValidator = new Ajv({ strict: false, allErrors: true, addUsedSchema:
 const isDelegationResult = (messageId: string, childId: string): boolean =>
   messageId === `delegation-result:${childId}` || messageId.startsWith(`delegation-recovery:${childId}:`)
 
+/**
+ * A delegated run stopped by a usage limit is not final while its thread is armed to resume it at the reset: the
+ * resumed run takes over the delegation (see `deliverMessage`) and its result is the one the parent gets.
+ */
+const resumesAtReset = (child: Task, run: Run): boolean =>
+  run.status === "failed" && child.usageLimitResume?.autoResume === true && child.usageLimitResume.runId === run.id
+
 /** A run is not done delegating until every child launched by that run has settled recursively. */
 const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): boolean =>
   state.tasks.some((child) => {
@@ -255,7 +267,7 @@ const hasPendingDelegations = (state: Readonly<StoreState>, runId: string): bool
     if (d?.parentRunId !== runId) return false
     if (d.cancelledAt === undefined && state.pendingAsks.some((ask) => ask.taskId === child.id)) return true
     const run = state.runs.find((r) => r.id === d.runId)
-    if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
+    if (d.cancelledAt === undefined && (run === undefined ? child.status !== "failed" : run.status === "running" || resumesAtReset(child, run) || (run.status !== "cancelled" && hasPendingDelegations(state, run.id)))) return true
     if (d.resultAcknowledged) return false
     const notification = [...state.messages].reverse().find((m) => m.taskId === d.parentTaskId && isDelegationResult(m.id, child.id))
     if (!notification) return true
@@ -1518,6 +1530,13 @@ export const CoreLive = Layer.effect(
               // Answering a question preserved across restart continues the delegated
               // work, rather than leaving its result attached to the interrupted run.
               task.delegation = { ...task.delegation, runId: run.id }
+            } else if (task.delegation?.runId !== undefined && task.delegation.cancelledAt === undefined &&
+              !task.delegation.resultAcknowledged && task.usageLimitResume?.autoResume === true &&
+              task.usageLimitResume.runId === task.delegation.runId &&
+              !s.messages.some((m) => m.id === `delegation-result:${taskId}`)) {
+              // The delegated run stopped on a usage limit, and its result was held for the resume. Whatever continues
+              // it now (the resume at the reset, or the user handing the work to another model) carries the delegation.
+              task.delegation = { ...task.delegation, runId: run.id }
             }
             // The prompt is what the run starts with, not mail for its inbox.
             seenFor(run.id).add(message.id)
@@ -1735,6 +1754,18 @@ export const CoreLive = Layer.effect(
         return yield* deliverMessage(sender.owner, toTaskId, text, resumeChoice(state, toTaskId), [], false, from)
       })
 
+    /**
+     * Whether a delegated child's run failed on a usage limit that is not final yet (see `DelegatedStatus.usageLimit`).
+     * Until the recovery sweep has looked at a fresh failure it may still arm a resume, so that failure is not final either.
+     */
+    const usageLimitWait = (state: Readonly<StoreState>, child: Task, run: Run | null): DelegatedStatus["usageLimit"] => {
+      if (run === null || run.status !== "failed" || child.delegation?.cancelledAt !== undefined) return null
+      const arm = child.usageLimitResume
+      if (arm !== undefined) return resumesAtReset(child, run) ? { resetsAt: arm.resetsAt } : null
+      const latest = [...state.runs].reverse().find((r) => r.taskId === child.id)
+      return latest?.id === run.id && runRecovery.deciding(child, run) ? { resetsAt: null } : null
+    }
+
     const delegatedStatus: CoreShape["delegatedStatus"] = (parentTaskId, childTaskId) =>
       Effect.gen(function* () {
         const state = yield* store.read
@@ -1762,7 +1793,11 @@ export const CoreLive = Layer.effect(
         const turns = items.filter((item) => item._tag === "turn")
         const sum = (values: ReadonlyArray<number | null>): number | null => values.some((v) => v !== null) ? values.reduce<number>((a, v) => a + (v ?? 0), 0) : null
         const usage = { inputTokens: sum(turns.map((t) => t.inputTokens)), outputTokens: sum(turns.map((t) => t.outputTokens)), costUsd: sum(turns.map((t) => t.costUsd)) }
-        return { task: { ...child }, run: run === null ? null : { ...run }, result, resultStatus, structured, usage, waitingForChildren: child.delegation.cancelledAt === undefined && run !== null && run.status !== "cancelled" && hasPendingDelegations(state, run.id) }
+        return {
+          task: { ...child }, run: run === null ? null : { ...run }, result, resultStatus, structured, usage,
+          waitingForChildren: child.delegation.cancelledAt === undefined && run !== null && run.status !== "cancelled" && hasPendingDelegations(state, run.id),
+          usageLimit: usageLimitWait(state, child, run),
+        }
       })
 
     const delegate: CoreShape["delegate"] = (parentTaskId, parentRunId, input) => delegationLock.withPermits(1)(
@@ -1776,7 +1811,9 @@ export const CoreLive = Layer.effect(
           try { schemaValidator.compile(input.outputSchema) } catch (e) { return yield* Effect.fail(new BadRequest({ message: `invalid output schema: ${String(e)}` })) }
         }
         const fingerprint = createHash("sha256").update(JSON.stringify([input.title, input.message, input.checkout ?? null, input.model ?? null, input.outputSchema ?? null])).digest("hex")
-        const existing = state.tasks.find((t) => t.delegation?.parentRunId === parentRunId && t.delegation.requestId === input.requestId)
+        // A requestId names one task for the whole parent thread: a parent that resumes after a usage limit, a retry or a
+        // restart repeats its delegate calls in a new run, and must get its existing children back, not new copies.
+        const existing = state.tasks.find((t) => t.delegation?.parentTaskId === parentTaskId && t.delegation.requestId === input.requestId)
         if (existing) {
           if (existing.delegation?.fingerprint !== fingerprint) return yield* Effect.fail(new Conflict({ message: "requestId was already used for a different task" }))
           if (existing.delegation?.runId === undefined && existing.status === "failed") return yield* Effect.fail(new Conflict({ message: `Delegated thread ${existing.id} failed before its run was reserved. Inspect it; use a new requestId to start a new task.` }))
@@ -1800,9 +1837,15 @@ export const CoreLive = Layer.effect(
         yield* deliverMessage(parent.owner, task.id, assignment, choice, [], false, { id: parent.id, title: parent.title }, `delegation-assignment:${task.id}`).pipe(
           Effect.tapError(() => store.update((s) => {
             const child = s.tasks.find((t) => t.id === task.id)
-            if (child && child.delegation?.runId === undefined) child.status = "failed"
-            return Either.right(undefined)
-          }).pipe(Effect.ignore)),
+            if (child === undefined || child.delegation?.runId !== undefined) return Either.right(null)
+            child.status = "failed"
+            child.updatedAt = nowIso()
+            return Either.right({ ...child })
+          }).pipe(
+            // The thread list learned the child as idle when it was created; without this it reads "starting" forever.
+            Effect.tap((failed) => (failed === null ? Effect.void : Effect.sync(() => hub.publish({ _tag: "task.updated", task: failed })))),
+            Effect.ignore,
+          )),
           Effect.mapError((e) => new InternalError({ message: `Created delegated thread ${task.id}, but could not start it: ${e.message}. Inspect the thread before deciding whether to start a new task.` })),
         )
         return yield* requireTask(task.id)
@@ -1862,14 +1905,28 @@ export const CoreLive = Layer.effect(
 
     const acknowledgeDelegation: CoreShape["acknowledgeDelegation"] = (parentTaskId, childTaskId) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
       yield* delegatedStatus(parentTaskId, childTaskId)
-      return yield* store.update((s) => {
+      const acknowledged = yield* store.update((s) => {
         const child = s.tasks.find((t) => t.id === childTaskId)!
         const delivered = s.messages.some((m) => m.taskId === parentTaskId && m.id === `delegation-result:${childTaskId}`)
-        if (delivered || child.delegation!.resultAcknowledged) return Either.right(false)
+        if (delivered || child.delegation!.resultAcknowledged) return Either.right(null)
         child.delegation = { ...child.delegation!, resultAcknowledged: true }
-        return Either.right(true)
+        return Either.right({ ...child })
       })
+      if (acknowledged === null) return false
+      hub.publish({ _tag: "task.updated", task: acknowledged })
+      return true
     }))
+
+    /**
+     * A parent whose latest run failed on a usage limit (armed to resume, or still being checked) holds its children's
+     * notifications: each would start a parent run that fails on the same limit and drops the parent's own resume. They
+     * reach the run that resumes it, or the one the user's next message starts, instead.
+     */
+    const holdsDelegationMail = (state: Readonly<StoreState>, parent: Task): boolean => {
+      const latest = [...state.runs].reverse().find((r) => r.taskId === parent.id)
+      if (latest === undefined || latest.status !== "failed") return false
+      return parent.usageLimitResume?.runId === latest.id || runRecovery.deciding(parent, latest)
+    }
 
     // Recover undelivered completions after a restart as well as delivering live completions. The stable message id
     // is reserved with the parent message itself, so a retry cannot deliver the same completion twice.
@@ -1882,14 +1939,16 @@ export const CoreLive = Layer.effect(
         const run = state.runs.find((r) => r.id === d.runId)
         const parent = state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
         const parentRun = state.runs.find((r) => r.id === d.parentRunId)
-        return (d.cancelledAt !== undefined || (run !== undefined && run.status !== "running" && (run.status === "cancelled" || !hasPendingDelegations(state, run.id))) || (run === undefined && child.status === "failed")) && parent !== undefined && parent.archivedAt === undefined &&
-          !d.resultAcknowledged && parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
+        return (d.cancelledAt !== undefined || (run !== undefined && run.status !== "running" && (run.status === "cancelled" || (!hasPendingDelegations(state, run.id) && usageLimitWait(state, child, run) === null))) || (run === undefined && child.status === "failed")) && parent !== undefined && parent.archivedAt === undefined &&
+          !d.resultAcknowledged && parent.delegation?.cancelledAt === undefined && parentRun?.status !== "cancelled" && !holdsDelegationMail(state, parent) && !state.messages.some((m) => m.taskId === parent.id && m.id === `delegation-result:${child.id}`)
       })
       yield* Effect.forEach(pending, (child) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {
         const latest = yield* store.read
         if (latest.tasks.find((t) => t.id === child.id)?.delegation?.resultAcknowledged) return
         const status = yield* delegatedStatus(child.delegation!.parentTaskId, child.id)
-        if (status.task.delegation?.cancelledAt === undefined && (status.task.status === "needs_input" || status.run?.status === "running" || status.waitingForChildren)) return
+        if (status.task.delegation?.cancelledAt === undefined && (status.task.status === "needs_input" || status.run?.status === "running" || status.waitingForChildren || status.usageLimit !== null)) return
+        const parent = latest.tasks.find((t) => t.id === child.delegation!.parentTaskId)
+        if (parent !== undefined && holdsDelegationMail(latest, parent)) return
         const summary = status.result === null ? "No final response was recorded." : status.result.slice(0, 3000)
         const validation = status.structured === null ? "" : `\nStructured output: ${status.structured.valid ? "valid" : `invalid (${status.structured.error ?? "schema validation failed"})`}.`
         const message = `Delegated task "${child.title}" (${child.id}) finished with status ${child.delegation?.cancelledAt ? "cancelled" : status.resultStatus ?? "failed to start"}.${validation}\n\n${summary}\n\nUse thread_read for the full conversation. This is an automatic result; do not send an acknowledgement.`
@@ -1902,7 +1961,7 @@ export const CoreLive = Layer.effect(
       const recoveries = state.tasks.flatMap((child) => {
         const d = child.delegation
         const parent = d && state.tasks.find((t) => t.id === d.parentTaskId && t.owner === child.owner)
-        if (!d || !parent || parent.archivedAt || parent.delegation?.cancelledAt) return []
+        if (!d || !parent || parent.archivedAt || parent.delegation?.cancelledAt || holdsDelegationMail(state, parent)) return []
         const message = [...state.messages].reverse().find((m) => m.taskId === parent.id && isDelegationResult(m.id, child.id))
         const run = message?.runId && state.runs.find((r) => r.id === message.runId)
         if (!message || !run || !run.interruptedByRestart) return []
@@ -1922,7 +1981,7 @@ export const CoreLive = Layer.effect(
         const parentRun = d && state.runs.find((r) => r.id === d.parentRunId)
         const question = state.messages.find((m) => m.id === ask.messageId)
         const id = `delegation-question:${ask.messageId}`
-        if (!child || !d || !parent || !question || d.cancelledAt || parent.archivedAt || parentRun?.status === "cancelled" || state.messages.some((m) => m.taskId === parent.id && m.id === id)) return []
+        if (!child || !d || !parent || !question || d.cancelledAt || parent.archivedAt || parentRun?.status === "cancelled" || holdsDelegationMail(state, parent) || state.messages.some((m) => m.taskId === parent.id && m.id === id)) return []
         return [{ child, parent, question, id }]
       })
       yield* Effect.forEach(questions, ({ child, parent, question, id }) => delegationDeliveryLock.withPermits(1)(Effect.gen(function* () {

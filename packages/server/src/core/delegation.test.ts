@@ -11,13 +11,21 @@ import { CredentialBroker } from "../broker"
 import { GitHub } from "../github/api"
 import { AgentHarness, type AgentChoice } from "./harness"
 import { EventHubLive } from "./events"
-import { CoreLive, CoreService } from "./service"
+import { CoreLive, CoreService, type CoreShape } from "./service"
 import { StateLive, StateStore, type StoreShape } from "./state"
 import { WorkspaceService } from "./workspace"
 import { BOX_USER_HEADER } from "@cloudagents/protocol"
 import { makeWebHandler } from "../http/router"
 
-test("delegation persists its lineage, deduplicates retries, and delivers one completion", async () => {
+interface Harnessed {
+  readonly store: StoreShape
+  readonly core: CoreShape
+  readonly config: ServerConfig
+  readonly choices: AgentChoice[]
+}
+
+/** Runs `body` against the real core over a fresh store. The harness starts no agent: it only records each run's choice. */
+const withCore = async (body: (h: Harnessed) => Effect.Effect<void, unknown>): Promise<void> => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-delegation-"))
   const config: ServerConfig = {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
@@ -53,6 +61,15 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       const store = yield* StateStore
       testStore = store
       const core = yield* CoreService
+      yield* body({ store, core, config, choices })
+    }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test("delegation persists its lineage, deduplicates retries, and delivers one completion", () => withCore(({ store, core, config, choices }) =>
+    Effect.gen(function* () {
       const now = new Date().toISOString()
       yield* store.update((s) => {
         s.tasks.push({ id: "parent", owner: "owner", title: "Parent", status: "running", createdAt: now, updatedAt: now, checkouts: [] })
@@ -243,8 +260,81 @@ test("delegation persists its lineage, deduplicates retries, and delivers one co
       expect(recovered?.runId).not.toBe("parent-run")
       const disk = yield* Effect.promise(() => readFile(config.stateFile, "utf8"))
       expect(disk).toContain('"requestId":"retry-key"')
-    }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
-}, 20_000)
+    })), 20_000)
+
+test("a usage limit holds delegated results until the work resumes or returns early", () => withCore(({ store, core }) =>
+  Effect.gen(function* () {
+    const now = new Date().toISOString()
+    const later = new Date(Date.now() + 3_600_000).toISOString()
+    const choice = { model: "gpt-6.1-sol" } as const
+    yield* store.update((s) => {
+      for (const id of ["parent", "held"]) {
+        s.tasks.push({ id, owner: "owner", title: id, status: "running", createdAt: now, updatedAt: now, checkouts: [] })
+        s.runs.push({ id: `${id}-run`, taskId: id, prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "openai", model: "gpt-6.1-sol" })
+      }
+      return Either.right(undefined)
+    })
+    /** The child's delegated run fails on a usage limit and recovery arms it to resume at `later`. */
+    const stall = (childId: string) => store.update((s) => {
+      const child = s.tasks.find((t) => t.id === childId)!
+      const run = s.runs.find((r) => r.id === child.delegation!.runId)!
+      run.status = "failed"
+      run.endedAt = now
+      child.status = "failed"
+      child.usageLimitResume = { runId: run.id, resetsAt: later, autoResume: true }
+      return Either.right(undefined)
+    })
+    const finish = (taskId: string, runId: string, text: string) => store.update((s) => {
+      const run = s.runs.find((r) => r.id === runId)!
+      run.status = "succeeded"
+      run.endedAt = now
+      s.tasks.find((t) => t.id === taskId)!.status = "done"
+      s.messages.push({ id: `answer:${runId}`, taskId, runId, role: "agent", text, createdAt: now })
+      return Either.right(undefined)
+    })
+    const results = (childId: string) => Effect.map(store.read, (s) => s.messages.filter((m) => m.id === `delegation-result:${childId}`))
+
+    // A stalled child is not finished: its result waits, and whatever continues the work carries the delegation.
+    const stalled = yield* core.delegate("parent", "parent-run", { title: "Stalled", message: "work", requestId: "stalled" })
+    yield* stall(stalled.id)
+    yield* Effect.sleep("2500 millis")
+    expect(yield* results(stalled.id)).toHaveLength(0)
+    expect((yield* core.delegatedStatus("parent", stalled.id)).usageLimit).toEqual({ resetsAt: later })
+    const handedOff = yield* core.sendMessage("owner", stalled.id, "Continue on another model", choice, [], false)
+    expect((yield* core.delegatedStatus("parent", stalled.id)).run?.id).toBe(handedOff.run.id)
+    yield* finish(stalled.id, handedOff.run.id, "Answer after the hand-off")
+    yield* Effect.sleep("2500 millis")
+    const delivered = yield* results(stalled.id)
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]?.text).toContain("Answer after the hand-off")
+
+    // Returning a stalled child early sends the parent its failed run's result now.
+    const returned = yield* core.delegate("parent", "parent-run", { title: "Returned", message: "work", requestId: "returned" })
+    yield* stall(returned.id)
+    yield* core.cancelDelegation("parent", returned.id)
+    // The arm here was set by hand, so recovery has not looked at the run yet: its first sweep (5 s) settles that.
+    yield* Effect.sleep("7500 millis")
+    expect((yield* results(returned.id))[0]?.text).toContain("finished with status failed")
+
+    // A parent stopped by a usage limit queues its children's results instead of starting a failing run for each.
+    const input = { title: "Queued", message: "work", requestId: "queued" }
+    const queued = yield* core.delegate("held", "held-run", input)
+    yield* store.update((s) => {
+      const held = s.tasks.find((t) => t.id === "held")!
+      const run = s.runs.find((r) => r.id === "held-run")!
+      run.status = "failed"
+      run.endedAt = now
+      held.status = "failed"
+      held.usageLimitResume = { runId: run.id, resetsAt: later, autoResume: true }
+      return Either.right(undefined)
+    })
+    yield* finish(queued.id, queued.delegation!.runId!, "Queued answer")
+    yield* Effect.sleep("2500 millis")
+    expect(yield* results(queued.id)).toHaveLength(0)
+    expect((yield* store.read).runs.filter((r) => r.taskId === "held")).toHaveLength(1)
+    const resumed = yield* core.sendMessage("owner", "held", "Continue where you left off.", choice, [], false)
+    yield* Effect.sleep("2500 millis")
+    expect((yield* core.inbox("held", resumed.run.id)).join("\n")).toContain("Queued answer")
+    // The resumed parent repeating its delegate call gets the same child back.
+    expect((yield* core.delegate("held", resumed.run.id, input)).id).toBe(queued.id)
+  })), 30_000)
