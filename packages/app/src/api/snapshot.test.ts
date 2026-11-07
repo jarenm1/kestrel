@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, QueryObserver } from "@tanstack/react-query"
 import type { Run, Task } from "@cloudagents/protocol"
 import { fetchSnapshot, fetchTaskSnapshot, invalidateRunItems } from "./snapshot"
 
@@ -10,6 +10,24 @@ test("reconnect marks cached run items stale outside the task prefix", () => {
   invalidateRunItems(client)
   expect(client.getQueryState(["runs", "run", "items"])?.isInvalidated).toBe(true)
   expect(client.getQueryState(["runs", "run", "other"])?.isInvalidated).toBe(false)
+})
+
+test("subscription refresh replaces an initial snapshot started before subscription", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const first = Promise.withResolvers<string[]>()
+  const second = Promise.withResolvers<string[]>()
+  let calls = 0
+  const key = ["runs", "run", "items"]
+  const observer = new QueryObserver(client, { queryKey: key, queryFn: () => ++calls === 1 ? first.promise : second.promise })
+  const unsubscribe = observer.subscribe(() => {})
+  expect(calls).toBe(1)
+  invalidateRunItems(client)
+  expect(calls).toBe(2)
+  first.resolve(["before subscription"])
+  second.resolve(["after subscription"])
+  await observer.refetch()
+  expect(client.getQueryData(key)).toEqual(["after subscription"])
+  unsubscribe()
 })
 
 const key = ["tasks", "task", "runs"]

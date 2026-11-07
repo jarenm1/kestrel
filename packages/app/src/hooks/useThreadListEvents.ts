@@ -45,7 +45,10 @@ function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): (
   let close = () => {}
   const connect = () => {
     close = openUserEvents(target, {
-      onOpen: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
+      onOpen: () => {
+        void queryClient.cancelQueries({ queryKey: keys.tasks })
+        void queryClient.invalidateQueries({ queryKey: keys.tasks })
+      },
       onEvent: (event) => {
         switch (event._tag) {
           case "task.updated":

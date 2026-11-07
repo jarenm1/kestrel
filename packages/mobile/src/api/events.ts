@@ -1,7 +1,8 @@
 import { Option, Schema } from "effect";
-import { ServerEvent, TaskStats } from "@cloudagents/protocol";
+import { EventsSubscribed, ServerEvent, TaskStats } from "@cloudagents/protocol";
 
 const decodeEvent = Schema.decodeUnknownOption(ServerEvent);
+const decodeSubscribed = Schema.decodeUnknownOption(EventsSubscribed);
 const decodeTaskStats = Schema.decodeUnknownOption(TaskStats);
 
 /**
@@ -26,6 +27,10 @@ export function openTaskEvents(
     try {
       parsed = JSON.parse(msg.data);
     } catch {
+      return;
+    }
+    if (Option.isSome(decodeSubscribed(parsed))) {
+      handlers.onOpen();
       return;
     }
     const event = decodeEvent(parsed);

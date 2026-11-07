@@ -90,10 +90,12 @@ export async function fetchSnapshot<T extends Keyed>(key: QueryKey, fetch: () =>
 
 /** Run item keys are outside the task key prefix; keep invalidation within the connected box. */
 export function invalidateRunItems(client: QueryClient, scope: string): void {
-  void client.invalidateQueries({
+  const filters: Parameters<QueryClient["cancelQueries"]>[0] = {
     predicate: ({ queryKey }) => queryKey.length === 5 && queryKey[0] === "box-data" &&
       queryKey[1] === scope && queryKey[2] === "runs" && queryKey[4] === "items",
-  });
+  };
+  void client.cancelQueries(filters);
+  void client.invalidateQueries(filters);
 }
 
 /**

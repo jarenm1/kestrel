@@ -50,6 +50,7 @@ export function useTaskState(taskId: string) {
       close = openTaskEvents(url, {
         onOpen: () => {
           setDisconnected(false);
+          void queryClient.cancelQueries({ queryKey: keys.task(taskId) });
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
           invalidateRunItems(queryClient, api.boxScope);
         },
