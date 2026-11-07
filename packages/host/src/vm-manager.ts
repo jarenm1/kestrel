@@ -19,9 +19,9 @@ import { ChClient, TEMPLATE_BOOT_MEMORY_BYTES, TEMPLATE_BOOT_VCPUS, type MemoryR
 import { killVmm, launchVmm, stopVmm as stopVmmProcess, vmUnitName, waitForApi } from "./ch-process"
 import type { HostConfig } from "./config"
 import { HostError, UnknownBoxError, WakeTimeoutError, errorMessage } from "./errors"
-import { fsyncDir, fsyncPath, writeFileAtomic } from "./fs-atomic"
+import { fsyncDir, fsyncPath } from "./fs-atomic"
 import { readLeaseUntil, writeLeaseUntil } from "./lease"
-import { type NetCommand, allocateSlot, firewallRuleset, guestNetwork, missingTapAddrs, networkForSlot, tapAddrsListArgs, tapDownCommands, tapUpCommands } from "./network"
+import { type NetCommand, type TapAddrsCheck, allocateSlot, checkTapAddrs, guestNetwork, networkForSlot, tapAddrsAddCommand, tapAddrsListArgs, tapDownCommands, tapUpCommands } from "./network"
 import { type GuestSample, type ScaleState, NO_SCALE, CPU_PRESSURE_AVG10, HOST_MEMORY_PRESSURE_AVG10, MEMORY_PRESSURE_AVG10, MEMORY_STEP_BYTES, cpuActive, diskFreeBytes, diskTight, isIdle, lastActiveAt, memoryFloorBytes, memoryHeadroomBytes, memoryTargetBytes, pickSuspendVictim, stepSize, vcpuTarget } from "./policy"
 import { cgroupDirOf, isProcessAlive, processIsVmm, readCpuUsec, readMemoryPressureAvg10, sleep, type ProcIdentity } from "./proc"
 import { recoverPlan } from "./recovery"
@@ -164,6 +164,9 @@ const runNetCommands = async (commands: readonly NetCommand[]): Promise<void> =>
   }
 }
 
+/** The networks of the VMs that currently have a tap. */
+const liveNetworks = (records: Iterable<VmRecord>): NestNetwork[] => [...records].flatMap((record) => (record.network === null ? [] : [record.network]))
+
 /** Tears a tap down. Best effort: a tap that is already gone is not an error. */
 const tapDown = async (network: NestNetwork): Promise<void> => {
   for (const command of tapDownCommands(network)) {
@@ -237,15 +240,20 @@ export class VmManager {
   }
 
   /**
-   * Loads the guest firewall and the records, recovers every VM from its last state, builds the template and starts the
-   * timers. Refuses to start when the firewall cannot be loaded or host memory pressure cannot be read: without the first
-   * no guest could have a safe network, and without the second the memory policy has no signal.
+   * Checks the `tap_addrs` set and recovers every VM from its last state, builds the template and starts the timers.
+   * Refuses to start when the set is absent, or when host memory pressure cannot be read: without the first no guest could
+   * have a safe network, and without the second the memory policy has no signal.
    */
   async start(): Promise<void> {
     ensureStateDirs(this.layout)
     this.leaseUntil = readLeaseUntil(this.layout.leasePath) ?? 0
     const records = listVms(this.layout)
-    await this.reloadFirewall(records.flatMap((record) => (record.network === null ? [] : [record.network])))
+    const firewall = await this.syncTapAddrs(liveNetworks(records))
+    if (firewall.kind === "missing-set") {
+      throw new HostError(
+        `nftables set inet kestrel tap_addrs is missing: the kestrel-host NixOS module must load its ruleset before the agent starts (${firewall.reason})`,
+      )
+    }
     readMemoryPressureAvg10()
     for (const record of records) this.records.set(record.boxId, record)
     for (const record of [...this.records.values()]) await this.recover(record)
@@ -276,30 +284,26 @@ export class VmManager {
   }
 
   /**
-   * Replaces the guest firewall with the agent's ruleset, carrying the element of every live tap. The replacement is one
-   * `nft -f` transaction, so no running tap is left without its anti-spoofing rule.
+   * Re-adds the `tap_addrs` element of every live tap the set lacks, and returns what the check found. The set belongs to
+   * the host NixOS module: when it is absent this does not create it.
    */
-  private async reloadFirewall(lives: readonly NestNetwork[]): Promise<void> {
-    const path = join(this.layout.root, "firewall.nft")
-    writeFileAtomic(path, firewallRuleset(lives))
-    await runChecked("nft", ["-f", path])
+  private async syncTapAddrs(lives: readonly NestNetwork[]): Promise<TapAddrsCheck> {
+    const check = checkTapAddrs(await runTool("nft", tapAddrsListArgs), lives)
+    if (check.kind === "present") await runNetCommands(check.missing.map((network) => tapAddrsAddCommand(network)))
+    return check
   }
 
   /**
-   * Checks the guest firewall every tick. An nftables service reload can flush the whole ruleset, or only `tap_addrs`,
-   * while VMs keep running; a missing table or set, or a live tap without its element, reloads the complete firewall.
-   * This runs with no live tap too: a new tap needs the tables.
+   * Checks `tap_addrs` every interval. A reload or stop of the nftables service flushes the set while VMs keep running,
+   * so missing elements are re-added here. An absent set is reported and left to the host NixOS module.
    */
   private async resyncFirewall(): Promise<void> {
-    const lives = [...this.records.values()].flatMap((record) => (record.network === null ? [] : [record.network]))
-    const listing = await runTool("nft", tapAddrsListArgs)
-    if (listing.status === 0 && missingTapAddrs(listing.stdout, lives).length === 0) return
-    await this.reloadFirewall(lives)
-    this.events.notice(
-      listing.status === 0
-        ? "reloaded the guest firewall: tap_addrs lacked the element of a live tap"
-        : `reloaded the guest firewall: its tables were missing (${listing.stderr.trim()})`,
-    )
+    const check = await this.syncTapAddrs(liveNetworks(this.records.values()))
+    if (check.kind === "missing-set") {
+      this.events.error(`nftables set inet kestrel tap_addrs is missing; the kestrel-host NixOS module owns it (${check.reason})`)
+    } else if (check.missing.length > 0) {
+      this.events.notice(`re-added the tap_addrs element of ${check.missing.map((network) => network.tap).join(", ")}: the set had lost it`)
+    }
   }
 
   /** A periodic task that throws must not stop its timer: the failure is reported and the next run tries again. */
