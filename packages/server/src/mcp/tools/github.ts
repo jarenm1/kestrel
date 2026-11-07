@@ -12,7 +12,7 @@ export interface GitHubToolDeps {
       taskId: string,
       input: { readonly title: string; readonly body: string; readonly draft: boolean; readonly checkoutId?: string; readonly branch?: string },
     ) => Effect.Effect<{ readonly pullRequest: PullRequest; readonly created: boolean }, unknown>
-    readonly pullRequestStatus: (taskId: string, checkoutId?: string) => Effect.Effect<PullRequestStatus, unknown>
+    readonly pullRequestStatus: (taskId: string, checkoutId?: string, number?: number) => Effect.Effect<PullRequestStatus, unknown>
     readonly readReference: (
       taskId: string,
       input: { readonly repo: string; readonly number: number; readonly kind: "pr" | "issue" },
@@ -207,15 +207,17 @@ export const registerGitHubTools = (server: McpServer, ctx: RunContext, deps: Gi
     "github_pr_status",
     {
       description:
-        "Show the live GitHub status of this task's pull request: mergeability, review decision, check results and " +
-        "recent review comments. Requires a pull request opened with github_pr_create or checked out with repo_checkout.",
-      inputSchema: { checkout: checkoutArg },
+        "Show the live GitHub status of a pull request this thread manages: mergeability, review decision, check results " +
+        "and recent review comments. Defaults to the checkout's pull request; name `number` for a pull request the " +
+        "thread registered, including one it watches in a repository it has not checked out. Requires a pull request " +
+        "opened with github_pr_create, checked out with repo_checkout, or watched with github_pr_watch.",
+      inputSchema: { checkout: checkoutArg, number: numberArg },
     },
-    ({ checkout }: { checkout?: string }) =>
+    ({ checkout, number }: { checkout?: string; number?: number }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
-            const status = yield* deps.github.pullRequestStatus(ctx.taskId, checkout)
+            const status = yield* deps.github.pullRequestStatus(ctx.taskId, checkout, number)
             return text(truncate(formatStatus(status)))
           }),
         ),

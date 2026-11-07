@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { BOX_ID_HEADER, BOX_TURN_PATH, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import type { ServerConfig } from "../config"
 import { mintIceServers, type WebRtcSettings } from "./webrtc"
-import { hasExplicitTurn, managedTurn, viewerIceServers } from "./turn"
+import { hasExplicitTurn, managedTurn, sessionIceServers } from "./turn"
 
 const PROVIDER_STUN: DesktopRtcIceServer = { urls: ["stun:managed-stun.example.com:3478"] }
 const MANAGED_TURN: DesktopRtcIceServer = {
@@ -68,11 +68,13 @@ describe("managedTurn", () => {
       return direct || relay ? credentials() : new Response(null, { status: 401 })
     })
 
-    const directViewer = await viewerIceServers(settings(), managedTurn(config(direct(controlUrl))), "thread-direct", NOW_S)
+    const directViewer = await sessionIceServers(settings(), managedTurn(config(direct(controlUrl))), "thread-direct", NOW_S)
     expect(directViewer.warning).toBeNull()
     expect(directViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    // The box's own peer takes the same list, and knows the relay is the control plane's.
+    expect(directViewer.managed).toBe(true)
 
-    const relayViewer = await viewerIceServers(
+    const relayViewer = await sessionIceServers(
       settings(),
       managedTurn(config(null, { controlUrl, boxToken: "relay-token" })),
       "thread-relay",
@@ -80,13 +82,16 @@ describe("managedTurn", () => {
     )
     expect(relayViewer.warning).toBeNull()
     expect(relayViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    expect(relayViewer.managed).toBe(true)
   })
 
   test("a standalone box has no control-plane identity and keeps its own servers", async () => {
     const turn = managedTurn(config())
 
     expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
-    expect((await viewerIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual(STUN)
+    const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+    expect(servers.iceServers).toEqual(STUN)
+    expect(servers.managed).toBe(false)
   })
 
   test("rejects expired credentials and does not cache the rejection", async () => {
@@ -103,7 +108,7 @@ describe("managedTurn", () => {
       warning: "managed TURN unavailable: control plane sent expired TURN credentials",
     } as const
     expect(first).toEqual(rejected)
-    const viewer = await viewerIceServers(settings(), turn, "thread-expired", NOW_S)
+    const viewer = await sessionIceServers(settings(), turn, "thread-expired", NOW_S)
     expect(viewer.iceServers).toEqual(STUN)
     expect(viewer.warning).toBe(rejected.warning)
     expect(calls).toBe(2)
@@ -121,7 +126,7 @@ describe("managedTurn", () => {
     )
     const turn = managedTurn(config(direct(controlUrl)))
 
-    const result = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
     expect(result.iceServers).toEqual(STUN)
     expect(result.warning).toBe("managed TURN unavailable: control plane sent no usable TURN credentials")
   })
@@ -141,7 +146,7 @@ describe("managedTurn", () => {
     )
     const turn = managedTurn(config(direct(controlUrl)))
 
-    const result = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
     expect(result.warning).toBeNull()
     expect(result.iceServers).toEqual([
       ...STUN,
@@ -158,8 +163,8 @@ describe("managedTurn", () => {
     })
     const turn = managedTurn(config(direct(controlUrl)))
 
-    const first = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
-    const second = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
+    const first = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+    const second = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
     expect(first.iceServers).toEqual([...STUN, ...MANAGED])
     expect(second.iceServers).toEqual([...STUN, ...MANAGED])
     expect(calls).toBe(1)
@@ -173,8 +178,8 @@ describe("managedTurn", () => {
     })
     const turn = managedTurn(config(direct(controlUrl)))
 
-    expect((await viewerIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual([...STUN, ...MANAGED])
-    expect((await viewerIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual([...STUN, ...MANAGED])
+    expect((await sessionIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual([...STUN, ...MANAGED])
+    expect((await sessionIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual([...STUN, ...MANAGED])
     expect(calls).toBe(2)
   })
 
@@ -231,7 +236,9 @@ describe("managedTurn", () => {
     const turn = managedTurn(config(direct(controlUrl)))
 
     expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
-    expect((await viewerIceServers(settings(), turn, "thread-1", NOW_S)).iceServers).toEqual(STUN)
+    const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+    expect(servers.iceServers).toEqual(STUN)
+    expect(servers.managed).toBe(false)
   })
 
   test("a malformed answer is a sanitized warning, not a crash or a fabricated relay", async () => {
@@ -245,12 +252,12 @@ describe("managedTurn", () => {
   })
 })
 
-describe("viewerIceServers", () => {
+describe("sessionIceServers", () => {
   test("appends managed TURN to the box's local STUN without requiring per-box TURN settings", async () => {
     const controlUrl = endpoint(() => credentials())
     const turn = managedTurn(config(direct(controlUrl)))
 
-    const result = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
 
     expect(result.warning).toBeNull()
     expect(result.iceServers).toEqual([...STUN, ...MANAGED])
@@ -260,7 +267,7 @@ describe("viewerIceServers", () => {
     const controlUrl = endpoint(() => new Response(null, { status: 503 }))
     const turn = managedTurn(config(direct(controlUrl)))
 
-    const result = await viewerIceServers(settings(), turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
 
     expect(result.iceServers).toEqual(STUN)
     expect(result.warning).toBe("managed TURN unavailable: control plane answered 503")
@@ -277,7 +284,7 @@ describe("viewerIceServers", () => {
       iceServers: [{ urls: ["turns:static-turn.example.com:443"], username: "local-user", credential: "local-pass" }],
     })
 
-    const result = await viewerIceServers(local, turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
 
     expect(result.iceServers).toEqual([...local.iceServers])
     expect(calls).toBe(0)
@@ -292,7 +299,7 @@ describe("viewerIceServers", () => {
     const turn = managedTurn(config(direct(controlUrl)))
     const local = settings({ iceServers: [], turn: { urls: ["turns:local-turn.example.com:443"], secret: "local-secret" } })
 
-    const result = await viewerIceServers(local, turn, "thread-1", NOW_S)
+    const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
 
     expect(result.iceServers).toEqual(mintIceServers(local, "thread-1", NOW_S))
     expect(calls).toBe(0)

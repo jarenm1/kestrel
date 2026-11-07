@@ -6,24 +6,28 @@ import { mkdir, readFile, rm } from "node:fs/promises"
 import { basename, join } from "node:path"
 import {
   InternalError,
+  DEFAULT_MODEL_HARNESS,
   DEFAULT_MODEL_PROVIDER,
   modelInfo,
+  modelUpstreamId,
   providerModels,
   type AgentEffort,
   type AgentModel,
   type Attachment,
+  type ModelHarness,
   type ModelProvider,
+  type RouteHarness,
   type TextGenerationSettings,
 } from "@cloudagents/protocol"
-import { AGENT_CLIS, MODEL_HARNESS } from "../agent-clis"
+import { AGENT_CLIS, harnessForModel, type Harness } from "../agent-clis"
 import type { CliAuthShape } from "../cliauth"
-import type { BrokerProvider, CredentialBrokerShape } from "../broker"
-import { loginsForProvider, claudeTierEnv } from "./harness"
+import { brokerApiBase, DEFAULT_BROKER_API, type BrokerProvider, type CredentialBrokerShape } from "../broker"
+import { loginsForModel, claudeTierEnv } from "./harness"
 import { makeTranscript } from "./transcript"
 import { makeAcpDriver } from "./acp"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { agentHome, prepareLaunch, removeTask, sandboxSettingsOf, stopTaskHolder, type Launch } from "../sandbox"
-import type { ServerConfig } from "../config"
+import { opencodeConfigContent, opencodeRouteModel, type ServerConfig } from "../config"
 
 /** Dependencies the box already has for model runs; text generation reuses their credential and sandbox paths. */
 export interface TextGeneratorDeps {
@@ -233,7 +237,7 @@ const runChild = (
 const runAcp = (
   launch: Pick<Launch, "file" | "args" | "cwd" | "env">,
   prompt: string,
-  model: AgentModel,
+  model: string,
   effort: AgentEffort | undefined,
 ): Effect.Effect<string, InternalError> =>
   Effect.tryPromise({
@@ -331,16 +335,16 @@ const runAcp = (
     catch: (e) => toInternal(`text generation failed: ${e instanceof Error ? e.message : String(e)}`),
   })
 
-/** The command for a provider CLI with a one-shot mode, its prompt channel, and where Codex writes its answer. */
+/** The command for a routed/CLI harness with a one-shot mode, its prompt channel, and where Codex writes its answer. */
 const oneShotCommand = (
-  provider: ModelProvider,
-  model: AgentModel,
+  harness: Harness,
+  model: string,
   effort: AgentEffort | undefined,
   lastMessage: string,
   openaiBaseUrl: string | undefined,
+  routed: boolean,
 ): { readonly command: string; readonly stdin: boolean } => {
-  const harness = MODEL_HARNESS[provider].conversation
-  if (harness === "claude") {
+  if (harness.conversation === "claude") {
     const args = [
       "claude",
       "-p",
@@ -360,7 +364,19 @@ const oneShotCommand = (
     ]
     return { command: args.map(shellQuote).join(" "), stdin: true }
   }
-  if (harness === "codex") {
+  if (harness.conversation === "codex") {
+    const providerArgs = routed
+      ? [
+          "-c", 'model_provider="kestrel"',
+          "-c", 'model_providers.kestrel.name="Kestrel"',
+          "-c", `model_providers.kestrel.base_url=${JSON.stringify(openaiBaseUrl ?? "")}`,
+          "-c", 'model_providers.kestrel.env_key="OPENAI_API_KEY"',
+          "-c", 'model_providers.kestrel.wire_api="responses"',
+          "-c", "model_providers.kestrel.supports_websockets=false",
+        ]
+      : openaiBaseUrl === undefined
+        ? []
+        : ["-c", `openai_base_url=${JSON.stringify(openaiBaseUrl)}`]
     const args = [
       "codex",
       "exec",
@@ -374,7 +390,7 @@ const oneShotCommand = (
       lastMessage,
       "--model",
       model,
-      ...(openaiBaseUrl === undefined ? [] : ["-c", `openai_base_url=${JSON.stringify(openaiBaseUrl)}`]),
+      ...providerArgs,
       ...(effort === undefined ? [] : ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`]),
       "-",
     ]
@@ -403,12 +419,30 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
         },
         conversationProvider,
       )
-      const provider = modelInfo(selected.model).provider
+      const info = modelInfo(selected.model)
+      const provider = info.provider
+      const harnessId: ModelHarness = info.harness ?? DEFAULT_MODEL_HARNESS[provider]
+      const harness = harnessForModel(selected.model)
+      const routed = info.harness !== undefined
       const prompt = threadTitlePrompt(request.source, request.settings.threadTitleInstructions)
       // Credentials are read before anything is written, so a refused read leaves no scratch directory.
-      const channel: BrokerProvider | null = MODEL_HARNESS[provider].broker ? (provider as BrokerProvider) : null
-      const lease = channel === null ? null : yield* broker.issue(id, request.user, channel)
-      const logins = loginsForProvider(
+      const channel: BrokerProvider | null = harness.broker ? (provider as BrokerProvider) : null
+      const goKey =
+        provider === "opencode-go" && channel !== null
+          ? yield* cliAuth.opencodeGoKey(request.user).pipe(
+              Effect.mapError((e) => toInternal(`cannot read the OpenCode Go key: ${e.message}`)),
+            )
+          : null
+      const lease =
+        channel === null
+          ? null
+          : yield* broker.issue(id, request.user, channel, {
+              harness: harnessId as RouteHarness,
+              opencodeGoKey: goKey,
+              sessionId: id,
+            })
+      const logins = loginsForModel(
+        selected.model,
         provider,
         yield* cliAuth.loggedInDirs(request.user).pipe(Effect.mapError((e) => toInternal(`cannot read CLI logins: ${e.message}`))),
       )
@@ -424,14 +458,32 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
       const dropped = new Set(logins.flatMap((login) => AGENT_CLIS[login.provider].brokerEnv))
       const brokerEnv = Object.fromEntries(Object.entries(lease?.env ?? {}).filter(([key]) => !dropped.has(key)))
       const loginEnv = Object.fromEntries(loginDirs.map((dir) => [AGENT_CLIS[dir.provider].configEnv, dir.inside]))
+      const modelId = modelUpstreamId(selected.model)
+      const opencodeEnv: Record<string, string> =
+        harness.conversation === "acp" && harness.bin === "opencode"
+          ? {
+              OPENCODE_CONFIG_CONTENT: opencodeConfigContent(
+                lease !== null && harnessId === "opencode" && channel !== null
+                  ? {
+                      // The config's base must be the API `brokerTarget` resolves for this provider.
+                      baseURL: brokerApiBase(lease.base, channel, DEFAULT_BROKER_API[channel]),
+                      api: DEFAULT_BROKER_API[channel],
+                      upstreamModel: modelId,
+                      name: provider,
+                    }
+                  : null,
+              ),
+            }
+          : {}
+      const command = routed ? config.agentRouteCommands[harnessId as RouteHarness] : config.agentCommands[provider]
       const agentEnv: Record<string, string> = {
         ...(config.fakeAgent ? { CLOUDAGENTS_TEXT_GENERATION: "1" } : {}),
-        CLOUDAGENTS_MODEL: selected.model,
+        CLOUDAGENTS_MODEL: modelId,
+        CLOUDAGENTS_HARNESS: harnessId,
         ...(selected.effort === undefined ? {} : { CLOUDAGENTS_EFFORT: selected.effort }),
-        ...(provider !== "anthropic" && MODEL_HARNESS[provider].conversation === "claude"
-          ? claudeTierEnv(selected.model)
-          : {}),
+        ...(provider !== "anthropic" && harness.conversation === "claude" ? claudeTierEnv(selected.model) : {}),
         ...brokerEnv,
+        ...opencodeEnv,
         ...loginEnv,
       }
       const prepare = (command: string) =>
@@ -454,7 +506,7 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
       const lastMessageHost = join(homeDir, "last-message.txt")
 
       const run = Effect.gen(function* () {
-        const configured = config.agentCommands[provider]
+        const configured = command
         if (config.fakeAgent) {
           if (configured === "") return yield* Effect.fail(toInternal("no command is configured for this provider"))
           const launch = yield* prepare(configured)
@@ -462,15 +514,16 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
           if (output.code !== 0) return yield* Effect.fail(toInternal(`text generation failed (exit code ${output.code ?? "none"})`))
           return output.stdout
         }
-        if (MODEL_HARNESS[provider].conversation === "acp") {
+        if (harness.conversation === "acp") {
           if (configured === "") return yield* Effect.fail(toInternal("no ACP command is configured for this provider"))
-          return yield* runAcp(yield* prepare(configured), prompt, selected.model, selected.effort)
+          const acpModel = routed && harnessId === "opencode" ? opencodeRouteModel(modelId) : modelId
+          return yield* runAcp(yield* prepare(configured), prompt, acpModel, selected.effort)
         }
-        const spec = oneShotCommand(provider, selected.model, selected.effort, lastMessageInside, brokerEnv.OPENAI_BASE_URL)
+        const spec = oneShotCommand(harness, modelId, selected.effort, lastMessageInside, brokerEnv.OPENAI_BASE_URL, routed)
         if (spec.command === "") return yield* Effect.fail(toInternal("no one-shot command is configured for this provider"))
         const output = yield* runChild(yield* prepare(spec.command), spec.stdin ? prompt : undefined)
         if (output.code !== 0) return yield* Effect.fail(toInternal(`text generation failed (exit code ${output.code ?? "none"})`))
-        if (MODEL_HARNESS[provider].conversation === "codex") {
+        if (harness.conversation === "codex") {
           // The file is the answer; stdout also carries progress and diagnostics, which must not become a title.
           return yield* Effect.tryPromise({
             try: () => readFile(lastMessageHost, "utf8"),

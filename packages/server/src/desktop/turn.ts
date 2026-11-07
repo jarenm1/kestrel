@@ -1,7 +1,8 @@
 /**
- * Managed TURN credentials for viewers. A registered box asks the control plane for short-lived provider credentials;
- * the provider token stays on the control plane, and the box's own identity (its secret or the relay token) is the only
- * thing it presents. A standalone box has no control-plane identity and keeps its local ICE configuration.
+ * Managed TURN credentials for desktop peers. A registered box asks the control plane for short-lived provider
+ * credentials; the provider token stays on the control plane, and the box's own identity (its secret or the relay
+ * token) is the only thing it presents. A standalone box has no control-plane identity and keeps its local ICE
+ * configuration.
  */
 import { Schema } from "effect"
 import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials, type DesktopRtcIceServer } from "@cloudagents/protocol"
@@ -175,26 +176,30 @@ export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
   settings.turn !== null ||
   settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
 
-export interface ViewerIceServers {
+export interface SessionIceServers {
   readonly iceServers: DesktopRtcIceServer[]
   readonly warning: string | null
+  /** Whether `iceServers` carries provider-issued TURN, which is the box's to use with a shorter allocation wait. */
+  readonly managed: boolean
 }
 
 /**
- * The ICE servers one viewer receives: the box's static and session-minted servers, with managed TURN appended when the
- * box is registered and has no operator-configured TURN. Local configuration is never replaced.
+ * The ICE servers one peer of a desktop session gets — the viewer's config and the box's own peer — with managed TURN
+ * appended when the box is registered and has no operator-configured TURN. Both ends allocate a relay, so a session
+ * still connects when neither side has a candidate the other can reach. Local configuration is never replaced.
  */
-export const viewerIceServers = async (
+export const sessionIceServers = async (
   settings: WebRtcSettings,
   managed: ManagedTurn | null,
   taskId: string,
   nowSeconds = Math.floor(Date.now() / 1000),
-): Promise<ViewerIceServers> => {
+): Promise<SessionIceServers> => {
   const local = mintIceServers(settings, taskId, nowSeconds)
-  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null }
+  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null, managed: false }
   const result = await managed.servers()
   return {
     iceServers: result.iceServers === null ? local : [...local, ...result.iceServers],
     warning: result.warning,
+    managed: result.iceServers !== null,
   }
 }

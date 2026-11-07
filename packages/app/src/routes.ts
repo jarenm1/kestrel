@@ -18,4 +18,18 @@ export const APP_ORIGIN = !IS_SITE_HOST
 /** Home of the app: the new chat composer. */
 export const APP_HOME = "/"
 
+const LOOPBACK_HOSTS: Record<string, true> = {
+  localhost: true,
+  "127.0.0.1": true,
+  "::1": true,
+  "[::1]": true,
+}
+
+/**
+ * Origin for links meant for other people. The desktop app serves the built app from loopback, so its links have to
+ * name the public app instead; a local dev server still shares links that point at itself.
+ */
+export const SHARE_ORIGIN =
+  LOOPBACK_HOSTS[hostname] === true && !import.meta.env.DEV ? "https://app.kestrel-agent.com" : APP_ORIGIN
+
 export const threadPath = (taskId: string) => `/c/${taskId}`

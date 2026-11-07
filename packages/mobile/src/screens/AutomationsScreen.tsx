@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Plus } from "lucide-react-native";
 import type { Automation, AutomationRun, TriggerAutomationBody } from "@cloudagents/protocol";
@@ -10,6 +10,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
+import { Switch } from "@/components/ui/Switch";
 import { confirmDestructive } from "@/lib/confirm";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { useApiClient } from "@/hooks/useApiClient";
@@ -17,8 +18,6 @@ import { useNavigation } from "@/nav/navigation";
 import { errorText } from "@/lib/format";
 import { describeTrigger, formatWhen, promptPreview } from "@/lib/automations";
 import { colors, fonts, radius, spacing } from "@/theme";
-
-const switchTrack = { false: colors.secondary, true: colors.primary };
 
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
@@ -147,10 +146,6 @@ function AutomationRow({
           disabled={toggle.isPending}
           onValueChange={(enabled) => toggle.mutate(enabled)}
           accessibilityLabel={`Enabled: ${automation.name}`}
-          trackColor={switchTrack}
-          thumbColor={automation.enabled ? colors.primaryForeground : colors.foreground}
-          ios_backgroundColor={colors.secondary}
-          style={toggle.isPending ? styles.disabled : undefined}
         />
       </View>
 
@@ -446,8 +441,5 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontSize: 12,
     fontWeight: "500",
-  },
-  disabled: {
-    opacity: 0.5,
   },
 });

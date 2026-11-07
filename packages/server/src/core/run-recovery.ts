@@ -127,10 +127,14 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       const provider = run.provider ?? DEFAULT_MODEL_PROVIDER
       const cli = MODEL_USAGE_CLI[provider]
       const usage = (yield* deps.providerUsage(task.owner, true)).find((entry) => entry.provider === cli)
-      // The probe is the only part that can fail transiently; do not consume this run's one look until it answered.
-      examined.add(run.id)
+      // The look is recorded only once its verdict is in the store: no reset to wait for, or the arm written (or ruled
+      // out by the thread moving on). Until then `deciding` holds a delegated child's failure; a probe or a write that
+      // fails leaves the run for the next sweep instead of letting that failure go up as final.
       const resetsAt = usageLimitResetAt(usage, endedAt)
-      if (resetsAt === null) return
+      if (resetsAt === null) {
+        examined.add(run.id)
+        return
+      }
       let autoResume = autoResumeByOwner.get(task.owner)
       if (autoResume === undefined) {
         autoResume = (yield* settingsOf(task.owner)).autoResumeAfterUsageLimits
@@ -144,6 +148,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
           stored.archivedAt !== undefined ||
           stored.usageLimitResume !== undefined ||
           stored.autoRetry !== undefined ||
+          s.settledRuns.includes(run.id) ||
           last?.id !== run.id
         ) {
           return Either.right(null)
@@ -151,6 +156,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
         stored.usageLimitResume = { runId: run.id, resetsAt, autoResume }
         return Either.right({ ...stored })
       })
+      examined.add(run.id)
       if (armed !== null) deps.publish(armed)
     }).pipe(
       Effect.catchAllCause((cause) =>
@@ -260,6 +266,16 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
     // Only a thread's latest run can ever be armed, so older ids would otherwise accumulate for the box's lifetime.
     const latestIds = new Set([...latest.values()].map((run) => run.id))
     for (const id of examined) if (!latestIds.has(id)) examined.delete(id)
+    if (state.settledRuns.some((id) => !latestIds.has(id))) {
+      yield* deps.store.update((s) => {
+        const latestRunIds = new Set<string>()
+        const seen = new Map<string, string>()
+        for (const run of s.runs) seen.set(run.taskId, run.id)
+        for (const id of seen.values()) latestRunIds.add(id)
+        s.settledRuns = s.settledRuns.filter((id) => latestRunIds.has(id))
+        return Either.right(undefined)
+      })
+    }
 
     // A reply, a resumed run, or a cancelled delegation leaves a pending recovery with nothing to do.
     const stale = state.tasks.filter((task) => {
@@ -345,10 +361,28 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       // Only a failure this box saw recently, and that is still the thread's latest run, can be armed or retried.
       if (run.status !== "failed" || run.endedAt === null) continue
       const endedAt = Date.parse(run.endedAt)
-      if (now - endedAt > ARM_WINDOW_MS || examined.has(run.id)) continue
+      if (now - endedAt > ARM_WINDOW_MS || examined.has(run.id) || current.settledRuns.includes(run.id)) continue
       yield* examine(task, run, endedAt, autoResumeByOwner)
     }
   })
 
-  return { sweep }
+  /**
+   * Whether the sweep has yet to decide what a thread's latest run, failed, gets: a usage-limit arm, a retry, or nothing.
+   * Callers pass the thread's latest run. Reporting a delegated child's failure before this verdict would announce as
+   * final a run the box may be about to resume; a probe that keeps failing holds it at most `ARM_WINDOW_MS`. A run a
+   * restart interrupted left no failure to read, so it can never be a usage limit; a run the user settled is decided.
+   */
+  const deciding = (state: Readonly<StoreState>, task: Task, run: Run): boolean =>
+    task.archivedAt === undefined &&
+    task.delegation?.cancelledAt === undefined &&
+    run.status === "failed" &&
+    run.interruptedByRestart !== true &&
+    run.endedAt !== null &&
+    task.usageLimitResume === undefined &&
+    task.autoRetry === undefined &&
+    Date.now() - Date.parse(run.endedAt) <= ARM_WINDOW_MS &&
+    !examined.has(run.id) &&
+    !state.settledRuns.includes(run.id)
+
+  return { sweep, deciding }
 }

@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tansta
 import {
   CLI_SIGN_IN,
   CliProvider,
+  baseModelId,
   MODEL_PROVIDERS,
-  providerModels,
 
   type CliLoginStart,
   type Connection,
@@ -12,7 +12,8 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
-import { ChevronDown, Plus } from "lucide-react"
+import { ChevronDown, Plus, RefreshCw } from "lucide-react"
+import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { Alert } from "@cloudagents/ui/alert"
@@ -30,7 +31,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 
-import { setShownModels, useShownModels } from "@/hooks/useShownModels"
+import { setShownModels, storedShownModels, useShownModels } from "@/hooks/useShownModels"
+import { useModelCatalog } from "@/hooks/useModelCatalog"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
 import { errorText } from "@/util"
 import { HarnessLogo } from "@/components/HarnessLogo"
@@ -48,6 +50,7 @@ const CLI_INTRO: Record<CliProvider, string> = {
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
   "opencode": "Sign in with OpenCode Console to use free models. The login stays in OpenCode on your box.",
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
+  "devin-cli": "Use your own Devin account through Devin CLI.",
 }
 
 /** Key-based CLI logins belong with API keys, but keep their box-local authentication. */
@@ -59,15 +62,36 @@ function isApiKeyConnection(connection: Connection) {
 /** Model subscriptions, installed harnesses, and API keys with their chat model preferences. */
 export function Connections() {
   const connections = useQuery(queries.connections())
+  const catalog = useModelCatalog()
   const list = connections.data
 
   return (
     <>
       {connections.error && <Alert>{errorText(connections.error)}</Alert>}
-      {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
-      {list && (
-        <div className="flex flex-col gap-2">
+      {catalog.isError && (
+        <Alert>
+          {catalog.isFallback
+            ? "Model discovery is unavailable; showing the built-in catalog. "
+            : "The last model refresh failed; showing the catalog read earlier. "}
+          {errorText(catalog.error)}
+        </Alert>
+      )}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-3">
           <h2 className="font-semibold tracking-tight">Harnesses/Subscriptions</h2>
+          <Button
+            variant="soft"
+            size="sm"
+            disabled={!catalog.canRefresh}
+            onClick={catalog.refresh}
+            aria-label="Refresh the models each provider offers"
+          >
+            <RefreshCw className={catalog.isRefreshing ? "animate-spin" : undefined} />
+            {catalog.isRefreshing ? "Refreshing…" : "Refresh models"}
+          </Button>
+        </div>
+        {connections.isPending && <div className="text-muted-foreground">Loading…</div>}
+        {list && (
           <Card className="py-0">
             <CardContent className="divide-y divide-white/[0.04] px-0">
               {list.filter((connection) => connection.kind === "cli" && !isApiKeyConnection(connection)).map((connection) =>
@@ -79,8 +103,8 @@ export function Connections() {
               )}
             </CardContent>
           </Card>
-        </div>
-      )}
+        )}
+      </div>
       {list && <ApiKeysCard connections={list} />}
     </>
   )
@@ -170,23 +194,42 @@ function HarnessRow({ connection, children }: { connection: Connection; children
 }
 
 /**
- * Height of the model list: ten items (2rem each), scrolling past that, less only when the window has less room. Fixed
- * for longer lists so the menu keeps its size while searching; shorter lists take their own height.
+ * Height of the model list: ten items (2rem each), scrolling past that, less only when the window has less room. The
+ * subtraction leaves room for the label, discovery status, search box and footer; the list stays fixed for longer
+ * lists so the menu keeps its size while searching, and shorter lists take their own height.
  */
 const MODEL_LIST_ROWS = 10
-const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 7rem))"
+const MODEL_LIST_HEIGHT = "min(20rem, calc(var(--radix-dropdown-menu-content-available-height) - 9rem))"
 
-/** Toggles which of the provider's models the chat's model picker offers, with a search box over the list. */
+/**
+ * Toggles which of the provider's models the chat's model picker offers, with a search box over the list. Routes appear
+ * under the harness they run; a subscription row may only pick its native models, and a route the selected box cannot
+ * launch is not offered at all. The models come from the active box's runtime catalog.
+ */
 function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
-  const all = providerModels(provider.id)
+  const discovery = useModelCatalog()
+  // Visibility is per model, not per route: one toggle covers every harness the model supports.
+  const catalog = discovery.models.filter((model) => model.provider === provider.id && !isRouteModel(model))
   const shown = useShownModels()[provider.id]
-  const shownIds = new Set(shown.map((m) => m.id))
-  const menu = useFilterMenu(all, (m) => `${m.name} ${m.id}`, (m) => toggle(m.id, !shownIds.has(m.id)), {
-    keepOpen: true,
-  })
+  const chosen = storedShownModels(provider.id)
+  const shownBase = new Set(shown.map((m) => baseModelId(m.id)))
+  const shownCount = catalog.filter((m) => shownBase.has(m.id)).length
+  const menu = useFilterMenu(
+    catalog,
+    (m) => `${modelDisplayName(m)} ${m.name} ${m.id}`,
+    (m) => toggle(m.id, !shownBase.has(m.id)),
+    { keepOpen: true },
+  )
 
   function toggle(id: AgentModel, on: boolean) {
-    setShownModels(provider.id, all.filter((m) => (m.id === id ? on : shownIds.has(m.id))).map((m) => m.id))
+    // Keep ids the current catalog does not offer (an offline box, an unsupported source) until they are toggled off.
+    const next = new Set((chosen ?? shown.map((m) => baseModelId(m.id))).map(baseModelId))
+    if (on) next.add(id)
+    else next.delete(id)
+    const offered = catalog.filter((m) => next.has(m.id)).map((m) => m.id)
+    const kept = [...next].filter((candidate) => !catalog.some((m) => baseModelId(m.id) === candidate))
+    // Store base ids only; the chat picker expands each one to its supported routes.
+    setShownModels(provider.id, [...offered, ...kept])
   }
 
   return (
@@ -198,7 +241,7 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
           className="ml-auto"
           aria-label={`Choose ${provider.name} models shown in chat`}
         >
-          {shown.length} of {all.length} shown
+          {shownCount} of {catalog.length} shown
           <ChevronDown className="opacity-60" />
         </Button>
       </DropdownMenuTrigger>
@@ -216,18 +259,18 @@ function ModelPicker({ provider }: { provider: ModelProviderInfo }) {
         <div
           ref={menu.listRef}
           className="overflow-y-auto"
-          style={all.length > MODEL_LIST_ROWS ? { height: MODEL_LIST_HEIGHT } : { maxHeight: MODEL_LIST_HEIGHT }}
+          style={catalog.length > MODEL_LIST_ROWS ? { height: MODEL_LIST_HEIGHT } : { maxHeight: MODEL_LIST_HEIGHT }}
         >
           {menu.matches.map((m) => (
             <DropdownMenuCheckboxItem
               key={m.id}
-              checked={shownIds.has(m.id)}
+              checked={shownBase.has(m.id)}
               // Keeps the menu open so several models can be toggled in one go.
               onSelect={(e) => e.preventDefault()}
               onCheckedChange={(on) => toggle(m.id, on)}
               {...filterItemProps}
             >
-              <span className="min-w-0 flex-1 truncate">{m.name}</span>
+              <span className="min-w-0 flex-1 truncate">{modelDisplayName(m)}</span>
             </DropdownMenuCheckboxItem>
           ))}
           {menu.matches.length === 0 && <DropdownMenuLabel>No model matches “{menu.query}”.</DropdownMenuLabel>}
@@ -357,6 +400,7 @@ function ConnectionHeader({
  */
 function invalidateConnections(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: keys.connections })
+  void queryClient.invalidateQueries({ queryKey: keys.allModels })
   void queryClient.invalidateQueries({ queryKey: keys.usage })
   void queryClient.invalidateQueries({ queryKey: keys.providerUsage })
   void queryClient.invalidateQueries({ queryKey: keys.usageActivity })

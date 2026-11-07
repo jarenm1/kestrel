@@ -1,7 +1,6 @@
 import React, { type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { PanelLeftOpen } from "lucide-react-native";
-import { BoxOfflineBanner } from "@/components/BoxStatus";
 import { KestrelMark } from "@/components/KestrelMark";
 import { Button } from "@/components/ui/Button";
 import { useShell } from "@/nav/navigation";
@@ -38,20 +37,14 @@ export function TopBar({ title, right }: { title?: string; right?: ReactNode }) 
 }
 
 /**
- * The raised panel every page sits in (web WorkspaceLayout: `rounded-2xl bg-card`), under the box offline banner.
+ * The raised panel every page sits in (web WorkspaceLayout: `rounded-2xl bg-card`).
  * It runs to the bottom edge; `bottomInset` keeps its content clear of the home indicator.
  */
 export function ContentPanel({ children, bottomInset }: { children: ReactNode; bottomInset: number }) {
-  return (
-    <>
-      <BoxOfflineBanner style={styles.banner} />
-      <View style={[styles.panel, { paddingBottom: bottomInset }]}>{children}</View>
-    </>
-  );
+  return <View style={[styles.panel, { paddingBottom: bottomInset }]}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
-  banner: { marginHorizontal: spacing.md, marginBottom: spacing.sm, width: "auto" },
   bar: {
     height: 48,
     flexDirection: "row",

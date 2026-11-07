@@ -64,6 +64,27 @@ describe("ACP driver", () => {
     expect(h.outcomes).toEqual([{ status: "completed" }])
   })
 
+  test("selects a discovered model using the agent's model-category option before prompting", () => {
+    const h = harness({ model: "gemini-future" })
+    h.driver.start()
+    h.reply({ protocolVersion: 1 })
+    h.reply({
+      sessionId: "s-new",
+      configOptions: [{
+        id: "llm", category: "model", type: "select",
+        options: [{ value: "gemini-future" }],
+      }],
+    })
+    expect(h.last()).toMatchObject({
+      method: "session/set_config_option",
+      params: { configId: "llm", value: "gemini-future" },
+    })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+    h.reply({ stopReason: "end_turn" })
+    expect(h.outcomes).toEqual([{ status: "completed" }])
+  })
+
   test("a resumed run resumes its session without replay; a refused resume fails the run", () => {
     const h = harness({ resumeSession: "s-old" })
     h.driver.start()
@@ -164,6 +185,104 @@ describe("ACP driver", () => {
     expect(h.last()).toEqual({ jsonrpc: "2.0", id: 12, result: { outcome: { outcome: "cancelled" } } })
   })
 
+  test("Devin resolves the advertised model variant and still sets thought_level", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-flash-medium",
+        options: [{ value: "swe-2-flash-medium" }, { value: "swe-2-flash-high" }, { value: "swe-2-flash-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "devin", model: "swe-2-flash", effort: "max" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash-max" } })
+    h.reply({ configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "thought_level", value: "max" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
+  test("model variant resolution is Devin-only", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-high",
+        options: [{ value: "swe-2-medium" }, { value: "swe-2-high" }, { value: "swe-2-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "opencode", model: "swe-2", effort: "max" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2" } })
+  })
+
+  test("Devin falls back to the session's current variant when the effort is not advertised", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2-high",
+        options: [{ value: "swe-2-medium" }, { value: "swe-2-high" }, { value: "swe-2-max" }],
+      },
+      thoughtOption("thought_level", ["medium", "high", "max"]),
+    ]
+    const h = harness({ provider: "devin", model: "swe-2", effort: "low" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-high" } })
+    h.reply({ configOptions })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
+  test("Devin passes through an advertised family anchor", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2",
+        options: [{ value: "adaptive" }, { value: "swe-2" }, { value: "swe-2-flash" }],
+      },
+    ]
+    const h = harness({ provider: "devin", model: "swe-2", effort: "high" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
+  test("Devin keeps the requested id when no advertised variant matches", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "adaptive",
+        options: [{ value: "adaptive" }, { value: "fusion" }],
+      },
+    ]
+    const h = harness({ provider: "devin", model: "swe-2-flash", effort: "medium" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
   test("an agent that exits mid-turn fails the run", () => {
     const h = harness()
     h.driver.start()
@@ -193,10 +312,25 @@ describe("ACP transcript", () => {
     t.push(update({ sessionUpdate: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "Done" } }))
     t.push(update({ sessionUpdate: "usage_update", used: 9000, size: 200000 }))
     expect(t.takeContext()).toEqual({ model: "opencode/big-pickle", usedTokens: 9000, windowTokens: 200000 })
-    const end = t.push({ jsonrpc: "2.0", id: 5, result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } } })
+    const at = Date.UTC(2026, 0, 2, 11, 0, 0)
+    const end = t.push({
+      jsonrpc: "2.0",
+      id: 5,
+      emittedAtMs: at,
+      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } },
+    })
     expect(end).toEqual([
       { _tag: "tool", id: "c2", parentToolId: null, name: "write", input: { path: "a.txt" }, status: "error", output: null },
-      { _tag: "turn", id: expect.any(String), durationMs: null, inputTokens: 9100, outputTokens: 7, costUsd: null, isError: false },
+      {
+        _tag: "turn",
+        id: expect.any(String),
+        timestamp: new Date(at).toISOString(),
+        durationMs: null,
+        inputTokens: 9100,
+        outputTokens: 7,
+        costUsd: null,
+        isError: false,
+      },
     ])
     expect(t.finalText()).toBe("Done")
   })

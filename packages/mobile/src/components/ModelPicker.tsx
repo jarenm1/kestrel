@@ -20,21 +20,17 @@ import {
   type AgentEffort,
   type AgentModel,
   type ModelInfo,
-  type ModelProviderInfo,
 } from "@cloudagents/protocol";
+import { modelDisplayName, type ModelSection } from "@cloudagents/composer/models";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { HarnessLogo } from "@/components/HarnessLogo";
-import { HARNESSES, harnessOf, type Harness } from "@/lib/harnesses";
+import { HARNESSES, harnessForModel, type Harness } from "@/lib/harnesses";
 import { thinkingFillWidth, thinkingStopOffsets } from "@/lib/thinking";
 import { colors, radius, shadows, spacing } from "@/theme";
 import { ThinkingSlider } from "@/components/ThinkingSlider";
 
-/** A connected provider and the models the user keeps in the picker for it. */
-export interface ModelSection {
-  readonly provider: ModelProviderInfo;
-  readonly models: readonly ModelInfo[];
-}
+export type { ModelSection } from "@cloudagents/composer/models";
 
 // Match the desktop ring regardless of the model's number of supported levels.
 const EFFORT_RING_FILL: Record<AgentEffort, number> = {
@@ -201,7 +197,8 @@ function offeredRows(tabs: readonly HarnessTab[]): readonly MenuRow[] {
 /** Whether a row matches every whitespace-separated term of the search across its identity. */
 function matchesSearch(row: MenuRow, query: string): boolean {
   const terms = query.toLowerCase().split(/\s+/).filter((term) => term !== "");
-  const haystack = `${row.model.name} ${row.model.id} ${row.section.provider.name} ${row.harness.name}`.toLowerCase();
+  const haystack =
+    `${modelDisplayName(row.model)} ${row.model.name} ${row.model.id} ${row.section.provider.name} ${row.harness.name}`.toLowerCase();
   return terms.every((term) => haystack.includes(term));
 }
 
@@ -251,7 +248,7 @@ export function ModelPicker({
     () =>
       HARNESSES.map((harness) => ({
         harness,
-        sections: (sections ?? []).filter((section) => harnessOf(section.provider.id).id === harness.id),
+        sections: (sections ?? []).filter((section) => section.harness === harness.id),
       })).filter((tab) => tab.sections.length > 0),
     [sections]
   );
@@ -263,7 +260,7 @@ export function ModelPicker({
   );
   // Filter each group by the row objects that matched, not by model id: two providers may offer the same id.
   const matchedModels = useMemo(() => new Set(matched.map((row) => row.model)), [matched]);
-  const valueHarness = value === undefined ? undefined : harnessOf(value.provider);
+  const valueHarness = value === undefined ? undefined : harnessForModel(value);
   // Opening clears the pick so the selected model's harness is restored every time.
   const tab =
     tabs.find((candidate) => candidate.harness.id === pickedHarness) ??
@@ -330,7 +327,9 @@ export function ModelPicker({
     }
   }
 
-  const label = value?.name ?? defaultLabel ?? (sections === null ? "Model" : "No models");
+  const label = value === undefined
+    ? defaultLabel ?? (sections === null ? "Model" : "No models")
+    : modelDisplayName(value);
   return (
     <>
       <Button
@@ -450,13 +449,13 @@ export function ModelPicker({
                             accessibilityRole="radio"
                             accessibilityState={{ checked: selected }}
                             aria-checked={selected}
-                            accessibilityLabel={`${model.name}, ${group.section.provider.name}${searching ? `, ${group.harness.name}` : ""}`}
+                            accessibilityLabel={`${modelDisplayName(model)}, ${group.section.provider.name}${searching ? `, ${group.harness.name}` : ""}`}
                             style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
                           >
                             <View style={styles.checkSlot}>
                               {selected ? <Check size={16} color={colors.foreground} /> : null}
                             </View>
-                            <Text style={styles.rowText} numberOfLines={1}>{model.name}</Text>
+                            <Text style={styles.rowText} numberOfLines={1}>{modelDisplayName(model)}</Text>
                           </Pressable>
                         );
                       })}

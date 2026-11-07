@@ -63,7 +63,7 @@ describe("resolveAgentChoice", () => {
   test("Z.ai preserves Max for unchosen and legacy defaults without overriding deliberate choices", () => {
     const zai = {
       ...base,
-      offered: AGENT_MODELS.filter((m) => m.provider === "zai"),
+      offered: AGENT_MODELS.filter((m) => m.provider === "zai" && !m.harness),
       connected: MODEL_PROVIDERS.filter((p) => p.id === "zai"),
     }
     for (const model of zai.offered) {

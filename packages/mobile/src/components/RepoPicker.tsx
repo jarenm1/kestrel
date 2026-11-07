@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { FolderGit2, Lock, type LucideIcon, User } from "lucide-react-native";
-import { ApiError } from "@/api/client";
+import { ApiError } from "@/api/errors";
 import { createQueries } from "@/api/queries";
 import { PickerSheet } from "@/components/PickerSheet";
 import { useApiClient } from "@/hooks/useApiClient";

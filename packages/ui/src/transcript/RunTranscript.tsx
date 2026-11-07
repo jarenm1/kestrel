@@ -3,6 +3,7 @@ import { describeTool, liveItemIds, summarizeTools, type AgentItem, type ToolIte
 import { Alert } from "../alert"
 import { Markdown } from "./Markdown"
 import { ThinkingBlock, ToolGroup, ToolRow, type RunSource } from "./WorkLog"
+import { formatMessageTime } from "./time"
 
 interface Props {
   taskId: string
@@ -14,6 +15,8 @@ interface Props {
   /** The part of the run's items to show: positions `from` up to `to` (null: the end). A tool keeps its subagent items. */
   from: number
   to: number | null
+  /** Completion time for saved turns that predate per-item timestamps. */
+  fallbackTimestamp: string
 }
 
 interface Tree {
@@ -27,6 +30,7 @@ interface Ctx {
   readonly liveIds: ReadonlySet<string>
   readonly turnTotals: ReadonlySet<string>
   readonly running: boolean
+  readonly fallbackTimestamp: string
 }
 
 /** Items in arrival order; a tool's subagent items (`parentToolId`) hang under it instead of the top level. */
@@ -58,25 +62,35 @@ function TokenCount({ value, label }: { value: number | null; label: string }) {
   return <span title={text === exact ? undefined : exact}>{text} {label}</span>
 }
 
-/** Local time of day with seconds (e.g. "14:05:32"); an unparsable timestamp is shown as it came. */
-function formatUsageTime(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime())
-    ? iso
-    : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+/**
+ * Output tokens per second over a measured duration. A response's rate covers that response; a turn's covers the
+ * whole turn, tool execution included, so it says so.
+ */
+function Throughput({ output, durationMs, turn = false }: { output: number | null; durationMs: number | null | undefined; turn?: boolean }) {
+  const rate = output !== null && durationMs != null && durationMs > 0
+    ? output * 1000 / durationMs
+    : null
+  return (
+    <span title={turn ? "Output tokens per second over the whole turn, including tool execution" : "Output tokens per second of this response"}>
+      {turn && "turn "}
+      {rate !== null && Number.isFinite(rate) ? rate.toLocaleString("en-US", { maximumFractionDigits: 1 }) : "?"} tok/s
+    </span>
+  )
 }
 
 /** One response's usage: when it finished, and its own tokens — never the run's totals. */
 function UsageStrip({ item }: { item: Extract<AgentItem, { _tag: "usage" }> }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
-      <time dateTime={item.timestamp}>{formatUsageTime(item.timestamp)}</time>
+      <time dateTime={item.timestamp}>{formatMessageTime(item.timestamp)}</time>
       <span aria-hidden="true">·</span>
       <TokenCount value={item.inputTokens} label="in" />
       <span aria-hidden="true">·</span>
       <TokenCount value={item.outputTokens} label="out" />
       <span aria-hidden="true">·</span>
       <TokenCount value={item.cachedTokens} label="cached" />
+      <span aria-hidden="true">·</span>
+      <Throughput output={item.outputTokens} durationMs={item.durationMs} />
     </div>
   )
 }
@@ -125,11 +139,17 @@ function ItemView({ item, ctx }: { item: Exclude<AgentItem, ToolItem>; ctx: Ctx 
         <>
           {ctx.turnTotals.has(item.id) && (
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground tabular-nums">
-              <span title="Response-level usage unavailable; total input includes cached tokens.">Turn total</span>
-              <span aria-hidden="true">·</span>
-              <TokenCount value={item.inputTokens} label="in" />
-              <span aria-hidden="true">·</span>
-              <TokenCount value={item.outputTokens} label="out" />
+              <time dateTime={item.timestamp ?? ctx.fallbackTimestamp}>{formatMessageTime(item.timestamp ?? ctx.fallbackTimestamp)}</time>
+              {(item.inputTokens !== null || item.outputTokens !== null) && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <TokenCount value={item.inputTokens} label="in" />
+                  <span aria-hidden="true">·</span>
+                  <TokenCount value={item.outputTokens} label="out" />
+                  <span aria-hidden="true">·</span>
+                  <Throughput output={item.outputTokens} durationMs={item.durationMs} turn />
+                </>
+              )}
             </div>
           )}
           {item.isError && <div className="text-[11px] text-destructive">failed</div>}
@@ -163,7 +183,7 @@ function Items({ items, ctx }: { items: readonly AgentItem[]; ctx: Ctx }) {
 }
 
 /** One run's normalized items, in order: the agent's reply as markdown, with thinking and tools collapsed. */
-export function RunTranscript({ taskId, runId, items, running, from, to }: Props) {
+export function RunTranscript({ taskId, runId, items, running, from, to, fallbackTimestamp }: Props) {
   const tree = useMemo(() => buildTree(items), [items])
   const liveIds = useMemo(() => liveItemIds(items, running), [items, running])
   // Inspect the whole run before slicing: a response strip can live in an earlier message segment.
@@ -173,7 +193,7 @@ export function RunTranscript({ taskId, runId, items, running, from, to }: Props
     for (const item of items) {
       if (item._tag === "usage" && item.parentToolId === null) hasResponseUsage = true
       if (item._tag !== "turn") continue
-      if (!hasResponseUsage && (item.inputTokens !== null || item.outputTokens !== null)) totals.add(item.id)
+      if (!hasResponseUsage) totals.add(item.id)
       hasResponseUsage = false
     }
     return totals
@@ -189,5 +209,5 @@ export function RunTranscript({ taskId, runId, items, running, from, to }: Props
 
   if (roots.length === 0) return null
 
-  return <Items items={roots} ctx={{ source, tree, liveIds, turnTotals, running }} />
+  return <Items items={roots} ctx={{ source, tree, liveIds, turnTotals, running, fallbackTimestamp }} />
 }

@@ -4,21 +4,59 @@ How the agent box (`packages/server`) runs agents. For the big picture see [arch
 
 ## Models and harnesses
 
-Each message runs on the model picked in the composer. The picker lists, per connected provider (an Anthropic or OpenAI key, or a Claude or ChatGPT subscription), the models chosen for it under Models in Settings › Connections; the list is kept per browser. OpenCode's free models require a Console account: use **OpenCode › Sign in** in Connections and authorize the displayed device code in your browser. OpenCode 2.0.7+ is required; its credentials stay on the box (see [harness authentication](harnesses.md#on-the-box)). Anthropic models run through Claude Code (`claude -p --model … --effort …`), OpenAI models through Codex app-server (`codex app-server`, driven over JSON-RPC on stdio by `core/codex-app-server.ts`: the box opens or resumes the thread with the model and starts the turn with the effort), OpenCode models through `opencode acp` (the Agent Client Protocol on stdio, `core/acp.ts`); `CLOUDAGENTS_ANTHROPIC_COMMAND` / `CLOUDAGENTS_OPENAI_COMMAND` / `CLOUDAGENTS_OPENCODE_COMMAND` override each command (the OpenAI one must start app-server on stdio, the OpenCode one an ACP server). A Codex run's process lives as long as its turn: a message sent while it runs joins the turn at once (`turn/steer`) instead of waiting in the run's `task_inbox`, Stop interrupts the turn (`turn/interrupt`) so its session ends cleanly, and its text, reasoning and command output stream into the chat as Codex writes them. Without a ChatGPT login, the box signs app-server in with the run's broker token (`account/login/start`), which app-server keeps in the task's `CODEX_HOME`. Claude Code runs with `--include-partial-messages`, so its text and thinking stream in the same way; its tool results arrive when each tool finishes. A Claude run takes its prompt on stdin (`--input-format stream-json`, `core/claude-stream.ts`): a message sent while it runs is written to the same session and Claude Code takes it at its next step (after the running tool, or as the next turn of the run while it is only writing text), and Stop sends an `interrupt` control request so the turn ends cleanly in its session. The box closes stdin after the run's first result; Claude Code still answers messages it already has, then exits. An OpenCode run streams its text, thinking and tool calls the same way; a message sent while it runs waits in its `task_inbox` (ACP has no way into a running turn), and Stop sends `session/cancel`. OpenCode runs with sessions unshared, updates off and no broker keys; OpenCode limits how much its free models are used. Streamed items are published at most every 100 ms each, so a token stream is not one relay message per token. The thinking picker offers only the levels the chosen model supports. A message sent with no model (nothing connected) runs on Claude Code's default.
+Each message runs on the catalog route picked in the composer. Compatible API-key models are offered under multiple
+harnesses; the provider still selects the credential and quota. Settings › Connections controls visible models per
+browser. See [the compatibility matrix](harnesses.md#harness-compatibility). Subscription logins retain their native
+harness. OpenCode's free models require a Console account and OpenCode 2.0.7+; their credentials stay on the box.
+
+Claude Code uses stream-JSON on stdin (`core/claude-stream.ts`); Codex uses app-server JSON-RPC on stdio
+(`core/codex-app-server.ts`); OpenCode uses ACP (`core/acp.ts`). The native command overrides remain
+`CLOUDAGENTS_ANTHROPIC_COMMAND`, `CLOUDAGENTS_OPENAI_COMMAND` and `CLOUDAGENTS_OPENCODE_COMMAND`.
+Routed models use canonical commands instead: `CLOUDAGENTS_ANTHROPIC_COMMAND` for `@claude`,
+`CLOUDAGENTS_CODEX_COMMAND` for `@codex` (the native OpenAI command is not reused, because a route needs the broker's
+Responses provider config) and `CLOUDAGENTS_OPENCODE_COMMAND` for `@opencode`. The OpenCode command must not inline
+`OPENCODE_CONFIG_CONTENT=…`: the box sets that per run, and an inline assignment in the command would shadow the
+generated provider config, failing routed API models with `model not found`. The box warns at startup when a
+configured OpenCode command contains it.
+Codex opens or resumes the thread with the selected model and starts the turn with its effort. Without a ChatGPT
+login, the box signs app-server in with the run's broker token, stored in the task's `CODEX_HOME`.
+
+Claude streams partial text and thinking, and reports tool results as they finish. New messages are written into
+its running session; Stop sends an interrupt control request. After the first result, the box closes stdin, but
+Claude still answers messages it already accepted before exiting. Codex messages join the active turn through
+`turn/steer`; Stop uses `turn/interrupt`. OpenCode streams text, thinking and tools, but new messages wait in
+`task_inbox` because ACP cannot steer an active turn; Stop uses `session/cancel`.
+
+OpenCode runs with sessions unshared and updates disabled. Its native free/Go routes use their own credentials;
+other API providers use per-run broker tokens, never real keys. Free models retain OpenCode's usage limits.
+Streamed items are published at most every 100 ms each. The thinking picker offers only supported levels.
+A message with no model uses Claude Code's default.
 
 The OpenCode account uses the existing **Connect** button; the device authorization then opens through **Open sign-in page**.
 
 Google's models run through Antigravity CLI as an ACP server (`agy acp --gemini-dir … --dangerously-skip-permissions`, same driver as OpenCode; `CLOUDAGENTS_GOOGLE_COMMAND` overrides it). They need the user's Google sign-in (below): `agy` reaches them only through it, so a Google run gets no broker keys. Its thinking level is the session's `thought_level` option. agy offers its commands and limits only inside a session, so the composer lists no Google commands and the usage panel shows none.
 
-OpenCode Go is a separate connection and model group from OpenCode's free models. Paste a Go API key under Settings › Connections; the box imports it over stdin into OpenCode's own credential database under `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode-go/opencode`. It is not stored in the Hub or passed on a command line. Go needs OpenCode 2.1 or newer; its runs use `opencode-go/*` models over the same ACP driver (`CLOUDAGENTS_OPENCODE_GO_COMMAND` overrides the command). The catalog omits Go's Claude, GPT and Gemini models, leaving those to their native harnesses, and omits its free/contributor variants.
+Devin's models run through Devin CLI as an ACP server (`devin acp`, same driver; `CLOUDAGENTS_DEVIN_COMMAND` overrides it). They need the user's Devin sign-in (below) and get no broker keys. `devin acp` has no `session/resume` (its `session/load` replays the whole history), so every Devin run opens a new session that carries the thread's saved conversation. Like agy, it offers its commands and `/usage` only inside a session.
 
-Go runs bind that login directory into the sandbox as `XDG_DATA_HOME`, so OpenCode can read its credential and keep its sessions there. Free OpenCode runs instead use `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode`, with a separate Console account and sessions. Disconnect deletes only the selected provider's login directory, including its sessions. Go's 5-hour, weekly and monthly limits come from `https://opencode.ai/zen/go/v1/usage`: the box reads the active Go key using `opencode auth export --standalone` and makes the authenticated request itself; neither the key nor the export is returned to the app. Saving a key connects its local credential; if OpenCode rejects the key, usage reports the error and model calls cannot run.
+OpenCode Go is a separate connection and model group from OpenCode's free models. Paste a Go API key under
+Settings › Connections; the box imports it over stdin into OpenCode's credential database under
+`<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode-go/opencode`, never into the Hub or command-line arguments.
+Its native OpenCode ACP route needs OpenCode 2.1+ (`CLOUDAGENTS_OPENCODE_GO_COMMAND` overrides it).
+Go models can also run through Claude Code or Codex using the same host-held key through the broker.
+The catalog continues to omit Go's Claude, GPT, Gemini and free/contributor variants.
 
-A thread retains each provider's native session across switches. Returning to a provider resumes its newest usable
-session and carries only messages from subsequent runs, rather than replaying that session's own conversation.
-If that provider has no usable session, the run starts fresh with conversation history. A failed run that never
-recorded a session invalidates older sessions of the same provider (except restart interruptions); recovery carries
-history instead of silently losing it. A session is also recorded with where its CLI kept it: the thread's home (broker
+Native Go runs bind that login directory as `XDG_DATA_HOME`; Go runs in Claude Code or Codex do not mount it.
+Free OpenCode runs use a separate `<CLOUDAGENTS_DATA_DIR>/users/<login>/opencode` directory and Console account.
+Disconnect deletes only the selected provider's login directory and its sessions. The host reads the active Go key
+with `opencode auth export --standalone` for usage and alternate-harness requests; neither key nor export reaches
+the app. Go usage comes from `https://opencode.ai/zen/go/v1/usage`. A saved but rejected key cannot run models and
+reports an error in usage.
+
+A thread retains native sessions separately for each provider and harness. Returning to a route resumes its newest
+usable session and carries only messages from subsequent runs. Without one, the run starts fresh with conversation
+history. A failed run that never recorded a session invalidates older sessions of the same route (except restart
+interruptions); recovery carries history instead of silently losing it.
+A session is also recorded with where its CLI kept it: the thread's home (broker
 keys) or the user's own CLI login directory (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`). After the user connects or disconnects
 that CLI login, the CLI no longer finds sessions from before, so the next run starts fresh with conversation history
 instead of failing to resume. A session recorded without its place (before this was tracked) also starts fresh, once.
@@ -43,6 +81,8 @@ diagnostics from recursively becoming conversation context.
 Agents need a model key: add one for Anthropic, OpenAI, OpenRouter, Z.ai, DeepSeek, MiniMax or Kimi in Settings › Connections. The sandbox only ever sees a per-run token, and the box never reads model keys from its own environment. Users can instead run agents on their own Claude or ChatGPT subscription: sign in under Settings › Connections (the box runs the unmodified `claude auth login` / `codex login --device-auth` in that user's directory). A subscription login replaces the broker key for Anthropic or OpenAI only; it never replaces an OpenRouter, Z.ai, DeepSeek, MiniMax or Kimi key. Each user's CLI state lives only on the box under `<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`, and the box's CLI runs use their own login; the sandbox sees just the directories of the providers that user has signed in to. Those runs use the login in place of the broker's API key for that provider. Settings › Connections labels Codex with the email from its own stored login; when no email is stored (for example an API-key login or an older token), its account stays blank rather than showing the sign-in method or any key material.
 
 A Google account signs in the same way through Antigravity CLI: the box runs `agy acp --login --gemini-dir <dir>` in the user's directory (`<CLOUDAGENTS_DATA_DIR>/users/<login>/antigravity`), the user opens the Google link it prints and sends back the code the page shows (or that page's URL). agy keeps its token and its sessions in that directory (`AGY_GEMINI_DIR` to runs); it has no status or sign-out command, so the box reads the token file (`antigravity-cli/antigravity-oauth-token`) and signs out by removing the directory. A rejected code ends the sign-in; start it again. agy writes the token to a file where it finds no OS keyring (no D-Bus session, as in the sandbox, or WSL); on a desktop session with a keyring it may keep it there instead, and the box would read it as signed out. Connections shows the Google email from the token's ID token when it has one, and leaves the account blank when it does not.
+
+A Devin account signs in through Devin CLI: the box runs `devin auth login --force-manual-token-flow` in the user's directory (`<CLOUDAGENTS_DATA_DIR>/users/<login>/devin`, `XDG_DATA_HOME` to the CLI and to runs), the user opens the app.devin.ai link it prints and sends back the code the page shows. The CLI reads that code only from a terminal, so the box runs it under `script` (util-linux; BSD `script` on macOS), which must be on the sandbox's PATH; Windows boxes cannot offer this sign-in. A rejected code ends the sign-in; start it again. The box reads the signed-in state from `devin/credentials.toml`, which names no account, so Connections leaves the account blank; Disconnect runs `devin auth logout` and removes the directory.
 
 ### Git commit identity
 
@@ -162,15 +202,15 @@ Desktop video, audio and input travel over WebRTC only; there is no WebSocket me
 - **Codec** is H.264 with packetization-mode 1, one encoder per desktop. The default is High 4:2:0 (`-profile:v high -bf 0`, level 4.0 in the SPS), answered with `640c` or `6400` (`f400` is also accepted, untested). If any connected viewer offers only Constrained Baseline (`42e0`, `42c0`, `4200`), the encoder switches to Constrained Baseline for all viewers while that viewer is connected, and that viewer is answered with a Baseline payload. Level is ignored in negotiation, as libwebrtc ignores it. A browser that offers none of these gets `rtc.unavailable` with `retryable: false`. Scaling is bicubic (`scale_cuda interp_algo=3`; `flags=area` on the CPU encoder, and for NVENC when the box's ffmpeg has no CUDA filters).
 - **Load**: the stream is encoded once whatever the viewer count. Each viewer costs box CPU for encryption and pacing. The box carries 16 viewers; past that, new ones get `rtc.unavailable` and retry later.
 
-The default STUN server, `stun:stun.cloudflare.com:3478`, lets both ends discover their public addresses. Registered boxes also obtain managed TURN credentials automatically when the control plane has a Cloudflare Realtime TURN key configured. Viewers prefer direct WebRTC and can use UDP, TCP or TLS on port 443 through the provider when direct connectivity fails. Media never traverses the Worker or Hub.
+The default STUN server, `stun:stun.cloudflare.com:3478`, lets both ends discover their public addresses. Registered boxes also obtain managed TURN credentials automatically when the control plane has a Cloudflare Realtime TURN key configured. The viewer and the box's own peer each allocate a relay from the provider, so a session still connects when neither side's candidates are reachable from the other; both prefer direct WebRTC, and relayed media can use UDP, TCP or TLS on port 443. Media never traverses the Worker or Hub.
 
 To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: managed boxes, registered user boxes and the legacy relay box authenticate `POST /box/turn` using their existing box identity.
 
-The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and include them in the viewer's `rtc.config`; retries requesting new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits.
+The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and resolve them once per `rtc.config`; that same list is what the box's own peer uses, so an offer never waits on the control plane and a failed fetch leaves both peers on the box's own configuration. Retries requesting a new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits. A managed-TURN allocation that gets no answer is given up after werift's STUN retransmissions over UDP (50 ms doubling over seven sends, about 6.3 s), then the TCP fallback connect is capped at two seconds, so an unreachable managed relay can delay the answer by roughly eight seconds, still inside the viewer's 15-second attempt. An operator-configured TURN server keeps werift's default eight-second TCP/TLS wait, since it may be far away or reached over TLS.
 
 Neither provider setting configured returns 204 and retains local ICE; partial configuration or provider failure returns a sanitized error. A box waits at most three seconds, logs a warning on failure and retains direct connectivity; it retries on a later config request. Explicit local TURN (a `turn` secret or `turn:`/`turns:` ICE URL) takes precedence and skips managed credentials entirely. Unregistered standalone boxes must supply their own TURN.
 
-Cloudflare bills relayed traffic; see [current pricing and limits](https://developers.cloudflare.com/realtime/turn/). Provisioning the key and deploying the Worker alone does not update running boxes. This integration supplies viewer-side relays: the relay must still reach a box candidate over UDP. It does not make a box with no reachable UDP candidate work through an HTTPS tunnel alone, and networks that block non-HTTP TLS even on 443 can still fail. What to set:
+Cloudflare bills relayed traffic; see [current pricing and limits](https://developers.cloudflare.com/realtime/turn/). Provisioning the key and deploying the Worker alone does not update running boxes. Both peers allocate their own relay, so a box behind symmetric NAT or carrier-grade NAT needs no reachable UDP candidate of its own, and media stays on a relay only while a direct pair is unavailable. Relay bandwidth is billed in both directions when the session falls back to it, and networks that block non-HTTP TLS as well as UDP still fail. What to set:
 
 | Your network | Settings |
 |---|---|
@@ -189,7 +229,7 @@ Limits today:
 - The SPS says level 4.0, the level for 1080p30 and 720p60, whatever level the browser offered, since negotiation ignores level. A browser that offers only a lower level may fail to decode large desktops. Hardware-only decoders may refuse a stream; the viewer then shows a decoder stuck asking for keyframes.
 - Constrained Baseline is used only while a Baseline-only viewer is connected. It has no B-frames and uses CAVLC, so it costs about 50% more bytes per frame than High at the same quality setting (measured on a synthetic scroll).
 - Pacing follows receiver loss reports, but nothing adapts the encoder's bitrate to the path, so a narrow path loses frames rather than quality.
-- A box that can only send through its own TURN allocation is untested: with `relay`, the relay must be able to reach the box directly.
+- A relay-only path (both peers behind restrictive networks, one of them CGNAT) is untested against the production provider; the box's allocation uses werift's TURN client over UDP with its TCP fallback.
 - TURN credentials expire after an hour. If the path then fails, the viewer reconnects and its next attempt gets a new one.
 - The peer lives with its WebSocket, so a dropped WebSocket interrupts video until it reconnects.
 

@@ -1,7 +1,7 @@
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
-import { InternalError, Message, Run, Task, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
+import { InternalError, Message, Run, Task, ModelHarness, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
@@ -17,6 +17,8 @@ const RunSessionRecord = Schema.Struct({
   sessionId: Schema.String,
   // State files written before model switching hold Claude Code sessions only.
   provider: Schema.optionalWith(ModelProvider, { default: () => DEFAULT_MODEL_PROVIDER }),
+  // Absent in state files written before model routing: the session belongs to the provider's current harness.
+  harness: Schema.optional(ModelHarness),
   // Absent in state files written before it existed: the place is unknown, so such a session is not resumed.
   continuation: Schema.optional(Schema.String),
 })
@@ -37,6 +39,7 @@ const PersistedState = Schema.Struct({
   pendingAsks: Schema.optional(Schema.Array(PendingAskRecord)),
   uploads: Schema.optional(Schema.Array(PendingUploadRecord)),
   runSessions: Schema.optional(Schema.Array(RunSessionRecord)),
+  settledRuns: Schema.optional(Schema.Array(Schema.String)),
 })
 
 export type Mutable<T> = { -readonly [K in keyof T]: T[K] }
@@ -52,6 +55,8 @@ export interface RunSession {
   readonly runId: string
   readonly sessionId: string
   readonly provider: ModelProvider
+  /** The harness that minted it; a session only resumes in the same provider and harness. */
+  readonly harness?: ModelHarness | undefined
   /**
    * The session store and its lifetime (`SessionContinuation` in `harness.ts`). Only a run using the same surviving
    * store can resume it. Absent or legacy unversioned CLI-login records are not resumed.
@@ -75,6 +80,11 @@ export interface StoreState {
   pendingAsks: PendingAsk[]
   uploads: PendingUpload[]
   runSessions: RunSession[]
+  /**
+   * Failed runs whose recovery the user already decided (they returned a usage-stopped child to its parent): the
+   * recovery sweep never arms them again, across restarts too. Pruned once a run stops being its thread's latest.
+   */
+  settledRuns: string[]
 }
 
 export interface StoreShape {
@@ -149,6 +159,47 @@ const dropRetiredHarnessState = (data: Record<string, unknown>): boolean => {
   return dropped
 }
 
+/**
+ * Moves the pull request link a checkout used to carry into its thread's `pullRequests` registry. State files written
+ * before a thread could own several pull requests keep the single link on the checkout; the registry is the current
+ * shape, so the field is dropped once its entry exists. Returns whether anything moved (and the file should be rewritten).
+ */
+const migrateCheckoutPullRequests = (data: Record<string, unknown>): boolean => {
+  if (!Array.isArray(data.tasks)) return false
+  let moved = false
+  for (const task of data.tasks) {
+    if (!isObject(task) || !Array.isArray(task.checkouts)) continue
+    const registry = Array.isArray(task.pullRequests) ? (task.pullRequests as Array<Record<string, unknown>>) : []
+    for (const checkout of task.checkouts) {
+      if (!isObject(checkout)) continue
+      const link = checkout.pullRequest
+      if (!isObject(link) || typeof link.number !== "number" || typeof link.url !== "string") continue
+      const repo = typeof checkout.repo === "string" ? checkout.repo : null
+      if (repo === null) continue
+      const id = `${repo.toLowerCase()}#${link.number}`
+      if (!registry.some((entry) => isObject(entry) && entry.id === id)) {
+        // Every legacy link keeps its checkout association, which the app and the `gh` shim show. No branch is recorded:
+        // the old state has no head ref, so a write resolves the pull request through the checkout's branch and records
+        // it once verified. A takeover is its own marker; a blocked fork/closed-PR link finds no open PR for the branch.
+        const takeover = checkout.pullRequestTakeover === true
+        registry.push({
+          id,
+          repo,
+          number: link.number,
+          url: link.url,
+          ...(typeof checkout.id === "string" ? { checkoutId: checkout.id } : {}),
+          source: takeover ? "takeover" : "linked",
+          ...(typeof checkout.createdAt === "string" ? { addedAt: checkout.createdAt } : {}),
+        })
+      }
+      delete checkout.pullRequest
+      moved = true
+    }
+    if (registry.length > 0) task.pullRequests = registry
+  }
+  return moved
+}
+
 const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
   Effect.gen(function* () {
     const raw = yield* Effect.tryPromise({
@@ -161,16 +212,17 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
           : Effect.fail(new InternalError({ message: `cannot read ${file}: ${String(e)}` })),
       ),
     )
-    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [] }
+    if (raw === null) return { tasks: [], messages: [], runs: [], pendingAsks: [], runSessions: [], uploads: [], settledRuns: [] }
     const parsed = yield* Schema.decodeUnknown(Schema.parseJson())(raw).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
     const dropped = isObject(parsed) && dropRetiredHarnessState(parsed)
+    const moved = isObject(parsed) && migrateCheckoutPullRequests(parsed)
     const decoded = yield* Schema.decodeUnknown(PersistedState)(parsed).pipe(
       Effect.mapError((e) => new InternalError({ message: `corrupt state file ${file}: ${e.message}` })),
     )
     // Rewritten only once the rest of the file decoded, so a file with unrelated corruption keeps its bytes.
-    if (dropped) {
+    if (dropped || moved) {
       yield* Effect.tryPromise({
         try: () => writeAtomic(file, JSON.stringify(parsed)),
         catch: (e) => new InternalError({ message: `cannot rewrite ${file}: ${String(e)}` }),
@@ -183,6 +235,7 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
       pendingAsks: [...(decoded.pendingAsks ?? [])],
       uploads: [...(decoded.uploads ?? [])],
       runSessions: [...(decoded.runSessions ?? [])],
+      settledRuns: [...(decoded.settledRuns ?? [])],
     }
   })
 

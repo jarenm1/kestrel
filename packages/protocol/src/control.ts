@@ -40,6 +40,11 @@ export const ControlPaths = {
   /** GET -> GithubRepo[] for the signed-in user's GitHub connection. */
   githubRepos: "/api/github/repos",
   /**
+   * GET -> GithubRepo for one "owner/name"; 404 when GitHub is not connected or the repository is not visible. Unlike
+   * `githubRepos` (GitHub's first page, sorted by update time), this answers for any repository the connection can read.
+   */
+  githubRepo: (repo: string) => `/api/github/repos/${repo}`,
+  /**
    * GET -> string[]: branch names of a repository the signed-in user's GitHub connection can read ("owner/name"),
    * the default branch first. 404 when GitHub is not connected or the repository is not visible.
    */
@@ -234,7 +239,7 @@ export const PutApiKeyBody = Schema.Struct({ apiKey: Schema.String.pipe(Schema.m
 export type PutApiKeyBody = typeof PutApiKeyBody.Type
 
 /** Logins of the official agent CLIs, held per user on the box. */
-export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go", "opencode")
+export const CliProvider = Schema.Literal("claude-cli", "codex-cli", "antigravity-cli", "opencode-go", "opencode", "devin-cli")
 export type CliProvider = typeof CliProvider.Type
 
 /**
@@ -247,6 +252,7 @@ export const CLI_SIGN_IN = {
   "antigravity-cli": "page",
   "opencode-go": "key",
   opencode: "page",
+  "devin-cli": "page",
 } as const satisfies Record<CliProvider, "page" | "key">
 export type CliSignIn = (typeof CLI_SIGN_IN)[CliProvider]
 
@@ -257,6 +263,11 @@ export const CliAuthStatus = Schema.Struct({
   account: Schema.NullOr(Schema.String),
   /** Why the box could not read this CLI's login (not installed, or it failed); `loggedIn` is then false. */
   error: Schema.optional(Schema.String),
+  /**
+   * The CLI cannot hold a login on this box at all: it is not installed, or its version cannot sign in. Distinct from
+   * `error`, which may also describe a probe that failed while a login could still exist.
+   */
+  cannotSignIn: Schema.optional(Schema.Boolean),
 })
 export type CliAuthStatus = typeof CliAuthStatus.Type
 
@@ -355,6 +366,7 @@ export type UseBankedResetResult = typeof UseBankedResetResult.Type
  * - claude-cli: open `url`, sign in, then send the code Anthropic shows to `cliLoginCode` (`needsCode`).
  * - codex-cli: open `url` and enter `userCode`; the box notices completion itself (poll `cliAuth`).
  * - antigravity-cli: open `url`, sign in with Google, then send the code the page shows (or its URL) to `cliLoginCode`.
+ * - devin-cli: open `url`, sign in to Devin, then send the code the page shows to `cliLoginCode`.
  */
 export const CliLoginStart = Schema.Struct({
   provider: CliProvider,
@@ -714,6 +726,21 @@ export const Automation = Schema.Struct({
   nextRunAt: Schema.NullOr(Schema.String),
 })
 export type Automation = typeof Automation.Type
+
+/**
+ * The portable part of an automation, as carried by a share link. It holds what decides how the imported copy runs,
+ * never the owner's id, run history, timestamps or enabled state: the recipient imports a disabled copy of their own.
+ */
+export const AutomationShare = Schema.Struct({
+  version: Schema.Literal(1),
+  name: Schema.String.pipe(Schema.minLength(1)),
+  /** The sharer's repository; the recipient may only use it if their GitHub connection can read it. */
+  repo: Schema.NullOr(GithubRepoSlug),
+  prompt: Schema.String.pipe(Schema.minLength(1)),
+  model: Schema.optionalWith(Schema.NullOr(AgentModel), { default: () => null, exact: true }),
+  trigger: AutomationTrigger,
+})
+export type AutomationShare = typeof AutomationShare.Type
 
 export const CreateAutomationBody = Schema.Struct({
   name: Schema.String.pipe(Schema.minLength(1)),

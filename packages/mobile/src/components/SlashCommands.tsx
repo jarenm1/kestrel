@@ -1,17 +1,19 @@
 import React from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
-import { harnessCommandPrefix, type HarnessCommand, type ModelProvider } from "@cloudagents/protocol";
+import type { HarnessCommand } from "@cloudagents/protocol";
+import { commandPrefixForHarness } from "@cloudagents/composer/commands";
+import type { ModelMentionHarness } from "@cloudagents/composer/models";
 import { colors, fonts, radius, shadows, spacing } from "@/theme";
 
 interface Props {
   matches: readonly HarnessCommand[];
-  provider: ModelProvider | undefined;
+  harness: ModelMentionHarness | undefined;
   pending: boolean;
   onSelect: (command: HarnessCommand) => void;
   activeIndex: number;
 }
 
-export function SlashCommands({ matches, provider, pending, onSelect, activeIndex }: Props) {
+export function SlashCommands({ matches, harness, pending, onSelect, activeIndex }: Props) {
   // App-owned actions are available before (and without) the harness list: only an empty menu waits on it.
   if (pending && matches.length === 0) {
     return (
@@ -36,7 +38,7 @@ export function SlashCommands({ matches, provider, pending, onSelect, activeInde
     <View style={styles.card}>
       <FlatList
         data={matches}
-        keyExtractor={(item) => `${harnessCommandPrefix(item, provider)}${item.name}`}
+        keyExtractor={(item) => `${commandPrefixForHarness(item, harness)}${item.name}`}
         keyboardShouldPersistTaps="always"
         style={styles.list}
         renderItem={({ item, index }) => (
@@ -48,7 +50,7 @@ export function SlashCommands({ matches, provider, pending, onSelect, activeInde
           >
             <View style={styles.nameRow}>
               <Text style={styles.name}>
-                {harnessCommandPrefix(item, provider)}
+                {commandPrefixForHarness(item, harness)}
                 {item.name}
               </Text>
               {item.argumentHint ? <Text style={styles.hint}>{item.argumentHint}</Text> : null}

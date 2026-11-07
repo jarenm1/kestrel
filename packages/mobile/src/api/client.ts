@@ -25,6 +25,7 @@ import {
   HarnessCommands,
   Me,
   Message,
+  ModelCatalog,
   type ModelProvider,
   Paths,
   PreviewSession,
@@ -46,30 +47,9 @@ import {
   type UserBox,
 } from "@cloudagents/protocol";
 import { fetchCredentials } from "@/auth/session";
-
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
+import { ApiError, responseError } from "./errors";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-
-function errorMessage(text: string, fallback: string): string {
-  try {
-    const body: unknown = JSON.parse(text);
-    if (typeof body === "object" && body !== null && "message" in body && typeof body.message === "string") {
-      return body.message;
-    }
-  } catch {
-    // Not JSON; fall through to the raw text.
-  }
-  return text || fallback;
-}
 
 /** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
@@ -165,6 +145,8 @@ export interface ApiClient {
   providerUsage(): Promise<readonly ProviderUsage[]>;
   /** What the active box can run, as it found at startup. */
   capabilities(): Promise<BoxCapabilities>;
+  /** The selected box's runtime model catalog; `refresh` bypasses the box's discovery cache. */
+  models(refresh?: boolean): Promise<ModelCatalog>;
   useBankedReset(provider: CliProvider, body: UseBankedResetBody): Promise<UseBankedResetResult>;
   /** Runs per day, counted in the device's time zone so the days match the user's calendar. */
   usageActivity(): Promise<UsageActivity>;
@@ -205,7 +187,7 @@ async function send<A, I>(
   }
 
   const text = await res.text();
-  if (!res.ok) throw new ApiError(res.status, errorMessage(text, res.statusText));
+  if (!res.ok) throw responseError(res.status, text, res.statusText);
 
   // 204 and other empty bodies carry no JSON; they decode as `undefined`.
   let json: unknown;
@@ -457,6 +439,8 @@ export function createApiClient(
     usage: () => boxRequest(Usage, "GET", Paths.usage),
     providerUsage: () => boxRequest(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
     capabilities: () => boxRequest(BoxCapabilities, "GET", Paths.capabilities),
+    models: (refresh = false) =>
+      boxRequest(ModelCatalog, "GET", refresh ? `${Paths.models}?refresh=1` : Paths.models),
     textGenerationSettings: () => boxRequest(TextGenerationSettings, "GET", Paths.textGenerationSettings),
     saveTextGenerationSettings: (settings) =>
       boxRequest(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),

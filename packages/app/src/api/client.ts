@@ -19,6 +19,7 @@ import {
   CreateBoxBody,
   CreateFleetBoxBody,
   CreateNestBoxBody,
+  CreateAutomationBody,
   CreatedBox,
   CreatedFleetBox,
   CreateTaskBody,
@@ -35,6 +36,7 @@ import {
   FleetActivity,
   Me,
   Message,
+  ModelCatalog,
   type ModelProvider,
   NestHostList,
   Paths,
@@ -50,6 +52,10 @@ import {
   type SetDesktopQualityBody,
   Task,
   TextGenerationSettings,
+  type ThreadPullRequestAction,
+  ThreadPullRequestDetail,
+  ThreadPullRequestDiff,
+  ThreadPullRequests,
   ThreadSettings,
   ToolFailureList,
   UpdateAutomationBody,
@@ -64,13 +70,7 @@ import {
 import { SERVER_URL, WS_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
 import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
-
-export class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
-    super(message)
-    this.name = "ApiError"
-  }
-}
+import { ApiError, responseError } from "./errors"
 
 type UnauthorizedListener = () => void
 const unauthorizedListeners = new Set<UnauthorizedListener>()
@@ -83,18 +83,6 @@ export function onUnauthorized(listener: UnauthorizedListener): () => void {
   }
 }
 
-function errorMessage(text: string, fallback: string): string {
-  try {
-    const body: unknown = JSON.parse(text)
-    if (typeof body === "object" && body !== null && "message" in body && typeof body.message === "string") {
-      return body.message
-    }
-  } catch {
-    // Body is not JSON; fall through to raw text.
-  }
-  return text || fallback
-}
-
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE"
 
 /** Decodes one exchange: a non-2xx status fails with the server's message; a 2xx body is decoded with `schema`. */
@@ -105,7 +93,7 @@ const decodeExchange = <A, I>(
   text: string,
 ): Effect.Effect<A, ApiError> =>
   Effect.gen(function* () {
-    if (status < 200 || status > 299) return yield* Effect.fail(new ApiError(status, errorMessage(text, statusText)))
+    if (status < 200 || status > 299) return yield* Effect.fail(responseError(status, text, statusText))
     // 204 and other empty bodies carry no JSON; they decode as `undefined`.
     const json = yield* Effect.try({
       try: () => (text === "" ? undefined : (JSON.parse(text) as unknown)),
@@ -344,7 +332,7 @@ function onBox<A, I>(
 ): Promise<A> {
   const target = routeOf(boxId)
   return target === undefined
-    ? Promise.reject(new ApiError(404, "That box is no longer in your box list"))
+    ? Promise.reject(new ApiError(404, "That box is no longer in your box list", "BoxNotFound"))
     : run(boxCall(target, schema, method, path, body))
 }
 
@@ -552,8 +540,12 @@ export const api = {
   deleteConnection: (provider: string) =>
     run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.connection(provider)))),
   listAutomations: () => run(request(Schema.Array(Automation), "GET", ControlPaths.automations)),
+  createAutomation: (body: CreateAutomationBody) =>
+    run(request(Automation, "POST", ControlPaths.automations, body)),
   /** Repositories the user's GitHub connection can read, most recently updated first. 404 when GitHub is not connected. */
   githubRepos: () => run(request(Schema.Array(GithubRepo), "GET", ControlPaths.githubRepos)),
+  /** One repository ("owner/name") the GitHub connection can read; 404 when GitHub is not connected or it is not visible. */
+  githubRepo: (repo: string) => run(request(GithubRepo, "GET", ControlPaths.githubRepo(repo))),
   /** Branch names of a repository ("owner/name") the GitHub connection can read, the default branch first. */
   githubBranches: (repo: string) => run(request(Schema.Array(Schema.String), "GET", ControlPaths.githubBranches(repo))),
   updateAutomation: (id: string, body: UpdateAutomationBody) =>
@@ -624,6 +616,17 @@ export const api = {
   providerUsage: () => onActive(Schema.Array(ProviderUsage), "GET", ControlPaths.cliUsageFor(CliProvider.literals)),
   /** What the active box can run, as it found at startup. */
   capabilities: () => onActive(BoxCapabilities, "GET", Paths.capabilities),
+  /**
+   * The active box's model catalog and the discovery sources behind it. `refresh` asks the box to bypass its cached
+   * discovery; `boxId` pins the read to the box a mounted picker was opened for, so a box switch mid-read cannot mix
+   * two catalogs.
+   */
+  models: (refresh = false, boxId?: string | null) => {
+    const path = `${Paths.models}${refresh ? "?refresh=1" : ""}`
+    return boxId === undefined
+      ? onActive(ModelCatalog, "GET", path)
+      : onBox(boxId, ModelCatalog, "GET", path)
+  },
   /**
    * The signed-in user's generated-text preferences. `boxId` pins the read to the box a settings form was opened for;
    * omitted, it reads the active box.
@@ -728,6 +731,16 @@ export const api = {
   setUsageLimitAutoResume: (taskId: string, autoResume: boolean) =>
     onTask(taskId, Task, "PUT", Paths.taskUsageLimit(taskId), { autoResume }),
   getDiff: (taskId: string) => onTask(taskId, DiffResponse, "GET", Paths.taskDiff(taskId)),
+  /** Every pull request the thread owns or manages, with GitHub's live view of each. */
+  getThreadPullRequests: (taskId: string) =>
+    onTask(taskId, ThreadPullRequests, "GET", Paths.taskPullRequests(taskId)),
+  getThreadPullRequest: (taskId: string, repo: string, number: number) =>
+    onTask(taskId, ThreadPullRequestDetail, "GET", Paths.taskPullRequest(taskId, repo, number)),
+  getThreadPullRequestDiff: (taskId: string, repo: string, number: number) =>
+    onTask(taskId, ThreadPullRequestDiff, "GET", Paths.taskPullRequestDiff(taskId, repo, number)),
+  /** Comments, reviews, merges and the rest; the box answers with the thread as stored. */
+  actOnThreadPullRequest: (taskId: string, action: ThreadPullRequestAction) =>
+    onTask(taskId, Task, "POST", Paths.taskPullRequestAction(taskId), action),
   getFiles: (taskId: string, hidden: boolean) =>
     onTask(taskId, FilesResponse, "GET", Paths.taskFiles(taskId) + (hidden ? "?hidden=1" : "")),
   /**

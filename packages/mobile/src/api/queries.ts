@@ -18,6 +18,8 @@ const BOX_POLL_MS = 10_000;
 const TASK_POLL_MS = 2000;
 /** The diff has no change events; it is polled while the agent runs and refetched when a run updates. */
 const DIFF_POLL_MS = 3000;
+/** Runtime model catalogs change rarely; a mounted picker re-reads one hourly. */
+const MODEL_CATALOG_POLL_MS = 60 * 60 * 1000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,6 +46,8 @@ export const boxKeys = (scope: string) => ({
   providerUsage: ["box-data", scope, "provider-usage"] as const,
   /** What the box can run (`BoxCapabilities`): which harnesses it has. */
   capabilities: ["box-data", scope, "capabilities"] as const,
+  /** The box's runtime model catalog (`ModelCatalog`), resolved for its owner's credentials. */
+  models: ["box-data", scope, "models"] as const,
   /** Generated-text preferences of this box's user (title, model, streaming). */
   textGenerationSettings: ["box-data", scope, "text-generation-settings"] as const,
   /** Thread-run preferences of this box's user (usage-limit auto-resume). */
@@ -76,11 +80,15 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   return next;
 }
 
-/** Snapshot entries first; entries already in the cache from live events (newer) override them. */
-function mergeSnapshot<T extends Keyed>(snapshot: readonly T[], current: readonly T[] | undefined): T[] {
+/** Fresh snapshots replace stale cache entries; only events written during the fetch override them. */
+async function mergeSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
+  const before = new Set(queryClient.getQueryData<readonly T[]>(key) ?? []);
+  const snapshot = await fetch();
   const byId = new Map<string, T>();
   for (const item of snapshot) byId.set(item.id, item);
-  for (const item of current ?? []) byId.set(item.id, item);
+  for (const item of queryClient.getQueryData<readonly T[]>(key) ?? []) {
+    if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item);
+  }
   return [...byId.values()];
 }
 
@@ -139,20 +147,17 @@ export function createQueries(api: ApiClient) {
     messages: (taskId: string) =>
       queryOptions({
         queryKey: scoped.messages(taskId),
-        queryFn: async (): Promise<Message[]> =>
-          mergeSnapshot(await api.listMessages(taskId), queryClient.getQueryData(scoped.messages(taskId))),
+        queryFn: () => mergeSnapshot(scoped.messages(taskId), () => api.listMessages(taskId)),
       }),
     runs: (taskId: string) =>
       queryOptions({
         queryKey: scoped.runs(taskId),
-        queryFn: async (): Promise<Run[]> =>
-          mergeSnapshot(await api.listRuns(taskId), queryClient.getQueryData(scoped.runs(taskId))),
+        queryFn: () => mergeSnapshot(scoped.runs(taskId), () => api.listRuns(taskId)),
       }),
     runItems: (runId: string) =>
       queryOptions({
         queryKey: scoped.runItems(runId),
-        queryFn: async (): Promise<AgentItem[]> =>
-          mergeSnapshot(await api.runItems(runId), queryClient.getQueryData(scoped.runItems(runId))),
+        queryFn: () => mergeSnapshot(scoped.runItems(runId), () => api.runItems(runId)),
       }),
     diff: (taskId: string, running = false) =>
       queryOptions({
@@ -165,6 +170,13 @@ export function createQueries(api: ApiClient) {
     usage: () => queryOptions({ queryKey: scoped.usage, queryFn: () => api.usage() }),
     providerUsage: () => queryOptions({ queryKey: scoped.providerUsage, queryFn: () => api.providerUsage() }),
     capabilities: () => queryOptions({ queryKey: scoped.capabilities, queryFn: () => api.capabilities() }),
+    models: () =>
+      queryOptions({
+        queryKey: scoped.models,
+        queryFn: () => api.models(),
+        staleTime: MODEL_CATALOG_POLL_MS,
+        refetchInterval: MODEL_CATALOG_POLL_MS,
+      }),
     textGenerationSettings: () =>
       queryOptions({
         queryKey: scoped.textGenerationSettings,
