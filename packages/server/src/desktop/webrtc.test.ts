@@ -245,13 +245,13 @@ describe("DesktopRtcSession", () => {
     for (const close of closing.splice(0)) await close()
   })
 
-  const session = (over: Partial<WebRtcSettings> = {}) => {
+  const session = (over: Partial<WebRtcSettings> = {}, hooks: { profileChanged?: () => void } = {}) => {
     const sent: DesktopRtcServerMessage[] = []
     const inputs: string[] = []
     const s = new DesktopRtcSession({ ...settings, ...over }, "thread-1", new MediaTap(), {
       send: (m) => sent.push(m),
       onInput: (raw) => inputs.push(raw),
-      profileChanged: () => {},
+      profileChanged: hooks.profileChanged ?? (() => {}),
       debug: () => {},
     })
     closing.push(() => s.close())
@@ -290,6 +290,24 @@ describe("DesktopRtcSession", () => {
     const answer = sent.find((m) => m._tag === "rtc.answer")
     if (answer?._tag !== "rtc.answer") throw new Error("no answer")
     expect(answer.sdp).toContain("profile-level-id=42e01f")
+  })
+
+  test("asks the manager to re-pick the encoder profile when a Baseline viewer attaches and leaves", async () => {
+    let changes = 0
+    const { s } = session({}, { profileChanged: () => (changes += 1) })
+    expect(s.baselineOnly).toBe(false)
+    const browser = await remoteOffer("video/H264", ["42e028"])
+    closing.push(() => browser.close())
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    // The manager restarts a live High encoder on this notification; without it a Baseline-only viewer drops
+    // every High frame (rtp.ts) and freezes.
+    expect(s.baselineOnly).toBe(true)
+    const afterOffer = changes
+    expect(afterOffer).toBeGreaterThan(0)
+    s.close()
+    // The last Baseline viewer leaving lets the encoder return to High.
+    expect(s.baselineOnly).toBe(false)
+    expect(changes).toBeGreaterThan(afterOffer)
   })
 
   test("prefers the 42e0 payload when the offer also carries a 42c0 one", async () => {

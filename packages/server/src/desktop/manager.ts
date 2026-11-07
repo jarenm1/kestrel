@@ -17,7 +17,7 @@ import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup } from "../process"
 import { startDesktopAudio, type DesktopAudio } from "./audio"
 import { FlvDemuxer, type FlvEvent } from "./flv"
 import { type AvcConfig, type H264Unit, parseAvcConfig } from "./rtp"
-import { type H264EncoderProfile, WEBRTC_H264_LEVEL } from "./h264"
+import { type H264EncoderProfile, WEBRTC_H264_LEVEL, profileForSinks } from "./h264"
 import { encodePng, resample, type RgbFrame } from "./frames"
 import { writeOpenboxConfig } from "./theme"
 import { isWsl } from "./platform"
@@ -719,8 +719,7 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
     const preferredEncoder = (): EncoderKind => (!wsl && !nvencDisabled && Date.now() >= nvencBusyUntil ? "nvenc" : "x264")
 
     /** Constrained Baseline while a connected viewer decodes only Baseline; High otherwise (see h264.ts). */
-    const profileFor = (s: Session): H264EncoderProfile =>
-      [...s.sinks].some((sink) => sink.baselineOnly) ? "baseline" : "high"
+    const profileFor = (s: Session): H264EncoderProfile => profileForSinks(s.sinks)
 
     /** Starts an encoder; throws if the process cannot be spawned. Viewers wait for its keyframe. */
     const startEncoder = (s: Session, kind: EncoderKind) => {
@@ -1157,6 +1156,11 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         sink.onStatus(toStatus(taskId, s))
         cancelLinger(s)
         listenToAudio(s)
+        // A new viewer may need Baseline, and a reattached one may already (its offer is not renegotiated by a desktop
+        // restart). Restart a live High encoder before it is handed the cached High config and GOP: a Baseline-only
+        // viewer drops those (rtp.ts) and would freeze. The restart clears the cache, so the branches below wait for
+        // the new stream's keyframe instead.
+        applyProfile(s)
         if (s.encoder === null && s.state === "running") {
           // Idle desktop: start the encoder again; this viewer waits for its first keyframe.
           yield* Effect.try({ try: () => startEncoder(s, preferredEncoder()), catch: toErr }).pipe(
@@ -1177,6 +1181,9 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
           if (current === undefined) return
           current.sinks.delete(sink)
           current.awaiting.delete(sink)
+          // The last Baseline-only viewer leaving lets the encoder go back to High; applyProfile no-ops if a viewer
+          // that still needs Baseline remains, and when this was the last viewer the linger stop handles it.
+          applyProfile(current)
           scheduleStop(current)
         })
       })
