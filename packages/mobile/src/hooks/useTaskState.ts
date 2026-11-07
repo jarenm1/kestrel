@@ -4,6 +4,7 @@ import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } fro
 import { openTaskEvents } from "@/api/events";
 import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
+import { threadErrors } from "@/hooks/threadErrors";
 
 const MAX_LOG_LINES = 2000;
 const RECONNECT_MS = 2000;
@@ -50,6 +51,7 @@ export function useTaskState(taskId: string) {
       close = openTaskEvents(url, {
         onOpen: () => {
           setDisconnected(false);
+          // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });
         },
         onEvent: (event) => {
@@ -102,14 +104,9 @@ export function useTaskState(taskId: string) {
     };
   }, [api, taskId, generation, queryClient]);
 
-  const failed = [task, messages, runs].find((q) => q.error);
-  const error = disconnected
-    ? "Live updates disconnected; reconnecting…"
-    : failed?.error
-      ? failed.error instanceof Error
-        ? failed.error.message
-        : String(failed.error)
-      : null;
+  const running = runs.data?.some((run) => run.status === "running") === true;
+  // A cold failure leaves content missing: the thread says so inline instead of showing an empty chat or a banner.
+  const { loadError, error } = threadErrors([task, messages, runs], disconnected, running);
 
   return {
     task: task.data ?? null,
@@ -119,5 +116,6 @@ export function useTaskState(taskId: string) {
     output,
     desktopOpens,
     error,
+    loadError,
   };
 }

@@ -106,27 +106,44 @@ interface ResponseUsage {
   outputTokens: number | null
   cachedTokens: number | null
   timestamp: string | null
+  /** Epoch milliseconds the response began (its `message_start`), once observed. */
+  startMs: number | null
+  /** That start came from a provider event time, not the box's clock. */
+  startFromEvent: boolean
+  /** Epoch milliseconds of its latest completion report while the stream is open; frozen after its stop. */
+  endMs: number | null
+  /** That end came from a provider event time, not the box's clock: an untimed report cannot move it. */
+  endFromEvent: boolean
+  /** Elapsed milliseconds from that start to that end; null while either is unknown. */
+  durationMs: number | null
   emitted: boolean
   /** A stream for this response is open (`message_start` without its `message_stop` yet). */
   active: boolean
+  /** The stream's stop arrived: duplicate completions after it cannot move the response's end. */
+  stopped: boolean
 }
 
-/** ISO time of a provider event: its `emittedAtMs` epoch-milliseconds or `timestamp`, when valid. */
-const eventTime = (...events: ReadonlyArray<unknown>): string | null => {
+/** Epoch milliseconds of a provider event: its `emittedAtMs` or `timestamp`, when valid. */
+const eventMillis = (...events: ReadonlyArray<unknown>): number | null => {
   for (const event of events) {
     if (!isRecord(event)) continue
     const milliseconds = asNumber(event.emittedAtMs)
     if (milliseconds !== null && milliseconds > 0 && Math.abs(milliseconds) <= 8.64e15) {
-      const date = new Date(milliseconds)
-      if (!Number.isNaN(date.getTime())) return date.toISOString()
+      if (!Number.isNaN(new Date(milliseconds).getTime())) return milliseconds
     }
     const text = asString(event.timestamp)
     if (text !== null) {
-      const date = new Date(text)
-      if (!Number.isNaN(date.getTime())) return date.toISOString()
+      const parsed = new Date(text).getTime()
+      if (!Number.isNaN(parsed)) return parsed
     }
   }
   return null
+}
+
+/** ISO time of a provider event, when valid. */
+const eventTime = (...events: ReadonlyArray<unknown>): string | null => {
+  const milliseconds = eventMillis(...events)
+  return milliseconds === null ? null : new Date(milliseconds).toISOString()
 }
 
 /** The usage item for a response, using the time it was first seen finished when the provider gave none. */
@@ -135,6 +152,7 @@ const usageItem = (state: ResponseUsage): AgentItem => ({
   id: state.id,
   parentToolId: state.parentToolId,
   timestamp: state.timestamp ?? new Date().toISOString(),
+  durationMs: state.durationMs,
   inputTokens: state.inputTokens,
   outputTokens: state.outputTokens,
   cachedTokens: state.cachedTokens,
@@ -275,15 +293,44 @@ export const makeTranscript = (
       outputTokens: null,
       cachedTokens: null,
       timestamp: null,
+      startMs: null,
+      startFromEvent: false,
+      endMs: null,
+      endFromEvent: false,
+      durationMs: null,
       emitted: false,
       active: false,
+      stopped: false,
     }
     claudeResponseUsage.set(key ?? state.id, state)
     return state
   }
 
+  /**
+   * Records a completion report: its time (the event's time, or now when it gave none) and, once both boundaries
+   * are known, the response's elapsed time. A response reports completion more than once — its assistant snapshot,
+   * then `message_delta` with the final output — so the end follows the latest report. After `message_stop` the
+   * response is closed and repeated reports cannot move it.
+   */
+  const completeClaudeResponse = (state: ResponseUsage, atMs: number | null) => {
+    if (state.stopped) return
+    if (atMs !== null) {
+      // A provider event time is authoritative; a later event always advances the end.
+      state.endMs = state.endMs === null ? atMs : Math.max(state.endMs, atMs)
+      state.endFromEvent = true
+    } else if (state.endMs === null || !state.endFromEvent) {
+      // Otherwise the box's own clock; it advances only a turn of observed times, never a provider's.
+      state.endMs = state.endMs === null ? Date.now() : Math.max(state.endMs, Date.now())
+    }
+    state.timestamp = new Date(state.endMs).toISOString()
+    // Only one clock can measure an interval: a provider time and the box's own clock are not comparable.
+    if (state.startMs !== null && state.startFromEvent === state.endFromEvent) {
+      state.durationMs = Math.max(0, Math.round(state.endMs - state.startMs))
+    }
+  }
+
   /** Merge the buckets a Claude event reports; a missing bucket leaves the value already known. */
-  const recordClaudeUsage = (state: ResponseUsage, usage: Record<string, unknown>, completedAt?: string | null) => {
+  const recordClaudeUsage = (state: ResponseUsage, usage: Record<string, unknown>, completedAtMs?: number | null) => {
     // Cache writes were read by the model too, so they are prompt input; cache reads stay their own bucket.
     const inputTokens = sumTokens([asNumber(usage.input_tokens), asNumber(usage.cache_creation_input_tokens)])
     const outputTokens = asNumber(usage.output_tokens)
@@ -294,7 +341,7 @@ export const makeTranscript = (
       state.outputTokens = state.emitted && state.outputTokens !== null ? Math.max(state.outputTokens, outputTokens) : outputTokens
     }
     if (cachedTokens !== null) state.cachedTokens = cachedTokens
-    if (completedAt !== undefined && state.timestamp === null) state.timestamp = completedAt ?? new Date().toISOString()
+    if (completedAtMs !== undefined) completeClaudeResponse(state, completedAtMs)
   }
 
   /** The response's item once anything is known. It keeps its id, so a later report replaces it in place. */
@@ -396,7 +443,7 @@ export const makeTranscript = (
     if (messageUsage !== null) {
       const state = claudeUsageState(messageId, parentToolId)
       // This line finished a message (or is one of its blocks), so a provider event time means completion.
-      recordClaudeUsage(state, messageUsage, eventTime(line))
+      recordClaudeUsage(state, messageUsage, eventMillis(line))
       // A stream already showed the response; its snapshot takes the same item, updating output (or vice versa).
       // Without an id there is nothing to deduplicate against, so the usage shows at once.
       if (state.emitted || messageId === null) {
@@ -451,6 +498,7 @@ export const makeTranscript = (
       {
         _tag: "turn",
         id: nextId(),
+        timestamp: eventTime(line) ?? new Date().toISOString(),
         durationMs: asNumber(line.duration_ms),
         // Claude splits prompt cost into fresh, cache-write and cache-read tokens; the model
         // read all three, so the reported input is their sum.
@@ -491,6 +539,13 @@ export const makeTranscript = (
           claudeStreaming.set(parentToolId, id)
           const state = claudeUsageState(id, parentToolId)
           state.active = true
+          // The response begins here: its elapsed time runs from this boundary to its latest completion report.
+          // A replayed start does not move it.
+          if (state.startMs === null) {
+            const eventStart = eventMillis(line, event)
+            state.startMs = eventStart ?? Date.now()
+            state.startFromEvent = eventStart !== null
+          }
           // Its input and cache reads are known now; output is not final until message_delta.
           if (isRecord(event.message) && isRecord(event.message.usage)) recordClaudeUsage(state, event.message.usage)
         }
@@ -522,8 +577,8 @@ export const makeTranscript = (
         if (id === null) return []
         const state = claudeUsageState(id, parentToolId)
         // The final output arrives after the assistant snapshot; the same item is updated, not added again.
-        if (isRecord(event.usage)) recordClaudeUsage(state, event.usage, eventTime(line, event))
-        else if (state.timestamp === null) state.timestamp = eventTime(line, event) ?? new Date().toISOString()
+        if (isRecord(event.usage)) recordClaudeUsage(state, event.usage, eventMillis(line, event))
+        else completeClaudeResponse(state, eventMillis(line, event))
         const item = emitClaudeUsage(state)
         return item === null ? [] : [item]
       }
@@ -532,7 +587,9 @@ export const makeTranscript = (
         const state = id === null ? undefined : claudeResponseUsage.get(claudeUsageKey(id, parentToolId))
         if (state !== undefined) {
           state.active = false
-          if (state.timestamp === null) state.timestamp = eventTime(line, event) ?? new Date().toISOString()
+          // The stop closes the response. It supplies an end only when no completion report did.
+          if (state.endMs === null) completeClaudeResponse(state, eventMillis(line, event))
+          state.stopped = true
         }
         const item = state === undefined || state.emitted ? null : emitClaudeUsage(state)
         if (id !== null) claudeStreaming.delete(parentToolId)
@@ -666,7 +723,7 @@ export const makeTranscript = (
     }
   }
 
-  const codexTurnEnd = (params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+  const codexTurnEnd = (line: Record<string, unknown>, params: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     const turn = isRecord(params.turn) ? params.turn : null
     if (turn === null) return []
     const turnId = asString(turn.id)
@@ -688,6 +745,7 @@ export const makeTranscript = (
     items.push({
       _tag: "turn",
       id: nextId(),
+      timestamp: eventTime(line) ?? new Date().toISOString(),
       durationMs: asNumber(turn.durationMs),
       // Codex's inputTokens already includes cachedInputTokens; adding them again would double-count the prompt.
       inputTokens: tokens === undefined ? null : tokens.input - tokens.baseInput,
@@ -717,6 +775,8 @@ export const makeTranscript = (
       id: `usage-codex-${threadId ?? "thread"}-${turnId ?? "turn"}-${count}`,
       parentToolId: null,
       timestamp: eventTime(line) ?? new Date().toISOString(),
+      // Codex reports token totals, not where a model call began or ended, so its elapsed time stays unknown.
+      durationMs: null,
       inputTokens,
       outputTokens,
       cachedTokens,
@@ -846,7 +906,7 @@ export const makeTranscript = (
         return [{ _tag: "error", id: nextId(), text }]
       }
       case "turn/completed":
-        return codexTurnEnd(params)
+        return codexTurnEnd(line, params)
       default:
         return []
     }
@@ -985,7 +1045,7 @@ export const makeTranscript = (
   }
 
   /** A response from the agent: the session's model from its config options, and the end of a turn (`session/prompt`). */
-  const acpResult = (result: Record<string, unknown>): ReadonlyArray<AgentItem> => {
+  const acpResult = (line: Record<string, unknown>, result: Record<string, unknown>): ReadonlyArray<AgentItem> => {
     const modelOption = asArray(result.configOptions).find((o) => isRecord(o) && o.id === "model")
     if (isRecord(modelOption) && typeof modelOption.currentValue === "string") {
       model = modelOption.currentValue
@@ -1003,6 +1063,7 @@ export const makeTranscript = (
     items.push({
       _tag: "turn",
       id: nextId(),
+      timestamp: eventTime(line) ?? new Date().toISOString(),
       durationMs: null,
       inputTokens: usage === null ? null : sumTokens([asNumber(usage.inputTokens), asNumber(usage.cachedReadTokens), asNumber(usage.cachedWriteTokens)]),
       outputTokens: usage === null ? null : asNumber(usage.outputTokens),
@@ -1020,7 +1081,7 @@ export const makeTranscript = (
     // `session/prompt` response.
     if (line.jsonrpc === "2.0") {
       if (line.method === "session/update" && isRecord(line.params)) return acpUpdate(line.params)
-      return isRecord(line.result) ? acpResult(line.result) : []
+      return isRecord(line.result) ? acpResult(line, line.result) : []
     }
     // Codex app-server speaks JSON-RPC 2.0 without the `jsonrpc` field: `method` and/or `id`.
     if (typeof line.method === "string" || line.id !== undefined) return codex(line)

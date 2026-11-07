@@ -17,6 +17,7 @@ export const CLI_INTRO: Record<CliProvider, string> = {
   "antigravity-cli": "Use your own Google account through Antigravity CLI.",
   "opencode": "Sign in with OpenCode Console to use free models. The login stays in OpenCode on your box.",
   "opencode-go": "Use your OpenCode Go subscription. The API key stays in OpenCode on your box.",
+  "devin-cli": "Use your own Devin account through Devin CLI.",
 };
 
 /** The CLI provider a key-based CLI connection signs in with, or null for page sign-ins and non-CLI rows. */
@@ -42,6 +43,7 @@ const HARNESS_OF_CONNECTION: Partial<Record<string, HarnessId>> = {
   "codex-cli": "codex",
   "antigravity-cli": "antigravity",
   opencode: "opencode",
+  "devin-cli": "devin",
 };
 
 export function harnessForConnection(provider: string): HarnessId | undefined {
@@ -55,6 +57,7 @@ export function harnessForConnection(provider: string): HarnessId | undefined {
 export function invalidateConnections(queryClient: QueryClient, scope: string): void {
   void queryClient.invalidateQueries({ queryKey: keys.connections });
   const scoped = boxKeys(scope);
+  void queryClient.invalidateQueries({ queryKey: scoped.models });
   void queryClient.invalidateQueries({ queryKey: scoped.usage });
   void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
   void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });

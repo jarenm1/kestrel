@@ -3,7 +3,7 @@ import { DesktopInput, DesktopRtcClientMessage, type DesktopRtcServerMessage, ty
 import { Config } from "../config"
 import { EventHub } from "../core/events"
 import { CoreService } from "../core/service"
-import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, viewerIceServers } from "../desktop"
+import { DesktopManager, DesktopRtcSession, MediaTap, managedTurn, sessionIceServers } from "../desktop"
 import { TaskStatsService } from "../stats"
 import { ActivityTracker } from "../platform/tracker"
 
@@ -140,6 +140,7 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     const sendSignal = (message: DesktopRtcServerMessage) => {
       if (!socketClosed) socket.sendText(JSON.stringify(message))
     }
+    const managed = managedTurn(config)
     const rtc = new DesktopRtcSession(config.webrtc, taskId, tap, {
       send: sendSignal,
       onInput: (raw, channel) =>
@@ -156,7 +157,6 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
       profileChanged: () => Effect.runSync(desktop.refreshProfile(taskId)),
       debug: (message) => fork(Effect.logDebug(message)),
     })
-    const managed = managedTurn(config)
     // A status or a config must not outpace the one before it: a slow credential fetch may not deliver its config after
     // a later status. Closing the socket also ends the queue: nothing is written to a socket the browser left.
     let signalQueue: Promise<void> = Promise.resolve()
@@ -177,9 +177,12 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
     let configSent = false
     const sendConfig = async (): Promise<void> => {
-      const resolved = await viewerIceServers(config.webrtc, managed, taskId)
+      const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
       if (resolved.warning !== null) fork(Effect.logWarning(resolved.warning))
+      // Resolved here, on the config path, so the box's own answer never waits on the control plane. A failed fetch
+      // leaves both peers on the box's own configuration.
+      rtc.setIceServers(resolved.iceServers, resolved.managed)
       sendSignal({
         _tag: "rtc.config",
         iceServers: resolved.iceServers,

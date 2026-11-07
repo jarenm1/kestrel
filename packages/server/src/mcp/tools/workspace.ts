@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { Effect, Schema } from "effect"
-import { CheckoutRequest, type Checkout } from "@cloudagents/protocol"
+import { CheckoutRequest, type Checkout, type ThreadPullRequest } from "@cloudagents/protocol"
 import { z } from "zod"
 import { type RunContext, guard, runTool, text } from "./common"
 
@@ -20,7 +20,7 @@ export interface WorkspaceToolDeps {
       taskId: string,
       request: CheckoutRequest,
     ) => Effect.Effect<
-      { readonly checkout: Checkout; readonly path: string; readonly instructionFiles: ReadonlyArray<string>; readonly note: string | null },
+      { readonly checkout: Checkout; readonly pullRequest?: ThreadPullRequest; readonly path: string; readonly instructionFiles: ReadonlyArray<string>; readonly note: string | null },
       unknown
     >
     readonly exec: (
@@ -66,8 +66,8 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
             const request = yield* Schema.decodeUnknown(CheckoutRequest)({ repo, baseBranch, pullRequest }).pipe(
               Effect.mapError((e) => new Error(`invalid repo_checkout arguments: ${e.message}`)),
             )
-            const { checkout, path, instructionFiles, note } = yield* deps.workspace.checkout(ctx.taskId, request)
-            const linked = checkout.pullRequest === undefined ? "" : `, pull request #${checkout.pullRequest.number}`
+            const { checkout, pullRequest: linkedPullRequest, path, instructionFiles, note } = yield* deps.workspace.checkout(ctx.taskId, request)
+            const linked = linkedPullRequest === undefined ? "" : `, pull request #${linkedPullRequest.number}`
             return text(
               `checked out ${checkout.repo} at ${path} (checkout id ${checkout.id}, branch ${checkout.branch}, base ${checkout.baseBranch}${linked})` +
                 (note === null ? "" : `\n${note}`) +

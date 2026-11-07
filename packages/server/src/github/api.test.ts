@@ -75,6 +75,13 @@ const pullRequestJson = (overrides: Record<string, unknown> = {}) => ({
   state: "open",
   merged: false,
   draft: false,
+  user: { login: "alice" },
+  created_at: "2024-01-01T00:00:00Z",
+  updated_at: "2024-01-02T00:00:00Z",
+  merged_at: null,
+  closed_at: null,
+  labels: [{ name: "bug" }],
+  requested_reviewers: [{ login: "bob" }],
   mergeable: true,
   mergeable_state: "clean",
   head: { sha: "abc123", ref: "cloudagents/topic" },
@@ -474,10 +481,10 @@ test("readReference returns a pull request's status, checks, changed files and c
       }
     }
     if (path === "/repos/jarenm1/kestrel/pulls/156/reviews?per_page=100") {
-      return { json: [{ state: "APPROVED", body: "Looks good", html_url: "https://github.com/jarenm1/kestrel/pull/156#review", user: { login: "reviewer" } }] }
+      return { json: [{ state: "APPROVED", body: "Looks good", html_url: "https://github.com/jarenm1/kestrel/pull/156#review", submitted_at: "2024-01-04T00:00:00Z", user: { login: "reviewer" } }] }
     }
     if (path === "/repos/jarenm1/kestrel/pulls/156/comments?sort=created&direction=desc&per_page=100") {
-      return { json: [{ path: "src/a.ts", line: 12, body: "nit", html_url: "https://github.com/jarenm1/kestrel/pull/156#comment", user: { login: "reviewer" } }] }
+      return { json: [{ path: "src/a.ts", line: 12, body: "nit", html_url: "https://github.com/jarenm1/kestrel/pull/156#comment", created_at: "2024-01-05T00:00:00Z", user: { login: "reviewer" } }] }
     }
     if (path === "/repos/jarenm1/kestrel/issues/156/comments?per_page=100") return { json: [commentJson()] }
     if (path === "/repos/jarenm1/kestrel/pulls/156/files?per_page=100") {
@@ -509,10 +516,10 @@ test("readReference returns a pull request's status, checks, changed files and c
       files: [{ path: "src/a.ts", status: "modified", additions: 3, deletions: 1 }],
     })
     expect(reference.kind === "pr" ? reference.reviews : []).toEqual([
-      { author: "reviewer", state: "APPROVED", body: "Looks good", url: "https://github.com/jarenm1/kestrel/pull/156#review" },
+      { author: "reviewer", state: "APPROVED", body: "Looks good", url: "https://github.com/jarenm1/kestrel/pull/156#review", submittedAt: "2024-01-04T00:00:00Z" },
     ])
     expect(reference.kind === "pr" ? reference.reviewComments : []).toEqual([
-      { path: "src/a.ts", line: 12, author: "reviewer", body: "nit", url: "https://github.com/jarenm1/kestrel/pull/156#comment" },
+      { path: "src/a.ts", line: 12, author: "reviewer", body: "nit", url: "https://github.com/jarenm1/kestrel/pull/156#comment", createdAt: "2024-01-05T00:00:00Z" },
     ])
     expect(reference.kind === "pr" ? reference.conversation : []).toHaveLength(1)
   } finally {

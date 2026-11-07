@@ -64,7 +64,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
   // agent CLIs it finds there).
   const sandboxed = (config ?? DEFAULT_CONFIG).sandbox === "basic"
   const home = mkdtempSync(join(tmpdir(), "kestrel-doctor-"))
-  const agents = ["claude", "codex", "opencode", "agy"].map((name) => {
+  const agents = ["claude", "codex", "opencode", "agy", "devin"].map((name) => {
     if (onPath(name) === null) return { name, ok: false, detail: "not on PATH" }
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home }
     const run = sandboxed
@@ -87,7 +87,7 @@ export const linuxChecks = async (): Promise<readonly Check[]> => {
     ok: agents.some((agent) => agent.ok),
     detail: agents.some((agent) => agent.ok)
       ? agents.filter((agent) => agent.ok).map((agent) => agent.name).join(", ")
-      : "no agent CLI runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex, npm i -g @opencode/cli, curl -fsSL https://antigravity.google/cli/install.sh | bash)",
+      : "no agent CLI runs (install one: https://docs.anthropic.com/claude-code, npm i -g @openai/codex, npm i -g @opencode/cli, curl -fsSL https://antigravity.google/cli/install.sh | bash, curl -fsSL https://cli.devin.ai/install.sh | bash)",
   })
 
   const port = (config ?? DEFAULT_CONFIG).port

@@ -5,7 +5,7 @@ import { Schema } from "effect"
  * One pick, remembered in localStorage so it survives switching threads and reloads. Writes go to storage directly
  * rather than from an effect: a send can resolve after its composer has unmounted, and that clear must still land.
  */
-export function useStoredChoice<A extends string>(key: string, schema: Schema.Schema<A>) {
+export function useStoredChoice<A extends string, I>(key: string, schema: Schema.Schema<A, I>) {
   const [value, setValue] = useState<A | undefined>(() => {
     const stored = localStorage.getItem(key)
     return stored !== null && Schema.is(schema)(stored) ? stored : undefined

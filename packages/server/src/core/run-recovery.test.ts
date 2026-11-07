@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { Effect, Either } from "effect"
-import { Conflict, type AgentItem, type ProviderUsage, type Run, type Task, type ThreadSettings } from "@cloudagents/protocol"
+import { Conflict, InternalError, type AgentItem, type ProviderUsage, type Run, type Task, type ThreadSettings } from "@cloudagents/protocol"
 import type { StoreShape, StoreState } from "./state"
 import { makeRunRecovery, AUTO_RETRY_LIMIT, autoRetryDelay } from "./run-recovery"
 
@@ -35,6 +35,7 @@ const stateWith = (overrides: Partial<StoreState> = {}): StoreState => ({
   pendingAsks: [],
   uploads: [],
   runSessions: [],
+  settledRuns: [],
   ...overrides,
 })
 
@@ -70,8 +71,12 @@ const setup = (input: {
   providerUsage?: () => Effect.Effect<ReadonlyArray<ProviderUsage>, unknown>
   deliver?: () => Effect.Effect<void, unknown>
   retry?: () => Effect.Effect<void, unknown>
+  /** Wraps the in-memory store, e.g. to make a write fail. */
+  wrapStore?: (store: StoreShape) => StoreShape
 }) => {
-  const { store, state } = memoryStore(input.state)
+  const memory = memoryStore(input.state)
+  const { state } = memory
+  const store = input.wrapStore?.(memory.store) ?? memory.store
   const delivered: string[] = []
   const retried: { readonly deliveryId: string; readonly attempt: number }[] = []
   const published: Task[] = []
@@ -231,6 +236,52 @@ test("a failed usage probe is retried on the next sweep", async () => {
   expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
   await Effect.runPromise(recovery.sweep)
   expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
+})
+
+test("a run the user settled is not re-armed by a recovery that never saw it, as after a restart", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const later = usage(new Date(Date.now() + 3_600_000).toISOString())
+  // Each `setup` is a fresh recovery with no memory of looked-at runs, as a restarted box has; only the store persists.
+  const settled = setup({ state: stateWith({ runs: [failedRun(endedAt)], settledRuns: ["run"] }), usage: later })
+  expect(settled.recovery.deciding(settled.state, settled.state.tasks[0]!, settled.state.runs[0]!)).toBe(false)
+  await Effect.runPromise(settled.recovery.sweep)
+  expect(settled.state.tasks[0]!.usageLimitResume).toBeUndefined()
+
+  // The same failure without the record is armed again: that is what the record prevents.
+  const unsettled = setup({ state: stateWith({ runs: [failedRun(endedAt)] }), usage: later })
+  await Effect.runPromise(unsettled.recovery.sweep)
+  expect(unsettled.state.tasks[0]!.usageLimitResume?.runId).toBe("run")
+})
+
+test("settled runs are forgotten once they stop being their thread's latest", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const later = { ...failedRun(endedAt), id: "later", status: "succeeded" as const }
+  const { recovery, state } = setup({ state: stateWith({ runs: [failedRun(endedAt), later], settledRuns: ["run"] }) })
+  await Effect.runPromise(recovery.sweep)
+  expect(state.settledRuns).toEqual([])
+})
+
+test("a failure stays undecided until its arm is written, so a delegated child's result is held meanwhile", async () => {
+  const endedAt = new Date(Date.now() - 60_000).toISOString()
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString()
+  let writes = 0
+  const { recovery, state } = setup({
+    state: stateWith({ runs: [failedRun(endedAt)] }),
+    usage: usage(resetsAt),
+    wrapStore: (store) => ({
+      ...store,
+      update: (f) => (++writes === 1 ? Effect.fail(new InternalError({ message: "disk full" })) : store.update(f)),
+    }),
+  })
+  const decidingNow = () => recovery.deciding(state, state.tasks[0]!, state.runs[0]!)
+
+  expect(decidingNow()).toBe(true)
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume).toBeUndefined()
+  expect(decidingNow()).toBe(true)
+  await Effect.runPromise(recovery.sweep)
+  expect(state.tasks[0]!.usageLimitResume?.resetsAt).toBe(resetsAt)
+  expect(decidingNow()).toBe(false)
 })
 
 test("does not arm another failure, agent prose, or a provider whose limits the box cannot read", async () => {

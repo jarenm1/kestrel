@@ -47,6 +47,8 @@ const TIMEOUT_MS = 15_000
 const MAX_COMMANDS = 200
 const DESCRIPTION_MAX = 600
 const HINT_MAX = 120
+/** A discovery CLI's whole answer is bounded; a runaway or compromised CLI cannot grow the box's heap. */
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 /** A command name has to survive being typed after the provider's prefix; keep it one token. */
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/
 /** CLIs add the source of a command to its description; that is not part of what the command does. */
@@ -66,32 +68,47 @@ export const killActiveDiscovery = (): void => {
   }
 }
 
-/** Discovery children allowed to run at once on the box; more wait in a queue, and a full queue fails fast. */
+/**
+ * A bounded process pool: a start runs at once while a slot is free, otherwise it waits in FIFO order. A finished
+ * child hands its slot straight to the next waiter; a full queue fails fast.
+ */
+const processSlots = (
+  maxRunning: number,
+  maxQueued: number,
+  busy: string,
+): (<A>(start: () => Promise<A>) => Promise<A>) => {
+  let running = 0
+  const queued: Array<() => void> = []
+  return <A>(start: () => Promise<A>): Promise<A> => {
+    const run = () =>
+      start().finally(() => {
+        const next = queued.shift()
+        if (next === undefined) running--
+        else next()
+      })
+    if (running < maxRunning) {
+      running++
+      return run()
+    }
+    if (queued.length >= maxQueued) return Promise.reject(new Error(busy))
+    const turn = Promise.withResolvers<void>()
+    queued.push(() => turn.resolve())
+    return turn.promise.then(run)
+  }
+}
+
+/** Processes allowed to run at once in each pool; more wait in a queue, and a full queue fails fast. */
 const MAX_RUNNING = 4
 const MAX_QUEUED = 32
-let running = 0
-const queued: Array<() => void> = []
+
+/** Discovery children: no more than MAX_RUNNING exist at once, whichever user or thread asked for them. */
+export const limitDiscovery = processSlots(MAX_RUNNING, MAX_QUEUED, "command discovery is busy; try again")
 
 /**
- * Runs `start` in a discovery slot. A finished child hands its slot straight to the next waiter, so no more than
- * MAX_RUNNING children exist at once, whichever user or thread asked for them.
+ * Status probes and the sign-in commands the user waits on (sign-out, key import, credential export). Their own
+ * pool keeps a discovery child from delaying them, while still bounding how many such CLIs run at once.
  */
-export const limitDiscovery = <A>(start: () => Promise<A>): Promise<A> => {
-  const run = () =>
-    start().finally(() => {
-      const next = queued.shift()
-      if (next === undefined) running--
-      else next()
-    })
-  if (running < MAX_RUNNING) {
-    running++
-    return run()
-  }
-  if (queued.length >= MAX_QUEUED) return Promise.reject(new Error("command discovery is busy; try again"))
-  const turn = Promise.withResolvers<void>()
-  queued.push(() => turn.resolve())
-  return turn.promise.then(run)
-}
+export const limitCliProbe = processSlots(MAX_RUNNING, MAX_QUEUED, "CLI probes are busy; try again")
 
 const cleanText = (value: unknown, max: number): string =>
   typeof value === "string"
@@ -202,7 +219,10 @@ export const discover = <A>(
     stdout.on("error", () => {})
     child.stderr?.removeAllListeners()
     child.stderr?.on("error", () => {})
-    child.removeAllListeners()
+    // Only this discovery's listeners go: `ownGroup` keeps its own `exit` listener, which releases the process group's
+    // handle once the child really exits. Removing every listener would leak one job object per discovery on Windows.
+    child.off("error", startFailed)
+    child.off("close", exitedBeforeAnswer)
     child.on("error", () => {})
     stdin.on("error", () => {})
     stdin.end()
@@ -213,11 +233,13 @@ export const discover = <A>(
     action()
   }
   const fail = (message: string) => finish(() => reject(new Error(message)))
+  const startFailed = () => fail(`${label} could not be started`)
+  const exitedBeforeAnswer = () => fail(`${label} exited before answering`)
   timer = setTimeout(() => fail(`${label} timed out`), timeoutMs)
-  child.once("error", () => fail(`${label} could not be started`))
+  child.once("error", startFailed)
   // stderr is drained so the CLI never blocks on a full pipe; it is not surfaced (it can name box paths).
   child.stderr?.on("data", () => {})
-  child.once("close", () => fail(`${label} exited before answering`))
+  child.once("close", exitedBeforeAnswer)
   stdin.on("error", () => {})
   const send = (message: unknown) => {
     if (done) return
@@ -228,6 +250,13 @@ export const discover = <A>(
     }
   }
   const handle = setup(send)
+  // The whole answer is bounded before any line is parsed; `runDiscoveryCommand` caps its document the same way.
+  let received = 0
+  stdout.on("data", (chunk: string | Buffer) => {
+    if (done) return
+    received += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length
+    if (received > MAX_OUTPUT_BYTES) fail(`${label} printed too much`)
+  })
   lines.on("line", (line) => {
     if (done) return
     const trimmed = line.trim()
@@ -244,6 +273,79 @@ export const discover = <A>(
     } catch (error) {
       fail(error instanceof Error ? error.message : `${label} failed`)
     }
+  })
+  return promise
+}
+
+/**
+ * Runs a discovery CLI that answers with one plain-text or JSON document rather than JSONL: OpenCode's model list.
+ * Bounded like `discover`, with stdout alone collected (stderr can name box paths) and the whole process group killed
+ * however it ends.
+ */
+export const runDiscoveryCommand = (
+  launch: DiscoveryLaunch,
+  label: string,
+  timeoutMs: number,
+  maxBytes = 2 * 1024 * 1024,
+): Promise<string> => {
+  const { promise, resolve, reject } = Promise.withResolvers<string>()
+  let child: ChildProcess
+  try {
+    child = ownGroup(
+      spawn(launch.file, [...launch.args], {
+        cwd: launch.cwd,
+        env: { ...launch.env },
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: NEW_PROCESS_GROUP,
+        windowsHide: true,
+      }),
+    )
+  } catch {
+    reject(new Error(`${label} could not be started`))
+    return promise
+  }
+  if (child.pid !== undefined) active.add(child.pid)
+  const stdout = child.stdout
+  if (stdout === null) {
+    if (child.pid !== undefined) {
+      active.delete(child.pid)
+      killProcessGroup(child.pid, "SIGKILL")
+    }
+    reject(new Error(`${label} could not be started`))
+    return promise
+  }
+  let done = false
+  let timer: NodeJS.Timeout | undefined
+  let output = ""
+  const finish = (action: () => void) => {
+    if (done) return
+    done = true
+    clearTimeout(timer)
+    stdout.removeAllListeners()
+    stdout.on("error", () => {})
+    child.stderr?.removeAllListeners()
+    child.stderr?.on("error", () => {})
+    child.off("error", startFailed)
+    child.off("close", closed)
+    child.on("error", () => {})
+    if (child.pid !== undefined) {
+      active.delete(child.pid)
+      killProcessGroup(child.pid, "SIGKILL")
+    }
+    action()
+  }
+  const fail = (message: string) => finish(() => reject(new Error(message)))
+  const startFailed = () => fail(`${label} could not be started`)
+  const closed = () => finish(() => resolve(output))
+  timer = setTimeout(() => fail(`${label} timed out`), timeoutMs)
+  child.once("error", startFailed)
+  child.stderr?.on("data", () => {})
+  child.once("close", closed)
+  stdout.setEncoding("utf8")
+  stdout.on("data", (chunk: string) => {
+    if (done) return
+    output += chunk
+    if (output.length > maxBytes) fail(`${label} printed too much`)
   })
   return promise
 }

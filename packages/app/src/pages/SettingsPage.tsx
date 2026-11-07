@@ -4,7 +4,6 @@ import {
   ControlPaths,
   CURRENT_PLAN,
   PLANS,
-  connectedModelProviders,
   modelInfo,
   type AgentEffort,
   type AgentModel,
@@ -19,6 +18,7 @@ import { Navigate, NavLink, Outlet } from "react-router-dom"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
 import { ModelPicker, ThinkingPicker, effortOptions } from "@/components/AgentPickers"
+import { offeredModelSections } from "@cloudagents/composer/models"
 import { Boxes } from "@/components/Boxes"
 import { Connections } from "@/components/Connections"
 import { Fleet } from "@/components/Fleet"
@@ -344,6 +344,7 @@ function TextGenerationSettings() {
 function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId: string | null }) {
   const queryClient = useQueryClient()
   const connections = useQuery(queries.connections())
+  const capabilities = useQuery(queries.capabilities())
   const settings = useQuery(queries.textGenerationSettings(boxKey, boxId))
   const shown = useShownModels()
   const instructionsId = useId()
@@ -436,9 +437,8 @@ function TextGenerationSettingsForBox({ boxKey, boxId }: { boxKey: string; boxId
     )
   }
 
-  const connected = connections.data ? connectedModelProviders(connections.data) : []
   const modelSections = connections.data
-    ? connected.map((provider) => ({ provider, models: shown[provider.id] })).filter((section) => section.models.length > 0)
+    ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
     : null
   const model = form.model === null ? undefined : modelInfo(form.model)
   const effort = form.effort ?? model?.defaultEffort ?? model?.efforts[0]

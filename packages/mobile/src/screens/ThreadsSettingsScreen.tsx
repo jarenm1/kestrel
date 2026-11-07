@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type AgentEffort,
   type AgentModel,
-  connectedModelProviders,
   modelInfo,
   type TextGenerationSettings,
   type ThreadSettings,
@@ -18,8 +17,10 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Textarea } from "@/components/ui/Input";
+import { Switch } from "@/components/ui/Switch";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useShownModels } from "@/hooks/useShownModels";
+import { offeredModelSections } from "@cloudagents/composer/models";
 import { errorText } from "@/lib/format";
 import { pendingSaves, trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
@@ -79,6 +80,7 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
   const queries = useMemo(() => createQueries(api), [api]);
   const client = useQueryClient();
   const connections = useQuery(queries.connections());
+  const capabilities = useQuery(queries.capabilities());
   const settings = useQuery(queries.textGenerationSettings());
   const shown = useShownModels();
   const [form, setForm] = useState<TextGenerationSettings>();
@@ -156,11 +158,8 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
     trackSaveQueue(api.boxScope, queue);
   }
 
-  const connected = connections.data ? connectedModelProviders(connections.data) : [];
   const modelSections = connections.data
-    ? connected
-        .map((provider) => ({ provider, models: shown[provider.id] }))
-        .filter((section) => section.models.length > 0)
+    ? offeredModelSections(connections.data, shown, capabilities.data?.modelHarnesses)
     : null;
   const model = form ? (form.model === null ? undefined : modelInfo(form.model)) : undefined;
   const effort = form === undefined ? undefined : form.effort ?? model?.defaultEffort ?? model?.efforts[0];
@@ -200,9 +199,6 @@ function TextGenerationCard({ api }: { api: ApiClient }) {
             accessibilityLabel="Enable text generation"
             value={form.enabled}
             onValueChange={(enabled) => update({ enabled })}
-            trackColor={switchTrack}
-            thumbColor={form.enabled ? colors.primaryForeground : colors.foreground}
-            ios_backgroundColor={colors.secondary}
           />
         </View>
         <Text style={styles.description}>
@@ -374,9 +370,6 @@ function UsageLimitsCard({ api }: { api: ApiClient }) {
               if (settings.data === undefined) return;
               save.mutate({ ...settings.data, autoResumeAfterUsageLimits: next });
             }}
-            trackColor={switchTrack}
-            thumbColor={enabled ? colors.primaryForeground : colors.foreground}
-            ios_backgroundColor={colors.secondary}
           />
         </View>
         {save.isPending ? <Text style={styles.helper}>Saving…</Text> : null}
@@ -386,8 +379,6 @@ function UsageLimitsCard({ api }: { api: ApiClient }) {
     </>
   );
 }
-
-const switchTrack = { false: colors.secondary, true: colors.primary };
 
 const styles = StyleSheet.create({
   body: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, gap: spacing.lg },

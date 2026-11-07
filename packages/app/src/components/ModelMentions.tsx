@@ -3,7 +3,7 @@ import type { ModelInfo } from "@cloudagents/protocol"
 import { modelMentionOf } from "@cloudagents/composer/models"
 import { HarnessLogo } from "@/components/HarnessLogo"
 import { AUTOCOMPLETE_MENU_CLASS, slashListboxId, slashOptionId } from "@/components/SlashCommands"
-import { harnessOf } from "@/lib/harnesses"
+import { harnessForModel } from "@/lib/harnesses"
 import { cn } from "@/lib/utils"
 
 /** Model mentions share the command menu's focus, pointer and keyboard-selection conventions. */
@@ -48,7 +48,7 @@ export function ModelMentions({ id, matches, query, pending, failed, activeIndex
                 selected ? "bg-white/[0.07]" : "hover:bg-white/[0.04]",
               )}
             >
-              <HarnessLogo harness={harnessOf(model.provider)} className="size-4" />
+              <HarnessLogo harness={harnessForModel(model)} className="size-4" />
               <span className="flex min-w-0 flex-col gap-0.5">
                 <span className="truncate font-medium">{mention.name}</span>
                 <span className="truncate text-xs text-muted-foreground">{mention.slug}</span>

@@ -8,8 +8,8 @@ import {
   EFFORT_LABELS,
   type AgentEffort,
   type ModelInfo,
-  type ModelProviderInfo,
 } from "@cloudagents/protocol"
+import { modelDisplayName, type ModelSection } from "@cloudagents/composer/models"
 import { Button } from "@cloudagents/ui/button"
 import {
   DropdownMenu,
@@ -24,14 +24,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { HarnessLogo } from "@/components/HarnessLogo"
 import { filterItemProps, useFilterMenu } from "@/hooks/useFilterMenu"
-import { HARNESSES, harnessOf, type Harness, type HarnessId } from "@/lib/harnesses"
+import { HARNESSES, harnessForModel, type Harness, type HarnessId } from "@/lib/harnesses"
 import { cn } from "@/lib/utils"
 
-/** A connected provider and the models the user keeps in the picker for it. */
-export interface ModelSection {
-  readonly provider: ModelProviderInfo
-  readonly models: readonly ModelInfo[]
-}
+export type { ModelSection } from "@cloudagents/composer/models"
 
 // Keep each level's visual weight consistent across models with different supported levels.
 const EFFORT_RING_FILL: Record<AgentEffort, number> = {
@@ -192,19 +188,19 @@ export function ModelPicker({
 }) {
   const tabs: readonly HarnessTab[] = HARNESSES.map((harness) => ({
     harness,
-    sections: (sections ?? []).filter((section) => harnessOf(section.provider.id) === harness),
+    sections: (sections ?? []).filter((section) => section.harness === harness.id),
   })).filter((tab) => tab.sections.length > 0)
   const offered = tabs.flatMap((tab) =>
     tab.sections.flatMap((section) => section.models.map((model) => ({ harness: tab.harness, section, model }))),
   )
   const menu = useFilterMenu(
     offered,
-    (item) => `${item.model.name} ${item.model.id} ${item.section.provider.name} ${item.harness.name}`,
+    (item) => `${modelDisplayName(item.model)} ${item.model.name} ${item.model.id} ${item.section.provider.name} ${item.harness.name}`,
     (item) => onChange(item.model.id),
   )
-  // Unset shows the selected model's harness; each opening goes back to it.
+  // Unset shows the selected model's actual harness; each opening goes back to it.
   const [pickedHarness, setPickedHarness] = useState<HarnessId>()
-  const valueHarness = value === undefined ? undefined : harnessOf(value.provider)
+  const valueHarness = value === undefined ? undefined : harnessForModel(value)
   const tab =
     tabs.find((candidate) => candidate.harness.id === pickedHarness) ??
     tabs.find((candidate) => candidate.harness === valueHarness) ??
@@ -242,7 +238,7 @@ export function ModelPicker({
     menu.inputProps.onKeyDown(e)
   }
 
-  const label = value?.name ?? defaultLabel ?? (sections === null ? "Model" : "No models")
+  const label = value === undefined ? defaultLabel ?? (sections === null ? "Model" : "No models") : modelDisplayName(value)
   return (
     <DropdownMenu
       open={menu.open}
@@ -323,7 +319,7 @@ export function ModelPicker({
               }}
             >
               {groups.map((group) => (
-                <Fragment key={group.section.provider.id}>
+                <Fragment key={`${group.harness.id}:${group.section.provider.id}`}>
                   <DropdownMenuLabel className="flex items-center gap-1.5">
                     {searching && <HarnessLogo harness={group.harness} className="size-3.5" />}
                     <span className="truncate">
@@ -332,7 +328,7 @@ export function ModelPicker({
                   </DropdownMenuLabel>
                   {group.models.map((m) => (
                     <DropdownMenuRadioItem key={m.id} value={m.id} {...filterItemProps}>
-                      <span className="min-w-0 flex-1 truncate">{m.name}</span>
+                      <span className="min-w-0 flex-1 truncate">{modelDisplayName(m)}</span>
                     </DropdownMenuRadioItem>
                   ))}
                 </Fragment>

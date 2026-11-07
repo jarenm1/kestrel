@@ -222,7 +222,7 @@ const previewAssetRequest = (request: Request, url: URL): boolean => {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     try {
       if (url.pathname === ControlPaths.nestHostConnect) {
@@ -243,7 +243,7 @@ export default {
         if (await boxAuthorized(request, env)) return url.pathname === "/box/automations/pr-watch" ? await handlePrWatch(request, env, url) : await handleBoxAutomations(request, env, url)
         return await managedBoxAutomations(request, env, url)
       }
-      if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env)
+      if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env, ctx)
       if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }

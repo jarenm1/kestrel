@@ -29,11 +29,13 @@ describe("per-provider run environment", () => {
     const go: Login = { provider: "opencode-go", dir: "/data/opencode-go" }
     const opencode: Login = { provider: "opencode", dir: "/data/opencode" }
     const google: Login = { provider: "antigravity-cli", dir: "/data/antigravity" }
-    const connected = [...logins, go, opencode, google]
+    const devin: Login = { provider: "devin-cli", dir: "/data/devin" }
+    const connected = [...logins, go, opencode, google, devin]
     // Free OpenCode and Go share a binary but not a login: each mounts only its own per-user home.
     expect(loginsForProvider("opencode", connected)).toEqual([opencode])
     expect(loginsForProvider("opencode-go", connected)).toEqual([go])
     expect(loginsForProvider("google", connected)).toEqual([google])
+    expect(loginsForProvider("devin", connected)).toEqual([devin])
     expect(loginsForProvider("anthropic", connected)).toEqual(logins)
     expect(loginsForProvider("openai", connected)).toEqual(logins)
     for (const provider of ModelProvider.literals.filter((id) => id !== "opencode-go")) {

@@ -23,6 +23,9 @@ RUN npm i -g @openai/codex @opencode/cli --prefix /home/dev/.npm-global
 # Antigravity CLI: its own installer -> ~/.local/bin/agy
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 
-RUN claude --version && codex --version && opencode --version && agy --version \
+# Devin CLI: its own installer -> ~/.local/bin/devin
+RUN curl -fsSL https://cli.devin.ai/install.sh | bash
+
+RUN claude --version && codex --version && opencode --version && agy --version && devin --version \
  && readlink -f "$(command -v claude)" && readlink -f "$(command -v codex)" && readlink -f "$(command -v opencode)" \
- && readlink -f "$(command -v agy)"
+ && readlink -f "$(command -v agy)" && readlink -f "$(command -v devin)"

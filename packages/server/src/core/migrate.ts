@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { copyFile, cp, lstat, readdir, readFile, rm, stat } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { Effect, Schema } from "effect"
-import { Checkout, InternalError, PullRequestLink, Task } from "@cloudagents/protocol"
+import { Checkout, InternalError, Task, threadPullRequestId, type ThreadPullRequest } from "@cloudagents/protocol"
 import type { ServerConfig } from "../config"
 import { writeAtomic } from "./atomic"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
@@ -23,7 +23,7 @@ const LegacyTask = Schema.Struct({
   status: Task.fields.status,
   createdAt: Schema.String,
   updatedAt: Schema.String,
-  pullRequest: Schema.optional(PullRequestLink),
+  pullRequest: Schema.optional(Schema.Struct({ number: Schema.Number, url: Schema.String })),
   archivedAt: Schema.optional(Schema.String),
 })
 const LegacyState = Schema.Struct({ repos: Schema.Array(LegacyRepo), tasks: Schema.Array(LegacyTask) })
@@ -95,7 +95,7 @@ const migrateCheckout = (
   ref: RepoRef,
   mirror: string,
   task: Schema.Schema.Type<typeof LegacyTask>,
-): Effect.Effect<Checkout, WorkspaceError | InternalError, WorkspaceService> =>
+): Effect.Effect<{ checkout: Checkout; pullRequest?: ThreadPullRequest }, WorkspaceError | InternalError, WorkspaceService> =>
   Effect.gen(function* () {
     const workspace = yield* WorkspaceService
     const startSha = yield* workspace.resolveRef(mirror, `refs/kestrel/migrate/heads/${task.branch}`)
@@ -128,14 +128,30 @@ const migrateCheckout = (
       try: () => copyWorktree(join(config.dataDir, "worktrees", task.id), dir),
       catch: (e) => new InternalError({ message: `copy of the old worktree failed: ${String(e)}` }),
     })
-    return {
+    const checkout: Checkout = {
       id: checkoutId,
       repo: ref.repo,
       dir: ref.name,
       branch: task.branch,
       baseBranch: task.baseBranch,
       createdAt: task.createdAt,
-      ...(task.pullRequest === undefined ? {} : { pullRequest: task.pullRequest }),
+    }
+    return {
+      checkout,
+      ...(task.pullRequest === undefined
+        ? {}
+        : {
+            pullRequest: {
+              id: threadPullRequestId(ref.repo, task.pullRequest.number),
+              repo: ref.repo,
+              number: task.pullRequest.number,
+              url: task.pullRequest.url,
+              checkoutId,
+              branch: task.branch,
+              source: "linked" as const,
+              addedAt: task.createdAt,
+            },
+          }),
     }
   })
 
@@ -172,8 +188,9 @@ export const migrateLegacyState = (config: ServerConfig): Effect.Effect<void, In
           : false
       for (const task of repoTasks) {
         const checkouts: Checkout[] = []
+        const pullRequests: ThreadPullRequest[] = []
         if (ref !== null && mirror !== null && imported) {
-          const checkout = yield* migrateCheckout(config, ref, mirror, task).pipe(
+          const migrated = yield* migrateCheckout(config, ref, mirror, task).pipe(
             Effect.catchAll((e) =>
               Effect.logWarning(`thread ${task.id} keeps no checkout: ${e.message}`).pipe(
                 Effect.zipRight(Effect.ignore(workspace.removePath(join(config.threadsDir, task.id)))),
@@ -182,7 +199,10 @@ export const migrateLegacyState = (config: ServerConfig): Effect.Effect<void, In
               ),
             ),
           )
-          if (checkout !== null) checkouts.push(checkout)
+          if (migrated !== null) {
+            checkouts.push(migrated.checkout)
+            if (migrated.pullRequest !== undefined) pullRequests.push(migrated.pullRequest)
+          }
         }
         tasks.push({
           id: task.id,
@@ -192,6 +212,7 @@ export const migrateLegacyState = (config: ServerConfig): Effect.Effect<void, In
           createdAt: task.createdAt,
           updatedAt: task.updatedAt,
           checkouts,
+          ...(pullRequests.length === 0 ? {} : { pullRequests }),
           ...(task.archivedAt === undefined ? {} : { archivedAt: task.archivedAt }),
         })
       }

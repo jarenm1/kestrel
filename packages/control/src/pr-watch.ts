@@ -6,18 +6,32 @@ import { enablePullRequestActivity, fetchPullRequest, fetchRepository } from "./
 import { decodeBody, errorResponse, json } from "./http"
 
 const Watch = Schema.Struct({ taskId: Schema.String, repo: Schema.String, number: Schema.Number.pipe(Schema.int(), Schema.positive()) })
-const Unwatch = Schema.Struct({ taskId: Schema.String })
+const Unwatch = Schema.Struct({
+  taskId: Schema.String,
+  repo: Schema.optional(Schema.String),
+  number: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
+})
 
-/** Authenticated box calls only: the named thread must belong to the caller and have exactly this checkout. */
+/**
+ * Authenticated box calls only. A thread may watch any number of pull requests, each in any repository its owner can
+ * see; the caller must own the thread and the thread must not be archived.
+ *
+ * Ownership is the owner's GitHub access plus the box's own registry: a watch names a pull request the owner's GitHub
+ * token can read (`fetchRepository`/`fetchPullRequest`), and the box records it in `Task.pullRequests` only once this
+ * route accepts it. The control plane does not re-check that registry: it is written after the decision, so a check
+ * here would reject every new watch — or, if the box recorded it first, be satisfied by the watch request itself.
+ */
 export const handlePrWatch = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const login = request.headers.get(BOX_USER_HEADER) ?? ""
   if (!login || (await hub(env).getUser(login)) === null) return errorResponse(401, "Unauthorized", "unknown user")
   if (request.method === "DELETE") {
     const body = await decodeBody(request, Unwatch)
     if (body instanceof Response) return body
-    const old = await hub(env).watchedRepository(login, body.taskId)
-    await hub(env).unwatchPullRequest(login, body.taskId)
-    if (old !== null) await releaseHook(env, login, old)
+    if ((body.repo === undefined) !== (body.number === undefined)) {
+      return errorResponse(400, "BadRequest", "name both repo and number, or neither to unwatch every pull request")
+    }
+    const repos = await hub(env).unwatchPullRequests(login, body.taskId, body.repo, body.number)
+    for (const repo of repos) await releaseHook(env, login, repo)
     return new Response(null, { status: 204 })
   }
   if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", "POST or DELETE required")
@@ -32,16 +46,12 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)
-  if (task._tag === "Left" || task.right.checkouts.length !== 1 || task.right.checkouts[0]?.repo.toLowerCase() !== repo.toLowerCase() || task.right.checkouts[0]?.pullRequest?.number !== body.number) {
-    return errorResponse(409, "Conflict", "thread must have one checkout linked to this pull request")
-  }
+  if (task._tag === "Left") return errorResponse(502, "BadGateway", "invalid thread response")
   if (task.right.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
   await ensureHook(env, token, repo, new URL(ControlPaths.githubWebhook, url.origin).toString())
   const hook = await hub(env).githubHook(repo.toLowerCase())
   if (hook === null) return errorResponse(502, "BadGateway", "could not register GitHub hook")
   await enablePullRequestActivity(token, repo, hook.hookId)
-  const old = await hub(env).watchedRepository(login, body.taskId)
   await hub(env).watchPullRequest(login, body.taskId, repo, body.number)
-  if (old !== null && old.toLowerCase() !== repo.toLowerCase()) await releaseHook(env, login, old)
   return json({ repo, number: body.number }, 201)
 }
