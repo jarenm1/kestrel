@@ -41,6 +41,7 @@ import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
 import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
+import { pullRequestDetail } from "./pr-detail"
 
 type ConnectionRow = { provider: string; account: string | null }
 
@@ -246,6 +247,7 @@ const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
 const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
+const GITHUB_PULL_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/pulls\/([^/]+)$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
@@ -257,6 +259,7 @@ const isWorkerRoute = (path: string, method: string): boolean =>
   CONNECTION_PATH.test(path) ||
   (path === ControlPaths.githubRepos && method === "GET") ||
   (GITHUB_BRANCHES_PATH.test(path) && method === "GET") ||
+  (GITHUB_PULL_PATH.test(path) && method === "GET") ||
   path === ControlPaths.automations ||
   path.startsWith(`${ControlPaths.automations}/`)
 
@@ -559,6 +562,19 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
     const repo = decodeURIComponent(branches)
     if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
     return listBranches(env, login, repo)
+  }
+
+  const pull = GITHUB_PULL_PATH.exec(path)
+  if (pull && method === "GET") {
+    let repo: string
+    try { repo = decodeURIComponent(pull[1]!) } catch { return errorResponse(400, "BadRequest", "invalid repository") }
+    if (!Schema.is(GithubRepoSlug)(repo)) return errorResponse(400, "BadRequest", "repository must be owner/name")
+    const number = Number(pull[2])
+    if (!/^[1-9][0-9]*$/.test(pull[2]!) || !Number.isSafeInteger(number)) return errorResponse(400, "BadRequest", "invalid pull request number")
+    const creds = await hub(env).credentials(login)
+    if (!creds.github) return errorResponse(404, "NotFound", "GitHub is not connected")
+    const detail = await pullRequestDetail(creds.github, repo, number)
+    return detail === null ? errorResponse(404, "NotFound", "pull request not found") : json(detail)
   }
 
   return handleAutomations(request, env, login, url, ControlPaths.automations)
