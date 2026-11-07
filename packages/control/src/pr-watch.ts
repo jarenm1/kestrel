@@ -46,7 +46,8 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)
-  if (task._tag === "Right" && task.right.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
+  if (task._tag === "Left") return errorResponse(502, "BadGateway", "invalid thread response")
+  if (task.right.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
   await ensureHook(env, token, repo, new URL(ControlPaths.githubWebhook, url.origin).toString())
   const hook = await hub(env).githubHook(repo.toLowerCase())
   if (hook === null) return errorResponse(502, "BadGateway", "could not register GitHub hook")

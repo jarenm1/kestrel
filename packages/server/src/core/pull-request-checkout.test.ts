@@ -79,6 +79,7 @@ const withCore = async <A>(
   root: string,
   body: (core: CoreService["Type"], threadDir: string) => Effect.Effect<A, unknown, never>,
   statusCalls: Array<{ readonly slug: string; readonly number: number }> = [],
+  writeCalls: number[] = [],
 ): Promise<A> => {
   const config = {
     port: 8899, host: "127.0.0.1", sandboxPort: 8899, mcpBaseUrl: "http://127.0.0.1:8899", dataDir: root,
@@ -108,6 +109,10 @@ const withCore = async <A>(
       getPullRequestStatus: (_token: string, repo: { owner: string; name: string }, number: number) => {
         statusCalls.push({ slug: `${repo.owner}/${repo.name}`, number })
         return Effect.succeed(status)
+      },
+      updatePullRequest: (_token: string, _repo: { owner: string; name: string }, number: number) => {
+        writeCalls.push(number)
+        return Effect.succeed({ number } as never)
       },
       // Linked checkouts must never need the lookup by branch.
       findOpenPullRequest: () => Effect.succeed(null),
@@ -311,6 +316,24 @@ describe("repo_checkout with a pull request", () => {
       }),
     )
   })
+
+  test("checking out a watched pull request keeps its watch, source and addedAt", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    await withCore(prStatus({}), origin, root, (core) =>
+      Effect.gen(function* () {
+        yield* core.setPullRequestWatching("t1", REPO, 7, true)
+        const watched = (yield* core.getTask("owner", "t1")).pullRequests?.find((pr) => pr.number === 7)
+        const { checkout } = yield* core.checkout("t1", { repo: REPO, pullRequest: 7 } as never)
+        const entry = (yield* core.getTask("owner", "t1")).pullRequests?.find((pr) => pr.number === 7)
+        expect(entry?.watching).toBe(true)
+        expect(entry?.source).toBe("linked")
+        expect(entry?.addedAt).toBe(watched?.addedAt)
+        expect(entry?.checkoutId).toBe(checkout.id)
+        expect(entry?.branch).toBe("topic")
+      }),
+    )
+  })
 })
 
 describe("github_pr_status by number", () => {
@@ -374,5 +397,31 @@ describe("github_pr_status by number", () => {
       calls,
     )
     expect(calls).toEqual([{ slug: REPO, number: 9 }])
+  })
+
+  test("a write does not fall back to a watched pull request, though a read does", async () => {
+    const root = await newRoot()
+    const { origin } = await makeOrigin(root, "topic")
+    const writes: number[] = []
+    await withCore(
+      prStatus({ number: 9 }),
+      origin,
+      root,
+      (core) =>
+        Effect.gen(function* () {
+          yield* core.checkout("t1", { repo: REPO } as never)
+          yield* core.setPullRequestWatching("t1", REPO, 9, true)
+          // A read may report the thread's only pull request in the checkout's repository.
+          expect((yield* core.pullRequestStatus("t1")).number).toBe(9)
+          const failed = yield* Effect.either(core.updatePullRequest("t1", { state: "closed" }))
+          expect(Either.isLeft(failed)).toBe(true)
+          if (Either.isLeft(failed) && "message" in failed.left && typeof failed.left.message === "string") {
+            expect(failed.left.message).toContain("no open pull request")
+          }
+        }),
+      [],
+      writes,
+    )
+    expect(writes).toEqual([])
   })
 })

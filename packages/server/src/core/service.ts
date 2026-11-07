@@ -850,9 +850,17 @@ export const CoreLive = Layer.effect(
 
     /**
      * The checkout's pull request number: the one recorded for it, else the open one for its branch (recorded for next
-     * time), else the thread's only pull request in this repository.
+     * time), else, for a read, the thread's only pull request in this repository. Writes never take the last fallback:
+     * a watched pull request the thread does not push from must not be updated or commented on by accident.
      */
-    const linkedPullRequestNumber = (taskId: string, task: Task, checkout: Checkout, slug: RepoSlug, token: string) =>
+    const linkedPullRequestNumber = (
+      taskId: string,
+      task: Task,
+      checkout: Checkout,
+      slug: RepoSlug,
+      token: string,
+      registryFallback: boolean,
+    ) =>
       Effect.gen(function* () {
         const recorded = checkoutPullRequest(task, checkout.id)
         if (recorded !== undefined) return recorded.number
@@ -860,6 +868,9 @@ export const CoreLive = Layer.effect(
         if (found !== null) {
           yield* recordPullRequest(taskId, { repo: checkout.repo, number: found.number, url: found.url, checkoutId: checkout.id, branch: checkout.branch, source: "linked" }, false)
           return found.number
+        }
+        if (!registryFallback) {
+          return yield* Effect.fail(new NotFound({ message: `no open pull request for ${checkout.branch}; open one with github_pr_create` }))
         }
         const sameRepo = threadPullRequestsOf(task).filter((pr) => pr.repo.toLowerCase() === checkout.repo.toLowerCase())
         if (sameRepo.length === 1 && sameRepo[0] !== undefined) return sameRepo[0].number
@@ -896,7 +907,7 @@ export const CoreLive = Layer.effect(
         const checkout = yield* pickCheckout(task, input.checkoutId)
         const ref = yield* checkoutRepoRef(checkout)
         const { slug, token } = yield* githubAccess(task.owner, ref)
-        const number = input.number ?? (yield* linkedPullRequestNumber(taskId, task, checkout, slug, token))
+        const number = input.number ?? (yield* linkedPullRequestNumber(taskId, task, checkout, slug, token, false))
         return { slug, token, number }
       })
 
@@ -1349,18 +1360,24 @@ export const CoreLive = Layer.effect(
           ...(fork.takeover ? { pullRequestTakeover: true } : {}),
           ...(icon === null ? {} : { icon }),
         }
+        const link = fork.link
+        const previous =
+          link === undefined ? undefined : threadPullRequestsOf(task).find((pr) => pr.id === threadPullRequestId(ref.repo, link.number))
+        // Merged, as `recordPullRequest` does: checking out a pull request the thread already watched must keep its
+        // watch, its original source and when it joined the registry.
         const pullRequest: ThreadPullRequest | undefined =
-          fork.link === undefined
+          link === undefined
             ? undefined
             : {
-                id: threadPullRequestId(ref.repo, fork.link.number),
+                ...previous,
+                id: threadPullRequestId(ref.repo, link.number),
                 repo: ref.repo,
-                number: fork.link.number,
-                url: fork.link.url,
+                number: link.number,
+                url: link.url,
                 checkoutId: id,
                 branch: fork.takeover ? checkout.branch : threadBranch,
-                source: fork.takeover ? "takeover" : "linked",
-                addedAt: checkout.createdAt,
+                source: previous?.source ?? (fork.takeover ? "takeover" : "linked"),
+                addedAt: previous?.addedAt ?? checkout.createdAt,
               }
         return { checkout, ...(pullRequest === undefined ? {} : { pullRequest }), note: fork.note, instructionFiles }
       }).pipe(Effect.tapError(() => removeOnFailure))
@@ -2849,7 +2866,7 @@ export const CoreLive = Layer.effect(
           const checkout = yield* pickCheckout(task, checkoutId)
           const ref = yield* checkoutRepoRef(checkout)
           const { slug, token } = yield* githubAccess(task.owner, ref)
-          const target = number ?? (yield* linkedPullRequestNumber(taskId, task, checkout, slug, token))
+          const target = number ?? (yield* linkedPullRequestNumber(taskId, task, checkout, slug, token, true))
           return yield* github.getPullRequestStatus(token, slug, target).pipe(Effect.mapError(fromGitHub))
         }),
 

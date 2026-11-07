@@ -1373,14 +1373,6 @@ export class Hub extends DurableObject<Env> {
     )
   }
 
-  /** The repositories of a thread's watched pull requests. */
-  watchedRepositories(login: string, taskId: string): string[] {
-    return this.ctx.storage.sql
-      .exec<{ repo: string }>("SELECT DISTINCT repo FROM pr_watches WHERE login = ? AND task_id = ?", login, taskId)
-      .toArray()
-      .map((row) => row.repo)
-  }
-
   /** Stops watching one pull request, or every one of the thread when no repository and number are named. Returns the repositories involved. */
   unwatchPullRequests(login: string, taskId: string, repo?: string, number?: number): string[] {
     const sql = this.ctx.storage.sql
