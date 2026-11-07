@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import type { BoxCapabilities, BoxStatus as BoxStatusInfo } from "@cloudagents/protocol"
 import { queries } from "@/api/queries"
-import { Alert } from "@cloudagents/ui/alert"
+import { FloatingNotice } from "@/components/FloatingNotice"
 import { useActiveBoxId } from "@/hooks/useActiveBox"
 
 /** Latest box status, or null while unknown (first poll pending or the last poll failed). */
@@ -21,20 +21,16 @@ export function useBoxCapabilities(): BoxCapabilities | null {
   return capabilities.isError ? null : (capabilities.data ?? null)
 }
 
-export function BoxOfflineBanner({ className }: { className?: string }) {
+export function BoxOfflineBanner() {
   const offline = useBoxOffline()
   const activeBoxId = useActiveBoxId()
   if (!offline) return null
   if (typeof activeBoxId === "string") {
-    return (
-      <Alert variant="warning" className={className}>
-        Your box is offline. Check that it is running and reachable from this browser.
-      </Alert>
-    )
+    return <FloatingNotice>Your box is offline. Check that it is running and reachable from this browser.</FloatingNotice>
   }
   return (
-    <Alert variant="warning" className={className}>
+    <FloatingNotice>
       Agent box offline. Start it with <code className="font-mono text-foreground">nix run .#box</code>
-    </Alert>
+    </FloatingNotice>
   )
 }

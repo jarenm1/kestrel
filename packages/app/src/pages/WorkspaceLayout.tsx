@@ -4,6 +4,7 @@ import { Outlet } from "react-router-dom"
 import { PanelLeftOpen } from "lucide-react"
 import { queries } from "@/api/queries"
 import { BoxOfflineBanner } from "@/components/BoxStatus"
+import { FloatingNotices } from "@/components/FloatingNotice"
 import { ReconnectBanner } from "@/components/ReconnectBanner"
 import { ThreadSidebar } from "@/components/ThreadSidebar"
 import { DesktopTranscriptHost } from "@/components/TranscriptHost"
@@ -31,8 +32,6 @@ export function WorkspaceLayout() {
     <UsagePanelProvider>
       <DesktopTranscriptHost>
         <div className="flex h-full flex-col">
-          <BoxOfflineBanner className="mx-3 mt-3 w-auto" />
-          <ReconnectBanner className="mx-3 mt-3 w-auto" />
           <div className="flex min-h-0 flex-1 pt-3">
             <ThreadSidebar
               tasks={tasks.data}
@@ -40,7 +39,11 @@ export function WorkspaceLayout() {
               collapsed={collapsed}
               onCollapse={() => setCollapsed(true)}
             />
-            <div className="mr-3 mb-3 flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-card shadow-soft">
+            <div className="relative mr-3 mb-3 flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-2xl bg-card shadow-soft">
+              <FloatingNotices>
+                <BoxOfflineBanner />
+                <ReconnectBanner />
+              </FloatingNotices>
               {collapsed && (
                 <aside className="flex w-[3.25rem] shrink-0 flex-col items-center py-2">
                   <Button variant="ghost" size="icon" aria-label="Expand threads" onClick={() => setCollapsed(false)}>
