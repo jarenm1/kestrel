@@ -32,7 +32,9 @@ describe("pull request detail route", () => {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer user-token")
       expect(url.startsWith("https://api.github.com/repos/acme/app/")).toBe(true)
       let body: unknown
+      if (url.endsWith("/pulls/12") && new Headers(init?.headers).get("accept") === "application/vnd.github.v3.diff") return new Response("diff --git a/a b/a\n+hello\n")
       if (url.endsWith("/pulls/12")) body = { number: 12, title: "Title", body: null, state: "closed", draft: false, merged: true, user: actor, head: { ref: "feature", sha }, base: { ref: "main" }, requested_reviewers: [actor], requested_teams: [] }
+      else if (url.includes("/pulls/12/comments?")) body = new URL(url).searchParams.get("page") === "1" ? Array.from({ length: 100 }, (_, id) => ({ id, path: "src/a.ts", line: null, original_line: 42, body: "review", user: actor, created_at: "now", html_url: "https://github.com/acme/app/pull/12#discussion_r1" })) : []
       else if (url.includes("/comments?")) body = new URL(url).searchParams.get("page") === "1" ? Array.from({ length: 100 }, (_, id) => ({ id, body: "hi", user: actor, created_at: "now", updated_at: "now" })) : []
       else if (url.includes("/reviews?")) body = [{ id: 1, body: null, user: actor, state: "APPROVED", submitted_at: "now" }]
       else if (url.includes("/commits?")) body = [{ author: actor }, { author: actor }]
@@ -42,12 +44,17 @@ describe("pull request detail route", () => {
     }) as typeof fetch
     const res = await request()
     expect(res.status).toBe(200)
-    const detail = await res.json() as { state: string; comments: unknown[]; contributors: unknown[]; checks: { status: string }; truncated: { comments: boolean } }
+    const detail = await res.json() as { state: string; comments: unknown[]; diff: string; inlineComments: unknown[]; contributors: unknown[]; checks: { status: string }; truncated: { comments: boolean; inlineComments: boolean } }
     expect(detail.state).toBe("merged")
     expect(detail.comments).toHaveLength(100)
+    expect(detail.diff).toBe("diff --git a/a b/a\n+hello\n")
+    expect(detail.inlineComments).toHaveLength(100)
+    expect(detail.inlineComments[0]).toEqual({ id: 0, path: "src/a.ts", line: null, originalLine: 42, author: { login: "alice", avatarUrl: actor.avatar_url }, body: "review", createdAt: "now", url: "https://github.com/acme/app/pull/12#discussion_r1" })
     expect(detail.contributors).toHaveLength(1)
     expect(detail.checks.status).toBe("success")
     expect(detail.truncated.comments).toBe(false)
+    expect(detail.truncated.inlineComments).toBe(false)
+    expect(calls.some((url) => url.includes("/pulls/12/comments?per_page=100&page=2"))).toBe(true)
     expect(calls.some((url) => url.includes("comments?per_page=100&page=2"))).toBe(true)
     expect(credentials.at(-1)).toBe("alice")
   })
