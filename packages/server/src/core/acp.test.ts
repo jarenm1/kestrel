@@ -224,6 +224,44 @@ describe("ACP driver", () => {
     expect(h.last().method).toBe("session/prompt")
   })
 
+  test("Devin passes through an advertised family anchor", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "swe-2",
+        options: [{ value: "adaptive" }, { value: "swe-2" }, { value: "swe-2-flash" }],
+      },
+    ]
+    const h = harness({ provider: "devin", model: "swe-2", effort: "high" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
+  test("Devin keeps the requested id when no advertised variant matches", () => {
+    const configOptions = [
+      {
+        id: "model",
+        category: "model",
+        type: "select",
+        currentValue: "adaptive",
+        options: [{ value: "adaptive" }, { value: "fusion" }],
+      },
+    ]
+    const h = harness({ provider: "devin", model: "swe-2-flash", effort: "medium" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash" } })
+    h.reply({ configOptions: [] })
+    expect(h.last().method).toBe("session/prompt")
+  })
+
   test("an agent that exits mid-turn fails the run", () => {
     const h = harness()
     h.driver.start()
