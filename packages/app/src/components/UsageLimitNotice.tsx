@@ -54,7 +54,10 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
           {paused
             ? `Auto-resume is off for this thread. The limit resets ${at}.`
             : `This thread resumes automatically ${at}, when the provider's limit resets.`}
-          {parentTaskId !== undefined && (paused ? " Its parent already has its result." : " Its parent gets the result after that.")}
+          {parentTaskId !== undefined &&
+            (paused
+              ? " Its parent gets this failed result; send a message here to keep working on it."
+              : " Its parent gets the result after that.")}
         </p>
       </div>
       {parentTaskId !== undefined && !paused && (
@@ -62,14 +65,17 @@ function ArmedUsageLimit({ task, arm }: { task: Task; arm: UsageLimitResume }) {
           Return to parent now
         </Button>
       )}
-      <Button
-        size="sm"
-        variant="ghost"
-        disabled={toggle.isPending}
-        onClick={() => toggle.mutate(paused)}
-      >
-        {paused ? "Resume at reset" : "Cancel auto-resume"}
-      </Button>
+      {/* Once a delegated child's result has gone to its parent, resuming it could never reach the parent (the box refuses). */}
+      {(parentTaskId === undefined || !paused) && (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={toggle.isPending}
+          onClick={() => toggle.mutate(paused)}
+        >
+          {paused ? "Resume at reset" : "Cancel auto-resume"}
+        </Button>
+      )}
       {toggle.error && <span className="text-xs text-destructive">Could not change auto-resume.</span>}
       {returnEarly.error && <span className="text-xs text-destructive">Could not return the task to its parent.</span>}
     </div>

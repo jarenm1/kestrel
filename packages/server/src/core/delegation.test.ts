@@ -326,6 +326,13 @@ test("a usage limit holds delegated results until the work resumes or returns ea
     yield* Effect.sleep("2500 millis")
     expect((yield* results(archived.id))[0]?.text).toContain("finished with status failed")
 
+    // With auto-resume off the failure goes up at once; turning it back on then could never reach the parent.
+    const released = yield* core.delegate("parent", "parent-run", { title: "Released", message: "work", requestId: "released" })
+    yield* stall(released.id, false)
+    yield* Effect.sleep("2500 millis")
+    expect((yield* results(released.id))[0]?.text).toContain("finished with status failed")
+    expect(Either.isLeft(yield* Effect.either(core.setUsageLimitAutoResume("owner", released.id, true)))).toBe(true)
+
     // A parent stopped by a usage limit queues its children's results instead of starting a failing run for each.
     const input = { title: "Queued", message: "work", requestId: "queued" }
     const queued = yield* core.delegate("held", "held-run", input)

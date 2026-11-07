@@ -1669,6 +1669,12 @@ export const CoreLive = Layer.effect(
           if (arm === undefined) {
             return Either.left(new Conflict({ message: "this thread is not waiting on a usage limit" }))
           }
+          // A delegated child whose result already went to its parent cannot resume for it: the parent has its answer
+          // and would never get the resumed run's. Its own thread can still continue through a message.
+          if (autoResume && task.delegation !== undefined && task.delegation.cancelledAt === undefined &&
+            (task.delegation.resultAcknowledged === true || s.messages.some((m) => m.id === `delegation-result:${taskId}`))) {
+            return Either.left(new Conflict({ message: "this task's result already went to its parent; send it a message to keep working on it" }))
+          }
           if (arm.autoResume !== autoResume) task.usageLimitResume = { ...arm, autoResume }
           return Either.right({ ...task })
         })
