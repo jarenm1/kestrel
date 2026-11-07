@@ -43,7 +43,7 @@ const withCore = async (body: (h: Harnessed) => Effect.Effect<void, unknown>): P
   const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
   const deps = Layer.mergeAll(
     configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
-    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
+    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stop: () => Effect.void, stopAll: () => Effect.void } as never),
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
     Layer.succeed(CredentialBroker, {} as never),
@@ -364,3 +364,36 @@ test("a usage limit holds delegated results until the work resumes or returns ea
     expect((yield* core.delegate("held", resumed.run.id, input)).id).toBe(queued.id)
     expect((yield* store.read).tasks.find((t) => t.id === queued.id)?.delegation?.parentRunId).toBe(resumed.run.id)
   })), 30_000)
+
+test("archiving a thread archives its whole sub-thread tree", () => withCore(({ store, core }) =>
+  Effect.gen(function* () {
+    yield* store.update((s) => {
+      const now = new Date().toISOString()
+      const base = { owner: "owner", status: "idle" as const, createdAt: now, updatedAt: now, checkouts: [] }
+      s.tasks.push(
+        { ...base, id: "root", title: "Root" },
+        { ...base, id: "spawned", title: "Spawned", spawnedByTaskId: "root" },
+        { ...base, id: "delegated", title: "Delegated", delegation: { parentTaskId: "root", parentRunId: "run", requestId: "r1", fingerprint: "f" } },
+        { ...base, id: "grandchild", title: "Grandchild", delegation: { parentTaskId: "delegated", parentRunId: "run", requestId: "r2", fingerprint: "f" } },
+        { ...base, id: "greatgrandchild", title: "Great-grandchild", spawnedByTaskId: "grandchild" },
+        { ...base, id: "foreign", title: "Foreign", owner: "other", spawnedByTaskId: "root" },
+        { ...base, id: "unrelated", title: "Unrelated" },
+      )
+      return Either.right(undefined)
+    })
+    const archived = yield* core.archiveTask("owner", "root")
+    expect(archived.id).toBe("root")
+    const archivedAt = new Map((yield* store.read).tasks.map((t) => [t.id, t.archivedAt]))
+    for (const id of ["root", "spawned", "delegated", "grandchild", "greatgrandchild"]) {
+      expect(archivedAt.get(id)).toBeDefined()
+    }
+    // Another user's thread linked to this one, and unrelated threads, stay active.
+    expect(archivedAt.get("foreign")).toBeUndefined()
+    expect(archivedAt.get("unrelated")).toBeUndefined()
+
+    // Unarchiving lifts only the named thread; its sub-threads stay archived.
+    yield* core.unarchiveTask("owner", "root")
+    const restored = yield* store.read
+    expect(restored.tasks.find((t) => t.id === "root")?.archivedAt).toBeUndefined()
+    expect(restored.tasks.find((t) => t.id === "spawned")?.archivedAt).toBeDefined()
+  })))

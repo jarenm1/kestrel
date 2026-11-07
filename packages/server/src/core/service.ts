@@ -1294,23 +1294,46 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "task.deleted", taskId, owner: task.owner })
       })
 
-    // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down.
+    // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down. A thread's
+    // sub-threads — delegated to it or spawned by it — archive with it, transitively, in the same update.
     const archiveTask: CoreShape["archiveTask"] = (user, id) =>
       Effect.gen(function* () {
         yield* ownedTask(user, id)
-        const archived = yield* store.update((s): Either.Either<Task, NotFound> => {
+        const archived = yield* store.update((s): Either.Either<{ task: Task; tree: Task[] }, NotFound> => {
           const found = findTask(s, id)
           if (Either.isLeft(found)) return Either.left(found.left)
-          const task = found.right
-          if (task.archivedAt === undefined) {
-            task.archivedAt = nowIso()
-            task.updatedAt = task.archivedAt
+          const owner = found.right.owner
+          const ids = new Set<string>([id])
+          const queue = [id]
+          for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+            for (const t of s.tasks) {
+              if (ids.has(t.id) || t.owner !== owner) continue
+              if ((t.delegation?.parentTaskId ?? t.spawnedByTaskId) === next) {
+                ids.add(t.id)
+                queue.push(t.id)
+              }
+            }
           }
-          return Either.right({ ...task })
+          const now = nowIso()
+          const tree: Task[] = []
+          let task: Task | undefined
+          for (const t of s.tasks) {
+            if (!ids.has(t.id)) continue
+            if (t.archivedAt === undefined) {
+              t.archivedAt = now
+              t.updatedAt = now
+            }
+            const copy = { ...t }
+            tree.push(copy)
+            if (t.id === id) task = copy
+          }
+          return Either.right({ task: task!, tree })
         })
-        hub.publish({ _tag: "task.updated", task: archived })
-        yield* teardownRuntime(id)
-        return archived
+        for (const t of archived.tree) {
+          hub.publish({ _tag: "task.updated", task: t })
+          yield* teardownRuntime(t.id)
+        }
+        return archived.task
       })
 
     const unarchiveTask: CoreShape["unarchiveTask"] = (user, id) =>
