@@ -133,6 +133,7 @@ const runningBox = async (boxId = "box-1") => {
   await placeBox("alice", boxId)
   const create = lastCommand("host-a", "create")
   fleet.result("host-a", create.commandId, true, null, vmReport(boxId, create.command.vmId, 1, "running"))
+  await fleet.capacity("host-a", { ...capacityOf(8), runningVmIds: [create.command.vmId] })
   return create.command.vmId
 }
 
@@ -204,6 +205,42 @@ describe("creating a box", () => {
     await hello("host-a", [], 2)
     await placeBox("alice", "box-1")
     expect(fleet.placement(null)).toBeNull()
+  })
+
+  test("a result before capacity keeps the reservation until that VM appears in a snapshot", async () => {
+    await hello("host-a", [], 2)
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    fleet.result("host-a", create.commandId, true, null, vmReport("box-1", create.command.vmId, 1, "running"))
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [] })
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(1), runningVmIds: [create.command.vmId] })
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [create.command.vmId] })
+    expect(fleet.placement(null)).not.toBeNull()
+  })
+
+  test("a failed create with a running VM keeps its reservation until capacity accounts for it", async () => {
+    await hello("host-a", [], 2)
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    fleet.result("host-a", create.commandId, false, "guest configuration failed", vmReport("box-1", create.command.vmId, 1, "running"))
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(1), runningVmIds: [create.command.vmId] })
+    expect(fleet.placement(null)).toBeNull()
+  })
+
+  test("capacity before result counts a boot only once, including after reconnect", async () => {
+    await hello("host-a", [], 3)
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    disconnect("host-a")
+    connected.add("host-a")
+    await fleet.hello({ hostId: "host-a", slug: "slug-host-a", agentVersion: "test", imageId: "image-1", capacity: { ...capacityOf(2), runningVmIds: [create.command.vmId] } })
+    expect(fleet.placement(null)).not.toBeNull()
+    fleet.result("host-a", create.commandId, true, null, vmReport("box-1", create.command.vmId, 1, "running"))
+    expect(fleet.placement(null)).not.toBeNull()
   })
 
   test("a create the host refuses leaves the box failed, and the owner can delete it", async () => {
@@ -490,6 +527,36 @@ describe("owner commands", () => {
 })
 
 describe("park and GPU", () => {
+  test("a parked resume remains reserved after its result until capacity includes the new VM", async () => {
+    const vmId = await runningBox()
+    await fleet.capacity("host-a", { ...capacityOf(8), runningVmIds: [vmId] })
+    fleet.park("alice", "box-1")
+    const park = lastCommand("host-a", "park")
+    fleet.result("host-a", park.commandId, true, null, vmReport("box-1", vmId, 1, "parked"))
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [] })
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = lastCommand("host-a", "resume")
+    fleet.result("host-a", resume.commandId, true, null, vmReport("box-1", resume.command.vmId, 2, "running"))
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [resume.command.vmId] })
+    expect(fleet.placement(null)).not.toBeNull()
+  })
+
+  test("a resume result without a VM keeps its claim and reservation across reconnect", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked"))
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [] })
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = lastCommand("host-a", "resume")
+    disconnect("host-a")
+    await hello("host-a", [], 2)
+    fleet.result("host-a", resume.commandId, true, null, undefined)
+    expect(fleet.placement(null)).toBeNull()
+    fleet.inventory("host-a", [vmReport("box-1", resume.command.vmId, 2, "running")], true)
+    expect(fleet.placement(null)).toBeNull()
+    await fleet.capacity("host-a", { ...capacityOf(2), runningVmIds: [resume.command.vmId] })
+    expect(fleet.placement(null)).not.toBeNull()
+  })
   test("parking a running box sends park to its host, and the report it sends back leaves no host", async () => {
     const vmId = await runningBox()
     expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })

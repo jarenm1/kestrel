@@ -31,6 +31,7 @@ import {
   withPlannedBoots,
 } from "./nest-control"
 import {
+  acknowledgeNestBoots,
   deleteNestBox,
   insertNestBox,
   nestBox,
@@ -119,6 +120,7 @@ export class NestFleet {
       capacity: frame.capacity,
       lastSeenAt: new Date(this.clock()).toISOString(),
     })
+    if (frame.capacity.runningVmIds !== undefined) acknowledgeNestBoots(this.sql, frame.hostId, frame.capacity.runningVmIds)
     this.inventories.delete(frame.hostId)
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
@@ -148,6 +150,7 @@ export class NestFleet {
     const host = nestHostRow(this.sql, hostId)
     if (host === null) return
     upsertNestHost(this.sql, { ...host, capacity, lastSeenAt: new Date(this.clock()).toISOString() })
+    if (capacity.runningVmIds !== undefined) acknowledgeNestBoots(this.sql, hostId, capacity.runningVmIds)
     this.link.send(hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
     await this.wakeWanted()
   }
@@ -180,7 +183,7 @@ export class NestFleet {
     row.backedUpAt = report.backedUpAt
     // A parked report with nothing in flight releases the box from this host. While a command is in flight the claim
     // stays until that command's result settles, since the two frames may arrive in either order.
-    if (report.state === "parked" && row.pendingId === null) row.hostId = null
+    if (report.state === "parked" && row.pendingId === null && !row.bootReserved) row.hostId = null
     saveNestBox(this.sql, row)
   }
 
@@ -190,6 +193,7 @@ export class NestFleet {
     if (row === null || row.hostId !== hostId) return
     const kind = row.pendingKind
     this.clearPending(row)
+    if (!ok && (kind === "create" || kind === "resume") && vm?.state !== "running") row.bootReserved = false
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
     if (kind === "create") row.createFailed = !ok
     if (kind === "destroy" && ok) {
@@ -199,7 +203,7 @@ export class NestFleet {
     // A parked box with nothing in flight is held by no host. A park result that arrives after the parked report, and a
     // refused resume (never started there), release the claim here. A result that carries a VM report is applied by
     // `vm`, which releases the claim on a parked report and keeps it on a running one.
-    if (vm === undefined && row.state === "parked") row.hostId = null
+    if (vm === undefined && row.state === "parked" && !row.bootReserved && !(kind === "resume" && ok)) row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
   }
@@ -325,6 +329,7 @@ export class NestFleet {
       pendingCommand: null,
       pendingDeadline: null,
       createFailed: false,
+      bootReserved: false,
     }
     insertNestBox(this.sql, row)
     const command: NestHostCommand = {
@@ -463,6 +468,7 @@ export class NestFleet {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
     if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
+    if (command._tag === "create" || (command._tag === "resume" && row.state === "parked")) row.bootReserved = true
     const timeout = commandTimeoutMs(command._tag)
     row.pendingId = commandId
     row.pendingKind = command._tag

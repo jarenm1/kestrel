@@ -373,6 +373,7 @@ export class VmManager {
         attachedTo: vms.find((vm) => vm.gpus.includes(gpu.pciAddress))?.boxId ?? null,
       })),
       running: running.length,
+      runningVmIds: running.map((vm) => vm.vmId),
       suspended: vms.filter((vm) => vm.state === "suspended").length,
     }
   }
