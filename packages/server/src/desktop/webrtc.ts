@@ -42,9 +42,9 @@ const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
 /**
- * Seconds the control plane's relay may take before the box answers without it. werift gathers inside
- * `setLocalDescription`, so an unreachable relay would otherwise hold the answer back for its 8s UDP and 8s TCP
- * attempts. Operator-configured TURN keeps werift's default: its server may be far away or reached over TLS.
+ * Seconds each transport attempt may take for the control plane's relay before the box answers without it. werift
+ * gathers inside `setLocalDescription` and tries UDP then TCP, so at most two of these delay the answer; its default is
+ * eight seconds per attempt. Operator-configured TURN keeps that default: its server may be far away or reached by TLS.
  */
 const TURN_CONNECT_TIMEOUT_S = 2
 const MAX_OFFER_CHARS = 64 * 1024
