@@ -172,7 +172,7 @@ const program = Effect.gen(function* () {
     },
     workspace: {
       checkout: core.checkout,
-      exec: (taskId, command, timeoutMs) => core.execInTask(taskId, command, timeoutMs),
+      exec: (taskId, command, timeoutMs, options) => core.execInTask(taskId, command, timeoutMs, options),
     },
     toolkits: config.toolkitsFlake === null ? null : { install: core.toolkitInstall },
     report: core.report,

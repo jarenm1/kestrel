@@ -14,6 +14,11 @@ export interface GpuOnDemand {
   readonly request: (runId: string) => Effect.Effect<void, PlatformError>
   /** Withdraws the run's request. The host detaches the GPU once no run wants it. */
   readonly release: (runId: string) => Effect.Effect<void, PlatformError>
+  /**
+   * Whether the run holds a usable grant now: its request is standing and the box is still connected to its guest
+   * agent. A GPU workload must not start on a wish that was released or never made.
+   */
+  readonly available: (runId: string) => Effect.Effect<boolean>
 }
 
 export interface PlatformHooks {

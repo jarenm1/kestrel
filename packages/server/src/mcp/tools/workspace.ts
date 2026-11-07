@@ -6,6 +6,8 @@ import { type RunContext, guard, runTool, text } from "./common"
 
 const DEFAULT_TIMEOUT_SEC = 120
 const MAX_TIMEOUT_SEC = 600
+/** GPU workloads (renders, compute) may run much longer than an ordinary shell command. */
+const MAX_GPU_TIMEOUT_SEC = 21_600
 
 /** A stream as the core captured it: its first and last bytes, and the bytes dropped between them. */
 interface ExecOutput {
@@ -27,6 +29,7 @@ export interface WorkspaceToolDeps {
       taskId: string,
       command: string,
       timeoutMs: number,
+      options?: { readonly gpu?: boolean; readonly runId?: string },
     ) => Effect.Effect<{ exitCode: number; timedOut: boolean; stdout: ExecOutput; stderr: ExecOutput }, unknown>
   }
 }
@@ -83,31 +86,55 @@ export const registerWorkspaceTools = (server: McpServer, ctx: RunContext, deps:
     {
       description:
         "Run a shell command with sh -c in the thread's workspace root (repo_checkout puts repositories under it). Use this only " +
-        "when the command needs the task's desktop DISPLAY, or when your harness has no shell of its own; if you " +
-        "have a shell, use that instead. Returns the exit code, stdout and stderr; a non-zero exit code is reported " +
-        "in the output, not as a tool error. Each stream keeps its first and last 10000 bytes; the middle is " +
-        "replaced by a `[... N bytes omitted ...]` marker. The command is killed with its whole process group " +
-        `after timeoutSec (default ${DEFAULT_TIMEOUT_SEC}, max ${MAX_TIMEOUT_SEC}); the output printed so far is ` +
-        "returned with a `timed out after Ns (process group killed)` line. The call returns as soon as the main " +
-        "process exits, so `sleep 30 & echo started` returns at once. To start a long-lived process, redirect its " +
-        "output and background it: `nohup cmd >log 2>&1 &`. Output a backgrounded process writes after the call " +
-        "returns goes to closed pipes and is lost (it gets SIGPIPE).",
+        "when the command needs the task's desktop DISPLAY, when it needs the GPU (`gpu: true`), or when your harness has no " +
+        "shell of its own; if you have a shell, use that instead. `gpu: true` is headless: the command gets the host's GPU " +
+        "render/compute devices and drivers but no DISPLAY and no X11 socket, so it must render offscreen. It needs a GPU " +
+        "present on the host, or on an on-demand GPU box a standing `gpu_request`. Returns the exit code, stdout and stderr; " +
+        "a non-zero exit code is reported in the output, not as a tool error. Each stream keeps its first and last 10000 " +
+        "bytes; the middle is replaced by a `[... N bytes omitted ...]` marker. The command is killed with its whole " +
+        `process group after timeoutSec (default ${DEFAULT_TIMEOUT_SEC}, max ${MAX_TIMEOUT_SEC}; with gpu: true, max ` +
+        `${MAX_GPU_TIMEOUT_SEC}); the output printed so far is returned with a ` +
+        "`timed out after Ns (process group killed)` line. A GPU command is supervised as a foreground workload: when it " +
+        "finishes, times out or is cancelled, anything it left running is killed before its GPU lease is released. The call " +
+        "returns as soon as the main process exits, so `sleep 30 & echo started` returns at once; for GPU work, background " +
+        "children do not survive the call. To start a long-lived process, redirect its output and background it outside a " +
+        "GPU command: `nohup cmd >log 2>&1 &`. Output a backgrounded process writes after the call returns goes to closed " +
+        "pipes and is lost (it gets SIGPIPE).",
       inputSchema: {
         command: z.string().describe("Shell command, run with sh -c in the workspace root"),
         timeoutSec: z
           .number()
           .positive()
-          .max(MAX_TIMEOUT_SEC)
+          .max(MAX_GPU_TIMEOUT_SEC)
           .optional()
-          .describe(`Timeout in seconds, default ${DEFAULT_TIMEOUT_SEC}, at most ${MAX_TIMEOUT_SEC}`),
+          .describe(
+            `Timeout in seconds, default ${DEFAULT_TIMEOUT_SEC}; at most ${MAX_TIMEOUT_SEC}, or ${MAX_GPU_TIMEOUT_SEC} with gpu: true`,
+          ),
+        gpu: z
+          .boolean()
+          .optional()
+          .describe(
+            "Expose the host GPU's render/compute devices and drivers without a desktop. Requires a GPU on the host, or a " +
+              "standing gpu_request on a box with an on-demand GPU.",
+          ),
       },
     },
-    ({ command, timeoutSec }: { command: string; timeoutSec?: number }) =>
+    ({ command, timeoutSec, gpu }: { command: string; timeoutSec?: number; gpu?: boolean }) =>
       guard(() =>
         runTool(
           Effect.gen(function* () {
             const timeoutMs = Math.round((timeoutSec ?? DEFAULT_TIMEOUT_SEC) * 1000)
-            const result = yield* deps.workspace.exec(ctx.taskId, command, timeoutMs)
+            if (gpu !== true && timeoutSec !== undefined && timeoutSec > MAX_TIMEOUT_SEC) {
+              return yield* Effect.fail(
+                new Error(`timeoutSec above ${MAX_TIMEOUT_SEC} is only allowed with gpu: true (GPU jobs may run up to ${MAX_GPU_TIMEOUT_SEC})`),
+              )
+            }
+            const result = yield* deps.workspace.exec(
+              ctx.taskId,
+              command,
+              timeoutMs,
+              gpu === true ? { gpu: true, runId: ctx.runId } : undefined,
+            )
             const status = result.timedOut
               ? `timed out after ${timeoutMs / 1000}s (process group killed)\nexit code: none`
               : `exit code: ${result.exitCode}`
