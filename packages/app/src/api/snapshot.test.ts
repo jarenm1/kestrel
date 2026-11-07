@@ -1,7 +1,40 @@
 import { describe, expect, test } from "bun:test"
-import { QueryClient } from "@tanstack/react-query"
+import { QueryClient, QueryObserver } from "@tanstack/react-query"
 import type { Run, Task } from "@cloudagents/protocol"
-import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
+import { fetchSnapshot, fetchTaskSnapshot, invalidateRunItems, refreshSnapshots } from "./snapshot"
+
+test("reconnect replaces an initial in-flight snapshot for task and run items", async () => {
+  for (const runItems of [false, true]) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const queryKey = runItems ? ["runs", "run", "items"] : ["tasks", "task", "messages"]
+    const first = Promise.withResolvers<string>()
+    const fresh = Promise.withResolvers<string>()
+    const received = Promise.withResolvers<void>()
+    let calls = 0
+    const observer = new QueryObserver(client, { queryKey, queryFn: () => ++calls === 1 ? first.promise : fresh.promise })
+    const unsubscribe = observer.subscribe((result) => { if (result.data === "fresh") received.resolve() })
+    expect(calls).toBe(1)
+    if (runItems) invalidateRunItems(client)
+    else refreshSnapshots(client, { queryKey: ["tasks", "task"] })
+    expect(calls).toBe(2)
+    fresh.resolve("fresh")
+    await received.promise
+    first.resolve("stale")
+    await first.promise
+    expect(client.getQueryData(queryKey)).toBe("fresh")
+    unsubscribe()
+    client.clear()
+  }
+})
+
+test("reconnect marks cached run items stale outside the task prefix", () => {
+  const client = new QueryClient()
+  client.setQueryData(["runs", "run", "items"], [{ id: "item" }])
+  client.setQueryData(["runs", "run", "other"], [])
+  invalidateRunItems(client)
+  expect(client.getQueryState(["runs", "run", "items"])?.isInvalidated).toBe(true)
+  expect(client.getQueryState(["runs", "run", "other"])?.isInvalidated).toBe(false)
+})
 
 const key = ["tasks", "task", "runs"]
 

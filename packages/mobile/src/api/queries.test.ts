@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { connectedModelProviders, type Connection, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
 import { createApiClient } from "./client";
-import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
+import { boxKeys, createQueries, fetchSnapshot, fetchTaskSnapshot, invalidateRunItems, queryClient, refreshSnapshots, storeTask } from "./queries";
 import { trackSave, trackSaveQueue } from "@/lib/pendingSaves";
 import { createSaveQueue } from "@/lib/saveQueue";
 
@@ -12,6 +12,58 @@ const task = (title: string): Task => ({
 });
 
 afterEach(() => queryClient.clear());
+
+test("reconnect replaces an initial in-flight snapshot for task and run items", async () => {
+  for (const runItems of [false, true]) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const keys = boxKeys("a");
+    const queryKey = runItems ? keys.runItems("run") : keys.messages("task");
+    const first = Promise.withResolvers<string>();
+    const fresh = Promise.withResolvers<string>();
+    const received = Promise.withResolvers<void>();
+    let calls = 0;
+    const observer = new QueryObserver(client, { queryKey, queryFn: () => ++calls === 1 ? first.promise : fresh.promise });
+    const unsubscribe = observer.subscribe((result) => { if (result.data === "fresh") received.resolve(); });
+    expect(calls).toBe(1);
+    if (runItems) invalidateRunItems(client, "a");
+    else refreshSnapshots(client, { queryKey: keys.task("task") });
+    expect(calls).toBe(2);
+    fresh.resolve("fresh");
+    await received.promise;
+    first.resolve("stale");
+    await first.promise;
+    expect(client.getQueryData(queryKey)).toBe("fresh");
+    unsubscribe();
+    client.clear();
+  }
+});
+
+test("reconnect invalidates run items only on its box", () => {
+  const client = new QueryClient();
+  const a = boxKeys("a").runItems("run");
+  const b = boxKeys("b").runItems("run");
+  client.setQueryData(a, [{ id: "item" }]);
+  client.setQueryData(b, [{ id: "item" }]);
+  invalidateRunItems(client, "a");
+  expect(client.getQueryState(a)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(b)?.isInvalidated).toBe(false);
+});
+
+test("list snapshots replace stale cached entries and retain events during the request", async () => {
+  const key = boxKeys("a").runs("task");
+  const old = { id: "old", status: "running" };
+  const changed = { id: "changed", status: "running" };
+  queryClient.setQueryData(key, [old, changed]);
+  const { promise, resolve } = Promise.withResolvers<{ id: string; status: string }[]>();
+  const result = fetchSnapshot(key, () => promise);
+  queryClient.setQueryData(key, [old, { id: "changed", status: "succeeded" }, { id: "new", status: "running" }]);
+  resolve([{ id: "old", status: "succeeded" }, changed]);
+  expect(await result).toEqual([
+    { id: "old", status: "succeeded" },
+    { id: "changed", status: "succeeded" },
+    { id: "new", status: "running" },
+  ]);
+});
 
 test("box clients isolate caches even for identical task and run IDs", () => {
   const first = createApiClient("https://control.example", "session", { id: "first", url: "https://first.example" });
