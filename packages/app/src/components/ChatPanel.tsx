@@ -166,7 +166,7 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
       : child.status === "needs_input"
         ? "Needs input"
         : working
-          ? delegated?.status === "succeeded" ? "Continuing" : "Running"
+          ? delegated?.status === "succeeded" ? nestedActive ? "Waiting for children" : "Continuing" : "Running"
           : arm !== undefined && resuming
             ? `Usage limit · resumes ${resetLabel(arm.resetsAt)}`
             : nestedActive
