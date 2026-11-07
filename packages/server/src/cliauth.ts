@@ -17,6 +17,7 @@ import { meetsMinimum } from "./capabilities"
 import { Config } from "./config"
 import { killActiveDiscovery, limitDiscovery } from "./harness-commands"
 import { NEW_PROCESS_GROUP, killProcessGroup, ownGroup, platformEnv, shell } from "./process"
+import { openCodeGoKey as parseOpenCodeGoKey } from "./provider-usage"
 import { boxHomeToolArgs, cliBwrapArgs, findExecutable } from "./sandbox"
 
 /** POSIX quoting for one argv element run through `sh -c`. */
@@ -91,6 +92,11 @@ export interface CliAuthShape {
   readonly logout: (user: string, provider: CliProvider) => Effect.Effect<void, BadRequest | InternalError>
   /** The providers `user` is logged in to; a sandboxed run binds these directories in. */
   readonly loggedInDirs: (user: string) => Effect.Effect<ReadonlyArray<CliLoginDir>, BadRequest | InternalError>
+  /**
+   * The active OpenCode Go key from `user`'s OpenCode credential store (`auth export`), or null when it has none. The
+   * key stays on the host: only a brokered Go route's grant carries it, never a sandboxed process or state file.
+   */
+  readonly opencodeGoKey: (user: string) => Effect.Effect<string | null, BadRequest | InternalError>
   /**
    * The real commands the provider's CLI offers for `user` in `workspacePath` (thread workspace), started in `cwd`
    * (where the thread's agent starts: the workspace or its first checkout): Claude Code slash commands or Codex skills.
@@ -738,6 +744,18 @@ export const CliAuthLive = Layer.effect(
         killActiveDiscovery()
       })
 
+    const opencodeGoKey = (user: string): Effect.Effect<string | null, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        const inv = yield* invoke(user, "opencode-go", ["auth", "export", "--standalone"])
+        const output = yield* runCli(inv, "opencode auth export", undefined, true)
+        if (output === null) return null
+        try {
+          return parseOpenCodeGoKey(JSON.parse(output.stdout))
+        } catch {
+          return null
+        }
+      })
+
     return {
       status,
       startLogin,
@@ -745,6 +763,7 @@ export const CliAuthLive = Layer.effect(
       submitKey,
       logout,
       loggedInDirs,
+      opencodeGoKey,
       discoverCommands,
       providerUsage,
       useBankedReset,

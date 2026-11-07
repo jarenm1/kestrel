@@ -37,8 +37,15 @@ if (!mcpUrl || !mcpToken) {
   process.exit(1)
 }
 
-const appServer = model?.startsWith("gpt-") === true
-const acp = /^opencode(-go)?\//.test(model ?? "") || model?.startsWith("gemini-") === true
+// The run tells the script which protocol its route actually uses. Model ids are no longer enough (a gateway model
+// may run through Claude Code, Codex or OpenCode), so CLOUDAGENTS_HARNESS wins and old callers fall back to the prefix.
+const harness = process.env.CLOUDAGENTS_HARNESS
+const appServer =
+  harness === "codex" || (harness === undefined && model?.startsWith("gpt-") === true)
+const acp =
+  harness === "opencode" ||
+  harness === "antigravity" ||
+  (harness === undefined && (/^opencode(-go)?\//.test(model ?? "") || model?.startsWith("gemini-") === true))
 // A Claude run's first line names its session in Claude Code's stream-json init; a Codex run's thread is named in its
 // `thread/start` or `thread/resume` response, an ACP run's session in `session/new` (or the one `session/resume` names).
 // A resumed run keeps its session.

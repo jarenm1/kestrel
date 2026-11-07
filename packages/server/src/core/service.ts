@@ -33,14 +33,17 @@ import {
   type CreateTaskBody,
   type Delegation,
   type HarnessCommands,
+  type ModelHarness,
   modelInfo,
+  modelHarness,
+  DEFAULT_MODEL_HARNESS,
   type FileRoot,
   providerModels,
   DEFAULT_TEXT_GENERATION_SETTINGS,
   type TextGenerationSettings,
   type ThreadSettings,
 } from "@cloudagents/protocol"
-import { MODEL_HARNESS } from "../agent-clis"
+import { MODEL_HARNESS, harnessForRoute } from "../agent-clis"
 import { CliAuth } from "../cliauth"
 import { CredentialBroker } from "../broker"
 import { dailyActivity } from "./activity"
@@ -1327,6 +1330,7 @@ export const CoreLive = Layer.effect(
           ),
         )
         const provider = choice.model === undefined ? DEFAULT_MODEL_PROVIDER : modelInfo(choice.model).provider
+        const harnessId = choice.model === undefined ? DEFAULT_MODEL_HARNESS[provider] : modelHarness(choice.model)
         if (text.trim() === "" && attachmentIds.length === 0) {
           return yield* Effect.fail(new BadRequest({ message: "message text or an attachment is required" }))
         }
@@ -1449,13 +1453,24 @@ export const CoreLive = Layer.effect(
             const taskRuns = s.runs.filter((r) => r.taskId === taskId)
             let resumeFrom: Run | undefined
             let resumeSession: RunSession | undefined
+            let resumeHarness: ModelHarness | undefined
             for (let i = taskRuns.length - 1; i >= 0; i--) {
               const previous = taskRuns[i]!
               const session = s.runSessions.find((x) => x.runId === previous.id)
-              if ((session?.provider ?? previous.provider ?? DEFAULT_MODEL_PROVIDER) !== provider) continue
+              const recordedProvider = session?.provider ?? previous.provider ?? DEFAULT_MODEL_PROVIDER
+              if (recordedProvider !== provider) continue
+              // A native session is only valid in the same provider and harness: routes have separate session stores.
+              const recordedHarness =
+                session?.harness ??
+                previous.harness ??
+                (previous.model === undefined
+                  ? DEFAULT_MODEL_HARNESS[recordedProvider]
+                  : modelHarness(previous.model))
+              if (recordedHarness !== harnessId) continue
               if (session !== undefined) {
                 resumeFrom = previous
                 resumeSession = session
+                resumeHarness = recordedHarness
                 break
               }
               // Keep a failed resume invalidated even if another provider ran afterward.
@@ -1476,6 +1491,7 @@ export const CoreLive = Layer.effect(
               endedAt: null,
               exitCode: null,
               provider,
+              harness: harnessId,
               ...(choice.model === undefined ? {} : { model: choice.model }),
               effort: choice.effort ?? null,
               ...(autoRetryAttempt === undefined ? {} : { autoRetryAttempt }),
@@ -1510,6 +1526,7 @@ export const CoreLive = Layer.effect(
                 : {
                     sessionId: resumeSession.sessionId,
                     continuation: resumeSession.continuation,
+                    ...(resumeHarness === undefined ? {} : { harness: resumeHarness }),
                     prompt: withUserContext(user, formatHandoff(earlier, asked, HANDOFF_HISTORY_LIMIT, "delta"), notes),
                   },
               responseStreamingMode: textSettings.enabled ? textSettings.responseStreamingMode : null,
@@ -1640,6 +1657,11 @@ export const CoreLive = Layer.effect(
         (latest && state.runSessions.find((x) => x.runId === latest.id)?.provider) ??
         latest?.provider ??
         DEFAULT_MODEL_PROVIDER
+      // A routed model keeps the native session store and harness the thread was already using; dropping it would
+      // silently switch a peer follow-up back to the provider's current harness.
+      if (latest?.model !== undefined && modelHarness(latest.model) !== DEFAULT_MODEL_HARNESS[provider]) {
+        return { model: latest.model }
+      }
       if (provider === DEFAULT_MODEL_PROVIDER) return {}
       const model = providerModels(provider).find((m) => m.shownByDefault)?.id
       return model === undefined ? {} : { model }
@@ -2151,12 +2173,17 @@ export const CoreLive = Layer.effect(
           const running = state.runs.find((r) => r.taskId === taskId && r.status === "running")
           const session = running === undefined ? undefined : state.runSessions.find((s) => s.runId === running.id)
           const provider = commandProvider(running, session, model)
-          const harness = MODEL_HARNESS[provider]
-          if (harness.cli === null) return { provider, commands: [] }
+          const harnessId =
+            running?.harness ??
+            session?.harness ??
+            (running === undefined ? modelHarness(model) : DEFAULT_MODEL_HARNESS[provider])
+          const harness =
+            harnessId === DEFAULT_MODEL_HARNESS[provider] ? MODEL_HARNESS[provider] : harnessForRoute(harnessId)
+          if (harness.cli === null) return { provider, harness: harnessId, commands: [] }
           // Started where the agent starts, so the list holds the project commands and skills of its checkout.
           const workspace = threadDirOf(task.id)
           const commands = yield* cliAuth.discoverCommands(user, harness.cli, workspace, agentCwd(workspace, task))
-          return { provider, commands }
+          return { provider, harness: harnessId, commands }
         }),
 
       deleteTask: (user, id) => Effect.zipRight(ownedTask(user, id), deleteTask(id)),

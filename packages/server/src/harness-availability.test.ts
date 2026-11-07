@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { availableHarnesses, type HarnessProbe } from "./capabilities"
+import { availableHarnesses, availableModelHarnesses, type HarnessProbe } from "./capabilities"
 
 const probe = (installed: Record<string, string>): HarnessProbe => ({
   which: (name) => (name in installed ? `/bin/${name}` : null),
@@ -60,12 +60,35 @@ test("a configured command's own binary is what the box offers", () => {
 })
 
 test("a fake-agent box plays every harness itself", () => {
-  // The scripted agent speaks Claude stream-json, Codex app-server and ACP, so it plays every remaining provider.
+  // The scripted agent speaks Claude stream-json, Codex app-server and ACP, so it plays every provider; routed
+  // gateway models carry CLOUDAGENTS_HARNESS so the script picks the right protocol.
   expect(availableHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual([
     "anthropic",
     "openai",
+    "openrouter",
+    "zai",
+    "deepseek",
+    "minimax",
+    "moonshot",
     "opencode",
     "opencode-go",
     "google",
+  ])
+})
+
+test("route harnesses need their own CLI and OpenCode route minimum", () => {
+  expect(availableModelHarnesses(box, probe({ claude: "2.1.318 (Claude Code)", codex: "codex-cli 0.166.0" }))).toEqual([
+    "claude",
+    "codex",
+  ])
+  // Native free OpenCode 2.0.7 is enough for its own models, but API-provider routes need 2.1.
+  expect(availableModelHarnesses(box, probe({ opencode: "opencode v2.0.7" }))).toEqual([])
+  expect(availableModelHarnesses(box, probe({ opencode: "opencode v2.1.0" }))).toEqual(["opencode"])
+  expect(availableModelHarnesses(box, probe({ agy: "1.5.0" }))).toEqual(["antigravity"])
+  expect(availableModelHarnesses({ fakeAgent: true, sandboxPath: null }, probe({}))).toEqual([
+    "claude",
+    "codex",
+    "opencode",
+    "antigravity",
   ])
 })

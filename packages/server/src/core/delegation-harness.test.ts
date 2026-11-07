@@ -37,7 +37,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     stateFile: join(root, "state.json"), mirrorsDir: join(root, "mirrors"), threadsDir: join(root, "threads"),
     shadowsDir: join(root, "shadows"), runsDir: join(root, "runs"), attachmentsDir: join(root, "attachments"), homesDir: join(root, "homes"),
     agentCommands: { anthropic: [process.execPath, cli].map((s) => `'${s.replaceAll("'", "'\\''")}'`).join(" "), openai: "", openrouter: "", zai: "", deepseek: "", minimax: "", moonshot: "", opencode: "", "opencode-go": "", google: "" },
-    fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
+    agentRouteCommands: { claude: "", codex: "", opencode: "" }, fakeAgent: false, fakeAgentRoBinds: [], sandbox: "off", sandboxPath: null, sandboxSslCertFile: null, systemd: null,
     nest: null,
     maxConcurrentRuns: 1, relay: null, direct: null, toolkitsFlake: null, taskDiskMax: 1024 ** 3,
     githubApiUrl: "https://api.github.com",
@@ -47,10 +47,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const deps = Layer.mergeAll(
     configLayer, WorkspaceLive, StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))), EventHubLive,
     Layer.succeed(CredentialBroker, {
-      issue: () => Effect.succeed({ token: "test-only", env: {} }), revoke: () => Effect.void,
+      issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
-    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), opencodeGoKey: () => Effect.succeed(null), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, { get: () => Effect.succeed({ user: "test", dev: true }) } as never),
     Layer.succeed(GitHub, {} as never),

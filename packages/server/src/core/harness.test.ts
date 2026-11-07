@@ -61,6 +61,11 @@ const harnessLayer = (
       google: "",
       ...Object.fromEntries((options.gateways ?? []).map((provider) => [provider, cliCommand] as const)),
     },
+    agentRouteCommands: {
+      claude: cliCommand,
+      codex: cliCommand,
+      opencode: cliCommand,
+    },
     fakeAgent: options.fakeAgent ?? false,
     fakeAgentRoBinds: [],
     sandbox: "off",
@@ -91,7 +96,7 @@ const harnessLayer = (
     options.realBroker
       ? CredentialBrokerLive.pipe(Layer.provide(Layer.merge(configLayer, credentialLayer)))
       : Layer.succeed(CredentialBroker, {
-          issue: () => Effect.succeed({ token: "test-only", env: {} }),
+          issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }),
           revoke: () => Effect.void,
           grantForToken: () => Effect.succeed(null),
           onRevoke: () => () => undefined,
@@ -99,6 +104,7 @@ const harnessLayer = (
         }),
     Layer.succeed(CliAuth, {
       loggedInDirs: options.loggedInDirs ?? (() => Effect.succeed([])),
+      opencodeGoKey: () => Effect.succeed(null),
       status: () => Effect.succeed([]),
       startLogin: () => Effect.die("unused"),
       submitCode: () => Effect.die("unused"),

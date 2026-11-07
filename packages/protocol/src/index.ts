@@ -5,7 +5,7 @@
  * Pure Effect Schema: no Node/DOM-specific imports here.
  */
 import { Schema } from "effect"
-import { AgentEffort, AgentModel, ModelProvider, modelInfo } from "./models"
+import { AgentEffort, AgentModel, ModelHarness, ModelProvider, modelInfo } from "./models"
 import { BranchName, RepoRef } from "./refs"
 
 // ---------------------------------------------------------------------------
@@ -210,6 +210,8 @@ export const Run = Schema.Struct({
   exitCode: Schema.NullOr(Schema.Number),
   /** The provider's CLI that ran it; absent on runs recorded before model switching stored it. */
   provider: Schema.optional(ModelProvider),
+  /** The harness that actually ran it (a route id may differ from the provider's current harness); absent on old runs. */
+  harness: Schema.optional(ModelHarness),
   /** Explicit model selected for this run; absent for runs using the box default. */
   model: Schema.optional(AgentModel),
   /** Thinking level selected for this run; null is the model default, absent on older runs. */
@@ -711,6 +713,8 @@ export const harnessCommandPrefix = (command: HarnessCommand, provider: ModelPro
  */
 export const HarnessCommands = Schema.Struct({
   provider: ModelProvider,
+  /** The harness the commands come from; absent from older boxes (derive from provider or the model's route). */
+  harness: Schema.optional(ModelHarness),
   commands: Schema.Array(HarnessCommand),
 })
 export type HarnessCommands = typeof HarnessCommands.Type
@@ -729,6 +733,11 @@ export const BoxCapabilities = Schema.Struct({
    * reported. Clients offer a provider that needs no connection only when its harness is listed here.
    */
   harnesses: Schema.optional(Schema.Array(ModelProvider)),
+  /**
+   * Harness kinds the box can launch, including route-only harnesses such as a recent OpenCode CLI. Absent on boxes
+   * from before model routing; clients should fall back to `harnesses` and the provider's current harness.
+   */
+  modelHarnesses: Schema.optional(Schema.Array(ModelHarness)),
   /**
    * The box's GPU: `none`, `static` (a GPU the machine always has), or `on-demand` (a Nest VM that borrows one from its
    * host while needed, see `guest.ts`). Absent on boxes from before it was reported; treat as unknown.

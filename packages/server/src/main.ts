@@ -1,4 +1,4 @@
-import { availableHarnesses, boxCapabilities } from "./capabilities"
+import { availableHarnesses, availableModelHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
 import { Effect, Fiber, Layer, Ref } from "effect"
@@ -133,7 +133,11 @@ const program = Effect.gen(function* () {
   const platform = yield* BoxPlatform
   const tracker = yield* ActivityTracker
   // The box's startup snapshot: which harness CLIs it found.
-  const capabilities = { ...boxCapabilities(config.sandbox, undefined, platform.hardware), harnesses: availableHarnesses(config) }
+  const capabilities = {
+    ...boxCapabilities(config.sandbox, undefined, platform.hardware),
+    harnesses: availableHarnesses(config),
+    modelHarnesses: availableModelHarnesses(config),
+  }
   const webHandler = yield* makeWebHandler(core, cliAuth, capabilities)
   // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
   // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.

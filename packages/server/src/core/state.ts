@@ -1,7 +1,7 @@
 import { Context, Effect, Either, Layer, Schema } from "effect"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
-import { InternalError, Message, Run, Task, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
+import { InternalError, Message, Run, Task, ModelHarness, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
@@ -17,6 +17,8 @@ const RunSessionRecord = Schema.Struct({
   sessionId: Schema.String,
   // State files written before model switching hold Claude Code sessions only.
   provider: Schema.optionalWith(ModelProvider, { default: () => DEFAULT_MODEL_PROVIDER }),
+  // Absent in state files written before model routing: the session belongs to the provider's current harness.
+  harness: Schema.optional(ModelHarness),
   // Absent in state files written before it existed: the place is unknown, so such a session is not resumed.
   continuation: Schema.optional(Schema.String),
 })
@@ -52,6 +54,8 @@ export interface RunSession {
   readonly runId: string
   readonly sessionId: string
   readonly provider: ModelProvider
+  /** The harness that minted it; a session only resumes in the same provider and harness. */
+  readonly harness?: ModelHarness | undefined
   /**
    * The session store and its lifetime (`SessionContinuation` in `harness.ts`). Only a run using the same surviving
    * store can resume it. Absent or legacy unversioned CLI-login records are not resumed.

@@ -1,13 +1,20 @@
 import { Effect } from "effect"
 import {
   CliProvider,
+  DEFAULT_MODEL_HARNESS,
+  DEFAULT_MODEL_PROVIDER,
   InternalError,
+  modelHarness,
+  modelInfo,
+  type AgentModel,
   type CLI_SIGN_IN,
   type CliAuthStatus,
   type CliSignIn,
   type HarnessCommand,
+  type ModelHarness,
   type ModelProvider,
   type ProviderUsage,
+  type RouteHarness,
   type UseBankedResetResult,
 } from "@cloudagents/protocol"
 import { isRecord } from "./core/transcript"
@@ -417,3 +424,26 @@ export const MODEL_HARNESS: Record<ModelProvider, Harness> = {
   // Sign-in from a terminal (`acp --login`) and `session/resume` arrived in 1.5.
   google: { conversation: "acp", cli: "antigravity-cli", bin: "agy", minVersion: [1, 5], broker: false },
 }
+
+/**
+ * Harnesses a route id can select in place of the provider's current one. Their `cli` is for command discovery only:
+ * `loginsForModel` mounts no CLI login for a route, so a subscription login never stands in for an API-key provider.
+ * OpenCode's custom provider overlay (and so the API-provider routes) needs 2.1; 2.0.x refuses the model.
+ */
+const ROUTE_HARNESSES: Record<RouteHarness, Harness> = {
+  claude: { conversation: "claude", cli: "claude-cli", bin: "claude", minVersion: null, broker: true },
+  codex: { conversation: "codex", cli: "codex-cli", bin: "codex", minVersion: null, broker: true },
+  opencode: { conversation: "acp", cli: "opencode", bin: "opencode", minVersion: [2, 1], broker: true },
+}
+
+/** The harness a run actually starts: the model's route when it names one, else the provider's current harness. */
+export const harnessForModel = (model: AgentModel | undefined): Harness => {
+  if (model === undefined) return MODEL_HARNESS[DEFAULT_MODEL_PROVIDER]
+  const provider = modelInfo(model).provider
+  const actual: ModelHarness = modelHarness(model)
+  return actual === DEFAULT_MODEL_HARNESS[provider] ? MODEL_HARNESS[provider] : ROUTE_HARNESSES[actual as RouteHarness]
+}
+
+/** A harness kind's route definition, for capability checks of routes independent of a provider. */
+export const harnessForRoute = (harness: ModelHarness): Harness =>
+  harness === "antigravity" ? MODEL_HARNESS.google : ROUTE_HARNESSES[harness]

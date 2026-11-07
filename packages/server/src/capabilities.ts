@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { release } from "node:os"
-import { MODEL_PROVIDERS, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
-import { MODEL_HARNESS, type HarnessMinimum } from "./agent-clis"
+import { MODEL_PROVIDERS, ModelHarness, ModelProvider, type BoxCapabilities } from "@cloudagents/protocol"
+import { MODEL_HARNESS, harnessForRoute, type Harness, type HarnessMinimum } from "./agent-clis"
 import { DESKTOP_HELPER, DESKTOP_REQUIRED_TOOLS, MIN_WESTON_MAJOR, hasRenderNode, parseWestonVersion } from "./desktop/requirements"
 import type { PlatformHardware } from "./platform/service"
 
@@ -88,8 +88,11 @@ export const harnessProbe = (sandboxPath: string | null): HarnessProbe => {
   }
 }
 
-/** Providers the scripted agent (`scripts/fake-agent.ts`) plays: Claude stream-json, Codex app-server and ACP. */
-const FAKE_AGENT_PROVIDERS: ReadonlyArray<ModelProvider> = ["anthropic", "openai", "opencode", "opencode-go", "google"]
+/**
+ * Providers the scripted agent (`scripts/fake-agent.ts`) plays. It speaks Claude stream-json, Codex app-server and ACP,
+ * and `CLOUDAGENTS_HARNESS` tells it which one a routed model needs, so every provider is playable in fake mode.
+ */
+const FAKE_AGENT_PROVIDERS: ReadonlyArray<ModelProvider> = ModelProvider.literals
 
 /**
  * The binary a configured harness command starts: its first shell word, with any leading `VAR=value` assignments
@@ -126,6 +129,8 @@ export interface HarnessAvailability {
 export interface HarnessConfig {
   readonly fakeAgent: boolean
   readonly agentCommands?: Readonly<Partial<Record<ModelProvider, string>>>
+  /** Canonical command per harness kind for models whose route names another harness. */
+  readonly agentRouteCommands?: Readonly<Partial<Record<ModelHarness, string>>>
 }
 
 export const meetsMinimum = (printed: string, minimum: HarnessMinimum | null): boolean => {
@@ -142,14 +147,16 @@ export const meetsMinimum = (printed: string, minimum: HarnessMinimum | null): b
 }
 
 /**
- * Whether one provider's harness CLI can start a run on this box: configured where agent runs look, and at least the
- * version its harness needs. A fake-agent box plays the providers its script speaks for itself, without probing a
- * binary. Only this provider's command is probed, so a launch never runs every harness's `--version`.
+ * Whether a provider's harness, or a route's alternative harness, can start a run on this box: configured where agent
+ * runs look, and at least the version it needs. A fake-agent box plays every harness itself, without probing a binary.
+ * Only the selected harness's command is probed, so a launch never runs every harness's `--version`.
  */
 export const harnessAvailability = (
   provider: ModelProvider,
   config: HarnessConfig,
   probe: HarnessProbe,
+  harness?: Harness,
+  commandOverride?: string,
 ): HarnessAvailability => {
   const name = MODEL_PROVIDERS.find((candidate) => candidate.id === provider)?.name ?? provider
   if (config.fakeAgent) {
@@ -157,8 +164,9 @@ export const harnessAvailability = (
       ? { available: true }
       : { available: false, error: `the fake agent does not play ${name}; start the box without CLOUDAGENTS_FAKE_AGENT` }
   }
-  const command = config.agentCommands?.[provider]
-  const binary = command === undefined ? MODEL_HARNESS[provider].bin : harnessBinary(command)
+  const selected = harness ?? MODEL_HARNESS[provider]
+  const command = commandOverride ?? (harness === undefined ? config.agentCommands?.[provider] : undefined)
+  const binary = command === undefined ? selected.bin : harnessBinary(command)
   if (binary === null) {
     return { available: false, error: `${name} has no command configured on this box` }
   }
@@ -166,7 +174,7 @@ export const harnessAvailability = (
   if (path === null) {
     return { available: false, error: `its CLI (${binary}) is not installed on this box` }
   }
-  const minimum = MODEL_HARNESS[provider].minVersion
+  const minimum = selected.minVersion
   if (minimum !== null && !meetsMinimum(probe.version(path), minimum)) {
     return { available: false, error: `its CLI (${binary}) must be version ${minimum.join(".")} or newer` }
   }
@@ -182,3 +190,23 @@ export const availableHarnesses = (
   probe: HarnessProbe = harnessProbe(config.sandboxPath),
 ): ReadonlyArray<ModelProvider> =>
   ModelProvider.literals.filter((provider) => harnessAvailability(provider, config, probe).available)
+
+/**
+ * Harness kinds the box can launch for routed models. Unlike `availableHarnesses`, OpenCode here means the route
+ * minimum (2.1), not the older native-free minimum; clients use it to offer only routes whose CLI is installed.
+ */
+export const availableModelHarnesses = (
+  config: HarnessConfig & { readonly sandboxPath: string | null },
+  probe: HarnessProbe = harnessProbe(config.sandboxPath),
+): ReadonlyArray<ModelHarness> => {
+  if (config.fakeAgent) return ModelHarness.literals
+  return ModelHarness.literals.filter((actual) => {
+    const definition = harnessForRoute(actual)
+    const command = actual === "antigravity" ? config.agentCommands?.google : config.agentRouteCommands?.[actual]
+    const binary = command === undefined ? definition.bin : harnessBinary(command)
+    if (binary === null) return false
+    const path = probe.which(binary)
+    if (path === null) return false
+    return definition.minVersion === null || meetsMinimum(probe.version(path), definition.minVersion)
+  })
+}
