@@ -283,6 +283,26 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
     expect(deletes).toEqual([`${managed.url}${Paths.task("managed-keep-thread")}`])
   })
 
+  test("a replaced managed box's threads are not shown for its successor", async () => {
+    const successor = "https://managed-new.test"
+    let current = { boxes: [BYOB_ENTRY], activeBoxId: BOX_ID, managedBox: { id: "managed-old", url: MANAGED } }
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json(current)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(BOX_ID)}`) return tokenFor(BOX)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken("managed-old")}`) return tokenFor(MANAGED)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken("managed-new")}`) return tokenFor(successor)
+      if (url === `${BOX}${Paths.tasks}`) return json([taskFor("user-thread")])
+      if (url === `${MANAGED}${Paths.tasks}`) return json([taskFor("old-managed-thread")])
+      if (url === `${successor}${Paths.tasks}`) return new Response("{}", { status: 500 })
+      return undefined
+    })
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["old-managed-thread", "user-thread"])
+
+    current = { ...current, managedBox: { id: "managed-new", url: successor } }
+
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["user-thread"])
+  })
+
   test("the managed box is waited for when no user box answers", async () => {
     const failing = entryFor("failing-box", "https://failing.test")
     const managed = { id: "managed-answers", url: "https://managed-answers.test" }

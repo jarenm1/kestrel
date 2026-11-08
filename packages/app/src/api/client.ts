@@ -425,14 +425,14 @@ function listAllTasks(): Promise<Task[]> {
 }
 
 /**
- * Where a box's threads are cached. `null` is Kestrel's box whichever target it has now (the managed box, or the relay),
- * the same as a thread's owner in `taskBoxes`.
+ * Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id, or `null` for the relay. The
+ * id is what keeps a replaced managed box's threads from being shown for its successor.
  */
 type BoxKey = string | null
 
-/** The key of a call's target: `null` for Kestrel's box, whether it is the managed box or the relay. */
+/** The key of a call's target: its box id, or `null` for the relay. */
 function boxKeyOf(target: Target): BoxKey {
-  return target === null || target.boxId === known?.managedBox?.id ? null : target.boxId
+  return target?.boxId ?? null
 }
 
 /** One thread list read's outcome for one box. */
@@ -520,7 +520,7 @@ function threadsNow(keys: readonly BoxKey[]): Task[] {
 async function readAllTasks(): Promise<Task[]> {
   await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
   const boxes: { readonly key: BoxKey; readonly target: Target }[] = [
-    { key: null, target: kestrelTarget() },
+    { key: boxKeyOf(kestrelTarget()), target: kestrelTarget() },
     ...(known?.boxes ?? []).map((box) => ({ key: box.id, target: { boxId: box.id, url: box.url } })),
   ]
   const answers = await settleRound(boxes.map(({ key, target }) => readBox(key, target)))
