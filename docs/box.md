@@ -235,6 +235,32 @@ Limits today:
 - TURN credentials expire after an hour. If the path then fails, the viewer reconnects and its next attempt gets a new one.
 - The peer lives with its WebSocket, so a dropped WebSocket interrupts video until it reconnects.
 
+##### TLS-only TURN regression
+
+`packages/server/scripts/test-desktop-turn-tls.ts` exercises real allocations and desktop RTP/input, not copied peer settings. Run it in an isolated Linux environment with coturn and Node 22; do not run this fixture on a production box. Ports 443, 3478 and 5349 must be unused. The fixed credentials and loopback-peer permission below are **test-only**, and the listener binds only loopback.
+
+```sh
+mkdir -p /tmp/kestrel-turn-test
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout /tmp/kestrel-turn-test/key.pem -out /tmp/kestrel-turn-test/cert.pem \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
+sudo turnserver -n --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+  --tls-listening-port=443 --listening-port=15478 --no-udp --no-tcp --no-dtls \
+  --cert=/tmp/kestrel-turn-test/cert.pem --pkey=/tmp/kestrel-turn-test/key.pem \
+  --realm=localhost --user=smoke:smoke-password --lt-cred-mech \
+  --allow-loopback-peers --no-cli --no-multicast-peers \
+  --pidfile=/tmp/kestrel-turn-test/turn.pid --log-file=stdout --relay-threads=1
+```
+
+In a second terminal, from the worktree root:
+
+```sh
+bun build packages/server/scripts/test-desktop-turn-tls.ts --target=node --outfile=/tmp/kestrel-turn-test/check.mjs
+NODE_EXTRA_CA_CERTS=/tmp/kestrel-turn-test/cert.pem node /tmp/kestrel-turn-test/check.mjs
+```
+
+The managed case must allocate TLS/443 and deliver the exact RTP payload and keyboard command through a relay-to-relay pair. The operator case must retain UDP-first ordering and get no box relay with this TLS-only fixture. Reverting managed TLS preference makes the first case fail. Stop coturn with Ctrl-C afterward and remove `/tmp/kestrel-turn-test`. On Windows, bundle to a Windows temporary file and run that bundle with Node inside WSL alongside coturn.
+
 ### Toolkits
 
 Heavy desktop apps are opt-in per task, never in `sandboxEnv`. The agent installs one with the `toolkit_install` MCP tool: `blender` (Blender) or `roblox-studio` (Roblox Studio through Vinegar, plus Rojo and Wally). The box builds the flake's `toolkit-<name>` package with `nix build` on the host (the first install on a box downloads it, which can take minutes; later ones reuse `/nix/store`), keeps the out-links under the task home in `.kestrel/toolkits/<name>/` as their GC roots, and links its executables into `.kestrel/bin`, which is last on every sandbox `PATH`, the agent's already-running shell included. Toolkits need a box started through Nix (`CLOUDAGENTS_TOOLKITS_FLAKE`, set by the flake) on x86_64 Linux; without it the agent is not offered `toolkit_install`.
