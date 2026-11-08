@@ -674,6 +674,22 @@ describe("a park or destroy the host refused for a lapse", () => {
     expect(commandsSince(before)).toHaveLength(0)
   })
 
+  test("an ingress wake does not drop an owed destroy: the destroy goes out on the next renewal after the wake", async () => {
+    const vmId = await runningBox()
+    expect(fleet.suspend("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "suspend").commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "destroy").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "suspended"))
+
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = lastCommand("host-a", "resume")
+    fleet.result("host-a", resume.commandId, true, null, vmReport("box-1", vmId, 1, "running"))
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before).map((entry) => (entry.frame as { command: NestHostCommand }).command._tag)).toEqual(["destroy"])
+  })
+
   test("an owner's newer request replaces an owed resend, which is not sent later", async () => {
     const vmId = await runningBox()
     fleet.park("alice", "box-1")

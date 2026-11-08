@@ -357,6 +357,9 @@ export class NestFleet {
     if (row.pendingId !== null) return DONE
     if (row.state !== "suspended" && row.state !== "parked") return DONE
     row.wakeWanted = true
+    // The owner's resume is a newer request: it replaces a park or destroy owed a resend.
+    row.retryKind = null
+    row.retryCount = 0
     saveNestBox(this.sql, row)
     await this.wake(boxId)
     return DONE
@@ -367,7 +370,7 @@ export class NestFleet {
     if (row === null) return NO_SUCH_BOX
     if (row.pendingId !== null) return IN_FLIGHT
     if (row.state !== "running" || row.hostId === null) return failure(409, "NotRunning", "only a running box can be suspended")
-    return this.dispatch(row, { _tag: "suspend", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
+    return this.ownerDispatch(row, { _tag: "suspend", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
   }
 
   /** Parks a running or suspended box: its host backs the volume up and releases the VM. The next wake places it. */
@@ -378,7 +381,7 @@ export class NestFleet {
     if ((row.state !== "running" && row.state !== "suspended") || row.hostId === null) {
       return failure(409, "NotRunning", "only a running or suspended box can be parked")
     }
-    return this.dispatch(row, { _tag: "park", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
+    return this.ownerDispatch(row, { _tag: "park", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
   }
 
   /** Hot-plugs or unplugs the box's GPU while it runs; only a box whose limits allow an on-demand GPU may. */
@@ -392,7 +395,7 @@ export class NestFleet {
     if (!attach && row.gpus === 0) return failure(409, "NoGpu", "this box has no GPU to detach")
     const ownerEpoch = row.ownerEpoch
     const command: NestHostCommand = attach ? { _tag: "gpuAttach", boxId, ownerEpoch } : { _tag: "gpuDetach", boxId, ownerEpoch }
-    return this.dispatch(row, command) ? DONE : HOST_OFFLINE
+    return this.ownerDispatch(row, command) ? DONE : HOST_OFFLINE
   }
 
   setLimits(login: string, boxId: string, limits: NestLimits): NestOutcome<null> {
@@ -404,7 +407,7 @@ export class NestFleet {
       saveNestBox(this.sql, row)
       return DONE
     }
-    return this.dispatch(row, { _tag: "setLimits", boxId, ownerEpoch: row.ownerEpoch, limits }) ? DONE : HOST_OFFLINE
+    return this.ownerDispatch(row, { _tag: "setLimits", boxId, ownerEpoch: row.ownerEpoch, limits }) ? DONE : HOST_OFFLINE
   }
 
   /**
@@ -420,7 +423,7 @@ export class NestFleet {
       if (host === undefined) return failure(409, "NoHost", "no Nest host is connected to delete this box")
       row.hostId = host.id
     }
-    return this.dispatch(row, { _tag: "destroy", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
+    return this.ownerDispatch(row, { _tag: "destroy", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
   }
 
   /** Whether the owner's box is running now; the automation wake waits on this. */
@@ -467,17 +470,20 @@ export class NestFleet {
    * Sends a command to the box's host and records it as in flight. When the socket refuses the frame nothing is
    * recorded, so the caller reports the failure and the box never waits on a command no host received.
    */
-  private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
-    if (!this.sendCommand(row, command)) return false
-    // A new request from the owner replaces a park or destroy owed a resend, and starts its run from zero.
+  /**
+   * Sends an owner's request. It replaces a park or destroy owed a resend, and starts its run from zero. System paths
+   * (wake, resume, limits reconciliation, the resends themselves) use `dispatch`, which leaves the owed resend alone.
+   */
+  private ownerDispatch(row: NestBoxRow, command: NestHostCommand): boolean {
+    if (!this.dispatch(row, command)) return false
     row.retryKind = null
     row.retryCount = 0
     saveNestBox(this.sql, row)
     return true
   }
 
-  /** Sends a command and records it in flight. Leaves the retry state alone: a resend owed to the box is not an owner request. */
-  private sendCommand(row: NestBoxRow, command: NestHostCommand): boolean {
+  /** Sends a command and records it in flight. Leaves the retry state alone. */
+  private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
     if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
@@ -549,7 +555,7 @@ export class NestFleet {
         kind === "park"
           ? { _tag: "park", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
           : { _tag: "destroy", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
-      if (!this.sendCommand(row, command)) {
+      if (!this.dispatch(row, command)) {
         row.retryKind = kind
         saveNestBox(this.sql, row)
       }
