@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import * as WebBrowser from "expo-web-browser";
-import { ChevronDown, Plus } from "lucide-react-native";
+import ChevronDown from "lucide-react-native/icons/chevron-down";
+import Plus from "lucide-react-native/icons/plus";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { MODEL_PROVIDERS, type CliLoginStart, type CliProvider, type Connection } from "@cloudagents/protocol";
 import { confirmDestructive } from "@/lib/confirm";

@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight } from "lucide-react-native";
+import ChevronRight from "lucide-react-native/icons/chevron-right";
 import type { CheckoutDiff } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { Alert } from "@/components/ui/Alert";

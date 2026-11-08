@@ -1,5 +1,5 @@
 import type { AgentItem, Run } from "@cloudagents/protocol"
-import { ChevronRight } from "lucide-react"
+import ChevronRight from "lucide-react/icons/chevron-right"
 import { formatMessageTime } from "./time"
 
 const TOKENS = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })

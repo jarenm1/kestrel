@@ -1,6 +1,6 @@
 import React, { type ReactNode, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
-import { Check } from "lucide-react-native";
+import Check from "lucide-react-native/icons/check";
 import { Input } from "@/components/ui/Input";
 import { colors, radius, spacing } from "@/theme";
 

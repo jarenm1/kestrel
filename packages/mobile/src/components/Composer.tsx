@@ -1,7 +1,9 @@
 import React, { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, Check, Square } from "lucide-react-native";
+import ArrowUp from "lucide-react-native/icons/arrow-up";
+import Check from "lucide-react-native/icons/check";
+import Square from "lucide-react-native/icons/square";
 import { Schema } from "effect";
 import {
   composerViewOf,

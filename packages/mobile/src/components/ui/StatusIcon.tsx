@@ -1,6 +1,11 @@
 import React, { useEffect, useRef } from "react";
 import { Animated, Easing, StyleSheet, Text, View } from "react-native";
-import { Ban, Check, CircleAlert, LoaderCircle, X, type LucideIcon } from "lucide-react-native";
+import Ban from "lucide-react-native/icons/ban";
+import Check from "lucide-react-native/icons/check";
+import CircleAlert from "lucide-react-native/icons/circle-alert";
+import LoaderCircle from "lucide-react-native/icons/loader-circle";
+import X from "lucide-react-native/icons/x";
+import type { LucideIcon } from "lucide-react-native";
 import { colors } from "@/theme";
 
 const ICON_BY_STATUS: Record<string, { icon: LucideIcon; color: string; spin?: boolean }> = {

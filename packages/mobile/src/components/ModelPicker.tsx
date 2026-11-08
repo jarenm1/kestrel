@@ -12,7 +12,10 @@ import {
   useWindowDimensions,
   type TextInputKeyPressEvent,
 } from "react-native";
-import { Check, ChevronDown, Settings2, X } from "lucide-react-native";
+import Check from "lucide-react-native/icons/check";
+import ChevronDown from "lucide-react-native/icons/chevron-down";
+import Settings2 from "lucide-react-native/icons/settings-2";
+import X from "lucide-react-native/icons/x";
 import Svg, { Circle } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {

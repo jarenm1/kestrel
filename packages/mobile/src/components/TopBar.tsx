@@ -1,6 +1,6 @@
 import React, { type ReactNode } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { PanelLeftOpen } from "lucide-react-native";
+import PanelLeftOpen from "lucide-react-native/icons/panel-left-open";
 import { KestrelMark } from "@/components/KestrelMark";
 import { Button } from "@/components/ui/Button";
 import { useShell } from "@/nav/navigation";
