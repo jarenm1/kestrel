@@ -101,9 +101,20 @@ export interface StoreShape {
    * unconfirmed: the caller must treat it as applied, not as rolled back.
    */
   readonly update: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<A, E | InternalError>
+  /**
+   * Like `update`, but an applied-yet-unconfirmed write succeeds with `_tag: "unconfirmed"` and `value` instead of failing. Use
+   * it where the caller must go on with what the update reserved: the update is applied in memory and in the file either
+   * way. `unconfirmed` means durability is not confirmed (a crash may roll the rename back); it is never a rollback.
+   */
+  readonly updateOutcome: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<UpdateOutcome<A>, E | InternalError>
   /** Resolves once every write made so far is on disk. */
   readonly flush: Effect.Effect<void>
 }
+
+/** How a write ended once its rename was attempted. `applied` is durable; `unconfirmed` is applied but not synced. */
+export type UpdateOutcome<A> =
+  | { readonly _tag: "applied"; readonly value: A }
+  | { readonly _tag: "unconfirmed"; readonly value: A; readonly cause: string }
 
 export class StateStore extends Context.Tag("cloudagents/StateStore")<StateStore, StoreShape>() {}
 
@@ -320,8 +331,8 @@ export const StateLive = Layer.effect(
     // after a write lands, so no reader sees a mutation that is still in flight or that a failed write rolls back.
     let committed: Readonly<StoreState> = structuredClone(state)
     let lane: Promise<void> = Promise.resolve()
-    const commit = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Promise<Either.Either<A, E | InternalError>> => {
-      const run = lane.then(async (): Promise<Either.Either<A, E | InternalError>> => {
+    const commit = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Promise<Either.Either<UpdateOutcome<A>, E | InternalError>> => {
+      const run = lane.then(async (): Promise<Either.Either<UpdateOutcome<A>, E | InternalError>> => {
         const snapshot = snapshotState(state)
         let result: Either.Either<A, E>
         try {
@@ -346,26 +357,33 @@ export const StateLive = Layer.effect(
         try {
           await syncDir(config.stateFile)
         } catch (e) {
-          return Either.left(
-            new InternalError({
-              message: `state update applied and visible, but its directory sync failed: durability unconfirmed, do not treat as not applied: ${String(e)}`,
-            }),
-          )
+          return Either.right({
+            _tag: "unconfirmed",
+            value: result.right,
+            cause: `state update applied and visible, but its directory sync failed: durability unconfirmed, do not treat as not applied: ${String(e)}`,
+          })
         }
-        return Either.right(result.right)
+        return Either.right({ _tag: "applied", value: result.right })
       })
       lane = run.then(() => undefined, () => undefined)
       return run
     }
 
+    const updateOutcome = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<UpdateOutcome<A>, E | InternalError> =>
+      Effect.flatMap(
+        Effect.promise(() => commit(f)),
+        (result): Effect.Effect<UpdateOutcome<A>, E | InternalError> =>
+          Either.isLeft(result) ? Effect.fail(result.left) : Effect.succeed(result.right),
+      )
+
     const shape: StoreShape = {
       read: Effect.sync(() => committed),
+      // An unconfirmed write fails here with its applied message: callers that go on with what it reserved use updateOutcome.
       update: <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<A, E | InternalError> =>
-        Effect.flatMap(
-          Effect.promise(() => commit(f)),
-          (result): Effect.Effect<A, E | InternalError> =>
-            Either.isLeft(result) ? Effect.fail(result.left) : Effect.succeed(result.right),
+        Effect.flatMap(updateOutcome(f), (outcome): Effect.Effect<A, InternalError> =>
+          outcome._tag === "applied" ? Effect.succeed(outcome.value) : Effect.fail(new InternalError({ message: outcome.cause })),
         ),
+      updateOutcome,
       flush: Effect.promise(() => lane),
     }
     return shape

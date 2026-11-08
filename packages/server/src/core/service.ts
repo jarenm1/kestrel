@@ -1648,7 +1648,9 @@ export const CoreLive = Layer.effect(
             }),
           { discard: true },
         )
-        const reserved = yield* store.update(
+        // Reserving the run is what starts it: an unconfirmed write is applied in memory and in the file, so the run is
+        // still spawned below (a failure here would strand it "running" with no process behind it).
+        const reservation = yield* store.updateOutcome(
           (
             s,
           ): Either.Either<
@@ -1724,10 +1726,6 @@ export const CoreLive = Layer.effect(
                 ...sent,
               }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
-              if (answer) {
-                liveAsks.delete(running.id)
-                seenFor(running.id).add(message.id)
-              }
               if (task.status === "needs_input" && from === null) task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
@@ -1819,8 +1817,6 @@ export const CoreLive = Layer.effect(
               // the user handing the work to another model, carries the delegation, auto-resume on or off.
               task.delegation = { ...task.delegation, runId: run.id }
             }
-            // The prompt is what the run starts with, not mail for its inbox.
-            seenFor(run.id).add(message.id)
             const asked =
               question === null
                 ? delivered
@@ -1850,7 +1846,14 @@ export const CoreLive = Layer.effect(
             })
           },
         )
+        const reserved = reservation.value
+        if (reservation._tag === "unconfirmed") yield* Effect.logWarning(`task ${taskId}: ${reservation.cause}`)
         if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
+        // In-memory bookkeeping follows the reservation, never runs inside it: the update's mutations are rolled back on a
+        // failed write, and these must not outlive them. A reply closes the question; the prompt is what a new run starts
+        // with, not mail for its inbox.
+        if (reserved.answer) liveAsks.delete(reserved.run.id)
+        if (reserved.answer || reserved.start !== null) seenFor(reserved.run.id).add(reserved.message.id)
         hub.publish({ _tag: "task.updated", task: reserved.task })
         // A title is generated beside the run, never in front of it: a slow or failed provider cannot hold up or
         // break the message. The write itself re-checks that the thread still has its provisional title.

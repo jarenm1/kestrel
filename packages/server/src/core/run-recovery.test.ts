@@ -51,6 +51,12 @@ const memoryStore = (initial: StoreState): { store: StoreShape; state: StoreStat
           if (Either.isLeft(result)) throw result.left
           return result.right
         }),
+      updateOutcome: <A, E>(f: (s: StoreState) => Either.Either<A, E>) =>
+        Effect.sync(() => {
+          const result = f(current)
+          if (Either.isLeft(result)) throw result.left
+          return { _tag: "applied" as const, value: result.right }
+        }),
       flush: Effect.void,
     },
   }
