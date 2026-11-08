@@ -222,7 +222,8 @@ providers, keeping new logins available without breaking an older decoder.
 
 CLI status and connection rows include `accounts: [{ id, account }]` and `activeAccountId` when accounts are connected;
 the existing `loggedIn`/`connected` and `account` fields describe the active login. `POST /api/cli-auth/:provider/login`
-returns the new pending `accountId`; send it with the pasted `code` to `POST /api/cli-auth/:provider/code`.
+returns the new pending `accountId`; send it with the pasted `code` to `POST /api/cli-auth/:provider/code`, and
+`POST /api/cli-auth/:provider/login/cancel` stops a pending sign-in and removes its unfinished home.
 `POST /api/cli-auth/:provider/account` with `{ accountId }` selects a connected login.
 `DELETE /api/cli-auth/:provider?accountId=<id>` disconnects one login; omitting the id targets the active login.
 
