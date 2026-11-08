@@ -1022,6 +1022,47 @@ test("a graceful shutdown interrupts a run the way a crash does, keeps its quest
   }
 }, 20_000)
 
+test("a graceful shutdown of a plain running run reloads with its task failed, as after a crash", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-shutdown-plain-"))
+  const cli = await sittingCli(root)
+  const { task, run } = runningTask("shutdown-plain")
+  const first = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(first.config.threadsDir, task.id), { recursive: true }))
+      const answered = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.stopAll()
+        const stopped = yield* store.read
+        expect(stopped.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+        // The shutdown leaves the task as it was; the next start's reconciliation is what fails it.
+        expect(stopped.tasks.find((t) => t.id === task.id)?.status).toBe("running")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(first.layer)))
+
+    const second = harnessLayer(root, cli)
+    await Effect.runPromise(Effect.gen(function* () {
+      const reloaded = yield* (yield* StateStore).read
+      expect(reloaded.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+      expect(reloaded.tasks.find((t) => t.id === task.id)?.status).toBe("failed")
+    }).pipe(Effect.provide(second.layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
 test("an explicit cancel is a user's stop: the run is cancelled, its question is dropped, and it is not a restart interruption", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-explicit-cancel-"))
   const cli = await sittingCli(root)
