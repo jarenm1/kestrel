@@ -73,7 +73,9 @@ Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<acc
 credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;
 credentials are never copied between accounts. The owner-only `.kestrel-cli-auth.json` in the user's root persists
 the selected account per provider. A different login directory starts a fresh native session with the thread's
-saved conversation rather than attempting to resume another account's session.
+saved conversation rather than attempting to resume another account's session. An unfinished attempt is marked and
+never listed as a login; a canceled, expired or failed attempt is removed with its home, and a box restart sweeps any
+left behind so later status reads do not probe them.
 
 
 ## Third-party model coverage

@@ -1,5 +1,6 @@
 import { Context, Effect, Layer, Option } from "effect"
 import { execFile, spawn, type ChildProcess } from "node:child_process"
+import { rmSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
@@ -78,6 +79,11 @@ export const CLI_ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 export const CLI_ACCOUNTS_DIR = "accounts"
 /** The selected account per provider, persisted in the user's root; both ids and provider names are validated on read. */
 export const CLI_AUTH_STATE_FILE = ".kestrel-cli-auth.json"
+/**
+ * Marks an isolated home whose sign-in attempt has not completed. A home carrying it is never a login: status skips it,
+ * and one found without a live attempt (a box process died mid-sign-in) is removed rather than probed forever.
+ */
+export const CLI_PENDING_LOGIN_MARKER = ".kestrel-pending-login"
 
 /** The home of one CLI login: the user's own root for `default`, an isolated directory for every other account. */
 export const cliAccountHome = (userRoot: string, accountId: string): string =>
@@ -243,6 +249,8 @@ interface Pending {
   readonly provider: CliProvider
   /** The fresh, isolated account this sign-in is filling; other accounts (and the active login) are untouched. */
   readonly accountId: string
+  /** That account's isolated home, removed with the attempt unless its login completes. */
+  readonly home: string
   readonly child: ChildProcess
   /** Everything the CLI has printed so far (stdout and stderr). */
   output: string
@@ -430,7 +438,11 @@ export const CliAuthLive = Layer.effect(
         }),
       )
 
-    /** The login directories on disk for one provider, `default` first. Pending, half-written accounts are included. */
+    /**
+     * The login directories on disk for one provider, `default` first. A home still marked by a sign-in attempt is not a
+     * login: a live attempt is skipped until it completes, and one left by a dead box process can never complete, so it
+     * is removed here instead of being probed by every later status, launch and discovery read.
+     */
     const listAccountIds = (user: string, provider: CliProvider): Effect.Effect<ReadonlyArray<string>, BadRequest> =>
       Effect.gen(function* () {
         const root = yield* rootOf(user)
@@ -441,7 +453,17 @@ export const CliAuthLive = Layer.effect(
         for (const entry of entries) {
           if (!entry.isDirectory()) continue
           if (entry.name === DEFAULT_CLI_ACCOUNT || !CLI_ACCOUNT_ID_PATTERN.test(entry.name)) continue
-          if (yield* isDirectory(homeProviderDir(join(accounts, entry.name), provider))) ids.push(entry.name)
+          const home = join(accounts, entry.name)
+          const pendingAttempt = yield* Effect.promise(() =>
+            stat(join(home, CLI_PENDING_LOGIN_MARKER)).then((s) => s.isFile(), () => false),
+          )
+          if (pendingAttempt) {
+            // The home belongs to one account, whichever provider's sign-in is filling it in this process.
+            const live = [...pending.values()].some((attempt) => attempt.user === user && attempt.accountId === entry.name)
+            if (!live) yield* Effect.promise(() => rm(home, { recursive: true, force: true }).catch(() => undefined))
+            continue
+          }
+          if (yield* isDirectory(homeProviderDir(home, provider))) ids.push(entry.name)
         }
         return ids.sort((left, right) =>
           left === DEFAULT_CLI_ACCOUNT ? -1 : right === DEFAULT_CLI_ACCOUNT ? 1 : left.localeCompare(right),
@@ -1023,6 +1045,10 @@ export const CliAuthLive = Layer.effect(
         while (yield* isDirectory(cliAccountHome(root, accountId))) accountId = randomUUID()
         const home = yield* accountHome(user, accountId)
         yield* ensureUserDirs(user, provider, accountId)
+        // An unfinished attempt is visibly not a login until its CLI exits successfully and the marker goes.
+        yield* Effect.promise(() =>
+          writeFile(join(home, CLI_PENDING_LOGIN_MARKER), "", { mode: 0o600 }).catch(() => undefined),
+        )
         // At most one sign-in per provider is pending: a retry cancels it, never the active login or its files.
         for (const previous of [...pending.values()]) {
           if (previous.user !== user || previous.provider !== provider) continue
@@ -1050,6 +1076,7 @@ export const CliAuthLive = Layer.effect(
           user,
           provider,
           accountId,
+          home,
           child,
           output: "",
           done,
@@ -1062,9 +1089,17 @@ export const CliAuthLive = Layer.effect(
         }
         child.stdout?.on("data", onChunk)
         child.stderr?.on("data", onChunk)
-        child.on("close", () => {
+        child.on("close", (code) => {
           clearTimeout(entry.timer)
           if (pending.get(key) === entry) pending.delete(key)
+          // The isolated home belongs to this attempt: a completed login keeps it, and an abandoned (TTL or replacement),
+          // failed or killed one is removed. Synchronous so no later read finds a half-written login to list or probe.
+          try {
+            if (code === 0) rmSync(join(home, CLI_PENDING_LOGIN_MARKER), { force: true })
+            else rmSync(home, { recursive: true, force: true })
+          } catch {
+            // The sweep in listAccountIds removes a marked home whose process died before this cleanup.
+          }
           for (const listener of entry.listeners) listener()
         })
         pending.set(key, entry)

@@ -6,7 +6,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import type { CliAuthStatus } from "@cloudagents/protocol"
 import type { ServerConfig } from "./config"
 import { Config } from "./config"
-import { CliAuth, CliAuthLive } from "./cliauth"
+import { CliAuth, CliAuthLive, CLI_PENDING_LOGIN_MARKER } from "./cliauth"
 import { limitDiscovery } from "./harness-commands"
 import { findExecutable } from "./sandbox"
 
@@ -426,6 +426,42 @@ console.log(JSON.stringify({ loggedIn: true, email: home.includes("accttwo") ? "
     expect(afterRetry).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: start.accountId })
     expect(afterRetry.accounts?.map((account) => account.id)).toEqual(["default", start.accountId])
     await run((auth) => auth.shutdown())
+  })
+
+  test("an abandoned or replaced sign-in leaves no directory to probe", async () => {
+    const root = rootFor()
+    fakeAntigravity(root, "second@example.com")
+    const run = authRuntime(root)
+    const first = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    if (first.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+    const firstHome = join(root, "users", "alice", "accounts", first.accountId)
+    expect(existsSync(join(firstHome, CLI_PENDING_LOGIN_MARKER))).toBe(true)
+
+    // A second attempt replaces the first, and the canceled attempt's home goes with it.
+    const second = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    expect(existsSync(firstHome)).toBe(false)
+    if (second.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+    const secondHome = join(root, "users", "alice", "accounts", second.accountId)
+
+    // While pending it is never listed as a login, and its live home is kept for the CLI to finish in.
+    const during = antigravity(await run((auth) => auth.status("alice")))
+    expect(during.loggedIn).toBe(false)
+    expect(during.accounts).toBeUndefined()
+    expect(existsSync(join(secondHome, CLI_PENDING_LOGIN_MARKER))).toBe(true)
+
+    const completed = await run((auth) => auth.submitCode("alice", "antigravity-cli", "good-code", second.accountId))
+    expect(completed.accounts?.map((account) => account.id)).toEqual([second.accountId])
+    expect(existsSync(join(secondHome, CLI_PENDING_LOGIN_MARKER))).toBe(false)
+  })
+
+  test("a marked home left by a dead box is removed instead of being probed", async () => {
+    const root = rootFor()
+    const leftover = join(root, "users", "alice", "accounts", "abandoned")
+    mkdirSync(join(leftover, "antigravity", "antigravity-cli"), { recursive: true })
+    writeFileSync(join(leftover, CLI_PENDING_LOGIN_MARKER), "")
+    const run = authRuntime(root)
+    expect(antigravity(await run((auth) => auth.status("alice")))).toMatchObject({ loggedIn: false, account: null })
+    expect(existsSync(leftover)).toBe(false)
   })
 })
 
