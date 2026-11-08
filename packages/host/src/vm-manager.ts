@@ -333,9 +333,10 @@ export class VmManager {
    * The outcome is stored until the control plane confirms it (`markReported`).
    *
    * A command received before the control connection dropped is refused with null: it did not run and has no outcome,
-   * because the control plane resends it on the new connection. A command received before a lease lapse, on a connection
-   * that stayed up, is refused with a failure and is not recorded, so the control plane learns of it at once and can
-   * re-place the box. Neither refusal runs the command or stores an outcome, so a later resend runs fresh.
+   * because the control plane resends it on the new connection. A command that reaches execution while the lease is
+   * lapsed, or was received before a lapse on a connection that stayed up, is refused with a failure and is not recorded,
+   * so the control plane learns of it at once and can re-place the box. Neither refusal runs the command or stores an
+   * outcome, so a later resend runs fresh.
    */
   execute(commandId: string, command: NestHostCommand): Promise<ExecutedCommand | null> {
     const connection = this.connectionGeneration
@@ -344,7 +345,7 @@ export class VmManager {
       const stored = findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
       if (connection !== this.connectionGeneration) return null
-      if (lease !== this.leaseGeneration) {
+      if (lease !== this.leaseGeneration || Date.now() >= this.leaseUntil) {
         const outcome: CommandOutcome = {
           commandId,
           boxId: command.boxId,

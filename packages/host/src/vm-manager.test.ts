@@ -71,6 +71,31 @@ describe("commands received before the lease lapsed or the connection dropped", 
     expect(applied).toEqual(["resume"])
   })
 
+  test("a command received during a lapse the tick already fenced is refused with a failure, not recorded, and runs after renewal", async () => {
+    const { manager, applied } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    ;(manager as unknown as { tick: () => void }).tick()
+    const during = await manager.execute("cmd-resume", resumeCommand(1))
+    expect(during?.outcome).toMatchObject({ commandId: "cmd-resume", ok: false })
+    expect(manager.pendingResults()).toEqual([])
+    expect(applied).toEqual([])
+    manager.setLease(Date.now() + 60_000)
+    const after = await manager.execute("cmd-resume", resumeCommand(1))
+    expect(after?.outcome).toMatchObject({ commandId: "cmd-resume", ok: true })
+    expect(applied).toEqual(["resume"])
+  })
+
+  test("a command that reaches execution during a lapse nothing has observed yet is refused, not recorded", async () => {
+    const { manager, applied } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    const during = await manager.execute("cmd-resume", resumeCommand(1))
+    expect(during?.outcome).toMatchObject({ commandId: "cmd-resume", ok: false })
+    expect(manager.pendingResults()).toEqual([])
+    expect(applied).toEqual([])
+  })
+
   test("a command already answered returns its stored outcome across a reconnect, without running again", async () => {
     const { manager, applied, open } = fixture()
     open()
