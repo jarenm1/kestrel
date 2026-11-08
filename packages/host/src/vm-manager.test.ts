@@ -113,6 +113,17 @@ describe("commands received before the lease lapsed or the connection dropped", 
     expect(applied).toEqual(["resume"])
   })
 
+  test("an operator command runs after a connection drop and a lapse: it is a request made on the host, not from control", async () => {
+    const { manager, applied, open } = fixture()
+    open()
+    manager.setLease(Date.now() + 60_000)
+    manager.connectionLost()
+    manager.setLease(Date.now() - 1)
+    const operator = await manager.executeOperator("cmd-operator", destroyCommand(1))
+    expect(operator.outcome).toMatchObject({ commandId: "cmd-operator", ok: true })
+    expect(applied).toEqual(["destroy"])
+  })
+
   test("a command already answered returns its stored outcome across a reconnect, without running again", async () => {
     const { manager, applied, open } = fixture()
     open()
