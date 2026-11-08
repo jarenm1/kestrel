@@ -4,6 +4,7 @@ import { join } from "node:path"
 import {
   GUEST_REPLY_TIMEOUT_MS,
   GUEST_STATUS_INTERVAL_MS,
+  NEST_LAPSE_REFUSAL,
   NEST_SWAP_SERIAL,
   NEST_VOLUME_SERIAL,
   type BoxActivity,
@@ -357,7 +358,7 @@ export class VmManager {
           commandId,
           boxId: command.boxId,
           ok: false,
-          error: "control lease lapsed before the command ran",
+          error: NEST_LAPSE_REFUSAL,
           reported: false,
         }
         return { outcome, vm: this.reportOf(command.boxId) }

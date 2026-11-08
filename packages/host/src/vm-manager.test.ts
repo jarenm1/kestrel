@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { NEST_LAPSE_REFUSAL } from "@cloudagents/protocol"
 import { chmodSync, mkdirSync, rmSync } from "node:fs"
 import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
 
@@ -144,7 +145,7 @@ describe("commands received before the lease lapsed or the connection dropped", 
     manager.setLease(Date.now() + 60_000)
     manager.setLease(Date.now() - 1)
     const refused = await manager.execute(`cmd-${command._tag}`, command)
-    expect(refused?.outcome).toMatchObject({ commandId: `cmd-${command._tag}`, ok: false, error: "control lease lapsed before the command ran" })
+    expect(refused?.outcome).toMatchObject({ commandId: `cmd-${command._tag}`, ok: false, error: NEST_LAPSE_REFUSAL })
     expect(applied).toEqual([])
     expect(manager.pendingResults()).toEqual([])
   })

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { NEST_LAPSE_REFUSAL } from "@cloudagents/protocol"
 import { chmodSync, mkdirSync, rmSync } from "node:fs"
 import { WebSocketServer, type WebSocket } from "ws"
 import { ControlLink } from "./control-link"
@@ -156,7 +157,7 @@ describe("control link with the real manager", () => {
     fixture.open()
 
     await waitFor(() => resultFor(peer, "cmd-stale") !== undefined, "failure result for the refused command")
-    expect(resultFor(peer, "cmd-stale")).toMatchObject({ ok: false, error: "control lease lapsed before the command ran" })
+    expect(resultFor(peer, "cmd-stale")).toMatchObject({ ok: false, error: NEST_LAPSE_REFUSAL })
     expect(resultFor(peer, "cmd-busy")).toMatchObject({ ok: true })
     expect(fixture.applied).toEqual(["destroy"])
     expect(fixture.manager.pendingResults().map((outcome) => outcome.commandId)).toEqual([])
