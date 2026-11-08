@@ -65,8 +65,9 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // Sidebar starts collapsed: chat is full width, and tab content only mounts while expanded,
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
-  // Collapsing on a wide screen, the panel stays mounted while it slides out; the width transition's end clears this.
-  const [closing, setClosing] = useState(false)
+  // Opening or closing on a wide screen: only then does the column's width transition, so window resizes and the
+  // resize handle stay instant. Closing, the panel stays mounted while it slides out; the transition's end clears this.
+  const [sliding, setSliding] = useState(false)
   const animated = useSidebarAnimation()
   const [tab, setTab] = useState<TabId>("desktop")
   // Elements picked in the preview, waiting in the composer to go with the next message.
@@ -81,21 +82,22 @@ export function ThreadView({ taskId }: { taskId: string }) {
   useEffect(() => {
     if (state.desktopOpens === 0) return
     setTab("desktop")
-    setOpen(true)
+    toggle(true)
   }, [state.desktopOpens])
+
+  function toggle(next: boolean) {
+    if (next === open) return
+    setOpen(next)
+    setSliding(animated)
+  }
 
   function openTab(next: TabId) {
     setTab(next)
-    setOpen(true)
-  }
-
-  function close() {
-    setOpen(false)
-    setClosing(animated)
+    toggle(true)
   }
 
   function onSlideEnd(e: TransitionEvent<HTMLDivElement>) {
-    if (e.target === e.currentTarget) setClosing(false)
+    if (e.target === e.currentTarget) setSliding(false)
   }
 
   /** Dragging the handle: the sidebar spans from the pointer to the thread's right edge. */
@@ -150,7 +152,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
       <div
         className={cn(
           "relative shrink-0",
-          animated && !resizing && "transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
+          sliding && "transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
         )}
         style={{ width: open ? openWidth : RAIL_WIDTH }}
         onTransitionEnd={onSlideEnd}
@@ -188,7 +190,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
         {/* Pinned to the right edge at its final width and clipped by the column, the panel slides in from the
             right instead of squeezing its content. */}
         <div className="absolute inset-0 overflow-hidden">
-          {(open || closing) && (
+          {(open || sliding) && (
             <aside
               inert={!open}
               className={cn(
@@ -231,7 +233,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
                   )}
                 </div>
                 <ThreadRepoButton checkouts={checkouts} />
-                <Button variant="ghost" size="icon" aria-label="Collapse sidebar" onClick={close}>
+                <Button variant="ghost" size="icon" aria-label="Collapse sidebar" onClick={() => toggle(false)}>
                   <PanelRightClose />
                 </Button>
               </div>
@@ -252,7 +254,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
               )}
               style={{ width: RAIL_WIDTH }}
             >
-              <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => setOpen(true)}>
+              <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => toggle(true)}>
                 <PanelRightOpen />
               </Button>
               {SIDEBAR_TABS.map((t) => (
