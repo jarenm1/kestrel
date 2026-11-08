@@ -1,4 +1,5 @@
 import type { AgentItem, Run } from "@cloudagents/protocol"
+import { ChevronRight } from "lucide-react"
 import { formatMessageTime } from "./time"
 
 const TOKENS = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 })
@@ -40,10 +41,13 @@ export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem
     : responses.reduce((sum, item) => sum + item.cachedTokens!, 0)
   const label = run.interruptedByRestart ? "Interrupted by restart" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Worked"
   return (
-    <details className="text-[11px] text-muted-foreground tabular-nums">
-      <summary className="w-fit cursor-pointer rounded-sm hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70">
-        {label}{measured ? ` for ${duration(elapsed)}` : ""}
-        {run.endedAt !== null && <><span aria-hidden="true"> · </span><time dateTime={run.endedAt}>{formatMessageTime(run.endedAt)}</time></>}
+    <details className="group/run text-[11px] text-muted-foreground tabular-nums">
+      <summary className="group/row flex w-fit cursor-pointer list-none items-center gap-2 rounded-sm text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 [&::-webkit-details-marker]:hidden">
+        <span>
+          {label}{measured ? ` for ${duration(elapsed)}` : ""}
+          {run.endedAt !== null && <><span aria-hidden="true"> · </span><time dateTime={run.endedAt}>{formatMessageTime(run.endedAt)}</time></>}
+        </span>
+        <ChevronRight aria-hidden="true" className="size-3.5 shrink-0 opacity-0 transition group-hover/row:opacity-100 group-focus-visible/row:opacity-100 group-open/run:rotate-90 group-open/run:opacity-100" />
       </summary>
       <dl className="mt-2 grid w-fit grid-cols-[auto_auto] gap-x-5 gap-y-1">
         <dt>Elapsed (wall-clock)</dt><dd title="Includes queueing, startup, tools and waiting">{measured ? duration(elapsed) : "Not reported"}</dd>

@@ -190,6 +190,8 @@ milliseconds below one second, tenths below ten seconds, then seconds/minutes/ho
 the unit. Failed and stopped runs retain their status and measured elapsed time. Restart-reconciled runs show
 “Interrupted by restart” without counting downtime as work; missing or invalid boundaries never invent a duration.
 The completion clock stays on the collapsed row. Steering splits the content but not the run summary.
+The row keeps its muted color and uses the thinking block's trailing 14px caret: revealed on hover or keyboard
+focus, rotated down and kept visible while open.
 Saved replies without loaded transcript items keep the summary after their answer.
 
 Expanding the disclosure reveals elapsed time, total input (including cache), cached input where reported,
