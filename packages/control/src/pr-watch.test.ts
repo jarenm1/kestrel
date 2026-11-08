@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, mock, spyOn, test } from "bun:test"
-import { BOX_USER_HEADER } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, BOX_USER_HEADER } from "@cloudagents/protocol"
 import type { Env } from "./env"
 
 mock.module("cloudflare:workers", () => ({ DurableObject: class {} }))
@@ -28,16 +28,24 @@ const stub = {
   getUser: async (login: string) => (login === "octo" ? { login } : null),
   credentials: async () => ({ github: "gh-token" }),
   boxCall: async () => boxAnswer,
+  managedBoxAuthorize: async (boxId: string, secret: string, login: string) =>
+    boxId === "managed" && secret === "managed-secret" && login === "octo"
+      ? { ok: true, value: null }
+      : { ok: false, status: 401, tag: "Unauthorized", message: "invalid box credentials" },
 }
 const env = {
-  BOX_TOKEN: "relay-secret",
   HUB: { idFromName: () => "main", get: () => stub },
 } as unknown as Env
 
 const watch = (): Promise<Response> =>
   worker.fetch(new Request("https://app.example/box/automations/pr-watch", {
     method: "POST",
-    headers: { authorization: "Bearer relay-secret", "content-type": "application/json", [BOX_USER_HEADER]: "octo" },
+    headers: {
+      authorization: "Bearer managed-secret",
+      "content-type": "application/json",
+      [BOX_ID_HEADER]: "managed",
+      [BOX_USER_HEADER]: "octo",
+    },
     body: JSON.stringify({ taskId: TASK_ID, repo: REPO, number: pr.number }),
   }), env)
 

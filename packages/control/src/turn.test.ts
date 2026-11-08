@@ -21,7 +21,6 @@ const HUB = { idFromName: () => "main", get: () => stub }
 
 const envWith = (vars: Partial<Env> = {}): Env =>
   ({
-    BOX_TOKEN: "relay-secret",
     KESTREL_TURN_KEY_ID: "turn-key",
     KESTREL_TURN_API_TOKEN: "provider-token",
     HUB,
@@ -71,7 +70,7 @@ afterEach(() => {
 const send = (headers: Record<string, string> = {}, overrides: Env = env): Promise<Response> =>
   worker.fetch(new Request(`https://app.example${BOX_TURN_PATH}`, { method: "POST", headers }), overrides)
 
-const relayHeaders = { authorization: "Bearer relay-secret" }
+const unknownHeaders = { authorization: "Bearer unknown" }
 const managedHeaders = { authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "managed-1" }
 const byobHeaders = { authorization: "Bearer byob-secret", [BOX_ID_HEADER]: "byob-1" }
 
@@ -81,25 +80,26 @@ describe("POST /box/turn", () => {
     expect(unauthorized.status).toBe(401)
     expect(await unauthorized.json()).toMatchObject({ issue: "control-rejected" })
     expect((await send({ authorization: "Bearer wrong" })).status).toBe(401)
+    expect((await send(unknownHeaders)).status).toBe(401)
     // An id without a secret, or a secret for a box in neither registry.
     expect((await send({ authorization: "Bearer managed-secret" })).status).toBe(401)
     expect((await send({ authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "byob-1" })).status).toBe(401)
     expect((await send({ authorization: "Bearer not-the-secret", [BOX_ID_HEADER]: "byob-1" })).status).toBe(401)
     expect(
-      (await worker.fetch(new Request(`https://app.example${BOX_TURN_PATH}`, { method: "GET", headers: relayHeaders }), env))
+      (await worker.fetch(new Request(`https://app.example${BOX_TURN_PATH}`, { method: "GET", headers: managedHeaders }), env))
         .status,
     ).toBe(405)
     expect(calls).toHaveLength(0)
   })
 
-  test("issues credentials to the relay box, a managed box and a registered user box", async () => {
+  test("issues credentials to a managed box and a registered user box", async () => {
     setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
     const now = Date.now()
 
-    const relay = await send(relayHeaders)
-    expect(relay.status).toBe(200)
-    expect(relay.headers.get("cache-control")).toBe("no-store")
-    const credentials = Schema.decodeUnknownSync(BoxTurnCredentials)(await relay.json())
+    const first = await send(managedHeaders)
+    expect(first.status).toBe(200)
+    expect(first.headers.get("cache-control")).toBe("no-store")
+    const credentials = Schema.decodeUnknownSync(BoxTurnCredentials)(await first.json())
     expect(credentials.expiresAt).toBe(now + TURN_CREDENTIAL_TTL_SECONDS * 1000)
     expect(credentials.iceServers).toEqual(ICE_SERVERS)
 
@@ -113,14 +113,10 @@ describe("POST /box/turn", () => {
     expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal)
     expect(JSON.stringify(credentials)).not.toContain("provider-token")
 
-    const managed = await send(managedHeaders)
-    expect(managed.status).toBe(200)
-    expect(Schema.is(BoxTurnCredentials)(await managed.json())).toBe(true)
-
     const byob = await send(byobHeaders)
     expect(byob.status).toBe(200)
     expect(Schema.is(BoxTurnCredentials)(await byob.json())).toBe(true)
-    expect(calls).toHaveLength(3)
+    expect(calls).toHaveLength(2)
   })
 
   test("answers 204 without a provider and 502 when only half of it is configured", async () => {

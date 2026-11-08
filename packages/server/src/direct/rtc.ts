@@ -7,13 +7,13 @@ import {
   decodeFrame,
   encodeFrame,
   fragmentMessage,
-  type RelayFrame,
+  type ChannelFrame,
   type RtcMessage,
   type WebRtcAnswer,
   type WebRtcOffer,
 } from "@cloudagents/protocol"
 import { CLOSE_NOT_FOUND, serveStream, streamRoute, type WsServices } from "../http/streams"
-import { RelayStream } from "../relay/stream"
+import { ChannelStream } from "./stream"
 import { serveTunnelHttp, TUNNEL_ORIGIN, type TunnelIdentity } from "../tunnel"
 import type { BoxActivitySink } from "./box-activity"
 
@@ -45,14 +45,14 @@ const MAX_CHANNELS = 16
 const OPEN_TIMEOUT_MS = 30_000
 const ICE_SERVERS = RTC_ICE_SERVERS.map((urls) => ({ urls }))
 
-/** Runs the relay frame protocol over the browser's data channel, with the channel's identity. */
+/** Runs the channel frame protocol over the browser's data channel, with the channel's identity. */
 const serveChannel = (
   deps: RtcDeps,
   identity: TunnelIdentity,
   dc: RTCDataChannel,
   closeChannel: () => void,
 ): void => {
-  const streams = new Map<number, RelayStream>()
+  const streams = new Map<number, ChannelStream>()
   const reassembler = new RtcReassembler()
 
   const send = (data: string | Uint8Array): void => {
@@ -62,7 +62,7 @@ const serveChannel = (
     }
   }
 
-  const dispatch = (frame: RelayFrame): void => {
+  const dispatch = (frame: ChannelFrame): void => {
     switch (frame.t) {
       case "http":
         // Every tunnelled HTTP request is a request the signed-in user made now, however old the channel is.
@@ -80,7 +80,7 @@ const serveChannel = (
           send(encodeFrame({ t: "ws-close", id: frame.id, code: CLOSE_NOT_FOUND, reason: "not found" }))
           return
         }
-        const stream = new RelayStream(frame.id, send)
+        const stream = new ChannelStream(frame.id, send)
         streams.set(frame.id, stream)
         stream.onClose(() => streams.delete(frame.id))
         Runtime.runFork(deps.runtime)(serveStream(route, identity.user, stream))
@@ -95,7 +95,6 @@ const serveChannel = (
       case "ping":
         send(encodeFrame({ t: "pong" }))
         return
-      case "hello":
       case "http-res":
       case "pong":
         return
@@ -112,7 +111,7 @@ const serveChannel = (
       Effect.runSync(Effect.logWarning(`webrtc: ${err instanceof Error ? err.message : String(err)}`))
       return closeChannel()
     }
-    // Binary messages would carry WebSocket binary payloads, which no local handler accepts (see relay/client.ts).
+    // Binary messages would carry WebSocket binary payloads, which no local handler accepts (the channel only carries text).
     if (message === null || !message.text || typeof message.data !== "string") return
     const frame = decodeFrame(message.data)
     if (frame === null) {

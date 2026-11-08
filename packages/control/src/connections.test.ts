@@ -58,12 +58,12 @@ test("installed clients see OpenCode as a CLI login that is signed out", async (
 })
 
 test("updated clients replace legacy box state with their selected box's CLI logins", async () => {
-  const relay: readonly Connection[] = [
+  const stored: readonly Connection[] = [
     { provider: "anthropic", label: "Anthropic", kind: "apikey", connected: true, account: "saved-key", available: true },
     { provider: "opencode", label: "OpenCode", kind: "cli", connected: false, account: null, available: false, error: "not installed on the managed box" },
     { provider: "opencode-go", label: "OpenCode Go", kind: "cli", connected: false, account: null, available: false, error: "not installed on the managed box" },
   ]
-  const selected = connectionsForBox(relay, {
+  const selected = connectionsForBox(stored, {
     cliAuth: [
       { provider: "opencode", loggedIn: true, account: null },
       { provider: "opencode-go", loggedIn: true, account: null },
@@ -74,17 +74,17 @@ test("updated clients replace legacy box state with their selected box's CLI log
   expect(selected.find((row) => row.provider === "opencode-go")).toMatchObject({ connected: true, available: true })
   expect(selected.find((row) => row.provider === "opencode-go")?.error).toBeUndefined()
   expect(selected.find((row) => row.provider === "opencode")).toMatchObject({ connected: true, available: true })
-  expect(selected.find((row) => row.provider === "anthropic")).toEqual(relay[0]!)
+  expect(selected.find((row) => row.provider === "anthropic")).toEqual(stored[0]!)
 })
 
 test("retired standalone harness rows never reach the selected box's connections", () => {
-  const relay: readonly Connection[] = [
+  const stored: readonly Connection[] = [
     { provider: "omp", label: "OMP", kind: "cli", connected: true, account: null, available: true },
     { provider: "pi", label: "Pi", kind: "cli", connected: true, account: null, available: true },
     { provider: "hermes", label: "Hermes", kind: "cli", connected: true, account: null, available: true },
   ]
   // Capabilities listing the harness no longer invents a connected OpenCode row.
-  const selected = connectionsForBox(relay, { cliAuth: [], harnesses: ["opencode"] })
+  const selected = connectionsForBox(stored, { cliAuth: [], harnesses: ["opencode"] })
   expect(selected).toEqual([])
 })
 

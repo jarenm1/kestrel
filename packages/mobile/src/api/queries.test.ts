@@ -72,12 +72,12 @@ test("box clients isolate caches even for identical task and run IDs", () => {
   ]) expect(left).not.toEqual(right);
 });
 
-test("relay and changed direct routes do not share a box scope", () => {
+test("an absent box and changed direct routes do not share a box scope", () => {
   const client = (box: { id: string; url: string } | null) => createApiClient("https://control.example", "session", box);
-  const relay = client(null);
+  const absent = client(null);
   const first = client({ id: "box", url: "https://one.example" });
   const moved = client({ id: "box", url: "https://two.example" });
-  expect(new Set([relay.boxScope, first.boxScope, moved.boxScope]).size).toBe(3);
+  expect(new Set([absent.boxScope, first.boxScope, moved.boxScope]).size).toBe(3);
   expect([...createQueries(first).tasks().queryKey]).toEqual([...boxKeys(first.boxScope).tasks]);
 });
 

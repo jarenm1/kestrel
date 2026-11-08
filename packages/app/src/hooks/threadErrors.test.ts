@@ -6,13 +6,13 @@ const cached = (error: unknown = null) => ({ data: [], error })
 const cold = (error: unknown) => ({ data: undefined, error })
 
 for (const status of [502, 503, 504]) {
-  test(`application ${status} remains visible; only explicit relay failures are suppressed`, () => {
+  test(`application ${status} remains visible; only explicit box failures are suppressed`, () => {
     const application = responseError(status, JSON.stringify({ _tag: "BadGateway", message: "upstream provider unavailable" }), "")
-    const relay = responseError(status, JSON.stringify({ _tag: "BoxOffline", message: "agent box unreachable" }), "")
+    const boxFailure = responseError(status, JSON.stringify({ _tag: "BoxOffline", message: "agent box unreachable" }), "")
     expect(isUnreachableError(application)).toBe(false)
-    expect(isUnreachableError(relay)).toBe(true)
+    expect(isUnreachableError(boxFailure)).toBe(true)
     expect(threadErrors([cached(application)], false, false).error).toBe("upstream provider unavailable")
-    expect(threadErrors([cached(relay)], true, false)).toEqual({ error: null, loadError: null })
+    expect(threadErrors([cached(boxFailure)], true, false)).toEqual({ error: null, loadError: null })
     expect(isUnreachableError(new ApiError(status, "untagged failure"))).toBe(false)
   })
 }

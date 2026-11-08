@@ -57,7 +57,7 @@ const LINK_TIMEOUT_MS = 20_000
 const CODE_TIMEOUT_MS = 60_000
 /** A sign-in that is not finished within this is killed. */
 const PENDING_TTL_MS = 15 * 60_000
-/** Native model discovery's whole answer must fit the relay's request budget; each child is bounded below this too. */
+/** Native model discovery's whole answer must fit a request budget; each child is bounded below this too. */
 const NATIVE_DISCOVERY_BUDGET_MS = 17_000
 /** One CLI's model-discovery child, before the remaining overall budget shortens it. */
 const PER_CLI_DISCOVERY_TIMEOUT_MS = 15_000

@@ -284,7 +284,7 @@ const TEXT_GENERATION_DESC =
 /**
  * The active box's route. A box switch remounts the form, so no state from another box can survive it. When Kestrel's
  * box is active (`activeBoxId === null`), `targetBoxId` names the managed box itself so a write can be pinned to it;
- * null stays only for the legacy relay, which has no box id to pin.
+ * null stays only when none is assigned: there is no box id to pin.
  */
 function activeBoxRoute(list: BoxList): { key: string; targetBoxId: string | null } {
   const active = list.activeBoxId

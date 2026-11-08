@@ -160,11 +160,9 @@ export interface ServerConfig {
    */
   readonly agentRouteCommands: Record<RouteHarness, string>
   readonly fakeAgent: boolean
-  /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
-  readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
   /**
-   * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box without
-   * the relay. Null unless the box has an id and a secret (`CLOUDAGENTS_BOX_SECRET`, or the stored Nest secret). `managed`
+   * Registered mode: the box's own control-plane lookups and box-token verification. Null unless the box has an id
+   * and a secret (`CLOUDAGENTS_BOX_SECRET`, or the stored Nest secret). `managed`
    * (`CLOUDAGENTS_BOX_MANAGED=1`) marks a Kestrel fleet box that serves many users; otherwise it is the user's own box.
    */
   readonly direct: {
@@ -320,7 +318,6 @@ export const loadConfig = (): ServerConfig => {
     port,
     host,
     sandboxPort,
-    relay: loadRelay(controlUrl, direct),
     direct,
     nest: loadNest(),
     mcpBaseUrl: `http://127.0.0.1:${sandboxPort}`,
@@ -469,8 +466,9 @@ const loadControlUrl = (): string | null => {
 }
 
 /**
- * Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. A managed box
- * (`CLOUDAGENTS_BOX_MANAGED=1`) must have all three.
+ * A registered box needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. A managed
+ * box (`CLOUDAGENTS_BOX_MANAGED=1`) must have all three. `CLOUDAGENTS_CONTROL_URL` without a box id and secret is a
+ * misconfiguration now that the box no longer dials a relay.
  */
 const loadDirect = (controlUrl: string | null, dataDir: string): ServerConfig["direct"] => {
   const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
@@ -481,25 +479,17 @@ const loadDirect = (controlUrl: string | null, dataDir: string): ServerConfig["d
       "CLOUDAGENTS_BOX_MANAGED=1 requires CLOUDAGENTS_BOX_ID, CLOUDAGENTS_BOX_SECRET and CLOUDAGENTS_CONTROL_URL",
     )
   }
-  if (boxId === "" && boxSecret === "") return null
+  if (boxId === "" && boxSecret === "") {
+    if (controlUrl !== null) {
+      throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET are required when CLOUDAGENTS_CONTROL_URL is set")
+    }
+    return null
+  }
   if (boxId === "" || boxSecret === "") {
     throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
   }
   if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
   return { controlUrl, boxId, boxSecret, managed }
-}
-
-/** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */
-const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): ServerConfig["relay"] => {
-  const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
-  if (boxToken === "") {
-    if (controlUrl !== null && direct === null) {
-      throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set without CLOUDAGENTS_BOX_ID")
-    }
-    return null
-  }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
-  return { controlUrl, boxToken }
 }
 
 /** `NEST_BOX_ENV.guestAgentSocket`: present only on a Nest VM. */

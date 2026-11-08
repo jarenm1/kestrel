@@ -23,7 +23,7 @@ import { colors, fonts, radius, spacing } from "@/theme";
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
   const { api } = useApiClient();
-  // Automations run on Kestrel's managed box (directly, or relayed); a user's own box cannot run them.
+  // Automations run on Kestrel's managed box directly; a user's own box cannot run them.
   const { activeBoxId } = useAuth();
   const unavailable = activeBoxId !== null;
   const queries = useMemo(() => createQueries(api), [api]);

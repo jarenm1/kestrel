@@ -225,7 +225,7 @@ app.devin.ai page it links. The catalog offers Devin's Adaptive router and SWE-1
 
 The box reports runnable providers in `GET /api/capabilities` (`harnesses`). Both clients combine Worker-stored
 connection metadata with CLI logins and capabilities from the **selected box**. A BYOB box never inherits the
-managed/relay box's availability. Switching boxes resets or scopes connection caches; an unreachable box leaves
+another box's availability. Switching boxes resets or scopes connection caches; an unreachable box leaves
 stored accounts manageable while its CLI rows become unavailable.
 
 `GET /api/connections` reports CLI-login state for installed clients, including the OpenCode account rather than

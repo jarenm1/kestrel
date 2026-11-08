@@ -28,7 +28,6 @@ const stub = {
   session: async (id: string) => (id === "operator" ? { login: "operator" } : id === "user" ? { login: "user" } : null),
 }
 const env = {
-  BOX_TOKEN: "relay-secret",
   KESTREL_OPERATORS: "operator",
   HUB: { idFromName: () => "main", get: () => stub },
 } as unknown as Env
@@ -46,7 +45,7 @@ describe("box activity ingestion", () => {
 
     expect((await send(managed)).status).toBe(204)
     expect((await send(managed, snapshot([]))).status).toBe(204)
-    // The legacy shared relay token is not managed-box proof.
+    // A foreign token is not managed-box proof.
     expect((await send({ authorization: "Bearer relay-secret", [BOX_ID_HEADER]: "managed" })).status).toBe(401)
     expect((await send({ authorization: "Bearer wrong", [BOX_ID_HEADER]: "managed" })).status).toBe(401)
     expect((await send({ authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "user-box" })).status).toBe(401)

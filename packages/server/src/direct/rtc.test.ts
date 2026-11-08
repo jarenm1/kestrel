@@ -8,7 +8,7 @@ import {
   decodeFrame,
   encodeFrame,
   fragmentMessage,
-  type RelayFrame,
+  type ChannelFrame,
 } from "@cloudagents/protocol"
 import type { WsServices } from "../http/streams"
 import type { BoxActivitySink } from "./box-activity"
@@ -20,10 +20,10 @@ const webHandler = async (request: Request): Promise<Response> =>
 
 const nowSeconds = (): number => Math.floor(Date.now() / 1000)
 
-/** A browser-side channel: sends relay frames and collects the box's replies by id. */
+/** A browser-side channel: sends channel frames and collects the box's replies by id. */
 class Browser {
   private readonly reassembler = new RtcReassembler()
-  private readonly replies = new Map<number, (frame: RelayFrame) => void>()
+  private readonly replies = new Map<number, (frame: ChannelFrame) => void>()
   private readonly pongs: Array<() => void> = []
   private nextId = 1
 
@@ -37,7 +37,7 @@ class Browser {
     }
   }
 
-  private sendFrame(frame: RelayFrame): void {
+  private sendFrame(frame: ChannelFrame): void {
     const encoded = encodeFrame(frame)
     for (const fragment of fragmentMessage({ text: true, data: encoded })) {
       this.dc.send(Buffer.from(fragment.buffer, fragment.byteOffset, fragment.byteLength))
@@ -45,9 +45,9 @@ class Browser {
   }
 
   /** Sends one GET /whoami and resolves with the reply. */
-  whoami(): Promise<RelayFrame> {
+  whoami(): Promise<ChannelFrame> {
     const id = this.nextId++
-    const { promise, resolve } = Promise.withResolvers<RelayFrame>()
+    const { promise, resolve } = Promise.withResolvers<ChannelFrame>()
     this.replies.set(id, resolve)
     this.sendFrame({ t: "http", id, method: "GET", path: "/whoami", headers: {} })
     return promise

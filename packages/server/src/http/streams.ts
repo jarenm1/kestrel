@@ -10,7 +10,7 @@ import { ActivityTracker } from "../platform/tracker"
 export type WsServices = CoreService | DesktopManager | EventHub | Config | TaskStatsService | ActivityTracker
 
 /**
- * One bidirectional stream to a browser, tunnelled through the control plane relay.
+ * One bidirectional stream to a browser, tunnelled over a channel.
  * Sends on a closed socket are dropped.
  */
 export interface StreamSocket {
@@ -34,7 +34,7 @@ const EVENTS_PATH = /^\/api\/tasks\/([^/]+)\/events$/
 const DESKTOP_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/stream$/
 const PREVIEW_PATH = /^\/api\/tasks\/([^/]+)\/preview(?:\/.*)?$/
 
-/** Maps a relayed WebSocket URL to its thread stream route. */
+/** Maps a channel WebSocket URL to its thread stream route. */
 export const streamRoute = (pathname: string, requestPath = pathname, protocol?: string): StreamRoute | null => {
   if (pathname === USER_EVENTS_PATH) return { kind: "user-events" }
   const events = EVENTS_PATH.exec(pathname)
@@ -287,7 +287,7 @@ const routeStream = (route: StreamRoute, user: string, socket: StreamSocket): Ef
 export const serveStream = (route: StreamRoute, user: string, rawSocket: StreamSocket): Effect.Effect<void, never, WsServices> =>
   Effect.gen(function* () {
     const tracker = yield* ActivityTracker
-    // Forwarded one by one: RelayStream's methods live on its prototype, where an object spread would drop them.
+    // Forwarded one by one: ChannelStream's methods live on its prototype, where an object spread would drop them.
     const socket: StreamSocket = {
       sendText: (data) => rawSocket.sendText(data),
       close: (code, reason) => rawSocket.close(code, reason),

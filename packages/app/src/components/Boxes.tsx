@@ -15,7 +15,7 @@ import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
 import { errorText, formatSize } from "@/util"
 
-/** Kestrel's managed box: its own health, reached directly (Kestrel's box is the relay's only while none is assigned). */
+/** Kestrel's managed box: its own health, reached directly (absent until one is assigned). */
 function ManagedOnline({ url }: { url: string }) {
   const health = useQuery(queries.boxHealth(url))
   return <OnlineBadge online={health.data?.online} />

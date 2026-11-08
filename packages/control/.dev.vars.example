@@ -1,7 +1,7 @@
 # Copy to packages/control/.dev.vars for `wrangler dev`. Never commit .dev.vars.
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
-BOX_TOKEN=
+
 # Comma-separated GitHub logins that manage the managed-box fleet (/api/fleet/boxes). Empty: no operators.
 KESTREL_OPERATORS=
 # Cloudflare Realtime TURN key id and API token, for POST /box/turn. Set both or neither; the token is never sent to a box.

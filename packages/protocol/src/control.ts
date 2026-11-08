@@ -4,8 +4,8 @@ import { AgentModel, type ModelProvider } from "./models"
 import { NestBoxStatus } from "./nest"
 
 /**
- * Control-plane API served by the Worker itself (not relayed to the box).
- * Box-specific paths such as `cliAuth` use the selected box directly, or its relay when no direct box is selected.
+ * Control-plane API served by the Worker itself.
+ * Box-specific paths such as `cliAuth` are served by the selected box directly.
  * Requests authenticate with the `session` cookie set by the GitHub OAuth callback;
  * unauthenticated `/api/*` requests get 401 `{ _tag: "Unauthorized", message }`.
  */
@@ -20,22 +20,11 @@ export const ControlPaths = {
   connectOAuth: (provider: string) => `/auth/connect/${provider}`,
   /** GET: OAuth callback for connections. */
   connectCallback: (provider: string) => `/auth/connect/${provider}/callback`,
-  /**
-   * POST (no body) -> FileToken: a short-lived token for box files loaded where a cookie cannot be sent (a WebView or
-   * DOM `<img>`). The token is accepted as `?access_token=` on GET requests for `Paths.taskAttachment`,
-   * `Paths.taskRunImage` and `Paths.taskCheckoutIcon`, and on nothing else.
-   */
-  fileToken: "/api/file-token",
-  /**
-   * POST (no body) -> FileToken: a short-lived token for one task's desktop stream, for a WebView that cannot send the
-   * session cookie. Accepted as `?access_token=` on `Paths.taskDesktopWs` of that task, and on nothing else.
-   */
-  desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
   /** POST WaitlistSignupBody -> WaitlistSignup: public waitlist signup; no session. */
   waitlist: "/api/waitlist",
-  /** GET -> Connection[] with legacy managed/relay-box status; updated clients replace box state with `connectionsForBox`. */
+  /** GET -> Connection[] with stored status; clients replace box state with `connectionsForBox`. */
   connections: "/api/connections",
   /** PUT { apiKey } for api-key providers -> Connection; DELETE -> 204. */
   connection: (provider: string) => `/api/connections/${provider}`,
@@ -63,29 +52,29 @@ export const ControlPaths = {
   cliUsageFor: (providers: readonly CliProvider[]) => `/api/cli-auth/usage?providers=${encodeURIComponent(providers.join(","))}`,
   /**
    * POST (no body) -> CliLoginStart: starts the provider CLI's own sign-in on the box for the signed-in
-   * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Relayed.
+   * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Served by the box.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
   /**
    * POST (no body) -> 204: cancels a sign-in still waiting on the box for this provider and removes its unfinished
-   * home, so an approval completed afterwards cannot add the account. Idempotent. Relayed.
+   * home, so an approval completed afterwards cannot add the account. Idempotent. Served by the box.
    */
   cliLoginCancel: (provider: CliProvider) => `/api/cli-auth/${provider}/login/cancel`,
-  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Relayed. */
+  /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Served by the box. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /**
    * POST PutApiKeyBody -> CliAuthStatus: signs the provider's CLI in on the box with the user's API key, replacing the
-   * one it holds. Only providers that sign in with a key (`CLI_SIGN_IN`). Relayed; the key stays with the CLI on the box.
+   * one it holds. Only providers that sign in with a key (`CLI_SIGN_IN`). Box-served; the key stays with the CLI on the box.
    */
   cliLoginKey: (provider: CliProvider) => `/api/cli-auth/${provider}/key`,
-  /** DELETE -> 204: disconnects one account, or the active account when omitted. Relayed. */
+  /** DELETE -> 204: disconnects one account, or the active account when omitted. Served by the box. */
   cliLogout: (provider: CliProvider, accountId?: string) =>
     `/api/cli-auth/${provider}${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`,
   /** POST { accountId } -> CliAuthStatus: selects the account used by subsequent runs and usage reads. */
   cliSelectAccount: (provider: CliProvider) => `/api/cli-auth/${provider}/account`,
   /**
    * POST UseBankedResetBody -> UseBankedResetResult: spends one of the user's banked resets (listed in `cliUsage`)
-   * through the provider's CLI on the box. Only providers that report `bankedResets` accept it. Relayed.
+   * through the provider's CLI on the box. Only providers that report `bankedResets` accept it. Served by the box.
    */
   cliUseBankedReset: (provider: CliProvider) => `/api/cli-auth/${provider}/banked-resets/use`,
   /** GET -> Automation[] / POST CreateAutomationBody -> Automation: the signed-in user's automations. */
@@ -98,7 +87,7 @@ export const ControlPaths = {
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
   /**
    * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
-   * The app talks to the active box directly at its `url` with a box token instead of through the relay.
+   * The app talks to the active box directly at its `url` with a box token.
    */
   boxes: "/api/boxes",
   /** PATCH UpdateBoxBody -> UserBox / DELETE -> 204 (clears it as the active box). Other users' ids are 404. */
@@ -149,7 +138,7 @@ export const ControlPaths = {
   boxToolFailures: "/box/telemetry/tool-failures",
   /**
    * Box-only, managed boxes: POST BoxActivityReport -> 204. Authenticated with `Authorization: Bearer <box secret>` and
-   * BOX_ID_HEADER; the relay token and user boxes are refused. The body is a full snapshot of the users with an
+   * BOX_ID_HEADER; user boxes are refused. The body is a full snapshot of the users with an
    * authenticated direct request to the box in the last `ACTIVITY_WINDOW_SECONDS`, sent every 30 seconds, including an
    * empty list. Never reached from a browser.
    */
@@ -180,8 +169,7 @@ export const ControlPaths = {
   /**
    * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user), for managed boxes.
    * Requires `Authorization: Bearer <box secret>` with BOX_ID_HEADER, and the acting user's login in BOX_USER_HEADER;
-   * the user must be assigned to that box. The relayed box authenticates with the shared relay token instead.
-   * Never reached from a browser.
+   * the user must be assigned to that box. Never reached from a browser.
    */
   boxAutomations: "/box/automations",
   boxAutomation: (id: string) => `/box/automations/${id}`,
@@ -310,10 +298,10 @@ export const CliAuthStatus = Schema.Struct({
 export type CliAuthStatus = typeof CliAuthStatus.Type
 
 /**
- * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state with
+ * The Worker retains stored status for installed clients. Updated clients replace that legacy state with
  * the selected box's CLI logins and the harnesses it reports, preserving stored account/key metadata.
  *
- * CLI rows use only the selected box's authentication status, never a relay box's saved login or installation state.
+ * CLI rows use only the selected box's authentication status.
  * Retired standalone harness rows (`omp`, `pi`, `hermes`) are dropped.
  */
 export const connectionsForBox = (
@@ -330,7 +318,7 @@ export const connectionsForBox = (
       if (connection.kind !== "cli" || !Schema.is(CliProvider)(connection.provider)) return connection
       const status = box.cliAuth?.find((candidate) => candidate.provider === connection.provider)
       const available = status !== undefined && status.error === undefined
-      const { error: _relayError, ...metadata } = connection
+      const { error: _storedError, ...metadata } = connection
       const error = status?.error ?? (available ? undefined : box.error ?? "The selected box has not reported this CLI as available.")
       return {
         ...metadata,
@@ -499,8 +487,8 @@ export const BoxList = Schema.Struct({
   /** The box the user's apps use; null for Kestrel's managed box. */
   activeBoxId: Schema.NullOr(Schema.String),
   /**
-   * Kestrel's managed box for this user, reached directly. Null while no managed box is active: the apps then reach
-   * Kestrel's box through the control plane's relay.
+   * Kestrel's managed box for this user, reached directly. Null when the user has no managed box: there is then no
+   * Kestrel box to reach, and the apps show "no box" until one is assigned or a user box is picked.
    */
   managedBox: Schema.NullOr(ManagedBox),
 })
@@ -529,16 +517,21 @@ export const BoxToken = Schema.Struct({
 export type BoxToken = typeof BoxToken.Type
 
 /**
- * A token that stands in for the session cookie on box files a WebView or DOM `<img>` loads (`ControlPaths.fileToken`).
- * It names the user who minted it, only loads files (`Paths.taskAttachment`, `Paths.taskRunImage`,
- * `Paths.taskCheckoutIcon`), and expires one hour after it is minted.
+ * Secrets of a user's connections as a box stores them (never to the sandbox). The control plane hands them to a box
+ * through `BoxSelf` (`/box/self` for a user's own box, `/box/credentials` for a managed box); `user` is the owner the
+ * secrets belong to and `dev` marks a dev-login session.
  */
-export const FileToken = Schema.Struct({
-  token: Schema.String,
-  /** ISO time the token expires. */
-  expiresAt: Schema.String,
-})
-export type FileToken = typeof FileToken.Type
+export interface UserCredentials {
+  readonly user: string // GitHub login of the user the credentials belong to
+  readonly github?: string // GitHub OAuth access token
+  /** Model API keys by `ModelProvider` id. The broker is the only reader. */
+  readonly providers?: Readonly<Record<string, string>>
+  /** Legacy Anthropic/OpenAI slots, still sent so boxes older than `providers` keep their keys. */
+  readonly anthropic?: string
+  readonly openai?: string
+  /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
+  readonly dev?: boolean
+}
 
 /** What a user's own box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
 export const BoxSelf = Schema.Struct({

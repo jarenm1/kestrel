@@ -133,9 +133,9 @@ describe("selected-box connections", () => {
       .map((provider) => provider.id)).toEqual(["openai"])
   })
 
-  test("the selected box's OpenCode logins replace conflicting relay state across a box switch", () => {
-    const relay = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
-    const selected = connectionsForBox(relay, {
+  test("the selected box's OpenCode logins replace conflicting stored state across a box switch", () => {
+    const stored = [{ ...cli("opencode-go", false), error: "not installed on the managed box" }, cli("opencode", false)]
+    const selected = connectionsForBox(stored, {
       cliAuth: [
         { provider: "opencode-go", loggedIn: true, account: null },
         { provider: "opencode", loggedIn: true, account: null },

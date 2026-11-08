@@ -46,8 +46,8 @@ function stubFetch(options: {
       return json({ token: "t", url: BOX, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     }
     if (url === `${BOX}${Paths.tasks}`) return options.box()
-    // Kestrel's own box is reached through the control plane's relay; it fails at once here.
-    if (url.startsWith(`${CONTROL}/api/`) && init?.method !== "POST") throw new TypeError("relay down")
+    // Kestrel's box calls go to the control plane, which has no box behind it; it fails at once here.
+    if (url.startsWith(`${CONTROL}/api/`) && init?.method !== "POST") throw new TypeError("no box")
     throw new Error(`unexpected request ${init?.method ?? "GET"} ${url}`)
   }) as typeof fetch
 }
@@ -151,7 +151,7 @@ describe("box list reads that answer after a change", () => {
 
     expect(switched.activeBoxId).toBe(BOX_ID)
     await api.cliLoginCancel("claude-cli")
-    // The active-box call goes to the switched box, not to the relay the stale list named.
+    // The active-box call goes to the switched box, not to the control plane the stale list named.
     expect(boxCalls).toEqual([`${BOX}${ControlPaths.cliLoginCancel("claude-cli")}`])
   })
 

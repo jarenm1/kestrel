@@ -27,7 +27,6 @@ import {
   DiffResponse,
   type FileRoot,
   FilesResponse,
-  MAX_RELAY_RESPONSE_BYTES,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -176,14 +175,14 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
 /** A user box the apps call directly: its id and URL. Box calls to it carry a box token. */
 type DirectRoute = { readonly boxId: string; readonly url: string }
 
-/** Where a box call goes: a user box directly, or `null` for Kestrel's relayed box (through the Worker). */
+/** Where a box call goes: a user box directly, or `null` for Kestrel's box (absent: no box). */
 export type Target = DirectRoute | null
 
 /** The box list as last read. Undefined until the first read. */
 let known: BoxList | undefined
 
 /**
- * The box each thread lives on, by thread id: a user box's id, or `null` for Kestrel's relayed box. Filled by the
+ * The box each thread lives on, by thread id: a box's id, or `null` for Kestrel's box. Filled by the
  * thread lists and by `createTask`. A thread missing from it is found by reading every box's thread list again.
  */
 const taskBoxes = new Map<string, string | null>()
@@ -245,7 +244,7 @@ function routeOf(boxId: string | null): Target | undefined {
 
 /**
  * Kestrel's box as the last box list read has it: the managed box the user is assigned to, reached directly, or `null`
- * (the legacy relay) while there is none.
+ * (absent) while there is none.
  */
 function kestrelTarget(): Target {
   const managed = known?.managedBox
@@ -359,7 +358,7 @@ function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: strin
 
 /**
  * A box call pinned to a box from the last box list read, so a later active-box switch cannot retarget it. `null` is
- * the legacy relay (no managed box); callers with a managed box pass its id instead.
+ * absent (no managed box); callers with a managed box pass its id instead.
  */
 function onBox<A, I>(
   boxId: string | null,
@@ -437,12 +436,12 @@ function listAllTasks(): Promise<Task[]> {
 }
 
 /**
- * Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id, or `null` for the relay. The
+ * Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id, or `null` for an absent Kestrel box. The
  * id is what keeps a replaced managed box's threads from being shown for its successor.
  */
 type BoxKey = string | null
 
-/** The key of a call's target: its box id, or `null` for the relay. */
+/** The key of a call's target: its box id, or `null` for an absent Kestrel box. */
 function boxKeyOf(target: Target): BoxKey {
   return target?.boxId ?? null
 }
@@ -560,7 +559,7 @@ const OFFLINE: BoxStatus = { online: false, connectedAt: null, boxVersion: null 
 
 /**
  * A user box's status from its own `Paths.health`, read without credentials: any failure to answer means offline.
- * The box has no relay connection, so `connectedAt` stays null.
+ * There is no dial-out connection, so `connectedAt` stays null.
  */
 async function checkBox(url: string): Promise<BoxStatus> {
   try {
@@ -573,7 +572,7 @@ async function checkBox(url: string): Promise<BoxStatus> {
   }
 }
 
-/** A box's status: the relayed status for Kestrel's relayed box, else the box's own health. */
+/** A box's status: the control-plane answer for an absent Kestrel box, else the box's own health. */
 function statusOf(target: Target): Promise<BoxStatus> {
   return target === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(target.url)
 }
@@ -729,7 +728,7 @@ export const api = {
   fleetToolFailures: () => run(request(ToolFailureList, "GET", ControlPaths.fleetToolFailures)),
   checkBox,
   forgetBox,
-  /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */
+  /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or "offline" when none is assigned), or the active user box's own health. */
   boxStatus: async (): Promise<BoxStatus> => statusOf(await activeTarget()),
   /** Status of Kestrel's box, whichever box is active. */
   kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget()),
@@ -818,7 +817,7 @@ export const api = {
     return task
   },
   getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),
-  /** The user box a thread lives on, or `null` for Kestrel's box (managed or relayed). */
+  /** The user box a thread lives on, or `null` for Kestrel's box. */
   taskBox: async (taskId: string): Promise<string | null> => {
     const target = await taskTarget(taskId)
     return target === null || target.boxId === known?.managedBox?.id ? null : target.boxId
@@ -874,18 +873,12 @@ export const api = {
   /**
    * Starts the browser's download of one of a thread's files. A HEAD request first finds out whether it would work:
    * handed straight to the browser, a failure would be saved as a file, or (cross-origin, on a user's own box) open as
-   * a page in place of the app. Through Kestrel's relayed box a file over `MAX_RELAY_RESPONSE_BYTES` cannot be sent;
-   * the relay answers that HEAD with 413 from the declared length alone.
+   * a page in place of the app.
    */
   downloadFile: async (taskId: string, root: FileRoot, path: string): Promise<void> => {
     const url = await taskFileUrl(taskId, Paths.taskFileDownload(taskId, root, path))
     const name = path.slice(path.lastIndexOf("/") + 1)
     const check = await fetch(url, { method: "HEAD" })
-    if (check.status === 413) {
-      throw new Error(
-        `${name} is over ${MAX_RELAY_RESPONSE_BYTES / 1024 / 1024} MB, the most Kestrel's shared box can send. Use your own or a managed box for larger files.`,
-      )
-    }
     if (check.status === 404) throw new Error(`${name} is no longer there; refresh the list.`)
     if (!check.ok) throw new Error(`Could not download ${name} (HTTP ${check.status}).`)
     // The response is an attachment, so following the link saves the file and leaves the page as it is.

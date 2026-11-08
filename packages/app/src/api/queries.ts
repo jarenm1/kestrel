@@ -162,7 +162,7 @@ export async function applyBoxList(client: QueryClient, list: BoxList): Promise<
 /**
  * The active box a model catalog belongs to. `key` identifies the exact box and route (`managedBox` keeps its id and
  * URL in the key, so a resumed box cannot serve an old catalog); `boxId` pins the box call to the same box. Kestrel's
- * box is the managed box's id, or `null` for the legacy relay.
+ * box is the managed box's id, or `null` when there is none.
  */
 export interface ModelBoxScope {
   readonly key: string
@@ -173,7 +173,7 @@ export interface ModelBoxScope {
 export function modelBoxScope(list: BoxList | undefined): ModelBoxScope | undefined {
   if (list === undefined) return undefined
   const active = list.activeBoxId
-  // Kestrel's box is the managed box, whose own id pins the read; null stays only for the legacy relay.
+  // Kestrel's box is the managed box, whose own id pins the read; null stays only when none is assigned.
   const box =
     active === null || active === list.managedBox?.id
       ? list.managedBox

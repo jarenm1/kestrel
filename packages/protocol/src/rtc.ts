@@ -3,7 +3,7 @@
  *
  * The app POSTs an SDP offer to `Paths.webrtcOffer` on the box (authenticated with the box token) and gets the
  * box's answer back in the same response: signalling is one round trip, so both sides gather their ICE candidates
- * before the offer is sent. The channel then carries the relay frames (`RelayFrame`, `encodeBinary`) in both
+ * before the offer is sent. The channel then carries channel frames (`ChannelFrame`, `encodeFrame`) in both
  * directions, so the box serves the same handlers it serves over HTTP and WebSocket.
  *
  * SCTP caps a message at the size the peer advertised (64 KiB unless negotiated higher), so each message is split

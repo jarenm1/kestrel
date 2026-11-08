@@ -9,7 +9,7 @@ const capabilities: BoxCapabilities = { version: 1, platform: "linux", sandbox: 
 const handlerFor = (core: Partial<CoreShape>, hooks?: RouterHooks) =>
   Effect.runPromise(makeWebHandler(core as CoreShape, {} as never, capabilities, {} as never, hooks))
 
-/** A request as the relay presents it: signed in as alice, with a JSON content type for bodies. */
+/** A request as a channel presents it: signed in as alice, with a JSON content type for bodies. */
 const request = (path: string, init: { readonly method?: string; readonly body?: string } = {}) =>
   new Request(`http://box.test${path}`, {
     method: init.method ?? "GET",

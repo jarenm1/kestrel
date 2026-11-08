@@ -77,13 +77,13 @@ const uploadInput = Effect.gen(function* () {
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
 
-/** The user the relay signed in for this request (relay-set header, stripped on the box's own port); null otherwise. */
+/** The user this request's box token bound (never settable from a raw header); null otherwise. */
 const requestUser = Effect.map(HttpServerRequest.HttpServerRequest, (req) => {
   const user = req.headers[BOX_USER_HEADER]
   return user === undefined || user === "" ? null : user
 })
 
-/** `/auth/dev-login` sessions may use dev-only flows (a `/replay` chat message); the relay marks them. */
+/** `/auth/dev-login` sessions may use dev-only flows (a `/replay` chat message); their tokens mark them. */
 const requestIsDev = Effect.map(
   HttpServerRequest.HttpServerRequest,
   (req) => req.headers[BOX_DEV_HEADER] === "1",
@@ -200,7 +200,7 @@ const applyPullRequestAction = (core: CoreShape, hooks: RouterHooks, user: strin
 /**
  * Streams one of the thread's files as a download. The agent wrote it, so whatever it is, it never renders as a page
  * on the app's origin: always `application/octet-stream`, an attachment, in a sandbox. `headOnly` answers with the
- * headers alone, so the app can learn whether the download would succeed (and through the relay, whether it fits)
+ * headers alone, so the app can learn whether the download would succeed
  * before handing the URL to the browser.
  */
 const serveDownload = (core: CoreShape, taskId: string, headOnly: boolean) =>

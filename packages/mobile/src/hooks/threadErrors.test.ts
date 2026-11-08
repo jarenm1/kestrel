@@ -21,13 +21,13 @@ describe("threadErrors", () => {
     );
   });
 
-  test("a tagged relay failure with no cached content is visible inline", () => {
+  test("a tagged box failure with no cached content is visible inline", () => {
     const result = threadErrors([loaded(undefined, offline()), loaded(undefined), loaded(undefined)], false, false);
     expect(result.error).toBeNull();
     expect(result.loadError).toBe("Could not load this conversation. agent box is not connected");
   });
 
-  test("a tagged relay failure over cached idle content stays quiet", () => {
+  test("a tagged box failure over cached idle content stays quiet", () => {
     const result = threadErrors([
       loaded({ id: "task" }, offline()),
       loaded([], offline()),

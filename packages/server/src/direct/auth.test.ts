@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Either } from "effect"
 import { BOX_ID_HEADER, BOX_USER_HEADER, type BoxTokenClaims, signBoxToken } from "@cloudagents/protocol"
-import type { RelayCredentials } from "@cloudagents/protocol"
+import type { UserCredentials } from "@cloudagents/protocol"
 import type { CredentialStoreShape } from "../credentials"
 import { type BoxAuth, type BoxAuthentication, makeBoxAuth, type DirectSettings } from "./auth"
 import type { BoxActivitySink } from "./box-activity"
@@ -11,7 +11,7 @@ const BOX_ID = "box_fleet_1"
 const SECRET = "fleet-box-secret"
 
 const memoryStore = (): CredentialStoreShape => {
-  const byUser = new Map<string, RelayCredentials>()
+  const byUser = new Map<string, UserCredentials>()
   return {
     get: (user) => Effect.sync(() => byUser.get(user) ?? null),
     set: (creds) => Effect.sync(() => void byUser.set(creds.user, creds)),

@@ -180,7 +180,7 @@ function screenFor(route: Route, bottomInset: number): ReactNode {
   if (route.name === "thread") {
     return (
       <TaskScreen
-        key={`${route.box?.id ?? "relay"}:${route.taskId}`}
+        key={`${route.box?.id ?? "none"}:${route.taskId}`}
         taskId={route.taskId}
         box={route.box}
         bottomInset={bottomInset}
