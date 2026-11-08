@@ -124,19 +124,19 @@
         # Devin CLI ships as one static binary per platform, from the manifest its installer reads.
         devin = pkgs.stdenvNoCC.mkDerivation rec {
           pname = "devin-cli";
-          version = "3000.12.17";
+          version = "3000.12.28";
           src = pkgs.fetchurl {
             x86_64-linux = {
               url = "https://static.devin.ai/cli/${version}/devin-${version}-x86_64-unknown-linux.tar.gz";
-              sha256 = "16b1414dcb50450e654954f10cd38107f93e450d76b0dea63d0b5a65ca600d45";
+              sha256 = "8bc952667502ac1175997364500b0d24c15fe35c8ebfd915dc1712d4211166d6";
             };
             aarch64-linux = {
               url = "https://static.devin.ai/cli/${version}/devin-${version}-aarch64-unknown-linux.tar.gz";
-              sha256 = "e98b39e71122c82a366fdaba99dc0b0531ab0fd6c95ec78031b57db7f9bd5093";
+              sha256 = "b8e2f450744b994b1a4b8db137d4026c0e1e65b29526a04f780c6e1125888a61";
             };
             aarch64-darwin = {
               url = "https://static.devin.ai/cli/${version}/devin-${version}-aarch64-apple-darwin.tar.gz";
-              sha256 = "7331731afa01db2c4848b9435e395e4bda534db4b100c188a7efe95173e6ccac";
+              sha256 = "8833a0537d9d05b7d754f4c195b20472b8680d97d6fab4cba7e349173a5f5b91";
             };
           }.${system};
           sourceRoot = ".";

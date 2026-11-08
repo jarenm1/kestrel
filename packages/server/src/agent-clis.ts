@@ -1,4 +1,7 @@
 import { Database } from "bun:sqlite"
+import { createHash, randomUUID } from "node:crypto"
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { Effect } from "effect"
 import {
   CliProvider,
@@ -107,8 +110,55 @@ const codexAccount = (text: string): string | null => {
   return email ?? agentIdentityEmail(parsed.agent_identity)
 }
 
-/** Older Antigravity logins omit `id_token`; Google userinfo identifies their stored access token. */
-const antigravityAccount = (text: string): string | null | Promise<string | null> => {
+/** Kestrel's note of the email Google reported for the Antigravity login in the same directory. */
+const ANTIGRAVITY_ACCOUNT_MEMO = ".kestrel-account.json"
+const ANTIGRAVITY_ACCOUNT_MEMO_MAX = 1024
+
+/** The remembered email, only while `key` (the login's refresh token hash) still names the stored login. */
+const readAntigravityMemo = async (path: string, key: string): Promise<string | null> => {
+  try {
+    const info = await lstat(path)
+    if (!info.isFile() || info.size > ANTIGRAVITY_ACCOUNT_MEMO_MAX) return null
+    const memo: unknown = JSON.parse(await readFile(path, "utf8"))
+    return isRecord(memo) && memo.key === key ? accountEmail(memo.email) : null
+  } catch {
+    return null
+  }
+}
+
+const writeAntigravityMemo = async (path: string, key: string, email: string): Promise<void> => {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, JSON.stringify({ key, email }), { mode: 0o600 })
+    await rename(temporary, path)
+  } catch {
+    // Remembering is an optimization: the next probe asks Google again.
+    await rm(temporary, { force: true }).catch(() => undefined)
+  }
+}
+
+const googleAccount = async (accessToken: string): Promise<string | null> => {
+  try {
+    const response = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(3_000),
+      redirect: "error",
+    })
+    if (!response.ok) return null
+    const user: unknown = await response.json()
+    return isRecord(user) ? accountEmail(user.email) : null
+  } catch {
+    // Identity lookup failing must not disconnect an otherwise valid CLI login.
+    return null
+  }
+}
+
+/**
+ * Older Antigravity logins omit `id_token`; Google userinfo identifies their stored access token. That token expires
+ * within an hour, so it is usually stale between runs: the email Google reports is remembered in the login directory,
+ * keyed by a hash of the refresh token (which outlives the access token and changes with a new sign-in).
+ */
+const antigravityAccount = async (text: string, dir: string): Promise<string | null> => {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -118,23 +168,21 @@ const antigravityAccount = (text: string): string | null | Promise<string | null
   if (!isRecord(parsed)) return null
   const email = jwtEmail(parsed.id_token)
   if (email !== null) return email
-  if (!isRecord(parsed.token) || typeof parsed.token.access_token !== "string" || parsed.token.access_token === "") return null
-  const accessToken = parsed.token.access_token
-  return (async () => {
-    try {
-      const response = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(3_000),
-        redirect: "error",
-      })
-      if (!response.ok) return null
-      const user: unknown = await response.json()
-      return isRecord(user) ? accountEmail(user.email) : null
-    } catch {
-      // Identity lookup failing must not disconnect an otherwise valid CLI login.
-      return null
-    }
-  })()
+  if (!isRecord(parsed.token)) return null
+  const { access_token: accessToken, refresh_token: refreshToken } = parsed.token
+  const memo = join(dir, ANTIGRAVITY_ACCOUNT_MEMO)
+  const key =
+    typeof refreshToken === "string" && refreshToken !== ""
+      ? createHash("sha256").update(refreshToken).digest("hex")
+      : null
+  if (key !== null) {
+    const remembered = await readAntigravityMemo(memo, key)
+    if (remembered !== null) return remembered
+  }
+  if (typeof accessToken !== "string" || accessToken === "") return null
+  const account = await googleAccount(accessToken)
+  if (account !== null && key !== null) await writeAntigravityMemo(memo, key, account)
+  return account
 }
 
 /** The CLI's own sign-in, which the user finishes on the provider's page. */
@@ -180,11 +228,12 @@ export interface AgentCli<K extends CliSignIn = CliSignIn> {
     | { readonly kind: "command"; readonly args: ReadonlyArray<string>; readonly parse: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError> }
     | { readonly kind: "file"; readonly path: string }
   /**
-   * The signed-in account's email in the CLI's own stored login (a file under the login directory), read only once
-   * `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or method.
+   * The signed-in account's email in the CLI's own stored login (a file under the login directory `dir`), read only
+   * once `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or
+   * method.
    */
   readonly identity:
-    | { readonly path: string; readonly parse: (text: string) => string | null | Promise<string | null> }
+    | { readonly path: string; readonly parse: (text: string, dir: string) => string | null | Promise<string | null> }
     | { readonly path: string; readonly read: (path: string) => string | null }
     | null
   readonly signIn: K extends "page" ? PageSignIn : KeySignIn

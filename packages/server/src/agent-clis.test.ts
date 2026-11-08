@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
@@ -15,10 +15,13 @@ const codexStatus = (text: string) => {
   return Effect.runSync(status.parse({ stdout: "", stderr: text }))
 }
 
+/** A login directory with nothing in it; Antigravity remembers looked-up emails there. */
+const emptyLoginDir = join(tmpdir(), "kestrel-no-such-login")
+
 const identityParser = (provider: "codex-cli" | "antigravity-cli") => {
   const identity = AGENT_CLIS[provider].identity
   if (identity === null || !("parse" in identity)) throw new Error(`${provider} has no stored identity parser`)
-  return identity.parse
+  return (text: string, dir = emptyLoginDir) => identity.parse(text, dir)
 }
 
 describe("codex login status", () => {
@@ -156,8 +159,8 @@ describe("stored identities", () => {
     expect(parse(JSON.stringify({ tokens: { id_token: jwt({ email: "user@example.com\nleak" }) } }))).toBeNull()
   })
 
-  test("Antigravity reads the signed-in Google email from its ID token", () => {
-    const account = identityParser("antigravity-cli")(
+  test("Antigravity reads the signed-in Google email from its ID token", async () => {
+    const account = await identityParser("antigravity-cli")(
       JSON.stringify({
         token: {
           access_token: "secret-access-token",
@@ -173,12 +176,12 @@ describe("stored identities", () => {
     expect(account).not.toContain("secret")
   })
 
-  test("Antigravity stays signed in without identity when the token is old, malformed or names no user", () => {
+  test("Antigravity stays signed in without identity when the token is old, malformed or names no user", async () => {
     const parse = identityParser("antigravity-cli")
-    expect(parse(JSON.stringify({ token: {}, auth_method: "consumer" }))).toBeNull()
-    expect(parse("not json")).toBeNull()
-    expect(parse(JSON.stringify({ token: {}, id_token: "not.a.jwt" }))).toBeNull()
-    expect(parse(JSON.stringify({ id_token: jwt({ email: "not-an-email" }) }))).toBeNull()
+    expect(await parse(JSON.stringify({ token: {}, auth_method: "consumer" }))).toBeNull()
+    expect(await parse("not json")).toBeNull()
+    expect(await parse(JSON.stringify({ token: {}, id_token: "not.a.jwt" }))).toBeNull()
+    expect(await parse(JSON.stringify({ id_token: jwt({ email: "not-an-email" }) }))).toBeNull()
   })
 
   test("Antigravity resolves older access-token-only logins through Google without exposing credentials", async () => {
@@ -204,6 +207,23 @@ describe("stored identities", () => {
       expect(await parse(credentials)).toBeNull()
     } finally {
       request.mockRestore()
+    }
+  })
+
+  test("Antigravity keeps the looked-up email after the access token expires, only for the same login", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kestrel-antigravity-identity-"))
+    const login = (access: string, refresh: string) => JSON.stringify({ token: { access_token: access, refresh_token: refresh } })
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ email: "fresh@example.com" }))
+    try {
+      const parse = identityParser("antigravity-cli")
+      expect(await parse(login("fresh-access", "refresh-one"), dir)).toBe("fresh@example.com")
+      expect(readFileSync(join(dir, ".kestrel-account.json"), "utf8")).not.toContain("refresh-one")
+      request.mockResolvedValue(new Response("expired", { status: 401 }))
+      expect(await parse(login("expired-access", "refresh-one"), dir)).toBe("fresh@example.com")
+      expect(await parse(login("expired-access", "refresh-two"), dir)).toBeNull()
+    } finally {
+      request.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

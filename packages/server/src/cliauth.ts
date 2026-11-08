@@ -103,7 +103,7 @@ const readAccountLabel = (dir: string, identity: AgentCli["identity"]): Effect.E
       if (!info.isFile()) return null
       if ("read" in identity) return identity.read(path)
       if (info.size > ACCOUNT_FILE_MAX) return null
-      const label = await identity.parse(await readFile(path, "utf8"))
+      const label = await identity.parse(await readFile(path, "utf8"), dir)
       return label === null || label === "" ? null : label
     } catch {
       return null
