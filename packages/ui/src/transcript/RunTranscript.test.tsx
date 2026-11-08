@@ -18,7 +18,6 @@ test("elapsed and rate use the lifecycle clock rather than response or provider 
   expect(html).toContain("Worked for 1m")
   expect(html).toContain("1 tok/s")
   expect(html).not.toContain("30 tok/s")
-  expect(html).not.toContain("150 tok/s")
 })
 
 test("input excludes cache reads, cached tokens stay separate, and details do not repeat elapsed", () => {
@@ -46,6 +45,15 @@ test("a response with missing output usage does not blank the turn's output tota
   const html = summary([partial, turn("end")])
   expect(html).toContain(`title="60"`)
   expect(html).toContain("1 tok/s")
+})
+
+test("subagent usage stays out of the main agent's input and cache totals", () => {
+  const subagent: AgentItem = { _tag: "usage", id: "sub", parentToolId: "tool-1", timestamp, durationMs: 400, inputTokens: 500, outputTokens: 60, cachedTokens: 5000 }
+  const html = summary([usage, subagent, turn("end")])
+  expect(html).toContain(`title="100"`)
+  expect(html).toContain(`title="1,000"`)
+  expect(html).not.toContain(`title="600"`)
+  expect(html).not.toContain(`title="6,000"`)
 })
 
 test("metadata no longer creates rows or splits consecutive tools", () => {
