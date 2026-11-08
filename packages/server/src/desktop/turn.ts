@@ -5,10 +5,17 @@
  * configuration.
  */
 import { Schema } from "effect"
-import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials, type DesktopRtcIceServer } from "@cloudagents/protocol"
+import {
+  BOX_ID_HEADER,
+  BOX_TURN_PATH,
+  BoxTurnCredentials,
+  BoxTurnError,
+  type DesktopRtcIceServer,
+  type DesktopTurnIssue,
+} from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { ServerConfig } from "../config"
-import { mintIceServers, type WebRtcSettings } from "./webrtc"
+import { mintIceServers, type TurnConfigDiagnostics, type WebRtcSettings } from "./webrtc"
 
 /** Refresh this long before the provider expires credentials, so a viewer retry never receives stale ones. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000
@@ -25,6 +32,8 @@ export interface ManagedTurnResult {
   readonly iceServers: ReadonlyArray<DesktopRtcIceServer> | null
   /** A sanitized warning when the control plane could not supply credentials; null when it supplied or declined. */
   readonly warning: string | null
+  /** The safe cause when `iceServers` is null because credentials failed; null on success or a 204. */
+  readonly issue: DesktopTurnIssue | null
 }
 
 export interface ManagedTurn {
@@ -58,9 +67,11 @@ interface FetchedCredentials extends ManagedTurnResult {
   readonly expiresAt: number | null
 }
 
-const unreachable = (error: unknown): string => {
-  const name = error instanceof Error ? error.name : ""
-  return `managed TURN unavailable: control plane ${name === "TimeoutError" || name === "AbortError" ? "timed out" : "unreachable"}`
+const unreachable = (error: unknown): { warning: string; issue: DesktopTurnIssue } => {
+  const interrupted = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")
+  return interrupted
+    ? { warning: "managed TURN unavailable: control plane timed out", issue: "control-timeout" }
+    : { warning: "managed TURN unavailable: control plane unreachable", issue: "control-unreachable" }
 }
 
 /**
@@ -78,6 +89,19 @@ const usableIceServers = (servers: ReadonlyArray<DesktopRtcIceServer>): DesktopR
       : [{ urls }]
   })
 
+/** A failed request's safe issue: its body may name a Worker configuration or provider failure, never raw text. */
+const responseIssue = async (response: Response): Promise<DesktopTurnIssue> => {
+  if (response.status === 401 || response.status === 403) return "control-rejected"
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return "control-error"
+  }
+  const decoded = Schema.decodeUnknownOption(BoxTurnError)(body)
+  return decoded._tag === "Some" ? (decoded.value.issue ?? "control-error") : "control-error"
+}
+
 const fetchManaged = async (identity: TurnIdentity): Promise<FetchedCredentials> => {
   let response: Response
   try {
@@ -87,36 +111,42 @@ const fetchManaged = async (identity: TurnIdentity): Promise<FetchedCredentials>
       signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
     })
   } catch (error) {
-    return { iceServers: null, expiresAt: null, warning: unreachable(error) }
+    const { warning, issue } = unreachable(error)
+    return { iceServers: null, expiresAt: null, warning, issue }
   }
   // No provider credentials configured on the control plane: keep the box's own ICE configuration.
-  if (response.status === 204) return { iceServers: null, expiresAt: null, warning: null }
+  if (response.status === 204) return { iceServers: null, expiresAt: null, warning: null, issue: null }
   if (!response.ok) {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: control plane answered ${response.status}` }
+    return {
+      iceServers: null,
+      expiresAt: null,
+      warning: `managed TURN unavailable: control plane answered ${response.status}`,
+      issue: await responseIssue(response),
+    }
   }
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}` }
+    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}`, issue: "invalid-answer" }
   }
   let credentials: BoxTurnCredentials
   try {
     credentials = Schema.decodeUnknownSync(BoxTurnCredentials)(body)
   } catch {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}` }
+    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}`, issue: "invalid-answer" }
   }
   if (!Number.isFinite(credentials.expiresAt)) {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}` }
+    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${INVALID_ANSWER}`, issue: "invalid-answer" }
   }
   if (credentials.expiresAt <= Date.now()) {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${EXPIRED_ANSWER}` }
+    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${EXPIRED_ANSWER}`, issue: "expired" }
   }
   const servers = usableIceServers(credentials.iceServers)
   if (!servers.some((server) => server.urls.some((url) => TURN_URL.test(url)))) {
-    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${NO_TURN_ANSWER}` }
+    return { iceServers: null, expiresAt: null, warning: `managed TURN unavailable: ${NO_TURN_ANSWER}`, issue: "no-usable-turn" }
   }
-  return { iceServers: servers, expiresAt: credentials.expiresAt, warning: null }
+  return { iceServers: servers, expiresAt: credentials.expiresAt, warning: null, issue: null }
 }
 
 interface CachedCredentials {
@@ -148,13 +178,13 @@ export const managedTurn = (config: ServerConfig): ManagedTurn => {
         cached = { iceServers: fetched.iceServers, expiresAt: fetched.expiresAt }
       }
     }
-    return { iceServers: fetched.iceServers, warning: fetched.warning }
+    return { iceServers: fetched.iceServers, warning: fetched.warning, issue: fetched.issue }
   }
 
   const servers = async (): Promise<ManagedTurnResult> => {
-    if (identity === null) return { iceServers: null, warning: null }
+    if (identity === null) return { iceServers: null, warning: null, issue: null }
     if (cached !== null && Date.now() < cached.expiresAt - REFRESH_MARGIN_MS) {
-      return { iceServers: cached.iceServers, warning: null }
+      return { iceServers: cached.iceServers, warning: null, issue: null }
     }
     if (inflight !== null) return inflight
     const pending = refresh()
@@ -176,11 +206,31 @@ export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
   settings.turn !== null ||
   settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
 
+/**
+ * What the box's own configuration provides, without asking the control plane. A TURN URL without usable credentials
+ * (or a REST secret with no TURN URL) is an explicit local misconfiguration: report it rather than call it absent.
+ */
+const localTurnDiagnostics = (settings: WebRtcSettings): TurnConfigDiagnostics => {
+  const rest = settings.turn
+  const restUsable = rest !== null && rest.secret.trim() !== "" && rest.urls.some((url) => TURN_URL.test(url))
+  const turnServers = settings.iceServers.filter((server) => server.urls.some((url) => TURN_URL.test(url)))
+  const staticUsable = turnServers.some(
+    (server) => (server.username?.trim() ?? "") !== "" && (server.credential?.trim() ?? "") !== "",
+  )
+  if (restUsable || staticUsable) return { source: "local", status: "configured", failure: null, issue: null }
+  if (rest === null && turnServers.length === 0) {
+    return { source: "none", status: "not-configured", failure: null, issue: null }
+  }
+  return { source: "local", status: "unavailable", failure: "turn-credentials", issue: "local-incomplete" }
+}
+
 export interface SessionIceServers {
   readonly iceServers: DesktopRtcIceServer[]
   readonly warning: string | null
   /** Whether `iceServers` carries provider-issued TURN, which is the box's to use with a shorter allocation wait. */
   readonly managed: boolean
+  /** Redacted source and credential outcome for `rtc.diagnostics`; never the provider's message or a URL. */
+  readonly turn: TurnConfigDiagnostics
 }
 
 /**
@@ -195,11 +245,26 @@ export const sessionIceServers = async (
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<SessionIceServers> => {
   const local = mintIceServers(settings, taskId, nowSeconds)
-  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null, managed: false }
+  if (managed === null || hasExplicitTurn(settings)) {
+    return { iceServers: local, warning: null, managed: false, turn: localTurnDiagnostics(settings) }
+  }
   const result = await managed.servers()
+  if (result.iceServers === null) {
+    // A provider that declined (204) or a standalone box asked for nothing: no TURN, no credential failure. A fetch,
+    // identity, expired-credential, or malformed-answer warning leaves the box without the relay it expected.
+    return {
+      iceServers: local,
+      warning: result.warning,
+      managed: false,
+      turn: result.warning === null
+        ? { source: "none", status: "not-configured", failure: null, issue: null }
+        : { source: "managed", status: "unavailable", failure: "turn-credentials", issue: result.issue },
+    }
+  }
   return {
-    iceServers: result.iceServers === null ? local : [...local, ...result.iceServers],
+    iceServers: [...local, ...result.iceServers],
     warning: result.warning,
-    managed: result.iceServers !== null,
+    managed: true,
+    turn: { source: "managed", status: "configured", failure: null, issue: null },
   }
 }

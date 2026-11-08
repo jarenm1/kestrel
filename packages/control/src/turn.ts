@@ -7,7 +7,7 @@
  * retrying box does not spend a provider call, and concurrent requests share one call.
  */
 import { Schema } from "effect"
-import { BOX_ID_HEADER, DesktopRtcIceServer, type BoxTurnCredentials } from "@cloudagents/protocol"
+import { BOX_ID_HEADER, DesktopRtcIceServer, type BoxTurnCredentials, type DesktopTurnIssue } from "@cloudagents/protocol"
 import { errorResponse, json, safeEqual } from "./http"
 import { hub, type Env } from "./env"
 
@@ -33,7 +33,15 @@ const ProviderResponse = Schema.Struct({ iceServers: Schema.Array(DesktopRtcIceS
 /** A scheme a browser's `RTCPeerConnection` accepts; anything else means the provider answered with something else. */
 const ICE_URL_SCHEME = /^(stun|stuns|turn|turns):/i
 
-class TurnProviderError extends Error {}
+class TurnProviderError extends Error {
+  constructor(message: string, readonly issue: DesktopTurnIssue) {
+    super(message)
+  }
+}
+
+/** A safe failure body: the issue enum names the fix without exposing provider text or credentials. */
+const turnError = (status: number, tag: string, message: string, issue: DesktopTurnIssue): Response =>
+  json({ _tag: tag, message, issue }, status)
 
 type TurnProviderConfig = { readonly keyId: string; readonly token: string }
 
@@ -97,17 +105,17 @@ const fetchProviderCredentials = async (config: TurnProviderConfig, now: number)
       signal: AbortSignal.timeout(TURN_PROVIDER_TIMEOUT_MS),
     })
   } catch {
-    throw new TurnProviderError(PROVIDER_UNAVAILABLE)
+    throw new TurnProviderError(PROVIDER_UNAVAILABLE, "provider-unavailable")
   }
-  if (!response.ok) throw new TurnProviderError(PROVIDER_UNAVAILABLE)
+  if (!response.ok) throw new TurnProviderError(PROVIDER_UNAVAILABLE, "provider-unavailable")
   let body: unknown
   try {
     body = await response.json()
   } catch {
-    throw new TurnProviderError(PROVIDER_UNUSABLE)
+    throw new TurnProviderError(PROVIDER_UNUSABLE, "provider-unusable")
   }
   const iceServers = usableIceServers(body)
-  if (iceServers === null) throw new TurnProviderError(PROVIDER_UNUSABLE)
+  if (iceServers === null) throw new TurnProviderError(PROVIDER_UNUSABLE, "provider-unusable")
   // The provider's credentials live exactly the TTL the request asked for.
   return { iceServers, expiresAt: now + TURN_CREDENTIAL_TTL_SECONDS * 1000 }
 }
@@ -159,14 +167,14 @@ const credentialsFor = (
 export const handleBoxTurn = async (request: Request, env: Env, now = Date.now()): Promise<Response> => {
   if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
   const identity = await boxIdentity(request, env)
-  if (identity === null) return errorResponse(401, "Unauthorized", "invalid box credentials")
+  if (identity === null) return turnError(401, "Unauthorized", "invalid box credentials", "control-rejected")
   const config = providerConfig(env)
   if (config === "absent") return new Response(null, { status: 204, headers: { "cache-control": "no-store" } })
-  if (config === "incomplete") return errorResponse(502, "BadGateway", INCOMPLETE_CONFIG)
+  if (config === "incomplete") return turnError(502, "BadGateway", INCOMPLETE_CONFIG, "configuration-incomplete")
   try {
     return json(await credentialsFor(identity, config, now))
   } catch (err) {
-    if (err instanceof TurnProviderError) return errorResponse(502, "BadGateway", err.message)
+    if (err instanceof TurnProviderError) return turnError(502, "BadGateway", err.message, err.issue)
     throw err
   }
 }

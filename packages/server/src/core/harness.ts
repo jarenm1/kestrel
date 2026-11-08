@@ -46,7 +46,7 @@ import type { RunDriver } from "./run-driver"
 import { saveRunImage } from "./run-images"
 import { makeTranscript, type ResponseStreamingMode, type Transcript } from "./transcript"
 import { agentDiagnostic, agentFailure, declinedCodexItem, endsCodexTurn, makeToolFailureReporter, toolFailure } from "./tool-failures"
-import { writeAtomic } from "./atomic"
+import { sessionGeneration } from "./session-generation"
 
 export interface AgentHarnessShape {
   /**
@@ -66,8 +66,9 @@ export interface AgentHarnessShape {
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
-   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. The turn is interrupted
-   * first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
+   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. At shutdown, a run that has
+   * started is marked failed and interrupted by restart instead, and a run still queued or launching is cancelled.
+   * The turn is interrupted first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
    * process is killed when it does not exit in time.
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
@@ -116,15 +117,7 @@ export type SessionContinuation = "task-home" | `cli-login:${string}`
 const loginContinuation = (dir: string): Effect.Effect<SessionContinuation, InternalError> =>
   Effect.tryPromise({
     try: async () => {
-      const path = join(dir, ".kestrel-session-generation")
-      let generation: string
-      try {
-        generation = await readFile(path, "utf8")
-      } catch (cause) {
-        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause
-        generation = newId()
-        await writeAtomic(path, generation)
-      }
+      const generation = await sessionGeneration(dir)
       return `cli-login:${generation}` as const
     },
     catch: () => new InternalError({ message: "cannot read the CLI session generation" }),
@@ -522,7 +515,9 @@ export const AgentHarnessLive = Layer.effect(
 
     /**
      * Kills a running run and marks it cancelled. A cancel also drops the run's question. At shutdown (`shutdown`),
-     * a run that waits on a question keeps it, and its task keeps waiting, for the next start.
+     * a run that has started is marked failed and interrupted by restart, as a crash leaves it; its question and task
+     * stay as they were, for the next start to reconcile. A run still queued or launching never started, so it is
+     * cancelled as on a cancel.
      */
     const stopRun = (runId: string, shutdown: boolean): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
@@ -549,10 +544,17 @@ export const AgentHarnessLive = Layer.effect(
         }
         yield* patchRunAndTask(runId, (run, task, s) => {
           if (run.status !== "running") return
-          run.status = "cancelled"
           run.exitCode = null
           run.endedAt = nowIso()
-          if (shutdown && s.pendingAsks.some((a) => a.runId === runId)) return
+          // The box is going down, not the user: a run that had started is left as a crash leaves it, and the next
+          // start's reconciliation marks it interrupted by restart and its task failed. A run still queued or launching
+          // never started an agent, so there is no work to resume and it is cancelled as before.
+          if (shutdown && entry !== undefined) {
+            run.status = "failed"
+            run.interruptedByRestart = true
+            return
+          }
+          run.status = "cancelled"
           s.pendingAsks = s.pendingAsks.filter((a) => a.runId !== runId)
           task.status = "idle"
         })
@@ -951,7 +953,7 @@ export const AgentHarnessLive = Layer.effect(
             })
 
             // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
-            // only marked it cancelled and revoked the token it had then. Give up the token and slot it holds now.
+            // only marked it stopped (cancelled, or interrupted at shutdown) and revoked the token it had then. Give up the token and slot it holds now.
             if ((yield* store.read).runs.find((r) => r.id === run.id)?.status !== "running") {
               yield* broker.revoke(run.id)
               releaseSlot(run.id)

@@ -12,6 +12,21 @@ const Unwatch = Schema.Struct({
   number: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 
+const BoxError = Schema.Struct({ message: Schema.String })
+
+/**
+ * A failed box call. A box error body with a `message` passes through with its status, so the caller keeps the box's
+ * detail, including a structured `NotFound`. Anything else, such as a proxy's HTML error page, keeps its status but is
+ * labelled `BadGateway` (a bare 404 from a proxy does not mean the thread is missing). Only the hub's own `BoxOffline`
+ * bodies carry that tag: a bare gateway status does not establish that the box is unreachable.
+ */
+const boxFailure = (result: { status: number; body: string }): Response => {
+  let value: unknown
+  try { value = JSON.parse(result.body) } catch { value = undefined }
+  if (Schema.is(BoxError)(value)) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
+  return errorResponse(result.status, "BadGateway", "agent box request failed")
+}
+
 /**
  * Authenticated box calls only. A thread may watch any number of pull requests, each in any repository its owner can
  * see; the caller must own the thread and the thread must not be archived.
@@ -42,7 +57,7 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   const repo = await fetchRepository(token, body.repo)
   if (repo === null || await fetchPullRequest(token, repo, body.number) === null) return errorResponse(404, "NotFound", "pull request not found")
   const result = await hub(env).boxCall(login, "GET", `/api/tasks/${encodeURIComponent(body.taskId)}`)
-  if (!result.ok) return errorResponse(404, "NotFound", "thread not found")
+  if (!result.ok) return boxFailure(result)
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)

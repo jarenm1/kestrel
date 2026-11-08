@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Check, ChevronDown, ChevronUp } from "lucide-react-native";
+import Check from "lucide-react-native/icons/check";
+import ChevronDown from "lucide-react-native/icons/chevron-down";
+import ChevronUp from "lucide-react-native/icons/chevron-up";
 import {
   baseModelId,
   type AgentModel,

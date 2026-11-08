@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  type DesktopRtcBoxDiagnostics,
   type DesktopRtcClientMessage,
   type DesktopRtcServerMessage,
 } from "@cloudagents/protocol"
@@ -16,6 +17,7 @@ import {
   type RtcState,
   type RtcStats,
 } from "./webrtc"
+import { diagnosticSummary, type RtcDiagnostics } from "./diagnostics"
 
 interface Timer {
   id: number
@@ -98,6 +100,7 @@ class FakeChannel {
 class FakePeer {
   static all: FakePeer[] = []
   connectionState = "new"
+  iceGatheringState = "new"
   localDescription: { sdp: string } | null = null
   remote: unknown = null
   remoteCandidates: unknown[] = []
@@ -107,6 +110,8 @@ class FakePeer {
   closed = false
   ontrack: ((ev: unknown) => void) | null = null
   onicecandidate: ((ev: unknown) => void) | null = null
+  onicecandidateerror: ((ev: unknown) => void) | null = null
+  onicegatheringstatechange: (() => void) | null = null
   onconnectionstatechange: (() => void) | null = null
 
   constructor(readonly config: unknown) {
@@ -155,6 +160,15 @@ class FakePeer {
     this.onconnectionstatechange?.()
   }
 
+  gather(state: string): void {
+    this.iceGatheringState = state
+    this.onicegatheringstatechange?.()
+  }
+
+  failIce(error: { errorCode: number; url: string; address?: string; port?: number; errorText?: string }): void {
+    this.onicecandidateerror?.(error)
+  }
+
   emitTrack(kind: string): void {
     this.ontrack?.({ track: { kind }, receiver: {} })
   }
@@ -197,13 +211,15 @@ function harness() {
   const states: RtcState[] = []
   const stats: RtcStats[] = []
   const audio: boolean[] = []
+  const diagnostics: RtcDiagnostics[] = []
   const rtc = new DesktopRtc(video, {
     send: (m) => sent.push(m),
     onState: (s) => states.push(s),
     onStats: (s) => stats.push(s),
+    onDiagnostics: (d) => diagnostics.push(d),
     onAudio: (a) => audio.push(a),
   })
-  return { rtc, sent, states, stats, audio }
+  return { rtc, sent, states, stats, audio, diagnostics }
 }
 
 /** Lets the fake peer's promise chains run. */
@@ -212,6 +228,11 @@ async function settle(): Promise<void> {
 }
 
 const config: DesktopRtcServerMessage = { _tag: "rtc.config", iceServers: [], iceTransportPolicy: "all" }
+const turnConfig: DesktopRtcServerMessage = {
+  _tag: "rtc.config",
+  iceServers: [{ urls: ["turn:turn.example?transport=udp"], username: "viewer", credential: "secret" }],
+  iceTransportPolicy: "all",
+}
 const unavailable = (retryable: boolean): DesktopRtcServerMessage => ({
   _tag: "rtc.unavailable",
   reason: "viewer limit",
@@ -276,7 +297,7 @@ describe("signaling", () => {
 describe("refusal and retry", () => {
   test("a retryable refusal re-offers after the first retry delay", async () => {
     const h = harness()
-    h.rtc.handle(config)
+    h.rtc.handle(turnConfig)
     await settle()
     h.rtc.handle(unavailable(true))
     expect(FakePeer.all[0]!.closed).toBe(true)
@@ -289,6 +310,16 @@ describe("refusal and retry", () => {
     expect(h.sent.filter((m) => m._tag === "rtc.offer").length).toBe(2)
     // A refusal sends no rtc.close: the box has no session.
     expect(h.sent.some((m) => m._tag === "rtc.close")).toBe(false)
+  })
+
+  test("a TURN-less refusal asks for a new config instead of re-offering", async () => {
+    const h = harness()
+    h.rtc.handle(config)
+    await settle()
+    h.rtc.handle(unavailable(true))
+    clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    expect(FakePeer.all.length).toBe(1)
   })
 
   test("a non-retryable refusal is unsupported and does not retry", async () => {
@@ -310,6 +341,8 @@ describe("refusal and retry", () => {
     const peer = await live(h.rtc)
     peer.set("failed")
     clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    h.rtc.handle(config)
     await settle()
     expect(FakePeer.all.length).toBe(2)
     expect(h.states.at(-1)).toBe("retrying")
@@ -333,13 +366,18 @@ describe("refusal and retry", () => {
     h.rtc.handle(turn)
     await settle()
     expect(FakePeer.all.length).toBe(2)
-    expect((FakePeer.all[1]!.config as { iceServers: unknown }).iceServers).toEqual([
-      { urls: ["turn:turn.example"], username: "new", credential: "new" },
-    ])
+    expect(FakePeer.all[1]!.config).toMatchObject({
+      iceServers: [{ urls: ["turn:turn.example"], username: "new", credential: "new" }],
+    })
     expect(h.states.at(-1)).toBe("retrying")
-    // The refreshed config is fresh: the next failure backs off and offers without asking again.
+    // The refreshed config keeps the attempt count: the next failure backs off further and refreshes again.
     FakePeer.all[1]!.set("failed")
-    clock.advance(retryDelay(1))
+    clock.advance(retryDelay(1) - 1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(1)
+    clock.advance(1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(2)
+    expect(FakePeer.all.length).toBe(2)
+    h.rtc.handle(turn)
     await settle()
     expect(FakePeer.all.length).toBe(3)
   })
@@ -362,6 +400,9 @@ describe("refusal and retry", () => {
     expect(h.sent.at(-1)).toEqual({ _tag: "rtc.close" })
     expect(h.states.at(-1)).toBe("retrying")
     clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    // The box does not answer: the old config is used so the session cannot stall.
+    clock.advance(CONNECT_TIMEOUT_MS)
     await settle()
     expect(FakePeer.all.length).toBe(2)
   })
@@ -472,6 +513,439 @@ describe("input", () => {
   })
 })
 
+describe("diagnostics", () => {
+  test("the first snapshot waits for a config", () => {
+    const h = harness()
+    expect(h.diagnostics).toHaveLength(1)
+    expect(h.diagnostics[0]).toEqual({
+      attempt: 0,
+      config: "waiting",
+      turnServers: 0,
+      viewerRelayCandidates: 0,
+      viewerGathering: "unknown",
+      connection: "unknown",
+      selectedPair: null,
+      videoBytes: null,
+      videoPackets: null,
+      framesDecoded: null,
+      lastFailure: null,
+      iceErrors: [],
+      box: null,
+    })
+  })
+
+  test("a box summary before the first config is kept for the first attempt", async () => {
+    const h = harness()
+    const box: DesktopRtcBoxDiagnostics = {
+      turnSource: "managed",
+      turnStatus: "unavailable",
+      gathering: "idle",
+      relayCandidates: 0,
+      connection: "new",
+      failure: "turn-credentials",
+    }
+    h.rtc.handle({ _tag: "rtc.diagnostics", diagnostics: box })
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(h.diagnostics.at(-1)!.attempt).toBe(1)
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+  })
+
+  test("turnServers counts credential-bearing TURN entries, not URLs", async () => {
+    const h = harness()
+    h.rtc.handle({
+      _tag: "rtc.config",
+      iceServers: [
+        { urls: ["turn:one.example?transport=udp", "turns:two.example?transport=tcp"], username: "u", credential: "c" },
+        { urls: ["stun:stun.example"] },
+        { urls: ["turn:no-auth.example"] },
+        { urls: ["turn:partial.example"], username: "u" },
+      ],
+      iceTransportPolicy: "all",
+    })
+    await settle()
+    expect(h.diagnostics.at(-1)!.turnServers).toBe(1)
+    expect(h.diagnostics.at(-1)!.config).toBe("ready")
+  })
+
+  test("the attempt counter counts negotiations, not retry backoff", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    expect(h.diagnostics.at(-1)!.attempt).toBe(1)
+    peer.set("failed")
+    expect(h.diagnostics.at(-1)!.attempt).toBe(1)
+    clock.advance(retryDelay(0))
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(h.diagnostics.at(-1)!.attempt).toBe(2)
+  })
+
+  test("a retry shows its previous failure during backoff, then clears it for the new attempt", async () => {
+    const h = harness()
+    h.rtc.handle(turnConfig)
+    await settle()
+    FakePeer.all[0]!.set("failed")
+    // scheduleRetry publishes before the timer: the cause stays visible while waiting.
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("WebRTC did not connect. Candidate gathering alone does not prove a working path.")
+    clock.advance(retryDelay(0))
+    await settle()
+    expect(h.diagnostics.at(-1)!.lastFailure).toBeNull()
+    expect(h.diagnostics.at(-1)!.config).toBe("refreshing")
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("Refreshing connection settings before retrying.")
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(h.diagnostics.at(-1)!.config).toBe("ready")
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("Gathering candidates and negotiating the connection.")
+  })
+
+  test("inbound video and the selected pair are monitored during negotiation", async () => {
+    const h = harness()
+    h.rtc.handle(config)
+    await settle()
+    const peer = FakePeer.all[0]!
+    peer.stats.set("v", {
+      type: "inbound-rtp",
+      kind: "video",
+      bytesReceived: 1_000,
+      packetsReceived: 8,
+      framesDecoded: 2,
+    })
+    peer.stats.set("pair", {
+      id: "pair",
+      type: "candidate-pair",
+      state: "succeeded",
+      nominated: true,
+      localCandidateId: "L",
+      remoteCandidateId: "R",
+      currentRoundTripTime: 0.05,
+    })
+    peer.stats.set("L", { id: "L", type: "local-candidate", candidateType: "host", protocol: "udp" })
+    peer.stats.set("R", { id: "R", type: "remote-candidate", candidateType: "relay", protocol: "udp" })
+    clock.advance(STATS_EVERY_MS)
+    await settle()
+    const diagnostics = h.diagnostics.at(-1)!
+    expect(diagnostics.connection).toBe("new")
+    expect(diagnostics.framesDecoded).toBe(2)
+    expect(diagnostics.videoBytes).toBe(1_000)
+    expect(diagnostics.videoPackets).toBe(8)
+    expect(diagnostics.selectedPair).toEqual({ local: "host", remote: "relay", protocol: "udp", relayProtocol: "unknown" })
+    // A relay on either end is a relay path, even when only the box's candidate is relayed.
+    expect(h.stats.at(-1)?.path).toBe("relay")
+  })
+
+  test("media counters are unknown until reported, and explicit zeros are kept", async () => {
+    const h = harness()
+    h.rtc.handle(config)
+    await settle()
+    const peer = FakePeer.all[0]!
+    clock.advance(STATS_EVERY_MS)
+    await settle()
+    expect(h.diagnostics.at(-1)!.videoBytes).toBeNull()
+    expect(h.diagnostics.at(-1)!.videoPackets).toBeNull()
+    expect(h.diagnostics.at(-1)!.framesDecoded).toBeNull()
+    peer.stats.set("v", {
+      type: "inbound-rtp",
+      mediaType: "video",
+      bytesReceived: 0,
+      packetsReceived: 0,
+      framesDecoded: 0,
+    })
+    clock.advance(STATS_EVERY_MS)
+    await settle()
+    const reported = h.diagnostics.at(-1)!
+    expect(reported.videoBytes).toBe(0)
+    expect(reported.videoPackets).toBe(0)
+    expect(reported.framesDecoded).toBe(0)
+  })
+
+  test("gathering and connection states come from the peer connection", async () => {
+    const h = harness()
+    h.rtc.handle(config)
+    await settle()
+    const peer = FakePeer.all[0]!
+    peer.gather("gathering")
+    expect(h.diagnostics.at(-1)!.viewerGathering).toBe("gathering")
+    expect(h.diagnostics.at(-1)!.connection).toBe("new")
+    peer.gather("complete")
+    expect(h.diagnostics.at(-1)!.viewerGathering).toBe("complete")
+  })
+
+  test("box snapshots are copied, kept through backoff, and cleared for a new attempt", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    const box: DesktopRtcBoxDiagnostics = {
+      turnSource: "managed",
+      turnStatus: "configured",
+      gathering: "complete",
+      relayCandidates: 2,
+      connection: "connected",
+      failure: null,
+    }
+    h.rtc.handle({ _tag: "rtc.diagnostics", diagnostics: box })
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    expect(h.diagnostics.at(-1)!.box).not.toBe(box)
+    peer.set("failed")
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("connection")
+    // A late snapshot cannot overwrite the failed attempt's evidence: no peer connection owns it.
+    h.rtc.handle({
+      _tag: "rtc.diagnostics",
+      diagnostics: { ...box, connection: "failed", failure: "connection-timeout" },
+    })
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    clock.advance(retryDelay(0))
+    h.rtc.handle(turnConfig)
+    await settle()
+    const next = h.diagnostics.at(-1)!
+    expect(next.attempt).toBe(2)
+    expect(next.box).toBeNull()
+    expect(next.lastFailure).toBeNull()
+  })
+
+  test("a box summary sent just before a config belongs to the new attempt", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.set("failed")
+    clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    const box: DesktopRtcBoxDiagnostics = {
+      turnSource: "managed",
+      turnStatus: "configured",
+      gathering: "idle",
+      relayCandidates: 0,
+      connection: "new",
+      failure: "turn-credentials",
+    }
+    h.rtc.handle({ _tag: "rtc.diagnostics", diagnostics: box })
+    expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    h.rtc.handle(turnConfig)
+    await settle()
+    const next = h.diagnostics.at(-1)!
+    expect(next.attempt).toBe(2)
+    expect(next.box).toEqual(box)
+  })
+
+  test("candidate errors keep only numeric codes and scheme/transport, unique and bounded", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.failIce({
+      errorCode: 701,
+      url: "turn:relay.example:3478?transport=udp",
+      address: "198.51.100.4",
+      port: 3478,
+      errorText: "secret failure",
+    })
+    peer.failIce({ errorCode: 701, url: "turn:relay.example:3478?transport=udp", address: "198.51.100.4" })
+    peer.failIce({ errorCode: 701, url: "turn:relay.example:3478?transport=tcp" })
+    peer.failIce({ errorCode: 702, url: "stun:stun.example" })
+    peer.failIce({ errorCode: 703, url: "turns:secure.example?transport=tcp" })
+    peer.failIce({ errorCode: 704, url: "turn:extra.example" })
+    const diagnostics = h.diagnostics.at(-1)!
+    expect(diagnostics.iceErrors).toEqual([
+      { code: 701, transport: "turn-udp" },
+      { code: 701, transport: "turn-tcp" },
+      { code: 702, transport: "stun" },
+      { code: 703, transport: "turn-tls" },
+    ])
+    const text = JSON.stringify(diagnostics)
+    for (const leaked of ["198.51.100.4", "relay.example", "stun.example", "secure.example", "secret failure"]) {
+      expect(text).not.toContain(leaked)
+    }
+  })
+
+  test("a TURN-less failure refreshes credentials after its backoff", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    const settled = h.diagnostics.at(-1)!
+    peer.set("failed")
+    const failed = h.diagnostics.at(-1)!
+    expect(failed.config).toBe("ready")
+    expect(failed.connection).toBe("failed")
+    expect(failed.lastFailure).toBe("connection")
+    expect(failed.attempt).toBe(settled.attempt)
+    clock.advance(retryDelay(0) - 1)
+    expect(h.sent.some((m) => m._tag === "rtc.config.request")).toBe(false)
+    clock.advance(1)
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    expect(h.diagnostics.at(-1)!.config).toBe("refreshing")
+    expect(FakePeer.all.length).toBe(1)
+  })
+
+  test("refreshed credentials are used and the session recovers live", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.set("failed")
+    clock.advance(retryDelay(0))
+    const fresh: DesktopRtcServerMessage = {
+      _tag: "rtc.config",
+      iceServers: [{ urls: ["turns:fresh.example?transport=tcp"], username: "fresh", credential: "fresh-secret" }],
+      iceTransportPolicy: "all",
+    }
+    h.rtc.handle(fresh)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+    expect(FakePeer.all[1]!.config).toMatchObject({
+      iceServers: [{ urls: ["turns:fresh.example?transport=tcp"], username: "fresh" }],
+    })
+    expect(h.diagnostics.at(-1)!.turnServers).toBe(1)
+    expect(h.diagnostics.at(-1)!.config).toBe("ready")
+    h.rtc.handle({ _tag: "rtc.answer", sdp: "answer" })
+    await settle()
+    const second = FakePeer.all[1]!
+    second.set("connected")
+    second.emitTrack("video")
+    second.stats.set("v", {
+      type: "inbound-rtp",
+      kind: "video",
+      bytesReceived: 2_048,
+      packetsReceived: 20,
+      framesDecoded: 7,
+    })
+    clock.advance(STATS_EVERY_MS)
+    await settle()
+    expect(h.states.at(-1)).toBe("live")
+    expect(h.diagnostics.at(-1)!.videoBytes).toBe(2_048)
+    // The new attempt is described by its own evidence; the earlier failure was visible during its backoff.
+    expect(h.diagnostics.at(-1)!.lastFailure).toBeNull()
+  })
+
+  test("repeated failures keep the exponential backoff", async () => {
+    const h = harness()
+    const first = await live(h.rtc)
+    first.set("failed")
+    clock.advance(retryDelay(0))
+    h.rtc.handle(turnConfig)
+    await settle()
+    FakePeer.all[1]!.set("failed")
+    clock.advance(retryDelay(1) - 1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(1)
+    clock.advance(1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(2)
+  })
+
+  test("a config arriving after the fallback deadline does not reset consecutive-failure backoff", async () => {
+    const h = harness()
+    const first = await live(h.rtc)
+    first.set("failed")
+    clock.advance(retryDelay(0))
+    clock.advance(CONNECT_TIMEOUT_MS)
+    await settle()
+    FakePeer.all.at(-1)!.set("failed")
+    // The earlier refresh finally arrives while a later failed attempt is backing off.
+    h.rtc.handle(turnConfig)
+    await settle()
+    FakePeer.all.at(-1)!.set("failed")
+    const requested = h.sent.filter((message) => message._tag === "rtc.config.request").length
+    clock.advance(retryDelay(2) - 1)
+    expect(h.sent.filter((message) => message._tag === "rtc.config.request").length).toBe(requested)
+    clock.advance(1)
+    expect(h.sent.filter((message) => message._tag === "rtc.config.request").length).toBe(requested + 1)
+  })
+
+  test("a hung sample from a replaced peer cannot stop the new peer's diagnostics", async () => {
+    const h = harness()
+    const first = await live(h.rtc)
+    const pending = Promise.withResolvers<Map<string, Record<string, unknown>>>()
+    first.getStats = () => pending.promise
+    clock.advance(STATS_EVERY_MS)
+    first.set("failed")
+    clock.advance(retryDelay(0))
+    h.rtc.handle(turnConfig)
+    await settle()
+    const next = FakePeer.all.at(-1)!
+    next.stats.set("video", { type: "inbound-rtp", kind: "video", bytesReceived: 123_456, packetsReceived: 70, framesDecoded: 7 })
+    try {
+      clock.advance(STATS_EVERY_MS)
+      await settle()
+      expect(h.diagnostics.at(-1)!.videoBytes).toBe(123_456)
+      pending.resolve(new Map([["old", { type: "inbound-rtp", kind: "video", bytesReceived: 99, framesDecoded: 1 }]]))
+      await settle()
+      expect(h.diagnostics.at(-1)!.videoBytes).toBe(123_456)
+    } finally {
+      pending.resolve(new Map())
+      h.rtc.close()
+      await settle()
+    }
+  })
+
+  test("rejected peer configuration reports negotiation failure and recovers with fresh settings", async () => {
+    const h = harness()
+    g.RTCPeerConnection = class {
+      constructor() { throw new Error("invalid ICE configuration with private details") }
+    }
+    h.rtc.handle(config)
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("negotiation")
+    clock.advance(retryDelay(0))
+    expect(h.sent.at(-1)).toEqual({ _tag: "rtc.config.request" })
+    g.RTCPeerConnection = FakePeer
+    h.rtc.handle(turnConfig)
+    await settle()
+    FakePeer.all.at(-1)!.set("connected")
+    expect(h.diagnostics.at(-1)!.connection).toBe("connected")
+  })
+
+  test("a stats snapshot from a dropped attempt is ignored", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    const gates: Array<(report: Map<string, Record<string, unknown>>) => void> = []
+    peer.getStats = () => {
+      const { promise, resolve } = Promise.withResolvers<Map<string, Record<string, unknown>>>()
+      gates.push(resolve)
+      return promise
+    }
+    clock.advance(STATS_EVERY_MS)
+    const samples = h.stats.length
+    const snapshots = h.diagnostics.length
+    h.rtc.close()
+    gates[0]!(new Map([["v", { type: "inbound-rtp", kind: "video", bytesReceived: 9, framesDecoded: 9 }]]))
+    await settle()
+    expect(h.stats.length).toBe(samples)
+    expect(h.diagnostics.length).toBe(snapshots)
+  })
+
+  test("a closed session never requests a config", async () => {
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.set("failed")
+    h.rtc.close()
+    clock.advance(RETRY_MAX_MS * 4)
+    expect(h.sent.some((m) => m._tag === "rtc.config.request")).toBe(false)
+    expect(FakePeer.all.length).toBe(1)
+  })
+
+  test("a rejected video.play is a playback failure, not a disconnect", async () => {
+    video = { srcObject: null, play: () => Promise.reject(new Error("blocked")) } as unknown as HTMLVideoElement
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.emitTrack("video")
+    await settle()
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("playback")
+    expect(h.states.at(-1)).toBe("live")
+  })
+
+  test("a play() aborted by teardown keeps the connection failure", async () => {
+    const aborts: Array<(reason: unknown) => void> = []
+    video = {
+      srcObject: null,
+      play: () => {
+        const { promise, reject } = Promise.withResolvers<void>()
+        aborts.push(reject)
+        return promise
+      },
+    } as unknown as HTMLVideoElement
+    const h = harness()
+    const peer = await live(h.rtc)
+    peer.emitTrack("video")
+    expect(aborts).toHaveLength(1)
+    peer.set("failed")
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("connection")
+    aborts[0]!({ name: "AbortError" })
+    await settle()
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("connection")
+  })
+})
+
 describe("measure", () => {
   const base = (): Record<string, Record<string, unknown>> => ({
     v: { type: "inbound-rtp", kind: "video", framesPerSecond: 30, framesDecoded: 20, totalDecodeTime: 0.3 },
@@ -507,9 +981,25 @@ describe("measure", () => {
     expect(stats.jitterMs).toBeCloseTo(10)
   })
 
-  test("a direct candidate pair reports the direct path", () => {
+  test("a direct candidate pair needs both ends known and non-relay", () => {
+    const entries = base()
+    entries.pair!.remoteCandidateId = "R"
+    entries.L = { id: "L", type: "local-candidate", candidateType: "host", protocol: "udp" }
+    entries.R = { id: "R", type: "remote-candidate", candidateType: "srflx", protocol: "udp" }
+    expect(measure(reports(entries), null).stats.path).toBe("direct")
+  })
+
+  test("a missing remote candidate is not confidently labelled direct", () => {
     const entries = base()
     entries.L = { id: "L", type: "local-candidate", candidateType: "host" }
-    expect(measure(reports(entries), null).stats.path).toBe("direct")
+    expect(measure(reports(entries), null).stats.path).toBeNull()
+  })
+
+  test("a relay remote candidate alone labels the path as relay", () => {
+    const entries = base()
+    entries.pair!.remoteCandidateId = "R"
+    entries.L = { id: "L", type: "local-candidate", candidateType: "host", protocol: "udp" }
+    entries.R = { id: "R", type: "remote-candidate", candidateType: "relay", protocol: "udp" }
+    expect(measure(reports(entries), null).stats.path).toBe("relay")
   })
 })

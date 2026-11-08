@@ -54,13 +54,14 @@ export function harnessForConnection(provider: string): HarnessId | undefined {
  * Re-reads the connections, whose CLI and harness rows come from the active box, and the usage figures a changed login
  * moves.
  */
-export function invalidateConnections(queryClient: QueryClient, scope: string): void {
-  void queryClient.invalidateQueries({ queryKey: keys.connections });
+export function invalidateConnections(queryClient: QueryClient, scope: string): Promise<void> {
+  const connections = queryClient.invalidateQueries({ queryKey: keys.connections });
   const scoped = boxKeys(scope);
   void queryClient.invalidateQueries({ queryKey: scoped.models });
   void queryClient.invalidateQueries({ queryKey: scoped.usage });
   void queryClient.invalidateQueries({ queryKey: scoped.providerUsage });
   void queryClient.invalidateQueries({ queryKey: scoped.usageActivity });
+  return connections;
 }
 
 export const connectionStyles = StyleSheet.create({
@@ -130,7 +131,11 @@ export function ConnectionRowFrame({
         <View style={styles.header}>
           <Text style={styles.label}>{connection.label}</Text>
           <Badge variant={connection.connected ? "success" : "neutral"}>
-            {connection.connected ? "connected" : "not connected"}
+            {connection.connected
+              ? connection.accounts !== undefined && connection.accounts.length > 1
+                ? `${connection.accounts.length} connected`
+                : "connected"
+              : "not connected"}
           </Badge>
           {account ? <Text style={styles.account}>{account}</Text> : null}
           {headerExtra}

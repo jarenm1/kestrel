@@ -9,30 +9,28 @@ import {
   type ToolKind,
   type ToolView,
 } from "@cloudagents/protocol"
-import {
-  Bot,
-  Brain,
-  Camera,
-  CheckSquare,
-  ChevronRight,
-  FilePen,
-  FileText,
-  GitBranch,
-  Globe,
-  Image,
-  Keyboard,
-  ListTodo,
-  Loader,
-  MessageSquare,
-  Monitor,
-  MousePointerClick,
-  Search,
-  Square,
-  SquareTerminal,
-  Wrench,
-  X,
-  type LucideIcon,
-} from "lucide-react"
+import Bot from "lucide-react/icons/bot"
+import Brain from "lucide-react/icons/brain"
+import Camera from "lucide-react/icons/camera"
+import CheckSquare from "lucide-react/icons/check-square"
+import ChevronRight from "lucide-react/icons/chevron-right"
+import FilePen from "lucide-react/icons/file-pen"
+import FileText from "lucide-react/icons/file-text"
+import GitBranch from "lucide-react/icons/git-branch"
+import Globe from "lucide-react/icons/globe"
+import Image from "lucide-react/icons/image"
+import Keyboard from "lucide-react/icons/keyboard"
+import ListTodo from "lucide-react/icons/list-todo"
+import Loader from "lucide-react/icons/loader"
+import MessageSquare from "lucide-react/icons/message-square"
+import Monitor from "lucide-react/icons/monitor"
+import MousePointerClick from "lucide-react/icons/mouse-pointer-click"
+import Search from "lucide-react/icons/search"
+import Square from "lucide-react/icons/square"
+import SquareTerminal from "lucide-react/icons/square-terminal"
+import Wrench from "lucide-react/icons/wrench"
+import X from "lucide-react/icons/x"
+import type { LucideIcon } from "lucide-react"
 import { cn } from "../cn"
 import { useTranscriptHost } from "./host"
 import { useAutoOpen } from "./useAutoOpen"
@@ -292,12 +290,12 @@ export function ToolRow({ item, view, source, running, nested }: {
  * coming in, folded once the agent moves on, like a thought. A lone call renders without the summary but through the
  * same elements, so its row (and whatever the user opened in it) survives the next call turning it into a group.
  */
-export function ToolGroup({ single, summary, kinds, live, failed, children }: {
+export function ToolGroup({ single, summary, kinds, live, failedCount, children }: {
   single: boolean
   summary: string
   kinds: ReadonlySet<ToolKind>
   live: boolean
-  failed: boolean
+  failedCount: number
   children: ReactNode
 }) {
   const [open, toggle] = useAutoOpen(live)
@@ -309,7 +307,12 @@ export function ToolGroup({ single, summary, kinds, live, failed, children }: {
         <button type="button" aria-expanded={open} onClick={toggle} className={ROW_CLASS}>
           <Icon className="size-4 shrink-0" />
           <span className={cn("min-w-0 truncate", live && SHIMMER_CLASS)}>{summary}</span>
-          {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="a call failed" />}
+          {failedCount > 0 && (
+            <span className="flex shrink-0 items-center gap-1 text-destructive">
+              <X className="size-3.5" aria-hidden="true" />
+              {failedCount} failed
+            </span>
+          )}
           <Chevron open={open} />
         </button>
       )}

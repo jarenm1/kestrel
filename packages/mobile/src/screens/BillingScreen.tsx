@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { Check } from "lucide-react-native";
+import Check from "lucide-react-native/icons/check";
 import { CURRENT_PLAN, PLANS, type Plan, type Usage } from "@cloudagents/protocol";
 import { createQueries } from "@/api/queries";
 import { SettingsDivider, SettingsPage, SettingsRow, SettingsSectionHeader } from "@/components/SettingsPage";

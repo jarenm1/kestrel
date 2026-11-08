@@ -71,6 +71,7 @@ describe("managedTurn", () => {
     const directViewer = await sessionIceServers(settings(), managedTurn(config(direct(controlUrl))), "thread-direct", NOW_S)
     expect(directViewer.warning).toBeNull()
     expect(directViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    expect(directViewer.turn).toEqual({ source: "managed", status: "configured", failure: null, issue: null })
     // The box's own peer takes the same list, and knows the relay is the control plane's.
     expect(directViewer.managed).toBe(true)
 
@@ -82,16 +83,31 @@ describe("managedTurn", () => {
     )
     expect(relayViewer.warning).toBeNull()
     expect(relayViewer.iceServers).toEqual([...STUN, ...MANAGED])
+    expect(relayViewer.turn).toEqual({ source: "managed", status: "configured", failure: null, issue: null })
     expect(relayViewer.managed).toBe(true)
   })
 
   test("a standalone box has no control-plane identity and keeps its own servers", async () => {
     const turn = managedTurn(config())
 
-    expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
+    expect(await turn.servers()).toEqual({ iceServers: null, warning: null, issue: null })
     const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
     expect(servers.iceServers).toEqual(STUN)
     expect(servers.managed).toBe(false)
+    expect(servers.turn).toEqual({ source: "none", status: "not-configured", failure: null, issue: null })
+  })
+
+  test("a failed provider fetch is a managed credential failure without provider text", async () => {
+    const controlUrl = endpoint(() => new Response("provider down", { status: 503 }))
+    const turn = managedTurn(config(direct(controlUrl)))
+
+    const result = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
+
+    expect(result.iceServers).toEqual(STUN)
+    expect(result.turn).toEqual({ source: "managed", status: "unavailable", failure: "turn-credentials", issue: "control-error" })
+    // Only the enumerated outcome travels; the provider's text stays in the warning log.
+    expect(JSON.stringify(result.turn)).not.toContain("503")
+    expect(JSON.stringify(result.turn)).not.toContain("provider down")
   })
 
   test("rejects expired credentials and does not cache the rejection", async () => {
@@ -106,6 +122,7 @@ describe("managedTurn", () => {
     const rejected = {
       iceServers: null,
       warning: "managed TURN unavailable: control plane sent expired TURN credentials",
+      issue: "expired",
     } as const
     expect(first).toEqual(rejected)
     const viewer = await sessionIceServers(settings(), turn, "thread-expired", NOW_S)
@@ -228,6 +245,7 @@ describe("managedTurn", () => {
     expect(await turn.servers()).toEqual({
       iceServers: null,
       warning: "managed TURN unavailable: control plane answered 401",
+      issue: "control-rejected",
     })
   })
 
@@ -235,10 +253,28 @@ describe("managedTurn", () => {
     const controlUrl = endpoint(() => new Response(null, { status: 204 }))
     const turn = managedTurn(config(direct(controlUrl)))
 
-    expect(await turn.servers()).toEqual({ iceServers: null, warning: null })
+    expect(await turn.servers()).toEqual({ iceServers: null, warning: null, issue: null })
     const servers = await sessionIceServers(settings(), turn, "thread-1", NOW_S)
     expect(servers.iceServers).toEqual(STUN)
     expect(servers.managed).toBe(false)
+    expect(servers.turn).toEqual({ source: "none", status: "not-configured", failure: null, issue: null })
+  })
+
+  test("maps the control plane's safe issue body without exposing its text", async () => {
+    const cases = [
+      { status: 401, tag: "Unauthorized", issue: "control-rejected" },
+      { status: 502, tag: "BadGateway", issue: "configuration-incomplete" },
+      { status: 502, tag: "BadGateway", issue: "provider-unavailable" },
+      { status: 502, tag: "BadGateway", issue: "provider-unusable" },
+    ] as const
+    for (const { status, tag, issue } of cases) {
+      const controlUrl = endpoint(() => Response.json({ _tag: tag, message: "worker detail", issue }, { status }))
+      const result = await managedTurn(config(direct(controlUrl))).servers()
+      expect(result).toMatchObject({ iceServers: null, issue })
+      expect(JSON.stringify(result)).not.toContain("worker detail")
+    }
+    const unknown = endpoint(() => Response.json({ _tag: "BadGateway", message: "worker detail" }, { status: 502 }))
+    expect((await managedTurn(config(direct(unknown))).servers()).issue).toBe("control-error")
   })
 
   test("a malformed answer is a sanitized warning, not a crash or a fabricated relay", async () => {
@@ -249,6 +285,7 @@ describe("managedTurn", () => {
     expect(result.iceServers).toBeNull()
     expect(result.warning).toBe("managed TURN unavailable: control plane sent an unexpected TURN answer")
     expect(result.warning).not.toContain("box-secret")
+    expect(result.issue).toBe("invalid-answer")
   })
 })
 
@@ -261,6 +298,7 @@ describe("sessionIceServers", () => {
 
     expect(result.warning).toBeNull()
     expect(result.iceServers).toEqual([...STUN, ...MANAGED])
+    expect(result.turn).toEqual({ source: "managed", status: "configured", failure: null, issue: null })
   })
 
   test("keeps local STUN when the control plane fails, without fabricating a relay", async () => {
@@ -271,6 +309,7 @@ describe("sessionIceServers", () => {
 
     expect(result.iceServers).toEqual(STUN)
     expect(result.warning).toBe("managed TURN unavailable: control plane answered 503")
+    expect(result.turn).toEqual({ source: "managed", status: "unavailable", failure: "turn-credentials", issue: "control-error" })
   })
 
   test("keeps static local TURN credentials and never asks the control plane", async () => {
@@ -287,6 +326,37 @@ describe("sessionIceServers", () => {
     const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
 
     expect(result.iceServers).toEqual([...local.iceServers])
+    expect(result.turn).toEqual({ source: "local", status: "configured", failure: null, issue: null })
+    expect(calls).toBe(0)
+  })
+
+  test("reports an explicit local TURN URL without credentials as unavailable", async () => {
+    const turn = managedTurn(config(direct(endpoint(() => credentials()))))
+    const local = settings({ iceServers: [{ urls: ["turns:static-turn.example.com:443"] }] })
+
+    const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
+
+    expect(result.iceServers).toEqual([...local.iceServers])
+    expect(result.turn).toEqual({ source: "local", status: "unavailable", failure: "turn-credentials", issue: "local-incomplete" })
+  })
+
+  test("reports a REST secret with no TURN URL as unavailable instead of asking the control plane", async () => {
+    let calls = 0
+    const turn = managedTurn(
+      config(
+        direct(
+          endpoint(() => {
+            calls++
+            return credentials()
+          }),
+        ),
+      ),
+    )
+    const local = settings({ iceServers: [], turn: { urls: ["stun:local-stun.example.com:3478"], secret: "local-secret" } })
+
+    const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
+
+    expect(result.turn).toEqual({ source: "local", status: "unavailable", failure: "turn-credentials", issue: "local-incomplete" })
     expect(calls).toBe(0)
   })
 
@@ -302,6 +372,7 @@ describe("sessionIceServers", () => {
     const result = await sessionIceServers(local, turn, "thread-1", NOW_S)
 
     expect(result.iceServers).toEqual(mintIceServers(local, "thread-1", NOW_S))
+    expect(result.turn).toEqual({ source: "local", status: "configured", failure: null, issue: null })
     expect(calls).toBe(0)
   })
 

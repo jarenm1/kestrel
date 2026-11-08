@@ -1,5 +1,5 @@
 import { Paths, type Attachment } from "@cloudagents/protocol"
-import { FileText } from "lucide-react"
+import FileText from "lucide-react/icons/file-text"
 import { cn } from "../cn"
 import { useTranscriptHost } from "./host"
 

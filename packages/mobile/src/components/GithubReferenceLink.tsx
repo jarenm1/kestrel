@@ -1,6 +1,7 @@
 import React from "react";
 import { Linking, StyleSheet, Text } from "react-native";
-import { CircleDot, GitPullRequest } from "lucide-react-native";
+import CircleDot from "lucide-react-native/icons/circle-dot";
+import GitPullRequest from "lucide-react-native/icons/git-pull-request";
 import { githubReferenceLabel, githubReferenceUrl, type GithubReference } from "@cloudagents/composer/reference";
 import { colors } from "@/theme";
 

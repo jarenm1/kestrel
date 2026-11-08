@@ -1,6 +1,8 @@
 import React, { type ComponentRef, useEffect, useRef } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import { CircleDot, GitPullRequest, type LucideIcon } from "lucide-react-native";
+import CircleDot from "lucide-react-native/icons/circle-dot";
+import GitPullRequest from "lucide-react-native/icons/git-pull-request";
+import type { LucideIcon } from "lucide-react-native";
 import { githubReferenceLabel, type GithubReferenceKind } from "@cloudagents/composer/reference";
 import { RepoPicker } from "@/components/RepoPicker";
 import { colors, radius, shadows, spacing } from "@/theme";

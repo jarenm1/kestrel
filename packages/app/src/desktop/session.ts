@@ -1,5 +1,6 @@
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
 import { type DesktopSource, openDesktopStream } from "@/api/events"
+import type { RtcDiagnostics } from "@/desktop/diagnostics"
 import { DesktopRtc, type RtcStats, type RtcState } from "@/desktop/webrtc"
 
 /** How the WebSocket ended. `opened` false means the handshake was refused or failed (auth, or no box). */
@@ -12,6 +13,8 @@ export interface DesktopSessionListeners {
   onStatus: (status: DesktopStatus) => void
   onRtc: (state: RtcState) => void
   onStats: (stats: RtcStats) => void
+  /** Redacted connection evidence for a bug report, copied per emit. */
+  onDiagnostics: (diagnostics: RtcDiagnostics) => void
   onAudio: (available: boolean) => void
   /** The WebSocket closed, or never opened. The WebRTC session is already torn down when this fires. */
   onClose: (close: DesktopClose) => void
@@ -36,6 +39,7 @@ export function startDesktopSession(
     send: (message) => stream.send(message),
     onState: listeners.onRtc,
     onStats: listeners.onStats,
+    onDiagnostics: listeners.onDiagnostics,
     onAudio: listeners.onAudio,
   })
   const stream = openDesktopStream(source, {

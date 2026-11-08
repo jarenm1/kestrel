@@ -82,7 +82,7 @@ Agents need a model key: add one for Anthropic, OpenAI, OpenRouter, Z.ai, DeepSe
 
 A Google account signs in the same way through Antigravity CLI: the box runs `agy acp --login --gemini-dir <dir>` in the user's directory (`<CLOUDAGENTS_DATA_DIR>/users/<login>/antigravity`), the user opens the Google link it prints and sends back the code the page shows (or that page's URL). agy keeps its token and its sessions in that directory (`AGY_GEMINI_DIR` to runs); it has no status or sign-out command, so the box reads the token file (`antigravity-cli/antigravity-oauth-token`) and signs out by removing the directory. A rejected code ends the sign-in; start it again. agy writes the token to a file where it finds no OS keyring (no D-Bus session, as in the sandbox, or WSL); on a desktop session with a keyring it may keep it there instead, and the box would read it as signed out. Connections shows the Google email from the token's ID token when it has one, and leaves the account blank when it does not.
 
-A Devin account signs in through Devin CLI: the box runs `devin auth login --force-manual-token-flow` in the user's directory (`<CLOUDAGENTS_DATA_DIR>/users/<login>/devin`, `XDG_DATA_HOME` to the CLI and to runs), the user opens the app.devin.ai link it prints and sends back the code the page shows. The CLI reads that code only from a terminal, so the box runs it under `script` (util-linux; BSD `script` on macOS), which must be on the sandbox's PATH; Windows boxes cannot offer this sign-in. A rejected code ends the sign-in; start it again. The box reads the signed-in state from `devin/credentials.toml`, which names no account, so Connections leaves the account blank; Disconnect runs `devin auth logout` and removes the directory.
+A Devin account signs in through Devin CLI: the box runs `devin auth login --force-manual-token-flow` in the user's directory (`<CLOUDAGENTS_DATA_DIR>/users/<login>/devin`, `XDG_DATA_HOME` to the CLI and to runs), the user opens the app.devin.ai link it prints and sends back the code the page shows. The CLI reads that code only from a terminal, so the box runs it under `script` (util-linux; BSD `script` on macOS), which must be on the sandbox's PATH; Windows boxes cannot offer this sign-in. A rejected code ends the sign-in; start it again. The box checks sign-in with `devin auth status`; Connections leaves the account blank. Disconnect runs `devin auth logout` and removes the directory.
 
 ### Git commit identity
 
@@ -195,18 +195,56 @@ From a checkout with Bun dependencies installed, `bun packages/server/scripts/de
 
 Desktop video, audio and input travel over WebRTC only; there is no WebSocket media fallback, and WebRTC is always on. The desktop WebSocket (`/api/tasks/:id/desktop/stream`) carries the status and signaling.
 
-- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate` and `rtc.unavailable`. Signaling also works over the legacy relay, where a session costs a handful of Hub requests. A viewer whose attempt fails tells the user and retries after 1 s, doubling to 30 s; a retry on a config over 30 minutes old asks for a new one first, so TURN credentials do not go stale.
+- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate`, `rtc.unavailable` and redacted `rtc.diagnostics`. Signaling also works over the legacy relay, where a session costs a handful of Hub requests. Failed connection attempts request fresh configuration after the existing 1 s–30 s exponential backoff instead of reusing a possibly TURN-less config for 30 minutes. Refreshing preserves that backoff. A bounded configuration wait falls back to the last known config rather than stalling reconnects indefinitely.
 - **Media** is H.264 video and Opus audio (48 kHz stereo, 10 ms frames) on recvonly transceivers. A desktop without audio dependencies still streams video; its audio m-line is answered inactive. Silent Opus packets (2 bytes or less) are gated to one per 400 ms, so a quiet desktop sends almost no audio; audible packets always pass. The audio server starts with the desktop, which waits up to 3 s for it so early apps get its socket; the Opus capture runs only while there are viewers (with the encoder's 15 s linger). Audio that dies is restarted up to three times per desktop; apps already running keep their old socket and stay silent.
 - **Input** runs over data channels. `input` (ordered, reliable) carries key, button, wheel and text input; `pointer` (unordered, no retransmits) carries mouse moves only. Wheel notches are clamped to ±10 per event, and `text` (at most 1000 characters) is typed with `xdotool type`.
 - **Video** comes from one encoder per desktop, shared by every viewer, with a paced RTP sender per viewer (`desktop/rtp.ts`). A keyframe request (PLI or FIR) or a joining viewer gets the current GOP replayed, unless it is over 4 MiB, in which case the viewer waits for the next keyframe. Replays take at most a quarter of the pacing rate. A viewer more than a second behind has its queue dropped and resumes at the next keyframe. Where the browser offers the playout-delay header extension, it is set to zero.
 - **Codec** is H.264 with packetization-mode 1, one encoder per desktop. The default is High 4:2:0 (`-profile:v high -bf 0`, level 4.0 in the SPS), answered with `640c` or `6400` (`f400` is also accepted, untested). If any connected viewer offers only Constrained Baseline (`42e0`, `42c0`, `4200`), the encoder switches to Constrained Baseline for all viewers while that viewer is connected, and that viewer is answered with a Baseline payload. Level is ignored in negotiation, as libwebrtc ignores it. A browser that offers none of these gets `rtc.unavailable` with `retryable: false`. Scaling is bicubic (`scale_cuda interp_algo=3`; `flags=area` on the CPU encoder, and for NVENC when the box's ffmpeg has no CUDA filters).
 - **Load**: the stream is encoded once whatever the viewer count. Each viewer costs box CPU for encryption and pacing. The box carries 16 viewers; past that, new ones get `rtc.unavailable` and retry later.
 
+##### Connection diagnostics
+
+Open the info button in the desktop viewer, including the phone embed, even when the stream never connects. **Copy redacted report** copies versioned JSON for a bug report; if clipboard access is unavailable, the viewer offers selectable report text instead. Compare reports from the same device on the failing Wi-Fi and on cellular.
+
+The report distinguishes:
+
+- **Settings and credentials:** waiting/ready/refreshing, authenticated TURN entry count, and the box's managed/local/no-TURN source and configured/unavailable/not-configured result. Missing provider settings and failed credential fetches are not evidence of a Wi-Fi firewall.
+- **Allocation:** viewer and box relay candidate counts alongside gathering state. Zero relays while gathering is incomplete is not yet an allocation failure; zero after gathering completes is useful evidence. Direct ICE may still succeed without a relay.
+- **Connectivity:** both endpoints' candidate types for the selected pair and the reported transport. A relay on either endpoint makes the path relayed. Unreported candidate or box metadata stays unknown.
+- **Video:** received bytes/packets and decoded frames. Connected ICE with no packets differs from packets arriving without decoded frames. Decoded frames alone do not prove that the browser has painted them.
+- **Failures:** the current attempt's failure category, the box's failure category and bounded numeric browser ICE error codes by transport. The failure remains visible during retry backoff and is cleared when the next attempt begins. These are observations, not a diagnosis that a particular network blocks UDP.
+
+When the box could not get TURN credentials, `TURN issue` gives the safe cause:
+
+| Issue | Meaning |
+|---|---|
+| `control-timeout` | The box's HTTP request to the control plane timed out |
+| `control-unreachable` | The box could not reach the control plane |
+| `control-rejected` | The control plane rejected the box identity |
+| `configuration-incomplete` | Only one of the Worker's TURN settings is present |
+| `provider-unavailable` | Cloudflare TURN is unavailable to the Worker |
+| `provider-unusable` | Cloudflare returned an unusable TURN configuration |
+| `invalid-answer` | The control plane's answer was not valid TURN credentials |
+| `expired` | Credentials were already expired; check the box clock |
+| `no-usable-turn` | The answer contained no usable relay |
+| `local-incomplete` | Operator-configured TURN lacks usable credentials |
+| `control-error` | An unknown control-plane error, such as an older Worker without an issue code |
+
+An older box that does not send the field reports `None reported`; the rest of the box evidence still works.
+
+Reports contain only allowlisted states, counts, candidate/transport types and numeric error codes. They exclude credentials, tokens, addresses, URLs, SDP and raw provider/browser errors. Do not paste raw `rtc.config` messages: those carry short-lived TURN credentials. Diagnostics use the existing authenticated desktop socket; they do not add a telemetry upload or a media fallback.
+
+##### TURN configuration
+
 The default STUN server, `stun:stun.cloudflare.com:3478`, lets both ends discover their public addresses. Registered boxes also obtain managed TURN credentials automatically when the control plane has a Cloudflare Realtime TURN key configured. The viewer and the box's own peer each allocate a relay from the provider, so a session still connects when neither side's candidates are reachable from the other; both prefer direct WebRTC, and relayed media can use UDP, TCP or TLS on port 443. Media never traverses the Worker or Hub.
 
 To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: managed boxes, registered user boxes and the legacy relay box authenticate `POST /box/turn` using their existing box identity.
 
-The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and resolve them once per `rtc.config`; that same list is what the box's own peer uses, so an offer never waits on the control plane and a failed fetch leaves both peers on the box's own configuration. Retries requesting a new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits. A managed-TURN allocation that gets no answer is given up after werift's STUN retransmissions over UDP (50 ms doubling over seven sends, about 6.3 s), then the TCP fallback connect is capped at two seconds, so an unreachable managed relay can delay the answer by roughly eight seconds, still inside the viewer's 15-second attempt. An operator-configured TURN server keeps werift's default eight-second TCP/TLS wait, since it may be far away or reached over TLS.
+The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and resolve them once per `rtc.config`; an offer never waits on the control plane and a failed fetch leaves both peers on the box's own configuration. Retries requesting a new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits.
+
+The browser receives the full provider ICE list. The box selects its managed `turns:...:443?transport=tcp` endpoint: werift 0.26 uses only the first TURN URL, and its UDP-to-TCP fallback retries the same host and port rather than trying the later TLS endpoints. Passing through the provider's UDP-first list therefore loses the box relay when port 3478 is blocked, even if TLS/443 works. Direct ICE candidates remain enabled; only a selected relay path carries media over TLS. The managed TCP/TLS connect is capped at two seconds. Operator-configured TURN keeps its original URL order and werift's default eight-second connect wait.
+
+**Trade-off:** this is TLS/443-only for the box's managed allocation, not a preference with a UDP fallback. TCP retransmissions can head-of-line block later RTP packets and stall media on lossy paths compared with UDP; that cost has not been benchmarked here. A box that can reach TURN/3478 but cannot reach TLS/443 now loses its managed relay, even though UDP would have worked previously. Direct ICE may still connect; otherwise the session fails. This chooses the commonly permitted TLS/443 path over UDP relay performance and UDP-only egress compatibility. Operators needing UDP-first allocation can explicitly configure local TURN, which bypasses managed selection, but then retain werift's first-URL limitation on blocked-UDP networks.
 
 Neither provider setting configured returns 204 and retains local ICE; partial configuration or provider failure returns a sanitized error. A box waits at most three seconds, logs a warning on failure and retains direct connectivity; it retries on a later config request. Explicit local TURN (a `turn` secret or `turn:`/`turns:` ICE URL) takes precedence and skips managed credentials entirely. Unregistered standalone boxes must supply their own TURN.
 
@@ -229,9 +267,37 @@ Limits today:
 - The SPS says level 4.0, the level for 1080p30 and 720p60, whatever level the browser offered, since negotiation ignores level. A browser that offers only a lower level may fail to decode large desktops. Hardware-only decoders may refuse a stream; the viewer then shows a decoder stuck asking for keyframes.
 - Constrained Baseline is used only while a Baseline-only viewer is connected. It has no B-frames and uses CAVLC, so it costs about 50% more bytes per frame than High at the same quality setting (measured on a synthetic scroll).
 - Pacing follows receiver loss reports, but nothing adapts the encoder's bitrate to the path, so a narrow path loses frames rather than quality.
-- A relay-only path (both peers behind restrictive networks, one of them CGNAT) is untested against the production provider; the box's allocation uses werift's TURN client over UDP with its TCP fallback.
+- A relay-only path is verified locally with coturn accepting only TLS/443, including desktop RTP and input. The production provider, real CGNAT, Safari and physical phones still need rollout verification. Networks that require an HTTP proxy or block non-HTTP TLS can still prevent TURN even on port 443.
 - TURN credentials expire after an hour. If the path then fails, the viewer reconnects and its next attempt gets a new one.
 - The peer lives with its WebSocket, so a dropped WebSocket interrupts video until it reconnects.
+
+##### TLS-only TURN regression
+
+`bun test packages/server/src/desktop/webrtc.test.ts` automatically checks authenticated UDP/TLS allocations on ephemeral loopback ports: managed TLS/443 selection, original operator ordering, managed lists without TLS/443, and the managed-only connection deadline. It needs neither coturn nor privileged ports. The separate coturn exercise below additionally verifies relay-to-relay media and input.
+
+`packages/server/scripts/test-desktop-turn-tls.ts` exercises real allocations and desktop RTP/input, not copied peer settings. Run it in an isolated Linux environment with coturn and Node 22; do not run this fixture on a production box. Ports 443, 3478 and 5349 must be unused. The fixed credentials and loopback-peer permission below are **test-only**, and the listener binds only loopback.
+
+```sh
+mkdir -p /tmp/kestrel-turn-test
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout /tmp/kestrel-turn-test/key.pem -out /tmp/kestrel-turn-test/cert.pem \
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
+sudo turnserver -n --listening-ip=127.0.0.1 --relay-ip=127.0.0.1 \
+  --tls-listening-port=443 --listening-port=15478 --no-udp --no-tcp --no-dtls \
+  --cert=/tmp/kestrel-turn-test/cert.pem --pkey=/tmp/kestrel-turn-test/key.pem \
+  --realm=localhost --user=smoke:smoke-password --lt-cred-mech \
+  --allow-loopback-peers --no-cli --no-multicast-peers \
+  --pidfile=/tmp/kestrel-turn-test/turn.pid --log-file=stdout --relay-threads=1
+```
+
+In a second terminal, from the worktree root:
+
+```sh
+bun build packages/server/scripts/test-desktop-turn-tls.ts --target=node --outfile=/tmp/kestrel-turn-test/check.mjs
+NODE_EXTRA_CA_CERTS=/tmp/kestrel-turn-test/cert.pem node /tmp/kestrel-turn-test/check.mjs
+```
+
+The managed case must allocate TLS/443 and deliver the exact RTP payload and keyboard command through a relay-to-relay pair. The operator case must retain UDP-first ordering and get no box relay with this TLS-only fixture. Reverting managed TLS preference makes the first case fail. Stop coturn with Ctrl-C afterward and remove `/tmp/kestrel-turn-test`. On Windows, bundle to a Windows temporary file and run that bundle with Node inside WSL alongside coturn.
 
 ### Toolkits
 

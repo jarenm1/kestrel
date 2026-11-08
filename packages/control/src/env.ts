@@ -5,6 +5,8 @@ export interface Env {
   ASSETS: Fetcher
   /** Singleton control-plane Durable Object. */
   HUB: DurableObjectNamespace<Hub>
+  /** Comma-separated GitHub logins allowed to use Kestrel. */
+  ALLOWED_GITHUB_LOGINS?: string
   /** Shared secret the agent box presents as `Authorization: Bearer <BOX_TOKEN>`. */
   BOX_TOKEN?: string
   GITHUB_CLIENT_ID?: string
@@ -33,6 +35,11 @@ export interface Env {
 
 /** RPC stub for the single control-plane Hub instance. */
 export const hub = (env: Env) => env.HUB.get(env.HUB.idFromName("main"))
+
+/** Fail closed when the allowlist is missing; local dev sessions are explicitly enabled separately. */
+export const isAllowedLogin = (env: Env, login: string, dev = false): boolean =>
+  (dev && !!env.DEV_SESSION_LOGIN) ||
+  (env.ALLOWED_GITHUB_LOGINS ?? "").split(",").some((entry) => entry.trim() !== "" && entry.trim().toLowerCase() === login.toLowerCase())
 
 /** Whether `login` is one of `KESTREL_OPERATORS`; GitHub logins compare case-insensitively. */
 export const isOperator = (env: Env, login: string): boolean =>

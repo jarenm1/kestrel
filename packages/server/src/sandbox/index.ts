@@ -254,6 +254,11 @@ export const cliBwrapArgs = (
     readonly network: "host" | "none"
     readonly workspacePath?: string
     readonly cwd?: string
+    /**
+     * Paths under `homeDir` replaced by an empty writable tmpfs. The `default` login's home is the user's root, whose
+     * `accounts` subtree holds every other login, so a CLI run for it must not see them.
+     */
+    readonly mask?: ReadonlyArray<string>
   },
 ): string[] => {
   const workspacePath = options.workspacePath
@@ -275,6 +280,7 @@ export const cliBwrapArgs = (
     "--bind",
     homeDir,
     homeDir,
+    ...(options.mask ?? []).flatMap((path) => ["--tmpfs", path]),
   ]
   if (workspacePath !== undefined) argv.push("--ro-bind", workspacePath, workspacePath)
   if (options.level === "strict") {

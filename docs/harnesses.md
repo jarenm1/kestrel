@@ -62,6 +62,43 @@ Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/)
   starts a fresh native session with the thread's saved conversation, rather than resuming a deleted session ID.
   Older unversioned CLI-login records also replay the saved conversation once.
 
+Page-based subscription sign-ins support multiple accounts per provider. In Connections, **+** repeats the provider's
+normal sign-in in a fresh login home; the signed-in identity menu selects the account for subsequent runs, model
+discovery and quota reads. Switching does not change a run already in progress. **Disconnect** lists the accounts
+and removes only the chosen login. The description reads **Signed in as name@example.com +N more** when multiple
+accounts are connected, where N excludes the displayed active account. The status pill reads **N connected** only
+above one account. API-key rows remain single-key connections. This follows [T3 Code's explicit account-switching approach](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts),
+without automatic quota rotation. **Cancel** stops the pending sign-in on the box as well as clearing the form, so an
+approval completed on the provider's page afterwards cannot silently add an account.
+
+The sign-in panel closes when its pending account appears in status, not just because the provider is already
+connected. On older boxes that omit the pending account id, polling requires a newly connected provider or a changed
+signed-in identity; a successful pasted-code submission also closes the panel. An unchanged legacy identity cannot
+prove that a device-code attempt finished, so its panel stays open until canceled or expired. Older boxes retain
+their single-account sign-in behavior; the client cannot provide account isolation on their behalf.
+
+Subscription identities come from the CLI's own account: Claude's status JSON, Codex's stored ID token,
+Antigravity's ID token (or Google's userinfo endpoint for older access-token-only logins), OpenCode's active
+Console credential metadata in its box-local database, and Devin's status email. OpenCode's database is opened
+read-only and only the email is selected, preserving support for 2.0.7 without requiring 2.1's credential export.
+Unavailable or invalid identities show **Signed in**, retaining **+N more** when other accounts are connected;
+a failed Google identity lookup does not disconnect the account. Google access tokens expire within an hour, so
+Antigravity's stored one is usually stale between runs. The email userinfo reports is therefore kept in the login
+directory's owner-only `.kestrel-account.json`, keyed by a SHA-256 hash of the login's refresh token. It is reused
+until a different login replaces the token file, and it goes away with the directory on sign-out. Credential tokens
+and keys stay on the box.
+
+Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<accountId>` and its provider's
+credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;
+credentials are never copied between accounts. The owner-only `.kestrel-cli-auth.json` in the user's root persists
+the selected account per provider. A different login directory starts a fresh native session with the thread's
+saved conversation rather than attempting to resume another account's session. An unfinished attempt is marked and
+never listed as a login; a canceled, expired or failed attempt is removed with its home, and a box restart sweeps any
+left behind so later status reads do not probe them. Sandboxed CLI runs for `default` bind the user root but replace
+its `accounts` subtree with an empty writable directory, so one login's processes can never read or write another
+login; an isolated account's run binds only that account's home.
+
+
 ## Third-party model coverage
 
 The selected box's runtime catalog drives desktop, phone and delegation model lists. Settings › Connections
@@ -161,8 +198,8 @@ opencode.ai/install are OpenCode 1 and do not satisfy these requirements.
 Free models sign in through Settings › Connections › **OpenCode › Connect**. The box runs
 `opencode auth login opencode --method device --standalone`; open the displayed OpenCode link and enter its device
 code. Kestrel polls the box until authorization completes. Installation alone does not connect the models.
-Disconnect stops any pending sign-in before removing this login directory and its sessions, without touching the
-separate Go connection.
+Disconnect removes only the selected login directory and its sessions, without touching other Console accounts or
+the separate Go connection.
 See [OpenCode authentication](https://opencode.ai/v2/docs/cli/providers).
 
 Go signs in through Settings › Connections › **API keys**: choose **Add API key › OpenCode Go**.
@@ -200,6 +237,14 @@ The status and usage arrays preserve installed clients' provider literals. With 
 supported, never Go or OpenCode Console. Updated clients advertise the catalog they can decode through
 `ControlPaths.cliAuthFor(CliProvider.literals)` and `cliUsageFor(CliProvider.literals)`. The box returns only advertised
 providers, keeping new logins available without breaking an older decoder.
+
+CLI status and connection rows include `accounts: [{ id, account }]` and `activeAccountId` when accounts are connected;
+the existing `loggedIn`/`connected` and `account` fields describe the active login. `POST /api/cli-auth/:provider/login`
+returns the new pending `accountId`; send it with the pasted `code` to `POST /api/cli-auth/:provider/code`, and
+`POST /api/cli-auth/:provider/login/cancel` stops a pending sign-in and removes its unfinished home.
+`POST /api/cli-auth/:provider/account` with `{ accountId }` selects a connected login.
+`DELETE /api/cli-auth/:provider?accountId=<id>` disconnects one login; omitting the id targets the active login.
+
 
 - Capability probes use the configured `CLOUDAGENTS_*_COMMAND`, including native-binary overrides and minimum versions.
 - Each ACP launch rechecks only its selected provider's command/version, so a removed or downgraded CLI fails before launch.

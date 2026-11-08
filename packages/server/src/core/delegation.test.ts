@@ -22,6 +22,7 @@ interface Harnessed {
   readonly core: CoreShape
   readonly config: ServerConfig
   readonly choices: AgentChoice[]
+  readonly desktopStops: string[]
 }
 
 /** Runs `body` against the real core over a fresh store. The harness starts no agent: it only records each run's choice. */
@@ -38,12 +39,13 @@ const withCore = async (body: (h: Harnessed) => Effect.Effect<void, unknown>): P
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
   }
   const choices: AgentChoice[] = []
+  const desktopStops: string[] = []
   let testStore: StoreShape | undefined
   const configLayer = Layer.succeed(Config, config)
   const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
   const deps = Layer.mergeAll(
     configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
-    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
+    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stop: (taskId: string) => Effect.sync(() => { desktopStops.push(taskId) }), stopAll: () => Effect.void } as never),
     workspaceLayer, Layer.succeed(CredentialStore, {} as never),
     Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never),
     Layer.succeed(CredentialBroker, {} as never),
@@ -61,7 +63,7 @@ const withCore = async (body: (h: Harnessed) => Effect.Effect<void, unknown>): P
       const store = yield* StateStore
       testStore = store
       const core = yield* CoreService
-      yield* body({ store, core, config, choices })
+      yield* body({ store, core, config, choices, desktopStops })
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -364,3 +366,45 @@ test("a usage limit holds delegated results until the work resumes or returns ea
     expect((yield* core.delegate("held", resumed.run.id, input)).id).toBe(queued.id)
     expect((yield* store.read).tasks.find((t) => t.id === queued.id)?.delegation?.parentRunId).toBe(resumed.run.id)
   })), 30_000)
+
+test("archiving a thread archives its whole sub-thread tree", () => withCore(({ store, core, desktopStops }) =>
+  Effect.gen(function* () {
+    yield* store.update((s) => {
+      const now = new Date().toISOString()
+      const base = { owner: "owner", status: "idle" as const, createdAt: now, updatedAt: now, checkouts: [] }
+      s.tasks.push(
+        { ...base, id: "root", title: "Root" },
+        { ...base, id: "spawned", title: "Spawned", spawnedByTaskId: "root" },
+        { ...base, id: "delegated", title: "Delegated", delegation: { parentTaskId: "root", parentRunId: "run", requestId: "r1", fingerprint: "f" } },
+        { ...base, id: "grandchild", title: "Grandchild", delegation: { parentTaskId: "delegated", parentRunId: "run", requestId: "r2", fingerprint: "f" } },
+        { ...base, id: "greatgrandchild", title: "Great-grandchild", spawnedByTaskId: "grandchild" },
+        { ...base, id: "foreign", title: "Foreign", owner: "other", spawnedByTaskId: "root" },
+        { ...base, id: "unrelated", title: "Unrelated" },
+      )
+      for (const taskId of ["root", "spawned", "delegated", "grandchild", "greatgrandchild"]) {
+        s.runs.push({ id: `run-${taskId}`, taskId, prompt: "work", status: "running", startedAt: now, endedAt: null, exitCode: null, provider: "openai", model: "gpt-6.1-sol" })
+      }
+      return Either.right(undefined)
+    })
+    const archived = yield* core.archiveTask("owner", "root")
+    expect(archived.id).toBe("root")
+    const state = yield* store.read
+    const archivedAt = new Map(state.tasks.map((t) => [t.id, t.archivedAt]))
+    for (const id of ["root", "spawned", "delegated", "grandchild", "greatgrandchild"]) {
+      expect(archivedAt.get(id)).toBeDefined()
+    }
+    // Another user's thread linked to this one, and unrelated threads, stay active.
+    expect(archivedAt.get("foreign")).toBeUndefined()
+    expect(archivedAt.get("unrelated")).toBeUndefined()
+    // Archiving tears down every thread in the tree: running runs are cancelled and desktops stopped.
+    expect([...desktopStops].sort()).toEqual(["delegated", "grandchild", "greatgrandchild", "root", "spawned"])
+    for (const taskId of ["root", "spawned", "delegated", "grandchild", "greatgrandchild"]) {
+      expect(state.runs.find((r) => r.id === `run-${taskId}`)?.status).toBe("cancelled")
+    }
+
+    // Unarchiving lifts only the named thread; its sub-threads stay archived.
+    yield* core.unarchiveTask("owner", "root")
+    const restored = yield* store.read
+    expect(restored.tasks.find((t) => t.id === "root")?.archivedAt).toBeUndefined()
+    expect(restored.tasks.find((t) => t.id === "spawned")?.archivedAt).toBeDefined()
+  })))

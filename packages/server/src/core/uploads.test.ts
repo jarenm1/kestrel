@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
+import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 
 const home = "/home/agent"
+
+test("upload operation IDs are validated and scoped", () => {
+  const key = "b6d6c050-4532-47a0-91de-9fca2b573554"
+  const id = uploadOperationId("owner", "task", key)
+  expect(id).toHaveLength(64)
+  expect(uploadOperationId("owner", "task", key.toUpperCase())).toBe(id)
+  expect(uploadOperationId("other", "task", key)).not.toBe(id)
+  expect(uploadOperationId("owner", "other", key)).not.toBe(id)
+  expect(uploadOperationId("owner", "task", "../bad")).toBeUndefined()
+})
 
 describe("sanitizeUploadName", () => {
   test("keeps only the base name", () => {

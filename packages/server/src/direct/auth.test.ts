@@ -3,7 +3,7 @@ import { Effect, Either } from "effect"
 import { BOX_ID_HEADER, BOX_USER_HEADER, type BoxTokenClaims, signBoxToken } from "@cloudagents/protocol"
 import type { RelayCredentials } from "@cloudagents/protocol"
 import type { CredentialStoreShape } from "../credentials"
-import { type BoxAuth, makeBoxAuth, type DirectSettings } from "./auth"
+import { type BoxAuth, type BoxAuthentication, makeBoxAuth, type DirectSettings } from "./auth"
 import type { BoxActivitySink } from "./box-activity"
 
 const CONTROL = "https://control.example"
@@ -200,5 +200,115 @@ describe("a user's own box", () => {
     expect(Either.isRight(result)).toBe(true)
     expect(calls[0]?.url).toBe(`${CONTROL}/box/self`)
     expect(calls[0]?.headers[BOX_USER_HEADER]).toBeUndefined()
+  })
+})
+
+/** A control plane answering call `n` with `answer(n)`: a reply, or "unreachable" for a request that never gets one. */
+const scripted = (answer: (call: number) => { status: number; body?: unknown } | "unreachable") => {
+  let calls = 0
+  const fetchFn = (async () => {
+    const reply = answer(calls++)
+    if (reply === "unreachable") throw new TypeError("fetch failed")
+    return new Response(reply.body === undefined ? null : JSON.stringify(reply.body), { status: reply.status })
+  }) as unknown as typeof fetch
+  return { fetchFn, count: () => calls }
+}
+
+const aliceCredentials = { status: 200, body: { owner: "alice", credentialsVersion: "1", github: "gh-a" } }
+
+const authenticated = (result: Either.Either<BoxAuthentication, { readonly _tag: string }>) =>
+  Either.isRight(result) ? result.right : null
+
+describe("a user's own box while the control plane is down", () => {
+  test("a valid token is served offline from an empty store, and nothing is stored", async () => {
+    const store = memoryStore()
+    const auth = makeBoxAuth(byo, store, scripted(() => "unreachable").fetchFn)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(authenticated(result)).toMatchObject({ offline: true, claims: { sub: "alice" } })
+    expect(await Effect.runPromise(store.get("alice"))).toBeNull()
+  })
+
+  test("a server error from the control plane is an outage too", async () => {
+    const auth = makeBoxAuth(byo, memoryStore(), scripted(() => ({ status: 503 })).fetchFn)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(authenticated(result)).toMatchObject({ offline: true })
+  })
+
+  test("a refusal from the control plane is a failure and never falls back", async () => {
+    for (const status of [401, 403, 404]) {
+      const auth = makeBoxAuth(byo, memoryStore(), scripted(() => ({ status })).fetchFn)
+
+      const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+      expect(failureTag(result)).toBe("Unavailable")
+    }
+  })
+
+  test("a control plane answer for another owner is unauthorized and never falls back", async () => {
+    const auth = makeBoxAuth(byo, memoryStore(), scripted(() => ({ status: 200, body: { owner: "bob", credentialsVersion: "1" } })).fetchFn)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(failureTag(result)).toBe("Unauthorized")
+  })
+
+  test("a malformed control plane answer is unavailable and never falls back", async () => {
+    const auth = makeBoxAuth(byo, memoryStore(), scripted(() => ({ status: 200, body: { nope: true } })).fetchFn)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(failureTag(result)).toBe("Unavailable")
+  })
+
+  test("with credentials already held, an outage fails as before rather than serving offline", async () => {
+    const { fetchFn, count } = scripted((call) => (call === 0 ? aliceCredentials : "unreachable"))
+    const auth = makeBoxAuth(byo, memoryStore(), fetchFn)
+    const now = Math.floor(Date.now() / 1000)
+
+    expect(authenticated(await authenticate(auth, await tokenFor("alice", "1", now)))).toMatchObject({ offline: false })
+    const result = await authenticate(auth, await tokenFor("alice", "2", now))
+
+    expect(failureTag(result)).toBe("Unavailable")
+    expect(count()).toBe(2)
+  })
+
+  test("a token that is expired, badly signed or for another box is refused without asking the control plane", async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const forged = await signBoxToken("not-the-box-secret", { sub: "alice", aud: BOX_ID, iat: now, exp: now + 600, cv: "1" })
+    for (const token of [await tokenFor("alice", "1", now - 1000), forged, await tokenFor("alice", "1", now, "box_other")]) {
+      const { fetchFn, count } = scripted(() => "unreachable")
+      const auth = makeBoxAuth(byo, memoryStore(), fetchFn)
+
+      const result = await authenticate(auth, token)
+
+      expect(failureTag(result)).toBe("Unauthorized")
+      expect(count()).toBe(0)
+    }
+  })
+
+  test("a managed box is never served offline", async () => {
+    const auth = makeBoxAuth(managed, memoryStore(), scripted(() => "unreachable").fetchFn)
+
+    const result = await authenticate(auth, await tokenFor("alice", "1"))
+
+    expect(failureTag(result)).toBe("Unavailable")
+  })
+
+  test("recovery: once the control plane answers, the owner's credentials are fetched and held again", async () => {
+    const { fetchFn, count } = scripted((call) => (call === 0 ? "unreachable" : aliceCredentials))
+    const store = memoryStore()
+    const auth = makeBoxAuth(byo, store, fetchFn)
+    const token = await tokenFor("alice", "1")
+
+    expect(authenticated(await authenticate(auth, token))).toMatchObject({ offline: true })
+    expect(authenticated(await authenticate(auth, token))).toMatchObject({ offline: false })
+    expect(authenticated(await authenticate(auth, token))).toMatchObject({ offline: false })
+
+    expect(count()).toBe(2)
+    expect(await Effect.runPromise(store.get("alice"))).toMatchObject({ user: "alice", github: "gh-a" })
   })
 })

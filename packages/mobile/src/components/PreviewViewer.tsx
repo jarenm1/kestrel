@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { RefreshCw } from "lucide-react-native";
+import RefreshCw from "lucide-react-native/icons/refresh-cw";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";

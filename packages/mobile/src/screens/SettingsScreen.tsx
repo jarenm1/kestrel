@@ -1,6 +1,12 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { ChevronRight, CreditCard, type LucideIcon, MessagesSquare, Plug, Server, User } from "lucide-react-native";
+import ChevronRight from "lucide-react-native/icons/chevron-right";
+import CreditCard from "lucide-react-native/icons/credit-card";
+import MessagesSquare from "lucide-react-native/icons/messages-square";
+import Plug from "lucide-react-native/icons/plug";
+import Server from "lucide-react-native/icons/server";
+import User from "lucide-react-native/icons/user";
+import type { LucideIcon } from "lucide-react-native";
 import { CURRENT_PLAN, PLANS } from "@cloudagents/protocol";
 import { useAuth } from "@/auth/AuthContext";
 import { ScreenHeader } from "@/components/ScreenHeader";

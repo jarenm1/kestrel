@@ -22,19 +22,17 @@ import Animated, {
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
-import {
-  Archive,
-  ChevronDown,
-  ChevronsUpDown,
-  GitBranch,
-  GitPullRequest,
-  LogOut,
-  type LucideIcon,
-  Plug,
-  Settings,
-  SquarePen,
-  Workflow,
-} from "lucide-react-native";
+import Archive from "lucide-react-native/icons/archive";
+import ChevronDown from "lucide-react-native/icons/chevron-down";
+import ChevronsUpDown from "lucide-react-native/icons/chevrons-up-down";
+import GitBranch from "lucide-react-native/icons/git-branch";
+import GitPullRequest from "lucide-react-native/icons/git-pull-request";
+import LogOut from "lucide-react-native/icons/log-out";
+import Plug from "lucide-react-native/icons/plug";
+import Settings from "lucide-react-native/icons/settings";
+import SquarePen from "lucide-react-native/icons/square-pen";
+import Workflow from "lucide-react-native/icons/workflow";
+import type { LucideIcon } from "lucide-react-native";
 import type { Task } from "@cloudagents/protocol";
 import { sameBox } from "@/api/client";
 import { isUnreachableError } from "@/api/errors";

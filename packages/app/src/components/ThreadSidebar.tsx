@@ -1,7 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react"
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "framer-motion"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, ChevronDown, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
+import {
+  Archive,
+  ChevronDown,
+  GitBranch,
+  GitPullRequest,
+  PanelLeftClose,
+  PanelLeftOpen,
+  SquarePen,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
@@ -9,6 +19,7 @@ import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
+import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
 import { cn } from "@/lib/utils"
@@ -101,18 +112,23 @@ interface Props {
   error: unknown
   collapsed: boolean
   onCollapse: () => void
+  onExpand: () => void
 }
 
 /**
  * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
  * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
- * ends. Collapsed, it is an icon rail; the button that expands it again lives in the page panel (`WorkspaceLayout`).
+ * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it. On wide
+ * screens the strip slides between the two widths while the list and the rail crossfade.
  */
-export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
+export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
   const { archive } = useThreadArchive()
+  const animated = useSidebarAnimation()
+  // The list and the rail swap through `SidebarMotion`'s `AnimatePresence`; on narrow screens they swap at once.
+  const swap = { ...FADE, transition: animated ? SLIDE : INSTANT }
   const [dockCollapsed, setDockCollapsed] = useState(() => localStorage.getItem(DOCK_COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (dockCollapsed) localStorage.setItem(DOCK_COLLAPSED_KEY, "1")
@@ -179,9 +195,9 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
 
   if (collapsed) {
     return (
-      <SidebarMotion>
-        <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
-          <HomeMark className="self-center py-0.5" />
+      <SidebarMotion collapsed>
+        <motion.div key="rail" {...swap} className="absolute inset-y-0 left-0 flex w-12 flex-col gap-1 pb-3 pl-2">
+          <BrandToggle label="Expand threads" Icon={PanelLeftOpen} onClick={onExpand} className="self-center" />
           <motion.nav
             layoutScroll
             aria-label="Threads"
@@ -232,27 +248,17 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
             )}
           </AnimatePresence>
           <AccountMenu compact />
-        </div>
+        </motion.div>
       </SidebarMotion>
     )
   }
 
   return (
-    <SidebarMotion>
-      <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
+    <SidebarMotion collapsed={false}>
+      <motion.div key="list" {...swap} className="absolute inset-y-0 left-0 flex w-64 flex-col pb-3 pl-3">
         <div className="flex items-center gap-2 pb-2 pl-1.5">
-          <HomeMark />
+          <BrandToggle label="Collapse threads" Icon={PanelLeftClose} onClick={onCollapse} />
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-7"
-            aria-label="Collapse threads"
-            title="Collapse threads"
-            onClick={onCollapse}
-          >
-            <PanelLeftClose />
-          </Button>
         </div>
         <motion.nav
           layoutScroll
@@ -323,7 +329,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
         <div className="pt-2 pr-3">
           <AccountMenu />
         </div>
-      </div>
+      </motion.div>
     </SidebarMotion>
   )
 }
@@ -380,17 +386,37 @@ const REVEAL = {
   exit: { height: 0, opacity: 0 },
 } as const
 const SPRING = { type: "spring", bounce: 0, duration: 0.3 } as const
+const INSTANT = { duration: 0 } as const
+/** Collapsing and expanding: the same curve and length as the thread sidebar's slide in `ThreadView`. */
+const SLIDE = { duration: 0.3, ease: [0.22, 1, 0.36, 1] } as const
+/** Widths of the collapsed rail (`w-12`) and the expanded list (`w-64`). */
+const RAIL_WIDTH = 48
+const LIST_WIDTH = 256
 
 /**
  * Shares one `LayoutGroup` across the list, the dock and the rail, so a thread whose run starts or ends slides
  * between them (rows carry a `layoutId`) instead of vanishing from one and appearing in the other. Users who ask
  * for reduced motion get the end state at once.
+ *
+ * Both branches of `ThreadSidebar` render it at the same place, so it survives collapsing and expanding: its width
+ * slides between the rail and the list (wide screens only) and its `AnimatePresence` keeps the leaving one, pinned
+ * to the left edge and clipped, while it fades out.
  */
-function SidebarMotion({ children }: { children: ReactNode }) {
+function SidebarMotion({ collapsed, children }: { collapsed: boolean; children: ReactNode }) {
   const reduce = useReducedMotion()
+  const animated = useSidebarAnimation()
   return (
-    <MotionConfig transition={reduce ? { duration: 0 } : SPRING}>
-      <LayoutGroup>{children}</LayoutGroup>
+    <MotionConfig transition={reduce ? INSTANT : SPRING}>
+      <LayoutGroup>
+        <motion.div
+          initial={false}
+          animate={{ width: collapsed ? RAIL_WIDTH : LIST_WIDTH }}
+          transition={animated ? SLIDE : INSTANT}
+          className="relative shrink-0 overflow-hidden"
+        >
+          <AnimatePresence initial={false}>{children}</AnimatePresence>
+        </motion.div>
+      </LayoutGroup>
     </MotionConfig>
   )
 }
@@ -494,16 +520,32 @@ function SubThreadTab({ task, hasChildren }: { task: Task; hasChildren: boolean 
   )
 }
 
-/** The Kestrel mark, linking to a new chat. */
-function HomeMark({ className }: { className?: string }) {
+/**
+ * The Kestrel mark doubling as the sidebar toggle: the bird at rest, the toggle icon once hovered or focused.
+ */
+function BrandToggle({
+  label,
+  Icon,
+  onClick,
+  className,
+}: {
+  label: string
+  Icon: LucideIcon
+  onClick: () => void
+  className?: string
+}) {
   return (
-    <NavLink
-      to={APP_HOME}
-      aria-label="Kestrel home"
-      className={cn("shrink-0 rounded text-foreground/90 transition-colors duration-200 hover:text-foreground", className)}
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn("group/brand relative size-7 text-foreground/90 hover:text-foreground", className)}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
     >
-      <KestrelMark className="h-6" />
-    </NavLink>
+      <KestrelMark className="h-6 transition-opacity duration-200 group-hover/brand:opacity-0 group-focus-visible/brand:opacity-0" />
+      <Icon className="absolute inset-0 m-auto opacity-0 transition-opacity duration-200 group-hover/brand:opacity-100 group-focus-visible/brand:opacity-100" />
+    </Button>
   )
 }
 

@@ -69,6 +69,22 @@ test.each([4, 0])("a message sent mid-run retains its position (initial items: %
       })
       const first = yield* core.sendMessage("owner", "task", "use the other file", {}, [], false)
       const second = yield* core.sendMessage("owner", "task", "and keep the tests", {}, [], false)
+      // Discard the first response as if the connection failed after commit, then retry concurrently.
+      const input = { mimeType: "text/plain", name: "note.txt", bytes: new TextEncoder().encode("hello"), operationId: "b6d6c050-4532-47a0-91de-9fca2b573554" }
+      yield* core.upload("owner", "task", input)
+      const retries = yield* Effect.all([core.upload("owner", "task", input), core.upload("owner", "task", input)], { concurrency: "unbounded" })
+      expect(retries[0]).toEqual(retries[1])
+      expect((yield* store.read).uploads).toHaveLength(1)
+      expect(Either.isLeft(yield* Effect.either(core.upload("owner", "task", { ...input, bytes: new TextEncoder().encode("different") })))).toBe(true)
+      expect(Either.isLeft(yield* Effect.either(core.upload("other", "task", input)))).toBe(true)
+      expect(Either.isLeft(yield* Effect.either(core.upload("owner", "task", { ...input, operationId: "../bad" })))).toBe(true)
+      yield* store.update((s) => {
+        s.uploads = []
+        s.messages.find((m) => m.id === first.message.id)!.attachments = [retries[0]!]
+        return Either.right(undefined)
+      })
+      expect(yield* core.upload("owner", "task", input)).toEqual(retries[0])
+      expect((yield* store.read).uploads).toHaveLength(0)
       unsubscribe()
       return { first, second, published }
     }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))))

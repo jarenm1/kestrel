@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Plus } from "lucide-react-native";
+import ChevronRight from "lucide-react-native/icons/chevron-right";
+import Plus from "lucide-react-native/icons/plus";
 import type { Automation, AutomationRun, TriggerAutomationBody } from "@cloudagents/protocol";
 import { createQueries, keys } from "@/api/queries";
 import { useAuth } from "@/auth/AuthContext";

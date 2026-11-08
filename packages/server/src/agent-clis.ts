@@ -1,3 +1,7 @@
+import { Database } from "bun:sqlite"
+import { createHash, randomUUID } from "node:crypto"
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { Effect } from "effect"
 import {
   CliProvider,
@@ -106,15 +110,79 @@ const codexAccount = (text: string): string | null => {
   return email ?? agentIdentityEmail(parsed.agent_identity)
 }
 
-/** Antigravity's credential document (`id_token` is an OIDC JWT for consumer and enterprise Google logins). */
-const antigravityAccount = (text: string): string | null => {
+/** Kestrel's note of the email Google reported for the Antigravity login in the same directory. */
+const ANTIGRAVITY_ACCOUNT_MEMO = ".kestrel-account.json"
+const ANTIGRAVITY_ACCOUNT_MEMO_MAX = 1024
+
+/** The remembered email, only while `key` (the login's refresh token hash) still names the stored login. */
+const readAntigravityMemo = async (path: string, key: string): Promise<string | null> => {
+  try {
+    const info = await lstat(path)
+    if (!info.isFile() || info.size > ANTIGRAVITY_ACCOUNT_MEMO_MAX) return null
+    const memo: unknown = JSON.parse(await readFile(path, "utf8"))
+    return isRecord(memo) && memo.key === key ? accountEmail(memo.email) : null
+  } catch {
+    return null
+  }
+}
+
+const writeAntigravityMemo = async (path: string, key: string, email: string): Promise<void> => {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, JSON.stringify({ key, email }), { mode: 0o600 })
+    await rename(temporary, path)
+  } catch {
+    // Remembering is an optimization: the next probe asks Google again.
+    await rm(temporary, { force: true }).catch(() => undefined)
+  }
+}
+
+const googleAccount = async (accessToken: string): Promise<string | null> => {
+  try {
+    const response = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(3_000),
+      redirect: "error",
+    })
+    if (!response.ok) return null
+    const user: unknown = await response.json()
+    return isRecord(user) ? accountEmail(user.email) : null
+  } catch {
+    // Identity lookup failing must not disconnect an otherwise valid CLI login.
+    return null
+  }
+}
+
+/**
+ * Older Antigravity logins omit `id_token`; Google userinfo identifies their stored access token. That token expires
+ * within an hour, so it is usually stale between runs: the email Google reports is remembered in the login directory,
+ * keyed by a hash of the refresh token (which outlives the access token and changes with a new sign-in).
+ */
+const antigravityAccount = async (text: string, dir: string): Promise<string | null> => {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
     return null
   }
-  return isRecord(parsed) ? jwtEmail(parsed.id_token) : null
+  if (!isRecord(parsed)) return null
+  const email = jwtEmail(parsed.id_token)
+  if (email !== null) return email
+  if (!isRecord(parsed.token)) return null
+  const { access_token: accessToken, refresh_token: refreshToken } = parsed.token
+  const memo = join(dir, ANTIGRAVITY_ACCOUNT_MEMO)
+  const key =
+    typeof refreshToken === "string" && refreshToken !== ""
+      ? createHash("sha256").update(refreshToken).digest("hex")
+      : null
+  if (key !== null) {
+    const remembered = await readAntigravityMemo(memo, key)
+    if (remembered !== null) return remembered
+  }
+  if (typeof accessToken !== "string" || accessToken === "") return null
+  const account = await googleAccount(accessToken)
+  if (account !== null && key !== null) await writeAntigravityMemo(memo, key, account)
+  return account
 }
 
 /** The CLI's own sign-in, which the user finishes on the provider's page. */
@@ -160,10 +228,14 @@ export interface AgentCli<K extends CliSignIn = CliSignIn> {
     | { readonly kind: "command"; readonly args: ReadonlyArray<string>; readonly parse: (out: CliOutput) => Effect.Effect<CliAuthStatus, InternalError> }
     | { readonly kind: "file"; readonly path: string }
   /**
-   * The signed-in account's email in the CLI's own stored login (a file under the login directory), read only once
-   * `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or method.
+   * The signed-in account's email in the CLI's own stored login (a file under the login directory `dir`), read only
+   * once `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or
+   * method.
    */
-  readonly identity: { readonly path: string; readonly parse: (text: string) => string | null } | null
+  readonly identity:
+    | { readonly path: string; readonly parse: (text: string, dir: string) => string | null | Promise<string | null> }
+    | { readonly path: string; readonly read: (path: string) => string | null }
+    | null
   readonly signIn: K extends "page" ? PageSignIn : KeySignIn
   /** Revokes the login before its directory is removed; null when removing the directory is the whole sign-out. */
   readonly logout: ReadonlyArray<string> | null
@@ -211,6 +283,17 @@ const parseCodexStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
     return { provider: "codex-cli", loggedIn: true, account: null }
   })
 
+const parseDevinStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, InternalError> =>
+  Effect.gen(function* () {
+    const text = `${out.stdout}\n${out.stderr}`
+    if (/^Not logged in\.$/m.test(text)) return { provider: "devin-cli", loggedIn: false, account: null }
+    if (/^Logged in \(via [^)\r\n]+\)/m.test(text) && !/^Failed to load credentials:/m.test(text)) {
+      const email = /^[ \t]*Email:[ \t]*([^\r\n]+)$/m.exec(text)?.[1]
+      return { provider: "devin-cli", loggedIn: true, account: accountEmail(email) }
+    }
+    return yield* Effect.fail(new InternalError({ message: "devin auth status: unexpected output" }))
+  })
+
 /** OpenCode's own ids for the Console (free models) and Go plan integrations, and the credential Kestrel keeps in Go. */
 const OPENCODE = "opencode"
 const OPENCODE_GO = "opencode-go"
@@ -234,6 +317,19 @@ const parseOpenCodeStatus =
         typeof integration === "object" && integration !== null && "connections" in integration ? integration.connections : null
       return { provider, loggedIn: Array.isArray(connections) && connections.length > 0, account: null }
     })
+
+/** Read only the active Console email, not the credential value. `auth export` requires OpenCode 2.1. */
+const openCodeAccount = (path: string): string | null => {
+  const db = new Database(path, { readonly: true })
+  try {
+    const row = db.query<{ email: unknown }, []>(
+      "SELECT json_extract(value, '$.metadata.email') AS email FROM credential WHERE integration_id = 'opencode' ORDER BY active DESC, time_created DESC, id DESC LIMIT 1",
+    ).get()
+    return accountEmail(row?.email)
+  } finally {
+    db.close()
+  }
+}
 
 /**
  * `opencode auth login opencode --method device --standalone` prints clack's decorated `Enter code: …` line, then the
@@ -356,7 +452,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
     status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeStatus(OPENCODE, "opencode") },
-    identity: null,
+    identity: { path: "opencode/opencode.db", read: openCodeAccount },
     signIn: {
       kind: "page",
       // The explicit integration and method are what let the CLI run without an interactive terminal.
@@ -394,14 +490,14 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
   },
   // Devin CLI keeps its API token (`devin/credentials.toml`) and its sessions under `$XDG_DATA_HOME`, like OpenCode, so
   // the shared variable names a directory of its own. The manual flow prints an app.devin.ai link whose page shows a
-  // code; the CLI reads it back only from a terminal and exits non-zero when the exchange fails. The credentials file
-  // names no account, and `/usage` and the commands are only offered inside a session.
+  // code; the CLI reads it back only from a terminal and exits non-zero when the exchange fails. `auth status`
+  // reports its account email; `/usage` and commands are only offered inside a session.
   "devin-cli": {
     bin: "devin",
     dir: "devin",
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
-    status: { kind: "file", path: "devin/credentials.toml" },
+    status: { kind: "command", args: ["auth", "status"], parse: parseDevinStatus },
     identity: null,
     signIn: {
       kind: "page",

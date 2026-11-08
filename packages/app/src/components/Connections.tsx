@@ -12,7 +12,7 @@ import {
   type ModelProviderInfo,
 } from "@cloudagents/protocol"
 import { Schema } from "effect"
-import { ChevronDown, Plus, RefreshCw } from "lucide-react"
+import { Check, ChevronDown, Plus, RefreshCw } from "lucide-react"
 import { isRouteModel, modelDisplayName } from "@cloudagents/composer/models"
 import { api } from "@/api/client"
 import { keys, queries } from "@/api/queries"
@@ -178,11 +178,13 @@ function HarnessRow({ connection, children }: { connection: Connection; children
   return (
     <div className="flex items-start gap-3 px-5 py-4">
       {harness && <HarnessLogo harness={harness} className="mt-0.5 size-6" />}
-      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+      {/* The model picker makes the header taller than its label, so its extra height already reads as gap above the body. */}
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-3">
           <ConnectionHeader
             label={connection.label}
             connected={connection.connected}
+            accountCount={connection.accounts?.length}
             expired={connection.expired === true}
           />
           {modelProvider && <ModelPicker provider={modelProvider} />}
@@ -330,7 +332,6 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         account={connection.account}
         expired={connection.expired === true}
       />
-      {keyProvider && <p className="text-xs text-muted-foreground">{CLI_INTRO[keyProvider]}</p>}
       {keyProvider && !connection.available ? (
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
@@ -374,11 +375,13 @@ function ConnectionHeader({
   label,
   connected,
   account,
+  accountCount,
   expired = false,
 }: {
   label: string
   connected: boolean
   account?: string | null
+  accountCount?: number
   expired?: boolean
 }) {
   return (
@@ -387,7 +390,13 @@ function ConnectionHeader({
       {expired ? (
         <Badge variant="warning">expired</Badge>
       ) : (
-        <Badge variant={connected ? "success" : "neutral"}>{connected ? "connected" : "not connected"}</Badge>
+        <Badge variant={connected ? "success" : "neutral"}>
+          {connected
+            ? accountCount !== undefined && accountCount > 1
+              ? `${accountCount} connected`
+              : "connected"
+            : "not connected"}
+        </Badge>
       )}
       {connected && account && <span className="font-mono text-xs text-muted-foreground">{account}</span>}
     </div>
@@ -399,36 +408,79 @@ function ConnectionHeader({
  * moves.
  */
 function invalidateConnections(queryClient: QueryClient) {
-  void queryClient.invalidateQueries({ queryKey: keys.connections })
+  const connections = queryClient.invalidateQueries({ queryKey: keys.connections })
   void queryClient.invalidateQueries({ queryKey: keys.allModels })
   void queryClient.invalidateQueries({ queryKey: keys.usage })
   void queryClient.invalidateQueries({ queryKey: keys.providerUsage })
   void queryClient.invalidateQueries({ queryKey: keys.usageActivity })
+  return connections
+}
+
+/**
+ * The active login, plus the number of other signed-in accounts when there are several, e.g.
+ * "Signed in as name@example.com +2 more". Older boxes report only `connection.account`.
+ */
+function accountDescription(
+  connection: Connection,
+  accounts: readonly { id: string; account: string | null }[],
+  activeAccountId: string | undefined,
+): string {
+  const account = accounts.find((candidate) => candidate.id === activeAccountId)?.account
+    ?? connection.account
+  const others = accounts.length - 1
+  return `${account ? `Signed in as ${account}` : "Signed in"}${others > 0 ? ` +${others} more` : ""}`
 }
 
 /** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */
 function CliConnectionRow({ connection, provider }: { connection: Connection; provider: CliProvider }) {
   const queryClient = useQueryClient()
   const [login, setLogin] = useState<CliLoginStart | null>(null)
+  const [loginOrigin, setLoginOrigin] = useState({ connected: false, account: null as string | null })
   const [expired, setExpired] = useState(false)
   const [code, setCode] = useState("")
   const refresh = () => invalidateConnections(queryClient)
+  // Older boxes report one login without the account list; keep its Disconnect menu working.
+  const accounts: readonly { id: string; account: string | null }[] = connection.accounts?.length
+    ? connection.accounts
+    : connection.connected
+      ? [{ id: connection.activeAccountId ?? "default", account: connection.account }]
+      : []
+  const activeAccountId = connection.activeAccountId
+    ?? accounts.find((account) => account.account === connection.account)?.id
+    ?? accounts[0]?.id
+  const description = accountDescription(connection, accounts, activeAccountId)
+  // The account a sign-in is adding; another login may already keep the connection connected.
+  const pendingAccountId = login?.accountId
+  const completed = login !== null && (pendingAccountId === undefined
+    ? connection.connected && (!loginOrigin.connected || connection.account !== loginOrigin.account)
+    : connection.accounts?.some((account) => account.id === pendingAccountId) === true)
 
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
+    // Older boxes have no attempt id: an unchanged existing login is not completion of this attempt.
+    onMutate: () => setLoginOrigin({ connected: connection.connected, account: connection.account }),
     onSuccess: (next) => {
       submitCode.reset()
       logout.reset()
+      select.reset()
+      cancelLogin.reset()
       setLogin(next)
       setExpired(false)
       setCode("")
     },
   })
   const submitCode = useMutation({
-    mutationFn: (value: string) => api.cliLoginCode(provider, { code: value }),
+    mutationFn: (value: string) =>
+      api.cliLoginCode(provider, {
+        code: value,
+        ...(pendingAccountId === undefined ? {} : { accountId: pendingAccountId }),
+      }),
     onSuccess: (status) => {
       // Keep the pending sign-in unless the box confirms it took; the user can retry or cancel.
-      if (status.loggedIn) {
+      const done = pendingAccountId === undefined
+        ? status.loggedIn
+        : status.accounts?.some((account) => account.id === pendingAccountId) === true
+      if (done) {
         setLogin(null)
         setCode("")
       }
@@ -436,18 +488,30 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     },
   })
   const logout = useMutation({
-    mutationFn: () => api.cliLogout(provider),
+    mutationFn: (accountId?: string) => api.cliLogout(provider, accountId),
     onSuccess: () => {
       setLogin(null)
       refresh()
     },
   })
-  const busy = start.isPending || submitCode.isPending || logout.isPending
-  const error = start.error ?? submitCode.error ?? logout.error
+  const select = useMutation({
+    mutationFn: (accountId: string) => api.cliSelectAccount(provider, accountId),
+    onSuccess: () => refresh(),
+  })
+  // Backing out must stop the CLI on the box too; otherwise it could finish and add the account after the cancel.
+  const cancelLogin = useMutation({
+    mutationFn: () => api.cliLoginCancel(provider),
+    onSuccess: () => refresh(),
+  })
+  const busy = start.isPending || submitCode.isPending || logout.isPending || select.isPending
+  const error = start.error ?? submitCode.error ?? logout.error ?? select.error ?? cancelLogin.error
 
+  // The pending account appearing in the box's list is the completion signal, which a second account never blurs.
   useEffect(() => {
-    if (connection.connected) setLogin(null)
-  }, [connection.connected])
+    if (!completed) return
+    setLogin(null)
+    setCode("")
+  }, [completed])
 
   useEffect(() => {
     if (!login) return
@@ -456,7 +520,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   }, [login])
 
   // A device-code sign-in finishes on the provider's page, so only a re-read shows it.
-  const polling = login !== null && !login.needsCode && !expired && !connection.connected
+  const polling = login !== null && !login.needsCode && !expired && !completed
   useEffect(() => {
     if (!polling) return
     const id = setInterval(() => invalidateConnections(queryClient), CLI_POLL_MS)
@@ -464,9 +528,11 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   }, [polling, queryClient])
 
   function cancel() {
+    cancelLogin.mutate()
     start.reset()
     submitCode.reset()
     logout.reset()
+    select.reset()
     setLogin(null)
     setCode("")
   }
@@ -482,32 +548,20 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
         </>
       )
     }
-    if (connection.connected) {
-      return (
-        <>
-          <p className="text-muted-foreground">
-            {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
-          </p>
-          <Button
-            variant="soft"
-            className="w-fit"
-            disabled={busy}
-            onClick={() => {
-              if (window.confirm("Disconnect this subscription? Agent runs will stop using it.")) logout.mutate()
-            }}
-          >
-            Disconnect
-          </Button>
-        </>
-      )
-    }
     if (login && expired) {
       return (
         <>
           <p className="text-muted-foreground">This sign-in expired.</p>
-          <Button className="w-fit" disabled={busy} onClick={() => start.mutate()}>
-            Try again
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button className="w-fit" disabled={busy} onClick={() => start.mutate()}>
+              Try again
+            </Button>
+            {connection.connected && (
+              <Button variant="soft" className="w-fit" onClick={cancel}>
+                Cancel
+              </Button>
+            )}
+          </div>
         </>
       )
     }
@@ -567,6 +621,78 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
         </>
       )
     }
+    if (connection.connected) {
+      return (
+        <>
+          {accounts.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Switch account"
+                  disabled={busy}
+                  className="flex w-fit items-center gap-1 text-left text-muted-foreground hover:text-foreground"
+                >
+                  {description}
+                  <ChevronDown className="size-3 opacity-60" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {accounts.map((account, index) => (
+                  <DropdownMenuItem
+                    key={account.id}
+                    disabled={busy || account.id === activeAccountId}
+                    onSelect={() => select.mutate(account.id)}
+                  >
+                    <span className="min-w-0 flex-1 truncate">
+                      {account.account ?? `Account ${index + 1}`}
+                    </span>
+                    {account.id === activeAccountId && <Check className="size-4" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <p className="text-muted-foreground">
+              {description}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="soft" className="w-fit" disabled={busy}>
+                  Disconnect
+                  <ChevronDown className="opacity-60" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {accounts.map((account, index) => (
+                  <DropdownMenuItem
+                    key={account.id}
+                    onSelect={() => {
+                      if (window.confirm("Disconnect this subscription? Agent runs will stop using it.")) {
+                        logout.mutate(account.id)
+                      }
+                    }}
+                  >
+                    {account.account ?? `Account ${index + 1}`}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              variant="soft"
+              size="icon"
+              disabled={busy}
+              aria-label="Sign in to another account"
+              onClick={() => start.mutate()}
+            >
+              <Plus />
+            </Button>
+          </div>
+        </>
+      )
+    }
     return (
       <>
         <p className="text-muted-foreground">
@@ -581,7 +707,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
 
   return (
     <HarnessRow connection={connection}>
-      <div className="flex flex-col gap-2">{body()}</div>
+      <div className="flex flex-col gap-3">{body()}</div>
       {error && <Alert>{errorText(error)}</Alert>}
     </HarnessRow>
   )

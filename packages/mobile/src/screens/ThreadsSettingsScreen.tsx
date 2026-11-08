@@ -8,7 +8,8 @@ import {
   type TextGenerationSettings,
   type ThreadSettings,
 } from "@cloudagents/protocol";
-import { Check, RotateCcw } from "lucide-react-native";
+import Check from "lucide-react-native/icons/check";
+import RotateCcw from "lucide-react-native/icons/rotate-ccw";
 import type { ApiClient } from "@/api/client";
 import { createQueries, queryClient } from "@/api/queries";
 import { effortOptions, ModelPicker, ThinkingPicker } from "@/components/ModelPicker";

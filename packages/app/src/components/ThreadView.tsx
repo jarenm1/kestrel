@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+  type TransitionEvent,
+} from "react"
 import {
   AppWindow,
   FolderTree,
@@ -21,6 +28,7 @@ import { ThreadBoxIndicator } from "@/components/ThreadBoxIndicator"
 import { ThreadRepoButton } from "@/components/ThreadRepoButton"
 import { FloatingNotice, FloatingNotices } from "@/components/FloatingNotice"
 import { Button } from "@cloudagents/ui/button"
+import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useTaskState } from "@/hooks/useTaskState"
 import { cn } from "@/lib/utils"
 
@@ -43,6 +51,8 @@ const MAX_SIDEBAR_SHARE = 0.8
 const SIDEBAR_SHARE_STEP = 0.02
 
 const clampShare = (share: number) => Math.min(MAX_SIDEBAR_SHARE, Math.max(MIN_SIDEBAR_SHARE, share))
+/** The collapsed sidebar's icon rail. */
+const RAIL_WIDTH = "3.25rem"
 
 function storedSidebarShare(): number {
   const stored = Number(localStorage.getItem(SIDEBAR_SHARE_KEY) ?? Number.NaN)
@@ -55,6 +65,10 @@ export function ThreadView({ taskId }: { taskId: string }) {
   // Sidebar starts collapsed: chat is full width, and tab content only mounts while expanded,
   // so the desktop stream does not connect until the user opens it.
   const [open, setOpen] = useState(false)
+  // Opening or closing on a wide screen: only then does the column's width transition, so window resizes and the
+  // resize handle stay instant. Closing, the panel stays mounted while it slides out; the transition's end clears this.
+  const [sliding, setSliding] = useState(false)
+  const animated = useSidebarAnimation()
   const [tab, setTab] = useState<TabId>("desktop")
   // Elements picked in the preview, waiting in the composer to go with the next message.
   const [elements, setElements] = useState<readonly ElementContext[]>([])
@@ -68,12 +82,22 @@ export function ThreadView({ taskId }: { taskId: string }) {
   useEffect(() => {
     if (state.desktopOpens === 0) return
     setTab("desktop")
-    setOpen(true)
+    toggle(true)
   }, [state.desktopOpens])
+
+  function toggle(next: boolean) {
+    if (next === open) return
+    setOpen(next)
+    setSliding(animated)
+  }
 
   function openTab(next: TabId) {
     setTab(next)
-    setOpen(true)
+    toggle(true)
+  }
+
+  function onSlideEnd(e: TransitionEvent<HTMLDivElement>) {
+    if (e.target === e.currentTarget) setSliding(false)
   }
 
   /** Dragging the handle: the sidebar spans from the pointer to the thread's right edge. */
@@ -99,19 +123,14 @@ export function ThreadView({ taskId }: { taskId: string }) {
     pullRequests.length === 1 && onlyPullRequest !== undefined ? `PR #${onlyPullRequest.number}` : "Pull requests"
   // Archived threads keep their history; their desktop was torn down, so it does not start again.
   const archivedTask = state.task?.archivedAt ? state.task : undefined
+  // The open sidebar's share of the thread, leaving both it and the chat at least 320px.
+  const openWidth = `clamp(320px, ${sidebarShare * 100}cqw, calc(100cqw - 320px))`
 
   return (
-    <div
-      ref={gridRef}
-      className={cn("grid min-h-0 flex-1", !open && "grid-cols-[minmax(0,1fr)_3.25rem]", resizing && "select-none")}
-      // Both columns keep at least 320px; between those, the sidebar takes its share.
-      style={
-        open
-          ? { gridTemplateColumns: `minmax(320px,1fr) clamp(320px, ${sidebarShare * 100}%, calc(100% - 320px))` }
-          : undefined
-      }
-    >
-      <section className="relative flex min-h-0 min-w-0 flex-col">
+    // A size container: the sidebar's width is a share of the thread (`cqw`), so the panel inside it can keep its
+    // final width while the column around it slides open or shut.
+    <div ref={gridRef} className={cn("@container flex min-h-0 flex-1", resizing && "select-none")}>
+      <section className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <ThreadBoxIndicator taskId={taskId} />
         {state.error && (
           <FloatingNotices>
@@ -130,9 +149,17 @@ export function ThreadView({ taskId }: { taskId: string }) {
           context={state.task?.context}
         />
       </section>
-      {open ? (
-        <div className="relative flex min-h-0 min-w-0">
-          {/* Drag (or arrow keys) to resize; double-click resets. Pointer capture keeps the drag over the preview iframe. */}
+      <div
+        className={cn(
+          "relative shrink-0",
+          sliding && "transition-[width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
+        )}
+        style={{ width: open ? openWidth : RAIL_WIDTH }}
+        onTransitionEnd={onSlideEnd}
+        onTransitionCancel={onSlideEnd}
+      >
+        {/* Drag (or arrow keys) to resize; double-click resets. Pointer capture keeps the drag over the preview iframe. */}
+        {open && (
           <div
             role="separator"
             aria-orientation="vertical"
@@ -159,99 +186,115 @@ export function ThreadView({ taskId }: { taskId: string }) {
               )}
             />
           </div>
-          <aside className="m-2 ml-0 flex min-h-0 min-w-0 flex-1 animate-in flex-col overflow-hidden rounded-xl bg-background/60 shadow-well duration-300 fade-in slide-in-from-right-4">
-            <div className="flex items-center gap-1.5 p-2">
+        )}
+        {/* Pinned to the right edge at its final width and clipped by the column, the panel slides in from the
+            right instead of squeezing its content. */}
+        <div className="absolute inset-0 overflow-hidden">
+          {(open || sliding) && (
+            <aside
+              inert={!open}
+              className={cn(
+                "absolute inset-y-2 right-2 flex flex-col overflow-hidden rounded-xl bg-background/60 shadow-well",
+                animated && "animate-in fade-in transition-opacity duration-300",
+                !open && "opacity-0",
+              )}
+              style={{ width: `calc(${openWidth} - 0.5rem)` }}
+            >
+              <div className="flex items-center gap-1.5 p-2">
+                {SIDEBAR_TABS.map((t) => (
+                  <Button
+                    key={t.id}
+                    variant={tab === t.id ? "soft" : "ghost"}
+                    size="sm"
+                    aria-pressed={tab === t.id}
+                    onClick={() => setTab(t.id)}
+                  >
+                    <t.icon />
+                    {t.label}
+                  </Button>
+                ))}
+                <div className="ml-auto flex min-w-0 items-center gap-1">
+                  {pullRequests.length > 0 && (
+                    <Button
+                      variant={tab === "pull-requests" ? "soft" : "ghost"}
+                      size="sm"
+                      aria-pressed={tab === "pull-requests"}
+                      title={pullRequestLabel}
+                      onClick={() => setTab("pull-requests")}
+                    >
+                      <GitPullRequest />
+                      {pullRequests.length === 1 ? pullRequestLabel : "Pull requests"}
+                      {pullRequests.length > 1 && (
+                        <span className="rounded-full bg-white/10 px-1.5 text-[10px] tabular-nums">
+                          {pullRequests.length}
+                        </span>
+                      )}
+                    </Button>
+                  )}
+                </div>
+                <ThreadRepoButton checkouts={checkouts} />
+                <Button variant="ghost" size="icon" aria-label="Collapse sidebar" onClick={() => toggle(false)}>
+                  <PanelRightClose />
+                </Button>
+              </div>
+              <SidebarBody
+                tab={tab}
+                taskId={taskId}
+                archived={archivedTask !== undefined}
+                previewPort={state.task?.previewPort}
+                onSelectElement={(element) => setElements((current) => [...current, element])}
+              />
+            </aside>
+          )}
+          {!open && (
+            <aside
+              className={cn(
+                "absolute inset-y-0 right-0 flex flex-col items-center gap-1 py-2",
+                animated && "animate-in fade-in duration-300",
+              )}
+              style={{ width: RAIL_WIDTH }}
+            >
+              <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => toggle(true)}>
+                <PanelRightOpen />
+              </Button>
               {SIDEBAR_TABS.map((t) => (
                 <Button
                   key={t.id}
-                  variant={tab === t.id ? "soft" : "ghost"}
-                  size="sm"
-                  aria-pressed={tab === t.id}
-                  onClick={() => setTab(t.id)}
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t.label}
+                  title={t.label}
+                  onClick={() => openTab(t.id)}
                 >
                   <t.icon />
-                  {t.label}
                 </Button>
               ))}
-              <div className="ml-auto flex min-w-0 items-center gap-1">
-                {pullRequests.length > 0 && (
-                  <Button
-                    variant={tab === "pull-requests" ? "soft" : "ghost"}
-                    size="sm"
-                    aria-pressed={tab === "pull-requests"}
-                    title={pullRequestLabel}
-                    onClick={() => setTab("pull-requests")}
-                  >
+              {pullRequests.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={pullRequestLabel}
+                  title={pullRequestLabel}
+                  onClick={() => openTab("pull-requests")}
+                >
+                  <span className="relative inline-flex">
                     <GitPullRequest />
-                    {pullRequests.length === 1 ? pullRequestLabel : "Pull requests"}
                     {pullRequests.length > 1 && (
-                      <span className="rounded-full bg-white/10 px-1.5 text-[10px] tabular-nums">
+                      <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
                         {pullRequests.length}
                       </span>
                     )}
-                  </Button>
-                )}
-              </div>
-              <ThreadRepoButton checkouts={checkouts} />
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label="Collapse sidebar"
-                onClick={() => setOpen(false)}
-              >
-                <PanelRightClose />
-              </Button>
-            </div>
-            <SidebarBody
-              tab={tab}
-              taskId={taskId}
-              archived={archivedTask !== undefined}
-              previewPort={state.task?.previewPort}
-              onSelectElement={(element) => setElements((current) => [...current, element])}
-            />
-          </aside>
-        </div>
-      ) : (
-        <aside className="flex flex-col items-center gap-1 py-2">
-          <Button variant="ghost" size="icon" aria-label="Expand sidebar" onClick={() => setOpen(true)}>
-            <PanelRightOpen />
-          </Button>
-          {SIDEBAR_TABS.map((t) => (
-            <Button
-              key={t.id}
-              variant="ghost"
-              size="icon"
-              aria-label={t.label}
-              title={t.label}
-              onClick={() => openTab(t.id)}
-            >
-              <t.icon />
-            </Button>
-          ))}
-          {pullRequests.length > 0 && (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={pullRequestLabel}
-              title={pullRequestLabel}
-              onClick={() => openTab("pull-requests")}
-            >
-              <span className="relative inline-flex">
-                <GitPullRequest />
-                {pullRequests.length > 1 && (
-                  <span className="absolute -top-1.5 -right-2 rounded-full bg-white/15 px-1 text-[9px] leading-4 tabular-nums">
-                    {pullRequests.length}
                   </span>
-                )}
-              </span>
-            </Button>
+                </Button>
+              )}
+              {/* Bottom of the rail, under the tabs and pull requests. */}
+              <div className="mt-auto">
+                <ThreadRepoButton checkouts={checkouts} />
+              </div>
+            </aside>
           )}
-          {/* Bottom of the rail, under the tabs and pull requests. */}
-          <div className="mt-auto">
-            <ThreadRepoButton checkouts={checkouts} />
-          </div>
-        </aside>
-      )}
+        </div>
+      </div>
     </div>
   )
 }

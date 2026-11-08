@@ -56,6 +56,9 @@ export interface RunRecoveryDeps {
  * retry is a normal run (so it resumes the thread's session), and a retry that fails again is itself retried until the
  * limit. A user reply, a new run, a cancelled delegation or an archived thread drops the pending retry.
  *
+ * A run a restart interrupted (a crash, or a graceful shutdown) is neither armed nor retried: it may have done part of
+ * its work already, and a rerun would repeat that work's external effects. The user decides whether to run it again.
+ *
  * The sweep reads the whole in-memory store on every tick. When thread counts grow, derive a next-wake time from the
  * soonest armed reset or retry (t3code does this with `getLimitRecoveryWakeAt`) and skip idle ticks; today it is cheap.
  */
@@ -333,6 +336,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
         if (
           run.id !== retryRecord.runId ||
           run.status !== "failed" ||
+          run.interruptedByRestart === true ||
           task.status !== "failed" ||
           !(Date.parse(retryRecord.nextAt) <= now)
         ) {
@@ -359,7 +363,7 @@ export const makeRunRecovery = (deps: RunRecoveryDeps) => {
       }
 
       // Only a failure this box saw recently, and that is still the thread's latest run, can be armed or retried.
-      if (run.status !== "failed" || run.endedAt === null) continue
+      if (run.status !== "failed" || run.endedAt === null || run.interruptedByRestart === true) continue
       const endedAt = Date.parse(run.endedAt)
       if (now - endedAt > ARM_WINDOW_MS || examined.has(run.id) || current.settledRuns.includes(run.id)) continue
       yield* examine(task, run, endedAt, autoResumeByOwner)

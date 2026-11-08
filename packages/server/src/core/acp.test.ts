@@ -264,7 +264,7 @@ describe("ACP driver", () => {
     expect(h.last().method).toBe("session/prompt")
   })
 
-  test("Devin keeps the requested id when no advertised variant matches", () => {
+  test("Devin fails clearly when the requested model is not advertised", () => {
     const configOptions = [
       {
         id: "model",
@@ -278,9 +278,23 @@ describe("ACP driver", () => {
     h.driver.start()
     h.reply({})
     h.reply({ sessionId: "s1", configOptions })
-    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { sessionId: "s1", configId: "model", value: "swe-2-flash" } })
-    h.reply({ configOptions: [] })
-    expect(h.last().method).toBe("session/prompt")
+    expect(h.outcomes).toEqual([{ status: "failed", error: "Devin does not advertise the requested model: swe-2-flash" }])
+  })
+
+  test("Devin uses the exact advertised spelling and config id", () => {
+    const h = harness({ provider: "devin", model: "gpt-6.1-sol" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions: [{ id: "model_id", category: "model", options: [{ group: "Models", options: [{ value: "gpt-6-1-sol" }] }] }] })
+    expect(h.last()).toMatchObject({ method: "session/set_config_option", params: { configId: "model_id", value: "gpt-6-1-sol" } })
+  })
+
+  test("Devin does not silently select a paid variant", () => {
+    const h = harness({ provider: "devin", model: "swe-2", effort: "high" })
+    h.driver.start()
+    h.reply({})
+    h.reply({ sessionId: "s1", configOptions: [{ id: "model", category: "model", currentValue: "swe-2-high-priority", options: [{ value: "swe-2-high-priority" }] }] })
+    expect(h.outcomes).toEqual([{ status: "failed", error: "Devin does not advertise the requested model: swe-2" }])
   })
 
   test("an agent that exits mid-turn fails the run", () => {
@@ -317,21 +331,41 @@ describe("ACP transcript", () => {
       jsonrpc: "2.0",
       id: 5,
       emittedAtMs: at,
-      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } },
+      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000, cachedWriteTokens: 50 } },
     })
     expect(end).toEqual([
       { _tag: "tool", id: "c2", parentToolId: null, name: "write", input: { path: "a.txt" }, status: "error", output: null },
+      // Cache writes count as input and cache reads are their own bucket, as with Claude's per-response usage.
+      {
+        _tag: "usage",
+        id: expect.any(String),
+        parentToolId: null,
+        timestamp: new Date(at).toISOString(),
+        durationMs: null,
+        inputTokens: 150,
+        outputTokens: 7,
+        cachedTokens: 9000,
+      },
       {
         _tag: "turn",
         id: expect.any(String),
         timestamp: new Date(at).toISOString(),
         durationMs: null,
-        inputTokens: 9100,
+        inputTokens: 9150,
         outputTokens: 7,
         costUsd: null,
         isError: false,
       },
     ])
     expect(t.finalText()).toBe("Done")
+  })
+
+  test("a turn's usage without cache buckets reports zero cached tokens; a turn without usage reports none", () => {
+    const t = makeTranscript()
+    // OpenCode omits a cache bucket that is zero.
+    const first = t.push({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn", usage: { inputTokens: 9908, outputTokens: 12, totalTokens: 9942 } } })
+    expect(first.find((item) => item._tag === "usage")).toMatchObject({ inputTokens: 9908, outputTokens: 12, cachedTokens: 0 })
+    const second = t.push({ jsonrpc: "2.0", id: 4, result: { stopReason: "end_turn" } })
+    expect(second.map((item) => item._tag)).toEqual(["turn"])
   })
 })

@@ -69,7 +69,7 @@ import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, type RunSession, type StoreState } from "./state"
-import { agentText, attachmentPath, sanitizeUploadName } from "./uploads"
+import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
 import { checkoutPinRef, iconMimeType, WorkspaceService, type CheckoutSpec } from "./workspace"
@@ -150,6 +150,7 @@ export interface AttachmentInput {
 export interface UploadInput {
   readonly mimeType: string
   readonly name?: string | undefined
+  readonly operationId?: string | undefined
   readonly bytes: Uint8Array
 }
 
@@ -823,6 +824,7 @@ export const CoreLive = Layer.effect(
     const textGenerator = makeTextGenerator({ config, cliAuth, broker })
     /** One checkout at a time: they all refresh mirrors, which are shared by every checkout of one owner. */
     const checkoutLock = yield* Effect.makeSemaphore(1)
+    const uploadLock = yield* Effect.makeSemaphore(1)
     const delegationLock = yield* Effect.makeSemaphore(1)
     const delegationDeliveryLock = yield* Effect.makeSemaphore(1)
 
@@ -1292,23 +1294,46 @@ export const CoreLive = Layer.effect(
         hub.publish({ _tag: "task.deleted", taskId, owner: task.owner })
       })
 
-    // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down.
+    // Archiving sets the flag before teardown, so no run can start while the runtime is being torn down. A thread's
+    // sub-threads — delegated to it or spawned by it — archive with it, transitively, in the same update.
     const archiveTask: CoreShape["archiveTask"] = (user, id) =>
       Effect.gen(function* () {
         yield* ownedTask(user, id)
-        const archived = yield* store.update((s): Either.Either<Task, NotFound> => {
+        const archived = yield* store.update((s): Either.Either<{ task: Task; tree: Task[] }, NotFound> => {
           const found = findTask(s, id)
           if (Either.isLeft(found)) return Either.left(found.left)
-          const task = found.right
-          if (task.archivedAt === undefined) {
-            task.archivedAt = nowIso()
-            task.updatedAt = task.archivedAt
+          const owner = found.right.owner
+          const ids = new Set<string>([id])
+          const queue = [id]
+          for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+            for (const t of s.tasks) {
+              if (ids.has(t.id) || t.owner !== owner) continue
+              if ((t.delegation?.parentTaskId ?? t.spawnedByTaskId) === next) {
+                ids.add(t.id)
+                queue.push(t.id)
+              }
+            }
           }
-          return Either.right({ ...task })
+          const now = nowIso()
+          const tree: Task[] = []
+          let task: Task | undefined
+          for (const t of s.tasks) {
+            if (!ids.has(t.id)) continue
+            if (t.archivedAt === undefined) {
+              t.archivedAt = now
+              t.updatedAt = now
+            }
+            const copy = { ...t }
+            tree.push(copy)
+            if (t.id === id) task = copy
+          }
+          return Either.right({ task: task!, tree })
         })
-        hub.publish({ _tag: "task.updated", task: archived })
-        yield* teardownRuntime(id)
-        return archived
+        for (const t of archived.tree) {
+          hub.publish({ _tag: "task.updated", task: t })
+          yield* teardownRuntime(t.id)
+        }
+        return archived.task
       })
 
     const unarchiveTask: CoreShape["unarchiveTask"] = (user, id) =>
@@ -1623,7 +1648,9 @@ export const CoreLive = Layer.effect(
             }),
           { discard: true },
         )
-        const reserved = yield* store.update(
+        // Reserving the run is what starts it: an unconfirmed write is applied in memory and in the file, so the run is
+        // still spawned below (a failure here would strand it "running" with no process behind it).
+        const reservation = yield* store.updateOutcome(
           (
             s,
           ): Either.Either<
@@ -1699,10 +1726,6 @@ export const CoreLive = Layer.effect(
                 ...sent,
               }
               const answer = ask?.runId === running.id ? (liveAsks.get(running.id) ?? null) : null
-              if (answer) {
-                liveAsks.delete(running.id)
-                seenFor(running.id).add(message.id)
-              }
               if (task.status === "needs_input" && from === null) task.status = "running"
               task.updatedAt = now
               s.messages.push(message)
@@ -1794,8 +1817,6 @@ export const CoreLive = Layer.effect(
               // the user handing the work to another model, carries the delegation, auto-resume on or off.
               task.delegation = { ...task.delegation, runId: run.id }
             }
-            // The prompt is what the run starts with, not mail for its inbox.
-            seenFor(run.id).add(message.id)
             const asked =
               question === null
                 ? delivered
@@ -1825,7 +1846,14 @@ export const CoreLive = Layer.effect(
             })
           },
         )
+        const reserved = reservation.value
+        if (reservation._tag === "unconfirmed") yield* Effect.logWarning(`task ${taskId}: ${reservation.cause}`)
         if (reserved.duplicate) return { message: reserved.message, run: reserved.run }
+        // In-memory bookkeeping follows the reservation, never runs inside it: the update's mutations are rolled back on a
+        // failed write, and these must not outlive them. A reply closes the question; the prompt is what a new run starts
+        // with, not mail for its inbox.
+        if (reserved.answer) liveAsks.delete(reserved.run.id)
+        if (reserved.answer || reserved.start !== null) seenFor(reserved.run.id).add(reserved.message.id)
         hub.publish({ _tag: "task.updated", task: reserved.task })
         // A title is generated beside the run, never in front of it: a slow or failed provider cannot hold up or
         // break the message. The write itself re-checks that the thread still has its provisional title.
@@ -2414,7 +2442,7 @@ export const CoreLive = Layer.effect(
 
     /** Stores a file for one of the task's messages. Its bytes wait under the attachments dir until a message names it. */
     const upload: CoreShape["upload"] = (user, taskId, input) =>
-      Effect.gen(function* () {
+      uploadLock.withPermits(1)(Effect.gen(function* () {
         yield* ownedTask(user, taskId)
         if (input.bytes.byteLength === 0) return yield* Effect.fail(new BadRequest({ message: "upload is empty" }))
         if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) {
@@ -2422,8 +2450,23 @@ export const CoreLive = Layer.effect(
             new BadRequest({ message: `upload is ${input.bytes.byteLength} bytes; the limit is ${MAX_ATTACHMENT_BYTES}` }),
           )
         }
-        const id = newId()
+        const id = input.operationId === undefined ? newId() : uploadOperationId(user, taskId, input.operationId)
+        if (id === undefined) return yield* Effect.fail(new BadRequest({ message: "invalid upload operation ID" }))
         const name = sanitizeUploadName(input.name)
+        const existing = yield* Effect.map(store.read, (s) =>
+          s.uploads.find((u) => u.taskId === taskId && u.id === id) ??
+          s.messages.filter((m) => m.taskId === taskId).flatMap((m) => m.attachments ?? []).find((a) => a.id === id),
+        )
+        if (existing) {
+          const bytes = yield* Effect.tryPromise({
+            try: () => readFile(join(config.attachmentsDir, id)),
+            catch: (e) => new InternalError({ message: `read upload: ${String(e)}` }),
+          })
+          if (existing.mimeType !== input.mimeType || existing.name !== name || !bytes.equals(input.bytes)) {
+            return yield* Effect.fail(new Conflict({ message: "upload operation ID was already used for different content" }))
+          }
+          return { id, mimeType: existing.mimeType, name: existing.name }
+        }
         // The upload's bytes count against the thread now, not at the next storage check, so a burst of uploads between
         // checks cannot pass the limit. Refused like a full disk: the bytes that would cross it are not written.
         const before = storageUsed.get(taskId) ?? 0
@@ -2464,7 +2507,7 @@ export const CoreLive = Layer.effect(
             ),
           )
         return { id, mimeType: input.mimeType, name }
-      })
+      }))
 
     // First check at startup, then every STORAGE_CHECK_MS; a failed check is logged and the next one runs anyway.
     yield* Effect.forkDaemon(

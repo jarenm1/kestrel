@@ -1,6 +1,6 @@
 # Kestrel architecture
 
-This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
+This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [resilience.md](resilience.md) for outage boundaries, [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
 
 ## System overview
 
@@ -81,6 +81,10 @@ change which models appear in chat. **Refresh models** reads the selected box's 
 (`GET /api/models?refresh=1`); clients also poll hourly. See [model coverage](harnesses.md#third-party-model-coverage)
 for provider/CLI discovery, fallback behavior and curated compatibility metadata.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
+Subscription rows support multiple isolated accounts per provider: **+** repeats sign-in, the signed-in identity
+menu switches the account for subsequent runs and quota reads, and **Disconnect** lists accounts to remove.
+The status pill shows **N connected** only above one account. Existing runs keep their original login; switching
+does not copy credentials or native sessions between account homes. See [credentials and sessions](harnesses.md#credentials-and-sessions).
 
 Settings › Threads (`/settings/threads`) groups thread preferences into sections. Its Text generation section stores
 each user's choices on the active box (`GET`/`PUT /api/settings/text-generation`). The section's toggle disables its
@@ -146,6 +150,11 @@ The authenticated `GET /api/capabilities` reports a versioned snapshot of platfo
 
 ## Agent execution and data
 
+Upload requests may carry an `operationId` UUID. Retrying the same bytes, MIME type and sanitized name for the same
+owner and thread returns the original attachment, including after it has been attached to a message. Reusing the key
+with different content is rejected. The record lasts for the lifetime of the pending upload or its message, until the
+thread is deleted. The web client keeps the key in memory while retrying a file; a page reload starts a new operation.
+
 A thread has a workspace, messages and runs. Repositories are checked out on demand, each on a thread branch. The box maintains per-user repository mirrors, fetching with the user's GitHub credentials on the host. Host-side Git operations use a separate shadow repository so agent-writable repository configuration cannot direct host commands. Thread data, workspaces and mirrors live on the box.
 
 Every agent-controlled task launch (agent CLI, `workspace_exec`, desktop terminal and launched apps) receives
@@ -177,23 +186,31 @@ session, the run starts fresh with bounded conversation history. Prompts travel 
 never become portable conversation history. Catalog routes and validated provider-qualified runtime identities
 live in `packages/protocol`; discovery results remain scoped to the signed-in user and selected box.
 
-Claude Code and Codex responses carry a shared transcript usage strip: local completion time as a 12-hour
-clock with minutes, `in`, `out`, `cached`, and the response's output rate in `tok/s`. Each strip describes
-one model response, including intermediate tool-calling responses, not the whole agent turn. Input includes
-fresh and cache-write tokens but excludes cache reads; `cached` shows cache reads separately. Counts are
-compact, with exact values on hover; unreported buckets display `?`. Repeated Claude content blocks and Codex
-usage notifications do not create duplicate response strips.
-The rate divides output tokens by the response's own elapsed time, measured from its start to its latest
-completion report, so tool execution between responses is excluded; without both boundaries it shows `?`.
-The context meter remains a separate current-context measurement. Historical runs without response usage and
-ACP agents reporting only prompt/session totals retain a compact input/output footer with the same clock and
-rate, labelled `turn … tok/s` because it divides by the whole turn's reported duration, tool execution
-included; no per-response timing exists for them. Its input includes cached tokens, and no cache split is
-guessed. Each turn with main-agent response strips suppresses its aggregate footer, without suppressing totals
-for other turns in the same run. Subagent strips do not suppress the main turn's footer. Cost is not displayed;
-failures remain visible with either usage format. An agent reply always shows its message time, on the same
-clock, unless the run transcript directly below it already dates the response; old turns recorded without
-their own timestamp fall back to the reply's message time.
+Every harness uses one compact completed-run disclosure in the shared desktop/phone transcript, inspired by
+[T3 Code's timing presentation](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/chat/MessagesTimeline.logic.ts).
+Its “Worked for …” duration uses Kestrel's persisted `Run.startedAt` and `endedAt`, not provider-reported
+response or turn durations. This wall-clock span includes queueing, startup, tools and waiting. Durations use
+milliseconds below one second, tenths below ten seconds, then seconds/minutes/hours, rounding before choosing
+the unit. Failed and stopped runs retain their status and measured elapsed time. Restart-reconciled runs show
+“Interrupted by restart” without counting downtime as work; missing or invalid boundaries never invent a duration.
+The completion clock stays on the collapsed row. Steering splits the content but not the run summary.
+The row keeps its muted color and uses the thinking block's trailing 14px caret: revealed on hover or keyboard
+focus, rotated down and kept visible while open.
+Saved replies without loaded transcript items keep the summary after their answer.
+
+Expanding the disclosure lists input, output and cached tokens plus average output tokens per second over the
+same wall-clock span. The collapsed row already carries elapsed time, so the details do not repeat it. Input
+excludes cache reads, which appear as cached tokens separately; cache writes count as input. Input and cached
+tokens come from main-agent response usage, never added to turn aggregates, so they are not double-counted;
+subagent rows are excluded. Output remains the completed turn aggregate. ACP harnesses (OpenCode, Antigravity,
+Devin) report usage only per turn, already split into input and cache buckets, so the transcript emits that split
+as the turn's one usage item; a bucket an agent omits next to a reported input counts as zero (OpenCode omits zero
+buckets). A harness that reports only a cache-inclusive turn aggregate still contributes its output, but its
+cache-free input cannot be recovered, so input and cached tokens say “Not reported” instead of guessing. This average
+includes tools and waiting; it is not model-generation speed. Incomplete, failed or stopped invocations do not
+present partial token totals as complete; unreported values say “Not reported” rather than showing `? tok/s`.
+Counts are compact with exact values on hover. Per-response metadata remains stored but no longer creates rows
+or splits consecutive tool groups. The context meter remains a separate current-context measurement.
 
 OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
 providers through the model picker rather than introducing a separate per-thread harness control.
@@ -294,7 +311,7 @@ The product direction is a common box contract and capabilities across BYOB and 
 - Usage limits do not end delegated work. A child whose run failed on a provider usage limit is held while the box checks the reset and, once armed to resume (`Task.usageLimitResume` with auto-resume on), until it resumes: no result goes up, `delegation_wait` keeps waiting and status names the reset. The run that continues it, the automatic resume or the user handing it to another model in its thread, becomes the delegated run, and its result is the one delivered. "Return to parent now" (the child's usage-limit notice, or the parent's strip) drops the arm and delivers the failed run's result at once; turning auto-resume off does the same, and once that result has gone up the box refuses to turn auto-resume back on (the parent could never get the resumed run's result; a message to the child still continues its own thread). A parent stopped by a usage limit queues its children's results and questions until it resumes or the user's next message starts a run, instead of starting a run per notification that fails on the same limit.
 - Delegation assignments and automatic result/question notifications have distinct framing from ordinary peer mail. Children give their final response in their own thread rather than also sending it with `thread_send`; automatic notifications do not invite replies or answers to the user's questions.
 - A delegation may supply a JSON Schema for its final response. Kestrel includes it in the assignment and validates the returned JSON; the status and notification report validation failures without hiding the original response. Role names are prompt guidance, not separate permission profiles. Children use their own thread workspace and may check out a repo, branch or PR; local uncommitted files and the parent's transcript are not copied.
-- An agent can call `thread_close` as its final action when its finished work needs no user attention, such as an automation check that found no issues. It archives only its own thread and ends its run.
-- Archiving a thread (`POST /api/tasks/:id/archive`; `DELETE` lifts it) tears down its runtime: running runs are cancelled, the desktop stops, and the sandbox network and systemd slice are removed. The workspace, checkouts, branches, messages and runs stay, and the thread leaves the active list. While archived, sending a message or starting the desktop fails with 409 Conflict. Unarchiving restores both and starts nothing on its own.
+- An agent can call `thread_close` as its final action when its finished work needs no user attention, such as an automation check that found no issues. It archives its own thread — and any threads it spawned or delegated — and ends its run.
+- Archiving a thread (`POST /api/tasks/:id/archive`; `DELETE` lifts it) tears down its runtime: running runs are cancelled, the desktop stops, and the sandbox network and systemd slice are removed. A thread's sub-threads — threads it spawned with `thread_spawn` or delegated work to with `delegate_task`, transitively — archive with it, each runtime torn down the same way. The workspace, checkouts, branches, messages and runs stay, and the threads leave the active list. While archived, sending a message or starting the desktop fails with 409 Conflict. Unarchiving lifts only the named thread and starts nothing on its own.
 - Kestrel's own managed and relayed boxes count failed tools and agent turns for operators at `GET /api/fleet/tool-failures?days=`. Agent failures include a scrubbed diagnostic when available, plus the exit code or signal. Tool and agent failures use scrubbed error signatures (`core/tool-failures.ts`); oversized outputs use a fixed signature, and scrubbing is heuristic so other signatures may still be sensitive. Declined actions, stopped runs and replays are skipped. Reports are best effort, at most once a minute, and kept per UTC day for 90 days without a user, thread or box. User-owned boxes do not report unless configured with the shared relay token.
 - Desktop video, audio and input are always WebRTC, signaled over the authenticated desktop WebSocket, direct or through the legacy relay. There is no WebSocket media path and no opt-in. See [box.md](box.md#webrtc-desktop).

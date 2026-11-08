@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import { Server } from "lucide-react-native";
+import Server from "lucide-react-native/icons/server";
 import { useApiClient } from "@/hooks/useApiClient";
 import { createQueries } from "@/api/queries";
 import { colors, radius, spacing } from "@/theme";

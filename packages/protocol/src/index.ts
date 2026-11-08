@@ -648,6 +648,46 @@ export const DesktopRtcClientMessage = Schema.Union(
 )
 export type DesktopRtcClientMessage = typeof DesktopRtcClientMessage.Type
 
+/** A safe, enumerated reason TURN credentials were unusable. Never provider text, a URL, or a credential. */
+export const DesktopTurnIssue = Schema.Literal(
+  "control-timeout",
+  "control-unreachable",
+  "control-rejected",
+  "configuration-incomplete",
+  "provider-unavailable",
+  "provider-unusable",
+  "invalid-answer",
+  "expired",
+  "no-usable-turn",
+  "local-incomplete",
+  "control-error",
+)
+export type DesktopTurnIssue = typeof DesktopTurnIssue.Type
+
+/** The safe part of a failed box-authenticated TURN request; enough to identify the fix without box logs. */
+export const BoxTurnError = Schema.Struct({
+  _tag: Schema.String,
+  message: Schema.String,
+  issue: Schema.optional(DesktopTurnIssue),
+})
+export type BoxTurnError = typeof BoxTurnError.Type
+
+/**
+ * Redacted box-side desktop connection evidence. Never carries credentials, addresses, URLs, SDP or raw provider errors.
+ * A missing relay is independent of direct ICE: a connection may still succeed without a relay candidate.
+ */
+export const DesktopRtcBoxDiagnostics = Schema.Struct({
+  turnSource: Schema.Literal("managed", "local", "none"),
+  turnStatus: Schema.Literal("configured", "unavailable", "not-configured"),
+  /** Optional so a box deployed before this field keeps producing decodable diagnostics. */
+  turnIssue: Schema.optional(Schema.NullOr(DesktopTurnIssue)),
+  gathering: Schema.Literal("idle", "gathering", "complete", "failed"),
+  relayCandidates: Schema.Number,
+  connection: Schema.Literal("new", "connecting", "connected", "disconnected", "failed", "closed"),
+  failure: Schema.NullOr(Schema.Literal("turn-credentials", "relay-allocation", "negotiation", "connection-timeout")),
+})
+export type DesktopRtcBoxDiagnostics = typeof DesktopRtcBoxDiagnostics.Type
+
 /** Box -> client WebRTC signaling over the desktop WebSocket, next to `DesktopStatus`. */
 export const DesktopRtcServerMessage = Schema.Union(
   Schema.Struct({
@@ -659,6 +699,7 @@ export const DesktopRtcServerMessage = Schema.Union(
   Schema.Struct({ _tag: Schema.Literal("rtc.unavailable"), reason: Schema.String, retryable: Schema.Boolean }),
   Schema.Struct({ _tag: Schema.Literal("rtc.answer"), sdp: Schema.String }),
   DesktopRtcCandidate,
+  Schema.Struct({ _tag: Schema.Literal("rtc.diagnostics"), diagnostics: DesktopRtcBoxDiagnostics }),
 )
 export type DesktopRtcServerMessage = typeof DesktopRtcServerMessage.Type
 

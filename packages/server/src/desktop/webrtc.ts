@@ -17,7 +17,7 @@ import {
   useNACK,
   usePLI,
 } from "werift"
-import { type DesktopRtcIceServer, type DesktopRtcServerMessage } from "@cloudagents/protocol"
+import { type DesktopRtcBoxDiagnostics, type DesktopRtcIceServer, type DesktopRtcServerMessage } from "@cloudagents/protocol"
 import { type H264Unit, MediaTap, RtpVideoSender } from "./rtp"
 
 export interface WebRtcSettings {
@@ -42,12 +42,12 @@ const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
 /**
- * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. The UDP attempt is not
- * covered: it fails under STUN retransmissions (50ms doubling over seven sends, about 6.3s) before that fallback starts,
- * so an unreachable managed relay can hold the answer for roughly eight seconds. Operator-configured TURN keeps the
- * default, since its server may be far away or reached over TLS.
+ * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. Managed allocations use
+ * TLS/443 directly, without waiting for a failed UDP allocation first. Operator-configured TURN keeps the default.
  */
 const TURN_TCP_CONNECT_TIMEOUT_S = 2
+/** The control plane requires this endpoint in managed credentials; werift only uses the first TURN URL. */
+const MANAGED_TURN_TLS = /^turns:(?:\[[^\]]+\]|[^:/?#]+):443\?transport=tcp$/i
 const MAX_OFFER_CHARS = 64 * 1024
 const INPUT_CHANNEL = "input"
 const POINTER_CHANNEL = "pointer"
@@ -67,6 +67,35 @@ const H264_PROFILES: readonly { readonly prefix: string; readonly baselineOnly: 
   { prefix: "42c0", baselineOnly: true },
   { prefix: "4200", baselineOnly: true },
 ]
+
+/** The redacted part of a session's diagnostics that `sessionIceServers` resolved; no URL, credential or provider text. */
+export interface TurnConfigDiagnostics {
+  readonly source: DesktopRtcBoxDiagnostics["turnSource"]
+  readonly status: DesktopRtcBoxDiagnostics["turnStatus"]
+  readonly failure: "turn-credentials" | null
+  readonly issue: DesktopRtcBoxDiagnostics["turnIssue"]
+}
+
+/**
+ * What a caller that only has the resolved list can say. `sessionIceServers` passes the precise outcome; this keeps
+ * direct `setIceServers` calls (tests and scripts) from having to invent one.
+ */
+const inferTurnDiagnostics = (
+  servers: ReadonlyArray<DesktopRtcIceServer>,
+  managed: boolean,
+): TurnConfigDiagnostics => {
+  const turn = servers.filter((server) => server.urls.some((url) => /^turns?:/i.test(url)))
+  if (turn.length === 0) return { source: "none", status: "not-configured", failure: null, issue: null }
+  const usable = turn.some(
+    (server) =>
+      server.urls.some((url) => /^turns?:/i.test(url)) &&
+      (server.username?.trim() ?? "") !== "" &&
+      (server.credential?.trim() ?? "") !== "",
+  )
+  return usable
+    ? { source: managed ? "managed" : "local", status: "configured", failure: null, issue: null }
+    : { source: managed ? "managed" : "local", status: "unavailable", failure: "turn-credentials", issue: "local-incomplete" }
+}
 
 let peers = 0
 
@@ -241,6 +270,14 @@ interface Peer {
   readonly release: () => void
 }
 
+/** The mutable part of a diagnostics snapshot that one negotiation owns. Turn source/status is session-level. */
+interface BoxView {
+  gathering: DesktopRtcBoxDiagnostics["gathering"]
+  relayCandidates: number
+  connection: DesktopRtcBoxDiagnostics["connection"]
+  failure: DesktopRtcBoxDiagnostics["failure"]
+}
+
 const realTimer = (run: () => void, ms: number): (() => void) => {
   const timer = setTimeout(run, ms)
   return () => clearTimeout(timer)
@@ -259,6 +296,19 @@ export class DesktopRtcSession {
   private relayServers: ReadonlyArray<DesktopRtcIceServer> | null = null
   private managedRelay = false
 
+  /** The last redacted config outcome, and the negotiation state currently published with it. */
+  private turn: TurnConfigDiagnostics = { source: "none", status: "not-configured", failure: null, issue: null }
+  private view: BoxView = { gathering: "idle", relayCandidates: 0, connection: "new", failure: null }
+  /** Invalidates gathering/connection events from a peer that has been replaced or closed. */
+  private viewToken = 0
+  /** A config resolving mid-offer must not reset the negotiation it is about to be used by. */
+  private negotiating = false
+  /** Whether the peer being negotiated actually received usable TURN: the only case where no relay is an allocation failure. */
+  private peerRelayConfigured = false
+  /** Distinct relay candidates this negotiation gathered, keyed by their signaling address. Never published. */
+  private readonly relayIds = new Set<string>()
+  private lastDiagnostics: string | null = null
+
   constructor(
     private readonly settings: WebRtcSettings,
     private readonly taskId: string,
@@ -268,11 +318,93 @@ export class DesktopRtcSession {
 
   /**
    * The ICE servers the box's own peer uses: the box's configuration plus any managed TURN the viewer just received, so
-   * a box without a candidate the viewer can reach still connects through both relays.
+   * a box without a candidate the viewer can reach still connects through both relays. `turn` is the redacted outcome
+   * from `sessionIceServers`; when omitted it is inferred from the resolved list alone.
    */
-  setIceServers(servers: ReadonlyArray<DesktopRtcIceServer>, managed: boolean): void {
+  setIceServers(
+    servers: ReadonlyArray<DesktopRtcIceServer>,
+    managed: boolean,
+    turn: TurnConfigDiagnostics = inferTurnDiagnostics(servers, managed),
+  ): void {
     this.relayServers = servers
     this.managedRelay = managed
+    this.turn = turn
+    if (this.peer === null && !this.negotiating) {
+      this.resetView()
+      this.publish(true)
+      return
+    }
+    // A running peer keeps its gathered evidence; only the credential outcome can have changed under it.
+    if (turn.failure !== null) this.view.failure = turn.failure
+    else if (this.view.failure === "turn-credentials") this.view.failure = null
+    this.publish(true)
+  }
+
+  private resetView(): void {
+    this.viewToken += 1
+    this.peerRelayConfigured = false
+    this.relayIds.clear()
+    this.view = { gathering: "idle", relayCandidates: 0, connection: "new", failure: this.turn.failure }
+  }
+
+  private publish(force = false): void {
+    if (this.closed) return
+    const diagnostics: DesktopRtcBoxDiagnostics = {
+      turnSource: this.turn.source,
+      turnStatus: this.turn.status,
+      turnIssue: this.turn.issue ?? null,
+      gathering: this.view.gathering,
+      relayCandidates: this.view.relayCandidates,
+      connection: this.view.connection,
+      failure: this.view.failure,
+    }
+    const serialized = JSON.stringify(diagnostics)
+    if (!force && serialized === this.lastDiagnostics) return
+    this.lastDiagnostics = serialized
+    this.handlers.send({ _tag: "rtc.diagnostics", diagnostics })
+  }
+
+  /** A negotiation the box could not even build a peer for: no stale state may suggest it is still trying. */
+  private failNegotiation(): void {
+    this.view.connection = "failed"
+    this.view.failure = "negotiation"
+    this.publish()
+  }
+
+  /** A real relay candidate appeared; publish the count only when it changes, never for host or srflx candidates. */
+  private noteRelayCandidate(token: number, identity: string): void {
+    if (token !== this.viewToken) return
+    const before = this.relayIds.size
+    this.relayIds.add(identity)
+    if (this.relayIds.size === before) return
+    this.view.relayCandidates = this.relayIds.size
+    if (this.view.failure === "relay-allocation") this.view.failure = null
+    this.publish()
+  }
+
+  /**
+   * Werift gathering itself finished. A configured relay with no allocated candidate is a relay-allocation failure, but
+   * gathering still completed: direct host/srflx candidates may connect. `gathering: "failed"` is reserved for a
+   * genuine gathering/negotiation exception, not for a missing relay.
+   */
+  private finishGathering(token: number, pc: RTCPeerConnection): void {
+    if (token !== this.viewToken) return
+    // The event stream above is the source at this point: werift completes gathering before the local description is
+    // applied, so the transport's advertised list may not include the relay yet.
+    for (const transport of pc.iceTransports) {
+      for (const candidate of transport.localCandidates) {
+        if (candidate.type === "relay") this.relayIds.add(`${candidate.ip}:${candidate.port}/${candidate.protocol}`)
+      }
+    }
+    const relays = this.relayIds.size
+    this.view.relayCandidates = relays
+    if (relays > 0) {
+      if (this.view.failure === "relay-allocation") this.view.failure = null
+    } else if (this.peerRelayConfigured) {
+      this.view.failure ??= "relay-allocation"
+    }
+    this.view.gathering = "complete"
+    this.publish()
   }
 
   /** Signaling from the viewer. Never rejects: what goes wrong is told to the viewer, which can retry. */
@@ -309,6 +441,7 @@ export class DesktopRtcSession {
     } catch (e) {
       this.handlers.debug(`webrtc ${message._tag} failed: ${e instanceof Error ? e.message : String(e)}`)
       // A live peer going away hands the viewer back to the WebSocket, as a dead connection does.
+      this.failNegotiation()
       this.lose()
       this.handlers.send({ _tag: "rtc.unavailable", reason: "negotiation failed", retryable: true })
     }
@@ -350,10 +483,22 @@ export class DesktopRtcSession {
   }
 
   private async answer(offer: string): Promise<void> {
+    this.negotiating = true
+    try {
+      await this.negotiate(offer)
+    } finally {
+      this.negotiating = false
+    }
+  }
+
+  private async negotiate(offer: string): Promise<void> {
     this.closePeer()
+    this.resetView()
+    const token = this.viewToken
     if (offer.length > MAX_OFFER_CHARS) throw new Error("offer is too large")
     const picked = pickH264Format(offer)
     if (picked === null) {
+      this.failNegotiation()
       this.handlers.send({
         _tag: "rtc.unavailable",
         reason: "the browser offered no H.264 format the box can encode (High 4:2:0 or Constrained Baseline)",
@@ -367,14 +512,31 @@ export class DesktopRtcSession {
       this.handlers.send({ _tag: "rtc.unavailable", reason: "this box is at its WebRTC viewer limit", retryable: true })
       return
     }
+    this.view.gathering = "gathering"
+    this.view.connection = "connecting"
+    this.publish()
     const servers = this.relayServers ?? mintIceServers(this.settings, this.taskId)
+    // Unlike browsers, werift 0.26 only uses the first TURN URL; its UDP fallback retries TCP on the same port,
+    // not later URLs. Select the managed TLS/443 endpoint so blocked UDP/3478 cannot silently remove the box's relay.
+    const tlsRelay = this.managedRelay
+      ? servers.find((server) => server.urls.some((url) => MANAGED_TURN_TLS.test(url)))
+      : undefined
+    const peerServers = tlsRelay === undefined
+      ? servers
+      : [{ ...tlsRelay, urls: tlsRelay.urls.filter((url) => MANAGED_TURN_TLS.test(url)) }, ...servers]
+    this.peerRelayConfigured = peerServers.some(
+      (server) =>
+        server.urls.some((url) => /^turns?:/i.test(url)) &&
+        (server.username?.trim() ?? "") !== "" &&
+        (server.credential?.trim() ?? "") !== "",
+    )
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
     const encoded = new RTCRtpCodecParameters({ mimeType: "video/H264", clockRate: 90_000, parameters: fmtp })
     const opusCodec = new RTCRtpCodecParameters({ mimeType: "audio/opus", clockRate: 48_000, channels: 2 })
     const pc = new RTCPeerConnection({
-      iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
+      iceServers: peerServers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
       // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
       // TURN server may be far away or reached over TLS, so it keeps werift's default wait.
@@ -409,7 +571,7 @@ export class DesktopRtcSession {
       const track = new MediaStreamTrack({ kind: "video", codec: encoded })
       const audioTrack = new MediaStreamTrack({ kind: "audio", codec: opusCodec })
       pc.onIceCandidate.subscribe((candidate) => {
-        if (this.closed || !candidate) return
+        if (this.closed || !candidate || token !== this.viewToken) return
         const init = candidate.toJSON()
         this.handlers.send({
           _tag: "rtc.candidate",
@@ -417,6 +579,18 @@ export class DesktopRtcSession {
           sdpMid: init.sdpMid ?? null,
           sdpMLineIndex: init.sdpMLineIndex ?? null,
         })
+        if (candidate.type === "relay") {
+          this.noteRelayCandidate(token, `${candidate.address}:${candidate.port}/${candidate.protocol}`)
+        }
+      })
+      pc.iceGatheringStateChange.subscribe((state) => {
+        if (token !== this.viewToken) return
+        if (state === "gathering") {
+          this.view.gathering = "gathering"
+          this.publish()
+        } else if (state === "complete") {
+          this.finishGathering(token, pc)
+        }
       })
       pc.onDataChannel.subscribe((channel) => {
         if (channel.label !== INPUT_CHANNEL && channel.label !== POINTER_CHANNEL) return
@@ -472,11 +646,29 @@ export class DesktopRtcSession {
         for (const report of packet.reports) sender.reportLoss(report.fractionLost / 256)
       })
       const timer = setTimeout(() => {
-        if (this.peer?.pc === pc) this.lose()
+        if (this.peer?.pc !== pc || token !== this.viewToken) return
+        this.view.connection = "failed"
+        this.view.failure = "connection-timeout"
+        this.publish()
+        this.lose()
       }, CONNECT_TIMEOUT_MS)
       connectTimer = timer
       const peer: Peer = { pc, sender, audio, live: false, connectTimer: timer, release, baselineOnly }
       pc.connectionStateChange.subscribe((state) => {
+        if (token === this.viewToken) {
+          this.view.connection = state
+          if (state === "connected" && this.view.failure === "relay-allocation") {
+            // Direct ICE can connect without the relay. The missing relay count remains evidence; it is not a
+            // failure of a working session.
+            this.view.failure = null
+          }
+          if (state === "failed") {
+            // Keep a credential failure; otherwise a configured-but-unallocated relay is the useful root cause.
+            this.view.failure ??=
+              this.peerRelayConfigured && this.view.relayCandidates === 0 ? "relay-allocation" : "negotiation"
+          }
+          this.publish()
+        }
         if (this.peer !== peer) return
         if (state === "connected") {
           clearTimeout(timer)
@@ -499,6 +691,8 @@ export class DesktopRtcSession {
         sender.start()
       }
     } catch (e) {
+      // A real gather/negotiation exception, unlike a completed gather that found no relay.
+      if (token === this.viewToken && pc.iceGatheringState === "gathering") this.view.gathering = "failed"
       clearTimeout(connectTimer)
       release()
       await pc.close().catch(() => {})
@@ -512,6 +706,9 @@ export class DesktopRtcSession {
   }
 
   private closePeer(): void {
+    // Before closing the transport: its synchronous closed event (and anything a restart left queued) must not
+    // overwrite the failure evidence or look like the current negotiation.
+    this.viewToken += 1
     const peer = this.peer
     if (peer === null) return
     this.peer = null

@@ -64,6 +64,11 @@ export const ControlPaths = {
    * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Relayed.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
+  /**
+   * POST (no body) -> 204: cancels a sign-in still waiting on the box for this provider and removes its unfinished
+   * home, so an approval completed afterwards cannot add the account. Idempotent. Relayed.
+   */
+  cliLoginCancel: (provider: CliProvider) => `/api/cli-auth/${provider}/login/cancel`,
   /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Relayed. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /**
@@ -71,8 +76,11 @@ export const ControlPaths = {
    * one it holds. Only providers that sign in with a key (`CLI_SIGN_IN`). Relayed; the key stays with the CLI on the box.
    */
   cliLoginKey: (provider: CliProvider) => `/api/cli-auth/${provider}/key`,
-  /** DELETE -> 204: signs the user's CLI out on the box and deletes its credentials there. Relayed. */
-  cliLogout: (provider: CliProvider) => `/api/cli-auth/${provider}`,
+  /** DELETE -> 204: disconnects one account, or the active account when omitted. Relayed. */
+  cliLogout: (provider: CliProvider, accountId?: string) =>
+    `/api/cli-auth/${provider}${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`,
+  /** POST { accountId } -> CliAuthStatus: selects the account used by subsequent runs and usage reads. */
+  cliSelectAccount: (provider: CliProvider) => `/api/cli-auth/${provider}/account`,
   /**
    * POST UseBankedResetBody -> UseBankedResetResult: spends one of the user's banked resets (listed in `cliUsage`)
    * through the provider's CLI on the box. Only providers that report `bankedResets` accept it. Relayed.
@@ -217,6 +225,13 @@ export type Me = typeof Me.Type
 export const ConnectionKind = Schema.Literal("oauth", "apikey", "cli")
 export type ConnectionKind = typeof ConnectionKind.Type
 
+/** A connected subscription identity; never includes credentials or host paths. */
+export const CliAccount = Schema.Struct({
+  id: Schema.String,
+  account: Schema.NullOr(Schema.String),
+})
+export type CliAccount = typeof CliAccount.Type
+
 export const Connection = Schema.Struct({
   provider: Schema.String, // "github", a MODEL_PROVIDERS id (API key), a CliProvider, or a legacy harness id.
   label: Schema.String, // display name
@@ -224,6 +239,8 @@ export const Connection = Schema.Struct({
   connected: Schema.Boolean,
   /** Account or key hint when connected, e.g. GitHub login or "sk-…a1b2". */
   account: Schema.NullOr(Schema.String),
+  accounts: Schema.optional(Schema.Array(CliAccount)),
+  activeAccountId: Schema.optional(Schema.String),
   /** OAuth: false when the Worker lacks client id/secret. CLI: false when the box cannot report login status. */
   available: Schema.Boolean,
   /** CLI only: why the box cannot use this CLI (e.g. it is not installed there); absent when it can. */
@@ -261,6 +278,8 @@ export const CliAuthStatus = Schema.Struct({
   provider: CliProvider,
   loggedIn: Schema.Boolean,
   account: Schema.NullOr(Schema.String),
+  accounts: Schema.optional(Schema.Array(CliAccount)),
+  activeAccountId: Schema.optional(Schema.String),
   /** Why the box could not read this CLI's login (not installed, or it failed); `loggedIn` is then false. */
   error: Schema.optional(Schema.String),
   /**
@@ -298,6 +317,8 @@ export const connectionsForBox = (
         ...metadata,
         connected: status?.loggedIn ?? false,
         account: status?.account ?? null,
+        accounts: status?.accounts,
+        activeAccountId: status?.activeAccountId,
         available,
         ...(error === undefined ? {} : { error }),
       }
@@ -370,6 +391,7 @@ export type UseBankedResetResult = typeof UseBankedResetResult.Type
  */
 export const CliLoginStart = Schema.Struct({
   provider: CliProvider,
+  accountId: Schema.optional(Schema.String),
   url: Schema.String,
   userCode: Schema.NullOr(Schema.String),
   needsCode: Schema.Boolean,
@@ -378,8 +400,16 @@ export const CliLoginStart = Schema.Struct({
 })
 export type CliLoginStart = typeof CliLoginStart.Type
 
-export const CliLoginCodeBody = Schema.Struct({ code: Schema.String.pipe(Schema.minLength(1)) })
+export const CliLoginCodeBody = Schema.Struct({
+  code: Schema.String.pipe(Schema.minLength(1)),
+  accountId: Schema.optional(Schema.String),
+})
 export type CliLoginCodeBody = typeof CliLoginCodeBody.Type
+
+export const CliSelectAccountBody = Schema.Struct({
+  accountId: Schema.String.pipe(Schema.minLength(1)),
+})
+export type CliSelectAccountBody = typeof CliSelectAccountBody.Type
 
 export const GithubRepo = Schema.Struct({
   fullName: Schema.String, // "owner/name"

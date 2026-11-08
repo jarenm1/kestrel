@@ -50,7 +50,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
-    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), opencodeGoKey: () => Effect.succeed(null), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, discoverCommands: () => Effect.succeed([]), discoverModels: () => Effect.succeed({ models: [], sources: [] }), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
+    Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), opencodeGoKey: () => Effect.succeed(null), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), cancelLogin: () => Effect.void, submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, selectAccount: () => Effect.die("unused"), discoverCommands: () => Effect.succeed([]), discoverModels: () => Effect.succeed({ models: [], sources: [] }), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),
     Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
     Layer.succeed(CredentialStore, { get: () => Effect.succeed({ user: "test", dev: true }) } as never),
     Layer.succeed(GitHub, {} as never),

@@ -114,9 +114,11 @@ export interface ApiClient {
   setActiveBox(boxId: string | null): Promise<BoxList>;
   box(): Promise<BoxStatus>;
   cliLoginStart(provider: CliProvider): Promise<CliLoginStart>;
+  cliLoginCancel(provider: CliProvider): Promise<void>;
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
   cliLoginKey(provider: CliProvider, body: PutApiKeyBody): Promise<CliAuthStatus>;
-  cliLogout(provider: CliProvider): Promise<void>;
+  cliLogout(provider: CliProvider, accountId?: string): Promise<void>;
+  cliSelectAccount(provider: CliProvider, accountId: string): Promise<CliAuthStatus>;
   listAutomations(): Promise<readonly Automation[]>;
   createAutomation(body: CreateAutomationBody): Promise<Automation>;
   updateAutomation(id: string, body: UpdateAutomationBody): Promise<Automation>;
@@ -408,10 +410,14 @@ export function createApiClient(
       }
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
+    cliLoginCancel: (provider) =>
+      boxRequest(Schema.Unknown, "POST", ControlPaths.cliLoginCancel(provider)).then(() => undefined),
     cliLoginCode: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
     cliLoginKey: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
-    cliLogout: (provider) =>
-      boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider)).then(() => undefined),
+    cliLogout: (provider, accountId) =>
+      boxRequest(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider, accountId)).then(() => undefined),
+    cliSelectAccount: (provider, accountId) =>
+      boxRequest(CliAuthStatus, "POST", ControlPaths.cliSelectAccount(provider), { accountId }),
     listAutomations: () => request(Schema.Array(Automation), "GET", ControlPaths.automations),
     createAutomation: (body) => request(Automation, "POST", ControlPaths.automations, body),
     updateAutomation: (id, body) => request(Automation, "PATCH", ControlPaths.automation(id), body),

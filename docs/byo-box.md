@@ -137,6 +137,32 @@ flowchart LR
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
 - The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries the same request frames the relay uses, in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
+- Offline thread reads (a user's own box only): when the control plane is unreachable or answers 5xx, and the box holds no
+  credentials for its owner (after a restart, its credential store is empty), a valid, unexpired box token is still
+  served the owner's thread reads: `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/messages`. Every other
+  request is refused with 503 `Unavailable`, including all writes, other GETs, WebSockets and `POST /api/webrtc/offer`.
+  Those reads are marked `x-kestrel-box-offline: 1` (exposed through `access-control-expose-headers`, so the web app can read it), and the box logs a warning when it starts serving offline and an info
+  line when the credentials return. Nothing is stored or written for the fallback. A control plane refusal (401/403), a
+  malformed answer, an invalid, expired or wrong-audience token, and a managed box never fall back; they fail as before.
+  Limitation: the control plane cannot be asked about revocation while offline, so a token minted before a logout or
+  revocation stays readable on that box until its `exp`, at most one hour. Owner: while offline the box has no record of
+  its owner, so it does not compare the token's subject with one. It trusts the subject because the token is signed with
+  this box's secret and control mints a token only for the box's owner; the core then returns only threads whose owner
+  is that subject (`listTasks`, `ownedTask`). Clients cannot mint new tokens offline, so the window is only the
+  remaining life of a token they already hold.
+  Scope: the fallback helps only a tab that was already open and holds a box list and a box token. A page loaded
+  during the outage cannot reach a user box, because the box list and every box token come from the control plane.
+  The box's `/api/health` needs no token, so the app shows the box as online during the outage, but writes stay
+  refused: online does not mean writes are available.
+  Timing: while the control plane is down, the box waits up to 15 s for it before it answers offline. The app reads the
+  control plane's box list for at most 5 s (then uses the last list it read) and gives each box's thread list 25 s, after
+  which that box's request fails. Each box's thread list is cached as it last answered. A read
+  returns once every box has answered, or once a box has answered (a failure counts) and a 1 s grace has passed, provided
+  the read has threads to show: a thread list from some box, or cached threads for every box still pending. So a slow or
+  down box, Kestrel's managed box included, does not hold the others back, and a first load still waits for a box that
+  can answer. A box still pending then keeps its last threads, and its one
+  pending request is shared rather than repeated; its answer shows on the next read. A box that stops answering keeps its
+  last threads. Writes to a thread still route to the box it lives on.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
 - Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare

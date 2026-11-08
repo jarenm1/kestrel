@@ -239,6 +239,7 @@ const runAcp = (
   prompt: string,
   model: string,
   effort: AgentEffort | undefined,
+  provider: ModelProvider,
 ): Effect.Effect<string, InternalError> =>
   Effect.tryPromise({
     try: () => {
@@ -287,6 +288,7 @@ const runAcp = (
           prompt,
           cwd: launch.cwd,
           resumeSession: null,
+          provider,
           model,
           ...(effort === undefined ? {} : { effort }),
           mcpServers: [],
@@ -517,7 +519,7 @@ export const makeTextGenerator = (deps: TextGeneratorDeps): TextGenerator => {
         if (harness.conversation === "acp") {
           if (configured === "") return yield* Effect.fail(toInternal("no ACP command is configured for this provider"))
           const acpModel = routed && harnessId === "opencode" ? opencodeRouteModel(modelId) : modelId
-          return yield* runAcp(yield* prepare(configured), prompt, acpModel, selected.effort)
+          return yield* runAcp(yield* prepare(configured), prompt, acpModel, selected.effort, provider)
         }
         const spec = oneShotCommand(harness, modelId, selected.effort, lastMessageInside, brokerEnv.OPENAI_BASE_URL, routed)
         if (spec.command === "") return yield* Effect.fail(toInternal("no one-shot command is configured for this provider"))

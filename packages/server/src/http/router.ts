@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { HttpApp, HttpMiddleware, HttpRouter, HttpServerRequest, HttpServerResponse } from "@effect/platform"
-import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, BadRequest, CliLoginCodeBody, CliProvider, CliSelectAccountBody, Conflict, CreateTaskBody, Health, InternalError, NotFound, PutApiKeyBody, SendMessageBody, SetDesktopQualityBody, AgentModel, UseBankedResetBody, type FileRoot } from "@cloudagents/protocol"
 import { Paths, SetPullRequestWatchingBody, SetUsageLimitAutoResumeBody, TextGenerationSettings, ThreadPullRequestAction, ThreadSettings } from "@cloudagents/protocol"
 import { Readable } from "node:stream"
 import { VERSION } from "../config"
@@ -69,8 +69,10 @@ const uploadInput = Effect.gen(function* () {
     return yield* Effect.fail(new BadRequest({ message: "content-type is required" }))
   }
   const bytes = yield* req.arrayBuffer.pipe(Effect.mapError(() => new BadRequest({ message: "cannot read request body" })))
-  const name = new URL(req.url, "http://localhost").searchParams.get("name") ?? undefined
-  return { mimeType, name, bytes: new Uint8Array(bytes) }
+  const params = new URL(req.url, "http://localhost").searchParams
+  const name = params.get("name") ?? undefined
+  const operationId = params.get("operationId") ?? undefined
+  return { mimeType, name, operationId, bytes: new Uint8Array(bytes) }
 })
 
 const pathId = Effect.map(HttpRouter.params, (p) => p.id ?? "")
@@ -318,12 +320,32 @@ export const makeRouter = (
       "/api/cli-auth/:provider/login",
       respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),
     ),
+    // Stops a sign-in the user backed out of; its unfinished login home goes with it.
+    HttpRouter.post(
+      "/api/cli-auth/:provider/login/cancel",
+      noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.cancelLogin(user, provider)))),
+    ),
     HttpRouter.post(
       "/api/cli-auth/:provider/code",
       respond(
         Effect.flatMap(cliProvider, (provider) =>
           signedIn((user) =>
-            Effect.flatMap(jsonBody(CliLoginCodeBody), (body) => cliAuth.submitCode(user, provider, body.code)),
+            Effect.flatMap(jsonBody(CliLoginCodeBody), (body) =>
+              cliAuth.submitCode(user, provider, body.code, body.accountId),
+            ),
+          ),
+        ),
+      ),
+    ),
+    // Selects the account runs, usage and discovery use for this provider; only a connected login may be chosen.
+    HttpRouter.post(
+      "/api/cli-auth/:provider/account",
+      respond(
+        Effect.flatMap(cliProvider, (provider) =>
+          signedIn((user) =>
+            Effect.flatMap(jsonBody(CliSelectAccountBody), (body) =>
+              cliAuth.selectAccount(user, provider, body.accountId),
+            ),
           ),
         ),
       ),
@@ -355,7 +377,13 @@ export const makeRouter = (
     ),
     HttpRouter.del(
       "/api/cli-auth/:provider",
-      noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.logout(user, provider)))),
+      noContent(
+        Effect.flatMap(cliProvider, (provider) =>
+          Effect.flatMap(searchParams, (params) =>
+            signedIn((user) => cliAuth.logout(user, provider, params.get("accountId") ?? undefined)),
+          ),
+        ),
+      ),
     ),
   ).pipe(
     // Threads of the signed-in user, archived ones included; core answers NotFound for anyone else's.

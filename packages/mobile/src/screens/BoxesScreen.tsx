@@ -1,7 +1,7 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useMutation } from "@tanstack/react-query";
-import { Monitor } from "lucide-react-native";
+import Monitor from "lucide-react-native/icons/monitor";
 import { useAuth } from "@/auth/AuthContext";
 import { SettingsPage } from "@/components/SettingsPage";
 import { Alert } from "@/components/ui/Alert";

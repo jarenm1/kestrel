@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Schema } from "effect";
 import { MODEL_PROVIDERS, CliProvider, type Connection } from "@cloudagents/protocol";
-import { Plus } from "lucide-react-native";
+import Plus from "lucide-react-native/icons/plus";
 import { createQueries } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { Button } from "@/components/ui/Button";

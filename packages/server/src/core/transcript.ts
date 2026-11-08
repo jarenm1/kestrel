@@ -1060,13 +1060,31 @@ export const makeTranscript = (
     acpTools.clear()
     acpCalls.clear()
     const usage = isRecord(result.usage) ? result.usage : null
+    const timestamp = eventTime(line) ?? new Date().toISOString()
+    const inputTokens = usage === null ? null : asNumber(usage.inputTokens)
+    const outputTokens = usage === null ? null : asNumber(usage.outputTokens)
+    // ACP reports one turn's usage as separate buckets: `inputTokens` excludes the cache, `cachedReadTokens` and
+    // `cachedWriteTokens` are their own. Next to a reported input, an absent cache bucket is zero: OpenCode omits
+    // them when they are. ACP has no per-response usage, so the turn's usage stands in as its one response.
+    if (inputTokens !== null) {
+      items.push({
+        _tag: "usage",
+        id: nextId(),
+        parentToolId: null,
+        timestamp,
+        durationMs: null,
+        inputTokens: inputTokens + (asNumber(usage?.cachedWriteTokens) ?? 0),
+        outputTokens,
+        cachedTokens: asNumber(usage?.cachedReadTokens) ?? 0,
+      })
+    }
     items.push({
       _tag: "turn",
       id: nextId(),
-      timestamp: eventTime(line) ?? new Date().toISOString(),
+      timestamp,
       durationMs: null,
-      inputTokens: usage === null ? null : sumTokens([asNumber(usage.inputTokens), asNumber(usage.cachedReadTokens), asNumber(usage.cachedWriteTokens)]),
-      outputTokens: usage === null ? null : asNumber(usage.outputTokens),
+      inputTokens: usage === null ? null : sumTokens([inputTokens, asNumber(usage.cachedReadTokens), asNumber(usage.cachedWriteTokens)]),
+      outputTokens,
       costUsd: null,
       isError: stopReason === "refusal",
     })
