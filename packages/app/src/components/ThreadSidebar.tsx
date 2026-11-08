@@ -241,8 +241,6 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
     <SidebarMotion>
       <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
         <div className="flex items-center gap-2 pb-2 pl-1.5">
-          <HomeMark />
-          <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
           <Button
             variant="ghost"
             size="icon"
@@ -253,6 +251,8 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
           >
             <PanelLeftClose />
           </Button>
+          <HomeMark />
+          <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <motion.nav
           layoutScroll
