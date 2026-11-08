@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { readdir, stat } from "node:fs/promises"
+import { readdir, readFile, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { Effect, Schema } from "effect"
 import {
@@ -15,6 +15,12 @@ import {
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, CLI_PROVIDERS } from "./agent-clis"
 import { credentialFor } from "./broker"
+import {
+  CLI_ACCOUNTS_DIR,
+  CLI_AUTH_STATE_FILE,
+  DEFAULT_CLI_ACCOUNT,
+  cliAccountHome,
+} from "./cliauth"
 import type { CredentialStoreShape } from "./credentials"
 
 /*
@@ -451,18 +457,32 @@ const loginDirectoryFingerprint = (
 ): Effect.Effect<{ readonly present: boolean; readonly fingerprint: string }> =>
   Effect.promise(async () => {
     if (!USER_PATTERN.test(user)) return { present: false, fingerprint: "invalid-user" }
+    const root = join(dataDir, "users", user)
     let present = false
+    const loginRow = async (label: string, home: string, provider: CliProvider): Promise<string> => {
+      const dir = join(home, AGENT_CLIS[provider].dir)
+      const dirSignature = await fileSignature(dir)
+      if (dirSignature === "missing") return `${label}:${provider}:-`
+      present = true
+      const files = await credentialSignatures(dir, 1)
+      return `${label}:${provider}:${dirSignature}:${files.join("|")}`
+    }
     const rows = await Promise.all(
-      CLI_PROVIDERS.map(async (provider) => {
-        const dir = join(dataDir, "users", user, AGENT_CLIS[provider].dir)
-        const dirSignature = await fileSignature(dir)
-        if (dirSignature === "missing") return `${provider}:-`
-        present = true
-        const files = await credentialSignatures(dir, 1)
-        return `${provider}:${dirSignature}:${files.join("|")}`
-      }),
+      CLI_PROVIDERS.map((provider) => loginRow(DEFAULT_CLI_ACCOUNT, root, provider)),
     )
-    return { present, fingerprint: rows.join(",") }
+    // An extra account is its own isolated home; switching the selected one must invalidate the catalog even when
+    // the legacy default login is untouched.
+    const accountsDir = join(root, CLI_ACCOUNTS_DIR)
+    const accounts = await readdir(accountsDir, { withFileTypes: true }).catch(() => [])
+    for (const account of accounts) {
+      if (!account.isDirectory()) continue
+      const label = `account:${account.name}`
+      for (const provider of CLI_PROVIDERS) {
+        rows.push(await loginRow(label, cliAccountHome(root, account.name), provider))
+      }
+    }
+    const selected = await readFile(join(root, CLI_AUTH_STATE_FILE), "utf8").catch(() => "")
+    return { present, fingerprint: `${rows.join(",")}|active:${selected}` }
   })
 
 const nativeProviderOfCli: Readonly<Record<CliProvider, ModelProvider>> = {

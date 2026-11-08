@@ -81,6 +81,10 @@ change which models appear in chat. **Refresh models** reads the selected box's 
 (`GET /api/models?refresh=1`); clients also poll hourly. See [model coverage](harnesses.md#third-party-model-coverage)
 for provider/CLI discovery, fallback behavior and curated compatibility metadata.
 When no key rows are visible, API keys shows a centered “No api keys added” empty state.
+Subscription rows support multiple isolated accounts per provider: **+** repeats sign-in, the signed-in identity
+menu switches the account for subsequent runs and quota reads, and **Disconnect** lists accounts to remove.
+The status pill shows **N connected** only above one account. Existing runs keep their original login; switching
+does not copy credentials or native sessions between account homes. See [credentials and sessions](harnesses.md#credentials-and-sessions).
 
 Settings › Threads (`/settings/threads`) groups thread preferences into sections. Its Text generation section stores
 each user's choices on the active box (`GET`/`PUT /api/settings/text-generation`). The section's toggle disables its

@@ -655,9 +655,11 @@ export const api = {
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
   cliLoginKey: (provider: CliProvider, body: PutApiKeyBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
-  cliLogout: async (provider: CliProvider): Promise<void> => {
-    await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider))
+  cliLogout: async (provider: CliProvider, accountId?: string): Promise<void> => {
+    await onActive(Schema.Unknown, "DELETE", ControlPaths.cliLogout(provider, accountId))
   },
+  cliSelectAccount: (provider: CliProvider, accountId: string) =>
+    onActive(CliAuthStatus, "POST", ControlPaths.cliSelectAccount(provider), { accountId }),
   useBankedReset: (provider: CliProvider, body: UseBankedResetBody) =>
     onActive(UseBankedResetResult, "POST", ControlPaths.cliUseBankedReset(provider), body),
   taskFileUrl,

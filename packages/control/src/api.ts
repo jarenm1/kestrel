@@ -66,6 +66,8 @@ const cliView = (provider: CliConnectionProvider, status: CliAuthStatus | undefi
   kind: provider.kind,
   connected: status?.loggedIn ?? false,
   account: status?.loggedIn ? status.account : null,
+  accounts: status?.accounts,
+  activeAccountId: status?.activeAccountId,
   available: status !== undefined && status.error === undefined,
   ...(status?.error === undefined ? {} : { error: status.error }),
 })

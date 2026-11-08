@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -88,8 +88,8 @@ describe("OpenCode status", () => {
 
     // Both CLIs read XDG_DATA_HOME: each status check must see its own login, not the one that happens to be last.
     const statuses = await statusesFor(root)
-    expect(statuses.find((row) => row.provider === "opencode")).toEqual({ provider: "opencode", loggedIn: true, account: null })
-    expect(statuses.find((row) => row.provider === "opencode-go")).toEqual({
+    expect(statuses.find((row) => row.provider === "opencode")).toMatchObject({ provider: "opencode", loggedIn: true, account: null })
+    expect(statuses.find((row) => row.provider === "opencode-go")).toMatchObject({
       provider: "opencode-go",
       loggedIn: true,
       account: null,
@@ -161,11 +161,13 @@ describe("Antigravity account label", () => {
     )
 
     const statuses = await statusesFor(root)
-    expect(antigravity(statuses)).toEqual({
+    expect(antigravity(statuses)).toMatchObject({
       provider: "antigravity-cli",
       loggedIn: true,
       account: "google-user@example.com",
+      activeAccountId: "default",
     })
+    expect(antigravity(statuses).accounts).toEqual([{ id: "default", account: "google-user@example.com" }])
     expect(JSON.stringify(statuses)).not.toContain("secret-access-token")
     expect(JSON.stringify(statuses)).not.toContain("secret-refresh-token")
   })
@@ -188,6 +190,242 @@ describe("Antigravity account label", () => {
   test("reports signed out when the user has no token file", async () => {
     const root = rootFor()
     expect(antigravity(await statusesFor(root))).toEqual({ provider: "antigravity-cli", loggedIn: false, account: null })
+  })
+})
+
+/**
+ * A stand-in for `agy acp --login`: it prints the Google link, reads codes from stdin, keeps waiting after a rejected
+ * one, and stores the token only for the accepted code. Its identity is fixed per test through the linked JWT.
+ */
+const fakeAntigravity = (root: string, email: string): void => {
+  const credentials = JSON.stringify({
+    token: { access_token: "secret-access-token", token_type: "Bearer", refresh_token: "secret-refresh-token" },
+    auth_method: "consumer",
+    id_token: jwt({ email, sub: "1234567890" }),
+  })
+  const script = join(root, "fake-agy.ts")
+  writeFileSync(script, `
+import { mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+if (!process.argv.includes("--login")) process.exit(1)
+console.log("https://accounts.google.com/o/oauth2/auth?state=test")
+for await (const code of console) {
+  if (code.trim() !== "good-code") {
+    console.log("Invalid code. Please make sure the full code was copied.")
+    continue
+  }
+  const dir = join(process.env.AGY_GEMINI_DIR!, "antigravity-cli")
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, "antigravity-oauth-token"), ${JSON.stringify(credentials)})
+  process.exit(0)
+}
+`)
+  const agy = join(root, "bin", "agy")
+  writeFileSync(agy, `#!/bin/sh\nexec "${process.execPath.replaceAll("\\", "/")}" "${script.replaceAll("\\", "/")}" "$@"\n`)
+  chmodSync(agy, 0o755)
+}
+
+const antigravityAccountDir = (root: string, accountId: string): string =>
+  accountId === "default"
+    ? join(root, "users", "alice", "antigravity")
+    : join(root, "users", "alice", "accounts", accountId, "antigravity")
+
+const antigravityToken = (root: string, accountId: string): string =>
+  join(antigravityAccountDir(root, accountId), "antigravity-cli", "antigravity-oauth-token")
+
+const writeAccountCredential = (root: string, accountId: string, email: string): void => {
+  const path = antigravityToken(root, accountId)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify({ token: { access_token: `secret-${accountId}` }, id_token: jwt({ email }) }))
+}
+
+describe("multiple page-auth accounts", () => {
+  const runtimes: Array<ManagedRuntime.ManagedRuntime<CliAuth, never>> = []
+  afterEach(async () => {
+    for (const runtime of runtimes.splice(0)) await runtime.dispose()
+  })
+
+  const authRuntime = (root: string) => {
+    const config = {
+      dataDir: root,
+      sandbox: "off",
+      sandboxPath: join(root, "bin"),
+      sandboxSslCertFile: null,
+    } as unknown as ServerConfig
+    const runtime = ManagedRuntime.make(CliAuthLive.pipe(Layer.provide(Layer.succeed(Config, config))))
+    runtimes.push(runtime)
+    return <A, E>(f: (auth: Effect.Effect.Success<typeof CliAuth>) => Effect.Effect<A, E>) =>
+      runtime.runPromise(Effect.flatMap(CliAuth, f))
+  }
+
+  const fakeClaudeStatus = (root: string) => {
+    const script = join(root, "fake-claude.ts")
+    writeFileSync(script, `
+import { existsSync, renameSync, watch } from "node:fs"
+import { join } from "node:path"
+const root = ${JSON.stringify(root)}
+const home = process.env.CLAUDE_CONFIG_DIR!
+if (existsSync(join(home, "bad-status"))) {
+  console.log("unreadable status")
+  process.exit(0)
+}
+if (home === join(root, "users", "alice", "claude") && existsSync(join(root, "gate"))) {
+  renameSync(join(root, "gate"), join(root, "blocked"))
+  const released = Promise.withResolvers<void>()
+  const watcher = watch(root, () => {
+    if (existsSync(join(root, "release"))) { watcher.close(); released.resolve() }
+  })
+  if (existsSync(join(root, "release"))) { watcher.close(); released.resolve() }
+  await released.promise
+}
+console.log(JSON.stringify({ loggedIn: true, email: home.includes("accttwo") ? "second@example.com" : "first@example.com" }))
+`)
+    const cli = join(root, "bin", "claude")
+    writeFileSync(cli, `#!/bin/sh\nexec "${process.execPath.replaceAll("\\", "/")}" "${script.replaceAll("\\", "/")}" "$@"\n`)
+    chmodSync(cli, 0o755)
+  }
+
+  test("an older status probe cannot overwrite an explicit selection of a newly connected account", async () => {
+    const root = rootFor()
+    fakeClaudeStatus(root)
+    mkdirSync(join(root, "users", "alice", "claude"), { recursive: true })
+    writeFileSync(join(root, "gate"), "")
+    const run = authRuntime(root)
+    const blocked = Promise.withResolvers<void>()
+    const watcher = watch(root, () => {
+      if (existsSync(join(root, "blocked"))) blocked.resolve()
+    })
+    const stale = run((auth) => auth.status("alice"))
+    try {
+      await blocked.promise
+      mkdirSync(join(root, "users", "alice", "accounts", "accttwo", "claude"), { recursive: true })
+      const selected = await run((auth) => auth.selectAccount("alice", "claude-cli", "accttwo"))
+      expect(selected.activeAccountId).toBe("accttwo")
+    } finally {
+      writeFileSync(join(root, "release"), "")
+      watcher.close()
+    }
+    expect((await stale).find((status) => status.provider === "claude-cli")?.activeAccountId).toBe("accttwo")
+    const stored = JSON.parse(readFileSync(join(root, "users", "alice", ".kestrel-cli-auth.json"), "utf8"))
+    expect(stored.active["claude-cli"]).toBe("accttwo")
+  })
+
+  test("a failed status probe does not turn an unfinished account into a connected selection", async () => {
+    const root = rootFor()
+    fakeClaudeStatus(root)
+    const unfinished = join(root, "users", "alice", "accounts", "unfinished", "claude")
+    mkdirSync(unfinished, { recursive: true })
+    writeFileSync(join(unfinished, "bad-status"), "")
+    const run = authRuntime(root)
+    const failure = await run((auth) => Effect.flip(auth.selectAccount("alice", "claude-cli", "unfinished")))
+    expect(failure._tag).toBe("BadRequest")
+    const status = (await run((auth) => auth.status("alice"))).find((row) => row.provider === "claude-cli")
+    expect(status?.loggedIn).toBe(false)
+    expect(status?.accounts).toBeUndefined()
+    expect(existsSync(join(root, "users", "alice", ".kestrel-cli-auth.json"))).toBe(false)
+  })
+
+  test("lists isolated logins, switches the active one, and disconnects one account without touching the other", async () => {
+    const root = rootFor()
+    fakeAntigravity(root, "second@example.com")
+    const run = authRuntime(root)
+    writeCredential(root, JSON.stringify({ token: { access_token: "secret-default" }, id_token: jwt({ email: "first@example.com" }) }))
+    writeAccountCredential(root, "accttwo", "second@example.com")
+
+    const status = antigravity(await run((auth) => auth.status("alice")))
+    expect(status).toMatchObject({ loggedIn: true, account: "first@example.com", activeAccountId: "default" })
+    expect(status.accounts).toEqual([
+      { id: "default", account: "first@example.com" },
+      { id: "accttwo", account: "second@example.com" },
+    ])
+    expect(await run((auth) => auth.loggedInDirs("alice"))).toContainEqual({
+      provider: "antigravity-cli",
+      dir: antigravityAccountDir(root, "default"),
+    })
+
+    const selected = await run((auth) => auth.selectAccount("alice", "antigravity-cli", "accttwo"))
+    expect(selected).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: "accttwo" })
+    expect(await run((auth) => auth.loggedInDirs("alice"))).toContainEqual({
+      provider: "antigravity-cli",
+      dir: antigravityAccountDir(root, "accttwo"),
+    })
+
+    await run((auth) => auth.logout("alice", "antigravity-cli", "default"))
+    const remaining = antigravity(await run((auth) => auth.status("alice")))
+    expect(remaining).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: "accttwo" })
+    expect(remaining.accounts?.map((account) => account.id)).toEqual(["accttwo"])
+    expect(existsSync(antigravityToken(root, "default"))).toBe(false)
+    expect(existsSync(antigravityToken(root, "accttwo"))).toBe(true)
+
+    await run((auth) => auth.logout("alice", "antigravity-cli"))
+    const none = antigravity(await run((auth) => auth.status("alice")))
+    expect(none).toMatchObject({ loggedIn: false, account: null })
+    expect(none.accounts).toBeUndefined()
+    expect(existsSync(antigravityToken(root, "accttwo"))).toBe(false)
+  })
+
+  test("persists the selected account across a fresh CliAuth instance", async () => {
+    const root = rootFor()
+    writeCredential(root, JSON.stringify({ token: { access_token: "secret-default" }, id_token: jwt({ email: "first@example.com" }) }))
+    writeAccountCredential(root, "accttwo", "second@example.com")
+    const run = authRuntime(root)
+    await run((auth) => auth.selectAccount("alice", "antigravity-cli", "accttwo"))
+    const stored = JSON.parse(readFileSync(join(root, "users", "alice", ".kestrel-cli-auth.json"), "utf8"))
+    expect(stored.active["antigravity-cli"]).toBe("accttwo")
+
+    // A new process (or a restarted service) reads the same file.
+    const restarted = antigravity(await statusesFor(root))
+    expect(restarted).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: "accttwo" })
+  })
+
+  test("keeps the active login untouched while another sign-in is pending and completes it into an isolated account", async () => {
+    const root = rootFor()
+    fakeAntigravity(root, "second@example.com")
+    const run = authRuntime(root)
+    const legacy = JSON.stringify({ token: { access_token: "secret-default" }, id_token: jwt({ email: "first@example.com" }) })
+    writeCredential(root, legacy)
+
+    const start = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    expect(start.accountId).toBeTruthy()
+    expect(start.accountId).not.toBe("default")
+    if (start.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+    expect(existsSync(antigravityToken(root, start.accountId!))).toBe(false)
+
+    // The half-written account is not a connected login; the active one still is.
+    const during = antigravity(await run((auth) => auth.status("alice")))
+    expect(during).toMatchObject({ loggedIn: true, account: "first@example.com", activeAccountId: "default" })
+    expect(during.accounts).toEqual([{ id: "default", account: "first@example.com" }])
+    expect(await run((auth) => auth.loggedInDirs("alice"))).toContainEqual({
+      provider: "antigravity-cli",
+      dir: antigravityAccountDir(root, "default"),
+    })
+
+    // A rejected code leaves the pending sign-in retryable and the active login untouched.
+    const failure = await run((auth) => Effect.flip(auth.submitCode("alice", "antigravity-cli", "bad-code", start.accountId)))
+    expect(failure.message).toContain("Invalid code")
+    expect(antigravity(await run((auth) => auth.status("alice")))).toMatchObject({
+      loggedIn: true,
+      account: "first@example.com",
+      activeAccountId: "default",
+    })
+
+    const completed = await run((auth) => auth.submitCode("alice", "antigravity-cli", "good-code", start.accountId))
+    expect(completed).toMatchObject({ loggedIn: true, account: "first@example.com", activeAccountId: "default" })
+    expect(completed.accounts?.map((account) => account.id)).toEqual(["default", start.accountId])
+    // The new login is isolated: the legacy credential bytes are unchanged and no token was copied into it.
+    expect(readFileSync(antigravityToken(root, "default"), "utf8")).toBe(legacy)
+    const isolated = JSON.parse(readFileSync(antigravityToken(root, start.accountId!), "utf8")) as { id_token: string }
+    const claims = JSON.parse(Buffer.from(isolated.id_token.split(".")[1] ?? "", "base64url").toString("utf8")) as { email?: string }
+    expect(claims.email).toBe("second@example.com")
+
+    // A retry/extra sign-in cancels only the pending attempt, never the selected login.
+    await run((auth) => auth.selectAccount("alice", "antigravity-cli", start.accountId!))
+    const retry = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    expect(retry.accountId).not.toBe(start.accountId)
+    const afterRetry = antigravity(await run((auth) => auth.status("alice")))
+    expect(afterRetry).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: start.accountId })
+    expect(afterRetry.accounts?.map((account) => account.id)).toEqual(["default", start.accountId])
+    await run((auth) => auth.shutdown())
   })
 })
 
@@ -261,16 +499,21 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
       userCode: null,
       needsCode: true,
     })
-    const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code"))
-    expect(status).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
+    expect(start.accountId).toBeTruthy()
+    if (start.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+    expect(start.accountId).not.toBe("default")
+    const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code", start.accountId))
+    expect(status).toMatchObject({ provider: "devin-cli", loggedIn: true, account: null })
+    expect(status.activeAccountId).toBe(start.accountId)
+    expect(status.accounts?.map((account) => account.id)).toEqual([start.accountId])
     expect(JSON.stringify(status)).not.toContain("secret-devin-token")
   })
 
   test("gives script a shell from the CLI toolchain, not the user's login shell", async () => {
     const root = rootFor()
     const run = devinAuth(root)
-    await run((auth) => auth.startLogin("alice", "devin-cli"))
-    const shell = readFileSync(join(root, "users", "alice", "script.log"), "utf8").trim()
+    const start = await run((auth) => auth.startLogin("alice", "devin-cli"))
+    const shell = readFileSync(join(root, "users", "alice", "accounts", start.accountId!, "script.log"), "utf8").trim()
     expect(shell).toMatch(/(^|\/)(bash|sh)$/)
   })
 
