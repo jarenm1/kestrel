@@ -1,6 +1,5 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { motion } from "framer-motion"
-import { Link } from "react-router-dom"
 import {
   ArrowRight,
   ArrowUp,
@@ -21,6 +20,7 @@ import { KestrelMark } from "@/components/KestrelMark"
 import { APP_URL, GITHUB_URL } from "@/components/PublicShell"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Button } from "@cloudagents/ui/button"
+import { APP_ORIGIN } from "@/routes"
 import { cn } from "@/lib/utils"
 
 /** What a box keeps from working locally. */
@@ -264,9 +264,9 @@ export function LandingPage() {
             </p>
           </div>
           <Button asChild size="lg">
-            <Link to="/download">
+            <a href={`${APP_ORIGIN}/download`}>
               Download <ArrowRight />
-            </Link>
+            </a>
           </Button>
         </motion.div>
       </section>

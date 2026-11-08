@@ -1,9 +1,13 @@
 import { useQuery } from "@tanstack/react-query"
+import { Link } from "react-router-dom"
 import { ArrowRight, Download, ExternalLink, Globe, Laptop, Monitor, Terminal } from "lucide-react"
 import { queries, type DesktopAsset } from "@/api/queries"
-import { APP_URL, GITHUB_URL } from "@/components/PublicShell"
+import { KestrelMark } from "@/components/KestrelMark"
+import { GITHUB_URL } from "@/components/PublicShell"
 import { Button } from "@cloudagents/ui/button"
+import { APP_HOME } from "@/routes"
 import { cn } from "@/lib/utils"
+import "@/stylesfrontend.css"
 
 const PLATFORMS = [
   {
@@ -78,7 +82,7 @@ function PlatformCard({
   )
 }
 
-/** Public download page: the web app plus the platform installers published on `desktop-latest`. */
+/** Download page for approved users: the web app plus the platform installers published on `desktop-latest`. */
 export function DownloadPage() {
   const release = useQuery(queries.desktopRelease())
   const assets = release.data?.assets ?? []
@@ -86,7 +90,26 @@ export function DownloadPage() {
     assets.find((asset) => asset.name.toLowerCase().endsWith(extension))
 
   return (
-    <>
+    <div className="public-page relative flex min-h-screen flex-col overflow-x-hidden bg-background">
+      <header className="fixed inset-x-0 top-4 z-50 flex justify-center px-4">
+        <nav className="flex w-full max-w-5xl items-center gap-1 rounded-full bg-card/70 py-1.5 pr-1.5 pl-4 shadow-soft backdrop-blur-xl">
+          <Link
+            to={APP_HOME}
+            aria-label="Kestrel home"
+            className="mr-auto flex items-center gap-2.5 text-foreground/90 transition-colors duration-200 hover:text-foreground"
+          >
+            <KestrelMark className="h-5" />
+            <span className="font-semibold tracking-tight max-sm:hidden">Kestrel</span>
+          </Link>
+          <Link
+            to={APP_HOME}
+            className="rounded-full px-3 py-1.5 text-muted-foreground transition-colors duration-200 hover:text-foreground"
+          >
+            Back to app
+          </Link>
+        </nav>
+      </header>
+
       <section className="relative z-10 px-8 pt-36 pb-10">
         <div className="mx-auto max-w-4xl space-y-6 text-center">
           <h1 className="bg-[linear-gradient(180deg,#ffffff_0%,#ededef_45%,#8b8b93_100%)] bg-clip-text pb-2 text-4xl leading-[1.15] font-semibold tracking-tight text-transparent md:text-6xl">
@@ -114,9 +137,9 @@ export function DownloadPage() {
               </div>
               <div className="mt-auto">
                 <Button asChild variant="soft" className="h-9 w-full">
-                  <a href={APP_URL}>
+                  <Link to={APP_HOME}>
                     Open Kestrel <ArrowRight />
-                  </a>
+                  </Link>
                 </Button>
               </div>
             </div>
@@ -155,6 +178,6 @@ export function DownloadPage() {
           </div>
         </div>
       </section>
-    </>
+    </div>
   )
 }

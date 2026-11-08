@@ -35,11 +35,10 @@ export function App() {
   if (IS_SITE_HOST) {
     return (
       <Routes>
-        {/* The public site never mounts the session query; everything else belongs to the app host. */}
+        {/* The public site only exposes landing and pricing; everything else belongs to the app host. */}
         <Route element={<PublicShell />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
-          <Route path="/download" element={<DownloadPage />} />
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>
@@ -54,6 +53,7 @@ export function App() {
 
       {/* Protected routes. The guard is the only place that checks the session. */}
       <Route element={<RequireAuth />}>
+        <Route path="/download" element={<DownloadPage />} />
         <Route element={<WorkspaceLayout />}>
           <Route path={APP_HOME} element={<NewThreadPage />} />
           <Route path="/c/:taskId" element={<ThreadPage />} />
