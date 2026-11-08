@@ -125,14 +125,15 @@ describe("cliBwrapArgs", () => {
       writeFileSync(join(secret, "HOST_SECRET"), "")
       // What an agent can do in its read-write workspace: replace its checkout with a link to a host directory.
       symlinkSync(secret, join(workspace, "linked"))
-      const ls = (cwd: string) => {
-        const argv = cliBwrapArgs(home, {}, ["ls"], { level: "basic", homeToolArgs: [], network: "none", workspacePath: workspace, cwd })
+      const list = (cwd: string) => {
+        // Builtins only: the sandbox env is empty, so a host without coreutils on the default PATH still lists here.
+        const argv = cliBwrapArgs(home, {}, ["sh", "-c", "for entry in *; do echo \"$entry\"; done"], { level: "basic", homeToolArgs: [], network: "none", workspacePath: workspace, cwd })
         const result = spawnSync("bwrap", argv, { encoding: "utf8" })
         return result.stdout + result.stderr
       }
-      expect(ls(join(workspace, "real"))).toContain("PROJECT_FILE")
+      expect(list(join(workspace, "real"))).toContain("PROJECT_FILE")
       // The link resolves inside the sandbox, where the host directory is not mounted: no listing, no secret.
-      expect(ls(join(workspace, "linked"))).not.toContain("HOST_SECRET")
+      expect(list(join(workspace, "linked"))).not.toContain("HOST_SECRET")
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -144,7 +145,7 @@ describe("cliBwrapArgs", () => {
       const home = join(root, "user")
       const accounts = join(home, "accounts")
       mkdirSync(join(accounts, "other"), { recursive: true })
-      writeFileSync(join(accounts, "other", "token"), "SECRET")
+      writeFileSync(join(accounts, "other", "token"), "SECRET\n")
       writeFileSync(join(home, "own-login"), "")
       // Builtins only: the sandbox env is empty, so hosts without coreutils in the default PATH still run this.
       const inspect = "for entry in *; do echo \"$entry\"; done; test -w accounts; read secret < accounts/other/token 2>/dev/null && echo \"$secret\"; true"

@@ -518,7 +518,6 @@ if [ "$1 $2" = "auth login" ]; then
   echo "Visit https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1 to sign in, then copy the code and paste it below."
   read code
   if [ "$code" = "good-code" ]; then
-    mkdir -p "$XDG_DATA_HOME/devin"
     printf 'valid\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
     exit 0
   fi
@@ -573,6 +572,8 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
     expect(start.accountId).toBeTruthy()
     if (start.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
     expect(start.accountId).not.toBe("default")
+    // The fake writes under its XDG data home, which the real CLI creates; the fixture cannot rely on host coreutils.
+    mkdirSync(join(root, "users", "alice", "accounts", start.accountId, "devin", "devin"), { recursive: true })
     const status = await run((auth) => auth.submitCode("alice", "devin-cli", "good-code", start.accountId))
     expect(status).toMatchObject({ provider: "devin-cli", loggedIn: true, account: null })
     expect(status.activeAccountId).toBe(start.accountId)
