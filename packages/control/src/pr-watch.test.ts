@@ -41,19 +41,18 @@ const watch = (): Promise<Response> =>
     body: JSON.stringify({ taskId: TASK_ID, repo: REPO, number: pr.number }),
   }), env)
 
-const boxError = (status: number, tag: string) => ({ ok: false, status, body: JSON.stringify({ _tag: tag, message: "agent box is offline" }) })
-
 describe("POST /box/automations/pr-watch: box failures", () => {
+  // The hub's own BoxOffline bodies (hub.ts `boxCall`/`directBoxCall`), with the messages it actually sends.
   test.each([
-    [502, "BoxOffline"],
-    [503, "BoxOffline"],
-    [504, "BoxOffline"],
-  ])("an offline box answering %i reaches the caller with its status and body", async (status, tag) => {
-    boxAnswer = boxError(status, tag)
+    [503, "agent box is not connected"],
+    [504, "agent box did not respond in time"],
+    [502, "agent box is unreachable"],
+  ])("the hub's BoxOffline answer %i reaches the caller with its status and body", async (status, message) => {
+    boxAnswer = { ok: false, status, body: JSON.stringify({ _tag: "BoxOffline", message }) }
     const response = await watch()
     expect(response.status).toBe(status)
     expect(response.headers.get("content-type")).toBe("application/json")
-    expect(await response.json()).toEqual({ _tag: tag, message: "agent box is offline" })
+    expect(await response.json()).toEqual({ _tag: "BoxOffline", message })
   })
 
   test.each([502, 503, 504])("a non-JSON gateway answer %i is not labelled as a box outage", async (status) => {
