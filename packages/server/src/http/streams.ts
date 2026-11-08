@@ -182,12 +182,13 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
       if (resolved.warning !== null) fork(Effect.logWarning(resolved.warning))
       // Resolved here, on the config path, so the box's own answer never waits on the control plane. A failed fetch
       // leaves both peers on the box's own configuration.
-      rtc.setIceServers(resolved.iceServers, resolved.managed)
       sendSignal({
         _tag: "rtc.config",
         iceServers: resolved.iceServers,
         iceTransportPolicy: config.webrtc.policy,
       })
+      // Follows the config: the viewer has the ICE servers before the box reports what TURN path it actually got.
+      rtc.setIceServers(resolved.iceServers, resolved.managed, resolved.turn)
     }
     const decodeMessage = Schema.decodeUnknown(Schema.parseJson(DesktopRtcClientMessage))
     const handleMessage = (raw: string) =>

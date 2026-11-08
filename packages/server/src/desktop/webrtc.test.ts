@@ -215,6 +215,14 @@ const remoteOffer = async (codec = "video/H264", profiles: readonly string[] = [
 /** The session's live peer is private; tests read the werift connection it built. */
 const peerOf = (session: DesktopRtcSession) => (session as unknown as { peer: { pc: RTCPeerConnection } }).peer
 
+const lastDiagnostics = (sent: DesktopRtcServerMessage[]) => {
+  for (let i = sent.length - 1; i >= 0; i -= 1) {
+    const message = sent[i]
+    if (message?._tag === "rtc.diagnostics") return message.diagnostics
+  }
+  return null
+}
+
 /**
  * In-process TURN allocation endpoints: UDP and TLS return different relay addresses after authenticated Allocate.
  * No privileged ports, coturn, fixed certificate or outbound network. Media delivery is exercised by the coturn runner.
@@ -413,6 +421,55 @@ describe("DesktopRtcSession", () => {
     expect(activeRtcPeers()).toBe(before)
   })
 
+  test("reports a failed credential outcome before and after a real offer", async () => {
+    const { s, sent } = session()
+    s.setIceServers([], false, { source: "managed", status: "unavailable", failure: "turn-credentials" })
+    expect(sent.at(-1)).toEqual({
+      _tag: "rtc.diagnostics",
+      diagnostics: {
+        turnSource: "managed",
+        turnStatus: "unavailable",
+        gathering: "idle",
+        relayCandidates: 0,
+        connection: "new",
+        failure: "turn-credentials",
+      },
+    })
+    const browser = await remoteOffer()
+    closing.push(() => browser.close())
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const diagnostics = lastDiagnostics(sent)
+    expect(diagnostics).toMatchObject({
+      turnSource: "managed",
+      turnStatus: "unavailable",
+      gathering: "complete",
+      relayCandidates: 0,
+      failure: "turn-credentials",
+    })
+  })
+
+  test("counts a real relay allocation from werift candidates", async () => {
+    const relay = await allocationServers()
+    const { s, sent } = session()
+    const browser = await remoteOffer()
+    closing.push(
+      () => browser.close(),
+      () => relay.close(),
+    )
+    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null })
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const diagnostics = lastDiagnostics(sent)
+    expect(diagnostics).toMatchObject({
+      turnSource: "managed",
+      turnStatus: "configured",
+      gathering: "complete",
+      failure: null,
+    })
+    expect(diagnostics?.relayCandidates).toBeGreaterThan(0)
+    expect(JSON.stringify(diagnostics)).not.toContain("fixture.invalid")
+    expect(JSON.stringify(diagnostics)).not.toContain("tls-user")
+  })
+
   test("werift gets the candidate filter, which refuses metadata and link-local peers", async () => {
     const { s } = session()
     const browser = await remoteOffer()
@@ -487,6 +544,20 @@ describe("DesktopRtcSession", () => {
     if (!managedAnswer || !operatorAnswer) throw new Error("no desktop answer")
     expect(managedAnswer.sdp).not.toContain("typ relay")
     expect(operatorAnswer.sdp).toContain(` ${relay.tlsAddress[0]} ${relay.tlsAddress[1]} typ relay `)
+    // The failed allocation is reported while gathering itself completed: direct host candidates still exist.
+    expect(lastDiagnostics(managed.sent)).toMatchObject({
+      turnSource: "managed",
+      turnStatus: "configured",
+      gathering: "complete",
+      relayCandidates: 0,
+      failure: "relay-allocation",
+    })
+    expect(lastDiagnostics(operator.sent)).toMatchObject({
+      turnSource: "local",
+      turnStatus: "configured",
+      gathering: "complete",
+      failure: null,
+    })
   }, 10_000)
 
   test("the viewer limit holds when every offer is answered at once", async () => {

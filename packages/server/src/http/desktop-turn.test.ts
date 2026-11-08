@@ -14,6 +14,16 @@ const running: DesktopStatus = {
   fps: 30, quality: "1080p30", error: null,
 }
 
+interface Frame {
+  _tag?: string
+  state?: string
+  display?: string | null
+  candidate?: string | null
+  iceServers?: { urls: string[]; username?: string; credential?: string }[]
+  iceTransportPolicy?: string
+  diagnostics?: unknown
+}
+
 test("slow TURN configuration precedes queued status changes and cannot write after disconnect", async () => {
   const requested = Promise.withResolvers<void>()
   const release = Promise.withResolvers<void>()
@@ -32,7 +42,7 @@ test("slow TURN configuration precedes queued status changes and cannot write af
     direct: { controlUrl: provider.url.href, boxId: "box", boxSecret: "secret", managed: true }, relay: null,
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: true },
   } as unknown as ServerConfig
-  const frames: unknown[] = []
+  const frames: Frame[] = []
   const finished = Promise.withResolvers<void>()
   const subscribed = Promise.withResolvers<DesktopSink>()
   const closed: (() => void)[] = []
@@ -66,17 +76,29 @@ test("slow TURN configuration precedes queued status changes and cannot write af
     expect(frames).toEqual([])
     release.resolve()
     await finished.promise
-    expect(frames).toEqual([
+    // Diagnostics follow the config they describe; the existing status ordering is unchanged.
+    expect(frames.filter((frame) => frame._tag !== "rtc.diagnostics")).toEqual([
       { _tag: "rtc.config", iceServers: [{ urls: ["turns:turn.example:443?transport=tcp"], username: "viewer", credential: "temporary" }], iceTransportPolicy: "all" },
       running,
       { ...running, state: "stopped", display: null },
     ])
+    expect(frames[1]).toEqual({
+      _tag: "rtc.diagnostics",
+      diagnostics: {
+        turnSource: "managed",
+        turnStatus: "configured",
+        gathering: "idle",
+        relayCandidates: 0,
+        connection: "new",
+        failure: null,
+      },
+    })
     // This restart queues configuration, but disconnect wins before the queue's next microtask.
     sink.onStatus(running)
     socket.close()
     await Effect.runPromise(Fiber.join(fiber))
     await Promise.resolve()
-    expect(frames).toHaveLength(3)
+    expect(frames).toHaveLength(4)
   } finally {
     release.resolve()
     socket.close()
@@ -106,13 +128,6 @@ const stunServer = (mapped: { address: string; port: number }) => {
     socket.send(Buffer.concat([header, attribute]), rinfo.port, rinfo.address)
   })
   return socket
-}
-
-interface Frame {
-  _tag?: string
-  candidate?: string | null
-  iceServers?: { urls: string[] }[]
-  iceTransportPolicy?: string
 }
 
 test("an offer's peer takes the managed ICE servers the config delivered", async () => {

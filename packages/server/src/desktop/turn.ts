@@ -8,7 +8,7 @@ import { Schema } from "effect"
 import { BOX_ID_HEADER, BOX_TURN_PATH, BoxTurnCredentials, type DesktopRtcIceServer } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { ServerConfig } from "../config"
-import { mintIceServers, type WebRtcSettings } from "./webrtc"
+import { mintIceServers, type TurnConfigDiagnostics, type WebRtcSettings } from "./webrtc"
 
 /** Refresh this long before the provider expires credentials, so a viewer retry never receives stale ones. */
 const REFRESH_MARGIN_MS = 5 * 60 * 1000
@@ -176,11 +176,31 @@ export const hasExplicitTurn = (settings: WebRtcSettings): boolean =>
   settings.turn !== null ||
   settings.iceServers.some((server) => server.urls.some((url) => /^turns?:/i.test(url)))
 
+/**
+ * What the box's own configuration provides, without asking the control plane. A TURN URL without usable credentials
+ * (or a REST secret with no TURN URL) is an explicit local misconfiguration: report it rather than call it absent.
+ */
+const localTurnDiagnostics = (settings: WebRtcSettings): TurnConfigDiagnostics => {
+  const rest = settings.turn
+  const restUsable = rest !== null && rest.secret.trim() !== "" && rest.urls.some((url) => TURN_URL.test(url))
+  const turnServers = settings.iceServers.filter((server) => server.urls.some((url) => TURN_URL.test(url)))
+  const staticUsable = turnServers.some(
+    (server) => (server.username?.trim() ?? "") !== "" && (server.credential?.trim() ?? "") !== "",
+  )
+  if (restUsable || staticUsable) return { source: "local", status: "configured", failure: null }
+  if (rest === null && turnServers.length === 0) {
+    return { source: "none", status: "not-configured", failure: null }
+  }
+  return { source: "local", status: "unavailable", failure: "turn-credentials" }
+}
+
 export interface SessionIceServers {
   readonly iceServers: DesktopRtcIceServer[]
   readonly warning: string | null
   /** Whether `iceServers` carries provider-issued TURN, which is the box's to use with a shorter allocation wait. */
   readonly managed: boolean
+  /** Redacted source and credential outcome for `rtc.diagnostics`; never the provider's message or a URL. */
+  readonly turn: TurnConfigDiagnostics
 }
 
 /**
@@ -195,11 +215,26 @@ export const sessionIceServers = async (
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<SessionIceServers> => {
   const local = mintIceServers(settings, taskId, nowSeconds)
-  if (managed === null || hasExplicitTurn(settings)) return { iceServers: local, warning: null, managed: false }
+  if (managed === null || hasExplicitTurn(settings)) {
+    return { iceServers: local, warning: null, managed: false, turn: localTurnDiagnostics(settings) }
+  }
   const result = await managed.servers()
+  if (result.iceServers === null) {
+    // A provider that declined (204) or a standalone box asked for nothing: no TURN, no credential failure. A fetch,
+    // identity, expired-credential, or malformed-answer warning leaves the box without the relay it expected.
+    return {
+      iceServers: local,
+      warning: result.warning,
+      managed: false,
+      turn: result.warning === null
+        ? { source: "none", status: "not-configured", failure: null }
+        : { source: "managed", status: "unavailable", failure: "turn-credentials" },
+    }
+  }
   return {
-    iceServers: result.iceServers === null ? local : [...local, ...result.iceServers],
+    iceServers: [...local, ...result.iceServers],
     warning: result.warning,
-    managed: result.iceServers !== null,
+    managed: true,
+    turn: { source: "managed", status: "configured", failure: null },
   }
 }

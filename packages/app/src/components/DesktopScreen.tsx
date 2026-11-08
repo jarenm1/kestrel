@@ -12,6 +12,8 @@ import { Maximize2, Minimize2, Volume2, VolumeX } from "lucide-react"
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
 import type { DesktopSource } from "@/api/events"
 import { Button } from "@cloudagents/ui/button"
+import { DesktopConnectionDetails } from "@/components/DesktopConnectionDetails"
+import type { RtcDiagnostics } from "@/desktop/diagnostics"
 import {
   contentRect,
   HeldKeys,
@@ -52,8 +54,8 @@ const SENTINEL = "\u200b"
 
 const UNSUPPORTED_TEXT = "This desktop cannot stream to this browser"
 
-/** A WebRTC attempt failed and another is coming. Media has no other path, so a blocked network must be told. */
-const RETRYING_TEXT = "Can't reach this desktop. Retrying… Networks that block UDP need a TURN server on the box."
+/** The details panel distinguishes signaling, relay allocation, connection and decoding evidence. */
+const RETRYING_TEXT = "Can't connect to this desktop. Retrying… Open Connection details for diagnostics."
 
 const MOD_LABELS: Readonly<Record<Modifier, string>> = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", super: "Super" }
 
@@ -135,6 +137,7 @@ export function DesktopScreen({
   const fullscreen = useIsFullscreen(frameRef)
 
   const [rtc, setRtc] = useState<RtcState>("idle")
+  const [diagnostics, setDiagnostics] = useState<RtcDiagnostics | null>(null)
   const [audio, setAudio] = useState(false)
   const [muted, setMuted] = useState(true)
   const [keyboard, setKeyboard] = useState(false)
@@ -218,6 +221,7 @@ export function DesktopScreen({
       onRtc: setRtc,
       onStats: (s) => callbacks.current.onStats(s),
       onAudio: setAudio,
+      onDiagnostics: setDiagnostics,
       onClose: (close) => {
         callbacks.current.onStats(null)
         callbacks.current.onClose(close)
@@ -231,6 +235,7 @@ export function DesktopScreen({
       sessionRef.current = null
       setRtc("idle")
       setAudio(false)
+      setDiagnostics(null)
     }
   }, [source, generation])
 
@@ -500,6 +505,7 @@ export function DesktopScreen({
             )}
           </div>
         )}
+        {source !== null && diagnostics !== null && <DesktopConnectionDetails diagnostics={diagnostics} embedded={embedded} />}
         {audio && (
           <Button
             variant="ghost"
