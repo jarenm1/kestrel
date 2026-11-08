@@ -19,7 +19,7 @@ import type { SwipeDirection } from "@/lib/swipe";
 
 interface Props {
   taskId: string;
-  /** The box the thread runs on (`null`: Kestrel's relayed box); threads it links to open on the same box. */
+  /** The box the thread runs on (`null`: an absent Kestrel box); threads it links to open on the same box. */
   box: ActiveBox | null;
   taskStatus: TaskStatus | undefined;
   messages: readonly Message[];

@@ -1,8 +1,6 @@
 import { Schema } from "effect"
 import {
   ApprovePairingBody,
-  BOX_TOKEN_QUERY,
-  CREDENTIALS_HEADER,
   CliAuthStatus,
   CliProvider,
   ControlPaths,
@@ -13,11 +11,8 @@ import {
   CreateMeterHostBody,
   GithubRepoSlug,
   MeterReportBody,
-  Paths,
-  PreviewSession,
   PutApiKeyBody,
   SetActiveBoxBody,
-  Task,
   UpdateBoxBody,
   UpdateFleetBoxBody,
   WaitlistSignupBody,
@@ -35,10 +30,8 @@ import {
   type Provider,
 } from "./providers"
 import { UpstreamError, cappedRequest, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
+import { hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
-import { desktopStreamTask } from "./desktop-tokens"
-import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
 import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
@@ -211,66 +204,13 @@ const listBranches = async (env: Env, login: string, repo: GithubRepoSlug): Prom
   return json([defaultBranch, ...names])
 }
 
-/**
- * Forwards a browser request to the Hub with the caller's session id. The Hub resolves the session, attaches the
- * caller's credentials (and dev-login marker) and relays to the box in that one Durable Object request; looking the
- * session and credentials up here first would cost two more.
- */
-const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> | Response => {
-  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-  if (!sessionId) return errorResponse(401, "Unauthorized", "sign in required")
-  const headers = new Headers(request.headers)
-  headers.delete(CREDENTIALS_HEADER)
-  headers.set(SESSION_HEADER, sessionId)
-  const hasBody = request.method !== "GET" && request.method !== "HEAD"
-  const forwarded = new Request(`https://hub${url.pathname}${url.search}`, {
-    method: request.method,
-    headers,
-    body: hasBody ? request.body : undefined,
-  })
-  return hub(env).fetch(forwarded)
-}
-
-/** Relays a box file to the Hub with a file token in place of the session cookie; the token query is dropped. */
-const forwardFileToken = (request: Request, env: Env, url: URL, token: string): Promise<Response> => {
-  const target = new URL(url)
-  target.searchParams.delete(BOX_TOKEN_QUERY)
-  const headers = new Headers(request.headers)
-  headers.delete("cookie")
-  headers.delete(CREDENTIALS_HEADER)
-  // Only the Worker sets the Hub's session header; one the browser sent must not reach the Hub on this route.
-  headers.delete(SESSION_HEADER)
-  headers.set(FILE_TOKEN_HEADER, token)
-  return hub(env).fetch(new Request(`https://hub${target.pathname}${target.search}`, { method: "GET", headers }))
-}
-
-const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
-  const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
-  if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
-  let value: unknown
-  try {
-    value = JSON.parse(result.body) as unknown
-  } catch {
-    return errorResponse(502, "BadGateway", "agent box returned an invalid task")
-  }
-  if (!Schema.is(Task)(value) || value.owner !== login) return errorResponse(404, "NotFound", "thread not found")
-  if (value.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
-  if (value.previewPort === undefined) return errorResponse(409, "Conflict", "the agent has not opened a preview")
-  const token = await hub(env).createPreviewSession(login, taskId)
-  return json(Schema.decodeSync(PreviewSession)({ token }))
-}
-
-const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
-const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 const GITHUB_REPO_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)$/
 
 /** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
 const isWorkerRoute = (path: string, method: string): boolean =>
-  (path === ControlPaths.fileToken && method === "POST") ||
-  (DESKTOP_TOKEN_PATH.test(path) && method === "POST") ||
-  (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
+  (path === ControlPaths.box && method === "GET") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
   CONNECTION_PATH.test(path) ||
@@ -516,18 +456,12 @@ const handleWaitlist = async (request: Request, env: Env): Promise<Response> => 
 }
 
 /**
- * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
- * `GET /api/box`) in one request to the Hub.
+ * Routes every `/api/*` request: control routes in the Worker, plus `GET /api/box`; box API paths get a clean
+ * "no box" answer, because there is no longer a Kestrel box behind the control plane to forward them to.
  */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
-  // A file token stands in for the session cookie on box files, and a desktop token on a desktop stream: a WebView or
-  // DOM `<img>` cannot send a Cookie header.
-  const fileToken = method === "GET" ? url.searchParams.get(BOX_TOKEN_QUERY) : null
-  if (fileToken !== null && (isBoxFilePath(path) || desktopStreamTask(path) !== null)) {
-    return forwardFileToken(request, env, url, fileToken)
-  }
   if (path === ControlPaths.waitlist) return handleWaitlist(request, env)
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
@@ -539,29 +473,15 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   }
   if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
   if (path === ControlPaths.fleetActivity) return handleFleetActivity(request, env)
-  if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
-
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
 
-  if (path === ControlPaths.fileToken) {
-    // `currentSession` found the session from this cookie, so it is present; the token lasts no longer than it.
-    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
-    const minted = await hub(env).createFileToken(sessionId)
-    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
-  }
+  if (!isWorkerRoute(path, method)) return errorResponse(503, "BoxOffline", "no box is available")
 
-  const desktopToken = DESKTOP_TOKEN_PATH.exec(path)
-  if (desktopToken?.[1] && method === "POST") {
-    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
-    const minted = await hub(env).createDesktopToken(sessionId, decodeURIComponent(desktopToken[1]))
-    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
-  }
-
-  const previewSession = PREVIEW_SESSION_PATH.exec(path)
-  if (previewSession?.[1] && method === "POST") {
-    return createPreviewSession(env, login, decodeURIComponent(previewSession[1]))
+  if (path === ControlPaths.box && method === "GET") {
+    // There is no Kestrel box behind the control plane; box status comes from each box's own health endpoint.
+    return json({ online: false, connectedAt: null, boxVersion: null })
   }
 
   if (path === ControlPaths.me && method === "GET") {

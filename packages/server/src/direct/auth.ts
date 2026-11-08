@@ -5,7 +5,7 @@ import {
   BoxSelf,
   type BoxTokenClaims,
   ControlPaths,
-  type RelayCredentials,
+  type UserCredentials,
   verifyBoxToken,
 } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
@@ -102,7 +102,7 @@ export const makeBoxAuth = (
     if (Either.isLeft(decoded)) throw new Unavailable({ message: INVALID_ANSWER })
     const self = decoded.right
     if (self.owner !== claims.sub) throw new Unauthorized({ message: "token is not for this box's owner" })
-    const creds: RelayCredentials = {
+    const creds: UserCredentials = {
       user: self.owner,
       github: self.github,
       providers: {

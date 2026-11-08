@@ -11,7 +11,7 @@ import {
   type CliAuthStatus,
   type CliProvider,
   type ModelProvider,
-  type RelayCredentials,
+  type UserCredentials,
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, CLI_PROVIDERS } from "./agent-clis"
 import { credentialFor } from "./broker"
@@ -43,7 +43,7 @@ const REQUEST_TIMEOUT_MS = 4_000
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 /** The most model rows one catalog will carry from any source. */
 const MAX_MODELS = 2000
-/** Native CLI status probes: enough for a warm CLI, short enough for the relay's 30s request budget. */
+/** Native CLI status probes: enough for a warm CLI, short enough for a request budget. */
 const LOGIN_TIMEOUT = "4 seconds"
 /** Native discovery runs CLIs; it is capped below the helper's own 18s budget for partial results. */
 const NATIVE_TIMEOUT = "19 seconds"
@@ -403,7 +403,7 @@ export const listProviderModels = (
   return source === undefined ? Effect.fail("unknown model provider") : source.list(apiKey, fetchImpl)
 }
 
-const credentialIdentity = (credentials: RelayCredentials | null): string => {
+const credentialIdentity = (credentials: UserCredentials | null): string => {
   const providers = Object.entries(credentials?.providers ?? {})
     .filter(([, key]) => key !== "")
     .sort(([left], [right]) => left.localeCompare(right))
@@ -588,7 +588,7 @@ export const makeModelDiscovery = (
 
     const loadCatalog = (
       user: string,
-      credentials: RelayCredentials | null,
+      credentials: UserCredentials | null,
       logins: ReadonlyArray<CliProvider>,
       uncertain: ReadonlySet<ModelProvider>,
       unavailable: ReadonlySet<CliProvider>,

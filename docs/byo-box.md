@@ -10,8 +10,9 @@ their compute is full, new threads run on Kestrel cloud boxes, which is what we 
 are the same box (`packages/server`) behind the same app, so moving to paid compute is a placement decision, not a
 migration.
 
-- Free: their boxes, their tunnel. We serve only sign-in, the box registry and tokens.
-- Paid: Nest compute, billed by what it uses. Optionally later, our relay for boxes without a tunnel.
+- Free: their boxes, their tunnel. We serve only sign-in, the box registry and tokens. The old control-plane relay
+  is removed: nothing a user's box carries goes through Kestrel.
+- Paid: Nest compute, billed by what it uses. Optionally later, a *paid* relay for boxes without a tunnel.
 - Full local (Worker + box + Vite on one machine, `bun run dev`) stays a developer setup, not a product.
 
 ## Install your own box
@@ -96,13 +97,14 @@ approve, set `port` and `dataDir` in the config, and `run` (or `install`). A she
 `CLOUDAGENTS_*` variables (e.g. a dev shell entered from another checkout) wins over a `--env-file`; `run` sets them
 from the config.
 
-## Before step 1
+## Direct only
 
-- One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
-  still holds for Kestrel's own box.
-- One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic goes browser → Worker → Hub → relay → box, including the desktop's status and WebRTC signaling. Desktop media does not: it goes between the box and each viewer over WebRTC, never through the Hub. Every relayed request is a Durable Object request, which we pay for.
-- The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
+- The Hub's relay socket and `BOX_TOKEN` are deleted: a box no longer dials `/box/connect`, and app traffic no longer
+  goes browser → Worker → Hub → box. Every box path is direct; a user with no managed box and no box of their own gets
+  a "no box" answer instead of a relayed request. Desktop media is unchanged: it goes between the box and each viewer
+  over WebRTC, never through the Hub.
+- A user box learns the user from the box token (and fetches owner credentials from `/box/self`); a managed box gets
+  them from `/box/credentials` and `BOX_USER_HEADER` on box-API calls.
 - Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
 - The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
   mobile app has a configurable `serverUrl` and sends an explicit session header.
@@ -121,7 +123,8 @@ flowchart LR
 
 - Sign-in and accounts stay on `app.kestrel-agent.com`.
 - Box registry: per-user boxes, each with an id, a public URL and a secret. Boxes are owned by one user, who picks the
-  active box their apps use. `null` means Kestrel's own box: its managed box when `BoxList.managedBox` is set, otherwise the legacy relay (see [box.md](box.md#managed-boxes-fleet)).
+  active box their apps use. `null` means Kestrel's own box: its managed box when `BoxList.managedBox` is set, otherwise
+  no box at all (see [box.md](box.md#managed-boxes-fleet)).
 - Box tokens: short-lived (1 h) HS256 JWTs the control plane mints for the owner (claims: `sub` user, `aud` box id,
   `exp`, `cv` credentials version, `dev`), keyed by that box's secret (`packages/protocol/src/boxtoken.ts`). The box
   verifies them offline, so the control plane is not on the request path.
@@ -136,7 +139,7 @@ flowchart LR
   `Authorization: Bearer`, or `?access_token=` where no header can be set (WebSockets, `<img>`).
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
-- The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries the same request frames the relay uses, in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
+- The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries channel frames (`channel.ts`), in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
 - Offline thread reads (a user's own box only): when the control plane is unreachable or answers 5xx, and the box holds no
   credentials for its owner (after a restart, its credential store is empty), a valid, unexpired box token is still
   served the owner's thread reads: `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/messages`. Every other
@@ -164,7 +167,7 @@ flowchart LR
   pending request is shared rather than repeated; its answer shows on the next read. A box that stops answering keeps its
   last threads. Writes to a thread still route to the box it lives on.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
-- Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
+- Automations fire only on Kestrel's managed boxes for now; the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.
@@ -209,7 +212,8 @@ shapes, the host layer and billing.
 4. Box control sockets: presence, capacity reports, automations on user boxes, provisioning edited from the app.
 5. Placement, with auto-overflow for subscribers and the upgrade prompt for everyone else.
 6. The Nest: host layer, VM shapes, metering and billing ([build order](goal-state.md#build-order)).
-7. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
+7. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel (the free
+   legacy relay is already deleted).
 
 ## Protocol impact
 

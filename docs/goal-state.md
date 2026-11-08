@@ -124,7 +124,7 @@ records and billing.
 - Every box holds at most one low-traffic dial-out socket for presence, wake-ups and WebRTC signaling. Keep-alives use
   Durable Object hibernation and auto-responses, so an idle box does not wake the Hub.
 - Usage arrives in batches, every few minutes, not per sample.
-- The legacy relay is deleted once its remaining users have moved.
+- The legacy relay is deleted: a user box never dials the Hub, and app traffic is never forwarded through it.
 
 An active BYOB user costs on the order of a few thousand control requests a month, which is well under a cent at current
 Workers and Durable Objects pricing. Check the current price list before relying on the exact figure.
@@ -336,7 +336,7 @@ Desktop video, audio and input are on WebRTC: H.264 video and Opus audio sent di
 
 - **Done:** WebRTC from box to viewer. The fMP4 WebSocket path is deleted; WebSocket media is not kept as a fallback.
 - **No fallback, by decision:** keeping the WebSocket stream for a tunnel-only box would have sent video through the Hub or another relay Kestrel pays for, which breaks requirement 1. The tradeoff: a box reachable only over an HTTPS tunnel, with no LAN, tailnet or public UDP path and no operator-configured TURN, cannot stream. It needs a direct UDP path or its operator's TURN server.
-- **Relay:** the Hub carries only desktop signaling and status for boxes on the legacy relay, a handful of requests per session. No media passes through it, so it adds no media cost.
+- **Relay:** the legacy Hub relay is deleted; signaling and status go over each box's own direct routes. No media passes through the Hub, so it adds no media cost.
 - **Every platform streams.** WSL and Lima boxes use x264 on the CPU, so their limit is frame rate and resolution, which the apps should set from the encoder capability.
 
 ## Saved evidence
@@ -407,7 +407,7 @@ Each step is useful by itself, and the Nest work comes after the BYOB and eviden
 
 1. **Contract:** define capabilities, report them from the box, and build the conformance suite.
 2. **BYOB reach:** split the sandbox listener and run the WebRTC spike.
-3. **Relay:** finish the cutover and delete it.
+3. **Done:** the legacy relay is deleted; every box path is direct.
 4. **Platform tiers:** ship desktop dependencies, fix WSL setup, and get hardware graphics working on Ubuntu.
 5. **Evidence:** explicit recording, clips and run summaries first, then the rolling buffer and desktop idle stop.
 6. **Parity:** automations and PR watches on BYOB through the dial-out socket, and multi-box support on mobile.

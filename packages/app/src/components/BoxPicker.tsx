@@ -18,14 +18,14 @@ import { cn } from "@/lib/utils"
 export const KESTREL_BOX = "kestrel"
 
 /**
- * Whether `boxId` (`null`: Kestrel's box) answers: a user box's or the managed box's own health, else the relayed
+ * Whether `boxId` (`null`: Kestrel's box) answers: a user box's or the managed box's own health, else the control-plane
  * status. `undefined` until known, and while the box list has not loaded.
  */
 export function useBoxOnline(boxId: string | null, list: BoxList | undefined): boolean | undefined {
   const url = boxId === null ? list?.managedBox?.url : list?.boxes.find((box) => box.id === boxId)?.url
   const health = useQuery({ ...queries.boxHealth(url ?? ""), enabled: url !== undefined })
-  const relayed = useQuery({ ...queries.kestrelBox(), enabled: list !== undefined && boxId === null && url === undefined })
-  return (url === undefined ? relayed : health).data?.online
+  const kestrel = useQuery({ ...queries.kestrelBox(), enabled: list !== undefined && boxId === null && url === undefined })
+  return (url === undefined ? kestrel : health).data?.online
 }
 
 export function OnlineDot({ boxId, list }: { boxId: string | null; list: BoxList }) {

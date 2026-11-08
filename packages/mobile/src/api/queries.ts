@@ -23,7 +23,7 @@ const MODEL_CATALOG_POLL_MS = 60 * 60 * 1000;
 
 export const queryClient = new QueryClient({
   defaultOptions: {
-    // Every box call crosses the relay; failures surface immediately instead of being retried.
+    // Absent and unreachable boxes surface immediately instead of being retried.
     queries: { retry: false, refetchOnWindowFocus: false },
   },
 });

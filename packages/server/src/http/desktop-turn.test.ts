@@ -39,7 +39,7 @@ test("slow TURN configuration precedes queued status changes and cannot write af
     },
   })
   const config = {
-    direct: { controlUrl: provider.url.href, boxId: "box", boxSecret: "secret", managed: true }, relay: null,
+    direct: { controlUrl: provider.url.href, boxId: "box", boxSecret: "secret", managed: true },
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: true },
   } as unknown as ServerConfig
   const frames: Frame[] = []
@@ -145,7 +145,7 @@ test("an offer's peer takes the managed ICE servers the config delivered", async
     fetch: () => Response.json({ iceServers: managed, expiresAt: Date.now() + 3_600_000 }),
   })
   const config = {
-    direct: { controlUrl: provider.url.href, boxId: "box", boxSecret: "secret", managed: true }, relay: null,
+    direct: { controlUrl: provider.url.href, boxId: "box", boxSecret: "secret", managed: true },
     webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: true },
   } as unknown as ServerConfig
   const frames: Frame[] = []

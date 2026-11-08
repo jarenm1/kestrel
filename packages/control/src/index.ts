@@ -12,33 +12,19 @@ import {
   NestEnrollBody,
   PairingPollBody,
   PairingStartBody,
-  RELAY_CONNECT_PATH,
   ToolFailureReport,
 } from "@cloudagents/protocol"
 import { handleApi } from "./api"
 import { handleAuth } from "./auth"
 import { handlePrWatch } from "./pr-watch"
 import { handleBoxAutomations } from "./automations"
-import { cappedRequest, decodeBody, errorResponse, json, safeEqual, UpstreamError } from "./http"
+import { cappedRequest, decodeBody, errorResponse, json, UpstreamError } from "./http"
 import { hub, type Env } from "./env"
 import { SITE_HOSTS, serveAppPage } from "./pages"
 import { handleGithubWebhook } from "./webhooks"
 import { handleBoxTurn } from "./turn"
 
 export { Hub } from "./hub"
-
-/** The relay's box holds BOX_TOKEN; its dial-in and its legacy automation routes require it. */
-const boxAuthorized = async (request: Request, env: Env): Promise<boolean> => {
-  const auth = request.headers.get("authorization") ?? ""
-  const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
-  return env.BOX_TOKEN !== undefined && token !== "" && (await safeEqual(token, env.BOX_TOKEN))
-}
-
-/** The agent box dials in here; the Durable Object accepts the socket once the token matches. */
-const connectBox = async (request: Request, env: Env): Promise<Response> => {
-  if (!(await boxAuthorized(request, env))) return errorResponse(401, "Unauthorized", "invalid box token")
-  return hub(env).fetch(request)
-}
 
 /**
  * A Nest VM's first contact: it trades the one-time enrollment token its host's create command issued for its box
@@ -54,8 +40,8 @@ const nestEnroll = async (request: Request, env: Env): Promise<Response> => {
 }
 
 /**
- * A user's own box asks who owns it and gets their connection secrets. It proves itself with its own secret rather
- * than BOX_TOKEN, so only the box holding that secret can read them.
+ * A user's own box asks who owns it and gets their connection secrets. It proves itself with its own box id and
+ * secret, so only the box holding that secret can read them.
  */
 const boxSelf = async (request: Request, env: Env): Promise<Response> => {
   if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
@@ -107,7 +93,6 @@ const meterRecords = async (request: Request, env: Env): Promise<Response> => {
 
 /**
  * Automation calls from a managed box, for the user in `BOX_USER_HEADER` when that user is assigned to the box.
- * The legacy relay token is checked before this.
  */
 const managedBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const caller = managedBoxHeaders(request)
@@ -118,12 +103,12 @@ const managedBoxAutomations = async (request: Request, env: Env, url: URL): Prom
 }
 
 /**
- * Kestrel's own boxes report tool failure counts: the relayed box with the relay token, a managed box with its secret.
- * A user's own box is neither, so a report from one is refused.
+ * A managed box reports tool failure counts, proving itself with its own secret and id.
+ * A user's own box is not Kestrel's, so a report from one is refused.
  */
 const boxToolFailures = async (request: Request, env: Env): Promise<Response> => {
   if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
-  if (!(await boxAuthorized(request, env))) {
+  {
     const auth = request.headers.get("authorization") ?? ""
     const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
     const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
@@ -139,7 +124,7 @@ const boxToolFailures = async (request: Request, env: Env): Promise<Response> =>
 
 /**
  * A managed box reports which of its assigned users had an authenticated direct request in the last five minutes. It
- * proves itself with its own secret and id; the legacy relay token and user boxes are refused. The report is a full
+ * proves itself with its own secret and id; user boxes are refused. The report is a full
  * snapshot, so an empty one clears the box. Timestamps beyond the clock-skew allowance are in the future and refused.
  */
 const boxActivity = async (request: Request, env: Env): Promise<Response> => {
@@ -210,17 +195,6 @@ const withCors = (response: Response, origin: string): Response => {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
-const previewAssetRequest = (request: Request, url: URL): boolean => {
-  if (url.pathname.startsWith("/_preview/")) return true
-  const referer = request.headers.get("referer")
-  if (referer === null) return false
-  try {
-    return /^\/_preview\/[0-9a-f-]{36}\/[^/]+(?:\/|$)/.test(new URL(referer).pathname)
-  } catch {
-    return false
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -229,7 +203,6 @@ export default {
         return env.KESTREL_NEST_DOMAIN ? hub(env).fetch(request) : errorResponse(404, "NotFound", "no such route")
       }
       if (url.pathname === ControlPaths.nestEnroll) return await nestEnroll(request, env)
-      if (url.pathname === RELAY_CONNECT_PATH) return await connectBox(request, env)
       if (url.pathname === ControlPaths.boxSelf) return await boxSelf(request, env)
       if (url.pathname === BOX_TURN_PATH) return await handleBoxTurn(request, env)
       if (url.pathname === ControlPaths.boxCredentials) return await boxCredentials(request, env)
@@ -239,10 +212,7 @@ export default {
       if (url.pathname === ControlPaths.boxPairing || url.pathname === ControlPaths.boxPairingPoll) {
         return await handleBoxPairing(request, env, url)
       }
-      if (isBoxAutomationPath(url.pathname)) {
-        if (await boxAuthorized(request, env)) return url.pathname === "/box/automations/pr-watch" ? await handlePrWatch(request, env, url) : await handleBoxAutomations(request, env, url)
-        return await managedBoxAutomations(request, env, url)
-      }
+      if (isBoxAutomationPath(url.pathname)) return await managedBoxAutomations(request, env, url)
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env, ctx)
       if (
         SITE_HOSTS[url.hostname] &&
@@ -251,7 +221,6 @@ export default {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)
-      if (previewAssetRequest(request, url)) return await hub(env).fetch(request)
       if (url.pathname.startsWith("/api/")) {
         const response = await handleApi(request, env, url)
         const origin = url.pathname === ControlPaths.me ? publicSiteOrigin(request, env) : null

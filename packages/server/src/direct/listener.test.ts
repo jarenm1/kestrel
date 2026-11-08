@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { IncomingMessage } from "node:http"
 import type { Duplex } from "node:stream"
 import { Effect, Runtime } from "effect"
-import { BOX_USER_HEADER, type BoxTokenClaims, type RelayCredentials, signBoxToken } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, type BoxTokenClaims, type UserCredentials, signBoxToken } from "@cloudagents/protocol"
 import type { CredentialStoreShape } from "../credentials"
 import type { WsServices } from "../http/streams"
 import { Unauthorized, makeBoxAuth, type DirectSettings } from "./auth"
@@ -86,7 +86,7 @@ const restartedBox = (settings: DirectSettings = ownBox) => {
     if (control === "refused") return new Response(null, { status: 401 })
     return Response.json({ owner: OWNER, credentialsVersion: "1", github: "gh" })
   }) as unknown as typeof fetch
-  const byUser = new Map<string, RelayCredentials>()
+  const byUser = new Map<string, UserCredentials>()
   const store: CredentialStoreShape = {
     get: (user) => Effect.sync(() => byUser.get(user) ?? null),
     set: (creds) => Effect.sync(() => void byUser.set(creds.user, creds)),

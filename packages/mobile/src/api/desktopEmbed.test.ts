@@ -12,32 +12,9 @@ test("desktop embed URL is the app host's embed page, with the ws URL and task i
   expect(fragment.get("task")).toBe("task 1");
 });
 
-test("desktopSocketUrl on the relayed box carries a desktop token for that task, reused until fresh is asked for", async () => {
-  const paths: string[] = [];
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request: Request) {
-      paths.push(new URL(request.url).pathname);
-      return Response.json({
-        token: `token-${paths.length}`,
-        expiresAt: new Date(Date.now() + 300_000).toISOString(),
-      });
-    },
-  });
-  try {
-    const client = createApiClient(server.url.origin, "session", null);
-    const url = new URL(await client.desktopSocketUrl("t1"));
-    expect(url.protocol).toBe("ws:");
-    expect(url.pathname).toBe("/api/tasks/t1/desktop/stream");
-    expect(url.searchParams.get("access_token")).toBe("token-1");
-    expect(new URL(await client.desktopSocketUrl("t1")).searchParams.get("access_token")).toBe("token-1");
-    expect(new URL(await client.desktopSocketUrl("t1", { fresh: true })).searchParams.get("access_token")).toBe("token-2");
-    expect(new URL(await client.desktopSocketUrl("t2")).searchParams.get("access_token")).toBe("token-3");
-    expect(paths).toEqual(["/api/tasks/t1/desktop/token", "/api/tasks/t1/desktop/token", "/api/tasks/t2/desktop/token"]);
-  } finally {
-    await server.stop(true);
-  }
+test("desktopSocketUrl with no box fails cleanly instead of minting a control-plane token", async () => {
+  const client = createApiClient("https://control.example", "session", null);
+  await expect(client.desktopSocketUrl("t1")).rejects.toThrow("no box is available");
 });
 
 test("desktopSocketUrl on a user box reuses the minted box token, and mints a new one when asked for a fresh URL", async () => {

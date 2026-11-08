@@ -74,10 +74,10 @@ Before a PR: `bun run typecheck` (and `bun run build:app` if `packages/app` or `
 | Path | What |
 |---|---|
 | [`packages/app`](packages/app) | React SPA (Vite, Tailwind, shadcn/ui, TanStack Query). One build serves the public pages on `kestrel-agent.com` and the app on `app.kestrel-agent.com`. |
-| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API, the managed-box fleet registry and the legacy relay to the box. Serves the built app. |
+| [`packages/control`](packages/control) | Cloudflare Worker: GitHub sign-in, control API, the managed-box fleet registry. Serves the built app. |
 | [`packages/server`](packages/server) | The agent box: harnesses in bubblewrap, MCP, credential broker, desktop. Dials out to the control plane. Also the `kestrel-box` CLI (`src/cli`). |
 | [`packages/kestrel-box`](packages/kestrel-box) | npm launcher for the `kestrel-box` binary (not a workspace). |
-| [`packages/protocol`](packages/protocol) | Shared Effect schemas: relay frames, control API, REST. |
+| [`packages/protocol`](packages/protocol) | Shared Effect schemas: channel frames, control API, REST. |
 | [`packages/mobile`](packages/mobile) | Expo app ([README](packages/mobile/README.md)). |
 | [`packages/desktop`](packages/desktop) | Electron desktop app for the same SPA, with GitHub-release auto-updates ([README](packages/desktop/README.md)). |
 
@@ -89,5 +89,5 @@ Deeper docs: [architecture and ownership](docs/architecture.md), [goal state](do
 - **GitHub sign-in:** a GitHub OAuth app with callback `https://app.kestrel-agent.com/auth/github/callback`; `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are secrets on Worker `kestrel`. Only logins in `ALLOWED_GITHUB_LOGINS` in `packages/control/wrangler.jsonc` can sign in; update both the production and preview lists to change access. Existing sessions are checked against the list too.
 - **Restrictive Wi-Fi / desktop TURN:** configure `KESTREL_TURN_KEY_ID` and secret `KESTREL_TURN_API_TOKEN` on the control Worker, then update/restart boxes. Registered boxes automatically supply expiring Cloudflare Realtime TURN credentials to viewers, including TLS on port 443; explicit local TURN wins. Provider bandwidth is billed to the operator. See [setup and limits](docs/box.md#webrtc-desktop).
 - **Production box:** `nix run .#box-auto` on the host; it follows `main` (or `KESTREL_BOX_REF`) and restarts once the box is idle, so merges don't interrupt agent runs ([details](docs/box.md#production-host)).
-- **Kestrel's boxes:** a managed fleet that operators add and drain; users not yet assigned to a box use the legacy relay ([details](docs/box.md#managed-boxes-fleet)).
+- **Kestrel's boxes:** a managed fleet that operators add and drain; users not yet assigned to a box have no box until they add their own ([details](docs/box.md#managed-boxes-fleet)).
 - **Previews:** every branch gets `https://<branch with / replaced by ->-kestrel.jarenmchugh.workers.dev` (own empty Hub, no secrets, no box; UI review only).

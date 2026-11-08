@@ -907,11 +907,6 @@ export type FilesResponse = typeof FilesResponse.Type
 /** Which folder a download path is relative to: the thread's workspace, the agent's home, or a checkout (by id). */
 export type FileRoot = "workspace" | "home" | { readonly checkoutId: string }
 
-/**
- * Largest response the box sends through the legacy relay: a relay frame carries the body base64-encoded, and
- * Cloudflare refuses WebSocket messages over 32 MiB. A larger one is answered 413. Direct boxes have no such limit.
- */
-export const MAX_RELAY_RESPONSE_BYTES = 20 * 1024 * 1024
 
 /**
  * One command the authenticated harness offers in a thread's workspace: a Claude Code slash command, a Codex
@@ -1181,7 +1176,7 @@ export const Paths = {
   mcp: (taskId: string) => `/mcp/${taskId}`,
 } as const
 
-export * from "./relay"
+export * from "./channel"
 export * from "./rtc"
 export * from "./control"
 export * from "./meter"

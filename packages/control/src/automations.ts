@@ -203,7 +203,7 @@ export const handleAutomations = async (
 }
 
 /**
- * Every `/box/automations` route. The box holds BOX_TOKEN (checked by the caller) and names the user it acts for in
+ * Every `/box/automations` route. A managed box proves itself to the caller and names the user it acts for in
  * BOX_USER_HEADER; that user must exist. Ownership is then enforced by the same handlers the browser uses.
  */
 export const handleBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {

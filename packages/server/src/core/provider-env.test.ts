@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { ModelProvider, type CliProvider, type RelayCredentials } from "@cloudagents/protocol"
+import { ModelProvider, type CliProvider, type UserCredentials } from "@cloudagents/protocol"
 import { brokerEnv, credentialFor } from "../broker"
 import { claudeTierEnv, loginsForProvider } from "./harness"
 
@@ -73,7 +73,7 @@ describe("per-provider run environment", () => {
   })
 
   test("a provider-map key wins over the legacy slot", () => {
-    const creds: RelayCredentials = {
+    const creds: UserCredentials = {
       user: "alice",
       providers: { anthropic: "provider-key", openai: "openai-provider" },
       anthropic: "legacy-key",

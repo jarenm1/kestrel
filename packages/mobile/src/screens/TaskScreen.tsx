@@ -43,7 +43,7 @@ const CLOSE_EDGE_WIDTH = 18;
 
 interface Props {
   taskId: string;
-  /** The box the thread runs on; `null` is Kestrel's relayed box. */
+  /** The box the thread runs on; `null` is an absent Kestrel box. */
   box: ActiveBox | null;
   /** Bottom safe-area inset, passed to the content panel. */
   bottomInset: number;

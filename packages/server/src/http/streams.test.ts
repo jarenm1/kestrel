@@ -3,7 +3,7 @@ import { Effect, Exit, Fiber, Layer, Runtime } from "effect"
 import { decodeFrame, type ServerEvent } from "@cloudagents/protocol"
 import { EventHub, EventHubLive } from "../core/events"
 import { ActivityTracker, ActivityTrackerLive } from "../platform/tracker"
-import { RelayStream } from "../relay/stream"
+import { ChannelStream } from "../direct/stream"
 import { serveStream, type WsServices } from "./streams"
 
 const deleted: ServerEvent = { _tag: "task.deleted", taskId: "task", owner: "alice" }
@@ -14,15 +14,15 @@ const setup = async () => {
   )
   const hub = Runtime.runSync(runtime)(EventHub)
   const sent: string[] = []
-  const stream = new RelayStream(7, (data) => sent.push(data))
+  const stream = new ChannelStream(7, (data) => sent.push(data))
   // The user-events route reads only the hub and the tracker.
   const fiber = Runtime.runFork(runtime as Runtime.Runtime<WsServices>)(serveStream({ kind: "user-events" }, "alice", stream))
   await Effect.runPromise(Effect.yieldNow())
   return { hub, stream, sent, fiber }
 }
 
-describe("serveStream over the relay", () => {
-  test("delivers events to a RelayStream", async () => {
+describe("serveStream over a channel", () => {
+  test("delivers events to a ChannelStream", async () => {
     const { hub, stream, sent, fiber } = await setup()
     hub.publish(deleted)
     expect(sent.map((frame) => decodeFrame(frame))).toEqual([{ t: "ws-text", id: 7, data: JSON.stringify(deleted) }])

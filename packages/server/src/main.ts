@@ -1,8 +1,8 @@
 import { availableHarnesses, availableModelHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { join } from "node:path"
-import { Effect, Fiber, Layer, Ref } from "effect"
-import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError, Paths } from "@cloudagents/protocol"
+import { Effect, Fiber, Layer } from "effect"
+import { BOX_USER_HEADER, InternalError, Paths } from "@cloudagents/protocol"
 import { ConfigLive, Config, dataDirFromEnv } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
 import { CoreLive, CoreService } from "./core/service"
@@ -23,7 +23,6 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { runRelay } from "./relay/client"
 import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
 import { makeBoxActivityReporter, type BoxActivityReporter } from "./direct/box-activity"
@@ -60,8 +59,8 @@ const toWebRequest = async (req: IncomingMessage): Promise<Request> => {
   const headers = new Headers()
   for (const [name, value] of Object.entries(req.headers)) {
     if (value === undefined) continue
-    // Identity only comes through the relay; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
-    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER || name === CREDENTIALS_HEADER) continue
+    // Identity is only set by the box's own auth layer; a local caller (e.g. a sandboxed agent) cannot claim a user or dev access.
+    if (name === BOX_USER_HEADER || name === BOX_DEV_HEADER || name === "x-cloudagents-credentials") continue
     if (Array.isArray(value)) for (const v of value) headers.append(name, v)
     else headers.set(name, value)
   }
@@ -149,7 +148,7 @@ const program = Effect.gen(function* () {
         Effect.mapError((e) => new InternalError({ message: e.message })),
       ),
   })
-  // Any request or relayed message is activity: it keeps a Nest VM from suspending while someone uses it. The health
+  // Any request or channelled message is activity: it keeps a Nest VM from suspending while someone uses it. The health
   // check is the exception: clients poll it in the background, so it would keep an idle box awake forever.
   const handle = (request: Request) => {
     if (new URL(request.url).pathname !== Paths.health) Effect.runSync(tracker.touch)
@@ -238,7 +237,7 @@ const program = Effect.gen(function* () {
     handled.catch((error: unknown) => failResponse(res, error))
   })
 
-  // Relayed task streams arrive through the control plane; direct mode serves them on this listener.
+  // A registered box serves its task streams on this listener.
   if (direct !== null) server.on("upgrade", direct.upgrade)
 
   yield* listen(sandboxServer, "127.0.0.1", config.sandboxPort)
@@ -255,37 +254,13 @@ const program = Effect.gen(function* () {
     Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
   )
 
-  // The control plane link. A Nest VM's resume restarts it, since its socket from before the snapshot is dead.
-  const relayFiber = yield* Ref.make<Fiber.RuntimeFiber<void> | null>(null)
-  const startRelay = Effect.gen(function* () {
-    if (config.relay === null) return
-    const fiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle }),
-    )
-    yield* Ref.set(relayFiber, fiber)
-    yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  })
-  yield* startRelay
-
-  // The resume hook restarts the relay, which needs the services the relay runs with; the platform needs none.
-  const relayServices = yield* Effect.context<WsServices | CredentialStore>()
-  const platformFiber = yield* Effect.forkDaemon(
-    platform.run({
-      resumed: Effect.gen(function* () {
-        const old = yield* Ref.get(relayFiber)
-        if (old !== null) yield* Fiber.interrupt(old)
-        yield* startRelay
-      }).pipe(Effect.provide(relayServices)),
-    }),
-  )
+  const platformFiber = yield* Effect.forkDaemon(platform.run({ resumed: Effect.void }))
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
   boxActivity?.stop()
   if (activity !== null) yield* activity.close
   yield* Fiber.interrupt(platformFiber)
-  const relay = yield* Ref.get(relayFiber)
-  if (relay !== null) yield* Fiber.interrupt(relay)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   if (direct !== null) direct.close()

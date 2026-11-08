@@ -16,7 +16,7 @@ export function useApiClient(): { api: ApiClient } {
   return { api: override ?? active };
 }
 
-/** The client for one box (`null` is Kestrel's relayed box). A new client is built when the session, server or box changes. */
+/** The client for one box (`null` is an absent Kestrel box). A new client is built when the session, server or box changes. */
 export function useBoxClient(box: ActiveBox | null): ApiClient {
   const { serverUrl, sessionCookie } = useAuth();
   const boxId = box?.id ?? null;

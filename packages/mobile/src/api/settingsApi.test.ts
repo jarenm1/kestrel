@@ -106,7 +106,7 @@ test("a settings response with an unsupported thinking level is rejected instead
   }
 });
 
-test("relayed settings use the session cookie and keep the control plane path", async () => {
+test("settings with no direct box use the session cookie and keep the control plane path", async () => {
   const seen: string[] = [];
   const control = Bun.serve({
     hostname: "127.0.0.1",

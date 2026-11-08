@@ -10,7 +10,7 @@ import {
   fragmentMessage,
   fromBase64,
   toBase64,
-  type RelayFrame,
+  type ChannelFrame,
   type RtcMessage,
 } from "@cloudagents/protocol"
 
@@ -68,7 +68,7 @@ export class BoxChannel {
   request(method: string, path: string, body: unknown): Promise<ChannelReply> {
     const id = this.nextId++
     const payload = body === undefined ? undefined : toBase64(new TextEncoder().encode(JSON.stringify(body)))
-    const frame: RelayFrame = {
+    const frame: ChannelFrame = {
       t: "http",
       id,
       method,

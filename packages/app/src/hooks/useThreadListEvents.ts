@@ -11,7 +11,7 @@ const RECONNECT_MS = 2000
  * Keeps the thread list current from the thread list streams, one per box (Kestrel's and each user box): `task.updated`
  * writes the task into the list (new threads included), `task.deleted` drops it. Each (re)connect refetches the list,
  * which catches changes missed meanwhile. The streams are reopened when the set of boxes changes. Kestrel's stream
- * comes straight from the user's managed box while one is assigned, else through the relay.
+ * comes straight from the user's managed box while one is assigned; with none there is no box stream to open.
  */
 export function useThreadListEvents(): void {
   const queryClient = useQueryClient()

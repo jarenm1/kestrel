@@ -195,7 +195,7 @@ From a checkout with Bun dependencies installed, `bun packages/server/scripts/de
 
 Desktop video, audio and input travel over WebRTC only; there is no WebSocket media fallback, and WebRTC is always on. The desktop WebSocket (`/api/tasks/:id/desktop/stream`) carries the status and signaling.
 
-- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate`, `rtc.unavailable` and redacted `rtc.diagnostics`. Signaling also works over the legacy relay, where a session costs a handful of Hub requests. Failed connection attempts request fresh configuration after the existing 1 s–30 s exponential backoff instead of reusing a possibly TURN-less config for 30 minutes. Refreshing preserves that backoff. A bounded configuration wait falls back to the last known config rather than stalling reconnects indefinitely.
+- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate`, `rtc.unavailable` and redacted `rtc.diagnostics`. Failed connection attempts request fresh configuration after the existing 1 s–30 s exponential backoff instead of reusing a possibly TURN-less config for 30 minutes. Refreshing preserves that backoff. A bounded configuration wait falls back to the last known config rather than stalling reconnects indefinitely.
 - **Media** is H.264 video and Opus audio (48 kHz stereo, 10 ms frames) on recvonly transceivers. A desktop without audio dependencies still streams video; its audio m-line is answered inactive. Silent Opus packets (2 bytes or less) are gated to one per 400 ms, so a quiet desktop sends almost no audio; audible packets always pass. The audio server starts with the desktop, which waits up to 3 s for it so early apps get its socket; the Opus capture runs only while there are viewers (with the encoder's 15 s linger). Audio that dies is restarted up to three times per desktop; apps already running keep their old socket and stay silent.
 - **Input** runs over data channels. `input` (ordered, reliable) carries key, button, wheel and text input; `pointer` (unordered, no retransmits) carries mouse moves only. Wheel notches are clamped to ±10 per event, and `text` (at most 1000 characters) is typed with `xdotool type`.
 - **Video** comes from one encoder per desktop, shared by every viewer, with a paced RTP sender per viewer (`desktop/rtp.ts`). A keyframe request (PLI or FIR) or a joining viewer gets the current GOP replayed, unless it is over 4 MiB, in which case the viewer waits for the next keyframe. Replays take at most a quarter of the pacing rate. A viewer more than a second behind has its queue dropped and resumes at the next keyframe. Where the browser offers the playout-delay header extension, it is set to zero.
@@ -238,7 +238,7 @@ Reports contain only allowlisted states, counts, candidate/transport types and n
 
 The default STUN server, `stun:stun.cloudflare.com:3478`, lets both ends discover their public addresses. Registered boxes also obtain managed TURN credentials automatically when the control plane has a Cloudflare Realtime TURN key configured. The viewer and the box's own peer each allocate a relay from the provider, so a session still connects when neither side's candidates are reachable from the other; both prefer direct WebRTC, and relayed media can use UDP, TCP or TLS on port 443. Media never traverses the Worker or Hub.
 
-To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: managed boxes, registered user boxes and the legacy relay box authenticate `POST /box/turn` using their existing box identity.
+To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: managed boxes and registered user boxes authenticate `POST /box/turn` using their existing box identity.
 
 The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and resolve them once per `rtc.config`; an offer never waits on the control plane and a failed fetch leaves both peers on the box's own configuration. Retries requesting a new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits.
 
@@ -362,7 +362,7 @@ of human attention or running agents. HTTP requests and requests on an authentic
 activity. Validated preview-token requests also count, including preview documents, HTTP subresources and WebSocket
 upgrades; invalid tokens or tokens used for another task do not. Opening a desktop, event or preview WebSocket
 stream counts, but traffic on an already-open stream does not; merely watching a desktop can therefore age out.
-Legacy relay traffic and user-owned boxes are not included.
+User-owned boxes are not included.
 
 Managed boxes send a complete snapshot, including an empty snapshot when idle, every 30 seconds to
 `POST /box/telemetry/activity`, authenticated with their box id and secret. Collection is in memory and resets on
@@ -383,7 +383,7 @@ A user is assigned lazily, whenever the control plane builds their box list or n
 
 - A user keeps their box while it is `active` or `draining`.
 - Otherwise the user is assigned to the active box with the fewest users (ties go to the oldest box).
-- With no active box, the user has no managed box, and their apps use the [legacy relay](#legacy-relay).
+- With no active box, the user has no managed box, and their apps have no box to reach.
 
 | State | Meaning |
 |---|---|
@@ -411,7 +411,7 @@ Nothing moves a box back to `pending`.
 
 - **Drain** (`draining`): no new users. Current users stay assigned and keep using the box. Draining moves nobody, so use it to stop new assignments before maintenance; set `active` again to resume.
 - **Rotate the secret** (`POST /api/fleet/boxes/:id/secret`): returns the new secret once. Until the box restarts with it, the box rejects tokens minted under the new secret and cannot fetch credentials. Rotate and restart together, when the box is idle.
-- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users, or to the relay if there is none. Their threads stay on the deleted box's disk and do not move.
+- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users, or to no box if there is none. Their threads stay on the deleted box's disk and do not move.
 
 ### Endpoint requirements
 
@@ -455,18 +455,18 @@ The modules are in `deploy/`. Key files must be absolute paths outside `/nix/sto
 
   Set `CLOUDAGENTS_HOST=10.203.0.2` on the box. That address exists only while the tunnel is up, so start the box after the tunnel. The box port opens only on the tunnel interface.
 
-### Cutover of the relayed production box
+### Cutover of a legacy relayed box
 
-The production box already dials the relay with `CLOUDAGENTS_BOX_TOKEN`. It keeps that token while it also serves direct traffic: the relay and managed direct mode run in one process, so no user loses the box during the switch.
+A box that still only dials the old relay (`CLOUDAGENTS_BOX_TOKEN` with no `CLOUDAGENTS_BOX_ID`) serves nothing once the relay is gone: it must be registered and reached directly, like every other box. The direct config can run in the same process, so no user loses the box during the switch.
 
 1. Register it: add the box in Settings › Fleet with its public URL. It is `pending` and gets no users.
 2. Configure the endpoint: serve that URL to `127.0.0.1:8787` on the production host, with `deploy/box-ingress.nix` or your own proxy that meets the [endpoint requirements](#endpoint-requirements).
-3. In `.box.env`, next to `CLOUDAGENTS_CONTROL_URL` and the kept `CLOUDAGENTS_BOX_TOKEN`, add `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and `CLOUDAGENTS_BOX_MANAGED=1`.
+3. In `.box.env`, next to `CLOUDAGENTS_CONTROL_URL`, set `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and `CLOUDAGENTS_BOX_MANAGED=1`; `CLOUDAGENTS_BOX_TOKEN` is dead and can be removed.
 4. Restart the box when it is idle. A restart interrupts agent runs, and `box-auto` defers its restarts while the box is busy.
 5. Verify through the public URL: `https://<url>/api/health` answers, and `https://<url>/mcp` answers 404.
 6. Activate. The box is then the only active box, so every user without a managed box is assigned to it on their next box list. Users keep it while it is `active` or `draining`.
 
-Rollback: Drain does not move users, so they keep the box. To move them back to the relay, delete the box. Its users go to another active box if one exists, otherwise to the relay. The relay works only while the box still runs with `CLOUDAGENTS_BOX_TOKEN`, so keep that token set until the cutover is final.
+Rollback: Drain does not move users, so they keep the box. Delete it and its users go to another active box if one exists, otherwise to no box; there is no relay to fall back to.
 
 ### Production host
 
@@ -487,11 +487,9 @@ Per user, the control plane (the Worker and its Hub Durable Object) handles only
 - credential bootstrap: the box fetches its user's connection secrets from `/box/credentials` when a token's credentials version changes;
 - automation dispatch: the control plane calls the box directly with a 5-minute token to start automation runs and fetch CLI sign-in state, and the box's automation tools call `/box/automations` with its own box auth.
 
-### Legacy relay
+### Legacy relay (removed)
 
-Until every client and box is cut over, Kestrel's box is also reached through the relay. A box dials `/box/connect` with `CLOUDAGENTS_BOX_TOKEN`, and the control plane forwards each app request over that socket, one Durable Object request per request. Clients use the relay when `BoxList.managedBox` is `null`. Relay deletion is a later change.
-
-Don't run a box against production with the production token from your machine: the control plane keeps one relayed box and a new connection replaces the live one.
+The Hub's box dial-in socket and `CLOUDAGENTS_BOX_TOKEN` are deleted. A box that only has the relay token is stranded: it serves no users until it is registered (`CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET`) and reached directly. Clients with no managed box (`BoxList.managedBox` is `null`) and no box of their own get the control plane's `BoxOffline` "no box is available" answer.
 
 ### Capability discovery
 

@@ -2,11 +2,11 @@ import { encodeFrame } from "@cloudagents/protocol"
 import type { StreamSocket } from "../http/streams"
 
 /**
- * Box-side end of one WebSocket the control plane tunnels over the relay connection.
+ * Box-side end of one stream an app tunnels over a channel (see `direct/rtc.ts`).
  * It implements StreamSocket so the shared stream handlers run unchanged. Text that arrives
  * before a listener is registered is buffered so no early message is lost.
  */
-export class RelayStream implements StreamSocket {
+export class ChannelStream implements StreamSocket {
   readonly id: number
   private readonly send: (data: string) => void
   private open = true
@@ -39,14 +39,14 @@ export class RelayStream implements StreamSocket {
     else listener()
   }
 
-  /** Delivers a text message from the browser. */
+  /** Delivers a text message from the app. */
   receiveText(data: string): void {
     if (!this.open) return
     if (this.textListener) this.textListener(data)
     else this.pendingText.push(data)
   }
 
-  /** The browser left (or the relay dropped): closes locally without echoing a `ws-close`. */
+  /** The app left (or the channel dropped): closes locally without echoing a `ws-close`. */
   receiveClose(): void {
     this.finish()
   }

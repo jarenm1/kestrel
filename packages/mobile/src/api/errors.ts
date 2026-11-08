@@ -25,7 +25,7 @@ export function responseError(status: number, text: string, fallback: string): A
   return new ApiError(status, text || fallback);
 }
 
-/** True only for a failure of transport: a failed connection or a relayed box the control plane explicitly reports down. */
+/** True only for a failure of transport: a failed connection or an absent or unreachable box the control plane reports down. */
 export function isUnreachableError(error: unknown): boolean {
   return error instanceof ApiError && (
     error.status === 0 || (error.tag === "BoxOffline" && [502, 503, 504].includes(error.status))
