@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Info, X } from "lucide-react"
 import { Button } from "@cloudagents/ui/button"
 import { diagnosticSummary, serializeDiagnostics, type RtcDiagnostics } from "@/desktop/diagnostics"
@@ -7,6 +7,16 @@ import { diagnosticSummary, serializeDiagnostics, type RtcDiagnostics } from "@/
 export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnostics: RtcDiagnostics; embedded: boolean }) {
   const [open, setOpen] = useState(false)
   const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle")
+  // The trigger and the close button replace each other, so focus follows the panel rather than dropping to <body>.
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const wasOpen = useRef(open)
+  useEffect(() => {
+    if (wasOpen.current === open) return
+    wasOpen.current = open
+    if (open) closeRef.current?.focus()
+    else triggerRef.current?.focus()
+  }, [open])
   const pair = d.selectedPair
   const rows = [
     ["Attempt / settings", `${d.attempt} / ${d.config}`],
@@ -44,6 +54,7 @@ export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnos
           className="pointer-events-auto relative flex max-h-full w-96 max-w-full flex-col rounded-lg bg-black/90 text-xs text-white/90 shadow-lg"
         >
           <Button
+            ref={closeRef}
             variant="ghost"
             size="icon"
             className="absolute top-1 right-1 z-10 rounded-full bg-black/50 text-white/60 hover:bg-black/70 hover:text-white"
@@ -64,7 +75,13 @@ export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnos
               ))}
             </dl>
             <div className="mt-3 flex items-center gap-2">
-              <Button size="sm" variant="ghost" className="text-white hover:bg-white/10 hover:text-white" onClick={() => void copyReport()}>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-white hover:bg-white/10 hover:text-white"
+                title="States and counts only. No credentials, addresses, URLs or SDP."
+                onClick={() => void copyReport()}
+              >
                 Copy redacted report
               </Button>
               {copy === "copied" && <span role="status">Copied</span>}
@@ -85,6 +102,7 @@ export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnos
         </section>
       ) : (
         <Button
+          ref={triggerRef}
           variant="ghost"
           size="icon"
           className="pointer-events-auto bg-black/50 text-white/80 hover:bg-black/70 hover:text-white"
