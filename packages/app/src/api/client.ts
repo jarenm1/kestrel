@@ -210,12 +210,14 @@ const minting = new Map<string, Promise<string>>()
 let clock = 0
 let knownStamp = 0
 
+/** Adopts `list` if it is the newest so far. Either way the caller gets the list the app now holds, never an older one. */
 function adoptBoxList(list: BoxList, stamp: number): BoxList {
   if (stamp > knownStamp) {
     knownStamp = stamp
     known = list
+    return list
   }
-  return list
+  return known ?? list
 }
 
 /** A box list a change answered with: the newest state, so it is adopted when it arrives. */
@@ -422,44 +424,109 @@ function listAllTasks(): Promise<Task[]> {
   return listing
 }
 
-/** One box's answer to the thread list read: its threads, or why it gave none. */
-type BoxRead = { readonly ok: true; readonly boxId: string | null; readonly tasks: readonly Task[] } | { readonly ok: false; readonly error: unknown }
+/**
+ * Where a box's threads are cached. `null` is Kestrel's box whichever target it has now (the managed box, or the relay),
+ * the same as a thread's owner in `taskBoxes`.
+ */
+type BoxKey = string | null
+
+/** The key of a call's target: `null` for Kestrel's box, whether it is the managed box or the relay. */
+function boxKeyOf(target: Target): BoxKey {
+  return target === null || target.boxId === known?.managedBox?.id ? null : target.boxId
+}
+
+/** One thread list read's outcome for one box. */
+type BoxAnswer = { readonly ok: true } | { readonly ok: false; readonly error: unknown }
+
+/** Each box's threads as it last answered, with the stamp of that read. A box keeps them until a newer answer replaces them. */
+const threadsOf = new Map<BoxKey, { readonly stamp: number; readonly tasks: readonly Task[] }>()
+/** The thread list read in flight for each box. A box is asked once at a time, and every round shares that one read. */
+const reading = new Map<BoxKey, Promise<BoxAnswer>>()
+let readStamp = 0
+
+/** Once one box has answered, a round waits this long for the others, then returns the threads it has. */
+const ROUND_GRACE_MS = 1_000
 
 /**
- * Reads the thread list of every user box and of Kestrel's box at once, and records which box owns each thread. A box
- * that fails or times out is left out; the read fails only when no box answers. Kestrel's box is not waited for once
- * every user box has answered, so a managed box that is down cannot hold a user's own boxes back; its threads are
- * listed by the next read. It is waited for only when no user box answered.
+ * Asks one box for its threads, unless its earlier read is still pending: the pending read is shared, so a slow box is
+ * never asked twice and its answer is never raced by a newer request. An answer replaces the box's threads only when
+ * it is the newest read so far.
  */
-async function readAllTasks(): Promise<Task[]> {
-  await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
-  const kestrel = kestrelTarget()
-  const userTargets: Target[] = (known?.boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))
-  const read = (target: Target): Promise<BoxRead> =>
-    withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
-      (tasks): BoxRead => ({ ok: true, boxId: target?.boxId ?? null, tasks }),
-      (error: unknown): BoxRead => ({ ok: false, error }),
+function readBox(key: BoxKey, target: Target): Promise<BoxAnswer> {
+  const pending = reading.get(key)
+  if (pending !== undefined) return pending
+  const stamp = ++readStamp
+  const started = withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS)
+    .then(
+      (tasks): BoxAnswer => {
+        if ((threadsOf.get(key)?.stamp ?? 0) < stamp) threadsOf.set(key, { stamp, tasks })
+        return { ok: true }
+      },
+      (error: unknown): BoxAnswer => ({ ok: false, error }),
     )
-  const kestrelRead = read(kestrel)
-  const kestrelSettled: { result?: BoxRead } = {}
-  void kestrelRead.then((result) => {
-    kestrelSettled.result = result
+    .finally(() => reading.delete(key))
+  reading.set(key, started)
+  return started
+}
+
+/**
+ * Resolves with the answers that have arrived once every read has answered, or once one has answered and the grace
+ * period after it has passed. A read still pending then is left out of this round; its answer is cached when it comes.
+ */
+function settleRound(reads: readonly Promise<BoxAnswer>[]): Promise<readonly (BoxAnswer | undefined)[]> {
+  return new Promise((resolve) => {
+    const answers: (BoxAnswer | undefined)[] = reads.map(() => undefined)
+    let open = reads.length
+    let grace: number | undefined
+    const finish = () => {
+      window.clearTimeout(grace)
+      resolve([...answers])
+    }
+    reads.forEach((read, index) => {
+      void read.then((answer) => {
+        answers[index] = answer
+        open -= 1
+        if (open === 0) finish()
+        else if (answer.ok && grace === undefined) grace = window.setTimeout(finish, ROUND_GRACE_MS)
+      })
+    })
   })
-  const users = await Promise.all(userTargets.map(read))
-  const kestrelResult = kestrelSettled.result ?? (users.some((result) => result.ok) ? undefined : await kestrelRead)
-  const results = kestrelResult === undefined ? users : [...users, kestrelResult]
-  if (results.every((result) => !result.ok)) throw results.find((result) => !result.ok)?.error
+}
+
+/**
+ * The threads of the boxes in `keys`, from what each last answered, recording which box owns each one. A box that is
+ * no longer in the list drops its threads and their routes.
+ */
+function threadsNow(keys: readonly BoxKey[]): Task[] {
+  const current = new Set(keys)
+  for (const key of threadsOf.keys()) if (!current.has(key)) threadsOf.delete(key)
+  for (const [id, owner] of taskBoxes) if (!current.has(owner)) taskBoxes.delete(id)
   const merged: Task[] = []
-  for (const result of results) {
-    if (!result.ok) continue
-    const { boxId, tasks } = result
-    for (const [id, owner] of taskBoxes) if ((owner ?? kestrel?.boxId ?? null) === boxId) taskBoxes.delete(id)
-    for (const task of tasks) {
-      taskBoxes.set(task.id, boxId)
+  for (const key of keys) {
+    for (const task of threadsOf.get(key)?.tasks ?? []) {
+      taskBoxes.set(task.id, key)
       merged.push(task)
     }
   }
   return merged
+}
+
+/**
+ * Reads the thread list of Kestrel's box and of every user box, and returns the threads they have. A box that is slow
+ * or down does not hold up the others: a round returns once the boxes have answered, or once one has and the grace
+ * period has passed. A box that has not answered keeps its last threads; if it is still pending, its answer lands in
+ * the cache and the next round shows it. The read fails only when no box answers.
+ */
+async function readAllTasks(): Promise<Task[]> {
+  await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
+  const boxes: { readonly key: BoxKey; readonly target: Target }[] = [
+    { key: null, target: kestrelTarget() },
+    ...(known?.boxes ?? []).map((box) => ({ key: box.id, target: { boxId: box.id, url: box.url } })),
+  ]
+  const answers = await settleRound(boxes.map(({ key, target }) => readBox(key, target)))
+  const failures = answers.flatMap((answer) => (answer?.ok === false ? [answer.error] : []))
+  if (failures.length === answers.length) throw failures[0]
+  return threadsNow(boxes.map((box) => box.key))
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message = "The box did not answer in time"): Promise<T> {
@@ -726,7 +793,7 @@ export const api = {
     const target = boxId === undefined ? await activeTarget() : routeOf(boxId)
     if (target === undefined) throw new ApiError(404, "That box is no longer in your box list")
     const task = await run(boxCall(target, Task, "POST", Paths.tasks, body))
-    taskBoxes.set(task.id, target?.boxId ?? null)
+    taskBoxes.set(task.id, boxKeyOf(target))
     return task
   },
   getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),
