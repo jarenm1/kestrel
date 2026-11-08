@@ -386,10 +386,10 @@ Requests with credentials are refused (private packages bypass the cache by goin
 
 Nix: the host keeps a static binary cache directory holding only the guest image closure and a pinned package set,
 served read-only on `169.254.0.1:5000`. The host's own store (its services and configuration) is never exposed.
-Populate and sign it with `nix copy --to 'file:///var/cache/kestrel-nix?secret-key=<secretKeyFile>'`. The signing key
-is `services.kestrel-nest.nixCache.secretKeyFile` (default `/etc/kestrel-host/nix-cache-secret-key`); its public half
-is `nixCache.publicKey`, which the host agent sends to guests at `configure` as `nixCachePublicKey`. Guests trust that
-key and cache.nixos.org.
+Populate and sign it with `nix copy --to 'file:///var/cache/kestrel-nix?secret-key=<secretKeyFile>'`. The module has
+no option for the secret key — keep it on the host (e.g. `/etc/kestrel-host/nix-cache-secret-key`) and put its public
+half in `services.kestrel-nest.nixCache.publicKey`, which the host agent sends to guests at `configure` as
+`nixCachePublicKey`. Guests trust that key and cache.nixos.org.
 
 ## Control plane
 
@@ -446,6 +446,8 @@ blocks of the volume and the memory image, GPU device-seconds while attached.
   `/dev/userfaultfd` with no ACL or sysctl change. Revisit this if the agent ever drops root.
 - Image rollout: hosts build a template for a new `imageId` and clone new VMs from it; boxes move to the new image when
   they next park and resume. Reports carry `imageId`, so the control plane can drain old images.
+- Going live: the ordered runbook for the first production host, `KESTREL_NEST_DOMAIN` and the Nest-only cutover is
+  [nest-rollout.md](nest-rollout.md).
 
 ## Testing
 
