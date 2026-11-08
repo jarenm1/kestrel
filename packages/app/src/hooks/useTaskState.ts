@@ -1,12 +1,11 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Message, Run, RunItems, Task } from "@cloudagents/protocol"
-import { openTaskEvents } from "@/api/events"
+import { openTaskEvents, reconnectDelay } from "@/api/events"
 import { keys, queries, storeTask, upsert } from "@/api/queries"
 import { threadErrors } from "./threadErrors"
 
 const MAX_LOG_LINES = 2000
-const RECONNECT_MS = 2000
 /** Items arrive far faster than the diff is worth fetching; one invalidation per window bounds that traffic. */
 const DIFF_INVALIDATE_MS = 3000
 
@@ -30,6 +29,12 @@ export function useTaskState(taskId: string) {
   const [disconnected, setDisconnected] = useState(false)
   const [generation, setGeneration] = useState(0)
   const [desktopOpens, setDesktopOpens] = useState(0)
+  // Consecutive failed connections back off; an open stream resets the count. Reconnecting resolves the thread's box
+  // again, which re-reads every box's thread list — an unbounded 2 s retry would storm the boxes of a dead thread.
+  const attempts = useRef(0)
+  useEffect(() => {
+    attempts.current = 0
+  }, [taskId])
 
   useEffect(() => {
     let active = true
@@ -61,6 +66,7 @@ export function useTaskState(taskId: string) {
 
     const close = openTaskEvents(taskId, {
       onOpen: () => {
+        attempts.current = 0
         setDisconnected(false)
         // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
         void queryClient.invalidateQueries({ queryKey: keys.task(taskId) })
@@ -118,7 +124,7 @@ export function useTaskState(taskId: string) {
       onClose: () => {
         if (!active) return
         setDisconnected(true)
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
+        retry = window.setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(attempts.current++))
       },
     })
 

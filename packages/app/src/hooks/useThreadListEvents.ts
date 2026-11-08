@@ -1,11 +1,9 @@
 import { useEffect, useRef } from "react"
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import type { Target } from "@/api/client"
-import { openUserEvents } from "@/api/events"
+import { openUserEvents, reconnectDelay } from "@/api/events"
 import { dropTask, keys, queries, storeTask } from "@/api/queries"
 import { observeTask, playTurnSound, type SeenTasks } from "@/lib/turnSound"
-
-const RECONNECT_MS = 2000
 
 /**
  * Keeps the thread list current from the thread list streams, one per box (Kestrel's and each user box): `task.updated`
@@ -34,16 +32,20 @@ export function useThreadListEvents(): void {
 }
 
 /**
- * Keeps one box's thread list stream open: reconnects 2 s after a close, and each (re)connect refetches the list.
- * Returns a function that stops it.
+ * Keeps one box's thread list stream open: reconnects after a close, backing off while it keeps failing (an open
+ * stream resets the count), and each (re)connect refetches the list. Returns a function that stops it.
  */
 function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): () => void {
   let active = true
   let retry: number | undefined
+  let attempts = 0
   let close = () => {}
   const connect = () => {
     close = openUserEvents(target, {
-      onOpen: () => void queryClient.invalidateQueries({ queryKey: keys.tasks }),
+      onOpen: () => {
+        attempts = 0
+        void queryClient.invalidateQueries({ queryKey: keys.tasks })
+      },
       onEvent: (event) => {
         switch (event._tag) {
           case "task.updated":
@@ -57,7 +59,7 @@ function followBox(queryClient: QueryClient, target: Target, seen: SeenTasks): (
         }
       },
       onClose: () => {
-        if (active) retry = window.setTimeout(connect, RECONNECT_MS)
+        if (active) retry = window.setTimeout(connect, reconnectDelay(attempts++))
       },
     })
   }

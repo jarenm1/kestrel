@@ -280,6 +280,26 @@ describe("thread reads across the user's boxes", () => {
     expect((await api.listTasks()).map((t) => t.id)).toEqual(["user-thread"])
   })
 
+  test("a thread whose box left the list reads as gone, not merely not found", async () => {
+    const removed = entryFor("removed-box-2", "https://removed-2.test")
+    let current = { boxes: [BYOB_ENTRY, removed], activeBoxId: BOX_ID }
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json(current)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(BOX_ID)}`) return tokenFor(BOX)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(removed.id)}`) return tokenFor(removed.url)
+      if (url === `${BOX}${Paths.tasks}`) return json([taskFor("user-thread-2")])
+      if (url === `${removed.url}${Paths.tasks}`) return json([taskFor("removed-thread-2")])
+      return undefined
+    })
+    await api.listTasks()
+
+    current = { ...current, boxes: [BYOB_ENTRY] }
+    await api.listTasks()
+
+    await expect(api.getTask("removed-thread-2")).rejects.toThrow("The box this thread lived on is gone")
+    await expect(api.getTask("never-seen")).rejects.toThrow("Thread not found")
+  })
+
   test("a box that answers after another is listed by that same read", async () => {
     const healthy = entryFor("healthy-box-5", "https://healthy-5.test")
     const late = entryFor("late-box", "https://late.test")

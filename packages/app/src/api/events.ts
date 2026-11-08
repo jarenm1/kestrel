@@ -9,6 +9,20 @@ import {
 } from "@cloudagents/protocol"
 import { socketUrl, taskTarget, type Target } from "@/api/client"
 
+/** The first reconnect wait after a stream closes. */
+export const RECONNECT_MS = 2000
+/** The longest reconnect wait: backoff caps at one attempt a minute. */
+export const RECONNECT_MAX_MS = 60_000
+
+/**
+ * The wait before reconnect attempt `attempts` (0-based): RECONNECT_MS, doubling to RECONNECT_MAX_MS. Resolving a
+ * stream's URL can re-read every box's thread list, so a dead target must not be retried every couple of seconds
+ * forever — but a capped retry still catches a box that comes back.
+ */
+export function reconnectDelay(attempts: number): number {
+  return Math.min(RECONNECT_MS * 2 ** attempts, RECONNECT_MAX_MS)
+}
+
 function decodeText<A, I>(schema: Schema.Schema<A, I>, text: string): A | null {
   try {
     const result = Schema.decodeUnknownEither(schema)(JSON.parse(text))

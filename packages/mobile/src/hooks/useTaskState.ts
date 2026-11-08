@@ -1,13 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { Paths, type AgentItem, type DesktopStatus, type Message, type Run } from "@cloudagents/protocol";
-import { openTaskEvents } from "@/api/events";
+import { openTaskEvents, reconnectDelay } from "@/api/events";
 import { createQueries, boxKeys, storeTask, upsert } from "@/api/queries";
 import { useApiClient } from "@/hooks/useApiClient";
 import { threadErrors } from "@/hooks/threadErrors";
 
 const MAX_LOG_LINES = 2000;
-const RECONNECT_MS = 2000;
 
 /**
  * Task chat state: REST snapshots in the query cache, kept current by the task events WebSocket.
@@ -32,6 +31,11 @@ export function useTaskState(taskId: string) {
   const [disconnected, setDisconnected] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [desktopOpens, setDesktopOpens] = useState(0);
+  // Consecutive failed connections back off; an open stream resets the count.
+  const attempts = useRef(0);
+  useEffect(() => {
+    attempts.current = 0;
+  }, [taskId]);
 
   useEffect(() => {
     let active = true;
@@ -41,7 +45,7 @@ export function useTaskState(taskId: string) {
     const reconnect = () => {
       if (!active) return;
       setDisconnected(true);
-      retry = setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS);
+      retry = setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(attempts.current++));
     };
 
     // A box token that cannot be minted, or a socket that cannot be opened, reconnects like a dropped socket.
@@ -50,6 +54,7 @@ export function useTaskState(taskId: string) {
       if (!active) return;
       close = openTaskEvents(url, {
         onOpen: () => {
+          attempts.current = 0;
           setDisconnected(false);
           // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
           void queryClient.invalidateQueries({ queryKey: keys.task(taskId) });

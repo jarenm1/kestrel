@@ -10,7 +10,7 @@ import {
 } from "react"
 import { Maximize2, Minimize2, Volume2, VolumeX } from "lucide-react"
 import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
-import type { DesktopSource } from "@/api/events"
+import { reconnectDelay, type DesktopSource } from "@/api/events"
 import { Button } from "@cloudagents/ui/button"
 import { DesktopConnectionDetails } from "@/components/DesktopConnectionDetails"
 import type { RtcDiagnostics } from "@/desktop/diagnostics"
@@ -45,9 +45,6 @@ import type { RtcState, RtcStats } from "@/desktop/webrtc"
 
 /** Until the first status arrives the box assumes the usual 16:9 desktop. */
 const DEFAULT_ASPECT = 16 / 9
-
-/** After a connection ends, the next attempt waits this long. The WebRTC layer applies its own backoff on top. */
-const RECONNECT_MS = 2000
 
 /** A zero-width character the hidden input always holds, so a Backspace on an empty field is still an input event. */
 const SENTINEL = "\u200b"
@@ -210,14 +207,22 @@ export function DesktopScreen({
     statusRef.current = status
   })
 
-  // Each connection is a billed relay request, so a null source stays disconnected. A closed connection retries after
-  // RECONNECT_MS, but only while the parent still wants it: setting the source to null cancels the retry.
+  // Each connection is a billed relay request, so a null source stays disconnected. A closed connection retries with
+  // backoff — resolving a task source re-reads every box's thread list, so a dead thread must not retry every couple
+  // of seconds — but only while the parent still wants it: setting the source to null cancels the retry.
+  const attempts = useRef(0)
+  useEffect(() => {
+    attempts.current = 0
+  }, [source])
   useEffect(() => {
     const video = videoRef.current
     if (!video || source === null) return
     let retry: number | undefined
     const session = startDesktopSession(source, video, {
-      onStatus: (s) => callbacks.current.onStatus(s),
+      onStatus: (s) => {
+        attempts.current = 0
+        callbacks.current.onStatus(s)
+      },
       onRtc: setRtc,
       onStats: (s) => callbacks.current.onStats(s),
       onAudio: setAudio,
@@ -225,7 +230,7 @@ export function DesktopScreen({
       onClose: (close) => {
         callbacks.current.onStats(null)
         callbacks.current.onClose(close)
-        retry = window.setTimeout(() => setGeneration((g) => g + 1), RECONNECT_MS)
+        retry = window.setTimeout(() => setGeneration((g) => g + 1), reconnectDelay(attempts.current++))
       },
     })
     sessionRef.current = session

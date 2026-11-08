@@ -174,7 +174,8 @@ let known: BoxList | undefined
 
 /**
  * The box each thread lives on, by thread id. Filled by the thread lists and by `createTask`. A thread missing
- * from it is found by reading every box's thread list again.
+ * from it is found by reading every box's thread list again. A thread whose box left the list keeps its last
+ * route, so a lookup can still say the box is gone rather than merely that the thread was not found.
  */
 const taskBoxes = new Map<string, string>()
 
@@ -398,8 +399,12 @@ export async function taskTarget(taskId: string): Promise<Target> {
   await listAllTasks()
   const boxId = taskBoxes.get(taskId)
   const target = boxId === undefined ? undefined : routeOf(boxId)
-  if (target === undefined) throw new ApiError(404, "Thread not found")
-  return target
+  if (target !== undefined) return target
+  // A thread whose box left the list went away with the box (deleted or lost), which reads differently from a thread
+  // no box has ever reported. A box that is merely unreachable keeps its route, so this cannot claim "gone" for one.
+  const owner = boxId ?? cached
+  const gone = owner !== undefined && known?.boxes.every((box) => box.id !== owner) === true
+  throw new ApiError(404, gone ? "The box this thread lived on is gone" : "Thread not found")
 }
 
 let listing: Promise<Task[]> | undefined
@@ -487,12 +492,11 @@ function settleRound(reads: readonly { readonly key: BoxKey; readonly read: Prom
 
 /**
  * The threads of the boxes in `keys`, from what each last answered, recording which box owns each one. A box that is
- * no longer in the list drops its threads and their routes.
+ * no longer in the list drops its threads but keeps their routes: `taskTarget` reports the box as gone for them.
  */
 function threadsNow(keys: readonly BoxKey[]): Task[] {
   const current = new Set(keys)
   for (const key of threadsOf.keys()) if (!current.has(key)) threadsOf.delete(key)
-  for (const [id, owner] of taskBoxes) if (!current.has(owner)) taskBoxes.delete(id)
   const merged: Task[] = []
   for (const key of keys) {
     for (const task of threadsOf.get(key)?.tasks ?? []) {
