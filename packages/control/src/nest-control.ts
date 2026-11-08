@@ -119,6 +119,12 @@ export const enrollTokenHash = async (token: string): Promise<string> => {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
 }
 
+/**
+ * How many times a park or destroy the host refused for a lapse is sent again, one per lease renewal. A refusal runs
+ * nothing, so a resend cannot repeat a side effect; the bound stops a host whose clock keeps it lapsed from looping.
+ */
+export const MAX_LAPSE_RETRIES = 3
+
 /** The owner's view of a box's VM. A `create` in flight is not shown as pending: the box is already `provisioning`. */
 export const nestStatusOf = (row: NestBoxRow): NestBoxStatus => ({
   state: row.state,

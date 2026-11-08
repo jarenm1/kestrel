@@ -5,6 +5,7 @@
  */
 import {
   NEST_ENROLL_TOKEN_TTL_MS,
+  NEST_LAPSE_REFUSAL,
   NEST_LEASE_MS,
   type NestBoxStatus,
   type NestControlFrame,
@@ -20,6 +21,7 @@ import { safeEqual } from "./http"
 import type { FleetSql } from "./fleet-table"
 import { listMeterHosts } from "./meter-table"
 import {
+  MAX_LAPSE_RETRIES,
   commandTimeoutMs,
   decideVm,
   enrollTokenHash,
@@ -124,6 +126,7 @@ export class NestFleet {
     this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
+    this.redispatchOwed(frame.hostId)
     await this.wakeWanted()
   }
 
@@ -150,6 +153,7 @@ export class NestFleet {
     if (host === null) return
     upsertNestHost(this.sql, { ...host, capacity, lastSeenAt: new Date(this.clock()).toISOString() })
     this.link.send(hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
+    this.redispatchOwed(hostId)
     await this.wakeWanted()
   }
 
@@ -193,6 +197,7 @@ export class NestFleet {
     this.clearPending(row)
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
     if (kind === "create") row.createFailed = !ok
+    if (kind === "park" || kind === "destroy") this.noteRetry(row, kind, ok, error)
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
@@ -326,6 +331,8 @@ export class NestFleet {
       pendingCommand: null,
       pendingDeadline: null,
       createFailed: false,
+      retryKind: null,
+      retryCount: 0,
     }
     insertNestBox(this.sql, row)
     const command: NestHostCommand = {
@@ -470,6 +477,8 @@ export class NestFleet {
     row.pendingCommand = storedFormOf(command)
     row.pendingDeadline = timeout === null ? null : this.clock() + timeout
     row.wakeWanted = false
+    // A newer command replaces a park or destroy owed a resend: that one must not go out again later.
+    row.retryKind = null
     saveNestBox(this.sql, row)
     return true
   }
@@ -497,6 +506,46 @@ export class NestFleet {
         ? { ...stored, enrollToken: enrollToken ?? newSecret() }
         : { ...stored, enrollToken }
     this.link.send(hostId, { _tag: "command", commandId: pendingId, command })
+  }
+
+  /**
+   * A park or destroy the host refused for a lapse ran nothing, so it is owed a resend at the host's next lease renewal,
+   * up to `MAX_LAPSE_RETRIES` in a row. Any other outcome ends the run. When the bound is reached the owed command is
+   * dropped and the event is logged; the owner's next request starts a fresh run.
+   */
+  private noteRetry(row: NestBoxRow, kind: "park" | "destroy", ok: boolean, error: string | null): void {
+    if (ok || error !== NEST_LAPSE_REFUSAL) {
+      row.retryCount = 0
+      return
+    }
+    if (row.retryCount >= MAX_LAPSE_RETRIES) {
+      console.warn(`nest: ${kind} for ${row.boxId} was refused for a lapse ${row.retryCount} times; not sending it again`)
+      row.retryCount = 0
+      return
+    }
+    row.retryKind = kind
+    row.retryCount += 1
+  }
+
+  /** Sends each park or destroy owed a resend to `hostId`. Called after the lease, so the resend arrives on a valid lease. */
+  private redispatchOwed(hostId: string): void {
+    for (const row of nestBoxesOnHost(this.sql, hostId)) {
+      const kind = row.retryKind
+      if (kind === null || row.pendingId !== null) continue
+      row.retryKind = null
+      if (kind === "park" && row.state !== "running" && row.state !== "suspended") {
+        saveNestBox(this.sql, row)
+        continue
+      }
+      const command: NestHostCommand =
+        kind === "park"
+          ? { _tag: "park", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
+          : { _tag: "destroy", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
+      if (!this.dispatch(row, command)) {
+        row.retryKind = kind
+        saveNestBox(this.sql, row)
+      }
+    }
   }
 
   private clearPending(row: NestBoxRow): void {
