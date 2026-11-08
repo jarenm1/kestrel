@@ -126,7 +126,7 @@ export class NestFleet {
     this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
-    this.redispatchOwed(frame.hostId)
+    await this.redispatchOwed(frame.hostId)
     await this.wakeWanted()
   }
 
@@ -156,7 +156,7 @@ export class NestFleet {
     if (host === null) return
     upsertNestHost(this.sql, { ...host, capacity, lastSeenAt: new Date(this.clock()).toISOString() })
     this.link.send(hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
-    this.redispatchOwed(hostId)
+    await this.redispatchOwed(hostId)
     await this.wakeWanted()
   }
 
@@ -200,8 +200,9 @@ export class NestFleet {
     const kind = row.pendingKind
     this.clearPending(row)
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
-    if (kind === "create") row.createFailed = !ok
-    if (kind === "park" || kind === "destroy") this.noteRetry(row, kind, ok, error)
+    const owed = kind === "create" || kind === "park" || kind === "destroy" ? this.noteRetry(row, kind, ok, error) : false
+    // A create refused for a lapse ran nothing, so it is owed a resend and the box is not failed yet.
+    if (kind === "create" && !owed) row.createFailed = !ok
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
@@ -534,25 +535,33 @@ export class NestFleet {
    * up to `MAX_LAPSE_RETRIES` in a row. Any other outcome ends the run. When the bound is reached the owed command is
    * dropped and the event is logged; the owner's next request starts a fresh run.
    */
-  private noteRetry(row: NestBoxRow, kind: "park" | "destroy", ok: boolean, error: string | null): void {
+  private noteRetry(row: NestBoxRow, kind: "create" | "park" | "destroy", ok: boolean, error: string | null): boolean {
     if (ok || error !== NEST_LAPSE_REFUSAL) {
       row.retryCount = 0
-      return
+      return false
     }
     if (row.retryCount >= MAX_LAPSE_RETRIES) {
       console.warn(`nest: ${kind} for ${row.boxId} was refused for a lapse ${row.retryCount} times; not sending it again`)
       row.retryCount = 0
-      return
+      return false
     }
     row.retryKind = kind
     row.retryCount += 1
+    return true
   }
 
-  /** Sends each park or destroy owed a resend to `hostId`. Called after the lease, so the resend arrives on a valid lease. */
-  private redispatchOwed(hostId: string): void {
+  /**
+   * Sends each command owed a resend to `hostId`: a park, a destroy, or a create. Called after the lease, so each resend
+   * arrives on a valid lease.
+   */
+  private async redispatchOwed(hostId: string): Promise<void> {
     for (const row of nestBoxesOnHost(this.sql, hostId)) {
       const kind = row.retryKind
       if (kind === null || row.pendingId !== null) continue
+      if (kind === "create") {
+        await this.redispatchCreate(row.boxId)
+        continue
+      }
       row.retryKind = null
       if (kind === "park" && row.state !== "running" && row.state !== "suspended") {
         saveNestBox(this.sql, row)
@@ -566,6 +575,32 @@ export class NestFleet {
         row.retryKind = kind
         saveNestBox(this.sql, row)
       }
+    }
+  }
+
+  /**
+   * Sends a create owed a resend. It carries a fresh enrollment token, as a resend of a create always does, and the box
+   * is re-read after the await: a newer request or a result that landed meanwhile wins.
+   */
+  private async redispatchCreate(boxId: string): Promise<void> {
+    const minted = await this.tokenFor(boxId)
+    const row = nestBox(this.sql, boxId)
+    if (row === null || row.retryKind !== "create" || row.pendingId !== null || row.hostId === null) return
+    const enrollToken = this.adoptToken(row, minted)
+    const command: NestHostCommand = {
+      _tag: "create",
+      boxId,
+      userId: row.login,
+      vmId: row.vmId,
+      ownerEpoch: row.ownerEpoch,
+      limits: row.limits,
+      publicUrl: this.boxUrl(boxId),
+      enrollToken: enrollToken ?? newSecret(),
+    }
+    row.retryKind = null
+    if (!this.dispatch(row, command)) {
+      row.retryKind = "create"
+      saveNestBox(this.sql, row)
     }
   }
 

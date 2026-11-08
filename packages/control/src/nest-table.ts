@@ -79,8 +79,8 @@ export type NestBoxRow = {
   pendingDeadline: number | null
   /** The create command failed or timed out: the box has no VM and needs the owner to delete it. */
   createFailed: boolean
-  /** A park or destroy the host refused for a lapse, owed a resend at the next lease renewal; null when nothing is owed. */
-  retryKind: "park" | "destroy" | null
+  /** A create, park or destroy the host refused for a lapse, owed a resend at the next lease renewal; null when none is owed. */
+  retryKind: "create" | "park" | "destroy" | null
   /** Lapse refusals in a row for the owed command; reset by a command that ran. */
   retryCount: number
 }

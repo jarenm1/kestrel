@@ -757,6 +757,58 @@ describe("a park or destroy the host refused for a lapse", () => {
   })
 })
 
+describe("a create the host refused for a lapse", () => {
+  const creates = (before: number) =>
+    sent
+      .slice(before)
+      .filter((entry) => entry.hostId === "host-a" && entry.frame._tag === "command")
+      .map((entry) => (entry.frame as { command: NestHostCommand }).command)
+      .filter((command) => command._tag === "create")
+
+  test("is sent again on the next lease renewal, and the box is not failed", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const first = lastCommand("host-a", "create")
+    fleet.result("host-a", first.commandId, false, NEST_LAPSE_REFUSAL, undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(false)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    const resend = creates(before)
+    expect(resend).toHaveLength(1)
+    expect(resend[0]).toMatchObject({ _tag: "create", boxId: "box-1", ownerEpoch: 1 })
+    expect(lastCommand("host-a", "create").commandId).not.toBe(first.commandId)
+  })
+
+  test("fails the box once the bound is reached", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    let id = lastCommand("host-a", "create").commandId
+    for (let attempt = 1; attempt <= MAX_LAPSE_RETRIES; attempt++) {
+      fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, undefined)
+      await fleet.capacity("host-a", capacityOf(8))
+      id = lastCommand("host-a", "create").commandId
+    }
+    fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(true)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(creates(before)).toHaveLength(0)
+  })
+
+  test("a create refused for another reason fails the box at once, and is not sent again", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    fleet.result("host-a", lastCommand("host-a", "create").commandId, false, "disk full", undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(true)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(creates(before)).toHaveLength(0)
+  })
+})
+
 describe("leases", () => {
   test("a hello and a capacity report each renew the host's lease", async () => {
     await hello("host-a")
