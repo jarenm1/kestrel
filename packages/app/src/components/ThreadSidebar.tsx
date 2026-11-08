@@ -19,6 +19,7 @@ import { ThreadAvatar } from "@/components/ThreadAvatar"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
+import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
 import { cn } from "@/lib/utils"
@@ -117,13 +118,17 @@ interface Props {
 /**
  * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
  * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
- * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it.
+ * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it. On wide
+ * screens the strip slides between the two widths while the list and the rail crossfade.
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
   const { archive } = useThreadArchive()
+  const animated = useSidebarAnimation()
+  // The list and the rail swap through `SidebarMotion`'s `AnimatePresence`; on narrow screens they swap at once.
+  const swap = animated ? FADE : { ...FADE, transition: INSTANT }
   const [dockCollapsed, setDockCollapsed] = useState(() => localStorage.getItem(DOCK_COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (dockCollapsed) localStorage.setItem(DOCK_COLLAPSED_KEY, "1")
@@ -190,8 +195,8 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
 
   if (collapsed) {
     return (
-      <SidebarMotion>
-        <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
+      <SidebarMotion collapsed>
+        <motion.div key="rail" {...swap} className="absolute inset-y-0 left-0 flex w-12 flex-col gap-1 pb-3 pl-2">
           <BrandToggle label="Expand threads" Icon={PanelLeftOpen} onClick={onExpand} className="self-center" />
           <motion.nav
             layoutScroll
@@ -243,14 +248,14 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
             )}
           </AnimatePresence>
           <AccountMenu compact />
-        </div>
+        </motion.div>
       </SidebarMotion>
     )
   }
 
   return (
-    <SidebarMotion>
-      <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
+    <SidebarMotion collapsed={false}>
+      <motion.div key="list" {...swap} className="absolute inset-y-0 left-0 flex w-64 flex-col pb-3 pl-3">
         <div className="flex items-center gap-2 pb-2 pl-1.5">
           <BrandToggle label="Collapse threads" Icon={PanelLeftClose} onClick={onCollapse} />
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
@@ -324,7 +329,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
         <div className="pt-2 pr-3">
           <AccountMenu />
         </div>
-      </div>
+      </motion.div>
     </SidebarMotion>
   )
 }
@@ -381,17 +386,35 @@ const REVEAL = {
   exit: { height: 0, opacity: 0 },
 } as const
 const SPRING = { type: "spring", bounce: 0, duration: 0.3 } as const
+const INSTANT = { duration: 0 } as const
+/** Widths of the collapsed rail (`w-12`) and the expanded list (`w-64`). */
+const RAIL_WIDTH = 48
+const LIST_WIDTH = 256
 
 /**
  * Shares one `LayoutGroup` across the list, the dock and the rail, so a thread whose run starts or ends slides
  * between them (rows carry a `layoutId`) instead of vanishing from one and appearing in the other. Users who ask
  * for reduced motion get the end state at once.
+ *
+ * Both branches of `ThreadSidebar` render it at the same place, so it survives collapsing and expanding: its width
+ * slides between the rail and the list (wide screens only) and its `AnimatePresence` keeps the leaving one, pinned
+ * to the left edge and clipped, while it fades out.
  */
-function SidebarMotion({ children }: { children: ReactNode }) {
+function SidebarMotion({ collapsed, children }: { collapsed: boolean; children: ReactNode }) {
   const reduce = useReducedMotion()
+  const animated = useSidebarAnimation()
   return (
-    <MotionConfig transition={reduce ? { duration: 0 } : SPRING}>
-      <LayoutGroup>{children}</LayoutGroup>
+    <MotionConfig transition={reduce ? INSTANT : SPRING}>
+      <LayoutGroup>
+        <motion.div
+          initial={false}
+          animate={{ width: collapsed ? RAIL_WIDTH : LIST_WIDTH }}
+          transition={animated ? undefined : INSTANT}
+          className="relative shrink-0 overflow-hidden"
+        >
+          <AnimatePresence initial={false}>{children}</AnimatePresence>
+        </motion.div>
+      </LayoutGroup>
     </MotionConfig>
   )
 }
