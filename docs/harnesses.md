@@ -65,8 +65,9 @@ Compatibility sources: [OpenCode providers](https://opencode.ai/docs/providers/)
 Page-based subscription sign-ins support multiple accounts per provider. In Connections, **+** repeats the provider's
 normal sign-in in a fresh login home; the signed-in identity menu selects the account for subsequent runs, model
 discovery and quota reads. Switching does not change a run already in progress. **Disconnect** lists the accounts
-and removes only the chosen login. The status pill reads **N connected** only above one account. API-key rows remain
-single-key connections. This follows [T3 Code's explicit account-switching approach](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts),
+and removes only the chosen login. The description reads **Signed in as name@example.com +N more** when multiple
+accounts are connected, where N excludes the displayed active account. The status pill reads **N connected** only
+above one account. API-key rows remain single-key connections. This follows [T3 Code's explicit account-switching approach](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts),
 without automatic quota rotation. **Cancel** stops the pending sign-in on the box as well as clearing the form, so an
 approval completed on the provider's page afterwards cannot silently add an account.
 
@@ -75,6 +76,13 @@ connected. On older boxes that omit the pending account id, polling requires a n
 signed-in identity; a successful pasted-code submission also closes the panel. An unchanged legacy identity cannot
 prove that a device-code attempt finished, so its panel stays open until canceled or expired. Older boxes retain
 their single-account sign-in behavior; the client cannot provide account isolation on their behalf.
+
+Subscription identities come from the CLI's own account: Claude's status JSON, Codex's stored ID token,
+Antigravity's ID token (or Google's userinfo endpoint for older access-token-only logins), OpenCode's active
+Console credential metadata in its box-local database, and Devin's status email. OpenCode's database is opened
+read-only and only the email is selected, preserving support for 2.0.7 without requiring 2.1's credential export.
+Unavailable or invalid identities remain **Signed in**; a failed Google identity lookup does not disconnect
+the account. Credential tokens and keys stay on the box.
 
 Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<accountId>` and its provider's
 credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;

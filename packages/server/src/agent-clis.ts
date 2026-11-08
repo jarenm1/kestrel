@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { Effect } from "effect"
 import {
   CliProvider,
@@ -106,15 +107,34 @@ const codexAccount = (text: string): string | null => {
   return email ?? agentIdentityEmail(parsed.agent_identity)
 }
 
-/** Antigravity's credential document (`id_token` is an OIDC JWT for consumer and enterprise Google logins). */
-const antigravityAccount = (text: string): string | null => {
+/** Older Antigravity logins omit `id_token`; Google userinfo identifies their stored access token. */
+const antigravityAccount = (text: string): string | null | Promise<string | null> => {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
     return null
   }
-  return isRecord(parsed) ? jwtEmail(parsed.id_token) : null
+  if (!isRecord(parsed)) return null
+  const email = jwtEmail(parsed.id_token)
+  if (email !== null) return email
+  if (!isRecord(parsed.token) || typeof parsed.token.access_token !== "string" || parsed.token.access_token === "") return null
+  const accessToken = parsed.token.access_token
+  return (async () => {
+    try {
+      const response = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(3_000),
+        redirect: "error",
+      })
+      if (!response.ok) return null
+      const user: unknown = await response.json()
+      return isRecord(user) ? accountEmail(user.email) : null
+    } catch {
+      // Identity lookup failing must not disconnect an otherwise valid CLI login.
+      return null
+    }
+  })()
 }
 
 /** The CLI's own sign-in, which the user finishes on the provider's page. */
@@ -163,7 +183,10 @@ export interface AgentCli<K extends CliSignIn = CliSignIn> {
    * The signed-in account's email in the CLI's own stored login (a file under the login directory), read only once
    * `status` says the user is signed in. Null when the CLI stores no identity; it never yields a token, key or method.
    */
-  readonly identity: { readonly path: string; readonly parse: (text: string) => string | null } | null
+  readonly identity:
+    | { readonly path: string; readonly parse: (text: string) => string | null | Promise<string | null> }
+    | { readonly path: string; readonly read: (path: string) => string | null }
+    | null
   readonly signIn: K extends "page" ? PageSignIn : KeySignIn
   /** Revokes the login before its directory is removed; null when removing the directory is the whole sign-out. */
   readonly logout: ReadonlyArray<string> | null
@@ -216,7 +239,8 @@ const parseDevinStatus = (out: CliOutput): Effect.Effect<CliAuthStatus, Internal
     const text = `${out.stdout}\n${out.stderr}`
     if (/^Not logged in\.$/m.test(text)) return { provider: "devin-cli", loggedIn: false, account: null }
     if (/^Logged in \(via [^)\r\n]+\)/m.test(text) && !/^Failed to load credentials:/m.test(text)) {
-      return { provider: "devin-cli", loggedIn: true, account: null }
+      const email = /^[ \t]*Email:[ \t]*([^\r\n]+)$/m.exec(text)?.[1]
+      return { provider: "devin-cli", loggedIn: true, account: accountEmail(email) }
     }
     return yield* Effect.fail(new InternalError({ message: "devin auth status: unexpected output" }))
   })
@@ -244,6 +268,19 @@ const parseOpenCodeStatus =
         typeof integration === "object" && integration !== null && "connections" in integration ? integration.connections : null
       return { provider, loggedIn: Array.isArray(connections) && connections.length > 0, account: null }
     })
+
+/** Read only the active Console email, not the credential value. `auth export` requires OpenCode 2.1. */
+const openCodeAccount = (path: string): string | null => {
+  const db = new Database(path, { readonly: true })
+  try {
+    const row = db.query<{ email: unknown }, []>(
+      "SELECT json_extract(value, '$.metadata.email') AS email FROM credential WHERE integration_id = 'opencode' ORDER BY active DESC, time_created DESC, id DESC LIMIT 1",
+    ).get()
+    return accountEmail(row?.email)
+  } finally {
+    db.close()
+  }
+}
 
 /**
  * `opencode auth login opencode --method device --standalone` prints clack's decorated `Enter code: …` line, then the
@@ -366,7 +403,7 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
     configEnv: "XDG_DATA_HOME",
     brokerEnv: [],
     status: { kind: "command", args: ["auth", "list", "--format", "json", "--standalone"], parse: parseOpenCodeStatus(OPENCODE, "opencode") },
-    identity: null,
+    identity: { path: "opencode/opencode.db", read: openCodeAccount },
     signIn: {
       kind: "page",
       // The explicit integration and method are what let the CLI run without an interactive terminal.
@@ -404,8 +441,8 @@ export const AGENT_CLIS: { readonly [P in CliProvider]: AgentCli<(typeof CLI_SIG
   },
   // Devin CLI keeps its API token (`devin/credentials.toml`) and its sessions under `$XDG_DATA_HOME`, like OpenCode, so
   // the shared variable names a directory of its own. The manual flow prints an app.devin.ai link whose page shows a
-  // code; the CLI reads it back only from a terminal and exits non-zero when the exchange fails. The credentials file
-  // names no account, and `/usage` and the commands are only offered inside a session.
+  // code; the CLI reads it back only from a terminal and exits non-zero when the exchange fails. `auth status`
+  // reports its account email; `/usage` and commands are only offered inside a session.
   "devin-cli": {
     bin: "devin",
     dir: "devin",

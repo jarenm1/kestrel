@@ -95,21 +95,15 @@ export const cliAccountHome = (userRoot: string, accountId: string): string =>
  * may include tokens, are parsed in memory and never returned or logged.
  */
 const readAccountLabel = (dir: string, identity: AgentCli["identity"]): Effect.Effect<string | null> =>
-  Effect.gen(function* () {
+  Effect.promise(async () => {
     if (identity === null) return null
-    const text = yield* Effect.promise(async () => {
-      try {
-        const path = join(dir, identity.path)
-        const info = await lstat(path)
-        if (!info.isFile() || info.size > ACCOUNT_FILE_MAX) return null
-        return await readFile(path, "utf8")
-      } catch {
-        return null
-      }
-    })
-    if (text === null) return null
     try {
-      const label = identity.parse(text)
+      const path = join(dir, identity.path)
+      const info = await lstat(path)
+      if (!info.isFile()) return null
+      if ("read" in identity) return identity.read(path)
+      if (info.size > ACCOUNT_FILE_MAX) return null
+      const label = await identity.parse(await readFile(path, "utf8"))
       return label === null || label === "" ? null : label
     } catch {
       return null

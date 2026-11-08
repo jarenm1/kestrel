@@ -416,6 +416,22 @@ function invalidateConnections(queryClient: QueryClient) {
   return connections
 }
 
+/**
+ * The active login, plus the number of other signed-in accounts when there are several, e.g.
+ * "Signed in as name@example.com +2 more". Older boxes report only `connection.account`.
+ */
+function accountDescription(
+  connection: Connection,
+  accounts: readonly { id: string; account: string | null }[],
+  activeAccountId: string | undefined,
+): string {
+  const account = accounts.find((candidate) => candidate.id === activeAccountId)?.account
+    ?? connection.account
+  if (!account) return "Signed in"
+  const others = accounts.length - 1
+  return `Signed in as ${account}${others > 0 ? ` +${others} more` : ""}`
+}
+
 /** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */
 function CliConnectionRow({ connection, provider }: { connection: Connection; provider: CliProvider }) {
   const queryClient = useQueryClient()
@@ -433,6 +449,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   const activeAccountId = connection.activeAccountId
     ?? accounts.find((account) => account.account === connection.account)?.id
     ?? accounts[0]?.id
+  const description = accountDescription(connection, accounts, activeAccountId)
   // The account a sign-in is adding; another login may already keep the connection connected.
   const pendingAccountId = login?.accountId
   const completed = login !== null && (pendingAccountId === undefined
@@ -617,7 +634,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
                   disabled={busy}
                   className="flex w-fit items-center gap-1 text-left text-muted-foreground hover:text-foreground"
                 >
-                  {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
+                  {description}
                   <ChevronDown className="size-3 opacity-60" />
                 </button>
               </DropdownMenuTrigger>
@@ -638,7 +655,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
             </DropdownMenu>
           ) : (
             <p className="text-muted-foreground">
-              {connection.account ? `Signed in as ${connection.account}` : "Signed in"}
+              {description}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-2">

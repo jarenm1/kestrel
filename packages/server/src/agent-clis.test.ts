@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { Database } from "bun:sqlite"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Effect } from "effect"
 import { AGENT_CLIS, MODEL_HARNESS } from "./agent-clis"
 
@@ -13,7 +17,7 @@ const codexStatus = (text: string) => {
 
 const identityParser = (provider: "codex-cli" | "antigravity-cli") => {
   const identity = AGENT_CLIS[provider].identity
-  if (identity === null) throw new Error(`${provider} has no stored identity`)
+  if (identity === null || !("parse" in identity)) throw new Error(`${provider} has no stored identity parser`)
   return identity.parse
 }
 
@@ -61,6 +65,32 @@ describe("OpenCode Console login", () => {
     ])
     expect(openCodeStatus("opencode", both)).toEqual({ provider: "opencode", loggedIn: true, account: null })
     expect(openCodeStatus("opencode-go", both)).toEqual({ provider: "opencode-go", loggedIn: false, account: null })
+  })
+
+  test("Console reads only its active account's email from its own database, never labels or tokens", () => {
+    const identity = AGENT_CLIS.opencode.identity
+    if (identity === null || !("read" in identity)) throw new Error("Console has no database identity reader")
+    const root = mkdtempSync(join(tmpdir(), "kestrel-opencode-identity-"))
+    const file = join(root, "opencode.db")
+    const db = new Database(file)
+    try {
+      db.exec("CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, value TEXT, active INTEGER, time_created INTEGER)")
+      const insert = db.query("INSERT INTO credential VALUES (?, ?, ?, ?, ?, ?)")
+      insert.run("old", "opencode", "old-org", JSON.stringify({ metadata: { email: "old@example.com" } }), 0, 1)
+      insert.run("go", "opencode-go", "go-org", JSON.stringify({ metadata: { email: "go@example.com" } }), 1, 3)
+      insert.run("current", "opencode", "org", JSON.stringify({ access: "secret", metadata: { email: "console@example.com" } }), 1, 2)
+      expect(identity.read(file)).toBe("console@example.com")
+      db.exec("UPDATE credential SET active = CASE WHEN id = 'old' THEN 1 ELSE 0 END WHERE integration_id = 'opencode'")
+      expect(identity.read(file)).toBe("old@example.com")
+      db.query("UPDATE credential SET label = ?, value = ? WHERE id = 'old'")
+        .run("not-the-identity@example.com", JSON.stringify({ access: "secret", metadata: { email: "invalid\nemail@example.com" } }))
+      expect(identity.read(file)).toBeNull()
+      db.exec("DELETE FROM credential WHERE integration_id = 'opencode'")
+      expect(identity.read(file)).toBeNull()
+    } finally {
+      db.close()
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("takes clack's decorated complete code and link lines", () => {
@@ -145,10 +175,36 @@ describe("stored identities", () => {
 
   test("Antigravity stays signed in without identity when the token is old, malformed or names no user", () => {
     const parse = identityParser("antigravity-cli")
-    expect(parse(JSON.stringify({ token: { access_token: "secret" }, auth_method: "consumer" }))).toBeNull()
+    expect(parse(JSON.stringify({ token: {}, auth_method: "consumer" }))).toBeNull()
     expect(parse("not json")).toBeNull()
-    expect(parse(JSON.stringify({ token: { access_token: "secret" }, id_token: "not.a.jwt" }))).toBeNull()
+    expect(parse(JSON.stringify({ token: {}, id_token: "not.a.jwt" }))).toBeNull()
     expect(parse(JSON.stringify({ id_token: jwt({ email: "not-an-email" }) }))).toBeNull()
+  })
+
+  test("Antigravity resolves older access-token-only logins through Google without exposing credentials", async () => {
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ email: "legacy@example.com" }))
+    try {
+      expect(await identityParser("antigravity-cli")(JSON.stringify({ token: { access_token: "secret" } }))).toBe("legacy@example.com")
+      expect(request.mock.calls[0]?.[0]).toBe("https://www.googleapis.com/oauth2/v2/userinfo")
+      expect(request.mock.calls[0]?.[1]?.headers).toEqual({ Authorization: "Bearer secret" })
+    } finally {
+      request.mockRestore()
+    }
+  })
+
+  test("Antigravity identity failures do not expose response data or reject the login probe", async () => {
+    const request = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ email: "secret-token" }))
+    const credentials = JSON.stringify({ token: { access_token: "secret" } })
+    try {
+      const parse = identityParser("antigravity-cli")
+      expect(await parse(credentials)).toBeNull()
+      request.mockResolvedValue(new Response("secret", { status: 401 }))
+      expect(await parse(credentials)).toBeNull()
+      request.mockRejectedValue(new Error("network unavailable"))
+      expect(await parse(credentials)).toBeNull()
+    } finally {
+      request.mockRestore()
+    }
   })
 })
 
@@ -167,6 +223,16 @@ describe("Devin CLI login", () => {
     expect(parse("Logged in (via browser)\n")).toEqual({ provider: "devin-cli", loggedIn: true, account: null })
     expect(() => parse("Failed to load credentials: secret-token\n")).toThrow("devin auth status: unexpected output")
     expect(() => parse("unrecognised output\n")).toThrow("devin auth status: unexpected output")
+  })
+
+  test("reads the server-reported Devin email, not credential paths or API keys", () => {
+    const status = AGENT_CLIS["devin-cli"].status
+    if (status.kind !== "command") throw new Error("devin status is not a command")
+    const parse = (stdout: string) => Effect.runSync(status.parse({ stdout, stderr: "" }))
+    expect(parse("Logged in (via browser).\nCredentials:\n  File: /tmp/other@example.com\nUser:\n  Email: devin@example.com\n"))
+      .toEqual({ provider: "devin-cli", loggedIn: true, account: "devin@example.com" })
+    expect(parse("Logged in (via API key).\n  Email: secret-token\n").account).toBeNull()
+    expect(parse("Not logged in.\n  Email: stale@example.com\n").account).toBeNull()
   })
   const url =
     "https://app.devin.ai/auth/cli/continue?state=3be28d3b&prompt=select_account&code_challenge=RAH2Lr&code_challenge_method=S256&cli_pkce_marker=1"
