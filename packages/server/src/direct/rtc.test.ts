@@ -11,7 +11,6 @@ import {
   type RelayFrame,
 } from "@cloudagents/protocol"
 import type { WsServices } from "../http/streams"
-import type { BoxActivitySink } from "./box-activity"
 import { makeRtcServer } from "./rtc"
 
 /** Answers each request with the identity the channel carried, as the box's web handler sees it. */
@@ -63,10 +62,10 @@ class Browser {
 }
 
 /** One browser connection with its channel; the box answers the offer for `expiresAt` (epoch seconds). */
-async function dial(expiresAt: number, activity?: BoxActivitySink): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel }> {
+async function dial(expiresAt: number): Promise<{ pc: RTCPeerConnection; dc: RTCDataChannel }> {
   // The channel's streams are never opened here, so the runtime's services are unused.
   const runtime = Runtime.defaultRuntime as Runtime.Runtime<WsServices>
-  const server = makeRtcServer({ webHandler, runtime, activity })
+  const server = makeRtcServer({ webHandler, runtime })
   const pc = new RTCPeerConnection({ iceServers: [] })
   const dc = pc.createDataChannel(RTC_CHANNEL_LABEL)
   await pc.setLocalDescription(await pc.createOffer())
@@ -99,20 +98,4 @@ describe("direct channel", () => {
     await pc.close()
   })
 
-  test("each request on an open channel is activity, but a keepalive is not", async () => {
-    const logins: string[] = []
-    const { pc, dc } = await dial(nowSeconds() + 30, { record: (login) => void logins.push(login) })
-    await untilState(dc, "open")
-    const browser = new Browser(dc)
-
-    await browser.whoami()
-    expect(logins).toEqual(["alice"])
-
-    await browser.ping()
-    expect(logins).toEqual(["alice"])
-
-    await browser.whoami()
-    expect(logins).toEqual(["alice", "alice"])
-    await pc.close()
-  })
 })

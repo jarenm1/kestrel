@@ -11,7 +11,7 @@ import {
   type CliAuthStatus,
   type CliProvider,
   type ModelProvider,
-  type RelayCredentials,
+  type BoxCredentials,
 } from "@cloudagents/protocol"
 import { AGENT_CLIS, CLI_PROVIDERS } from "./agent-clis"
 import { credentialFor } from "./broker"
@@ -403,7 +403,7 @@ export const listProviderModels = (
   return source === undefined ? Effect.fail("unknown model provider") : source.list(apiKey, fetchImpl)
 }
 
-const credentialIdentity = (credentials: RelayCredentials | null): string => {
+const credentialIdentity = (credentials: BoxCredentials | null): string => {
   const providers = Object.entries(credentials?.providers ?? {})
     .filter(([, key]) => key !== "")
     .sort(([left], [right]) => left.localeCompare(right))
@@ -588,7 +588,7 @@ export const makeModelDiscovery = (
 
     const loadCatalog = (
       user: string,
-      credentials: RelayCredentials | null,
+      credentials: BoxCredentials | null,
       logins: ReadonlyArray<CliProvider>,
       uncertain: ReadonlySet<ModelProvider>,
       unavailable: ReadonlySet<CliProvider>,

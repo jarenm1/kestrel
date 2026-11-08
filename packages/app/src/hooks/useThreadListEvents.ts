@@ -23,13 +23,11 @@ export function useThreadListEvents(): void {
     if (turns.length > 0) playTurnSound()
   }, [tasks])
   const list = useQuery(queries.boxes()).data
-  const managed = list?.managedBox ?? null
   const boxes = list?.boxes
-  const boxSet = JSON.stringify([managed?.id, managed?.url, boxes?.map((box) => [box.id, box.url]) ?? []])
+  const boxSet = JSON.stringify(boxes?.map((box) => [box.id, box.url]) ?? [])
 
   useEffect(() => {
-    const kestrel: Target = managed === null ? null : { boxId: managed.id, url: managed.url }
-    const targets: Target[] = [kestrel, ...(boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))]
+    const targets: Target[] = (boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))
     const stops = targets.map((target) => followBox(queryClient, target, seen.current))
     return () => stops.forEach((stop) => stop())
   }, [boxSet, queryClient])

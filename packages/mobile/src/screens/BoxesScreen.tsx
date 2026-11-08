@@ -28,13 +28,6 @@ export function BoxesScreen() {
     >
       <View style={styles.body}>
         <Card style={styles.card}>
-          <BoxRow
-            name="Kestrel's box"
-            detail="Hosted by Kestrel"
-            active={activeBoxId === null}
-            disabled={switchBox.isPending}
-            onUse={() => switchBox.mutate(null)}
-          />
           {boxes.map((box) => (
             <View key={box.id} style={styles.divider}>
               <BoxRow

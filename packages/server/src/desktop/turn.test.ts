@@ -25,16 +25,12 @@ const settings = (overrides: Partial<WebRtcSettings> = {}): WebRtcSettings => ({
   ...overrides,
 })
 
-const config = (
-  direct: ServerConfig["direct"] = null,
-  relay: ServerConfig["relay"] = null,
-): ServerConfig => ({ direct, relay } as ServerConfig)
+const config = (direct: ServerConfig["direct"] = null): ServerConfig => ({ direct } as ServerConfig)
 
 const direct = (controlUrl: string): ServerConfig["direct"] => ({
   controlUrl,
   boxId: "box-1",
   boxSecret: "box-secret",
-  managed: false,
 })
 
 let servers: Array<{ stop: (force?: boolean) => void }> = []
@@ -75,16 +71,6 @@ describe("managedTurn", () => {
     // The box's own peer takes the same list, and knows the relay is the control plane's.
     expect(directViewer.managed).toBe(true)
 
-    const relayViewer = await sessionIceServers(
-      settings(),
-      managedTurn(config(null, { controlUrl, boxToken: "relay-token" })),
-      "thread-relay",
-      NOW_S,
-    )
-    expect(relayViewer.warning).toBeNull()
-    expect(relayViewer.iceServers).toEqual([...STUN, ...MANAGED])
-    expect(relayViewer.turn).toEqual({ source: "managed", status: "configured", failure: null, issue: null })
-    expect(relayViewer.managed).toBe(true)
   })
 
   test("a standalone box has no control-plane identity and keeps its own servers", async () => {

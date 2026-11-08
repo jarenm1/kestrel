@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
 import { storage } from "@/lib/storage";
-import type { BoxList, ManagedBox, Me, UserBox } from "@cloudagents/protocol";
+import type { BoxList, Me, UserBox } from "@cloudagents/protocol";
 import { createApiClient, type ActiveBox } from "@/api/client";
 import { fetchCredentials, hostOrigin } from "@/auth/session";
 
@@ -22,10 +22,9 @@ interface AuthState {
   user: Me | null;
   /** The user's own boxes (bring your own box); loaded with `/api/me` */
   boxes: readonly UserBox[];
-  /** The box the user's apps use; `null` is Kestrel's managed box */
+  /** The box the user's apps use; `null` when none is selected */
   activeBoxId: string | null;
-  /** Kestrel's managed box assigned to the user, reached directly; `null` when none is assigned (the relay serves Kestrel's box). */
-  managedBox: ManagedBox | null;
+
   /** Whether we're currently checking auth state */
   loading: boolean;
   /** Last auth error */
@@ -55,14 +54,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     error: null,
     boxes: [],
     activeBoxId: null,
-    managedBox: null,
   });
   const activeBox = useMemo(
-    () => resolveActiveBox(state.boxes, state.activeBoxId, state.managedBox),
-    [state.boxes, state.activeBoxId, state.managedBox]
+    () => resolveActiveBox(state.boxes, state.activeBoxId),
+    [state.boxes, state.activeBoxId]
   );
   const applyBoxList = useCallback((list: BoxList) => {
-    setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId, managedBox: list.managedBox }));
+    setState((s) => ({ ...s, boxes: list.boxes, activeBoxId: list.activeBoxId }));
   }, []);
 
   // Load saved server URL and session on mount
@@ -130,7 +128,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       sessionCookie: null,
       boxes: [],
       activeBoxId: null,
-      managedBox: null,
       user: null,
       error: null,
     }));
@@ -216,15 +213,14 @@ async function fetchMe(
 }
 
 /**
- * The box the apps' requests go to: the user's chosen box, or with no choice (`activeBoxId` null) their managed box.
- * `null` means no direct box applies and Kestrel's box is relayed through the control plane.
+ * The box the apps' requests go to: the user's chosen box. `null` when there is no active box — the control plane
+ * may still be provisioning one.
  */
 function resolveActiveBox(
   boxes: readonly UserBox[],
   activeBoxId: string | null,
-  managedBox: ManagedBox | null
 ): ActiveBox | null {
-  if (activeBoxId === null) return managedBox === null ? null : { id: managedBox.id, url: managedBox.url };
+  if (activeBoxId === null) return null;
   const box = boxes.find((b) => b.id === activeBoxId);
   return box === undefined ? null : { id: box.id, url: box.url };
 }

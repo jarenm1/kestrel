@@ -7,13 +7,13 @@ const worker = (await import("./index")).default
 
 const received: unknown[] = []
 const stub = {
-  managedBoxVerify: async (id: string, secret: string) => id === "managed" && secret === "managed-secret",
+  boxVerify: async (id: string, secret: string) => id === "box-1" && secret === "box-secret",
   recordToolFailures: async (report: unknown) => { received.push(report) },
   commonToolFailures: async (days: number) => ({ days, failures: [] }),
   session: async (id: string) => id === "operator" ? { login: "operator" } : id === "user" ? { login: "user" } : null,
 }
 const env = {
-  BOX_TOKEN: "relay-secret",
+  ALLOWED_GITHUB_LOGINS: "operator,user",
   KESTREL_OPERATORS: "operator",
   HUB: { idFromName: () => "main", get: () => stub },
 } as unknown as Env
@@ -21,18 +21,18 @@ const request = (path: string, init?: RequestInit) => worker.fetch(new Request(`
 const report = JSON.stringify({ failures: [{ tool: "Read", signature: "failed", count: 1 }] })
 
 describe("tool failure routes", () => {
-  test("accepts relay and managed credentials, rejects invalid credentials and bodies", async () => {
+  test("accepts a box's own credentials, rejects invalid credentials and bodies", async () => {
     received.length = 0
     const send = (headers: Record<string, string>, body = report) => request(ControlPaths.boxToolFailures, { method: "POST", headers, body })
-    expect((await send({ authorization: "Bearer relay-secret" })).status).toBe(204)
-    expect((await send({ authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "managed" })).status).toBe(204)
-    expect((await send({ authorization: "Bearer wrong", [BOX_ID_HEADER]: "managed" })).status).toBe(401)
-    expect((await send({ authorization: "Bearer managed-secret", [BOX_ID_HEADER]: "user-box" })).status).toBe(401)
-    expect((await send({ authorization: "Bearer relay-secret" }, "{}" )).status).toBe(400)
+    expect((await send({ authorization: "Bearer box-secret", [BOX_ID_HEADER]: "box-1" })).status).toBe(204)
+    expect((await send({ authorization: "Bearer box-secret" })).status).toBe(401)
+    expect((await send({ authorization: "Bearer wrong", [BOX_ID_HEADER]: "box-1" })).status).toBe(401)
+    expect((await send({ authorization: "Bearer box-secret", [BOX_ID_HEADER]: "other-box" })).status).toBe(401)
+    expect((await send({ authorization: "Bearer box-secret", [BOX_ID_HEADER]: "box-1" }, "{}" )).status).toBe(400)
     const oversized = JSON.stringify({ failures: Array.from({ length: 201 }, () => ({ tool: "Read", signature: "failed", count: 1 })) })
-    expect((await send({ authorization: "Bearer relay-secret" }, oversized)).status).toBe(400)
+    expect((await send({ authorization: "Bearer box-secret", [BOX_ID_HEADER]: "box-1" }, oversized)).status).toBe(400)
     expect((await request(ControlPaths.boxToolFailures)).status).toBe(405)
-    expect(received).toHaveLength(2)
+    expect(received).toHaveLength(1)
   })
 
   test("restricts the list to operators and validates the method and window", async () => {

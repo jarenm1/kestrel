@@ -100,9 +100,8 @@ from the config.
 
 - One Hub, one box: the Hub holds a single box socket (tag `"box"`, `hub.ts`); a new dial-in replaces the old one. This
   still holds for Kestrel's own box.
-- One shared `BOX_TOKEN` (`control/src/env.ts`, `index.ts`); no per-user box enrollment.
-- All app traffic goes browser → Worker → Hub → relay → box, including the desktop's status and WebRTC signaling. Desktop media does not: it goes between the box and each viewer over WebRTC, never through the Hub. Every relayed request is a Durable Object request, which we pay for.
-- The box learns the user only from relay headers (`BOX_USER_HEADER`); its own port serves no thread data.
+- Every box enrolls per user with its own secret: `kestrel-box login` pairs it to the account, and the Nest enrolls its VM itself.
+- All app traffic goes browser → box directly, with a one-hour box token the Worker mints. Desktop media goes between the box and each viewer over WebRTC.
 - Threads, subscription logins (`<CLOUDAGENTS_DATA_DIR>/users/<login>/{claude,codex}`) and repo mirrors live on the box.
 - The web app already separates `SERVER_URL` (API) from `APP_ORIGIN` (`/api/me`) but authenticates with cookies; the
   mobile app has a configurable `serverUrl` and sends an explicit session header.
@@ -121,7 +120,7 @@ flowchart LR
 
 - Sign-in and accounts stay on `app.kestrel-agent.com`.
 - Box registry: per-user boxes, each with an id, a public URL and a secret. Boxes are owned by one user, who picks the
-  active box their apps use. `null` means Kestrel's own box: its managed box when `BoxList.managedBox` is set, otherwise the legacy relay (see [box.md](box.md#managed-boxes-fleet)).
+  active box their apps use. `null` means no box is selected: a user with no boxes is provisioned a Nest box automatically.
 - Box tokens: short-lived (1 h) HS256 JWTs the control plane mints for the owner (claims: `sub` user, `aud` box id,
   `exp`, `cv` credentials version, `dev`), keyed by that box's secret (`packages/protocol/src/boxtoken.ts`). The box
   verifies them offline, so the control plane is not on the request path.
@@ -136,14 +135,14 @@ flowchart LR
   `Authorization: Bearer`, or `?access_token=` where no header can be set (WebSockets, `<img>`).
 - The box's own port authenticates every request: valid signature for its secret, its own box id in `aud`, not expired,
   `sub` is its owner. CORS stays open: bearer tokens are not ambient credentials.
-- The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries the same request frames the relay uses, in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
+- The web app opens a WebRTC data channel to each user box for the API and sends those calls over it when it is open: everything under `/api/*` except file uploads, the event stream, attachments and previews, which stay on HTTP. It posts an SDP offer to `POST /api/webrtc/offer` with the box token; the box answers, binds the caller's identity to that channel and carries the same request frames the WebSocket streams use, in 16 KiB fragments. A connection serves one such channel. The channel closes when the token it was opened with expires (at most `BOX_TOKEN_TTL_SECONDS`, one hour); until then the box does not re-check the token, so a revoked credential keeps its channel for up to that long, while HTTP calls are checked on every request. Calls fall back to HTTP until the channel opens, and when it cannot be made. A refused or dropped channel is retried after 60 s. Browsers hide host candidates behind mDNS `.local` names that the box cannot resolve, so same-LAN paths may fall back to HTTP.
 - Offline thread reads (a user's own box only): when the control plane is unreachable or answers 5xx, and the box holds no
   credentials for its owner (after a restart, its credential store is empty), a valid, unexpired box token is still
   served the owner's thread reads: `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/messages`. Every other
   request is refused with 503 `Unavailable`, including all writes, other GETs, WebSockets and `POST /api/webrtc/offer`.
   Those reads are marked `x-kestrel-box-offline: 1` (exposed through `access-control-expose-headers`, so the web app can read it), and the box logs a warning when it starts serving offline and an info
   line when the credentials return. Nothing is stored or written for the fallback. A control plane refusal (401/403), a
-  malformed answer, an invalid, expired or wrong-audience token, and a managed box never fall back; they fail as before.
+  malformed answer and an invalid, expired or wrong-audience token never fall back; they fail as before.
   Limitation: the control plane cannot be asked about revocation while offline, so a token minted before a logout or
   revocation stays readable on that box until its `exp`, at most one hour. Owner: while offline the box has no record of
   its owner, so it does not compare the token's subject with one. It trusts the subject because the token is signed with
@@ -159,12 +158,12 @@ flowchart LR
   which that box's request fails. Each box's thread list is cached as it last answered. A read
   returns once every box has answered, or once a box has answered (a failure counts) and a 1 s grace has passed, provided
   the read has threads to show: a thread list from some box, or cached threads for every box still pending. So a slow or
-  down box, Kestrel's managed box included, does not hold the others back, and a first load still waits for a box that
+  down box does not hold the others back, and a first load still waits for a box that
   can answer. A box still pending then keeps its last threads, and its one
   pending request is shared rather than repeated; its answer shows on the next read. A box that stops answering keeps its
   last threads. Writes to a thread still route to the box it lives on.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
-- Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
+- Automations fire on the user's active box, whichever kind that is.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.
@@ -209,7 +208,7 @@ shapes, the host layer and billing.
 4. Box control sockets: presence, capacity reports, automations on user boxes, provisioning edited from the app.
 5. Placement, with auto-overflow for subscribers and the upgrade prompt for everyone else.
 6. The Nest: host layer, VM shapes, metering and billing ([build order](goal-state.md#build-order)).
-7. Later: cross-box thread tools, moving a thread between boxes, a paid relay for boxes without a tunnel.
+7. Later: cross-box thread tools, moving a thread between boxes.
 
 ## Protocol impact
 

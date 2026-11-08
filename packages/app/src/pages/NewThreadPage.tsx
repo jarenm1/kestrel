@@ -63,7 +63,7 @@ export function NewThreadPage() {
         throw new Error("That box is offline. Pick another box or start it first.")
       } else {
         const target = repo === undefined ? {} : branch === undefined ? { pickedRepo: repo } : { checkout: { repo, baseBranch: branch } }
-        task = await api.createTask({ title, generateTitle: true, ...target }, boxId)
+        task = await api.createTask({ title, generateTitle: true, ...target }, boxId ?? undefined)
       }
       created.current = { task, repo, branch, boxId }
       // The thread exists from here on, even if the message below fails.

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createServer, request } from "node:http"
 import type { AddressInfo } from "node:net"
 import { Effect, Layer } from "effect"
-import type { RelayCredentials } from "@cloudagents/protocol"
+import type { BoxCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 import {
@@ -459,7 +459,7 @@ describe("broker requests", () => {
 
 describe("credential choice", () => {
   test("a provider key wins over the legacy flat slots", () => {
-    const creds: RelayCredentials = {
+    const creds: BoxCredentials = {
       user: "octocat",
       anthropic: "old-anthropic",
       openai: "old-openai",

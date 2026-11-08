@@ -3,7 +3,7 @@
  * Kept apart from the Hub class so the rules can be exercised against a plain SQLite database.
  */
 import type { ToolFailureCount, ToolFailureSummary } from "@cloudagents/protocol"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 
 export const DEFAULT_TOOL_FAILURE_DAYS = 30
 export const TOOL_FAILURE_RETENTION_DAYS = 90

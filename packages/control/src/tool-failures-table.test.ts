@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { beforeEach, describe, expect, test } from "bun:test"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 import { commonToolFailures, ensureToolFailuresTable, recordToolFailures } from "./tool-failures-table"
 
 const failure = (signature: string, count = 1, tool = "Bash") => ({ tool, signature, count })

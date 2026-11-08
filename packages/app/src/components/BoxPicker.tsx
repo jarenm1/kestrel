@@ -14,18 +14,18 @@ import {
 import { BAR_TRIGGER_CLASS } from "@/components/RepoPicker"
 import { cn } from "@/lib/utils"
 
-/** Radio value of Kestrel's box, whose id is `null`; also how the new-thread page stores that pick. */
+/** Radio value of the default pick, the active box, whose id is `null`; also how the new-thread page stores that pick. */
 export const KESTREL_BOX = "kestrel"
 
 /**
- * Whether `boxId` (`null`: Kestrel's box) answers: a user box's or the managed box's own health, else the relayed
- * status. `undefined` until known, and while the box list has not loaded.
+ * Whether `boxId` (`null`: the active box) answers, from the box's own health. `undefined` until known, and while the
+ * box list has not loaded.
  */
 export function useBoxOnline(boxId: string | null, list: BoxList | undefined): boolean | undefined {
-  const url = boxId === null ? list?.managedBox?.url : list?.boxes.find((box) => box.id === boxId)?.url
+  const id = boxId ?? list?.activeBoxId ?? null
+  const url = id === null ? undefined : list?.boxes.find((box) => box.id === id)?.url
   const health = useQuery({ ...queries.boxHealth(url ?? ""), enabled: url !== undefined })
-  const relayed = useQuery({ ...queries.kestrelBox(), enabled: list !== undefined && boxId === null && url === undefined })
-  return (url === undefined ? relayed : health).data?.online
+  return health.data?.online
 }
 
 export function OnlineDot({ boxId, list }: { boxId: string | null; list: BoxList }) {
@@ -79,7 +79,7 @@ export function BoxPicker({
         >
           <DropdownMenuRadioItem value={KESTREL_BOX}>
             <OnlineDot boxId={null} list={list} />
-            Kestrel&apos;s box
+            {boxName(null, list)}
           </DropdownMenuRadioItem>
           {list.boxes.map((box) => (
             <DropdownMenuRadioItem key={box.id} value={box.id}>
@@ -93,6 +93,8 @@ export function BoxPicker({
   )
 }
 
-/** Display name of `boxId` (`null`: Kestrel's box) in `list`. */
+/** Display name of `boxId` (`null`: the active box, labeled "Kestrel's box" until one exists) in `list`. */
 export const boxName = (boxId: string | null, list: BoxList): string =>
-  boxId === null ? "Kestrel's box" : (list.boxes.find((box) => box.id === boxId)?.name ?? "Box")
+  boxId === null
+    ? (list.boxes.find((box) => box.id === list.activeBoxId)?.name ?? "Kestrel's box")
+    : (list.boxes.find((box) => box.id === boxId)?.name ?? "Box")

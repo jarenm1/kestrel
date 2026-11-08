@@ -16,7 +16,7 @@ import { makeDirectListener, OFFLINE_HEADER } from "./listener"
 const OWNER = "alice"
 const BOX_ID = "box_alice"
 const BOX_SECRET = "alice-box-secret"
-const settings: DirectSettings = { controlUrl: "http://control.invalid", boxId: BOX_ID, boxSecret: BOX_SECRET, managed: false }
+const settings: DirectSettings = { controlUrl: "http://control.invalid", boxId: BOX_ID, boxSecret: BOX_SECRET }
 
 const tokenFor = (sub: string): Promise<string> => {
   const now = Math.floor(Date.now() / 1000)

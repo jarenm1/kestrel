@@ -2,73 +2,16 @@ import { describe, expect, test } from "bun:test"
 import type { IncomingMessage } from "node:http"
 import type { Duplex } from "node:stream"
 import { Effect, Runtime } from "effect"
-import { BOX_USER_HEADER, type BoxTokenClaims, type RelayCredentials, signBoxToken } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, type BoxTokenClaims, type BoxCredentials, signBoxToken } from "@cloudagents/protocol"
 import type { CredentialStoreShape } from "../credentials"
 import type { WsServices } from "../http/streams"
 import { Unauthorized, makeBoxAuth, type DirectSettings } from "./auth"
-import { makeBoxActivityReporter } from "./box-activity"
 import { makeDirectListener, OFFLINE_HEADER } from "./listener"
-
-const token = "11111111-1111-4111-8111-111111111111"
-const settings = { controlUrl: "http://control.invalid", boxId: "managed", boxSecret: "test-secret" }
-
-const setup = () => {
-  let now = Date.parse("2026-11-05T12:00:00.000Z")
-  const activity = makeBoxActivityReporter(settings, { now: () => now })
-  // HTTP routing does not run stream services or open an RTC channel.
-  const runtime = Runtime.defaultRuntime as Runtime.Runtime<WsServices>
-  const listener = makeDirectListener({
-    auth: { authenticate: () => Effect.fail(new Unauthorized({ message: "no box token" })) },
-    activity,
-    core: { previewTokenFor: (candidate) => Effect.succeed(candidate === token ? { user: "alice", taskId: "task" } : null) },
-    webHandler: async () => new Response("preview content"),
-    runtime,
-  })
-  return { activity, listener, advance: (ms: number) => { now += ms } }
-}
-
-describe("preview activity", () => {
-  for (const resource of ["frame", "subresource"] as const) {
-    test(`${resource} requests keep the validated preview user active`, async () => {
-      const { activity, listener, advance } = setup()
-      const request = () => resource === "frame"
-        ? new Request(`http://box.local/_preview/${token}/task/`)
-        : new Request("http://box.local/assets/app.js", { headers: { referer: `http://box.local/_preview/${token}/task/` } })
-      try {
-        expect((await listener.handle(request())).status).toBe(200)
-        advance(299_000)
-        expect((await listener.handle(request())).status).toBe(200)
-        advance(2_000)
-        expect(activity.snapshot().users).toEqual([{ login: "alice", lastActiveAt: "2026-11-05T12:04:59.000Z" }])
-        advance(298_000)
-        expect(activity.snapshot().users).toEqual([])
-      } finally {
-        listener.close()
-      }
-    })
-  }
-
-  test("invalid preview tokens and task mismatches cannot refresh activity", async () => {
-    const { activity, listener, advance } = setup()
-    activity.record("alice")
-    advance(299_000)
-    try {
-      for (const path of [`/_preview/22222222-2222-4222-8222-222222222222/task/`, `/_preview/${token}/other-task/`]) {
-        expect((await listener.handle(new Request(`http://box.local${path}`))).status).toBe(404)
-        expect((await listener.handle(new Request("http://box.local/app.js", { headers: { referer: `http://box.local${path}` } }))).status).toBe(404)
-      }
-      advance(1_000)
-      expect(activity.snapshot().users).toEqual([])
-    } finally {
-      listener.close()
-    }
-  })
-})
 
 const OWNER = "alice"
 const BOX_ID = "box_alice"
 const BOX_SECRET = "alice-box-secret"
-const ownBox: DirectSettings = { controlUrl: "http://control.invalid", boxId: BOX_ID, boxSecret: BOX_SECRET, managed: false }
+const ownBox: DirectSettings = { controlUrl: "http://control.invalid", boxId: BOX_ID, boxSecret: BOX_SECRET }
 
 const tokenFor = (sub: string, overrides: Partial<BoxTokenClaims> = {}): Promise<string> => {
   const now = Math.floor(Date.now() / 1000)
@@ -86,7 +29,7 @@ const restartedBox = (settings: DirectSettings = ownBox) => {
     if (control === "refused") return new Response(null, { status: 401 })
     return Response.json({ owner: OWNER, credentialsVersion: "1", github: "gh" })
   }) as unknown as typeof fetch
-  const byUser = new Map<string, RelayCredentials>()
+  const byUser = new Map<string, BoxCredentials>()
   const store: CredentialStoreShape = {
     get: (user) => Effect.sync(() => byUser.get(user) ?? null),
     set: (creds) => Effect.sync(() => void byUser.set(creds.user, creds)),
@@ -212,18 +155,6 @@ describe("a user's own box after a restart, with the control plane down", () => 
 
       expect(response.status).toBe(503)
       expect(response.headers.get(OFFLINE_HEADER)).toBeNull()
-      expect(box.served).toEqual([])
-    } finally {
-      box.listener.close()
-    }
-  })
-
-  test("a managed box is never served offline", async () => {
-    const box = restartedBox({ ...ownBox, managed: true })
-    try {
-      const response = await box.listener.handle(request("GET", "/api/tasks/t1", await tokenFor(OWNER)))
-
-      expect(response.status).toBe(503)
       expect(box.served).toEqual([])
     } finally {
       box.listener.close()

@@ -1,5 +1,5 @@
 import { Context, Effect, Layer } from "effect"
-import type { RelayCredentials } from "@cloudagents/protocol"
+import type { BoxCredentials } from "@cloudagents/protocol"
 
 /**
  * Connection secrets forwarded by the control plane (header `x-cloudagents-credentials`), one slot
@@ -8,14 +8,14 @@ import type { RelayCredentials } from "@cloudagents/protocol"
  */
 export interface CredentialStoreShape {
   /** Latest credentials of `user`; null before that user's first relayed request. */
-  readonly get: (user: string) => Effect.Effect<RelayCredentials | null>
-  readonly set: (creds: RelayCredentials) => Effect.Effect<void>
+  readonly get: (user: string) => Effect.Effect<BoxCredentials | null>
+  readonly set: (creds: BoxCredentials) => Effect.Effect<void>
 }
 
 export class CredentialStore extends Context.Tag("cloudagents/CredentialStore")<CredentialStore, CredentialStoreShape>() {}
 
 export const CredentialStoreLive = Layer.sync(CredentialStore, () => {
-  const byUser = new Map<string, RelayCredentials>()
+  const byUser = new Map<string, BoxCredentials>()
   const shape: CredentialStoreShape = {
     get: (user) => Effect.sync(() => byUser.get(user) ?? null),
     set: (creds) => Effect.sync(() => void byUser.set(creds.user, creds)),

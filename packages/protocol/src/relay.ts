@@ -1,39 +1,16 @@
 /**
- * Relay protocol between the control plane (Cloudflare Worker + Durable Object) and an agent box.
- *
- * The box dials OUT to `RELAY_CONNECT_PATH` on the control plane with
- * `Authorization: Bearer <box token>`. Over that single WebSocket the control plane tunnels the
- * browser's `/api/*` HTTP requests and WebSockets to the box, which serves them with its
- * existing local handlers.
- *
- * Text frames carry one JSON `RelayFrame`. Binary frames carry WebSocket binary payloads for a
- * tunnelled stream: the first 4 bytes are the stream id (uint32, big-endian), the rest is the payload.
- *
- * Stream ids are allocated by the control plane and are unique per box connection; HTTP request
- * ids and WebSocket stream ids share the same id space.
+ * The frame protocol one WebRTC data channel multiplexes: HTTP requests, browser WebSocket streams,
+ * and keepalives (`direct/rtc.ts` on the box). Text frames carry one JSON `RelayFrame`; binary frames
+ * carry a stream payload: the first 4 bytes are the stream id (uint32, big-endian).
  */
 
-export const RELAY_CONNECT_PATH = "/box/connect"
 export const RELAY_PROTOCOL_VERSION = 1
 
 /**
  * Request header the control plane sets on every tunnelled HTTP request and WebSocket open.
- * Value: JSON `RelayCredentials`. The control plane strips any client-supplied copy.
+ * Value: JSON `BoxCredentials`. The control plane strips any client-supplied copy.
  */
 export const CREDENTIALS_HEADER = "x-cloudagents-credentials"
-
-/** Secrets of the signed-in user's connections, forwarded to the box (never to the sandbox). */
-export interface RelayCredentials {
-  readonly user: string // GitHub login of the signed-in user
-  readonly github?: string // GitHub OAuth access token
-  /** Model API keys by `ModelProvider` id. The broker is the only reader. */
-  readonly providers?: Readonly<Record<string, string>>
-  /** Legacy Anthropic/OpenAI slots, still sent so boxes older than `providers` keep their keys. */
-  readonly anthropic?: string
-  readonly openai?: string
-  /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
-  readonly dev?: boolean
-}
 
 export type RelayFrame =
   // box -> control plane, first frame after connect
@@ -93,15 +70,3 @@ export const decodeBinary = (frame: Uint8Array): { id: number; payload: Uint8Arr
   return { id, payload: frame.subarray(4) }
 }
 
-export const toBase64 = (bytes: Uint8Array): string => {
-  let s = ""
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  return btoa(s)
-}
-
-export const fromBase64 = (b64: string): Uint8Array => {
-  const s = atob(b64)
-  const out = new Uint8Array(s.length)
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i)
-  return out
-}

@@ -19,7 +19,6 @@ import {
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
-  FileToken,
   GithubRepo,
   Health,
   HarnessCommands,
@@ -51,10 +50,10 @@ import { ApiError, responseError } from "./errors";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
-/** A box the apps reach directly: the user's own box, or their managed box. `null` everywhere means Kestrel's box, relayed by the Worker. */
+/** A box the apps reach directly. `null` means there is no active box (the control plane may still be provisioning one). */
 export type ActiveBox = Pick<UserBox, "id" | "url">;
 
-/** Whether two active boxes are the same route; `null` (Kestrel's relayed box) only matches `null`. */
+/** Whether two active boxes are the same route; `null` (no box) only matches `null`. */
 export function sameBox(a: ActiveBox | null, b: ActiveBox | null): boolean {
   if (a === null || b === null) return a === b;
   return a.id === b.id && a.url === b.url;
@@ -93,8 +92,8 @@ export interface ApiClient {
   /** A WebSocket URL for a box path (`Paths.*Ws`), carrying the box token when the active box is reached directly. */
   socketUrl(path: string): Promise<string>;
   /**
-   * The WebSocket URL for a task's desktop stream, which carries its own auth: the embed page holds no session. A box
-   * token on a user box, a desktop token on the relayed box. `fresh` mints a new one.
+   * The WebSocket URL for a task's desktop stream, which carries its own auth: the embed page holds no session, so the
+   * query carries the box token. `fresh` mints a new one.
    */
   desktopSocketUrl(taskId: string, options?: { fresh?: boolean }): Promise<string>;
   /** The desktop embed page URL for a task, given the stream's ws URL from `desktopSocketUrl`. */
@@ -235,49 +234,6 @@ export function createApiClient(
     return entry.minted;
   }
 
-  // A file token for the relayed box, single-flight in the same way: reused until a minute before it expires.
-  let fileToken: { minted: Promise<FileToken>; refreshAt: number } | null = null;
-  function mintFileToken(): Promise<FileToken> {
-    if (fileToken && Date.now() < fileToken.refreshAt) return fileToken.minted;
-    const entry: { minted: Promise<FileToken>; refreshAt: number } = {
-      refreshAt: Number.POSITIVE_INFINITY,
-      minted: request(FileToken, "POST", ControlPaths.fileToken).then(
-        (minted) => {
-          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted;
-        },
-        (error: unknown) => {
-          if (fileToken === entry) fileToken = null;
-          throw error;
-        }
-      ),
-    };
-    fileToken = entry;
-    return entry.minted;
-  }
-
-  // A desktop token for the relayed box, single-flight per task in the same way.
-  let desktopToken: { taskId: string; minted: Promise<FileToken>; refreshAt: number } | null = null;
-  function mintDesktopToken(taskId: string, fresh: boolean): Promise<FileToken> {
-    if (!fresh && desktopToken?.taskId === taskId && Date.now() < desktopToken.refreshAt) return desktopToken.minted;
-    const entry: { taskId: string; minted: Promise<FileToken>; refreshAt: number } = {
-      taskId,
-      refreshAt: Number.POSITIVE_INFINITY,
-      minted: request(FileToken, "POST", ControlPaths.desktopToken(taskId)).then(
-        (minted) => {
-          entry.refreshAt = Date.parse(minted.expiresAt) - TOKEN_REFRESH_MARGIN_MS;
-          return minted;
-        },
-        (error: unknown) => {
-          if (desktopToken === entry) desktopToken = null;
-          throw error;
-        }
-      ),
-    };
-    desktopToken = entry;
-    return entry.minted;
-  }
-
   // Control plane (served by the Worker): authenticated by the session cookie.
   function request<A, I>(
     schema: Schema.Schema<A, I, never>,
@@ -288,14 +244,14 @@ export function createApiClient(
     return send(schema, method, `${serverUrl}${path}`, cookieHeaders, body);
   }
 
-  // Box-served paths: the relayed Kestrel box goes through the Worker with the session; a direct box takes a bearer token.
+  // Box-served paths: a direct box takes a bearer token. No active box fails the call.
   async function boxRequest<A, I>(
     schema: Schema.Schema<A, I, never>,
     method: Method,
     path: string,
     body?: unknown
   ): Promise<A> {
-    if (activeBox === null) return request(schema, method, path, body);
+    if (activeBox === null) throw new ApiError(503, "No agent box is selected");
     const box = activeBox;
     const attempt = async () =>
       send(
@@ -349,40 +305,35 @@ export function createApiClient(
   }
 
   return {
-    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "relay"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
+    boxScope: JSON.stringify(activeBox === null ? [serverUrl, "none"] : [serverUrl, "direct", activeBox.id, activeBox.url]),
     fileSource: async (path) => {
-      if (activeBox === null) return { uri: serverUrl + path, headers: cookieHeaders };
+      if (activeBox === null) throw new ApiError(503, "No agent box is selected");
       const { token } = await mintBoxToken(activeBox);
       return { uri: `${activeBox.url}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, headers: {} };
     },
     fileAccess: async () => {
-      if (activeBox !== null) {
-        const { token, expiresAt } = await mintBoxToken(activeBox);
-        return { base: activeBox.url, query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, expiresAt };
-      }
-      // The relayed Kestrel box: a WebView cannot send the session cookie, so the Worker accepts a file token instead.
-      const minted = await mintFileToken();
-      return {
-        base: serverUrl,
-        query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(minted.token)}`,
-        expiresAt: Date.parse(minted.expiresAt),
-      };
+      if (activeBox === null) throw new ApiError(503, "No agent box is selected");
+      const { token, expiresAt } = await mintBoxToken(activeBox);
+      return { base: activeBox.url, query: `?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`, expiresAt };
     },
     socketUrl: async (path) => {
-      if (activeBox === null) return serverUrl.replace(/^http/, "ws") + path;
+      if (activeBox === null) throw new ApiError(503, "No agent box is selected");
       const { token } = await mintBoxToken(activeBox);
       return `${activeBox.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
     desktopSocketUrl: async (taskId, options) => {
       const path = Paths.taskDesktopWs(taskId);
       const box = activeBox;
-      const { token } = box !== null ? await mintBoxToken(box, options?.fresh) : await mintDesktopToken(taskId, options?.fresh ?? false);
-      const base = box !== null ? box.url : serverUrl;
-      return `${base.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+      if (box === null) throw new ApiError(503, "No agent box is selected");
+      const { token } = await mintBoxToken(box, options?.fresh);
+      return `${box.url.replace(/^http/, "ws")}${path}?${BOX_TOKEN_QUERY}=${encodeURIComponent(token)}`;
     },
     desktopEmbedUrl: (taskId, ws) =>
       `${serverUrl}${DESKTOP_EMBED_PATH}#ws=${encodeURIComponent(ws)}&task=${encodeURIComponent(taskId)}`,
-    previewFrameUrl: (taskId, token) => (activeBox?.url ?? serverUrl) + Paths.taskPreviewFrame(token, taskId),
+    previewFrameUrl: (taskId, token) => {
+      if (activeBox === null) throw new ApiError(503, "No agent box is selected");
+      return activeBox.url + Paths.taskPreviewFrame(token, taskId);
+    },
 
     // Control plane (served by the Worker).
     me: () => request(Me, "GET", ControlPaths.me),
@@ -399,7 +350,7 @@ export function createApiClient(
     boxes: () => request(BoxList, "GET", ControlPaths.boxes),
     setActiveBox: (boxId) => request(BoxList, "PUT", ControlPaths.activeBox, { boxId }),
     box: async () => {
-      if (activeBox === null) return request(BoxStatus, "GET", ControlPaths.box);
+      if (activeBox === null) return { online: false, connectedAt: null, boxVersion: null };
       // A direct box is reached at its own URL: its unauthenticated health route answers, and an unreachable box reads as offline.
       try {
         const health = await send(Health, "GET", `${activeBox.url}${Paths.health}`, {});

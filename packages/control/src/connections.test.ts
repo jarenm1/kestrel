@@ -31,7 +31,7 @@ const connections = async (offline = false): Promise<readonly Connection[]> => {
       throw new Error(`unexpected box path ${path}`)
     },
   }
-  const env = { HUB: { idFromName: () => "main", get: () => stub } } as unknown as Env
+  const env = { ALLOWED_GITHUB_LOGINS: "tester", HUB: { idFromName: () => "main", get: () => stub } } as unknown as Env
   const response = await worker.fetch(new Request(`https://app.example${ControlPaths.connections}`, {
     headers: { cookie: "session=signed-in" },
   }), env)

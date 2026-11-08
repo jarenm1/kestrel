@@ -9,7 +9,7 @@ import {
   purgeExpiredMeterRecords,
   storeMeterRecords,
 } from "./meter-table"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 
 let db: Database
 let sql: FleetSql

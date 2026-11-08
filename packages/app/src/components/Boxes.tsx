@@ -5,7 +5,7 @@ import { Either, Schema } from "effect"
 import { Link } from "react-router-dom"
 import { api } from "@/api/client"
 import { applyBoxList, keys, queries } from "@/api/queries"
-import { useBox, useBoxCapabilities } from "@/components/BoxStatus"
+import { useBoxCapabilities } from "@/components/BoxStatus"
 import { Alert } from "@cloudagents/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
@@ -14,12 +14,6 @@ import { Input } from "@/components/ui/input"
 import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
 import { errorText, formatSize } from "@/util"
-
-/** Kestrel's managed box: its own health, reached directly (Kestrel's box is the relay's only while none is assigned). */
-function ManagedOnline({ url }: { url: string }) {
-  const health = useQuery(queries.boxHealth(url))
-  return <OnlineBadge online={health.data?.online} />
-}
 
 export const BOX_FORM_ERROR =
   "Name must be 1–64 characters. The URL must be an origin such as https://box.example.com (http is allowed only for localhost)."
@@ -58,10 +52,8 @@ export function Boxes() {
   })
   const activeBoxId = useActiveBoxId()
   const setActive = useSetActiveBox()
-  const kestrel = useBox()
   const [created, setCreated] = useState<CreatedBox | null>(null)
   const list = boxes.data?.boxes ?? []
-  const managed = boxes.data?.managedBox ?? null
 
   return (
     <>
@@ -72,21 +64,9 @@ export function Boxes() {
       {boxes.data && (
         <Card className="py-0">
           <CardContent className="divide-y divide-white/[0.04] px-0">
-            <div className="flex items-start gap-4 px-5 py-4">
-              <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate font-medium">Kestrel&apos;s box</span>
-                  {activeBoxId === null && <Badge variant="success">active</Badge>}
-                  {managed === null ? <OnlineBadge online={kestrel?.online} /> : <ManagedOnline url={managed.url} />}
-                </div>
-                <span className="text-xs text-muted-foreground">Hosted by Kestrel. Used when no box of your own is active.</span>
-              </div>
-              {activeBoxId !== null && (
-                <Button variant="soft" size="sm" disabled={setActive.isPending} onClick={() => setActive.mutate(null)}>
-                  Use this box
-                </Button>
-              )}
-            </div>
+            {list.length === 0 && (
+              <div className="px-5 py-4 text-muted-foreground">No boxes yet.</div>
+            )}
             {list.map((box) =>
               box.nest ? (
                 <NestBoxRow

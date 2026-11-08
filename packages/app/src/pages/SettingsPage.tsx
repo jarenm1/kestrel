@@ -282,16 +282,12 @@ const TEXT_GENERATION_DESC =
   "Choose how short generated text is written, how new threads are titled, and how assistant prose is buffered."
 
 /**
- * The active box's route. A box switch remounts the form, so no state from another box can survive it. When Kestrel's
- * box is active (`activeBoxId === null`), `targetBoxId` names the managed box itself so a write can be pinned to it;
- * null stays only for the legacy relay, which has no box id to pin.
+ * The active box's route. A box switch remounts the form, so no state from another box can survive it. `targetBoxId`
+ * pins the box call to the active box's own id (or the box it resolves to); null when there is none.
  */
 function activeBoxRoute(list: BoxList): { key: string; targetBoxId: string | null } {
   const active = list.activeBoxId
-  const box =
-    active === null || active === list.managedBox?.id
-      ? list.managedBox
-      : list.boxes.find((candidate) => candidate.id === active)
+  const box = list.boxes.find((candidate) => candidate.id === active)
   return {
     key: JSON.stringify([active, box?.id ?? null, box?.url ?? null]),
     targetBoxId: active ?? box?.id ?? null,

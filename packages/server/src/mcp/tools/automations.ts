@@ -73,7 +73,7 @@ export const registerAutomationTools = (server: McpServer, ctx: RunContext, deps
       return yield* Effect.fail(
         new ControlError({
           message:
-            "automations need the control plane: this box has neither a managed box (CLOUDAGENTS_BOX_MANAGED=1) nor a relay token (CLOUDAGENTS_BOX_TOKEN)",
+            "automations need the control plane: this box runs without a box identity (CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET)",
         }),
       )
     }

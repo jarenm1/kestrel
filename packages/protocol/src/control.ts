@@ -20,20 +20,9 @@ export const ControlPaths = {
   connectOAuth: (provider: string) => `/auth/connect/${provider}`,
   /** GET: OAuth callback for connections. */
   connectCallback: (provider: string) => `/auth/connect/${provider}/callback`,
-  /**
-   * POST (no body) -> FileToken: a short-lived token for box files loaded where a cookie cannot be sent (a WebView or
-   * DOM `<img>`). The token is accepted as `?access_token=` on GET requests for `Paths.taskAttachment`,
-   * `Paths.taskRunImage` and `Paths.taskCheckoutIcon`, and on nothing else.
-   */
-  fileToken: "/api/file-token",
-  /**
-   * POST (no body) -> FileToken: a short-lived token for one task's desktop stream, for a WebView that cannot send the
-   * session cookie. Accepted as `?access_token=` on `Paths.taskDesktopWs` of that task, and on nothing else.
-   */
-  desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
-  /** GET -> Connection[] with legacy managed/relay-box status; updated clients replace box state with `connectionsForBox`. */
+  /** GET -> Connection[] with the stored box state; clients replace box state with `connectionsForBox`. */
   connections: "/api/connections",
   /** PUT { apiKey } for api-key providers -> Connection; DELETE -> 204. */
   connection: (provider: string) => `/api/connections/${provider}`,
@@ -49,8 +38,6 @@ export const ControlPaths = {
    * the default branch first. 404 when GitHub is not connected or the repository is not visible.
    */
   githubBranches: (repo: string) => `/api/github/repos/${repo}/branches`,
-  /** GET -> BoxStatus */
-  box: "/api/box",
   /** GET -> CliAuthStatus[] with the pre-Go provider catalog. Go-aware clients use `cliAuthFor`. */
   cliAuth: "/api/cli-auth",
   /** GET -> CliAuthStatus[] restricted to the provider literals this client can decode, on its selected box. */
@@ -95,8 +82,8 @@ export const ControlPaths = {
   /** POST TriggerAutomationBody -> AutomationRun: "run now". */
   automationTrigger: (id: string) => `/api/automations/${id}/trigger`,
   /**
-   * The signed-in user's own boxes (bring your own box). GET -> BoxList / POST CreateBoxBody -> CreatedBox.
-   * The app talks to the active box directly at its `url` with a box token instead of through the relay.
+   * The signed-in user's boxes. GET -> BoxList / POST CreateBoxBody -> CreatedBox.
+   * The app talks to the active box directly at its `url` with a box token.
    */
   boxes: "/api/boxes",
   /** PATCH UpdateBoxBody -> UserBox / DELETE -> 204 (clears it as the active box). Other users' ids are 404. */
@@ -104,54 +91,25 @@ export const ControlPaths = {
   /** POST -> CreatedBox: replaces the box's secret; tokens signed with the old one stop working. */
   userBoxSecret: (id: string) => `/api/boxes/${id}/secret`,
   /**
-   * POST -> BoxToken: a fresh box token for the signed-in user and this box: one of their own boxes, or the managed
-   * box they are assigned to (`BoxList.managedBox.id`). Any other id is 404.
+   * POST -> BoxToken: a fresh box token for the signed-in user and this box, which must be one of their own.
+   * Any other id is 404.
    */
   userBoxToken: (id: string) => `/api/boxes/${id}/token`,
-  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` is Kestrel's managed box. */
+  /** PUT SetActiveBoxBody -> BoxList: which box the user's apps use; `null` selects none. */
   activeBox: "/api/boxes/active",
   /**
    * Box-only: GET -> BoxSelf for the box named in BOX_ID_HEADER, authenticated with `Authorization: Bearer <box
-   * secret>`. How a user's own box learns its owner and the owner's connection secrets. Never reached from a browser.
+   * secret>`. How a box learns its owner and the owner's connection secrets. Never reached from a browser.
    */
   boxSelf: "/box/self",
-  /**
-   * Box-only, managed (fleet) boxes: GET -> BoxSelf for the user named in BOX_USER_HEADER, authenticated with
-   * `Authorization: Bearer <box secret>` and BOX_ID_HEADER. Answers only for users assigned to that box (403
-   * otherwise), so a box can read the credentials of its own users and nobody else's. Never reached from a browser.
-   */
-  boxCredentials: "/box/credentials",
-  /**
-   * Operator-only (`Me.operator`): Kestrel's managed boxes. GET -> FleetBoxList / POST CreateFleetBoxBody ->
-   * CreatedFleetBox (state `pending`). Everyone else gets 404.
-   */
-  fleetBoxes: "/api/fleet/boxes",
-  /**
-   * PATCH UpdateFleetBoxBody -> FleetBox / DELETE -> 204. Deleting unassigns its users, who are assigned to another
-   * active box on their next BoxList; their threads stay on the deleted box's disk.
-   */
-  fleetBox: (id: string) => `/api/fleet/boxes/${id}`,
-  /** POST -> CreatedFleetBox: replaces the managed box's secret; the box must be restarted with the new one. */
-  fleetBoxSecret: (id: string) => `/api/fleet/boxes/${id}/secret`,
   /** Operator-only: GET `?days=` (1-90, default 30) -> ToolFailureList, most common first. Everyone else gets 404. */
   fleetToolFailures: "/api/fleet/tool-failures",
   /**
-   * Operator-only: GET -> FleetActivity, every registered box including ones that never reported. Everyone else gets
-   * 404. A snapshot at least `ACTIVITY_STALE_AFTER_SECONDS` old keeps its `receivedAt` but carries no users.
-   */
-  fleetActivity: "/api/fleet/activity",
-  /**
-   * Box-only, Kestrel's own boxes: POST ToolFailureReport -> 204. Authenticated like the automation routes below, but
-   * names no user: the counts belong to no one. A user's own box never reports. Never reached from a browser.
+   * Box-only: POST ToolFailureReport -> 204. Authenticated with `Authorization: Bearer <box secret>` and
+   * BOX_ID_HEADER, like the automation routes below, but names no user: the counts belong to no one.
+   * Never reached from a browser.
    */
   boxToolFailures: "/box/telemetry/tool-failures",
-  /**
-   * Box-only, managed boxes: POST BoxActivityReport -> 204. Authenticated with `Authorization: Bearer <box secret>` and
-   * BOX_ID_HEADER; the relay token and user boxes are refused. The body is a full snapshot of the users with an
-   * authenticated direct request to the box in the last `ACTIVITY_WINDOW_SECONDS`, sent every 30 seconds, including an
-   * empty list. Never reached from a browser.
-   */
-  boxActivity: "/box/telemetry/activity",
   /**
    * Nest host only: POST MeterBatch -> MeterIngestResult, with `Authorization: Bearer <host secret>` and
    * METER_HOST_ID_HEADER. Stores each record once per host and eventId; a retry of identical records is acknowledged
@@ -176,10 +134,9 @@ export const ControlPaths = {
   /** POST ApprovePairingBody -> BoxList: creates the box for the signed-in user (optionally making it active). */
   pairingApprove: (code: string) => `/api/boxes/pairings/${code}/approve`,
   /**
-   * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user), for managed boxes.
+   * Box-only mirror of the automation routes above (same bodies and answers, scoped to one user).
    * Requires `Authorization: Bearer <box secret>` with BOX_ID_HEADER, and the acting user's login in BOX_USER_HEADER;
-   * the user must be assigned to that box. The relayed box authenticates with the shared relay token instead.
-   * Never reached from a browser.
+   * the user must own that box. Never reached from a browser.
    */
   boxAutomations: "/box/automations",
   boxAutomation: (id: string) => `/box/automations/${id}`,
@@ -215,7 +172,7 @@ export const Me = Schema.Struct({
   login: Schema.String,
   name: Schema.NullOr(Schema.String),
   avatarUrl: Schema.String,
-  /** May manage Kestrel's managed boxes (`ControlPaths.fleetBoxes`); listed in the Worker's KESTREL_OPERATORS. */
+  /** May see the operator routes (Nest hosts, metering, tool failures); listed in the Worker's KESTREL_OPERATORS. */
   operator: Schema.Boolean,
   /** Whether this deployment offers Nest boxes (`KESTREL_NEST_DOMAIN` is set); the app offers Create Nest box only then. */
   nestEnabled: Schema.Boolean,
@@ -291,10 +248,9 @@ export const CliAuthStatus = Schema.Struct({
 export type CliAuthStatus = typeof CliAuthStatus.Type
 
 /**
- * The Worker retains managed/relay-box status for installed clients. Updated clients replace that legacy state with
+ * The Worker retains stored box status for installed clients. Updated clients replace that state with
  * the selected box's CLI logins and the harnesses it reports, preserving stored account/key metadata.
  *
- * CLI rows use only the selected box's authentication status, never a relay box's saved login or installation state.
  * Retired standalone harness rows (`omp`, `pi`, `hermes`) are dropped.
  */
 export const connectionsForBox = (
@@ -468,22 +424,10 @@ export const UserBox = Schema.Struct({
 })
 export type UserBox = typeof UserBox.Type
 
-/**
- * The managed box a user is assigned to, reached directly at `url` with a token from `userBoxToken(id)`. A user keeps
- * their assignment while the box is active or draining; deleting the box reassigns them.
- */
-export const ManagedBox = Schema.Struct({ id: Schema.String, url: BoxUrl })
-export type ManagedBox = typeof ManagedBox.Type
-
 export const BoxList = Schema.Struct({
   boxes: Schema.Array(UserBox),
-  /** The box the user's apps use; null for Kestrel's managed box. */
+  /** The box the user's apps use; null when none is selected. */
   activeBoxId: Schema.NullOr(Schema.String),
-  /**
-   * Kestrel's managed box for this user, reached directly. Null while no managed box is active: the apps then reach
-   * Kestrel's box through the control plane's relay.
-   */
-  managedBox: Schema.NullOr(ManagedBox),
 })
 export type BoxList = typeof BoxList.Type
 
@@ -509,19 +453,7 @@ export const BoxToken = Schema.Struct({
 })
 export type BoxToken = typeof BoxToken.Type
 
-/**
- * A token that stands in for the session cookie on box files a WebView or DOM `<img>` loads (`ControlPaths.fileToken`).
- * It names the user who minted it, only loads files (`Paths.taskAttachment`, `Paths.taskRunImage`,
- * `Paths.taskCheckoutIcon`), and expires one hour after it is minted.
- */
-export const FileToken = Schema.Struct({
-  token: Schema.String,
-  /** ISO time the token expires. */
-  expiresAt: Schema.String,
-})
-export type FileToken = typeof FileToken.Type
-
-/** What a user's own box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
+/** What a box gets from `ControlPaths.boxSelf`. Host-side only: never passed into a sandbox. */
 export const BoxSelf = Schema.Struct({
   owner: Schema.String,
   /** Matches the `cv` claim of tokens minted while these credentials were current. */
@@ -534,46 +466,6 @@ export const BoxSelf = Schema.Struct({
   openai: Schema.optional(Schema.String),
 })
 export type BoxSelf = typeof BoxSelf.Type
-
-/**
- * Lifecycle of a managed box. `pending`: registered, gets no users (configure and check it first). `active`: new users
- * are assigned to the active box with the fewest users. `draining`: keeps its users, gets no new ones.
- */
-export const FleetBoxState = Schema.Literal("pending", "active", "draining")
-export type FleetBoxState = typeof FleetBoxState.Type
-
-/** One of Kestrel's managed boxes, as operators see it. Its secret is shown only when created or replaced. */
-export const FleetBox = Schema.Struct({
-  id: Schema.String,
-  name: BoxName,
-  url: BoxUrl,
-  state: FleetBoxState,
-  /** Users assigned to this box. */
-  users: Schema.Number.pipe(Schema.int(), Schema.nonNegative()),
-  createdAt: Schema.String,
-})
-export type FleetBox = typeof FleetBox.Type
-
-export const FleetBoxList = Schema.Struct({ boxes: Schema.Array(FleetBox) })
-export type FleetBoxList = typeof FleetBoxList.Type
-
-export const CreateFleetBoxBody = Schema.Struct({ name: BoxName, url: BoxUrl })
-export type CreateFleetBoxBody = typeof CreateFleetBoxBody.Type
-
-/** Every field optional. `state` can move between `active` and `draining`; nothing returns a box to `pending`. */
-export const UpdateFleetBoxBody = Schema.Struct({
-  name: Schema.optional(BoxName),
-  url: Schema.optional(BoxUrl),
-  state: Schema.optional(Schema.Literal("active", "draining")),
-})
-export type UpdateFleetBoxBody = typeof UpdateFleetBoxBody.Type
-
-/**
- * The managed box and its secret. The box runs with `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and
- * `CLOUDAGENTS_BOX_MANAGED=1`.
- */
-export const CreatedFleetBox = Schema.Struct({ box: FleetBox, secret: Schema.String })
-export type CreatedFleetBox = typeof CreatedFleetBox.Type
 
 /** How often one failure happened: the tool, and its error with everything specific to the run scrubbed out. */
 export const ToolFailureCount = Schema.Struct({
@@ -602,64 +494,6 @@ export type ToolFailureSummary = typeof ToolFailureSummary.Type
 
 export const ToolFailureList = Schema.Struct({ days: Schema.Number, failures: Schema.Array(ToolFailureSummary) })
 export type ToolFailureList = typeof ToolFailureList.Type
-
-/** How far back a box activity report looks; a user with an authenticated request in this window is active. */
-export const ACTIVITY_WINDOW_SECONDS = 5 * 60
-
-/** After this long without a report, a box's snapshot is stale: its users are no longer counted as active. */
-export const ACTIVITY_STALE_AFTER_SECONDS = 90
-
-/** Users one box reports. A full snapshot beyond this is refused rather than stored. */
-export const MAX_BOX_ACTIVITY_USERS = 10_000
-
-/** Box clocks may run this far ahead of the receiver; timestamp further ahead is a future timestamp, refused. */
-export const MAX_ACTIVITY_CLOCK_SKEW_SECONDS = 30
-
-/** Largest body `ControlPaths.boxActivity` reads. A full 10,000-user snapshot is well under it. */
-export const MAX_BOX_ACTIVITY_BODY_BYTES = 2 * 1024 * 1024
-
-/** A UTC timestamp with milliseconds, as `Date.toISOString` writes it. */
-export const ActivityTimestamp = Schema.String.pipe(
-  Schema.pattern(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/),
-  Schema.filter((value) =>
-    Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value ? true : "not a valid UTC timestamp",
-  ),
-)
-
-/**
- * One user with an authenticated request to the box in the activity window. `lastActiveAt` is when the box last served
- * such a request; it says nothing about human attention or a running agent.
- */
-export const BoxActivityUser = Schema.Struct({
-  login: Schema.String.pipe(Schema.minLength(1), Schema.maxLength(100)),
-  lastActiveAt: ActivityTimestamp,
-})
-export type BoxActivityUser = typeof BoxActivityUser.Type
-
-/** A managed box's full activity snapshot. An empty `users` retires every user in the previous snapshot. */
-export const BoxActivityReport = Schema.Struct({
-  users: Schema.Array(BoxActivityUser).pipe(Schema.maxItems(MAX_BOX_ACTIVITY_USERS)),
-})
-export type BoxActivityReport = typeof BoxActivityReport.Type
-
-/** One registered managed box's latest snapshot; `receivedAt` is the control plane's clock, null if it never reported. */
-export const FleetActivityBox = Schema.Struct({
-  boxId: Schema.String,
-  receivedAt: Schema.NullOr(ActivityTimestamp),
-  users: Schema.Array(BoxActivityUser),
-})
-export type FleetActivityBox = typeof FleetActivityBox.Type
-
-/**
- * Active users per registered managed box. A box whose snapshot is at least `staleAfterSeconds` old keeps its
- * `receivedAt` but has no `users`, so a stale snapshot never reads as a current count.
- */
-export const FleetActivity = Schema.Struct({
-  windowSeconds: Schema.Number,
-  staleAfterSeconds: Schema.Number,
-  boxes: Schema.Array(FleetActivityBox),
-})
-export type FleetActivity = typeof FleetActivity.Type
 
 /** How long a pairing code stays valid. */
 export const PAIRING_TTL_SECONDS = 10 * 60

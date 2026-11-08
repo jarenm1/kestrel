@@ -3,7 +3,7 @@ import { Effect } from "effect"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AGENT_MODELS, discoveredModel, type CliProvider, type ModelDiscoverySource, type ModelInfo, type RelayCredentials } from "@cloudagents/protocol"
+import { AGENT_MODELS, discoveredModel, type CliProvider, type ModelDiscoverySource, type ModelInfo, type BoxCredentials } from "@cloudagents/protocol"
 import type { CliLoginDir } from "./cliauth"
 import type { CredentialStoreShape } from "./credentials"
 import { CLI_PROVIDERS } from "./agent-clis"
@@ -50,7 +50,7 @@ const fakeFetch = (handler: (call: FetchCall) => Response | Promise<Response>) =
   return { fetch: impl as unknown as typeof fetch, calls }
 }
 
-const credentialStore = (initial: Readonly<Record<string, RelayCredentials>>) => {
+const credentialStore = (initial: Readonly<Record<string, BoxCredentials>>) => {
   const byUser = new Map(Object.entries(initial))
   const shape: CredentialStoreShape = {
     get: (user) => Effect.succeed(byUser.get(user) ?? null),

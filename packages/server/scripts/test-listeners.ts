@@ -4,8 +4,8 @@
  * strict also needs pasta, nsenter and unshare on PATH, /dev/net/tun, and the sandbox toolchain
  * (CLOUDAGENTS_SANDBOX_PATH, set by `nix develop`).
  *   bun packages/server/scripts/test-listeners.ts off
- *   bun packages/server/scripts/test-listeners.ts basic [--managed]
- *   bun packages/server/scripts/test-listeners.ts strict [--managed]   (inside `nix develop`)
+ *   bun packages/server/scripts/test-listeners.ts basic
+ *   bun packages/server/scripts/test-listeners.ts strict   (inside `nix develop`)
  */
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
@@ -18,7 +18,6 @@ const sandbox = process.argv[2] ?? "off"
 assert(["off", "basic", "strict"].includes(sandbox), "sandbox must be off, basic or strict")
 const sandboxPath = process.env.CLOUDAGENTS_SANDBOX_PATH
 assert(sandbox !== "strict" || sandboxPath, "strict needs CLOUDAGENTS_SANDBOX_PATH; run inside `nix develop`")
-const managed = process.argv.includes("--managed")
 const owner = "listener-test"
 const boxId = "listener-test-box"
 const secret = crypto.randomUUID()
@@ -46,12 +45,11 @@ const control = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch(request) {
-    const expected = managed ? "/box/credentials" : "/box/self"
+    const expected = "/box/self"
     if (request.method !== "GET" || new URL(request.url).pathname !== expected) return new Response(null, { status: 404 })
     if (request.headers.get("authorization") !== `Bearer ${secret}` || request.headers.get(BOX_ID_HEADER) !== boxId) {
       return new Response(null, { status: 401 })
     }
-    if (managed && request.headers.get("x-kestrel-box-user") !== owner) return new Response(null, { status: 403 })
     lookups++
     return Response.json({ owner, credentialsVersion: "0:" })
   },
@@ -72,7 +70,6 @@ const child = Bun.spawn([process.execPath, "packages/server/src/main.ts"], {
     CLOUDAGENTS_CONTROL_URL: `http://127.0.0.1:${control.port}`,
     CLOUDAGENTS_BOX_ID: boxId,
     CLOUDAGENTS_BOX_SECRET: secret,
-    CLOUDAGENTS_BOX_MANAGED: managed ? "1" : "0",
   },
   stdout: "pipe",
   stderr: "pipe",
@@ -135,7 +132,7 @@ try {
   }
   assert.equal(run?.status, "succeeded", "authenticated agent run failed")
   assert.equal(lookups, 1, "one credentials lookup for this session")
-  console.log(`PASS: authenticated ${managed ? "managed" : "BYOB"} API/WebSocket, ${sandbox} agent MCP, broker, workspace exec${sandbox === "strict" ? " and loopback isolation" : ""}`)
+  console.log(`PASS: authenticated BYOB API/WebSocket, ${sandbox} agent MCP, broker, workspace exec${sandbox === "strict" ? " and loopback isolation" : ""}`)
 
   const mcp = JSON.parse(await readFile(join(dataDir, "homes", task.id, ".cloudagents", "mcp.json"), "utf8"))
     .mcpServers.cloudagents as { url: string; headers: { Authorization: string } }
