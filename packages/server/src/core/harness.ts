@@ -514,7 +514,8 @@ export const AgentHarnessLive = Layer.effect(
 
     /**
      * Kills a running run and marks it cancelled. A cancel also drops the run's question. At shutdown (`shutdown`),
-     * a run that waits on a question keeps it, and its task keeps waiting, for the next start.
+     * the run is marked failed and interrupted by restart, as a crash leaves it; its question and task stay as they
+     * were, for the next start to reconcile.
      */
     const stopRun = (runId: string, shutdown: boolean): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
@@ -541,10 +542,16 @@ export const AgentHarnessLive = Layer.effect(
         }
         yield* patchRunAndTask(runId, (run, task, s) => {
           if (run.status !== "running") return
-          run.status = "cancelled"
           run.exitCode = null
           run.endedAt = nowIso()
-          if (shutdown && s.pendingAsks.some((a) => a.runId === runId)) return
+          // The box is going down, not the user: the run is left as a crash leaves it, and the next start's
+          // reconciliation marks it interrupted by restart and its task failed.
+          if (shutdown) {
+            run.status = "failed"
+            run.interruptedByRestart = true
+            return
+          }
+          run.status = "cancelled"
           s.pendingAsks = s.pendingAsks.filter((a) => a.runId !== runId)
           task.status = "idle"
         })
