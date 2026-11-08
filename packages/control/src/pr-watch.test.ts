@@ -56,19 +56,19 @@ describe("POST /box/automations/pr-watch: box failures", () => {
     expect(await response.json()).toEqual({ _tag: tag, message: "agent box is offline" })
   })
 
-  test("a failed box answer with a non-JSON body is not labelled as JSON", async () => {
-    boxAnswer = { ok: false, status: 502, body: "<html>bad gateway</html>" }
+  test.each([502, 503, 504])("a non-JSON gateway answer %i is not labelled as a box outage", async (status) => {
+    boxAnswer = { ok: false, status, body: "<html>bad gateway</html>" }
     const response = await watch()
-    expect(response.status).toBe(502)
+    expect(response.status).toBe(status)
     expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8")
-    expect(await response.json()).toEqual({ _tag: "BoxOffline", message: "agent box request failed" })
+    expect(await response.json()).toEqual({ _tag: "BadGateway", message: "agent box request failed" })
   })
 
   test("a failed box answer that is JSON but not an error shape is not forwarded", async () => {
     boxAnswer = { ok: false, status: 503, body: JSON.stringify({ unexpected: true }) }
     const response = await watch()
     expect(response.status).toBe(503)
-    expect(await response.json()).toEqual({ _tag: "BoxOffline", message: "agent box request failed" })
+    expect(await response.json()).toEqual({ _tag: "BadGateway", message: "agent box request failed" })
   })
 
   test("an untagged box error with a message keeps its detail", async () => {
