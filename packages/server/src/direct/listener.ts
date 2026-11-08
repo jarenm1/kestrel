@@ -157,6 +157,8 @@ const withIdentity = (headers: Headers, routed: Routed): Headers => {
 const withOfflineMark = (response: Response): Response => {
   const headers = new Headers(response.headers)
   headers.set(OFFLINE_HEADER, "1")
+  // The app is cross-origin to the box: without this a browser cannot read the marker.
+  headers.set("access-control-expose-headers", OFFLINE_HEADER)
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 

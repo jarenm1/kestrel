@@ -127,6 +127,8 @@ describe("a user's own box after a restart, with the control plane down", () => 
 
       expect(response.status).toBe(200)
       expect(response.headers.get(OFFLINE_HEADER)).toBe("1")
+      // A browser on the app's origin can only read the marker if the box exposes it.
+      expect(response.headers.get("access-control-expose-headers")).toBe(OFFLINE_HEADER)
       expect(box.served).toEqual([{ method: "GET", path: "/api/tasks/t1", user: OWNER }])
     } finally {
       box.listener.close()
@@ -162,6 +164,7 @@ describe("a user's own box after a restart, with the control plane down", () => 
     try {
       for (const [method, path] of denied) {
         const response = await box.listener.handle(request(method, path, token))
+        expect(response.headers.get("access-control-expose-headers")).toBe(OFFLINE_HEADER)
         expect({ method, path, status: response.status, _tag: (await response.json())._tag }).toEqual({
           method,
           path,
