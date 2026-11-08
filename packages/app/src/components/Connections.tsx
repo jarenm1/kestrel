@@ -427,9 +427,8 @@ function accountDescription(
 ): string {
   const account = accounts.find((candidate) => candidate.id === activeAccountId)?.account
     ?? connection.account
-  if (!account) return "Signed in"
   const others = accounts.length - 1
-  return `Signed in as ${account}${others > 0 ? ` +${others} more` : ""}`
+  return `${account ? `Signed in as ${account}` : "Signed in"}${others > 0 ? ` +${others} more` : ""}`
 }
 
 /** Subscription logins of the official CLIs. The sign-in runs on the agent box; this page only relays the provider's own steps. */

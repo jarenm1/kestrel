@@ -81,8 +81,8 @@ Subscription identities come from the CLI's own account: Claude's status JSON, C
 Antigravity's ID token (or Google's userinfo endpoint for older access-token-only logins), OpenCode's active
 Console credential metadata in its box-local database, and Devin's status email. OpenCode's database is opened
 read-only and only the email is selected, preserving support for 2.0.7 without requiring 2.1's credential export.
-Unavailable or invalid identities remain **Signed in**; a failed Google identity lookup does not disconnect
-the account. Credential tokens and keys stay on the box.
+Unavailable or invalid identities show **Signed in**, retaining **+N more** when other accounts are connected;
+a failed Google identity lookup does not disconnect the account. Credential tokens and keys stay on the box.
 
 Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<accountId>` and its provider's
 credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;
