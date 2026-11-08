@@ -10,7 +10,7 @@ const run: Run = { id: "run", taskId: "task", prompt: "Go", status: "succeeded",
 const turn = (id: string, outputTokens: number | null = 60): AgentItem => ({
   _tag: "turn", id, inputTokens: 1234, outputTokens, durationMs: 2000, costUsd: null, isError: false,
 })
-const usage: AgentItem = { _tag: "usage", id: "usage", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 20, cachedTokens: 1000 }
+const usage: AgentItem = { _tag: "usage", id: "usage", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: 1000 }
 const summary = (items: AgentItem[], overrides: Partial<Run> = {}) => renderToStaticMarkup(<RunSummary run={{ ...run, ...overrides }} items={items} />)
 
 test("elapsed and rate use the lifecycle clock rather than response or provider timing", () => {
@@ -18,7 +18,25 @@ test("elapsed and rate use the lifecycle clock rather than response or provider 
   expect(html).toContain("Worked for 1m")
   expect(html).toContain("1 tok/s")
   expect(html).not.toContain("30 tok/s")
-  expect(html).not.toContain("50 tok/s")
+  expect(html).not.toContain("150 tok/s")
+})
+
+test("input excludes cache reads, cached tokens stay separate, and details do not repeat elapsed", () => {
+  const html = summary([usage, turn("end")])
+  expect(html).not.toContain("Elapsed")
+  expect(html).toContain(`title="100"`)
+  expect(html).toContain(`title="60"`)
+  expect(html).toContain(`title="1,000"`)
+  expect(html).not.toContain(`title="1,234"`)
+  expect(html.indexOf("Input tokens")).toBeLessThan(html.indexOf("Output tokens"))
+  expect(html.indexOf("Output tokens")).toBeLessThan(html.indexOf("Cached tokens"))
+  expect(html.indexOf("Cached tokens")).toBeLessThan(html.indexOf("Avg TPS"))
+})
+
+test("turn-only totals keep input and output but never invent a cache split", () => {
+  const html = summary([turn("end")])
+  expect(html).toContain(`title="1,234"`)
+  expect(html).toContain("Cached tokens</dt><dd>Not reported</dd>")
 })
 
 test("metadata no longer creates rows or splits consecutive tools", () => {

@@ -198,13 +198,16 @@ The row keeps its muted color and uses the thinking block's trailing 14px caret:
 focus, rotated down and kept visible while open.
 Saved replies without loaded transcript items keep the summary after their answer.
 
-Expanding the disclosure reveals elapsed time, total input (including cache), cached input where reported,
-output, and average output tokens divided by the same wall-clock span. This average includes tools and waiting;
-it is not model-generation speed. Tokens come from completed turn aggregates, never added to response counts.
-Incomplete, failed or stopped invocations do not present partial token totals as complete; unreported values
-say “Not reported” rather than showing `? tok/s`. Cached input uses only main-agent response usage, excluding
-subagent rows. Counts are compact with exact values on hover. Per-response metadata remains stored but no longer
-creates rows or splits consecutive tool groups. The context meter remains a separate current-context measurement.
+Expanding the disclosure lists input, output and cached tokens plus average output tokens per second over the
+same wall-clock span. The collapsed row already carries elapsed time, so the details do not repeat it. Input
+excludes cache reads, which appear as cached tokens separately; cache writes count as input. Totals come from
+main-agent response usage and are never added to turn aggregates, so they are not double-counted; subagent rows
+are excluded. A harness that reports only turn aggregates still contributes its input and output, but its cache
+split is unknown, so cached tokens say “Not reported” instead of guessing. This average includes tools and
+waiting; it is not model-generation speed. Incomplete, failed or stopped invocations do not present partial
+token totals as complete; unreported values say “Not reported” rather than showing `? tok/s`. Counts are
+compact with exact values on hover. Per-response metadata remains stored but no longer creates rows or splits
+consecutive tool groups. The context meter remains a separate current-context measurement.
 
 OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
 providers through the model picker rather than introducing a separate per-thread harness control.
