@@ -147,6 +147,14 @@ export interface BwrapOptions {
   readonly display?: number
   /** `display` only: the task desktop's PulseAudio socket (see `pulseSocket`) is bound too. */
   readonly audio?: boolean
+  /**
+   * Expose the host GPU's render/compute nodes and drivers without a desktop. With `display` the desktop's X socket
+   * is bound too; without it the launch is headless: no DISPLAY, no PulseAudio socket and no X11 socket. Card nodes
+   * (which can modeset) are never exposed.
+   */
+  readonly gpu?: boolean
+  /** How GPU device nodes and driver directories are discovered; tests inject a synthetic host. */
+  readonly gpuProbe?: GpuProbe
   /** Exact environment of the sandboxed process. Nothing else from the host is passed. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -226,9 +234,15 @@ export const buildBwrapArgv = (opts: BwrapOptions): string[] => {
     const socket = x11Socket(opts.display)
     if (opts.audio) argv.push("--bind", pulseSocket(opts.display), pulseSocket(opts.display))
     argv.push("--bind", socket, socket)
-    argv.push(...gpuArgs())
   }
-  for (const [name, value] of Object.entries(opts.env)) argv.push("--setenv", name, value)
+  // The desktop's sandbox gets the GPU as before; a headless workload asks for it without a display. Neither path
+  // exposes card nodes, and a headless launch binds no X socket, so GPU access no longer depends on a desktop.
+  if (opts.display !== undefined || opts.gpu === true) argv.push(...gpuArgs(opts.gpuProbe, opts.display === undefined))
+  for (const [name, value] of Object.entries(opts.env)) {
+    // A headless GPU workload must not inherit a stale DISPLAY (or the audio socket that goes with it).
+    if (opts.gpu === true && opts.display === undefined && (name === "DISPLAY" || name === "PULSE_SERVER")) continue
+    argv.push("--setenv", name, value)
+  }
   argv.push("--chdir", opts.cwd, "--", "sh", "-c", opts.command)
   return argv
 }
@@ -301,24 +315,65 @@ export const x11Socket = (display: number): string => `/tmp/.X11-unix/X${display
 export const pulseSocket = (display: number): string => `/tmp/.X11-unix/pulse-${display}`
 
 /**
- * The host GPU, for processes that can draw on the task desktop: DRM render nodes (never the card nodes, which can
- * modeset), NVIDIA's device files, and the host's GL/Vulkan drivers at /run/opengl-driver, where nixpkgs' libglvnd and
- * Vulkan loader look (NixOS; elsewhere sandboxed apps keep Mesa's software drivers). Mesa finds a render node's driver
- * through sysfs, so /sys/dev and /sys/devices are visible read-only. Empty on a host without a GPU.
+ * The device nodes a headless workload may use: DRM render nodes and NVIDIA's compute devices (nvidiactl, the uvm pair
+ * and the nvidia-caps directory). Headless launches get only these, so /dev/nvidia-modeset is never bound for them.
  */
-const gpuArgs = (): string[] => {
-  const devices: string[] = []
-  try {
-    for (const name of readdirSync("/dev/dri")) if (name.startsWith("renderD")) devices.push(`/dev/dri/${name}`)
-  } catch {
-    // no DRM devices
-  }
-  for (const name of readdirSync("/dev")) if (name.startsWith("nvidia")) devices.push(`/dev/${name}`)
+const GPU_DEVICE_NODE = /^\/dev\/(dri\/renderD\d+|nvidia(\d+|ctl|-uvm|-uvm-tools|-caps))$/
+
+/**
+ * Where the host GPU can be found. Separate from {@link gpuArgs} so tests can describe a synthetic host and so a
+ * headless launch can check availability without reading /dev.
+ */
+export interface GpuProbe {
+  /** Device nodes on the host: DRM render nodes and NVIDIA's device files. Card nodes are filtered out by gpuArgs. */
+  readonly devices: () => ReadonlyArray<string>
+  readonly exists: (path: string) => boolean
+}
+
+/** The real host: DRM render nodes (never the card nodes) and NVIDIA's device files. */
+export const hostGpuProbe: GpuProbe = {
+  devices: () => {
+    const devices: string[] = []
+    try {
+      for (const name of readdirSync("/dev/dri")) if (name.startsWith("renderD")) devices.push(`/dev/dri/${name}`)
+    } catch {
+      // no DRM devices
+    }
+    try {
+      for (const name of readdirSync("/dev")) if (name.startsWith("nvidia")) devices.push(`/dev/${name}`)
+    } catch {
+      // no NVIDIA devices
+    }
+    return devices
+  },
+  exists: (path) => existsSync(path),
+}
+
+/** Whether the host has any GPU device a headless workload can use. */
+export const hasGpuDevice = (probe: GpuProbe = hostGpuProbe): boolean =>
+  probe.devices().some((device) => GPU_DEVICE_NODE.test(device))
+
+/** The host's GL/Vulkan drivers and the sysfs entries Mesa uses to find a render node's driver. */
+const GPU_DRIVER_DIRS = ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run/opengl-driver-32"]
+
+/**
+ * The host GPU, for processes that can draw on the task desktop or for a headless GPU workload: DRM render nodes (never
+ * the card nodes, which can modeset), NVIDIA's compute device files, and the host's GL/Vulkan drivers at
+ * /run/opengl-driver, where nixpkgs' libglvnd and Vulkan loader look (NixOS; elsewhere sandboxed apps keep Mesa's
+ * software drivers). Mesa finds a render node's driver through sysfs, so /sys/dev and /sys/devices are visible
+ * read-only. A headless launch gets only the allow-listed nodes. Empty on a host without a GPU.
+ */
+export const gpuArgs = (probe: GpuProbe = hostGpuProbe, headless = false): string[] => {
+  const devices = probe
+    .devices()
+    // Even a hand-written probe cannot make a card node visible.
+    .filter((device) => !/^\/dev\/dri\/card\d+$/.test(device))
+    .filter((device) => !headless || GPU_DEVICE_NODE.test(device))
   if (devices.length === 0) return []
   const argv: string[] = []
   for (const device of devices) argv.push("--dev-bind", device, device)
-  for (const dir of ["/sys/dev", "/sys/devices", "/run/opengl-driver", "/run/opengl-driver-32"]) {
-    if (existsSync(dir)) argv.push("--ro-bind", dir, dir)
+  for (const dir of GPU_DRIVER_DIRS) {
+    if (probe.exists(dir)) argv.push("--ro-bind", dir, dir)
   }
   return argv
 }
@@ -363,6 +418,11 @@ export interface LaunchRequest {
   readonly homeDir: string
   /** X display string (e.g. ":101") of the task desktop, or null. */
   readonly display: string | null
+  /**
+   * Give the launch the host GPU even without a desktop (`display: null`): render/compute nodes and drivers, but no
+   * DISPLAY, no PulseAudio and no X11 socket. Defaults to false, so ordinary CPU commands stay GPU-free.
+   */
+  readonly gpu?: boolean
   /** Variables beyond the base allowlist (CLOUDAGENTS_*, broker env). Never host env. */
   readonly env: Readonly<Record<string, string>>
   readonly command: string
@@ -800,6 +860,12 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
       ...(pulse ? { PULSE_SERVER: `unix:${pulse}` } : {}),
       ...req.env,
     }
+    // Headless GPU work has no display: a stale DISPLAY or audio socket from the caller must not leak in.
+    const headlessGpu = req.gpu === true && req.display === null
+    if (headlessGpu) {
+      delete env.DISPLAY
+      delete env.PULSE_SERVER
+    }
 
     const bwrapArgs = (level: "strict" | "basic"): string[] =>
       buildBwrapArgv({
@@ -810,6 +876,7 @@ export const prepareLaunch = (req: LaunchRequest): Effect.Effect<Launch, Interna
         homeDir: req.homeDir,
         display: x11Display,
         audio: pulse !== undefined,
+        gpu: req.gpu === true,
         env,
         command: req.command,
         roBinds: req.roBinds,
@@ -901,7 +968,13 @@ class OutputWindow {
 export const runProcess = (
   file: string,
   args: ReadonlyArray<string>,
-  opts: { readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly timeoutMs?: number },
+  opts: {
+    readonly cwd: string
+    readonly env: Readonly<Record<string, string>>
+    readonly timeoutMs?: number
+    /** Called once with the new process group's leader, so a supervisor can kill everything it starts. */
+    readonly onSpawn?: (pid: number | undefined) => void
+  },
 ): Effect.Effect<ProcessResult, InternalError> =>
   Effect.async<ProcessResult, InternalError>((resume) => {
     let done = false
@@ -934,6 +1007,7 @@ export const runProcess = (
     )
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk))
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk))
+    opts.onSpawn?.(child.pid)
     if (opts.timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true
