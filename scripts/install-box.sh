@@ -62,3 +62,4 @@ if [ "$RUN_INSTALL" = 1 ]; then
   "$target" install
 fi
 echo "kestrel-box installed at $target"
+echo "the box answers on localhost only; to reach it from other devices run: $target network"

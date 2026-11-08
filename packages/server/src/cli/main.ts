@@ -1,11 +1,12 @@
 import { parseArgs } from "node:util"
 import type { ParseArgsOptionsConfig } from "node:util"
 import { VERSION } from "../config"
-import { configPath, loadConfig } from "./config"
+import { configPath, DEFAULT_CONFIG, loadConfig } from "./config"
 import { linuxChecks, printChecks, SERVICE_NAME } from "./doctor"
 import { installLinux, uninstallLinux } from "./linux"
 import { login } from "./login"
 import { macosDoctor, macosInstall, macosUninstall } from "./macos"
+import { detectTailscale, network, networkChecks } from "./network"
 import { runBox } from "./run"
 import { CliError, execInherit } from "./system"
 
@@ -21,7 +22,8 @@ Commands:
   run          run the box in this process (what the service executes)
   status       show whether the service is running (macOS: inside the Lima VM)
   logs         follow the service's log (macOS: inside the Lima VM)
-  doctor       check that this machine can run the box
+  doctor       check that this machine can run the box (--network adds reachability checks)
+  network      show how the box can be reached (--serve: publish it on Tailscale Serve)
   config       show the config file (secret redacted)
   help         show this message
   --version    print the version
@@ -95,9 +97,29 @@ const command = async (name: string, args: readonly string[]): Promise<void> => 
       await runBox()
       return
     case "doctor": {
-      flags(args, {})
-      const ok = process.platform === "darwin" ? macosDoctor() : printChecks(await linuxChecks())
+      const values = flags(args, { network: { type: "boolean" } })
+      if (process.platform === "darwin") {
+        if (!macosDoctor(values.network ?? false)) process.exitCode = 1
+        return
+      }
+      const checks = await linuxChecks()
+      const port = (loadConfig() ?? DEFAULT_CONFIG).port
+      const ok = printChecks(values.network ? [...checks, ...networkChecks(port, detectTailscale())] : checks)
       if (!ok) process.exitCode = 1
+      return
+    }
+    case "network": {
+      const values = flags(args, { serve: { type: "boolean" } })
+      if (process.platform === "darwin") {
+        const code = execInherit("limactl", [
+          "shell", "--tty=false", "kestrel-box", "--", "sh", "-lc",
+          `"$HOME/.local/bin/kestrel-box" network${values.serve ? " --serve" : ""}`,
+        ])
+        if (code !== 0) process.exitCode = code
+        return
+      }
+      const config = loadConfig()
+      network((config ?? DEFAULT_CONFIG).port, { serve: values.serve ?? false })
       return
     }
     case "status":
