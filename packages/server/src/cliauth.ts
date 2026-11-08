@@ -285,6 +285,8 @@ export const CliAuthLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config
     const pending = new Map<string, Pending>()
+    /** Isolated homes being prepared, before their pending entry exists: a status read must not sweep them. */
+    const preparing = new Set<string>()
     const pendingKey = (user: string, provider: CliProvider, accountId: string) =>
       `${user}\0${provider}\0${accountId}`
     /** Cache identity: a provider's account has its own usage and Go-key answers. */
@@ -459,7 +461,8 @@ export const CliAuthLive = Layer.effect(
           )
           if (pendingAttempt) {
             // The home belongs to one account, whichever provider's sign-in is filling it in this process.
-            const live = [...pending.values()].some((attempt) => attempt.user === user && attempt.accountId === entry.name)
+            const live = preparing.has(home) ||
+              [...pending.values()].some((attempt) => attempt.user === user && attempt.accountId === entry.name)
             if (!live) yield* Effect.promise(() => rm(home, { recursive: true, force: true }).catch(() => undefined))
             continue
           }
@@ -1045,6 +1048,8 @@ export const CliAuthLive = Layer.effect(
         while (yield* isDirectory(cliAccountHome(root, accountId))) accountId = randomUUID()
         const home = yield* accountHome(user, accountId)
         yield* ensureUserDirs(user, provider, accountId)
+        // Reserve the home before its marker exists: a concurrent status read must not sweep a live attempt.
+        preparing.add(home)
         // An unfinished attempt is visibly not a login until its CLI exits successfully and the marker goes.
         yield* Effect.promise(() =>
           writeFile(join(home, CLI_PENDING_LOGIN_MARKER), "", { mode: 0o600 }).catch(() => undefined),
@@ -1055,15 +1060,19 @@ export const CliAuthLive = Layer.effect(
           killEntry(previous)
           yield* Effect.promise(() => previous.done)
         }
+        const discard = Effect.promise(() => {
+          preparing.delete(home)
+          return rm(home, { recursive: true, force: true }).catch(() => undefined)
+        })
         const inv = yield* invokeAt(home, provider, signIn.args(homeProviderDir(home, provider)), undefined, signIn.terminal).pipe(
-          Effect.tapError(() => Effect.promise(() => rm(home, { recursive: true, force: true }).catch(() => undefined))),
+          Effect.tapError(() => discard),
         )
         const child = yield* Effect.try({
           try: () =>
             ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
           catch: () => new InternalError({ message: `${spec.bin} could not be started` }),
         }).pipe(
-          Effect.tapError(() => Effect.promise(() => rm(home, { recursive: true, force: true }).catch(() => undefined))),
+          Effect.tapError(() => discard),
         )
         child.stdin?.on("error", () => {})
         const { promise: done, resolve: settle } = Promise.withResolvers<number | null>()
@@ -1092,6 +1101,7 @@ export const CliAuthLive = Layer.effect(
         child.on("close", (code) => {
           clearTimeout(entry.timer)
           if (pending.get(key) === entry) pending.delete(key)
+          preparing.delete(home)
           // The isolated home belongs to this attempt: a completed login keeps it, and an abandoned (TTL or replacement),
           // failed or killed one is removed. Synchronous so no later read finds a half-written login to list or probe.
           try {
@@ -1103,6 +1113,7 @@ export const CliAuthLive = Layer.effect(
           for (const listener of entry.listeners) listener()
         })
         pending.set(key, entry)
+        preparing.delete(home)
 
         const link = yield* Effect.promise(() => waitFor(entry, (text) => signIn.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS))
         if (link === null) {
