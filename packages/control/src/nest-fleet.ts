@@ -468,6 +468,16 @@ export class NestFleet {
    * recorded, so the caller reports the failure and the box never waits on a command no host received.
    */
   private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
+    if (!this.sendCommand(row, command)) return false
+    // A new request from the owner replaces a park or destroy owed a resend, and starts its run from zero.
+    row.retryKind = null
+    row.retryCount = 0
+    saveNestBox(this.sql, row)
+    return true
+  }
+
+  /** Sends a command and records it in flight. Leaves the retry state alone: a resend owed to the box is not an owner request. */
+  private sendCommand(row: NestBoxRow, command: NestHostCommand): boolean {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
     if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
@@ -477,8 +487,6 @@ export class NestFleet {
     row.pendingCommand = storedFormOf(command)
     row.pendingDeadline = timeout === null ? null : this.clock() + timeout
     row.wakeWanted = false
-    // A newer command replaces a park or destroy owed a resend: that one must not go out again later.
-    row.retryKind = null
     saveNestBox(this.sql, row)
     return true
   }
@@ -541,7 +549,7 @@ export class NestFleet {
         kind === "park"
           ? { _tag: "park", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
           : { _tag: "destroy", boxId: row.boxId, ownerEpoch: row.ownerEpoch }
-      if (!this.dispatch(row, command)) {
+      if (!this.sendCommand(row, command)) {
         row.retryKind = kind
         saveNestBox(this.sql, row)
       }

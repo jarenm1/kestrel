@@ -655,6 +655,25 @@ describe("a park or destroy the host refused for a lapse", () => {
     expect(stored).toEqual({ retry_kind: null, retry_count: 0 })
   })
 
+  test("an owner's newer request starts its own run: a destroy after an owed park gets the full bound of resends", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    fleet.result("host-a", lastCommand("host-a", "park").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    let id = lastCommand("host-a", "destroy").commandId
+    for (let attempt = 1; attempt <= MAX_LAPSE_RETRIES; attempt++) {
+      fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+      const before = sent.length
+      await fleet.capacity("host-a", capacityOf(8))
+      expect(commandsSince(before)).toHaveLength(1)
+      id = lastCommand("host-a", "destroy").commandId
+    }
+    fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before)).toHaveLength(0)
+  })
+
   test("an owner's newer request replaces an owed resend, which is not sent later", async () => {
     const vmId = await runningBox()
     fleet.park("alice", "box-1")
