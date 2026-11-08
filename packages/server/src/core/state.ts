@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
 import { InternalError, Message, Run, Task, ModelHarness, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
 import { Config } from "../config"
-import { writeAtomic } from "./atomic"
+import { replaceFile, syncDir, writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
 
 export const newId = (): string => randomUUID()
@@ -88,17 +88,33 @@ export interface StoreState {
 }
 
 export interface StoreShape {
-  /** Current state. Callers MUST NOT mutate it; use `update`. */
+  /**
+   * The last committed state, a snapshot that changes only when an update lands. Callers MUST NOT mutate it; use
+   * `update`. A value read before an update keeps the old contents; read again to see the new ones.
+   */
   readonly read: Effect.Effect<Readonly<StoreState>>
   /**
-   * Runs `f` synchronously against the state. If `f` returns Right, the state is
-   * persisted atomically before the effect succeeds. If it returns Left, nothing is
-   * persisted, so `f` MUST validate before mutating.
+   * Runs `f` synchronously against the working state. If `f` returns Right, the state is persisted atomically before
+   * the effect succeeds. If it returns Left, or the write fails before the rename, nothing is persisted and the
+   * mutations are rolled back, so the effect fails with the update NOT applied. If the rename landed but its directory
+   * sync fails, the effect fails with an InternalError saying the update was applied and is visible, but durability is
+   * unconfirmed: the caller must treat it as applied, not as rolled back.
    */
   readonly update: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<A, E | InternalError>
+  /**
+   * Like `update`, but an applied-yet-unconfirmed write succeeds with `_tag: "unconfirmed"` and `value` instead of failing. Use
+   * it where the caller must go on with what the update reserved: the update is applied in memory and in the file either
+   * way. `unconfirmed` means durability is not confirmed (a crash may roll the rename back); it is never a rollback.
+   */
+  readonly updateOutcome: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<UpdateOutcome<A>, E | InternalError>
   /** Resolves once every write made so far is on disk. */
   readonly flush: Effect.Effect<void>
 }
+
+/** How a write ended once its rename was attempted. `applied` is durable; `unconfirmed` is applied but not synced. */
+export type UpdateOutcome<A> =
+  | { readonly _tag: "applied"; readonly value: A }
+  | { readonly _tag: "unconfirmed"; readonly value: A; readonly cause: string }
 
 export class StateStore extends Context.Tag("cloudagents/StateStore")<StateStore, StoreShape>() {}
 
@@ -258,6 +274,39 @@ const reconcile = (state: StoreState): void => {
   }
 }
 
+/**
+ * Every object and array reachable from the state before an update runs, with a shallow copy of its own contents.
+ * Restoring resets each one to its copy, so every object keeps its identity, nested ones included, and whatever an
+ * update attached is dropped along with the object that held it. Shallow copies make this one pass over the state,
+ * the same order as the serialization the write does anyway.
+ */
+type Container = Record<string, unknown> | unknown[]
+type StateSnapshot = ReadonlyArray<readonly [Container, Container]>
+
+const snapshotState = (state: StoreState): StateSnapshot => {
+  const copies = new Map<Container, Container>()
+  const visit = (value: unknown): void => {
+    if (typeof value !== "object" || value === null || copies.has(value as Container)) return
+    const container = value as Container
+    copies.set(container, Array.isArray(container) ? [...container] : { ...container })
+    for (const child of Object.values(container)) visit(child)
+  }
+  visit(state)
+  return [...copies]
+}
+
+const restoreState = (snapshot: StateSnapshot): void => {
+  for (const [container, copy] of snapshot) {
+    if (Array.isArray(container)) {
+      container.length = 0
+      for (const item of copy as unknown[]) container.push(item)
+    } else {
+      for (const key of Object.keys(container)) delete container[key]
+      Object.assign(container, copy)
+    }
+  }
+}
+
 export const StateLive = Layer.effect(
   StateStore,
   Effect.gen(function* () {
@@ -276,27 +325,66 @@ export const StateLive = Layer.effect(
     const state = yield* loadFile(config.stateFile)
     reconcile(state)
 
-    // Writes are serialized; a failed write does not poison later ones.
-    let queue: Promise<void> = Promise.resolve()
-    const persist = (data: string) => {
-      const write = queue.then(() => writeAtomic(config.stateFile, data))
-      queue = write.catch(() => undefined)
-      return write
+    // Updates run one at a time, each against the state the previous one committed. A rejected or unwritten update is
+    // rolled back before the next one runs, so its mutations can never ride along in a later write.
+    // `state` is the working copy an update mutates in place; `committed` is what `read` returns. It is replaced only
+    // after a write lands, so no reader sees a mutation that is still in flight or that a failed write rolls back.
+    let committed: Readonly<StoreState> = structuredClone(state)
+    let lane: Promise<void> = Promise.resolve()
+    const commit = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Promise<Either.Either<UpdateOutcome<A>, E | InternalError>> => {
+      const run = lane.then(async (): Promise<Either.Either<UpdateOutcome<A>, E | InternalError>> => {
+        const snapshot = snapshotState(state)
+        let result: Either.Either<A, E>
+        try {
+          result = f(state)
+        } catch (e) {
+          restoreState(snapshot)
+          throw e
+        }
+        if (Either.isLeft(result)) {
+          restoreState(snapshot)
+          return Either.left(result.left)
+        }
+        try {
+          await replaceFile(config.stateFile, JSON.stringify(state))
+        } catch (e) {
+          restoreState(snapshot)
+          return Either.left(new InternalError({ message: `state write failed, update not applied: ${String(e)}` }))
+        }
+        // The rename landed, so the file holds the new state and the update is applied: publish it before the directory
+        // sync, whose failure only leaves durability unconfirmed (a crash may still roll the rename back).
+        committed = structuredClone(state)
+        try {
+          await syncDir(config.stateFile)
+        } catch (e) {
+          return Either.right({
+            _tag: "unconfirmed",
+            value: result.right,
+            cause: `state update applied and visible, but its directory sync failed: durability unconfirmed, do not treat as not applied: ${String(e)}`,
+          })
+        }
+        return Either.right({ _tag: "applied", value: result.right })
+      })
+      lane = run.then(() => undefined, () => undefined)
+      return run
     }
 
+    const updateOutcome = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<UpdateOutcome<A>, E | InternalError> =>
+      Effect.flatMap(
+        Effect.promise(() => commit(f)),
+        (result): Effect.Effect<UpdateOutcome<A>, E | InternalError> =>
+          Either.isLeft(result) ? Effect.fail(result.left) : Effect.succeed(result.right),
+      )
+
     const shape: StoreShape = {
-      read: Effect.sync(() => state),
+      read: Effect.sync(() => committed),
+      // An unconfirmed write fails here with its applied message: callers that go on with what it reserved use updateOutcome.
       update: <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<A, E | InternalError> =>
-        Effect.suspend((): Effect.Effect<A, E | InternalError> => {
-          const result = f(state)
-          if (Either.isLeft(result)) return Effect.fail(result.left)
-          const data = JSON.stringify(state)
-          return Effect.tryPromise({
-            try: () => persist(data),
-            catch: (e) => new InternalError({ message: `state write failed: ${String(e)}` }),
-          }).pipe(Effect.as(result.right))
-        }),
-      flush: Effect.promise(() => queue),
+        Effect.flatMap(updateOutcome(f), (outcome): Effect.Effect<A, InternalError> =>
+          outcome._tag === "applied" ? Effect.succeed(outcome.value) : Effect.fail(new InternalError({ message: outcome.cause })),
+        ),
+      updateOutcome,
+      flush: Effect.promise(() => lane),
     }
     return shape
   }),

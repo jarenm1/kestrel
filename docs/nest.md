@@ -198,10 +198,17 @@ reads the copy, which the CLI reflinks again to its own snapshot.
   plane sends `evict` once the host's `inventory` is complete, for every VM it reports with an epoch below the box's
   current one. So a host that was partitioned while its box moved cannot bring the old copy back.
 - **Leases.** The host may wake a `suspended` box from an ingress request by itself only while its last `lease` is
-  valid. A `parked` box, or any box without a lease, is woken only by `resume`: the host sends `wakeRequest` and holds
-  the request until the control plane answers. Past `validUntil` the host fences: it stops every running VM at once
-  without a sync and wakes nothing. The control plane moves a box off a host it cannot reach only after that host's last
-  `validUntil` plus `NEST_FENCE_MARGIN_MS`.
+  valid. A `parked` box, or any box without a valid lease, is not started by the host alone: the host sends
+  `wakeRequest` and holds the request until the control plane answers with a `resume`. Control honours a parked box's
+  `wakeRequest` only from the host its URL names; a suspended box's only from the host that holds it. Past `validUntil`
+  the host fences: it stops every running VM at once without a sync and wakes nothing.
+- **Intended, not implemented: the fence margin.** The lease frame (`packages/protocol/src/nest.ts`) describes control
+  moving a box off a host it cannot reach only after that host's last `validUntil` plus `NEST_FENCE_MARGIN_MS` (60 s).
+  No code reads `NEST_FENCE_MARGIN_MS`, and control does not currently move a box that a host still claims. A parked
+  box whose claim is held by an offline host waits for that host to reconnect, with no deadline (`resumeOn`,
+  `holdWake`). Only a parked box with no claim is placed elsewhere on wake, and that placement does not wait for any
+  fence. The margin is therefore a design target, not a safety property this system provides today, and this doc
+  does not claim that failover is safe.
 - **A second placement.** A parked box with no claim has no VM on any host, so control places it on a host with room with
   a higher epoch and a new `vmId`. The previous host refuses commands below that epoch and evicts its copy on the first
   inventory that shows it at a lower epoch. Control does not wait for the old host to fence. A copy the old host started
@@ -398,8 +405,9 @@ key and cache.nixos.org.
   authenticates, and a resent `create` carries a fresh token.
 - **Resume**: suspended → its host; parked → the host its URL names when that host has room (the request reached its
   ingress), otherwise any host with room (`resume` with `volumeRef`, new `vmId`, epoch + 1; the box's URL moves to the new
-  host's slug). A host that is offline holds a parked box that has a claim until it returns. `wakeRequest` from a host is
-  treated as a resume request.
+  host's slug). A host that is offline holds a parked box that has a claim until it returns. A `wakeRequest` is treated as a
+  resume request only from the host that holds a suspended box, or from the host a parked box's URL names; any other
+  host's is ignored.
 - **Reconcile**: `result` frames are applied as they arrive; when the last `inventory` chunk arrives, VMs with a stale
   epoch are evicted, and a VM the control plane does not know is logged and left alone.
 - **Wake before work**: automation dispatch to a Nest box sends `resume` and waits for `running` (60 s) first.

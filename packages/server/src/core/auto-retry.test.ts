@@ -26,6 +26,26 @@ const configOf = (root: string): ServerConfig => ({
   webrtc: { iceServers: [], turn: null, policy: "all", portRange: null, hostAddresses: [], denyPrivate: false },
 })
 
+/** The core service on a state file, with the harness stubbed: `spawned` records every run the box starts. */
+const coreDeps = (config: ServerConfig, spawned: { readonly prompt: string; readonly choice: AgentChoice }[]) => {
+  const configLayer = Layer.succeed(Config, config)
+  const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
+  const deps = Layer.mergeAll(
+    configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
+    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
+    workspaceLayer, Layer.succeed(CredentialStore, {} as never),
+    Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never), Layer.succeed(CredentialBroker, {} as never),
+    Layer.succeed(AgentHarness, {
+      spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
+        Effect.sync(() => void spawned.push({ prompt: start.resume?.prompt ?? start.fresh, choice })),
+      steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
+      cancel: () => Effect.void,
+      stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
+    } as never),
+  )
+  return CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps))
+}
+
 test("a due retry starts the thread's next run and clears the arm", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-retry-"))
   const config = configOf(root)
@@ -65,22 +85,6 @@ test("a due retry starts the thread's next run and clears the arm", async () => 
     }),
   )
 
-  const configLayer = Layer.succeed(Config, config)
-  const workspaceLayer = Layer.succeed(WorkspaceService, {} as never)
-  const deps = Layer.mergeAll(
-    configLayer, StateLive.pipe(Layer.provide(Layer.merge(configLayer, workspaceLayer))), EventHubLive,
-    Layer.succeed(DesktopManager, { watchStatus: () => Effect.void, status: () => Effect.succeed({ state: "stopped", display: null }), stopAll: () => Effect.void } as never),
-    workspaceLayer, Layer.succeed(CredentialStore, {} as never),
-    Layer.succeed(GitHub, {} as never), Layer.succeed(CliAuth, {} as never), Layer.succeed(CredentialBroker, {} as never),
-    Layer.succeed(AgentHarness, {
-      spawn: (_task: unknown, _run: unknown, start: RunStart, _display: unknown, _user: unknown, choice: AgentChoice) =>
-        Effect.sync(() => void spawned.push({ prompt: start.resume?.prompt ?? start.fresh, choice })),
-      steer: () => Effect.succeed({ accepted: true, afterItems: 0 }),
-      cancel: () => Effect.void,
-      stopAll: () => Effect.void, items: () => Effect.succeed([]), itemCount: () => 0,
-    } as never),
-  )
-
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -94,7 +98,63 @@ test("a due retry starts the thread's next run and clears the arm", async () => 
         expect(state.tasks[0]!.autoRetry).toBeUndefined()
         expect(state.messages.some((message) => message.id === "auto-retry:task:run:1")).toBe(true)
         expect(spawned).toHaveLength(1)
-      }).pipe(Effect.provide(CoreLive.pipe(Layer.provide(deps), Layer.provideMerge(deps)))),
+      }).pipe(Effect.provide(coreDeps(config, spawned))),
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("after a restart, a crashed run and a shut-down run are not retried; a plain failure still is", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-restart-retry-"))
+  const config = configOf(root)
+  const at = new Date(Date.now() - 60_000).toISOString()
+  const run = (id: string, taskId: string, overrides: Record<string, unknown>) => ({
+    id, taskId, prompt: "Do the work", startedAt: at, endedAt: at, exitCode: 1,
+    provider: "anthropic", model: "claude-opus-5-5", effort: null, ...overrides,
+  })
+  const task = (id: string, overrides: Record<string, unknown>) => ({
+    id, owner: "owner", title: id, createdAt: at, updatedAt: at, checkouts: [], ...overrides,
+  })
+  // What a crash leaves (a run and its task still running), what a graceful shutdown records (a failed, interrupted run),
+  // and a failure no restart touched, which the box must still retry.
+  await writeFile(
+    config.stateFile,
+    JSON.stringify({
+      tasks: [
+        task("crash", { status: "running" }),
+        task("shutdown", { status: "failed" }),
+        task("control", { status: "failed" }),
+      ],
+      messages: [],
+      runs: [
+        run("crash-run", "crash", { status: "running", endedAt: null, exitCode: null }),
+        run("shutdown-run", "shutdown", { status: "failed", interruptedByRestart: true }),
+        run("control-run", "control", { status: "failed" }),
+      ],
+    }),
+  )
+
+  const spawned: { readonly prompt: string; readonly choice: AgentChoice }[] = []
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* StateStore
+        yield* CoreService
+        // The control's arm proves the sweep has looked at this state; the interrupted runs must have been skipped too.
+        for (let i = 0; i < 100 && (yield* store.read).tasks.find((t) => t.id === "control")?.autoRetry === undefined; i++) {
+          yield* Effect.sleep("20 millis")
+        }
+        const state = yield* store.read
+        expect(state.tasks.find((t) => t.id === "control")?.autoRetry).toMatchObject({ runId: "control-run", attempt: 1 })
+        expect(state.runs.find((r) => r.id === "crash-run")).toMatchObject({ status: "failed", interruptedByRestart: true })
+        expect(state.runs.find((r) => r.id === "shutdown-run")).toMatchObject({ status: "failed", interruptedByRestart: true })
+        expect(state.tasks.find((t) => t.id === "crash")?.autoRetry).toBeUndefined()
+        expect(state.tasks.find((t) => t.id === "shutdown")?.autoRetry).toBeUndefined()
+        // Only the two seeded runs: no retry started for either interrupted thread.
+        expect(state.runs.filter((r) => r.taskId === "crash" || r.taskId === "shutdown")).toHaveLength(2)
+        expect(spawned).toEqual([])
+      }).pipe(Effect.provide(coreDeps(config, spawned))),
     )
   } finally {
     await rm(root, { recursive: true, force: true })

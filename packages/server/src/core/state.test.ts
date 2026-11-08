@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { Cause, Effect, Exit, Layer, Option } from "effect"
+import { Cause, Effect, Either, Exit, Layer, Option } from "effect"
 import type { InternalError } from "@cloudagents/protocol"
 import { existsSync } from "node:fs"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Config, type ServerConfig } from "../config"
@@ -220,5 +220,322 @@ describe("legacy checkout pull requests", () => {
     expect(entries[1]).toMatchObject({ checkoutId: "c2", source: "linked" })
     expect(entries[2]).toMatchObject({ checkoutId: "c3", source: "linked" })
     for (const entry of entries) expect(entry.branch).toBeUndefined()
+  })
+})
+
+describe("failed durable writes", () => {
+  let root: string
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "kestrel-state-"))
+  })
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  // A directory where the state file belongs makes the atomic rename fail, so the write is refused as a real I/O fault.
+  const breakWrites = (file: string) => Effect.promise(() => rm(file, { force: true }).then(() => mkdir(file)))
+  const mendWrites = (file: string) => Effect.promise(() => rm(file, { recursive: true, force: true }))
+
+  test("a mutation whose write failed never reaches disk, even after a later successful update", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      const before = (yield* store.read).tasks[0]!
+      const titleBefore = before.title
+      yield* breakWrites(file)
+
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "never saved"
+          s.tasks.push({ ...s.tasks[0]!, id: "ghost" })
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      // Memory matches what is durable: the failed mutation is rolled back, and the object identity callers hold survives.
+      const after = yield* store.read
+      expect(after.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread"])
+      expect(after.tasks[0]).toBe(before)
+      expect(before.title).toBe(titleBefore)
+
+      yield* mendWrites(file)
+      yield* store.update((s) => {
+        s.tasks.push({ ...s.tasks[0]!, id: "kept" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
+    expect(reloaded.tasks[0]!.title).toBe("thread supported-thread")
+    expect(JSON.stringify(reloaded)).not.toContain("never saved")
+    expect(JSON.stringify(reloaded)).not.toContain("ghost")
+  })
+
+  test("a rejected update rolls back the mutations it made before returning Left", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      const rejected = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "rejected"
+          return Either.left("nope" as const)
+        }),
+      )
+      expect(Either.isLeft(rejected)).toBe(true)
+      expect((yield* store.read).tasks[0]!.title).toBe("thread supported-thread")
+      yield* store.update((s) => {
+        s.tasks.push({ ...s.tasks[0]!, id: "kept" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks[0]!.title).toBe("thread supported-thread")
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
+  })
+
+  // `f` runs synchronously, so reading from inside it is the exact window an update's mutation is in flight before the
+  // write settles. Overlapping readers must see the last committed state there, not the mutation.
+  test("readers during an in-flight update see only committed state, on success and on failure", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      const seenDuring: string[] = []
+      yield* store.update((s) => {
+        s.tasks[0]!.title = "in flight"
+        seenDuring.push(Effect.runSync(store.read).tasks[0]!.title)
+        return Either.right(undefined)
+      })
+      expect(seenDuring).toEqual(["thread supported-thread"])
+      expect((yield* store.read).tasks[0]!.title).toBe("in flight")
+
+      yield* breakWrites(file)
+      const failedSeen: string[] = []
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "doomed"
+          failedSeen.push(Effect.runSync(store.read).tasks[0]!.title)
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      expect(failedSeen).toEqual(["in flight"])
+      expect((yield* store.read).tasks[0]!.title).toBe("in flight")
+      yield* mendWrites(file)
+      yield* store.update((s) => {
+        s.tasks.push({ ...s.tasks[0]!, id: "kept" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks[0]!.title).toBe("in flight")
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
+  })
+
+  test("a rejected update is reported as not applied, and a failed write names its outcome", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* breakWrites(file)
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "never saved"
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      if (Either.isLeft(failed)) expect(failed.left.message).toContain("update not applied")
+      yield* mendWrites(file)
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+  })
+
+  test("a failed write leaves no temporary file behind", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* breakWrites(file)
+      yield* Effect.either(
+        store.update((s) => {
+          s.tasks.push({ ...s.tasks[0]!, id: "ghost" })
+          return Either.right(undefined)
+        }),
+      )
+      yield* mendWrites(file)
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([])
+  })
+
+  test("a rejected update restores nested values in place, so references held across it stay valid", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+    // The protocol types are not needed here: the test only needs an object nested inside a task.
+    const nestedOf = (s: Readonly<StoreState>) => (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* store.update((s) => {
+        (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts.push({ id: "c1", branch: "original" })
+        return Either.right(undefined)
+      })
+      const list = nestedOf(yield* store.read)
+      const checkout = list[0]!
+
+      const rejected = yield* Effect.either(
+        store.update((s) => {
+          const nested = (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts
+          nested[0]!.branch = "rejected"
+          nested.push({ id: "c2", branch: "rejected" })
+          return Either.left("nope" as const)
+        }),
+      )
+      expect(Either.isLeft(rejected)).toBe(true)
+      expect(nestedOf(yield* store.read)).toBe(list)
+      expect(list[0]).toBe(checkout)
+      expect(checkout.branch).toBe("original")
+      expect(list.map((c) => c.id)).toEqual(["c1"])
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+  })
+
+  test("a failed write restores nested values in place too", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+    const nestedOf = (s: Readonly<StoreState>) => (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* store.update((s) => {
+        (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts.push({ id: "c1", branch: "original" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+      const list = nestedOf(yield* store.read)
+      const checkout = list[0]!
+      yield* breakWrites(file)
+
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          const nested = (s.tasks[0] as unknown as { checkouts: Array<Record<string, unknown>> }).checkouts
+          nested[0]!.branch = "never saved"
+          nested.splice(0, 1)
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      expect(nestedOf(yield* store.read)).toBe(list)
+      expect(list[0]).toBe(checkout)
+      expect(checkout.branch).toBe("original")
+      yield* mendWrites(file)
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+  })
+
+  test("concurrent updates run in order, and a rejected one never rides along in a later write", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* Effect.all(
+        [
+          Effect.either(
+            store.update((s) => {
+              s.tasks[0]!.title = "rejected"
+              return Either.left("nope" as const)
+            }),
+          ),
+          Effect.either(
+            store.update((s) => {
+              s.tasks.push({ ...s.tasks[0]!, id: "kept" })
+              return Either.right(undefined)
+            }),
+          ),
+        ],
+        { concurrency: "unbounded" },
+      )
+      yield* store.flush
+      expect((yield* store.read).tasks[0]!.title).toBe("thread supported-thread")
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks[0]!.title).toBe("thread supported-thread")
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
+  })
+})
+
+// Removing read permission from the state directory keeps rename and temp-file creation working (both need write and
+// search) while opening the directory for its sync fails: the real fault a directory fsync error produces after the
+// rename has already landed. Root ignores directory permissions, so the case is skipped there and on Windows.
+describe("directory sync failure after the rename", () => {
+  let root: string
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "kestrel-state-"))
+  })
+  afterEach(async () => {
+    await chmod(root, 0o755).catch(() => undefined)
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const canSimulate = process.platform !== "win32" && process.getuid?.() !== 0
+
+  test.skipIf(!canSimulate)("reports the outcome as unconfirmed, keeps the new state in memory and on disk", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* Effect.promise(() => chmod(root, 0o300))
+
+      const outcome = yield* Effect.either(
+        store.update((s) => {
+          s.tasks.push({ ...s.tasks[0]!, id: "landed" })
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(outcome)).toBe(true)
+      if (Either.isLeft(outcome)) {
+        expect(outcome.left._tag).toBe("InternalError")
+        expect(outcome.left.message).toContain("applied and visible")
+        expect(outcome.left.message).toContain("durability unconfirmed")
+      }
+      // The rename landed, so memory matches the file rather than rolling back to the old state.
+      expect((yield* store.read).tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "landed"])
+
+      yield* Effect.promise(() => chmod(root, 0o755))
+      const names = yield* Effect.promise(() => readdir(root))
+      expect(names.filter((name) => name.endsWith(".tmp"))).toEqual([])
+      // A later update still succeeds once the directory can be synced again.
+      yield* store.update((s) => {
+        s.tasks.push({ ...s.tasks[0]!, id: "after" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "landed", "after"])
   })
 })

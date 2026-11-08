@@ -1,6 +1,6 @@
 # Kestrel architecture
 
-This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
+This document describes the system as implemented today: its components, data flows and trust boundaries. The intended evolution, including The Nest's per-user VMs and saved evidence, is described separately in [goal-state.md](goal-state.md). A goal or proposal there is not a claim that it is already implemented. See [resilience.md](resilience.md) for outage boundaries, [box.md](box.md) for box operations and sandbox details, and [byo-box.md](byo-box.md) for bringing your own box.
 
 ## System overview
 

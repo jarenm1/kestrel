@@ -73,7 +73,7 @@ import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
 import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
-import { SESSION_HEADER, FILE_TOKEN_HEADER, type Env } from "./env"
+import { SESSION_HEADER, FILE_TOKEN_HEADER, isAllowedLogin, type Env } from "./env"
 import {
   createDesktopToken,
   deleteSessionDesktopTokens,
@@ -439,7 +439,7 @@ export class Hub extends DurableObject<Env> {
     const sql = this.ctx.storage.sql
     sql.exec("DELETE FROM sessions WHERE expires_at <= ?", Date.now())
     const row = sql.exec<{ login: string; dev: number }>("SELECT login, dev FROM sessions WHERE id = ?", id).toArray()[0]
-    return row ? { login: row.login, dev: row.dev === 1 } : null
+    return row && isAllowedLogin(this.env, row.login, row.dev === 1) ? { login: row.login, dev: row.dev === 1 } : null
   }
 
   /** Ends a session (sign-out); the file and desktop tokens it minted end with it. */
@@ -477,7 +477,7 @@ export class Hub extends DurableObject<Env> {
         now,
       )
       .toArray()[0]
-    return row ?? null
+    return row && isAllowedLogin(this.env, row.login, !!this.env.DEV_SESSION_LOGIN) ? row : null
   }
 
   /**
@@ -850,7 +850,7 @@ export class Hub extends DurableObject<Env> {
   async managedBoxAuthorize(boxId: string, secret: string, login: string): Promise<BoxOutcome<null>> {
     const access = await managedBoxAccess(this.ctx.storage.sql, boxId, secret, login)
     if (access === "unauthenticated") return INVALID_BOX_CREDENTIALS
-    if (access === "unassigned") return NOT_ASSIGNED
+    if (access === "unassigned" || !isAllowedLogin(this.env, login, !!this.env.DEV_SESSION_LOGIN)) return NOT_ASSIGNED
     return { ok: true, value: null }
   }
 
@@ -1127,6 +1127,9 @@ export class Hub extends DurableObject<Env> {
   // -------------------------------------------------------------------------
 
   boxCall(login: string, method: "GET" | "POST", path: string, payload?: unknown): Promise<BoxResult> {
+    if (!isAllowedLogin(this.env, login, !!this.env.DEV_SESSION_LOGIN)) {
+      return Promise.resolve({ ok: false, status: 403, body: JSON.stringify({ _tag: "Forbidden", message: "account is not allowed" }) })
+    }
     const nestId = this.activeNestBox(login)
     if (nestId !== null) return this.nestBoxCall(login, nestId, method, path, payload)
     const managed = managedBoxFor(this.ctx.storage.sql, login)

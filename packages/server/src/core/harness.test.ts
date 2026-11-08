@@ -4,7 +4,7 @@ import { createServer } from "node:http"
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Checkout, ModelProvider, Run, Task } from "@cloudagents/protocol"
+import type { Checkout, Message, ModelProvider, Run, Task } from "@cloudagents/protocol"
 import { CredentialBroker, CredentialBrokerLive } from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
@@ -956,6 +956,204 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     await rm(root, { recursive: true, force: true })
   }
 }, 12_000)
+
+/** A Claude CLI that answers its first message, then sits on its input like an agent waiting on the user. */
+const sittingCli = async (root: string) => {
+  const cli = join(root, "cli.ts")
+  await writeFile(cli, `
+import { createInterface } from "node:readline"
+createInterface({ input: process.stdin })
+  .on("line", (line) => {
+    if (JSON.parse(line).type !== "user") return
+    console.log(JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Working." }] }, parent_tool_use_id: null }))
+  })
+`)
+  return cli
+}
+
+test("a graceful shutdown interrupts a run the way a crash does, keeps its question, and a reload keeps both", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-shutdown-restart-"))
+  const cli = await sittingCli(root)
+  const { task, run } = runningTask("shutdown")
+  const question: Message = { id: "question", taskId: task.id, runId: run.id, role: "agent", text: "Which option?", options: ["A", "B"], createdAt: new Date().toISOString() }
+  const first = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(first.config.threadsDir, task.id), { recursive: true }))
+      const answered = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        yield* store.update((state) => {
+          state.tasks.find((t) => t.id === task.id)!.status = "needs_input"
+          state.messages.push(question)
+          state.pendingAsks.push({ taskId: task.id, runId: run.id, messageId: question.id })
+          return Either.right(null)
+        })
+        yield* harness.stopAll()
+        const stopped = yield* store.read
+        // Same as a crash (`reconcile`): the run is a restart interruption, not a user's cancel.
+        expect(stopped.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+        expect(stopped.pendingAsks).toEqual([{ taskId: task.id, runId: run.id, messageId: question.id }])
+        expect(stopped.tasks.find((t) => t.id === task.id)?.status).toBe("needs_input")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(first.layer)))
+
+    // The next box start loads the same state directory; reconciliation must not reclassify what shutdown recorded.
+    const second = harnessLayer(root, cli)
+    await Effect.runPromise(Effect.gen(function* () {
+      const reloaded = yield* (yield* StateStore).read
+      expect(reloaded.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+      expect(reloaded.pendingAsks.map((a) => a.messageId)).toEqual([question.id])
+      expect(reloaded.tasks.find((t) => t.id === task.id)?.status).toBe("needs_input")
+    }).pipe(Effect.provide(second.layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a graceful shutdown of a plain running run reloads with its task failed, as after a crash", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-shutdown-plain-"))
+  const cli = await sittingCli(root)
+  const { task, run } = runningTask("shutdown-plain")
+  const first = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(first.config.threadsDir, task.id), { recursive: true }))
+      const answered = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.stopAll()
+        const stopped = yield* store.read
+        expect(stopped.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+        // The shutdown leaves the task as it was; the next start's reconciliation is what fails it.
+        expect(stopped.tasks.find((t) => t.id === task.id)?.status).toBe("running")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(first.layer)))
+
+    const second = harnessLayer(root, cli)
+    await Effect.runPromise(Effect.gen(function* () {
+      const reloaded = yield* (yield* StateStore).read
+      expect(reloaded.runs.find((r) => r.id === run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+      expect(reloaded.tasks.find((t) => t.id === task.id)?.status).toBe("failed")
+    }).pipe(Effect.provide(second.layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a graceful shutdown cancels a run still queued for a slot: it never started, so it is not an interruption", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-shutdown-queued-"))
+  const cli = await sittingCli(root)
+  const first = runningTask("shutdown-first")
+  const queued = runningTask("shutdown-queued")
+  const { config, layer } = harnessLayer(root, cli, { maxConcurrentRuns: 1 })
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* store.update((state) => {
+        state.tasks.push(first.task, queued.task)
+        state.runs.push(first.run, queued.run)
+        return Either.right(null)
+      })
+      for (const { task } of [first, queued]) {
+        yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      }
+      const answered = Promise.withResolvers<void>()
+      const waiting = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(first.task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+      })
+      const unsubscribeQueued = hub.subscribe(queued.task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "tool" && event.item.status === "running") waiting.resolve()
+      })
+      try {
+        yield* harness.spawn(first.task, first.run, { fresh: first.run.prompt, resume: null }, null, first.task.owner, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.spawn(queued.task, queued.run, { fresh: queued.run.prompt, resume: null }, null, queued.task.owner, {})
+        yield* Effect.promise(() => waiting.promise).pipe(Effect.timeout("8 seconds"))
+        yield* harness.stopAll()
+        const stopped = yield* store.read
+        // The first run had started: an interruption. The queued run never ran: cancelled, as an explicit stop leaves it.
+        expect(stopped.runs.find((r) => r.id === first.run.id)).toMatchObject({ status: "failed", interruptedByRestart: true })
+        expect(stopped.runs.find((r) => r.id === queued.run.id)).toMatchObject({ status: "cancelled" })
+        expect(stopped.runs.find((r) => r.id === queued.run.id)?.interruptedByRestart).toBeUndefined()
+        expect(stopped.tasks.find((t) => t.id === queued.task.id)?.status).toBe("idle")
+      } finally {
+        unsubscribe()
+        unsubscribeQueued()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("an explicit cancel is a user's stop: the run is cancelled, its question is dropped, and it is not a restart interruption", async () => {
+  const root = await mkdtemp(join(tmpdir(), "kestrel-explicit-cancel-"))
+  const cli = await sittingCli(root)
+  const { task, run } = runningTask("cancel")
+  const question: Message = { id: "question", taskId: task.id, runId: run.id, role: "agent", text: "Which option?", options: ["A", "B"], createdAt: new Date().toISOString() }
+  const { config, layer } = harnessLayer(root, cli)
+  try {
+    await Effect.runPromise(Effect.gen(function* () {
+      const store = yield* StateStore
+      const harness = yield* AgentHarness
+      const hub = yield* EventHub
+      yield* store.update((state) => { state.tasks.push(task); state.runs.push(run); return Either.right(null) })
+      yield* Effect.promise(() => mkdir(join(config.threadsDir, task.id), { recursive: true }))
+      const answered = Promise.withResolvers<void>()
+      const unsubscribe = hub.subscribe(task.id, (event) => {
+        if (event._tag === "agent.item" && event.item._tag === "text") answered.resolve()
+      })
+      try {
+        yield* harness.spawn(task, run, { fresh: run.prompt, resume: null }, null, task.owner, {})
+        yield* Effect.promise(() => answered.promise).pipe(Effect.timeout("8 seconds"))
+        yield* store.update((state) => {
+          state.tasks.find((t) => t.id === task.id)!.status = "needs_input"
+          state.messages.push(question)
+          state.pendingAsks.push({ taskId: task.id, runId: run.id, messageId: question.id })
+          return Either.right(null)
+        })
+        yield* harness.cancel(run.id)
+        const state = yield* store.read
+        expect(state.runs.find((r) => r.id === run.id)).toMatchObject({ status: "cancelled" })
+        expect(state.runs.find((r) => r.id === run.id)?.interruptedByRestart).toBeUndefined()
+        expect(state.pendingAsks).toEqual([])
+        expect(state.tasks.find((t) => t.id === task.id)?.status).toBe("idle")
+      } finally {
+        unsubscribe()
+        yield* harness.stopAll()
+      }
+    }).pipe(Effect.provide(layer)))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}, 20_000)
 
 test("a Devin ACP run sets the upstream model id, without the protocol prefix", async () => {
   const root = await mkdtemp(join(tmpdir(), "kestrel-devin-acp-model-"))

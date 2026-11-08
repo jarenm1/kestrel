@@ -21,6 +21,25 @@ const PREVIEW_REFERER = /^\/_preview\/([0-9a-f-]{36})\/([^/]+)(?:\/.*)?$/
 
 const REASON: Record<number, string> = { 401: "Unauthorized", 404: "Not Found", 503: "Service Unavailable" }
 
+/** Set on every response a box serves while its control plane is unreachable, so clients and tooling can tell. */
+export const OFFLINE_HEADER = "x-kestrel-box-offline"
+
+/**
+ * What a box serves while its control plane is unreachable and it holds no credentials for the token's user: thread
+ * reads, which only touch the box's own store. Every other route, every write, and every stream or WebRTC channel is
+ * refused until the credentials return.
+ */
+const OFFLINE_READS: readonly RegExp[] = [/^\/api\/tasks$/, /^\/api\/tasks\/[^/]+$/, /^\/api\/tasks\/[^/]+\/messages$/]
+
+const offlineReadable = (method: string, pathname: string): boolean =>
+  method === "GET" && OFFLINE_READS.some((pattern) => pattern.test(pathname))
+
+const OFFLINE_DENIED = {
+  status: 503,
+  tag: "Unavailable",
+  message: "this box cannot reach the control plane, so it serves only reads of your threads until it can",
+} as const
+
 interface Rejection {
   readonly status: number
   readonly tag: "Unauthorized" | "NotFound" | "Unavailable"
@@ -37,6 +56,8 @@ interface Routed {
   readonly dev: boolean
   /** Set only for preview frames: the frame's token, which the core checks against the task. */
   readonly previewToken: string | null
+  /** The box token's user has no credentials here and the control plane is unreachable: see `OFFLINE_READS`. */
+  readonly offline: boolean
 }
 
 export interface DirectListenerDeps {
@@ -98,11 +119,12 @@ const route = async (
       dev: false,
       previewToken: preview.token,
       expiresAt: null,
+      offline: false,
     }
   }
   const token = bearerOrQueryToken(url, authorization)
   url.searchParams.delete(BOX_TOKEN_QUERY)
-  if (token === null) return { url, user: null, expiresAt: null, dev: false, previewToken: null }
+  if (token === null) return { url, user: null, expiresAt: null, dev: false, previewToken: null, offline: false }
   const outcome = await Effect.runPromise(Effect.either(deps.auth.authenticate(token)))
   if (Either.isLeft(outcome)) {
     const error = outcome.left
@@ -110,12 +132,14 @@ const route = async (
       ? { status: 401, tag: "Unauthorized", message: error.message }
       : { status: 503, tag: "Unavailable", message: error.message }
   }
+  const { claims, offline } = outcome.right
   return {
     url,
-    user: outcome.right.sub,
-    expiresAt: outcome.right.exp,
-    dev: outcome.right.dev === true,
+    user: claims.sub,
+    expiresAt: claims.exp,
+    dev: claims.dev === true,
     previewToken: null,
+    offline,
   }
 }
 
@@ -128,6 +152,14 @@ const withIdentity = (headers: Headers, routed: Routed): Headers => {
     headers.set(PREVIEW_TOKEN_HEADER, routed.previewToken)
   }
   return headers
+}
+
+const withOfflineMark = (response: Response): Response => {
+  const headers = new Headers(response.headers)
+  headers.set(OFFLINE_HEADER, "1")
+  // The app is cross-origin to the box: without this a browser cannot read the marker.
+  headers.set("access-control-expose-headers", OFFLINE_HEADER)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
 const withReferrerPolicy = (response: Response): Response => {
@@ -176,20 +208,24 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     const routed = await route(deps, url, request.headers.get("referer"), request.headers.get("authorization"))
-    if ("status" in routed) {
-      const rejected = new Response(JSON.stringify({ _tag: routed.tag, message: routed.message }), {
-        status: routed.status,
+    const reject = (rejection: Rejection, offline: boolean): Response => {
+      const rejected = new Response(JSON.stringify({ _tag: rejection.tag, message: rejection.message }), {
+        status: rejection.status,
         headers: { "content-type": "application/json" },
       })
-      return url.pathname === Paths.webrtcOffer ? withAllowOrigin(rejected, request.headers.get("origin")) : rejected
+      const cors = url.pathname === Paths.webrtcOffer ? withAllowOrigin(rejected, request.headers.get("origin")) : rejected
+      return offline ? withOfflineMark(cors) : cors
     }
+    if ("status" in routed) return reject(routed, false)
+    if (routed.offline && !offlineReadable(request.method, routed.url.pathname)) return reject(OFFLINE_DENIED, true)
     if (request.method === "POST" && routed.url.pathname === Paths.webrtcOffer) {
       return withAllowOrigin(await answerOffer(request, routed), request.headers.get("origin"))
     }
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer()
     const headers = withIdentity(new Headers(request.headers), routed)
     const response = await deps.webHandler(new Request(routed.url, { method: request.method, headers, body }))
-    return routed.previewToken === null ? response : withReferrerPolicy(response)
+    const served = routed.previewToken === null ? response : withReferrerPolicy(response)
+    return routed.offline ? withOfflineMark(served) : served
   }
 
   const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer): void => {
@@ -202,6 +238,7 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
     const protocol = typeof offered === "string" ? offered.split(",")[0]?.trim() : undefined
     void route(deps, url, referer, authorization).then((routed) => {
       if ("status" in routed) return rejectUpgrade(socket, routed)
+      if (routed.offline) return rejectUpgrade(socket, OFFLINE_DENIED)
       if (routed.user === null) {
         return rejectUpgrade(socket, { status: 401, tag: "Unauthorized", message: "box token is required" })
       }

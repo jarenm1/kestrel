@@ -51,6 +51,12 @@ const memoryStore = (initial: StoreState): { store: StoreShape; state: StoreStat
           if (Either.isLeft(result)) throw result.left
           return result.right
         }),
+      updateOutcome: <A, E>(f: (s: StoreState) => Either.Either<A, E>) =>
+        Effect.sync(() => {
+          const result = f(current)
+          if (Either.isLeft(result)) throw result.left
+          return { _tag: "applied" as const, value: result.right }
+        }),
       flush: Effect.void,
     },
   }
@@ -498,6 +504,33 @@ test("a retry that dies consumes the last attempt and stops", async () => {
 
   await Effect.runPromise(recovery.sweep)
   expect(state.tasks[0]!.autoRetry).toBeUndefined()
+})
+
+test("a run a restart interrupted is neither retried nor armed as a usage limit", async () => {
+  // A crash or a graceful shutdown leaves the run failed and interrupted; a rerun would repeat work it may have done.
+  const interrupted = failedWith({ interruptedByRestart: true })
+  const retryable = setup({ state: stateWith({ runs: [interrupted] }), items: transportError })
+  await Effect.runPromise(retryable.recovery.sweep)
+  expect(retryable.state.tasks[0]!.autoRetry).toBeUndefined()
+  expect(retryable.retried).toEqual([])
+
+  const limited = setup({ state: stateWith({ runs: [interrupted] }), usage: usage(new Date(Date.now() - 30_000).toISOString()) })
+  await Effect.runPromise(limited.recovery.sweep)
+  expect(limited.state.tasks[0]!.usageLimitResume).toBeUndefined()
+})
+
+test("a retry armed before its run was interrupted does not fire", async () => {
+  const { recovery, state, retried } = setup({
+    state: stateWith({
+      tasks: [task({ autoRetry: { runId: "run", attempt: 1, nextAt: new Date(Date.now() - 1).toISOString() } })],
+      runs: [failedWith({ interruptedByRestart: true })],
+    }),
+    items: transportError,
+  })
+
+  await Effect.runPromise(recovery.sweep)
+  expect(retried).toEqual([])
+  expect(state.tasks[0]!.autoRetry?.runId).toBe("run")
 })
 
 test("a delegated child's failure is not retried", async () => {

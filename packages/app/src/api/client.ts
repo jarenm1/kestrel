@@ -186,22 +186,48 @@ let known: BoxList | undefined
  */
 const taskBoxes = new Map<string, string | null>()
 
-/** A box's thread list that takes longer than this is left out, so one slow box cannot hold up the others. */
-const BOX_LIST_TIMEOUT_MS = 10_000
+/** The control plane's box list that takes longer than this is replaced by the last one read. */
+const CONTROL_LIST_TIMEOUT_MS = 5_000
+
+/**
+ * A box's thread list that takes longer than this is left out, so one slow box cannot hold up the others. It must exceed
+ * the box's own 15 s wait for the control plane (`CONTROL_TIMEOUT_MS` in `direct/auth.ts`), or an offline box's
+ * fallback answer arrives after it has been dropped.
+ */
+const BOX_LIST_TIMEOUT_MS = 25_000
 
 /** Box tokens are re-minted this long before they expire, so a call never leaves with a token about to lapse. */
 const TOKEN_REFRESH_MS = 60_000
 
-const tokens = new Map<string, { readonly token: string; readonly refreshAt: number }>()
+const tokens = new Map<string, { readonly token: string; readonly refreshAt: number; readonly expiresAt: number }>()
 const minting = new Map<string, Promise<string>>()
 
-function adoptBoxList(list: BoxList): BoxList {
-  known = list
-  return list
+/**
+ * Orders box list reads and changes. A read is stamped when it starts and a change when it completes, so a read that
+ * started before a change cannot overwrite it when it answers late, and a read that timed out cannot resurrect a box
+ * the user has since removed or undo a box switch.
+ */
+let clock = 0
+let knownStamp = 0
+
+/** Adopts `list` if it is the newest so far. Either way the caller gets the list the app now holds, never an older one. */
+function adoptBoxList(list: BoxList, stamp: number): BoxList {
+  if (stamp > knownStamp) {
+    knownStamp = stamp
+    known = list
+    return list
+  }
+  return known ?? list
+}
+
+/** A box list a change answered with: the newest state, so it is adopted when it arrives. */
+function adoptChange(list: BoxList): BoxList {
+  return adoptBoxList(list, ++clock)
 }
 
 async function loadBoxes(): Promise<BoxList> {
-  return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)))
+  const stamp = ++clock
+  return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)), stamp)
 }
 
 /**
@@ -241,10 +267,20 @@ function boxToken(boxId: string): Promise<string> {
   const pending = minting.get(boxId)
   if (pending !== undefined) return pending
   const mint = run(request(BoxToken, "POST", ControlPaths.userBoxToken(boxId)))
-    .then((issued) => {
-      tokens.set(boxId, { token: issued.token, refreshAt: Date.parse(issued.expiresAt) - TOKEN_REFRESH_MS })
-      return issued.token
-    })
+    .then(
+      (issued) => {
+        const expiresAt = Date.parse(issued.expiresAt)
+        tokens.set(boxId, { token: issued.token, refreshAt: expiresAt - TOKEN_REFRESH_MS, expiresAt })
+        return issued.token
+      },
+      (error: unknown) => {
+        // A token past its refresh time is still accepted by the box until it expires. It serves while control is
+        // unreachable or failing, but not when control refuses the mint (4xx): that is a real refusal.
+        const refused = error instanceof ApiError && error.status >= 400 && error.status < 500
+        if (cached !== undefined && !refused && Date.now() < cached.expiresAt) return cached.token
+        throw error
+      },
+    )
     .finally(() => minting.delete(boxId))
   minting.set(boxId, mint)
   return mint
@@ -399,38 +435,121 @@ function listAllTasks(): Promise<Task[]> {
 }
 
 /**
- * Reads the thread list of Kestrel's box and of every user box at once, and records which box owns each thread. A box
- * that fails or times out is left out; the read fails only when no box answers.
+ * Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id, or `null` for the relay. The
+ * id is what keeps a replaced managed box's threads from being shown for its successor.
  */
-async function readAllTasks(): Promise<Task[]> {
-  const boxes = (await loadBoxes().catch(() => known))?.boxes ?? []
-  const targets: Target[] = [kestrelTarget(), ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
-  const results = await Promise.allSettled(
-    targets.map((target) =>
-      withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
-        (tasks) => ({ boxId: target?.boxId ?? null, tasks }),
-      ),
-    ),
-  )
-  const failed = results.filter((result): result is PromiseRejectedResult => result.status === "rejected")
-  if (failed.length === results.length) throw failed[0]?.reason
+type BoxKey = string | null
+
+/** The key of a call's target: its box id, or `null` for the relay. */
+function boxKeyOf(target: Target): BoxKey {
+  return target?.boxId ?? null
+}
+
+/** One thread list read's outcome for one box. */
+type BoxAnswer = { readonly ok: true } | { readonly ok: false; readonly error: unknown }
+
+/** Each box's threads as it last answered, with the stamp of that read. A box keeps them until a newer answer replaces them. */
+const threadsOf = new Map<BoxKey, { readonly stamp: number; readonly tasks: readonly Task[] }>()
+/** The thread list read in flight for each box. A box is asked once at a time, and every round shares that one read. */
+const reading = new Map<BoxKey, Promise<BoxAnswer>>()
+let readStamp = 0
+
+/** Once one box has answered, a round waits this long for the others, then returns the threads it has. */
+const ROUND_GRACE_MS = 1_000
+
+/**
+ * Asks one box for its threads, unless its earlier read is still pending: the pending read is shared, so a slow box is
+ * never asked twice and its answer is never raced by a newer request. An answer replaces the box's threads only when
+ * it is the newest read so far.
+ */
+function readBox(key: BoxKey, target: Target): Promise<BoxAnswer> {
+  const pending = reading.get(key)
+  if (pending !== undefined) return pending
+  const stamp = ++readStamp
+  const started = withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS)
+    .then(
+      (tasks): BoxAnswer => {
+        if ((threadsOf.get(key)?.stamp ?? 0) < stamp) threadsOf.set(key, { stamp, tasks })
+        return { ok: true }
+      },
+      (error: unknown): BoxAnswer => ({ ok: false, error }),
+    )
+    .finally(() => reading.delete(key))
+  reading.set(key, started)
+  return started
+}
+
+/**
+ * Resolves with the answers that have arrived once every read has answered, or once the grace period after an answer has
+ * passed and the round has something to show (see `canFinish`). A read still pending then is left out of this round;
+ * its answer is cached when it comes.
+ */
+function settleRound(reads: readonly { readonly key: BoxKey; readonly read: Promise<BoxAnswer> }[]): Promise<readonly (BoxAnswer | undefined)[]> {
+  return new Promise((resolve) => {
+    const answers: (BoxAnswer | undefined)[] = reads.map(() => undefined)
+    let open = reads.length
+    let grace: number | undefined
+    const finish = () => {
+      window.clearTimeout(grace)
+      resolve([...answers])
+    }
+    // The round may end early only with something to show: a thread list that arrived, or cached threads for every box
+    // still pending. A failure alone does not end it, so a first load waits for the box that can answer.
+    const canFinish = () =>
+      answers.some((answer) => answer?.ok === true) ||
+      (answers.some((answer) => answer !== undefined) &&
+        reads.every(({ key }, index) => answers[index] !== undefined || threadsOf.has(key)))
+    reads.forEach(({ read }, index) => {
+      void read.then((answer) => {
+        answers[index] = answer
+        open -= 1
+        if (open === 0) finish()
+        else if (grace === undefined && canFinish()) grace = window.setTimeout(finish, ROUND_GRACE_MS)
+      })
+    })
+  })
+}
+
+/**
+ * The threads of the boxes in `keys`, from what each last answered, recording which box owns each one. A box that is
+ * no longer in the list drops its threads and their routes.
+ */
+function threadsNow(keys: readonly BoxKey[]): Task[] {
+  const current = new Set(keys)
+  for (const key of threadsOf.keys()) if (!current.has(key)) threadsOf.delete(key)
+  for (const [id, owner] of taskBoxes) if (!current.has(owner)) taskBoxes.delete(id)
   const merged: Task[] = []
-  for (const result of results) {
-    if (result.status === "rejected") continue
-    const { boxId, tasks } = result.value
-    for (const [id, owner] of taskBoxes) if ((owner ?? kestrelTarget()?.boxId ?? null) === boxId) taskBoxes.delete(id)
-    for (const task of tasks) {
-      taskBoxes.set(task.id, boxId)
+  for (const key of keys) {
+    for (const task of threadsOf.get(key)?.tasks ?? []) {
+      taskBoxes.set(task.id, key)
       merged.push(task)
     }
   }
   return merged
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * Reads the thread list of Kestrel's box and of every user box, and returns the threads they have. A box that is slow
+ * or down does not hold up the others: a round returns once the boxes have answered, or once one has and the grace
+ * period has passed. A box that has not answered keeps its last threads; if it is still pending, its answer lands in
+ * the cache and the next round shows it. The read fails only when no box answers.
+ */
+async function readAllTasks(): Promise<Task[]> {
+  await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
+  const boxes: { readonly key: BoxKey; readonly target: Target }[] = [
+    { key: boxKeyOf(kestrelTarget()), target: kestrelTarget() },
+    ...(known?.boxes ?? []).map((box) => ({ key: box.id, target: { boxId: box.id, url: box.url } })),
+  ]
+  const answers = await settleRound(boxes.map(({ key, target }) => ({ key, read: readBox(key, target) })))
+  const failures = answers.flatMap((answer) => (answer?.ok === false ? [answer.error] : []))
+  if (failures.length === answers.length) throw failures[0]
+  return threadsNow(boxes.map((box) => box.key))
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message = "The box did not answer in time"): Promise<T> {
   let timer: number | undefined
   const expired = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => reject(new ApiError(0, "The box did not answer in time")), ms)
+    timer = window.setTimeout(() => reject(new ApiError(0, message)), ms)
   })
   return Promise.race([promise, expired]).finally(() => window.clearTimeout(timer))
 }
@@ -585,13 +704,13 @@ export const api = {
   nestHosts: () => run(request(NestHostList, "GET", ControlPaths.nestHosts)),
   setActiveBox: async (boxId: string | null): Promise<BoxList> => {
     const body: SetActiveBoxBody = { boxId }
-    return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
+    return adoptChange(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
   },
   /** The pending pairing of a code the CLI showed, for the approval page; 404 when unknown or expired. */
   pendingPairing: (code: string) => run(request(PendingPairing, "GET", ControlPaths.pairing(code))),
   /** Approves a pairing: creates the box, made active when `activate`. Returns the box list, like `setActiveBox`. */
   approvePairing: async (code: string, body: ApprovePairingBody): Promise<BoxList> =>
-    adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
+    adoptChange(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
   /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
   fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
   fleetActivity: () => run(request(FleetActivity, "GET", ControlPaths.fleetActivity)),
@@ -691,7 +810,7 @@ export const api = {
     const target = boxId === undefined ? await activeTarget() : routeOf(boxId)
     if (target === undefined) throw new ApiError(404, "That box is no longer in your box list")
     const task = await run(boxCall(target, Task, "POST", Paths.tasks, body))
-    taskBoxes.set(task.id, target?.boxId ?? null)
+    taskBoxes.set(task.id, boxKeyOf(target))
     return task
   },
   getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),

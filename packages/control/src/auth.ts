@@ -1,7 +1,7 @@
 import { ControlPaths } from "@cloudagents/protocol"
 import { findProvider, type OAuthProvider } from "./providers"
 import { UpstreamError, errorResponse, readCookie, safeReturnPath } from "./http"
-import { hub, type Env } from "./env"
+import { hub, isAllowedLogin, type Env } from "./env"
 import type { SessionRecord } from "./hub"
 
 export const SESSION_COOKIE = "session"
@@ -13,7 +13,7 @@ export const currentSession = async (request: Request, env: Env): Promise<Sessio
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
   if (!id) return null
   const session = await hub(env).session(id)
-  if (!session) return null
+  if (!session || !isAllowedLogin(env, session.login, session.dev)) return null
   return session
 }
 
@@ -116,6 +116,7 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   const account = await provider.fetchAccount(token)
 
   if (row.kind === "login") {
+    if (!isAllowedLogin(env, account.login)) return htmlPage(403, "Forbidden: this account is not allowed to use Kestrel.")
     const stub = hub(env)
     await stub.upsertUser({ login: account.login, name: account.name, avatarUrl: account.avatarUrl })
     await stub.putConnection(account.login, provider.id, token, account.login)
@@ -149,8 +150,7 @@ const nativeCallback = async (
   client: string,
 ): Promise<Response> => {
   const id = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-  const login = id ? (await hub(env).session(id))?.login : null
-  if (!id || !login) return errorResponse(401, "Unauthorized", "sign in required")
+  if (!id || !(await currentSession(request, env))) return errorResponse(401, "Unauthorized", "sign in required")
   const session = scriptString(id)
   const nonce = scriptString(url.searchParams.get("state") ?? "")
   return new Response(
