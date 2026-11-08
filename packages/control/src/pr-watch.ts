@@ -42,7 +42,10 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   const repo = await fetchRepository(token, body.repo)
   if (repo === null || await fetchPullRequest(token, repo, body.number) === null) return errorResponse(404, "NotFound", "pull request not found")
   const result = await hub(env).boxCall(login, "GET", `/api/tasks/${encodeURIComponent(body.taskId)}`)
-  if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
+  if (!result.ok) {
+    try { JSON.parse(result.body) } catch { return errorResponse(result.status, "BoxOffline", "agent box request failed") }
+    return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
+  }
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)

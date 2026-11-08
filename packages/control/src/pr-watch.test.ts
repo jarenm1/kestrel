@@ -56,6 +56,14 @@ describe("POST /box/automations/pr-watch: box failures", () => {
     expect(await response.json()).toEqual({ _tag: tag, message: "agent box is offline" })
   })
 
+  test("a failed box answer that is not JSON keeps its status but is sent as a JSON error", async () => {
+    boxAnswer = { ok: false, status: 503, body: "<html>bad gateway</html>" }
+    const response = await watch()
+    expect(response.status).toBe(503)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual({ _tag: "BoxOffline", message: "agent box request failed" })
+  })
+
   test("a thread the box does not have is still a 404", async () => {
     boxAnswer = { ok: false, status: 404, body: JSON.stringify({ _tag: "NotFound", message: "thread not found" }) }
     const response = await watch()
