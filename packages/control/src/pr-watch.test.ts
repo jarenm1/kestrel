@@ -71,6 +71,13 @@ describe("POST /box/automations/pr-watch: box failures", () => {
     expect(await response.json()).toEqual({ _tag: "BoxOffline", message: "agent box request failed" })
   })
 
+  test("an untagged box error with a message keeps its detail", async () => {
+    boxAnswer = { ok: false, status: 404, body: JSON.stringify({ message: "no such box" }) }
+    const response = await watch()
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ message: "no such box" })
+  })
+
   test("a non-JSON box 404 is still a 404", async () => {
     boxAnswer = { ok: false, status: 404, body: "not found" }
     const response = await watch()

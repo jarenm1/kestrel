@@ -12,11 +12,11 @@ const Unwatch = Schema.Struct({
   number: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 
-const BoxError = Schema.Struct({ _tag: Schema.String, message: Schema.String })
+const BoxError = Schema.Struct({ message: Schema.String })
 
 /**
- * A failed box call. The box's own `{ _tag, message }` error passes through with its status. Anything else, such as a
- * proxy's HTML error page, is labelled as JSON only after being rewritten into that shape.
+ * A failed box call. A box error body with a `message` passes through with its status, so the caller keeps the box's
+ * detail. Anything else, such as a proxy's HTML error page, is labelled as JSON only after being rewritten.
  */
 const boxFailure = (result: { status: number; body: string }): Response => {
   let value: unknown
