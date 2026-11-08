@@ -107,8 +107,9 @@ export class NestFleet {
   // ---------------------------------------------------------------------------
 
   /**
-   * The first frame on a connection: records the host, resends its in-flight commands, and renews its lease. Its VMs
-   * follow as `inventory` chunks.
+   * The first frame on a connection: records the host, renews its lease, and resends its in-flight commands. Its VMs
+   * follow as `inventory` chunks. The lease goes first: a host refuses a command that arrives on a lease it already
+   * knows has lapsed, so a resend sent ahead of the renewal would fail after a long disconnect.
    */
   async hello(frame: NestHello): Promise<void> {
     upsertNestHost(this.sql, {
@@ -120,9 +121,9 @@ export class NestFleet {
       lastSeenAt: new Date(this.clock()).toISOString(),
     })
     this.inventories.delete(frame.hostId)
+    this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
-    this.link.send(frame.hostId, { _tag: "lease", validUntil: this.clock() + NEST_LEASE_MS })
     await this.wakeWanted()
   }
 

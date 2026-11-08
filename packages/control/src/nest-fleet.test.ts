@@ -563,6 +563,24 @@ describe("park and GPU", () => {
   })
 })
 
+describe("reconnect", () => {
+  test("a hello sends the lease before it resends in-flight commands, so a resend reaches a host with a valid lease", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    expect(lastCommand("host-a", "create").command._tag).toBe("create")
+    disconnect("host-a")
+
+    const before = sent.length
+    await hello("host-a")
+    const reconnect = sent.slice(before).filter((entry) => entry.hostId === "host-a")
+    const leaseAt = reconnect.findIndex((entry) => entry.frame._tag === "lease")
+    const resendAt = reconnect.findIndex((entry) => entry.frame._tag === "command")
+    expect(resendAt).toBeGreaterThanOrEqual(0)
+    expect(leaseAt).toBeGreaterThanOrEqual(0)
+    expect(leaseAt).toBeLessThan(resendAt)
+  })
+})
+
 describe("leases", () => {
   test("a hello and a capacity report each renew the host's lease", async () => {
     await hello("host-a")
