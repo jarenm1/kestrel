@@ -140,6 +140,8 @@ interface AccountProbe {
 export interface CliAuthShape {
   readonly status: (user: string) => Effect.Effect<ReadonlyArray<CliAuthStatus>, BadRequest | InternalError>
   readonly startLogin: (user: string, provider: CliProvider) => Effect.Effect<CliLoginStart, BadRequest | InternalError>
+  /** Stops a sign-in still waiting for the user; its unfinished home is removed with it. A no-op when none is pending. */
+  readonly cancelLogin: (user: string, provider: CliProvider) => Effect.Effect<void, BadRequest | InternalError>
   readonly submitCode: (
     user: string,
     provider: CliProvider,
@@ -1167,6 +1169,20 @@ export const CliAuthLive = Layer.effect(
         }
       })
 
+    /**
+     * Cancels the sign-in still pending for this provider. Its close handler removes the unfinished home, so an approval
+     * completed on the provider's page afterwards has nowhere to land. Idempotent: nothing pending is not an error.
+     */
+    const cancelLogin = (user: string, provider: CliProvider): Effect.Effect<void, BadRequest | InternalError> =>
+      Effect.gen(function* () {
+        yield* rootOf(user)
+        for (const entry of [...pending.values()]) {
+          if (entry.user !== user || entry.provider !== provider) continue
+          killEntry(entry)
+          yield* Effect.promise(() => entry.done)
+        }
+      })
+
     const submitCode = (
       user: string,
       provider: CliProvider,
@@ -1398,6 +1414,7 @@ export const CliAuthLive = Layer.effect(
     return {
       status,
       startLogin,
+      cancelLogin,
       submitCode,
       submitKey,
       logout,

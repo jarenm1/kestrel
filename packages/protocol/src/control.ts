@@ -64,6 +64,11 @@ export const ControlPaths = {
    * user, replacing any login already pending for them. Only providers that sign in on a page (`CLI_SIGN_IN`). Relayed.
    */
   cliLogin: (provider: CliProvider) => `/api/cli-auth/${provider}/login`,
+  /**
+   * POST (no body) -> 204: cancels a sign-in still waiting on the box for this provider and removes its unfinished
+   * home, so an approval completed afterwards cannot add the account. Idempotent. Relayed.
+   */
+  cliLoginCancel: (provider: CliProvider) => `/api/cli-auth/${provider}/login/cancel`,
   /** POST CliLoginCodeBody -> CliAuthStatus: hands the code the provider's page showed to the pending login (`needsCode`). Relayed. */
   cliLoginCode: (provider: CliProvider) => `/api/cli-auth/${provider}/code`,
   /**

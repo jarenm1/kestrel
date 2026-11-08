@@ -320,6 +320,11 @@ export const makeRouter = (
       "/api/cli-auth/:provider/login",
       respond(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.startLogin(user, provider)))),
     ),
+    // Stops a sign-in the user backed out of; its unfinished login home goes with it.
+    HttpRouter.post(
+      "/api/cli-auth/:provider/login/cancel",
+      noContent(Effect.flatMap(cliProvider, (provider) => signedIn((user) => cliAuth.cancelLogin(user, provider)))),
+    ),
     HttpRouter.post(
       "/api/cli-auth/:provider/code",
       respond(

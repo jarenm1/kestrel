@@ -108,6 +108,7 @@ const harnessLayer = (
       opencodeGoKey: () => Effect.succeed(null),
       status: () => Effect.succeed([]),
       startLogin: () => Effect.die("unused"),
+      cancelLogin: () => Effect.void,
       submitCode: () => Effect.die("unused"),
       submitKey: () => Effect.die("unused"),
       logout: () => Effect.void,

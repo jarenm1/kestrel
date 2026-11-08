@@ -67,7 +67,8 @@ normal sign-in in a fresh login home; the signed-in identity menu selects the ac
 discovery and quota reads. Switching does not change a run already in progress. **Disconnect** lists the accounts
 and removes only the chosen login. The status pill reads **N connected** only above one account. API-key rows remain
 single-key connections. This follows [T3 Code's explicit account-switching approach](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-codex.md#use-multiple-accounts),
-without automatic quota rotation.
+without automatic quota rotation. **Cancel** stops the pending sign-in on the box as well as clearing the form, so an
+approval completed on the provider's page afterwards cannot silently add an account.
 
 Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<accountId>` and its provider's
 credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;

@@ -651,6 +651,9 @@ export const api = {
       ? onActive(ThreadSettings, "PUT", Paths.threadSettings, settings)
       : onBox(boxId, ThreadSettings, "PUT", Paths.threadSettings, settings),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
+  cliLoginCancel: async (provider: CliProvider): Promise<void> => {
+    await onActive(Schema.Unknown, "POST", ControlPaths.cliLoginCancel(provider))
+  },
   cliLoginCode: (provider: CliProvider, body: CliLoginCodeBody) =>
     onActive(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
   cliLoginKey: (provider: CliProvider, body: PutApiKeyBody) =>

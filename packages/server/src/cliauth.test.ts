@@ -479,6 +479,25 @@ console.log(JSON.stringify({ loggedIn: true, email: home.includes("accttwo") ? "
     expect(antigravity(await run((auth) => auth.status("alice")))).toMatchObject({ loggedIn: false, account: null })
     expect(existsSync(leftover)).toBe(false)
   })
+
+  test("canceling a sign-in stops its CLI and removes the unfinished home", async () => {
+    const root = rootFor()
+    fakeAntigravity(root, "second@example.com")
+    const run = authRuntime(root)
+    const start = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    if (start.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+    const home = join(root, "users", "alice", "accounts", start.accountId)
+    expect(existsSync(home)).toBe(true)
+
+    await run((auth) => auth.cancelLogin("alice", "antigravity-cli"))
+    expect(existsSync(home)).toBe(false)
+    // The stopped CLI cannot take a code afterwards, so an approval on the page cannot silently add the account.
+    const failure = await run((auth) => Effect.flip(auth.submitCode("alice", "antigravity-cli", "good-code", start.accountId)))
+    expect(failure.message).toContain("no sign-in is pending")
+    expect(antigravity(await run((auth) => auth.status("alice")))).toMatchObject({ loggedIn: false, account: null })
+    // Cancelling again is a no-op.
+    await run((auth) => auth.cancelLogin("alice", "antigravity-cli"))
+  })
 })
 
 /**

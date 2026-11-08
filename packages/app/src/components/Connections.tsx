@@ -444,6 +444,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
       submitCode.reset()
       logout.reset()
       select.reset()
+      cancelLogin.reset()
       setLogin(next)
       setExpired(false)
       setCode("")
@@ -478,8 +479,13 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
     mutationFn: (accountId: string) => api.cliSelectAccount(provider, accountId),
     onSuccess: () => refresh(),
   })
+  // Backing out must stop the CLI on the box too; otherwise it could finish and add the account after the cancel.
+  const cancelLogin = useMutation({
+    mutationFn: () => api.cliLoginCancel(provider),
+    onSuccess: () => refresh(),
+  })
   const busy = start.isPending || submitCode.isPending || logout.isPending || select.isPending
-  const error = start.error ?? submitCode.error ?? logout.error ?? select.error
+  const error = start.error ?? submitCode.error ?? logout.error ?? select.error ?? cancelLogin.error
 
   // The pending account appearing in the box's list is the completion signal, which a second account never blurs.
   useEffect(() => {
@@ -503,6 +509,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
   }, [polling, queryClient])
 
   function cancel() {
+    cancelLogin.mutate()
     start.reset()
     submitCode.reset()
     logout.reset()

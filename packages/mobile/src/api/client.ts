@@ -114,6 +114,7 @@ export interface ApiClient {
   setActiveBox(boxId: string | null): Promise<BoxList>;
   box(): Promise<BoxStatus>;
   cliLoginStart(provider: CliProvider): Promise<CliLoginStart>;
+  cliLoginCancel(provider: CliProvider): Promise<void>;
   cliLoginCode(provider: CliProvider, body: CliLoginCodeBody): Promise<CliAuthStatus>;
   cliLoginKey(provider: CliProvider, body: PutApiKeyBody): Promise<CliAuthStatus>;
   cliLogout(provider: CliProvider, accountId?: string): Promise<void>;
@@ -409,6 +410,8 @@ export function createApiClient(
       }
     },
     cliLoginStart: (provider) => boxRequest(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
+    cliLoginCancel: (provider) =>
+      boxRequest(Schema.Unknown, "POST", ControlPaths.cliLoginCancel(provider)).then(() => undefined),
     cliLoginCode: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginCode(provider), body),
     cliLoginKey: (provider, body) => boxRequest(CliAuthStatus, "POST", ControlPaths.cliLoginKey(provider), body),
     cliLogout: (provider, accountId) =>
