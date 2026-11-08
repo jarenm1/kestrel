@@ -5,7 +5,7 @@ import { Link, useSearchParams } from "react-router-dom"
 import { api } from "@/api/client"
 import { ApiError } from "@/api/errors"
 import { applyBoxList, queries, queryClient } from "@/api/queries"
-import { BOX_FORM_ERROR, parseBoxForm } from "@/components/Boxes"
+import { AddressHelp, BOX_FORM_ERROR, ReachCheck, parseBoxForm } from "@/components/Boxes"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -115,6 +115,8 @@ function PairingForm({ code, pending }: { code: string; pending: PendingPairing 
           onChange={(e) => setUrl(e.target.value)}
         />
       </label>
+      <AddressHelp />
+      <ReachCheck url={url} />
       <label className="flex items-center gap-2.5">
         <Checkbox checked={activate} onCheckedChange={(checked) => setActivate(checked === true)} />
         Use this box now

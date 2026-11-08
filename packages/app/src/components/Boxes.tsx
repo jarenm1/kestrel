@@ -11,8 +11,10 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@cloudagents/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { SERVER_URL } from "@/config"
 import { useActiveBoxId, useSetActiveBox } from "@/hooks/useActiveBox"
+import { BOX_URL_ERROR, boxUrlKind, checkReach, parseBoxUrl, reachText } from "@/lib/boxReach"
 import { errorText, formatSize } from "@/util"
 
 /** Kestrel's managed box: its own health, reached directly (absent until one is assigned). */
@@ -151,20 +153,126 @@ export function ActiveBoxFeatures() {
   )
 }
 
-/** The quickest way to add a box: the CLI pairs it with your account, then the code is approved on the pairing page. */
+const INSTALL_SH = "curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh"
+
+/** The installer for each OS the box supports; it always runs on Linux, natively, in WSL2 or in a Lima VM. */
+const INSTALLERS = [
+  { os: "linux", label: "Linux", command: INSTALL_SH, note: "Or: npx kestrel-box login && npx kestrel-box install" },
+  {
+    os: "macos",
+    label: "macOS",
+    command: `brew install lima && ${INSTALL_SH}`,
+    note: "The installer runs the box in a Lima VM and forwards port 8787 to the Mac.",
+  },
+  {
+    os: "windows",
+    label: "Windows",
+    command: "irm https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.ps1 | iex",
+    note: "In PowerShell. Needs WSL2 with systemd; the box runs inside it.",
+  },
+] as const
+
+const BOX_GUIDE_URL = "https://github.com/jarenm1/kestrel/blob/main/docs/byo-box.md"
+
+/** The quickest way to add a box: the installer pairs each machine with your account, then its code is approved on the pairing page. */
 function PairHint() {
   return (
-    <p className="text-muted-foreground">
-      Easiest: run <code className="font-mono text-xs">npx kestrel-box login</code> on the machine, or{" "}
-      <code className="break-all font-mono text-xs">
-        curl -fsSL https://raw.githubusercontent.com/jarenm1/kestrel/main/scripts/install-box.sh | sh
-      </code>
-      , then approve its code on the{" "}
-      <Link to={ControlPaths.pairPage} className="text-foreground underline underline-offset-4">
-        pairing page
-      </Link>
-      .
-    </p>
+    <Card className="py-0">
+      <CardContent className="flex flex-col gap-3 px-5 py-4">
+        <div>
+          <span className="font-medium">Add your machines</span>
+          <p className="text-muted-foreground">
+            Run the installer on each machine. It shows a code; approve it on the{" "}
+            <Link to={ControlPaths.pairPage} className="text-foreground underline underline-offset-4">
+              pairing page
+            </Link>
+            . Every machine becomes its own box in this list.
+          </p>
+        </div>
+        <Tabs defaultValue="linux" className="gap-2">
+          <TabsList className="h-8">
+            {INSTALLERS.map((installer) => (
+              <TabsTrigger key={installer.os} value={installer.os}>
+                {installer.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {INSTALLERS.map((installer) => (
+            <TabsContent key={installer.os} value={installer.os} className="flex flex-col gap-2">
+              <code className="break-all rounded-lg bg-white/[0.06] p-3 font-mono text-xs">{installer.command}</code>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex-1 text-xs text-muted-foreground">{installer.note}</span>
+                <Button variant="soft" size="sm" onClick={() => void navigator.clipboard.writeText(installer.command)}>
+                  Copy command
+                </Button>
+              </div>
+            </TabsContent>
+          ))}
+        </Tabs>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Which address to give a box: localhost for this machine only, else HTTPS, with Tailscale as the optional easy path. */
+export function AddressHelp() {
+  return (
+    <ul className="flex list-disc flex-col gap-1 pl-5 text-xs text-muted-foreground">
+      <li>
+        Same machine: <code className="font-mono">http://localhost:8787</code>. localhost is the machine the browser runs
+        on, so it works only there.
+      </li>
+      <li>
+        Other devices: an HTTPS address. Easiest, if you use Tailscale: Tailscale Serve gives the machine an{" "}
+        <code className="font-mono">https://….ts.net</code> address for devices signed in to the same tailnet. A
+        Cloudflare Tunnel or your own domain works too. Point it straight at the box port; the box keeps its private
+        endpoints on loopback, so no filtering proxy is needed. The{" "}
+        <a href={BOX_GUIDE_URL} target="_blank" rel="noreferrer" className="text-foreground underline underline-offset-4">
+          box guide
+        </a>{" "}
+        has the details.
+      </li>
+      <li>Plain http:// to another machine, even on the same Wi-Fi, cannot be reached from the app.</li>
+    </ul>
+  )
+}
+
+/**
+ * An explicit check of the entered URL's health from this device only. Nothing is requested until the button is
+ * pressed and the URL is valid. Editing the URL starts over, so a result never outlives the URL it was taken for.
+ */
+export function ReachCheck({ url }: { url: string }) {
+  return <UrlReachCheck key={url} url={url} />
+}
+
+function UrlReachCheck({ url }: { url: string }) {
+  const [invalid, setInvalid] = useState(false)
+  const check = useMutation({
+    mutationFn: async (target: string) => ({ url: target, reachable: await checkReach(target, api.checkBox) }),
+  })
+  const result = check.data
+
+  function run() {
+    const target = parseBoxUrl(url)
+    setInvalid(target === null)
+    if (target !== null) check.mutate(target)
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="ghost" size="sm" disabled={check.isPending} onClick={run}>
+          {check.isPending ? "Checking…" : "Check from this device"}
+        </Button>
+        {result && (
+          <Badge variant={result.reachable ? "success" : "neutral"}>
+            {result.reachable ? "reachable from this device" : "unreachable from this device"}
+          </Badge>
+        )}
+      </div>
+      {result && <p className="text-xs text-muted-foreground">{reachText(boxUrlKind(result.url), result.reachable)}</p>}
+      {invalid && <p className="text-xs text-muted-foreground">{BOX_URL_ERROR}</p>}
+    </div>
   )
 }
 
@@ -250,6 +358,7 @@ function UserBoxRow({
           </Button>
         </form>
       )}
+      {editing && <ReachCheck url={url} />}
       {editing && invalid && <Alert>{BOX_FORM_ERROR}</Alert>}
 
       <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
@@ -437,11 +546,12 @@ function AddBoxForm({ onCreated }: { onCreated: (created: CreatedBox) => void })
       <CardContent className="flex flex-col gap-3 px-5 py-4">
         <form onSubmit={submit} className="flex flex-col gap-3">
           <div>
-            <span className="font-medium">Add a box</span>
+            <span className="font-medium">Add a box by URL</span>
             <p className="text-muted-foreground">
-              Run the box on a machine you control and enter the address where it can be reached.
+              For a box you started yourself. Enter the address this device and your others use to reach it.
             </p>
           </div>
+          <AddressHelp />
           <div className="flex flex-wrap gap-2">
             <Input
               aria-label="Box name"
@@ -462,6 +572,7 @@ function AddBoxForm({ onCreated }: { onCreated: (created: CreatedBox) => void })
             </Button>
           </div>
         </form>
+        <ReachCheck url={url} />
         {invalid && <Alert>{BOX_FORM_ERROR}</Alert>}
         {create.error && <Alert>{errorText(create.error)}</Alert>}
       </CardContent>
