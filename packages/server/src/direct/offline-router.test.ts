@@ -76,6 +76,8 @@ describe("offline reads through the real router", () => {
       const response = await box.listener.handle(request("GET", "/api/tasks", await tokenFor(OWNER)))
       expect(response.status).toBe(200)
       expect(response.headers.get(OFFLINE_HEADER)).toBe("1")
+      // The app is a cross-origin page: it can read the mark only when the box exposes it.
+      expect(response.headers.get("access-control-expose-headers")).toContain(OFFLINE_HEADER)
       expect(box.calls).toEqual([{ method: "listTasks", args: [OWNER] }])
     } finally {
       box.listener.close()

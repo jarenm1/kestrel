@@ -141,7 +141,7 @@ flowchart LR
   credentials for its owner (after a restart, its credential store is empty), a valid, unexpired box token is still
   served the owner's thread reads: `GET /api/tasks`, `GET /api/tasks/:id`, `GET /api/tasks/:id/messages`. Every other
   request is refused with 503 `Unavailable`, including all writes, other GETs, WebSockets and `POST /api/webrtc/offer`.
-  Those reads are marked `x-kestrel-box-offline: 1`, and the box logs a warning when it starts serving offline and an info
+  Those reads are marked `x-kestrel-box-offline: 1` (exposed through `access-control-expose-headers`, so the web app can read it), and the box logs a warning when it starts serving offline and an info
   line when the credentials return. Nothing is stored or written for the fallback. A control plane refusal (401/403), a
   malformed answer, an invalid, expired or wrong-audience token, and a managed box never fall back; they fail as before.
   Limitation: the control plane cannot be asked about revocation while offline, so a token minted before a logout or
