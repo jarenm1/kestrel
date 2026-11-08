@@ -240,21 +240,19 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
   return (
     <SidebarMotion>
       <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
-        <div className="-ml-3 grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-4.5 pb-2">
+        <div className="flex items-center gap-2 pb-2 pl-1.5">
           <Button
             variant="ghost"
             size="icon"
-            className="size-7 justify-self-start"
+            className="group/brand relative size-7 text-foreground/90 hover:text-foreground"
             aria-label="Collapse threads"
             title="Collapse threads"
             onClick={onCollapse}
           >
-            <PanelLeftClose />
+            <KestrelMark className="h-6 transition-opacity duration-200 group-hover/brand:opacity-0 group-focus-visible/brand:opacity-0" />
+            <PanelLeftClose className="absolute inset-0 m-auto opacity-0 transition-opacity duration-200 group-hover/brand:opacity-100 group-focus-visible/brand:opacity-100" />
           </Button>
-          <div className="flex min-w-0 items-center gap-2">
-            <HomeMark />
-            <span className="min-w-0 truncate font-semibold tracking-tight">Kestrel</span>
-          </div>
+          <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <motion.nav
           layoutScroll
