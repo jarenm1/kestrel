@@ -156,7 +156,9 @@ flowchart LR
   refused: online does not mean writes are available.
   Timing: while the control plane is down, the box waits up to 15 s for it before it answers offline. The app reads the
   control plane's box list for at most 5 s (then uses the last list it read) and gives each box's thread list 25 s; a box
-  that has not answered by then is left out of the list.
+  that has not answered by then is left out of the list. Kestrel's box (managed or relay) is not waited for once every
+  user box has answered, so a managed box that is down does not hold a user's own boxes back; its threads appear on the
+  next read. It is waited for only when no user box answered.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
 - Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare

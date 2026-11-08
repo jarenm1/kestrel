@@ -202,13 +202,30 @@ const TOKEN_REFRESH_MS = 60_000
 const tokens = new Map<string, { readonly token: string; readonly refreshAt: number }>()
 const minting = new Map<string, Promise<string>>()
 
-function adoptBoxList(list: BoxList): BoxList {
-  known = list
+/**
+ * Orders box list reads and changes. A read is stamped when it starts and a change when it completes, so a read that
+ * started before a change cannot overwrite it when it answers late, and a read that timed out cannot resurrect a box
+ * the user has since removed or undo a box switch.
+ */
+let clock = 0
+let knownStamp = 0
+
+function adoptBoxList(list: BoxList, stamp: number): BoxList {
+  if (stamp > knownStamp) {
+    knownStamp = stamp
+    known = list
+  }
   return list
 }
 
+/** A box list a change answered with: the newest state, so it is adopted when it arrives. */
+function adoptChange(list: BoxList): BoxList {
+  return adoptBoxList(list, ++clock)
+}
+
 async function loadBoxes(): Promise<BoxList> {
-  return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)))
+  const stamp = ++clock
+  return adoptBoxList(await run(request(BoxList, "GET", ControlPaths.boxes)), stamp)
 }
 
 /**
@@ -405,28 +422,38 @@ function listAllTasks(): Promise<Task[]> {
   return listing
 }
 
+/** One box's answer to the thread list read: its threads, or why it gave none. */
+type BoxRead = { readonly ok: true; readonly boxId: string | null; readonly tasks: readonly Task[] } | { readonly ok: false; readonly error: unknown }
+
 /**
- * Reads the thread list of Kestrel's box and of every user box at once, and records which box owns each thread. A box
- * that fails or times out is left out; the read fails only when no box answers.
+ * Reads the thread list of every user box and of Kestrel's box at once, and records which box owns each thread. A box
+ * that fails or times out is left out; the read fails only when no box answers. Kestrel's box is not waited for once
+ * every user box has answered, so a managed box that is down cannot hold a user's own boxes back; its threads are
+ * listed by the next read. It is waited for only when no user box answered.
  */
 async function readAllTasks(): Promise<Task[]> {
-  const boxes = (await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time")
-    .catch(() => known))?.boxes ?? []
-  const targets: Target[] = [kestrelTarget(), ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
-  const results = await Promise.allSettled(
-    targets.map((target) =>
-      withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
-        (tasks) => ({ boxId: target?.boxId ?? null, tasks }),
-      ),
-    ),
-  )
-  const failed = results.filter((result): result is PromiseRejectedResult => result.status === "rejected")
-  if (failed.length === results.length) throw failed[0]?.reason
+  await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
+  const kestrel = kestrelTarget()
+  const userTargets: Target[] = (known?.boxes ?? []).map((box) => ({ boxId: box.id, url: box.url }))
+  const read = (target: Target): Promise<BoxRead> =>
+    withTimeout(run(boxCall(target, Schema.Array(Task), "GET", Paths.tasks)), BOX_LIST_TIMEOUT_MS).then(
+      (tasks): BoxRead => ({ ok: true, boxId: target?.boxId ?? null, tasks }),
+      (error: unknown): BoxRead => ({ ok: false, error }),
+    )
+  const kestrelRead = read(kestrel)
+  const kestrelSettled: { result?: BoxRead } = {}
+  void kestrelRead.then((result) => {
+    kestrelSettled.result = result
+  })
+  const users = await Promise.all(userTargets.map(read))
+  const kestrelResult = kestrelSettled.result ?? (users.some((result) => result.ok) ? undefined : await kestrelRead)
+  const results = kestrelResult === undefined ? users : [...users, kestrelResult]
+  if (results.every((result) => !result.ok)) throw results.find((result) => !result.ok)?.error
   const merged: Task[] = []
   for (const result of results) {
-    if (result.status === "rejected") continue
-    const { boxId, tasks } = result.value
-    for (const [id, owner] of taskBoxes) if ((owner ?? kestrelTarget()?.boxId ?? null) === boxId) taskBoxes.delete(id)
+    if (!result.ok) continue
+    const { boxId, tasks } = result
+    for (const [id, owner] of taskBoxes) if ((owner ?? kestrel?.boxId ?? null) === boxId) taskBoxes.delete(id)
     for (const task of tasks) {
       taskBoxes.set(task.id, boxId)
       merged.push(task)
@@ -593,13 +620,13 @@ export const api = {
   nestHosts: () => run(request(NestHostList, "GET", ControlPaths.nestHosts)),
   setActiveBox: async (boxId: string | null): Promise<BoxList> => {
     const body: SetActiveBoxBody = { boxId }
-    return adoptBoxList(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
+    return adoptChange(await run(request(BoxList, "PUT", ControlPaths.activeBox, body)))
   },
   /** The pending pairing of a code the CLI showed, for the approval page; 404 when unknown or expired. */
   pendingPairing: (code: string) => run(request(PendingPairing, "GET", ControlPaths.pairing(code))),
   /** Approves a pairing: creates the box, made active when `activate`. Returns the box list, like `setActiveBox`. */
   approvePairing: async (code: string, body: ApprovePairingBody): Promise<BoxList> =>
-    adoptBoxList(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
+    adoptChange(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
   /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
   fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
   fleetActivity: () => run(request(FleetActivity, "GET", ControlPaths.fleetActivity)),
