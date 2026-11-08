@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile } from "node:fs/promises"
 import { InternalError, Message, Run, Task, ModelHarness, ModelProvider, DEFAULT_MODEL_PROVIDER } from "@cloudagents/protocol"
 import { Config } from "../config"
-import { writeAtomic } from "./atomic"
+import { replaceFile, syncDir, writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
 
 export const newId = (): string => randomUUID()
@@ -260,7 +260,8 @@ const reconcile = (state: StoreState): void => {
 
 /**
  * Each top-level list of the state, its entries' original references and a deep copy of every entry's contents, taken
- * before an update runs. Restoring writes the copies back into the same objects, so references callers hold stay valid.
+ * before an update runs. Restoring writes the copies back into the same top-level entry objects, so those references stay
+ * valid. Nested values (a task's checkouts, say) are replaced by their copies.
  */
 type StateSnapshot = ReadonlyArray<{ readonly list: unknown[]; readonly entries: unknown[]; readonly copies: unknown[] }>
 
@@ -320,11 +321,14 @@ export const StateLive = Layer.effect(
           return Either.left(result.left)
         }
         try {
-          await writeAtomic(config.stateFile, JSON.stringify(state))
+          await replaceFile(config.stateFile, JSON.stringify(state))
         } catch (e) {
           restoreState(snapshot)
           return Either.left(new InternalError({ message: `state write failed: ${String(e)}` }))
         }
+        // The rename already published the new state, so memory keeps it even if the directory sync fails. That failure
+        // only weakens crash durability, the same trade-off `syncDir` makes on Windows.
+        await syncDir(config.stateFile).catch(() => undefined)
         return Either.right(result.right)
       })
       lane = run.then(() => undefined, () => undefined)
