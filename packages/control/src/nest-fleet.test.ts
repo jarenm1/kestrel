@@ -690,6 +690,19 @@ describe("a park or destroy the host refused for a lapse", () => {
     expect(commandsSince(before).map((entry) => (entry.frame as { command: NestHostCommand }).command._tag)).toEqual(["destroy"])
   })
 
+  test("an owner's limits change does not withdraw an owed destroy: it goes out on the next renewal after the change lands", async () => {
+    const vmId = await runningBox()
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "destroy").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+
+    expect(fleet.setLimits("alice", "box-1", NEST_STANDARD_LIMITS)).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "setLimits").commandId, true, null, vmReport("box-1", vmId, 1, "running"))
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before).map((entry) => (entry.frame as { command: NestHostCommand }).command._tag)).toEqual(["destroy"])
+  })
+
   test("an owner's newer request replaces an owed resend, which is not sent later", async () => {
     const vmId = await runningBox()
     fleet.park("alice", "box-1")

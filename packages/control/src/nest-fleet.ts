@@ -467,22 +467,25 @@ export class NestFleet {
   }
 
   /**
-   * Sends a command to the box's host and records it as in flight. When the socket refuses the frame nothing is
-   * recorded, so the caller reports the failure and the box never waits on a command no host received.
-   */
-  /**
-   * Sends an owner's request. It replaces a park or destroy owed a resend, and starts its run from zero. System paths
-   * (wake, resume, limits reconciliation, the resends themselves) use `dispatch`, which leaves the owed resend alone.
+   * Sends an owner's request. A park or destroy replaces an owed resend and starts its run from zero. Other owner requests
+   * (suspend, limits, GPU) leave an owed park or destroy alone: the owner never withdrew it. System paths (wake, resume,
+   * limits reconciliation, the resends themselves) use `dispatch`.
    */
   private ownerDispatch(row: NestBoxRow, command: NestHostCommand): boolean {
     if (!this.dispatch(row, command)) return false
-    row.retryKind = null
-    row.retryCount = 0
-    saveNestBox(this.sql, row)
+    if (command._tag === "park" || command._tag === "destroy") {
+      row.retryKind = null
+      row.retryCount = 0
+      saveNestBox(this.sql, row)
+    }
     return true
   }
 
-  /** Sends a command and records it in flight. Leaves the retry state alone. */
+  /**
+   * Sends a command to the box's host and records it as in flight. When the socket refuses the frame nothing is
+   * recorded, so the caller reports the failure and the box never waits on a command no host received. Leaves the retry
+   * state alone.
+   */
   private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
