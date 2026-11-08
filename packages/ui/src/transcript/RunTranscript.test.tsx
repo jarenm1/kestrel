@@ -10,13 +10,16 @@ const run: Run = { id: "run", taskId: "task", prompt: "Go", status: "succeeded",
 const turn = (id: string, outputTokens: number | null = 60): AgentItem => ({
   _tag: "turn", id, inputTokens: 1234, outputTokens, durationMs: 2000, costUsd: null, isError: false,
 })
-const usage: AgentItem = { _tag: "usage", id: "usage", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: 1000 }
+const usage: AgentItem = { _tag: "usage", id: "usage", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 20, cachedTokens: 1000 }
 const summary = (items: AgentItem[], overrides: Partial<Run> = {}) => renderToStaticMarkup(<RunSummary run={{ ...run, ...overrides }} items={items} />)
 
 test("elapsed and rate use the lifecycle clock rather than response or provider timing", () => {
   const html = summary([usage, turn("end")])
   expect(html).toContain("Worked for 1m")
+  // 60 turn output over the run's 60s; response output/duration (20 / 0.4s) and turn output/duration (60 / 2s) must
+  // not leak into the rate.
   expect(html).toContain("1 tok/s")
+  expect(html).not.toContain("50 tok/s")
   expect(html).not.toContain("30 tok/s")
 })
 
