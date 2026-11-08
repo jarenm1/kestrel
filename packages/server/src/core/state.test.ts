@@ -303,6 +303,69 @@ describe("failed durable writes", () => {
     expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
   })
 
+  // `f` runs synchronously, so reading from inside it is the exact window an update's mutation is in flight before the
+  // write settles. Overlapping readers must see the last committed state there, not the mutation.
+  test("readers during an in-flight update see only committed state, on success and on failure", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      const seenDuring: string[] = []
+      yield* store.update((s) => {
+        s.tasks[0]!.title = "in flight"
+        seenDuring.push(Effect.runSync(store.read).tasks[0]!.title)
+        return Either.right(undefined)
+      })
+      expect(seenDuring).toEqual(["thread supported-thread"])
+      expect((yield* store.read).tasks[0]!.title).toBe("in flight")
+
+      yield* breakWrites(file)
+      const failedSeen: string[] = []
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "doomed"
+          failedSeen.push(Effect.runSync(store.read).tasks[0]!.title)
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      expect(failedSeen).toEqual(["in flight"])
+      expect((yield* store.read).tasks[0]!.title).toBe("in flight")
+      yield* mendWrites(file)
+      yield* store.update((s) => {
+        s.tasks.push({ ...s.tasks[0]!, id: "kept" })
+        return Either.right(undefined)
+      })
+      yield* store.flush
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+
+    const reloaded = await loadState(root)
+    expect(reloaded.tasks[0]!.title).toBe("in flight")
+    expect(reloaded.tasks.map((t) => t.id)).toEqual(["supported-thread", "retired-thread", "kept"])
+  })
+
+  test("a rejected update is reported as not applied, and a failed write names its outcome", async () => {
+    const file = join(root, "state.json")
+    await writeFile(file, JSON.stringify(mixedState()))
+
+    const program = Effect.gen(function* () {
+      const store = yield* StateStore
+      yield* breakWrites(file)
+      const failed = yield* Effect.either(
+        store.update((s) => {
+          s.tasks[0]!.title = "never saved"
+          return Either.right(undefined)
+        }),
+      )
+      expect(Either.isLeft(failed)).toBe(true)
+      if (Either.isLeft(failed)) expect(failed.left.message).toContain("update not applied")
+      yield* mendWrites(file)
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(storeLayer(root))))
+  })
+
   test("a failed write leaves no temporary file behind", async () => {
     const file = join(root, "state.json")
     await writeFile(file, JSON.stringify(mixedState()))
@@ -454,6 +517,7 @@ describe("directory sync failure after the rename", () => {
       expect(Either.isLeft(outcome)).toBe(true)
       if (Either.isLeft(outcome)) {
         expect(outcome.left._tag).toBe("InternalError")
+        expect(outcome.left.message).toContain("applied and visible")
         expect(outcome.left.message).toContain("durability unconfirmed")
       }
       // The rename landed, so memory matches the file rather than rolling back to the old state.

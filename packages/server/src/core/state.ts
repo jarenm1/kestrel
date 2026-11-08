@@ -88,15 +88,17 @@ export interface StoreState {
 }
 
 export interface StoreShape {
-  /** Current state. Callers MUST NOT mutate it; use `update`. */
+  /**
+   * The last committed state, a snapshot that changes only when an update lands. Callers MUST NOT mutate it; use
+   * `update`. A value read before an update keeps the old contents; read again to see the new ones.
+   */
   readonly read: Effect.Effect<Readonly<StoreState>>
   /**
-   * Runs `f` synchronously against the state. If `f` returns Right, the state is
-   * persisted atomically before the effect succeeds. If it returns Left, nothing is
-   * persisted, so `f` MUST validate before mutating. If the write renames the new state
-   * into place but its directory sync fails, the effect fails with an InternalError
-   * saying durability is unconfirmed: the new state stays in memory and in the file,
-   * so the caller must treat the outcome as uncertain, not as rolled back.
+   * Runs `f` synchronously against the working state. If `f` returns Right, the state is persisted atomically before
+   * the effect succeeds. If it returns Left, or the write fails before the rename, nothing is persisted and the
+   * mutations are rolled back, so the effect fails with the update NOT applied. If the rename landed but its directory
+   * sync fails, the effect fails with an InternalError saying the update was applied and is visible, but durability is
+   * unconfirmed: the caller must treat it as applied, not as rolled back.
    */
   readonly update: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<A, E | InternalError>
   /** Resolves once every write made so far is on disk. */
@@ -314,6 +316,9 @@ export const StateLive = Layer.effect(
 
     // Updates run one at a time, each against the state the previous one committed. A rejected or unwritten update is
     // rolled back before the next one runs, so its mutations can never ride along in a later write.
+    // `state` is the working copy an update mutates in place; `committed` is what `read` returns. It is replaced only
+    // after a write lands, so no reader sees a mutation that is still in flight or that a failed write rolls back.
+    let committed: Readonly<StoreState> = structuredClone(state)
     let lane: Promise<void> = Promise.resolve()
     const commit = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Promise<Either.Either<A, E | InternalError>> => {
       const run = lane.then(async (): Promise<Either.Either<A, E | InternalError>> => {
@@ -333,15 +338,18 @@ export const StateLive = Layer.effect(
           await replaceFile(config.stateFile, JSON.stringify(state))
         } catch (e) {
           restoreState(snapshot)
-          return Either.left(new InternalError({ message: `state write failed: ${String(e)}` }))
+          return Either.left(new InternalError({ message: `state write failed, update not applied: ${String(e)}` }))
         }
-        // The rename succeeded, so the file and memory both hold the new state and nothing is rolled back. Until the
-        // directory sync succeeds, a crash may still roll the rename back, so that outcome is reported as uncertain.
+        // The rename landed, so the file holds the new state and the update is applied: publish it before the directory
+        // sync, whose failure only leaves durability unconfirmed (a crash may still roll the rename back).
+        committed = structuredClone(state)
         try {
           await syncDir(config.stateFile)
         } catch (e) {
           return Either.left(
-            new InternalError({ message: `state written but directory sync failed, durability unconfirmed: ${String(e)}` }),
+            new InternalError({
+              message: `state update applied and visible, but its directory sync failed: durability unconfirmed, do not treat as not applied: ${String(e)}`,
+            }),
           )
         }
         return Either.right(result.right)
@@ -351,7 +359,7 @@ export const StateLive = Layer.effect(
     }
 
     const shape: StoreShape = {
-      read: Effect.sync(() => state),
+      read: Effect.sync(() => committed),
       update: <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<A, E | InternalError> =>
         Effect.flatMap(
           Effect.promise(() => commit(f)),
