@@ -206,7 +206,7 @@ export const registerThreadTools = (server: McpServer, ctx: RunContext, deps: Th
         "no issues. Do not close when the user needs a result, review, decision, follow-up, or explanation of a failure; " +
         "leave the thread active so they can see it. Call only as the final action after all work is complete. Closing " +
         "moves the thread and the threads it spawned or delegated to the archive, stops the current run and desktop, " +
-        "and preserves their history and files; the user can unarchive them later. The call may end the run before it returns.",
+        "and preserves their history and files; the user can unarchive each of them later. The call may end the run before it returns.",
       inputSchema: {},
     },
     () =>
