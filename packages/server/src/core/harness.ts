@@ -66,7 +66,7 @@ export interface AgentHarnessShape {
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
-   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. The turn is interrupted
+   * Stops a running run and marks it cancelled (at shutdown, failed and interrupted by restart); a cancelled run's question is dropped. The turn is interrupted
    * first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
    * process is killed when it does not exit in time.
    */
@@ -950,7 +950,7 @@ export const AgentHarnessLive = Layer.effect(
             })
 
             // Stopped while it was being prepared: a run that waited for a slot is not in `active` yet, so `stopRun`
-            // only marked it cancelled and revoked the token it had then. Give up the token and slot it holds now.
+            // only marked it stopped (cancelled, or interrupted at shutdown) and revoked the token it had then. Give up the token and slot it holds now.
             if ((yield* store.read).runs.find((r) => r.id === run.id)?.status !== "running") {
               yield* broker.revoke(run.id)
               releaseSlot(run.id)
