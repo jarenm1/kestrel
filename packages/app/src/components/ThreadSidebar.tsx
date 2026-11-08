@@ -1,7 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react"
 import { AnimatePresence, LayoutGroup, MotionConfig, motion, useReducedMotion } from "framer-motion"
 import { NavLink, useNavigate, useParams } from "react-router-dom"
-import { Archive, ChevronDown, GitBranch, GitPullRequest, PanelLeftClose, SquarePen, Workflow } from "lucide-react"
+import {
+  Archive,
+  ChevronDown,
+  GitBranch,
+  GitPullRequest,
+  PanelLeftClose,
+  PanelLeftOpen,
+  SquarePen,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react"
 import type { Task } from "@cloudagents/protocol"
 import { AccountMenu } from "@/components/AccountMenu"
 import { KestrelMark } from "@/components/KestrelMark"
@@ -101,14 +111,15 @@ interface Props {
   error: unknown
   collapsed: boolean
   onCollapse: () => void
+  onExpand: () => void
 }
 
 /**
  * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
  * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
- * ends. Collapsed, it is an icon rail; the button that expands it again lives in the page panel (`WorkspaceLayout`).
+ * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it.
  */
-export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
+export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)
   const navigate = useNavigate()
   const { taskId: openTaskId } = useParams()
@@ -181,7 +192,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
     return (
       <SidebarMotion>
         <div className="flex w-12 shrink-0 flex-col gap-1 pb-3 pl-2">
-          <HomeMark className="self-center py-0.5" />
+          <BrandToggle label="Expand threads" Icon={PanelLeftOpen} onClick={onExpand} className="self-center" />
           <motion.nav
             layoutScroll
             aria-label="Threads"
@@ -241,17 +252,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse }: Props) {
     <SidebarMotion>
       <div className="flex w-64 shrink-0 flex-col pb-3 pl-3">
         <div className="flex items-center gap-2 pb-2 pl-1.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="group/brand relative size-7 text-foreground/90 hover:text-foreground"
-            aria-label="Collapse threads"
-            title="Collapse threads"
-            onClick={onCollapse}
-          >
-            <KestrelMark className="h-6 transition-opacity duration-200 group-hover/brand:opacity-0 group-focus-visible/brand:opacity-0" />
-            <PanelLeftClose className="absolute inset-0 m-auto opacity-0 transition-opacity duration-200 group-hover/brand:opacity-100 group-focus-visible/brand:opacity-100" />
-          </Button>
+          <BrandToggle label="Collapse threads" Icon={PanelLeftClose} onClick={onCollapse} />
           <span className="min-w-0 flex-1 truncate font-semibold tracking-tight">Kestrel</span>
         </div>
         <motion.nav
@@ -494,16 +495,32 @@ function SubThreadTab({ task, hasChildren }: { task: Task; hasChildren: boolean 
   )
 }
 
-/** The Kestrel mark, linking to a new chat. */
-function HomeMark({ className }: { className?: string }) {
+/**
+ * The Kestrel mark doubling as the sidebar toggle: the bird at rest, the toggle icon once hovered or focused.
+ */
+function BrandToggle({
+  label,
+  Icon,
+  onClick,
+  className,
+}: {
+  label: string
+  Icon: LucideIcon
+  onClick: () => void
+  className?: string
+}) {
   return (
-    <NavLink
-      to={APP_HOME}
-      aria-label="Kestrel home"
-      className={cn("shrink-0 rounded text-foreground/90 transition-colors duration-200 hover:text-foreground", className)}
+    <Button
+      variant="ghost"
+      size="icon"
+      className={cn("group/brand relative size-7 text-foreground/90 hover:text-foreground", className)}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
     >
-      <KestrelMark className="h-6" />
-    </NavLink>
+      <KestrelMark className="h-6 transition-opacity duration-200 group-hover/brand:opacity-0 group-focus-visible/brand:opacity-0" />
+      <Icon className="absolute inset-0 m-auto opacity-0 transition-opacity duration-200 group-hover/brand:opacity-100 group-focus-visible/brand:opacity-100" />
+    </Button>
   )
 }
 
