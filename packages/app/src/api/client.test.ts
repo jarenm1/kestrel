@@ -75,13 +75,19 @@ describe("listTasks with the control plane and a user box", () => {
     expect(elapsed).toBeLessThan(10_000)
   }, 20_000)
 
-  test("a box that waits out its 15 s control timeout before answering offline is still listed", async () => {
-    // The box's offline fallback answers after its own 15 s control wait; the list must wait for that answer.
-    stubFetch({
-      box: () => new Promise<Response>((resolve) => setTimeout(() => resolve(json([task])), 15_500)),
+  test("a box with no cached threads that waits out its 15 s control timeout is still listed", async () => {
+    // Its offline fallback answers after its own 15 s control wait. It has no cached threads, so the list waits for it.
+    const slow = entryFor("slow-box-1", "https://slow-1.test")
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [slow], activeBoxId: slow.id, managedBox: null })
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(slow.id)}`) return tokenFor(slow.url)
+      if (url === `${slow.url}${Paths.tasks}`) {
+        return new Promise<Response>((resolve) => setTimeout(() => resolve(json([taskFor("slow-thread")])), 15_500))
+      }
+      return undefined
     })
     const tasks = await api.listTasks()
-    expect(tasks.map((t) => t.id)).toEqual(["thread-1"])
+    expect(tasks.map((t) => t.id)).toEqual(["slow-thread"])
   }, 40_000)
 })
 
@@ -319,6 +325,29 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
 
     expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["managed-thread", "user-thread"])
   })
+
+  test("a managed box that fails at once does not hold back a user box's cached threads", async () => {
+    const cached = entryFor("cached-box", "https://cached.test")
+    const failing = { id: "managed-failing", url: "https://managed-failing.test" }
+    let userHangs = false
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [cached], activeBoxId: cached.id, managedBox: failing })
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(cached.id)}`) return tokenFor(cached.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(failing.id)}`) return tokenFor(failing.url)
+      if (url === `${cached.url}${Paths.tasks}`) {
+        return userHangs ? new Promise<Response>(() => {}) : json([taskFor("cached-user-thread")])
+      }
+      if (url === `${failing.url}${Paths.tasks}`) return json({ _tag: "Unavailable", message: "down" }, 503)
+      return undefined
+    })
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-user-thread"])
+
+    userHangs = true
+    const started = Date.now()
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-user-thread"])
+    // Within the grace period after the managed box's failure, not the user box's full wait.
+    expect(Date.now() - started).toBeLessThan(5_000)
+  }, 20_000)
 
   test("the managed box is waited for when no user box answers", async () => {
     const failing = entryFor("failing-box", "https://failing.test")

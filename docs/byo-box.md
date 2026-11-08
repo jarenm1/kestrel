@@ -157,8 +157,10 @@ flowchart LR
   Timing: while the control plane is down, the box waits up to 15 s for it before it answers offline. The app reads the
   control plane's box list for at most 5 s (then uses the last list it read) and gives each box's thread list 25 s, after
   which that box's request fails. Each box's thread list is cached as it last answered. A read
-  returns once every box has answered, or once one has and a 1 s grace has passed, so a slow or down box, Kestrel's
-  managed box included, does not hold the others back. A box still pending then keeps its last threads, and its one
+  returns once every box has answered, or once a box has answered (a failure counts) and a 1 s grace has passed, provided
+  the read has threads to show: a thread list from some box, or cached threads for every box still pending. So a slow or
+  down box, Kestrel's managed box included, does not hold the others back, and a first load still waits for a box that
+  can answer. A box still pending then keeps its last threads, and its one
   pending request is shared rather than repeated; its answer shows on the next read. A box that stops answering keeps its
   last threads. Writes to a thread still route to the box it lives on.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.

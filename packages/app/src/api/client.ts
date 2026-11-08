@@ -480,10 +480,11 @@ function readBox(key: BoxKey, target: Target): Promise<BoxAnswer> {
 }
 
 /**
- * Resolves with the answers that have arrived once every read has answered, or once one has answered and the grace
- * period after it has passed. A read still pending then is left out of this round; its answer is cached when it comes.
+ * Resolves with the answers that have arrived once every read has answered, or once the grace period after an answer has
+ * passed and the round has something to show (see `canFinish`). A read still pending then is left out of this round;
+ * its answer is cached when it comes.
  */
-function settleRound(reads: readonly Promise<BoxAnswer>[]): Promise<readonly (BoxAnswer | undefined)[]> {
+function settleRound(reads: readonly { readonly key: BoxKey; readonly read: Promise<BoxAnswer> }[]): Promise<readonly (BoxAnswer | undefined)[]> {
   return new Promise((resolve) => {
     const answers: (BoxAnswer | undefined)[] = reads.map(() => undefined)
     let open = reads.length
@@ -492,12 +493,18 @@ function settleRound(reads: readonly Promise<BoxAnswer>[]): Promise<readonly (Bo
       window.clearTimeout(grace)
       resolve([...answers])
     }
-    reads.forEach((read, index) => {
+    // The round may end early only with something to show: a thread list that arrived, or cached threads for every box
+    // still pending. A failure alone does not end it, so a first load waits for the box that can answer.
+    const canFinish = () =>
+      answers.some((answer) => answer?.ok === true) ||
+      (answers.some((answer) => answer !== undefined) &&
+        reads.every(({ key }, index) => answers[index] !== undefined || threadsOf.has(key)))
+    reads.forEach(({ read }, index) => {
       void read.then((answer) => {
         answers[index] = answer
         open -= 1
         if (open === 0) finish()
-        else if (answer.ok && grace === undefined) grace = window.setTimeout(finish, ROUND_GRACE_MS)
+        else if (grace === undefined && canFinish()) grace = window.setTimeout(finish, ROUND_GRACE_MS)
       })
     })
   })
@@ -533,7 +540,7 @@ async function readAllTasks(): Promise<Task[]> {
     { key: boxKeyOf(kestrelTarget()), target: kestrelTarget() },
     ...(known?.boxes ?? []).map((box) => ({ key: box.id, target: { boxId: box.id, url: box.url } })),
   ]
-  const answers = await settleRound(boxes.map(({ key, target }) => readBox(key, target)))
+  const answers = await settleRound(boxes.map(({ key, target }) => ({ key, read: readBox(key, target) })))
   const failures = answers.flatMap((answer) => (answer?.ok === false ? [answer.error] : []))
   if (failures.length === answers.length) throw failures[0]
   return threadsNow(boxes.map((box) => box.key))
