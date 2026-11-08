@@ -655,6 +655,11 @@ export class DesktopRtcSession {
       pc.connectionStateChange.subscribe((state) => {
         if (token === this.viewToken) {
           this.view.connection = state
+          if (state === "connected" && this.view.failure === "relay-allocation") {
+            // Direct ICE can connect without the relay. The missing relay count remains evidence; it is not a
+            // failure of a working session.
+            this.view.failure = null
+          }
           if (state === "failed") {
             // Keep a credential failure; otherwise a configured-but-unallocated relay is the useful root cause.
             this.view.failure ??=

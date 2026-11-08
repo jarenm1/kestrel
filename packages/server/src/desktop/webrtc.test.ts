@@ -560,6 +560,29 @@ describe("DesktopRtcSession", () => {
     })
   }, 10_000)
 
+  test("a direct connection clears a relay-allocation failure but keeps the missing relay evidence", async () => {
+    const relay = await allocationServers(3_000)
+    const { s, sent } = session()
+    const browser = await remoteOffer()
+    closing.push(() => browser.close(), () => relay.close())
+    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null })
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const answer = sent.find((message) => message._tag === "rtc.answer")
+    if (!answer) throw new Error("no desktop answer")
+    expect(lastDiagnostics(sent)).toMatchObject({ gathering: "complete", relayCandidates: 0, failure: "relay-allocation" })
+    await browser.setRemoteDescription({ type: "answer", sdp: answer.sdp })
+    for (let i = 0; i < 100 && browser.connectionState !== "connected"; i++) await Bun.sleep(50)
+    expect(browser.connectionState).toBe("connected")
+    expect(lastDiagnostics(sent)).toMatchObject({
+      turnSource: "managed",
+      turnStatus: "configured",
+      gathering: "complete",
+      relayCandidates: 0,
+      connection: "connected",
+      failure: null,
+    })
+  }, 10_000)
+
   test("the viewer limit holds when every offer is answered at once", async () => {
     const before = activeRtcPeers()
     const offers = await Promise.all(
