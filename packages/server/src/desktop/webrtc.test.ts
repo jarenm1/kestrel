@@ -438,7 +438,8 @@ describe("DesktopRtcSession", () => {
     const { s, sent } = session()
     const browser = await remoteOffer()
     closing.push(() => browser.close(), () => relay.close())
-    s.setIceServers([relay.udpServer, relay.tlsServer], true)
+    // Cloudflare puts UDP and TLS URLs in one credential entry, with UDP first.
+    s.setIceServers([{ ...relay.tlsServer, urls: [...relay.udpServer.urls, ...relay.tlsServer.urls] }], true)
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
     const answer = sent.find((message) => message._tag === "rtc.answer")
     if (!answer) throw new Error("no desktop answer")
