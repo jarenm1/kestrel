@@ -55,7 +55,7 @@ const SENTINEL = "\u200b"
 const UNSUPPORTED_TEXT = "This desktop cannot stream to this browser"
 
 /** The details panel distinguishes signaling, relay allocation, connection and decoding evidence. */
-const RETRYING_TEXT = "Can't connect to this desktop. Retrying… Open Connection details for diagnostics."
+const RETRYING_TEXT = "Can't connect to this desktop. Retrying… Use the info button for diagnostics."
 
 const MOD_LABELS: Readonly<Record<Modifier, string>> = { ctrl: "Ctrl", alt: "Alt", shift: "Shift", super: "Super" }
 

@@ -204,7 +204,7 @@ Desktop video, audio and input travel over WebRTC only; there is no WebSocket me
 
 ##### Connection diagnostics
 
-Open **Connection details** in the desktop viewer, including the phone embed, even when the stream never connects. **Copy redacted report** copies versioned JSON for a bug report; if clipboard access is unavailable, the viewer offers selectable report text instead. Compare reports from the same device on the failing Wi-Fi and on cellular.
+Open the info button in the desktop viewer, including the phone embed, even when the stream never connects. **Copy redacted report** copies versioned JSON for a bug report; if clipboard access is unavailable, the viewer offers selectable report text instead. Compare reports from the same device on the failing Wi-Fi and on cellular.
 
 The report distinguishes:
 
