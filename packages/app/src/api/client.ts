@@ -199,7 +199,7 @@ const BOX_LIST_TIMEOUT_MS = 25_000
 /** Box tokens are re-minted this long before they expire, so a call never leaves with a token about to lapse. */
 const TOKEN_REFRESH_MS = 60_000
 
-const tokens = new Map<string, { readonly token: string; readonly refreshAt: number }>()
+const tokens = new Map<string, { readonly token: string; readonly refreshAt: number; readonly expiresAt: number }>()
 const minting = new Map<string, Promise<string>>()
 
 /**
@@ -267,10 +267,20 @@ function boxToken(boxId: string): Promise<string> {
   const pending = minting.get(boxId)
   if (pending !== undefined) return pending
   const mint = run(request(BoxToken, "POST", ControlPaths.userBoxToken(boxId)))
-    .then((issued) => {
-      tokens.set(boxId, { token: issued.token, refreshAt: Date.parse(issued.expiresAt) - TOKEN_REFRESH_MS })
-      return issued.token
-    })
+    .then(
+      (issued) => {
+        const expiresAt = Date.parse(issued.expiresAt)
+        tokens.set(boxId, { token: issued.token, refreshAt: expiresAt - TOKEN_REFRESH_MS, expiresAt })
+        return issued.token
+      },
+      (error: unknown) => {
+        // A token past its refresh time is still accepted by the box until it expires. It serves while control is
+        // unreachable or failing, but not when control refuses the mint (4xx): that is a real refusal.
+        const refused = error instanceof ApiError && error.status >= 400 && error.status < 500
+        if (cached !== undefined && !refused && Date.now() < cached.expiresAt) return cached.token
+        throw error
+      },
+    )
     .finally(() => minting.delete(boxId))
   minting.set(boxId, mint)
   return mint

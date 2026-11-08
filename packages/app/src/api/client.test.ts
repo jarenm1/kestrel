@@ -335,3 +335,55 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
     expect((await api.listTasks()).map((t) => t.id)).toEqual(["managed-thread"])
   })
 })
+
+/** A user box with one thread, whose box tokens are minted by `mint`; records the Authorization each box call sent. */
+function tokenBox(id: string, mint: (call: number) => Response) {
+  const box = entryFor(id, `https://${id}.test`)
+  const authorizations: string[] = []
+  let mints = 0
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [box], activeBoxId: box.id, managedBox: null })
+    if (url === `${CONTROL}${ControlPaths.userBoxToken(box.id)}`) {
+      mints += 1
+      return mint(mints)
+    }
+    if (url === `${box.url}${Paths.tasks}`) {
+      authorizations.push(new Headers(init?.headers).get("authorization") ?? "")
+      return json([taskFor("cached-thread")])
+    }
+    throw new Error(`unexpected request ${url}`)
+  }) as typeof fetch
+  return { authorizations }
+}
+
+describe("box tokens when control cannot mint a fresh one", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch
+  })
+
+  test("a token still before its expiry is used when control is down and cannot mint a fresh one", async () => {
+    // The token expires in 30 s, so it is already past its refresh time and the next read must mint.
+    const { authorizations } = tokenBox("token-outage", (call) =>
+      call === 1
+        ? json({ token: "t-first", url: "https://token-outage.test", expiresAt: new Date(Date.now() + 30_000).toISOString() })
+        : new Response("{}", { status: 503 }),
+    )
+
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-thread"])
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-thread"])
+    expect(authorizations).toEqual(["Bearer t-first", "Bearer t-first"])
+  })
+
+  test("a refused mint is not papered over with the cached token", async () => {
+    const { authorizations } = tokenBox("token-refused", (call) =>
+      call === 1
+        ? json({ token: "t-refused-1", url: "https://token-refused.test", expiresAt: new Date(Date.now() + 30_000).toISOString() })
+        : new Response("{}", { status: 401 }),
+    )
+
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-thread"])
+    await expect(api.listTasks()).rejects.toBeDefined()
+    expect(authorizations).toEqual(["Bearer t-refused-1"])
+  })
+})
