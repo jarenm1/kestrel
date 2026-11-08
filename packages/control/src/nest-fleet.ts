@@ -18,7 +18,7 @@ import {
   type NestVmReport,
 } from "@cloudagents/protocol"
 import { safeEqual } from "./http"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 import { listMeterHosts } from "./meter-table"
 import {
   MAX_LAPSE_RETRIES,

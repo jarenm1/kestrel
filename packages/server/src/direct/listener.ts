@@ -7,7 +7,6 @@ import type { CoreShape } from "../core/service"
 import { BOX_DEV_HEADER } from "../tunnel"
 import { serveStream, streamRoute, type WsServices } from "../http/streams"
 import type { BoxAuth } from "./auth"
-import type { BoxActivitySink } from "./box-activity"
 import { wsStreamSocket } from "./socket"
 import { makeRtcServer } from "./rtc"
 
@@ -62,8 +61,6 @@ interface Routed {
 
 export interface DirectListenerDeps {
   readonly auth: BoxAuth
-  /** Told about validated preview requests and requests over authenticated, long-lived WebRTC channels. */
-  readonly activity?: BoxActivitySink
   readonly core: Pick<CoreShape, "previewTokenFor">
   /** The app's web handler (`makeWebHandler`), serving HTTP requests whose identity is already set. */
   readonly webHandler: (request: Request) => Promise<Response>
@@ -112,7 +109,6 @@ const route = async (
     if (session === null || session.taskId !== preview.taskId) {
       return { status: 404, tag: "NotFound", message: "preview session is invalid" }
     }
-    deps.activity?.record(session.user)
     return {
       url: new URL(`${Paths.taskPreview(preview.taskId)}${preview.path}`, url),
       user: session.user,
@@ -179,7 +175,7 @@ const withAllowOrigin = (response: Response, origin: string | null): Response =>
 export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => {
   const wss = new WebSocketServer({ noServer: true })
 
-  const rtc = makeRtcServer({ webHandler: deps.webHandler, runtime: deps.runtime, activity: deps.activity })
+  const rtc = makeRtcServer({ webHandler: deps.webHandler, runtime: deps.runtime })
 
   const answerOffer = async (request: Request, routed: Routed): Promise<Response> => {
     if (routed.user === null || routed.expiresAt === null) {

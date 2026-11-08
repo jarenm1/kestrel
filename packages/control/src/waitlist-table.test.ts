@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { beforeEach, describe, expect, test } from "bun:test"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 import { ensureWaitlistTable, storeWaitlistSignup } from "./waitlist-table"
 
 let sql: FleetSql

@@ -17,7 +17,7 @@ import { colors } from "@/theme";
  * component (`UsageQuotasDom`). This screen only owns the data, as the desktop's `UsagePanel` does.
  */
 export function UsageScreen() {
-  const { activeBox, boxes, managedBox } = useAuth();
+  const { activeBox, boxes } = useAuth();
   const nav = useNavigation();
   const { api } = useApiClient();
   const queries = useMemo(() => createQueries(api), [api]);
@@ -34,7 +34,7 @@ export function UsageScreen() {
       <View style={styles.heading}>
         <Text style={styles.title}>Quotas</Text>
         <Text style={styles.description}>
-          {usageSubtitle(boxLabel(activeBox, boxes, managedBox), usage.data?.length ?? null)}
+          {usageSubtitle(boxLabel(activeBox, boxes), usage.data?.length ?? null)}
         </Text>
       </View>
       <UsageQuotasDom

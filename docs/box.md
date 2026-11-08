@@ -102,7 +102,7 @@ This is a comma-separated, case-insensitive list of **thread owners**, not repos
 use the legacy address; everyone else keeps `ID+LOGIN@users.noreply.github.com`. No private email is needed.
 If an owner switches to GitHub's ID-based format, remove their login from the list. Apply changes by restarting
 the box when idle (a restart interrupts running agents); they affect newly launched processes, not existing
-processes or commits. On a managed box, ask its operator to make this selection.
+processes or commits.
 
 ### Harness commands
 
@@ -163,7 +163,7 @@ Each task has its own network namespace, made by `pasta` (passt) when the task f
 
 The sandbox listener binds only `127.0.0.1` and serves only MCP, the broker and GitHub (`/gh/`). Its port defaults to the public box port plus 10,000, wrapping within 1–65535; set `CLOUDAGENTS_SANDBOX_PORT` to another free port if needed. It must differ from `CLOUDAGENTS_PORT`. Keep this listener local and point tunnels and proxies at the public box port, never the sandbox port. Both interfaces still require a live run token. Basic and off sandbox modes share the host network, so other local processes can reach this listener too.
 
-`bun packages/server/scripts/test-listeners.ts <off|basic|strict>` checks the listener split with a real box process, a local control stub and a fake agent. It exercises authenticated API and event connections, MCP, the broker, workspace execution and token revocation without model keys. Add `--managed` to check the managed credential path. `basic` needs bubblewrap on `PATH`. `strict` needs bubblewrap, pasta, `/dev/net/tun` and the Nix toolchain (`CLOUDAGENTS_SANDBOX_PATH`, which `nix develop` sets). Under `strict` the agent's own loopback must also be unable to reach the box's public port or the control stub, so the script checks that as well.
+`bun packages/server/scripts/test-listeners.ts <off|basic|strict>` checks the listener split with a real box process, a local control stub and a fake agent. It exercises authenticated API and event connections, MCP, the broker, workspace execution and token revocation without model keys. `basic` needs bubblewrap on `PATH`. `strict` needs bubblewrap, pasta, `/dev/net/tun` and the Nix toolchain (`CLOUDAGENTS_SANDBOX_PATH`, which `nix develop` sets). Under `strict` the agent's own loopback must also be unable to reach the box's public port or the control stub, so the script checks that as well.
 
 The holder of that namespace also owns the task's own SysV IPC namespace (`unshare --ipc`). The task's sandboxes, its X server and the box's capture and screenshot processes for it all join it, so GTK and Qt apps on the desktop can use X shared memory (MIT-SHM), and no task can attach another task's shared memory. Starting a desktop therefore starts the task's pasta and holder if nothing else has, and the desktop fails to start if pasta does. Processes keep the namespaces they started in: if the holder dies and is replaced while a desktop runs, apps launched afterwards no longer share memory with that desktop's X server until the desktop is restarted.
 
@@ -195,7 +195,7 @@ From a checkout with Bun dependencies installed, `bun packages/server/scripts/de
 
 Desktop video, audio and input travel over WebRTC only; there is no WebSocket media fallback, and WebRTC is always on. The desktop WebSocket (`/api/tasks/:id/desktop/stream`) carries the status and signaling.
 
-- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate`, `rtc.unavailable` and redacted `rtc.diagnostics`. Signaling also works over the legacy relay, where a session costs a handful of Hub requests. Failed connection attempts request fresh configuration after the existing 1 s–30 s exponential backoff instead of reusing a possibly TURN-less config for 30 minutes. Refreshing preserves that backoff. A bounded configuration wait falls back to the last known config rather than stalling reconnects indefinitely.
+- **Signaling** is `rtc.*` JSON on the desktop WebSocket, so it is authenticated like the status and only the thread's owner reaches it. The viewer sends `rtc.offer`, `rtc.candidate`, `rtc.close` and `rtc.config.request`; the box sends `rtc.config`, `rtc.answer`, `rtc.candidate`, `rtc.unavailable` and redacted `rtc.diagnostics`. Failed connection attempts request fresh configuration after the existing 1 s–30 s exponential backoff instead of reusing a possibly TURN-less config for 30 minutes. Refreshing preserves that backoff. A bounded configuration wait falls back to the last known config rather than stalling reconnects indefinitely.
 - **Media** is H.264 video and Opus audio (48 kHz stereo, 10 ms frames) on recvonly transceivers. A desktop without audio dependencies still streams video; its audio m-line is answered inactive. Silent Opus packets (2 bytes or less) are gated to one per 400 ms, so a quiet desktop sends almost no audio; audible packets always pass. The audio server starts with the desktop, which waits up to 3 s for it so early apps get its socket; the Opus capture runs only while there are viewers (with the encoder's 15 s linger). Audio that dies is restarted up to three times per desktop; apps already running keep their old socket and stay silent.
 - **Input** runs over data channels. `input` (ordered, reliable) carries key, button, wheel and text input; `pointer` (unordered, no retransmits) carries mouse moves only. Wheel notches are clamped to ±10 per event, and `text` (at most 1000 characters) is typed with `xdotool type`.
 - **Video** comes from one encoder per desktop, shared by every viewer, with a paced RTP sender per viewer (`desktop/rtp.ts`). A keyframe request (PLI or FIR) or a joining viewer gets the current GOP replayed, unless it is over 4 MiB, in which case the viewer waits for the next keyframe. Replays take at most a quarter of the pacing rate. A viewer more than a second behind has its queue dropped and resumes at the next keyframe. Where the browser offers the playout-delay header extension, it is set to zero.
@@ -238,7 +238,7 @@ Reports contain only allowlisted states, counts, candidate/transport types and n
 
 The default STUN server, `stun:stun.cloudflare.com:3478`, lets both ends discover their public addresses. Registered boxes also obtain managed TURN credentials automatically when the control plane has a Cloudflare Realtime TURN key configured. The viewer and the box's own peer each allocate a relay from the provider, so a session still connects when neither side's candidates are reachable from the other; both prefer direct WebRTC, and relayed media can use UDP, TCP or TLS on port 443. Media never traverses the Worker or Hub.
 
-To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: managed boxes, registered user boxes and the legacy relay box authenticate `POST /box/turn` using their existing box identity.
+To enable managed TURN for the fleet, create a [Cloudflare Realtime TURN key](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and set **both** `KESTREL_TURN_KEY_ID` and `KESTREL_TURN_API_TOKEN` on the control Worker. Keep the API token only in Worker secrets; do not put it on boxes or in client builds. Update/restart boxes onto this version. No per-box TURN settings or app update are needed: every registered box authenticates `POST /box/turn` with its existing box identity.
 
 The control plane issues one-hour credentials, caches them per box until five minutes before expiry and coalesces concurrent requests. Boxes also cache credentials until that margin and resolve them once per `rtc.config`; an offer never waits on the control plane and a failed fetch leaves both peers on the box's own configuration. Retries requesting a new config refresh them. Credentials are bearer access to paid relay bandwidth, not thread authorization; a viewer can reuse them until expiry. The provider API token never leaves the Worker. Authentication is checked even on cache hits.
 
@@ -257,9 +257,9 @@ Cloudflare bills relayed traffic; see [current pricing and limits](https://devel
 | Box behind ordinary NAT | Nothing more: the default STUN server sees both ends' public addresses. Set `CLOUDAGENTS_WEBRTC_ICE_SERVERS` to a STUN server of your choice, or to `[]` to use none |
 | Symmetric NAT or viewer UDP blocked | Enable managed TURN centrally as above, or supply your own relay with TCP/TLS support using `CLOUDAGENTS_WEBRTC_TURN_URLS` and `CLOUDAGENTS_WEBRTC_TURN_SECRET` |
 
-`CLOUDAGENTS_WEBRTC_TURN_SECRET` is coturn's `static-auth-secret` (`use-auth-secret`). It stays on the box: each session gets a credential minted from it (username `<expiry>:<thread id>`, HMAC-SHA1, valid one hour), for the thread's owner only. It is held like `CLOUDAGENTS_BOX_SECRET`, out of the sandbox's environment. A managed box refuses static TURN passwords in `CLOUDAGENTS_WEBRTC_ICE_SERVERS`, which every viewer could read. `CLOUDAGENTS_WEBRTC_ICE_POLICY=relay` makes viewers send only through TURN; the box still offers its own candidates for the relay to reach. The box itself does not probe a viewer's candidates on loopback, link-local or metadata addresses.
+`CLOUDAGENTS_WEBRTC_TURN_SECRET` is coturn's `static-auth-secret` (`use-auth-secret`). It stays on the box: each session gets a credential minted from it (username `<expiry>:<thread id>`, HMAC-SHA1, valid one hour), for the thread's owner only. It is held like `CLOUDAGENTS_BOX_SECRET`, out of the sandbox's environment. `CLOUDAGENTS_WEBRTC_ICE_POLICY=relay` makes viewers send only through TURN; the box still offers its own candidates for the relay to reach. The box itself does not probe a viewer's candidates on loopback, link-local or metadata addresses.
 
-Managed boxes also refuse viewer candidates in private IPv4, carrier-grade NAT, and IPv6 unique-local ranges, including addresses advertised by the box. Viewers on those networks need a reachable public candidate or a TURN relay to see the desktop. Self-hosted boxes keep private LAN and tailnet connectivity.
+Boxes keep private LAN and tailnet connectivity for their owner: a viewer on a private network still needs a reachable candidate or a TURN relay.
 
 Limits today:
 
@@ -273,7 +273,7 @@ Limits today:
 
 ##### TLS-only TURN regression
 
-`bun test packages/server/src/desktop/webrtc.test.ts` automatically checks authenticated UDP/TLS allocations on ephemeral loopback ports: managed TLS/443 selection, original operator ordering, managed lists without TLS/443, and the managed-only connection deadline. It needs neither coturn nor privileged ports. The separate coturn exercise below additionally verifies relay-to-relay media and input.
+`bun test packages/server/src/desktop/webrtc.test.ts` automatically checks authenticated UDP/TLS allocations on ephemeral loopback ports: control-plane TURN TLS/443 selection, original operator ordering, lists without TLS/443, and the managed-TURN connection deadline. It needs neither coturn nor privileged ports. The separate coturn exercise below additionally verifies relay-to-relay media and input.
 
 `packages/server/scripts/test-desktop-turn-tls.ts` exercises real allocations and desktop RTP/input, not copied peer settings. Run it in an isolated Linux environment with coturn and Node 22; do not run this fixture on a production box. Ports 443, 3478 and 5349 must be unused. The fixed credentials and loopback-peer permission below are **test-only**, and the listener binds only loopback.
 
@@ -297,7 +297,7 @@ bun build packages/server/scripts/test-desktop-turn-tls.ts --target=node --outfi
 NODE_EXTRA_CA_CERTS=/tmp/kestrel-turn-test/cert.pem node /tmp/kestrel-turn-test/check.mjs
 ```
 
-The managed case must allocate TLS/443 and deliver the exact RTP payload and keyboard command through a relay-to-relay pair. The operator case must retain UDP-first ordering and get no box relay with this TLS-only fixture. Reverting managed TLS preference makes the first case fail. Stop coturn with Ctrl-C afterward and remove `/tmp/kestrel-turn-test`. On Windows, bundle to a Windows temporary file and run that bundle with Node inside WSL alongside coturn.
+The managed-TURN case must allocate TLS/443 and deliver the exact RTP payload and keyboard command through a relay-to-relay pair. The operator case must retain UDP-first ordering and get no box relay with this TLS-only fixture. Reverting managed-TURN TLS preference makes the first case fail. Stop coturn with Ctrl-C afterward and remove `/tmp/kestrel-turn-test`. On Windows, bundle to a Windows temporary file and run that bundle with Node inside WSL alongside coturn.
 
 ### Toolkits
 
@@ -340,9 +340,11 @@ The box needs the user's systemd manager (`systemd-run --user`) with the memory,
 
 The storage limit is not a filesystem quota (the box runs unprivileged). The box measures every task's files at startup and every 30 s, and an upload counts as soon as it arrives: one that would take the task past the limit is refused (409). A task over the limit also has new checkouts refused, and a new run's prompt asks the agent to delete files first. If the task is over the limit and still growing (by more than 64 MiB since the last check) while a run or its desktop is going, the box stops them and says so in the chat. A task that is over the limit but shrinking keeps running, so an agent can clean up. The agent's own writes are never blocked mid-way, so a task can briefly pass the limit by whatever it writes in 30 s.
 
-## Managed boxes (fleet)
+## Kestrel's boxes (Nest)
 
-Kestrel runs its own boxes as a fleet. Each managed box is a row in the control plane's fleet registry (the Hub's `managed_boxes` table) with a public HTTPS URL and its own secret. One managed box serves many users. The control plane assigns each user to one box, and that user's apps call the box directly. Authentication is the same as for a user's own box: the box verifies HS256 box tokens offline with its own secret, `aud` is its box id and `sub` is the user's login.
+Kestrel's own compute is the Nest: one VM per box on shared hosts, described in [nest.md](nest.md). A Nest box is a row in the user's own box list (`user_boxes`), like a BYOB box, except the control plane created it and manages its VM. When `KESTREL_NEST_DOMAIN` is set, a user whose box list is empty is provisioned a standard Nest box automatically the first time their list is read or a background call needs a box; it is created at `NEST_STANDARD_LIMITS` (4 vCPU, 8 GiB, no GPU, 64 GiB volume), placed on a host with room, and made active. A user who has boxes but leaves no box active gets nothing: no box is picked for them, and calls fail with `NoBox` until they choose one or delete every box.
+
+Authentication is the same as for a user's own box: the box verifies HS256 box tokens offline with its own secret, `aud` is its box id and `sub` is the user's login. The box's public URL names the host the VM lives on, `https://<boxId>.<host-slug>.<nest-domain>`, and the host's ingress wakes a suspended or parked box when a request arrives.
 
 ### Operators
 
@@ -352,66 +354,7 @@ Operators are the GitHub logins in the Worker's `KESTREL_OPERATORS` secret, comm
 bunx wrangler secret put KESTREL_OPERATORS   # e.g. jarenm1,caayd
 ```
 
-Operators see Settings › Fleet and the `/api/fleet/boxes` routes (`Me.operator` is `true`). Everyone else gets 404 there.
-
-### Active-user telemetry
-
-Settings › Fleet separates **assigned users** (placement) from **active users**: unique assigned logins that made
-an authenticated request to that box within the last five minutes. Background polling counts; this is not a measure
-of human attention or running agents. HTTP requests and requests on an authenticated WebRTC API channel refresh
-activity. Validated preview-token requests also count, including preview documents, HTTP subresources and WebSocket
-upgrades; invalid tokens or tokens used for another task do not. Opening a desktop, event or preview WebSocket
-stream counts, but traffic on an already-open stream does not; merely watching a desktop can therefore age out.
-Legacy relay traffic and user-owned boxes are not included.
-
-Managed boxes send a complete snapshot, including an empty snapshot when idle, every 30 seconds to
-`POST /box/telemetry/activity`, authenticated with their box id and secret. Collection is in memory and resets on
-box restart; reporting never blocks serving requests. The Hub stores only the latest snapshot per box: login,
-last-activity time, and receiver-side report time. It filters users against their current box assignment and retains
-no prompts, thread data or activity history. Snapshots are capped at 10,000 users, keeping the most recently active.
-Box clocks must be synchronized: timestamps more than 30 seconds ahead of the control plane are rejected; smaller
-positive skew is clamped to receiver time.
-
-Operators read `GET /api/fleet/activity`; signed-in non-operators get 404. Fleet refreshes it every ten seconds and
-shows usernames, last-seen times and the last report time. A box that has never reported shows telemetry unavailable;
-a report at least 90 seconds old shows telemetry stale, not a zero/current count. Box health is separate: an online
-box can have stale telemetry. Older boxes need the updated box code before activity is available.
-
-### Assignment and states
-
-A user is assigned lazily, whenever the control plane builds their box list or needs their managed box:
-
-- A user keeps their box while it is `active` or `draining`.
-- Otherwise the user is assigned to the active box with the fewest users (ties go to the oldest box).
-- With no active box, the user has no managed box, and their apps use the [legacy relay](#legacy-relay).
-
-| State | Meaning |
-|---|---|
-| `pending` | Registered; gets no users. Configure and check it first. |
-| `active` | Gets new users, by the rule above. |
-| `draining` | Keeps its users; gets no new ones. |
-
-Nothing moves a box back to `pending`.
-
-### Adding a box
-
-1. In Settings › Fleet, add the box with a name and its public URL (see [Endpoint requirements](#endpoint-requirements)). The secret is shown once. The box starts `pending`.
-2. Run the box on its host in managed direct mode, with its id and secret. The same variables can go in `.box.env`, which `nix run .#box` reads:
-
-   ```sh
-   CLOUDAGENTS_BOX_ID=<id> CLOUDAGENTS_BOX_SECRET=<secret> CLOUDAGENTS_BOX_MANAGED=1 \
-   CLOUDAGENTS_CONTROL_URL=<control plane origin> nix run .#box
-   ```
-
-   The box listens on `CLOUDAGENTS_HOST:CLOUDAGENTS_PORT`, by default `127.0.0.1:8787`. If the proxy runs on another host, set `CLOUDAGENTS_HOST` to an address that proxy can reach (see [Deploy modules](#deploy-modules)).
-3. Check health: `curl -fsS https://<url>/api/health` must answer. The control plane checks the same URL for the box's status.
-4. Activate: set the state to `active`.
-
-### Drain, rotate, delete
-
-- **Drain** (`draining`): no new users. Current users stay assigned and keep using the box. Draining moves nobody, so use it to stop new assignments before maintenance; set `active` again to resume.
-- **Rotate the secret** (`POST /api/fleet/boxes/:id/secret`): returns the new secret once. Until the box restarts with it, the box rejects tokens minted under the new secret and cannot fetch credentials. Rotate and restart together, when the box is idle.
-- **Delete** (`DELETE`): removes the box row. Its users are unassigned and, on their next box list, move to the active box with the fewest users, or to the relay if there is none. Their threads stay on the deleted box's disk and do not move.
+Operators see Settings › Fleet, which lists the Nest hosts, their connectivity and capacity, and the common tool failures the boxes report (`/api/fleet/tool-failures`). Everyone else gets 404 there.
 
 ### Endpoint requirements
 
@@ -455,43 +398,14 @@ The modules are in `deploy/`. Key files must be absolute paths outside `/nix/sto
 
   Set `CLOUDAGENTS_HOST=10.203.0.2` on the box. That address exists only while the tunnel is up, so start the box after the tunnel. The box port opens only on the tunnel interface.
 
-### Cutover of the relayed production box
-
-The production box already dials the relay with `CLOUDAGENTS_BOX_TOKEN`. It keeps that token while it also serves direct traffic: the relay and managed direct mode run in one process, so no user loses the box during the switch.
-
-1. Register it: add the box in Settings › Fleet with its public URL. It is `pending` and gets no users.
-2. Configure the endpoint: serve that URL to `127.0.0.1:8787` on the production host, with `deploy/box-ingress.nix` or your own proxy that meets the [endpoint requirements](#endpoint-requirements).
-3. In `.box.env`, next to `CLOUDAGENTS_CONTROL_URL` and the kept `CLOUDAGENTS_BOX_TOKEN`, add `CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET` and `CLOUDAGENTS_BOX_MANAGED=1`.
-4. Restart the box when it is idle. A restart interrupts agent runs, and `box-auto` defers its restarts while the box is busy.
-5. Verify through the public URL: `https://<url>/api/health` answers, and `https://<url>/mcp` answers 404.
-6. Activate. The box is then the only active box, so every user without a managed box is assigned to it on their next box list. Users keep it while it is `active` or `draining`.
-
-Rollback: Drain does not move users, so they keep the box. To move them back to the relay, delete the box. Its users go to another active box if one exists, otherwise to the relay. The relay works only while the box still runs with `CLOUDAGENTS_BOX_TOKEN`, so keep that token set until the cutover is final.
-
-### Production host
-
-The production host runs the box with `nix run .#box-auto`. It keeps its own clone in `~/.local/share/kestrel-box` (override with `KESTREL_BOX_DIR`) and polls GitHub every 60 s (`KESTREL_BOX_POLL`). It follows the git ref in `KESTREL_BOX_REF` (default `main`), checking it out at startup. When the ref moves, box-auto fast-forwards to the new commit, reinstalls deps and restarts the box, but only once the box is idle: no agent runs and no desktops, as reported on the box's activity socket. While the box is busy the update is deferred and rechecked on every poll. An update that has waited `KESTREL_BOX_MAX_DEFER` seconds (default 21600, 6 h; 0 waits indefinitely) runs anyway and interrupts whatever is still running. If the activity socket does not answer, box-auto updates without an idle check.
-
-The box serves the activity socket at `box.sock` in its data dir: `CLOUDAGENTS_DATA_DIR` from `.box.env` (must be an absolute path; box-auto refuses a relative one), otherwise `.data` in the clone. Only counts leave that socket, and it is owner-only.
-
-To ship a change to the box without merging to `main`, push the commit to a release branch and point the box at it: `git push origin <sha>:box-release`, then start box-auto with `KESTREL_BOX_REF=box-release`. Relaunching box-auto restarts the box once, interrupting any run in progress; after that, pushes to the ref follow the rules above.
-
-It reads the box's environment (`CLOUDAGENTS_CONTROL_URL`, and the relay token and/or managed box id and secret above) from `.box.env` in that clone (copied from the current directory on first run). `nix run .#box` runs a box once from the current checkout.
-
 ### Control plane traffic per user
 
 Per user, the control plane (the Worker and its Hub Durable Object) handles only short control requests. None carries thread data:
 
-- the box list (`GET /api/boxes`), which assigns the managed box;
-- a box token from `POST /api/boxes/:id/token`, valid for an hour, for the user's own box or managed box;
-- credential bootstrap: the box fetches its user's connection secrets from `/box/credentials` when a token's credentials version changes;
+- the box list (`GET /api/boxes`), which auto-provisions a Nest box when the user has none;
+- a box token from `POST /api/boxes/:id/token`, valid for an hour, for any box on the list;
+- credential bootstrap: the box fetches its owner's connection secrets from `/box/self` when a token's credentials version changes;
 - automation dispatch: the control plane calls the box directly with a 5-minute token to start automation runs and fetch CLI sign-in state, and the box's automation tools call `/box/automations` with its own box auth.
-
-### Legacy relay
-
-Until every client and box is cut over, Kestrel's box is also reached through the relay. A box dials `/box/connect` with `CLOUDAGENTS_BOX_TOKEN`, and the control plane forwards each app request over that socket, one Durable Object request per request. Clients use the relay when `BoxList.managedBox` is `null`. Relay deletion is a later change.
-
-Don't run a box against production with the production token from your machine: the control plane keeps one relayed box and a new connection replaces the live one.
 
 ### Capability discovery
 

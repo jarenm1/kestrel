@@ -1,20 +1,17 @@
 import { Data, Effect, Either, Schema } from "effect"
 import {
   BOX_ID_HEADER,
-  BOX_USER_HEADER,
   BoxSelf,
   type BoxTokenClaims,
   ControlPaths,
-  type RelayCredentials,
+  type BoxCredentials,
   verifyBoxToken,
 } from "@cloudagents/protocol"
 import { controlBase } from "../control/client"
 import type { CredentialStoreShape } from "../credentials"
-import type { BoxActivitySink } from "./box-activity"
 
 /**
- * The token is missing, malformed, expired, for another box, or for a user who does not own this box (for a managed
- * box: who is not assigned to it).
+ * The token is missing, malformed, expired, for another box, or for a user who does not own this box.
  */
 export class Unauthorized extends Data.TaggedError("Unauthorized")<{ readonly message: string }> {}
 
@@ -37,15 +34,12 @@ export interface DirectSettings {
   readonly controlUrl: string
   readonly boxId: string
   readonly boxSecret: string
-  /** A Kestrel fleet box serving many users: its credentials come from `/box/credentials`, per user. */
-  readonly managed: boolean
 }
 
 export interface BoxAuth {
   /**
    * Claims of a valid box token. Unless `offline`, the token's user's credentials are current in the store: fetched from
-   * the control plane (`/box/self` for a user's own box, `/box/credentials` for a managed box) on first use and whenever
-   * the token's `cv` differs from the version last absorbed.
+   * the control plane (`/box/self`) on first use and whenever the token's `cv` differs from the version last absorbed.
    */
   readonly authenticate: (token: string) => Effect.Effect<BoxAuthentication, Unauthorized | Unavailable>
 }
@@ -58,8 +52,6 @@ export const makeBoxAuth = (
   settings: DirectSettings,
   store: CredentialStoreShape,
   fetchFn: typeof fetch = fetch,
-  /** Told about each login whose request fully authenticated, so a managed box can report active users. */
-  activity?: BoxActivitySink,
 ): BoxAuth => {
   const base = controlBase(settings.controlUrl)
   // Per user: the credentials version last absorbed and when (seconds) its fetch started. A token refetches only when
@@ -73,18 +65,12 @@ export const makeBoxAuth = (
 
   const fetchCredentials = async (claims: BoxTokenClaims): Promise<void> => {
     const at = Math.floor(Date.now() / 1000)
-    const path = settings.managed ? ControlPaths.boxCredentials : ControlPaths.boxSelf
     const headers: Record<string, string> = { authorization: `Bearer ${settings.boxSecret}`, [BOX_ID_HEADER]: settings.boxId }
-    // A managed box names the user it wants credentials for; the control plane answers only for users assigned to it.
-    if (settings.managed) headers[BOX_USER_HEADER] = claims.sub
     let response: Response
     try {
-      response = await fetchFn(`${base}${path}`, { headers, signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) })
+      response = await fetchFn(`${base}${ControlPaths.boxSelf}`, { headers, signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) })
     } catch {
       throw new ControlOutage({ message: "control plane unreachable" })
-    }
-    if (settings.managed && response.status === 403) {
-      throw new Unauthorized({ message: "user is not assigned to this managed box" })
     }
     if (response.status >= 500) {
       throw new ControlOutage({ message: `control plane answered ${response.status} for the box's credentials` })
@@ -102,7 +88,7 @@ export const makeBoxAuth = (
     if (Either.isLeft(decoded)) throw new Unavailable({ message: INVALID_ANSWER })
     const self = decoded.right
     if (self.owner !== claims.sub) throw new Unauthorized({ message: "token is not for this box's owner" })
-    const creds: RelayCredentials = {
+    const creds: BoxCredentials = {
       user: self.owner,
       github: self.github,
       providers: {
@@ -151,9 +137,9 @@ export const makeBoxAuth = (
         )
         if (Either.isLeft(outcome)) {
           const failure = outcome.left
-          // Only an outage of a user's own box, with no credentials held for its owner, lets reads go on. Anything else,
+          // Only an outage, with no credentials held for the owner, lets reads go on. Anything else,
           // including a refusal (401/403) from the control plane, stays a failure.
-          if (failure._tag !== "ControlOutage" || cached !== null || settings.managed) {
+          if (failure._tag !== "ControlOutage" || cached !== null) {
             return yield* Effect.fail(failure._tag === "ControlOutage" ? new Unavailable({ message: failure.message }) : failure)
           }
           offline = true
@@ -163,15 +149,6 @@ export const makeBoxAuth = (
               `control plane unreachable: serving offline thread reads for ${claims.sub} until its credentials return`,
             )
           }
-        }
-      }
-      // Only a fully authenticated request counts as activity, and only on a managed box: a user's own box reports to
-      // nobody. The sink is synchronous and does no I/O, so it cannot delay or fail the authentication.
-      if (settings.managed) {
-        try {
-          activity?.record(claims.sub)
-        } catch {
-          // Telemetry is best effort.
         }
       }
       return { claims, offline }

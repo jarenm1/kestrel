@@ -203,8 +203,9 @@ export const handleAutomations = async (
 }
 
 /**
- * Every `/box/automations` route. The box holds BOX_TOKEN (checked by the caller) and names the user it acts for in
- * BOX_USER_HEADER; that user must exist. Ownership is then enforced by the same handlers the browser uses.
+ * Every `/box/automations` route. The box proved its secret and that the caller owns it (in the caller's check) and
+ * names the user it acts for in BOX_USER_HEADER; that user must exist. Ownership is then enforced by the same
+ * handlers the browser uses.
  */
 export const handleBoxAutomations = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const login = request.headers.get(BOX_USER_HEADER) ?? ""

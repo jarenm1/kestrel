@@ -16,7 +16,6 @@ const BOX_ID = "box-1"
 const boxList = {
   boxes: [{ id: BOX_ID, name: "Desk", url: BOX, createdAt: "2026-11-01T00:00:00.000Z" }],
   activeBoxId: BOX_ID,
-  managedBox: null,
 }
 
 const task = {
@@ -46,8 +45,6 @@ function stubFetch(options: {
       return json({ token: "t", url: BOX, expiresAt: new Date(Date.now() + 3_600_000).toISOString() })
     }
     if (url === `${BOX}${Paths.tasks}`) return options.box()
-    // Kestrel's own box is reached through the control plane's relay; it fails at once here.
-    if (url.startsWith(`${CONTROL}/api/`) && init?.method !== "POST") throw new TypeError("relay down")
     throw new Error(`unexpected request ${init?.method ?? "GET"} ${url}`)
   }) as typeof fetch
 }
@@ -79,7 +76,7 @@ describe("listTasks with the control plane and a user box", () => {
     // Its offline fallback answers after its own 15 s control wait. It has no cached threads, so the list waits for it.
     const slow = entryFor("slow-box-1", "https://slow-1.test")
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [slow], activeBoxId: slow.id, managedBox: null })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [slow], activeBoxId: slow.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(slow.id)}`) return tokenFor(slow.url)
       if (url === `${slow.url}${Paths.tasks}`) {
         return new Promise<Response>((resolve) => setTimeout(() => resolve(json([taskFor("slow-thread")])), 15_500))
@@ -91,7 +88,6 @@ describe("listTasks with the control plane and a user box", () => {
   }, 40_000)
 })
 
-const MANAGED = "https://managed.test"
 const BYOB_ENTRY = { id: BOX_ID, name: "Desk", url: BOX, createdAt: "2026-11-01T00:00:00.000Z" }
 
 /** A fetch that answers each request by `answer`; a request it returns nothing for fails the test. */
@@ -123,7 +119,7 @@ describe("box list reads that answer after a change", () => {
   })
 
   test("a read that answers after a box switch does not undo the switch", async () => {
-    const before = { boxes: [BYOB_ENTRY], activeBoxId: null, managedBox: null }
+    const before = { boxes: [BYOB_ENTRY], activeBoxId: null }
     const after = { ...before, activeBoxId: BOX_ID }
     let releaseStaleRead: (response: Response) => void = () => {}
     let listReads = 0
@@ -151,12 +147,12 @@ describe("box list reads that answer after a change", () => {
 
     expect(switched.activeBoxId).toBe(BOX_ID)
     await api.cliLoginCancel("claude-cli")
-    // The active-box call goes to the switched box, not to the relay the stale list named.
+    // The active-box call goes to the switched box, not to the stale list's choice.
     expect(boxCalls).toEqual([`${BOX}${ControlPaths.cliLoginCancel("claude-cli")}`])
   })
 
   test("a box list read that answers after a change returns the list the app holds", async () => {
-    const before = { boxes: [BYOB_ENTRY], activeBoxId: null, managedBox: null }
+    const before = { boxes: [BYOB_ENTRY], activeBoxId: null }
     const after = { ...before, activeBoxId: BOX_ID }
     let releaseStaleRead: (response: Response) => void = () => {}
     let listReads = 0
@@ -178,69 +174,46 @@ describe("box list reads that answer after a change", () => {
   })
 })
 
-describe("thread reads across Kestrel's managed box and a user's own boxes", () => {
+describe("thread reads across the user's boxes", () => {
   afterEach(() => {
     globalThis.fetch = realFetch
   })
 
-  test("a managed box that never answers does not hold a user's own box back", async () => {
+  test("a box that never answers does not hold a healthy box back", async () => {
     const healthy = entryFor("healthy-box", "https://healthy.test")
-    const managed = { id: "managed-stall", url: "https://managed-stall.test" }
-    let releaseManaged: (response: Response) => void = () => {}
+    const stalled = entryFor("stalled-box", "https://stalled.test")
+    let releaseStalled: (response: Response) => void = () => {}
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy], activeBoxId: healthy.id, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy, stalled], activeBoxId: healthy.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(stalled.id)}`) return tokenFor(stalled.url)
       if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("healthy-thread")])
-      if (url === `${managed.url}${Paths.tasks}`) return new Promise<Response>((resolve) => (releaseManaged = resolve))
+      if (url === `${stalled.url}${Paths.tasks}`) return new Promise<Response>((resolve) => (releaseStalled = resolve))
       return undefined
     })
 
     const tasks = await Promise.race([
       api.listTasks().then((list) => list.map((t) => t.id)),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("held by the managed box")), 4_000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("held by the stalled box")), 4_000)),
     ])
-    releaseManaged(new Response("{}", { status: 500 }))
+    releaseStalled(new Response("{}", { status: 500 }))
     await settle()
 
     expect(tasks).toEqual(["healthy-thread"])
   })
 
-  test("a user box that never answers does not hold a healthy user box back", async () => {
-    const healthy = entryFor("healthy-box-2", "https://healthy-2.test")
-    const dead = entryFor("dead-box", "https://dead.test")
-    let releaseDead: (response: Response) => void = () => {}
-    routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy, dead], activeBoxId: healthy.id, managedBox: null })
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(dead.id)}`) return tokenFor(dead.url)
-      if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("healthy-thread-2")])
-      if (url === `${dead.url}${Paths.tasks}`) return new Promise<Response>((resolve) => (releaseDead = resolve))
-      return undefined
-    })
-
-    const tasks = await Promise.race([
-      api.listTasks().then((list) => list.map((t) => t.id)),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("held by the dead box")), 4_000)),
-    ])
-    releaseDead(new Response("{}", { status: 500 }))
-    await settle()
-
-    expect(tasks).toEqual(["healthy-thread-2"])
-  })
-
-  test("a slow managed box is listed by the next read, and is not asked again while its first read is pending", async () => {
+  test("a slow box is listed by the next read, and is not asked again while its first read is pending", async () => {
     const healthy = entryFor("healthy-box-3", "https://healthy-3.test")
-    const managed = { id: "managed-slow", url: "https://managed-slow.test" }
+    const slow = entryFor("slow-box-3", "https://slow-3.test")
     let answerSlow: (response: Response) => void = () => {}
     let slowAnswered = false
     let slowAsks = 0
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy], activeBoxId: healthy.id, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy, slow], activeBoxId: healthy.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(slow.id)}`) return tokenFor(slow.url)
       if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("healthy-thread-3")])
-      if (url === `${managed.url}${Paths.tasks}`) {
+      if (url === `${slow.url}${Paths.tasks}`) {
         if (slowAnswered) return json([taskFor("slow-thread")])
         slowAsks += 1
         return new Promise<Response>((resolve) => (answerSlow = resolve))
@@ -261,77 +234,75 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
     expect(third).toEqual(["healthy-thread-3", "slow-thread"])
   })
 
-  test("a managed box that stops answering keeps its last threads, and its threads still route to it", async () => {
+  test("a box that stops answering keeps its last threads, and its threads still route to it", async () => {
     const healthy = entryFor("healthy-box-4", "https://healthy-4.test")
-    const managed = { id: "managed-keep", url: "https://managed-keep.test" }
-    let managedFails = false
+    const flaky = entryFor("flaky-box", "https://flaky.test")
+    let flakyFails = false
     const deletes: string[] = []
     routes((url, method) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy], activeBoxId: healthy.id, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy, flaky], activeBoxId: healthy.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(flaky.id)}`) return tokenFor(flaky.url)
       if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("healthy-thread-4")])
-      if (url === `${managed.url}${Paths.tasks}`) {
-        return managedFails ? new Response("{}", { status: 500 }) : json([taskFor("managed-keep-thread")])
+      if (url === `${flaky.url}${Paths.tasks}`) {
+        return flakyFails ? new Response("{}", { status: 500 }) : json([taskFor("flaky-keep-thread")])
       }
-      if (url === `${managed.url}${Paths.task("managed-keep-thread")}` && method === "DELETE") {
+      if (url === `${flaky.url}${Paths.task("flaky-keep-thread")}` && method === "DELETE") {
         deletes.push(url)
         return json({})
       }
       return undefined
     })
 
-    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["healthy-thread-4", "managed-keep-thread"])
-    managedFails = true
-    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["healthy-thread-4", "managed-keep-thread"])
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["flaky-keep-thread", "healthy-thread-4"])
+    flakyFails = true
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["flaky-keep-thread", "healthy-thread-4"])
 
-    await api.deleteTask("managed-keep-thread")
-    expect(deletes).toEqual([`${managed.url}${Paths.task("managed-keep-thread")}`])
+    await api.deleteTask("flaky-keep-thread")
+    expect(deletes).toEqual([`${flaky.url}${Paths.task("flaky-keep-thread")}`])
   })
 
-  test("a replaced managed box's threads are not shown for its successor", async () => {
-    const successor = "https://managed-new.test"
-    let current = { boxes: [BYOB_ENTRY], activeBoxId: BOX_ID, managedBox: { id: "managed-old", url: MANAGED } }
+  test("a removed box's threads are not shown", async () => {
+    const removed = entryFor("removed-box", "https://removed.test")
+    let current = { boxes: [BYOB_ENTRY, removed], activeBoxId: BOX_ID }
     routes((url) => {
       if (url === `${CONTROL}${ControlPaths.boxes}`) return json(current)
       if (url === `${CONTROL}${ControlPaths.userBoxToken(BOX_ID)}`) return tokenFor(BOX)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken("managed-old")}`) return tokenFor(MANAGED)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken("managed-new")}`) return tokenFor(successor)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(removed.id)}`) return tokenFor(removed.url)
       if (url === `${BOX}${Paths.tasks}`) return json([taskFor("user-thread")])
-      if (url === `${MANAGED}${Paths.tasks}`) return json([taskFor("old-managed-thread")])
-      if (url === `${successor}${Paths.tasks}`) return new Response("{}", { status: 500 })
+      if (url === `${removed.url}${Paths.tasks}`) return json([taskFor("removed-thread")])
       return undefined
     })
-    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["old-managed-thread", "user-thread"])
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["removed-thread", "user-thread"])
 
-    current = { ...current, managedBox: { id: "managed-new", url: successor } }
+    current = { ...current, boxes: [BYOB_ENTRY] }
 
     expect((await api.listTasks()).map((t) => t.id)).toEqual(["user-thread"])
   })
 
-  test("a managed box that answers after a user box is listed by that same read", async () => {
+  test("a box that answers after another is listed by that same read", async () => {
     const healthy = entryFor("healthy-box-5", "https://healthy-5.test")
-    const managed = { id: "managed-late", url: "https://managed-late.test" }
+    const late = entryFor("late-box", "https://late.test")
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy], activeBoxId: healthy.id, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy, late], activeBoxId: healthy.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(late.id)}`) return tokenFor(late.url)
       if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("user-thread")])
-      if (url === `${managed.url}${Paths.tasks}`) {
-        return new Promise<Response>((resolve) => setTimeout(() => resolve(json([taskFor("managed-thread")])), 300))
+      if (url === `${late.url}${Paths.tasks}`) {
+        return new Promise<Response>((resolve) => setTimeout(() => resolve(json([taskFor("late-thread")])), 300))
       }
       return undefined
     })
 
-    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["managed-thread", "user-thread"])
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["late-thread", "user-thread"])
   })
 
-  test("a managed box that fails at once does not hold back a user box's cached threads", async () => {
+  test("a box that fails at once does not hold back another box's cached threads", async () => {
     const cached = entryFor("cached-box", "https://cached.test")
-    const failing = { id: "managed-failing", url: "https://managed-failing.test" }
+    const failing = entryFor("failing-box", "https://failing.test")
     let userHangs = false
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [cached], activeBoxId: cached.id, managedBox: failing })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [cached, failing], activeBoxId: cached.id })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(cached.id)}`) return tokenFor(cached.url)
       if (url === `${CONTROL}${ControlPaths.userBoxToken(failing.id)}`) return tokenFor(failing.url)
       if (url === `${cached.url}${Paths.tasks}`) {
@@ -345,23 +316,31 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
     userHangs = true
     const started = Date.now()
     expect((await api.listTasks()).map((t) => t.id)).toEqual(["cached-user-thread"])
-    // Within the grace period after the managed box's failure, not the user box's full wait.
+    // Within the grace period after the failing box's failure, not the user box's full wait.
     expect(Date.now() - started).toBeLessThan(5_000)
   }, 20_000)
 
-  test("the managed box is waited for when no user box answers", async () => {
+  test("an answering box is waited for when the other fails", async () => {
     const failing = entryFor("failing-box", "https://failing.test")
-    const managed = { id: "managed-answers", url: "https://managed-answers.test" }
+    const answering = entryFor("answering-box", "https://answering.test")
     routes((url) => {
-      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [failing], activeBoxId: null, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [failing, answering], activeBoxId: null })
       if (url === `${CONTROL}${ControlPaths.userBoxToken(failing.id)}`) return tokenFor(failing.url)
-      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(answering.id)}`) return tokenFor(answering.url)
       if (url === `${failing.url}${Paths.tasks}`) return new Response("{}", { status: 500 })
-      if (url === `${managed.url}${Paths.tasks}`) return json([taskFor("managed-thread")])
+      if (url === `${answering.url}${Paths.tasks}`) return json([taskFor("answering-thread")])
       return undefined
     })
 
-    expect((await api.listTasks()).map((t) => t.id)).toEqual(["managed-thread"])
+    expect((await api.listTasks()).map((t) => t.id)).toEqual(["answering-thread"])
+  })
+
+  test("a user with no boxes gets an empty list", async () => {
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [], activeBoxId: null })
+      return undefined
+    })
+    expect((await api.listTasks()).map((t) => t.id)).toEqual([])
   })
 })
 
@@ -372,7 +351,7 @@ function tokenBox(id: string, mint: (call: number) => Response) {
   let mints = 0
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input)
-    if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [box], activeBoxId: box.id, managedBox: null })
+    if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [box], activeBoxId: box.id })
     if (url === `${CONTROL}${ControlPaths.userBoxToken(box.id)}`) {
       mints += 1
       return mint(mints)

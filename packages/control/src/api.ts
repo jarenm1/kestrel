@@ -1,25 +1,18 @@
 import { Schema } from "effect"
 import {
   ApprovePairingBody,
-  BOX_TOKEN_QUERY,
-  CREDENTIALS_HEADER,
   CliAuthStatus,
   CliProvider,
   ControlPaths,
   CreateBoxBody,
   CreateNestBoxBody,
   NestLimits,
-  CreateFleetBoxBody,
   CreateMeterHostBody,
   GithubRepoSlug,
   MeterReportBody,
-  Paths,
-  PreviewSession,
   PutApiKeyBody,
   SetActiveBoxBody,
-  Task,
   UpdateBoxBody,
-  UpdateFleetBoxBody,
   WaitlistSignupBody,
   type Connection,
   type GithubRepo,
@@ -35,10 +28,8 @@ import {
   type Provider,
 } from "./providers"
 import { UpstreamError, cappedRequest, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
-import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
+import { hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
-import { desktopStreamTask } from "./desktop-tokens"
-import { isBoxFilePath } from "./file-tokens"
 import { handleAutomations } from "./automations"
 import type { BoxOutcome } from "./hub"
 import { DEFAULT_TOOL_FAILURE_DAYS, TOOL_FAILURE_RETENTION_DAYS } from "./tool-failures-table"
@@ -211,66 +202,12 @@ const listBranches = async (env: Env, login: string, repo: GithubRepoSlug): Prom
   return json([defaultBranch, ...names])
 }
 
-/**
- * Forwards a browser request to the Hub with the caller's session id. The Hub resolves the session, attaches the
- * caller's credentials (and dev-login marker) and relays to the box in that one Durable Object request; looking the
- * session and credentials up here first would cost two more.
- */
-const forwardToHub = (request: Request, env: Env, url: URL): Promise<Response> | Response => {
-  const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE)
-  if (!sessionId) return errorResponse(401, "Unauthorized", "sign in required")
-  const headers = new Headers(request.headers)
-  headers.delete(CREDENTIALS_HEADER)
-  headers.set(SESSION_HEADER, sessionId)
-  const hasBody = request.method !== "GET" && request.method !== "HEAD"
-  const forwarded = new Request(`https://hub${url.pathname}${url.search}`, {
-    method: request.method,
-    headers,
-    body: hasBody ? request.body : undefined,
-  })
-  return hub(env).fetch(forwarded)
-}
-
-/** Relays a box file to the Hub with a file token in place of the session cookie; the token query is dropped. */
-const forwardFileToken = (request: Request, env: Env, url: URL, token: string): Promise<Response> => {
-  const target = new URL(url)
-  target.searchParams.delete(BOX_TOKEN_QUERY)
-  const headers = new Headers(request.headers)
-  headers.delete("cookie")
-  headers.delete(CREDENTIALS_HEADER)
-  // Only the Worker sets the Hub's session header; one the browser sent must not reach the Hub on this route.
-  headers.delete(SESSION_HEADER)
-  headers.set(FILE_TOKEN_HEADER, token)
-  return hub(env).fetch(new Request(`https://hub${target.pathname}${target.search}`, { method: "GET", headers }))
-}
-
-const createPreviewSession = async (env: Env, login: string, taskId: string): Promise<Response> => {
-  const result = await hub(env).boxCall(login, "GET", Paths.task(taskId))
-  if (!result.ok) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
-  let value: unknown
-  try {
-    value = JSON.parse(result.body) as unknown
-  } catch {
-    return errorResponse(502, "BadGateway", "agent box returned an invalid task")
-  }
-  if (!Schema.is(Task)(value) || value.owner !== login) return errorResponse(404, "NotFound", "thread not found")
-  if (value.archivedAt !== undefined) return errorResponse(409, "Conflict", "thread is archived")
-  if (value.previewPort === undefined) return errorResponse(409, "Conflict", "the agent has not opened a preview")
-  const token = await hub(env).createPreviewSession(login, taskId)
-  return json(Schema.decodeSync(PreviewSession)({ token }))
-}
-
-const PREVIEW_SESSION_PATH = /^\/api\/tasks\/([^/]+)\/preview\/session$/
-const DESKTOP_TOKEN_PATH = /^\/api\/tasks\/([^/]+)\/desktop\/token$/
 const CONNECTION_PATH = /^\/api\/connections\/([a-z0-9-]+)$/
 const GITHUB_BRANCHES_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)\/branches$/
 const GITHUB_REPO_PATH = /^\/api\/github\/repos\/([^/]+\/[^/]+)$/
 
-/** Control routes the Worker answers itself. They are rare (page loads, settings), so they look the session up first. */
+/** Control routes the Worker answers itself; everything else under `/api/*` is the box's API, reached directly. */
 const isWorkerRoute = (path: string, method: string): boolean =>
-  (path === ControlPaths.fileToken && method === "POST") ||
-  (DESKTOP_TOKEN_PATH.test(path) && method === "POST") ||
-  (PREVIEW_SESSION_PATH.test(path) && method === "POST") ||
   (path === ControlPaths.me && method === "GET") ||
   (path === ControlPaths.connections && method === "GET") ||
   CONNECTION_PATH.test(path) ||
@@ -291,8 +228,6 @@ const NEST_BOX_LIMITS_PATH = /^\/api\/nest\/boxes\/([^/]+)\/limits$/
 const NEST_BOX_PARK_PATH = /^\/api\/nest\/boxes\/([^/]+)\/park$/
 const NEST_BOX_GPU_ATTACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/attach$/
 const NEST_BOX_GPU_DETACH_PATH = /^\/api\/nest\/boxes\/([^/]+)\/gpu\/detach$/
-const FLEET_BOX_PATH = /^\/api\/fleet\/boxes\/([^/]+)$/
-const FLEET_BOX_SECRET_PATH = /^\/api\/fleet\/boxes\/([^/]+)\/secret$/
 
 /** The Hub's outcome as a response: the value as JSON with `status`, or the failure as an error body. */
 const answerBox = <T>(outcome: BoxOutcome<T>, status = 200): Response =>
@@ -356,44 +291,6 @@ const handleUserBoxes = async (request: Request, env: Env, url: URL): Promise<Re
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 
-/**
- * Fleet management for operators (`KESTREL_OPERATORS`). Anyone else gets 404, so the routes are not discoverable.
- */
-const handleFleetBoxes = async (request: Request, env: Env, url: URL): Promise<Response> => {
-  const session = await currentSession(request, env)
-  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
-  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
-  const fleet = hub(env)
-  const path = url.pathname
-  const method = request.method
-
-  if (path === ControlPaths.fleetBoxes) {
-    if (method === "GET") return json(await fleet.fleetBoxes())
-    if (method === "POST") {
-      const body = await decodeBody(request, CreateFleetBoxBody)
-      if (body instanceof Response) return body
-      return json(await fleet.createFleetBox(body), 201)
-    }
-  }
-  const rotate = FLEET_BOX_SECRET_PATH.exec(path)?.[1]
-  if (rotate !== undefined && method === "POST") {
-    const created = await fleet.rotateFleetSecret(decodeURIComponent(rotate))
-    return created === null ? errorResponse(404, "NotFound", "no such box") : json(created)
-  }
-  const id = FLEET_BOX_PATH.exec(path)?.[1]
-  if (id !== undefined && method === "PATCH") {
-    const body = await decodeBody(request, UpdateFleetBoxBody)
-    if (body instanceof Response) return body
-    const box = await fleet.changeFleetBox(decodeURIComponent(id), body)
-    return box === null ? errorResponse(404, "NotFound", "no such box") : json(box)
-  }
-  if (id !== undefined && method === "DELETE") {
-    const removed = await fleet.removeFleetBox(decodeURIComponent(id))
-    return removed ? new Response(null, { status: 204 }) : errorResponse(404, "NotFound", "no such box")
-  }
-  return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
-}
-
 /** The most common tool failures, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes. */
 const handleToolFailures = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const session = await currentSession(request, env)
@@ -405,18 +302,6 @@ const handleToolFailures = async (request: Request, env: Env, url: URL): Promise
     return errorResponse(400, "BadRequest", `days must be a whole number from 1 to ${TOOL_FAILURE_RETENTION_DAYS}`)
   }
   return json(await hub(env).commonToolFailures(days))
-}
-
-/**
- * Active users per managed box, for operators (`KESTREL_OPERATORS`). Anyone else gets 404, like the fleet routes.
- * The read includes every registered box, including one that never reported.
- */
-const handleFleetActivity = async (request: Request, env: Env): Promise<Response> => {
-  const session = await currentSession(request, env)
-  if (!session) return errorResponse(401, "Unauthorized", "sign in required")
-  if (!isOperator(env, session.login)) return errorResponse(404, "NotFound", "no such route")
-  if (request.method !== "GET") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
-  return json(await hub(env).fleetActivity())
 }
 
 /**
@@ -516,53 +401,24 @@ const handleWaitlist = async (request: Request, env: Env): Promise<Response> => 
 }
 
 /**
- * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
- * `GET /api/box`) in one request to the Hub.
+ * Routes every `/api/*` request: control routes in the Worker; anything else is the box's API, which apps
+ * reach directly on the box's own URL, and gets a 404 here.
  */
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
-  // A file token stands in for the session cookie on box files, and a desktop token on a desktop stream: a WebView or
-  // DOM `<img>` cannot send a Cookie header.
-  const fileToken = method === "GET" ? url.searchParams.get(BOX_TOKEN_QUERY) : null
-  if (fileToken !== null && (isBoxFilePath(path) || desktopStreamTask(path) !== null)) {
-    return forwardFileToken(request, env, url, fileToken)
-  }
   if (path === ControlPaths.waitlist) return handleWaitlist(request, env)
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
-  if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
-    return handleFleetBoxes(request, env, url)
-  }
   if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
   if (path === ControlPaths.nestHosts || path === ControlPaths.nestBoxes || path.startsWith(`${ControlPaths.nestBoxes}/`)) {
     return handleNest(request, env, url)
   }
   if (path === ControlPaths.fleetToolFailures) return handleToolFailures(request, env, url)
-  if (path === ControlPaths.fleetActivity) return handleFleetActivity(request, env)
-  if (!isWorkerRoute(path, method)) return forwardToHub(request, env, url)
+  if (!isWorkerRoute(path, method)) return errorResponse(404, "NotFound", "no such route")
 
   const session = await currentSession(request, env)
   if (!session) return errorResponse(401, "Unauthorized", "sign in required")
   const login = session.login
-
-  if (path === ControlPaths.fileToken) {
-    // `currentSession` found the session from this cookie, so it is present; the token lasts no longer than it.
-    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
-    const minted = await hub(env).createFileToken(sessionId)
-    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
-  }
-
-  const desktopToken = DESKTOP_TOKEN_PATH.exec(path)
-  if (desktopToken?.[1] && method === "POST") {
-    const sessionId = readCookie(request.headers.get("cookie"), SESSION_COOKIE) ?? ""
-    const minted = await hub(env).createDesktopToken(sessionId, decodeURIComponent(desktopToken[1]))
-    return minted === null ? errorResponse(401, "Unauthorized", "sign in required") : json(minted)
-  }
-
-  const previewSession = PREVIEW_SESSION_PATH.exec(path)
-  if (previewSession?.[1] && method === "POST") {
-    return createPreviewSession(env, login, decodeURIComponent(previewSession[1]))
-  }
 
   if (path === ControlPaths.me && method === "GET") {
     const user = await hub(env).getUser(login)

@@ -2,13 +2,12 @@
  * `POST /box/turn`: managed TURN credentials from Cloudflare Realtime, for boxes on networks that only let WebRTC
  * through a relay. The provider API token stays here; a box gets only the short-lived username and credential it needs.
  *
- * A box authenticates like its other box-only routes: the legacy relay token, a managed box's secret with its id, or a
- * user's registered box secret with its id. Credentials are cached per box until five minutes before they expire, so a
- * retrying box does not spend a provider call, and concurrent requests share one call.
+ * A box authenticates like its other box-only routes: its own secret with its id. Credentials are cached per box until
+ * five minutes before they expire, so a retrying box does not spend a provider call, and concurrent requests share one call.
  */
 import { Schema } from "effect"
 import { BOX_ID_HEADER, DesktopRtcIceServer, type BoxTurnCredentials, type DesktopTurnIssue } from "@cloudagents/protocol"
-import { errorResponse, json, safeEqual } from "./http"
+import { errorResponse, json } from "./http"
 import { hub, type Env } from "./env"
 
 /** The provider issues credentials for this long; the response says so in `expiresAt`. */
@@ -58,19 +57,14 @@ const providerConfig = (env: Env): TurnProviderConfig | "absent" | "incomplete" 
 
 /**
  * Which box is calling, named so its credentials cache apart from every other box's. Null when it proves nothing:
- * the relay token, a managed box's own secret and id, or a user's registered box secret and id.
+ * a registered box's own secret and id.
  */
 const boxIdentity = async (request: Request, env: Env): Promise<string | null> => {
   const auth = request.headers.get("authorization") ?? ""
   const secret = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : ""
-  if (secret === "") return null
-  if (env.BOX_TOKEN !== undefined && env.BOX_TOKEN !== "" && (await safeEqual(secret, env.BOX_TOKEN))) return "relay"
   const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
-  if (boxId === "") return null
-  if (await hub(env).managedBoxVerify(boxId, secret)) return `managed:${boxId}`
-  // A user's own box proves itself the way `/box/self` does, but gets no owner credentials from this check.
-  if (await hub(env).boxVerify(boxId, secret)) return `box:${boxId}`
-  return null
+  if (secret === "" || boxId === "") return null
+  return (await hub(env).boxVerify(boxId, secret)) ? `box:${boxId}` : null
 }
 
 /** Accept only usable provider ICE lists containing authenticated TURN over TLS on port 443. */

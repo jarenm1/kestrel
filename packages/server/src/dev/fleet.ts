@@ -1,15 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 import { Schema } from "effect"
-import { ControlPaths, CreatedFleetBox, FleetBox, FleetBoxList } from "@cloudagents/protocol"
+import { BoxList, ControlPaths, CreatedBox, UserBox } from "@cloudagents/protocol"
 
-/** The dev stack's managed box: what the box process runs with (`CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET`). */
-export interface DevFleetBox {
+/** The dev stack's box: what the box process runs with (`CLOUDAGENTS_BOX_ID`, `CLOUDAGENTS_BOX_SECRET`). */
+export interface DevBox {
   readonly id: string
   readonly secret: string
 }
 
-export interface DevFleetOptions {
+export interface DevBoxOptions {
   /** Origin of the local control plane (the Worker). */
   readonly workerUrl: string
   /** Where the box listens; the control plane calls it directly. */
@@ -20,7 +20,7 @@ export interface DevFleetOptions {
   readonly savedFile: string
 }
 
-const SavedFleetBox = Schema.Struct({ id: Schema.String, secret: Schema.String })
+const SavedBox = Schema.Struct({ id: Schema.String, secret: Schema.String })
 
 /** Waits up to 60 seconds for the control plane to answer HTTP at all. */
 const waitForWorker = async (workerUrl: string): Promise<void> => {
@@ -47,7 +47,7 @@ const devSignIn = async (workerUrl: string): Promise<string> => {
   return cookie.split(";")[0] ?? cookie
 }
 
-const callFleet = async <A, I>(
+const callControl = async <A, I>(
   workerUrl: string,
   cookie: string,
   method: string,
@@ -61,33 +61,32 @@ const callFleet = async <A, I>(
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (!response.ok) {
-    const hint = response.status === 404 ? " (is the dev login in KESTREL_OPERATORS?)" : ""
-    throw new Error(`${method} ${path} answered ${response.status}${hint}`)
+    throw new Error(`${method} ${path} answered ${response.status}`)
   }
   return Schema.decodeUnknownPromise(schema)(await response.json())
 }
 
 /**
- * Makes sure the dev stack has one active managed box pointing at `boxUrl`, and returns its id and secret. Creates the
- * box when the control plane does not know the saved one, rotates the secret when the saved copy is lost, and
- * reactivates or re-points it when its state or URL differs.
+ * Makes sure the dev user has one box pointing at `boxUrl`, active, and returns its id and secret. Creates the box
+ * when the control plane does not know the saved one, rotates the secret when the saved copy is lost, and re-points
+ * it when its URL differs.
  */
-export const provisionDevFleetBox = async (options: DevFleetOptions): Promise<DevFleetBox> => {
+export const provisionDevBox = async (options: DevBoxOptions): Promise<DevBox> => {
   await waitForWorker(options.workerUrl)
   const cookie = await devSignIn(options.workerUrl)
   const call = <A, I>(method: string, path: string, schema: Schema.Schema<A, I>, body?: unknown) =>
-    callFleet(options.workerUrl, cookie, method, path, schema, body)
+    callControl(options.workerUrl, cookie, method, path, schema, body)
 
   const saved = existsSync(options.savedFile)
-    ? Schema.decodeUnknownSync(SavedFleetBox)(JSON.parse(readFileSync(options.savedFile, "utf8")))
+    ? Schema.decodeUnknownSync(SavedBox)(JSON.parse(readFileSync(options.savedFile, "utf8")))
     : null
-  const { boxes } = await call("GET", ControlPaths.fleetBoxes, FleetBoxList)
-  const existing = boxes.find((box) => box.id === saved?.id) ?? boxes.find((box) => box.name === options.name)
+  const list = await call("GET", ControlPaths.boxes, BoxList)
+  const existing = list.boxes.find((box) => box.id === saved?.id) ?? list.boxes.find((box) => box.name === options.name)
 
-  let box: FleetBox
+  let box: UserBox
   let secret: string
   if (existing === undefined) {
-    const created = await call("POST", ControlPaths.fleetBoxes, CreatedFleetBox, {
+    const created = await call("POST", ControlPaths.boxes, CreatedBox, {
       name: options.name,
       url: options.boxUrl,
     })
@@ -97,13 +96,17 @@ export const provisionDevFleetBox = async (options: DevFleetOptions): Promise<De
     box = existing
     secret = saved.secret
   } else {
-    const rotated = await call("POST", ControlPaths.fleetBoxSecret(existing.id), CreatedFleetBox)
+    const rotated = await call("POST", ControlPaths.userBoxSecret(existing.id), CreatedBox)
     box = rotated.box
     secret = rotated.secret
   }
 
-  if (box.url !== options.boxUrl || box.state !== "active") {
-    box = await call("PATCH", ControlPaths.fleetBox(box.id), FleetBox, { url: options.boxUrl, state: "active" })
+  if (box.url !== options.boxUrl) {
+    box = await call("PATCH", ControlPaths.userBox(box.id), UserBox, { url: options.boxUrl })
+  }
+
+  if (list.activeBoxId !== box.id) {
+    await call("PUT", ControlPaths.activeBox, BoxList, { boxId: box.id })
   }
 
   mkdirSync(dirname(options.savedFile), { recursive: true })

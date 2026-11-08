@@ -1,7 +1,6 @@
 import { availableHarnesses, availableModelHarnesses, boxCapabilities } from "./capabilities"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
-import { join } from "node:path"
-import { Effect, Fiber, Layer, Ref } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { BOX_USER_HEADER, CREDENTIALS_HEADER, InternalError, Paths } from "@cloudagents/protocol"
 import { ConfigLive, Config, dataDirFromEnv } from "./config"
 import { CliAuth, CliAuthLive } from "./cliauth"
@@ -23,12 +22,9 @@ import { createMcpHandler } from "./mcp"
 import { TaskStatsLive } from "./stats"
 import { makeWebHandler } from "./http/router"
 import type { WsServices } from "./http/streams"
-import { runRelay } from "./relay/client"
 import { BOX_DEV_HEADER } from "./tunnel"
 import { makeBoxAuth } from "./direct/auth"
-import { makeBoxActivityReporter, type BoxActivityReporter } from "./direct/box-activity"
 import { makeDirectListener, type DirectListener } from "./direct/listener"
-import { openActivitySocket } from "./activity"
 import { ensureNestSecret } from "./platform/enroll"
 import { BoxPlatform, BoxPlatformLive } from "./platform"
 import { ActivityTracker, ActivityTrackerLive } from "./platform/tracker"
@@ -208,14 +204,10 @@ const program = Effect.gen(function* () {
   })
 
   let direct: DirectListener | null = null
-  /** Reports this managed box's active users; null on a user's own box, which reports to no fleet. */
-  let boxActivity: BoxActivityReporter | null = null
   if (config.direct !== null) {
     const store = yield* CredentialStore
-    boxActivity = config.direct.managed ? makeBoxActivityReporter(config.direct) : null
     direct = makeDirectListener({
-      auth: makeBoxAuth(config.direct, store, fetch, boxActivity ?? undefined),
-      activity: boxActivity ?? undefined,
+      auth: makeBoxAuth(config.direct, store, fetch),
       core,
       webHandler: handle,
       runtime: yield* Effect.runtime<WsServices>(),
@@ -246,46 +238,11 @@ const program = Effect.gen(function* () {
   yield* Effect.logInfo(`cloudagents server listening on http://${config.host}:${config.port}`)
   yield* Effect.logInfo(`sandbox listener on 127.0.0.1:${config.sandboxPort}`)
 
-  // Reports start only once the box actually serves; a managed box sends an empty snapshot first, then every 30 seconds.
-  boxActivity?.start()
-
-  // box-auto asks this socket whether a restart would interrupt running work (see docs/box.md).
-  const activity = yield* openActivitySocket(
-    join(config.dataDir, "box.sock"),
-    Effect.all({ runs: harness.activeRunCount(), desktops: desktop.activeCount() }),
-  )
-
-  // The control plane link. A Nest VM's resume restarts it, since its socket from before the snapshot is dead.
-  const relayFiber = yield* Ref.make<Fiber.RuntimeFiber<void> | null>(null)
-  const startRelay = Effect.gen(function* () {
-    if (config.relay === null) return
-    const fiber = yield* Effect.forkDaemon(
-      runRelay({ controlUrl: config.relay.controlUrl, boxToken: config.relay.boxToken, handle }),
-    )
-    yield* Ref.set(relayFiber, fiber)
-    yield* Effect.logInfo(`box connecting to control plane at ${config.relay.controlUrl}`)
-  })
-  yield* startRelay
-
-  // The resume hook restarts the relay, which needs the services the relay runs with; the platform needs none.
-  const relayServices = yield* Effect.context<WsServices | CredentialStore>()
-  const platformFiber = yield* Effect.forkDaemon(
-    platform.run({
-      resumed: Effect.gen(function* () {
-        const old = yield* Ref.get(relayFiber)
-        if (old !== null) yield* Fiber.interrupt(old)
-        yield* startRelay
-      }).pipe(Effect.provide(relayServices)),
-    }),
-  )
+  const platformFiber = yield* Effect.forkDaemon(platform.run({ resumed: Effect.void }))
 
   yield* untilSignal
   yield* Effect.logInfo("shutting down")
-  boxActivity?.stop()
-  if (activity !== null) yield* activity.close
   yield* Fiber.interrupt(platformFiber)
-  const relay = yield* Ref.get(relayFiber)
-  if (relay !== null) yield* Fiber.interrupt(relay)
   yield* cliAuth.shutdown()
   yield* core.shutdown()
   if (direct !== null) direct.close()

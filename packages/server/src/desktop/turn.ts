@@ -40,27 +40,19 @@ export interface ManagedTurn {
   readonly servers: () => Promise<ManagedTurnResult>
 }
 
-/** What this box presents to the TURN endpoint: its own registered identity, else the relay's. */
+/** What this box presents to the TURN endpoint: its registered box identity, else nothing. */
 interface TurnIdentity {
   readonly controlUrl: string
   readonly headers: Readonly<Record<string, string>>
 }
 
-const turnIdentity = (config: ServerConfig): TurnIdentity | null => {
-  if (config.direct !== null) {
-    return {
-      controlUrl: config.direct.controlUrl,
-      headers: { authorization: `Bearer ${config.direct.boxSecret}`, [BOX_ID_HEADER]: config.direct.boxId },
-    }
-  }
-  if (config.relay !== null) {
-    return {
-      controlUrl: config.relay.controlUrl,
-      headers: { authorization: `Bearer ${config.relay.boxToken}` },
-    }
-  }
-  return null
-}
+const turnIdentity = (config: ServerConfig): TurnIdentity | null =>
+  config.direct === null
+    ? null
+    : {
+        controlUrl: config.direct.controlUrl,
+        headers: { authorization: `Bearer ${config.direct.boxSecret}`, [BOX_ID_HEADER]: config.direct.boxId },
+      }
 
 /** Provider credentials can be short-lived; keep the expiry so the next call can decide whether it needs new ones. */
 interface FetchedCredentials extends ManagedTurnResult {

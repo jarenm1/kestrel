@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import { DEFAULT_MODEL_HARNESS, type ModelHarness, type ModelProvider, type RelayCredentials } from "@cloudagents/protocol"
+import { DEFAULT_MODEL_HARNESS, type ModelHarness, type ModelProvider, type BoxCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
 
@@ -183,7 +183,7 @@ export const brokerEnv = (
 }
 
 /** The real key for `provider`, preferring the provider map and falling back to the legacy flat slots. */
-export const credentialFor = (creds: RelayCredentials | null, provider: BrokerProvider): string | null => {
+export const credentialFor = (creds: BoxCredentials | null, provider: BrokerProvider): string | null => {
   const key = creds?.providers?.[provider]
   if (key !== undefined && key !== "") return key
   if (provider === "anthropic") return creds?.anthropic ?? null

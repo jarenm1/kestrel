@@ -3,7 +3,7 @@
  * records are checked against what is stored and against each other before any is written.
  */
 import type { MeterHost, MeterIngestResult, MeterRecord } from "@cloudagents/protocol"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 
 /** How long records are kept: a report may start no earlier than this many days before it runs. */
 export const METER_RETENTION_DAYS = 90

@@ -57,10 +57,10 @@ interface Props {
  */
 export function TaskScreen({ taskId, box, bottomInset }: Props) {
   const api = useBoxClient(box);
-  const { boxes, managedBox } = useAuth();
+  const { boxes } = useAuth();
   return (
     <BoxApiContext.Provider value={api}>
-      <ThreadView taskId={taskId} box={box} boxName={boxLabel(box, boxes, managedBox)} bottomInset={bottomInset} />
+      <ThreadView taskId={taskId} box={box} boxName={boxLabel(box, boxes)} bottomInset={bottomInset} />
     </BoxApiContext.Provider>
   );
 }

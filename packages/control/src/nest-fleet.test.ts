@@ -9,7 +9,7 @@ import {
   type NestHostCommand,
   type NestVmReport,
 } from "@cloudagents/protocol"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 import { MAX_LAPSE_RETRIES, NEST_STANDARD_LIMITS } from "./nest-control"
 import { NestFleet, type NestLink } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"

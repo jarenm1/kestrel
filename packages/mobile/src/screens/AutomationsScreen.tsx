@@ -23,9 +23,6 @@ import { colors, fonts, radius, spacing } from "@/theme";
 /** Lists every automation; toggles, edits, removes and runs them, and shows each one's recent runs. */
 export function AutomationsScreen() {
   const { api } = useApiClient();
-  // Automations run on Kestrel's managed box (directly, or relayed); a user's own box cannot run them.
-  const { activeBoxId } = useAuth();
-  const unavailable = activeBoxId !== null;
   const queries = useMemo(() => createQueries(api), [api]);
   const automations = useQuery(queries.automations());
   const [editing, setEditing] = useState<AutomationEditorTarget | null>(null);
@@ -38,15 +35,8 @@ export function AutomationsScreen() {
           <Text style={styles.title}>Automations</Text>
           <Text style={styles.subtitle}>Tasks the agent starts on a schedule or when a pull request changes.</Text>
         </View>
-        {unavailable ? (
-          <Alert variant="warning">
-            {"Automations run on Kestrel's box; not yet available on your own box"}
-          </Alert>
-        ) : null}
-
         <Button
           icon={Plus}
-          disabled={unavailable}
           onPress={() => setEditing({ kind: "create" })}
           style={styles.newButton}
         >
@@ -73,7 +63,6 @@ export function AutomationsScreen() {
                 key={automation.id}
                 automation={automation}
                 divided={index > 0}
-                unavailable={unavailable}
                 onEdit={() => setEditing({ kind: "edit", automation })}
               />
             ))}
@@ -89,12 +78,10 @@ export function AutomationsScreen() {
 function AutomationRow({
   automation,
   divided,
-  unavailable,
   onEdit,
 }: {
   automation: Automation;
   divided: boolean;
-  unavailable: boolean;
   onEdit: () => void;
 }) {
   const { api } = useApiClient();
@@ -198,7 +185,7 @@ function AutomationRow({
         ) : null}
         <Button
           variant="soft"
-          disabled={unavailable || run.isPending || (isGithub && !pullRequestValid)}
+          disabled={run.isPending || (isGithub && !pullRequestValid)}
           onPress={() => run.mutate(isGithub ? { pullRequest: pullRequestNumber } : {})}
         >
           {run.isPending ? "Starting…" : "Run now"}
@@ -236,7 +223,7 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
 /** One run: its status, reason, time and error; opens the run's thread when it started one. */
 function RunLine({ run }: { run: AutomationRun }) {
   const { push } = useNavigation();
-  const { managedBox } = useAuth();
+  const { activeBox } = useAuth();
   const failed = run.status === "failed";
   const body = (
     <>
@@ -262,7 +249,7 @@ function RunLine({ run }: { run: AutomationRun }) {
   return (
     <Pressable
       style={styles.run}
-      onPress={() => push({ name: "thread", taskId, box: managedBox === null ? null : { id: managedBox.id, url: managedBox.url } })}
+      onPress={() => push({ name: "thread", taskId, box: activeBox })}
       accessibilityRole="button"
       accessibilityLabel="Open thread"
     >

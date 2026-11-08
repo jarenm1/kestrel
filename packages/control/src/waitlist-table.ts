@@ -3,7 +3,7 @@
  * plain SQLite database.
  */
 import type { WaitlistSignup } from "@cloudagents/protocol"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 
 export const ensureWaitlistTable = (sql: FleetSql): void => {
   sql.exec(`CREATE TABLE IF NOT EXISTS waitlist_signups (

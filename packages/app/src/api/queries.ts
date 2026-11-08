@@ -30,11 +30,6 @@ export const keys = {
   boxHealth: (url: string) => ["box-health", url] as const,
   /** Status of the box the apps talk to. */
   box: ["box"] as const,
-  /** Status of Kestrel's box, read whichever box is active (the new-thread box picker). */
-  kestrelBox: ["kestrel-box"] as const,
-  /** Kestrel's managed boxes, as operators see them (`Me.operator`). */
-  fleetBoxes: ["fleet-boxes"] as const,
-  fleetActivity: ["fleet-activity"] as const,
   /** The most common tool and agent failures across Kestrel's boxes, as operators see them. */
   fleetToolFailures: ["fleet-tool-failures"] as const,
   /** Nest hosts and their capacity, as operators see them. */
@@ -143,26 +138,22 @@ export function dropTask(client: QueryClient, taskId: string): void {
  */
 export async function applyBoxList(client: QueryClient, list: BoxList): Promise<void> {
   const previous = client.getQueryData<BoxList>(keys.boxes)
-  const previousManaged = previous?.managedBox ?? null
-  const managedChanged = previousManaged?.id !== list.managedBox?.id || previousManaged?.url !== list.managedBox?.url
-  if (previous?.activeBoxId !== list.activeBoxId || managedChanged) {
+  if (previous?.activeBoxId !== list.activeBoxId) {
     const activeScoped = {
       predicate: (query: { queryKey: readonly unknown[] }) => ACTIVE_BOX_ROOTS[String(query.queryKey[0])] === true,
     }
     await client.cancelQueries(activeScoped)
     client.resetQueries(activeScoped)
   }
-  if (managedChanged && previousManaged !== null) api.forgetBox(previousManaged.id)
   const before = JSON.stringify(previous?.boxes.map((box) => [box.id, box.url]) ?? [])
   const after = JSON.stringify(list.boxes.map((box) => [box.id, box.url]))
-  if (before !== after || managedChanged) void client.invalidateQueries({ queryKey: keys.tasks })
+  if (before !== after) void client.invalidateQueries({ queryKey: keys.tasks })
   client.setQueryData(keys.boxes, list)
 }
 
 /**
- * The active box a model catalog belongs to. `key` identifies the exact box and route (`managedBox` keeps its id and
- * URL in the key, so a resumed box cannot serve an old catalog); `boxId` pins the box call to the same box. Kestrel's
- * box is the managed box's id, or `null` for the legacy relay.
+ * The active box a model catalog belongs to. `key` identifies the exact box and route (its id and URL stay in the key,
+ * so a resumed box cannot serve an old catalog); `boxId` pins the box call to the same box.
  */
 export interface ModelBoxScope {
   readonly key: string
@@ -173,11 +164,7 @@ export interface ModelBoxScope {
 export function modelBoxScope(list: BoxList | undefined): ModelBoxScope | undefined {
   if (list === undefined) return undefined
   const active = list.activeBoxId
-  // Kestrel's box is the managed box, whose own id pins the read; null stays only for the legacy relay.
-  const box =
-    active === null || active === list.managedBox?.id
-      ? list.managedBox
-      : list.boxes.find((candidate) => candidate.id === active)
+  const box = list.boxes.find((candidate) => candidate.id === active)
   return {
     key: JSON.stringify([active, box?.id ?? null, box?.url ?? null]),
     boxId: active ?? box?.id ?? null,
@@ -247,17 +234,12 @@ export const queries = {
       staleTime: 5 * 60_000,
     }),
   boxes: () => queryOptions({ queryKey: keys.boxes, queryFn: api.boxes }),
-  fleetBoxes: () => queryOptions({ queryKey: keys.fleetBoxes, queryFn: api.fleetBoxes }),
-  fleetActivity: () =>
-    queryOptions({ queryKey: keys.fleetActivity, queryFn: api.fleetActivity, refetchInterval: BOX_POLL_MS }),
   fleetToolFailures: () => queryOptions({ queryKey: keys.fleetToolFailures, queryFn: api.fleetToolFailures }),
   nestHosts: () => queryOptions({ queryKey: keys.nestHosts, queryFn: api.nestHosts }),
   pairing: (code: string) => queryOptions({ queryKey: keys.pairing(code), queryFn: () => api.pendingPairing(code) }),
   boxHealth: (url: string) =>
     queryOptions({ queryKey: keys.boxHealth(url), queryFn: () => api.checkBox(url), refetchInterval: BOX_POLL_MS }),
   box: () => queryOptions({ queryKey: keys.box, queryFn: api.boxStatus, refetchInterval: BOX_POLL_MS }),
-  kestrelBox: () =>
-    queryOptions({ queryKey: keys.kestrelBox, queryFn: api.kestrelBoxStatus, refetchInterval: BOX_POLL_MS }),
   connections: () => queryOptions({ queryKey: keys.connections, queryFn: api.connections }),
   usage: () => queryOptions({ queryKey: keys.usage, queryFn: api.usage }),
   providerUsage: () => queryOptions({ queryKey: keys.providerUsage, queryFn: api.providerUsage }),

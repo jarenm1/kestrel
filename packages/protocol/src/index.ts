@@ -908,8 +908,8 @@ export type FilesResponse = typeof FilesResponse.Type
 export type FileRoot = "workspace" | "home" | { readonly checkoutId: string }
 
 /**
- * Largest response the box sends through the legacy relay: a relay frame carries the body base64-encoded, and
- * Cloudflare refuses WebSocket messages over 32 MiB. A larger one is answered 413. Direct boxes have no such limit.
+ * Largest body a tunnelled HTTP response carries over the box's data-channel frame protocol (`direct/rtc.ts`);
+ * a larger one is answered 413.
  */
 export const MAX_RELAY_RESPONSE_BYTES = 20 * 1024 * 1024
 

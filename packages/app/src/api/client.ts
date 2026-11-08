@@ -17,23 +17,17 @@ import {
   connectionsForBox,
   ControlPaths,
   CreateBoxBody,
-  CreateFleetBoxBody,
   CreateNestBoxBody,
   CreateAutomationBody,
   CreatedBox,
-  CreatedFleetBox,
   CreateTaskBody,
   DesktopStatus,
   DiffResponse,
   type FileRoot,
   FilesResponse,
-  MAX_RELAY_RESPONSE_BYTES,
   GithubRepo,
   Health,
   HarnessCommands,
-  FleetBox,
-  FleetBoxList,
-  FleetActivity,
   Me,
   Message,
   ModelCatalog,
@@ -60,7 +54,6 @@ import {
   ToolFailureList,
   UpdateAutomationBody,
   UpdateBoxBody,
-  UpdateFleetBoxBody,
   UserBox,
   Usage,
   UsageActivity,
@@ -69,7 +62,7 @@ import {
   type UseBankedResetBody,
   UseBankedResetResult,
 } from "@cloudagents/protocol"
-import { SERVER_URL, WS_URL } from "@/config"
+import { SERVER_URL } from "@/config"
 import { APP_ORIGIN } from "@/routes"
 import { type BoxChannel, ChannelUnsent, channelFor, closeChannels } from "./rtc"
 import { ApiError, responseError } from "./errors"
@@ -173,20 +166,17 @@ const run = <A>(effect: Effect.Effect<A, ApiError>): Promise<A> =>
     return result.right
   })
 
-/** A user box the apps call directly: its id and URL. Box calls to it carry a box token. */
-type DirectRoute = { readonly boxId: string; readonly url: string }
-
-/** Where a box call goes: a user box directly, or `null` for Kestrel's relayed box (through the Worker). */
-export type Target = DirectRoute | null
+/** A box the apps call directly: its id and URL. Box calls to it carry a box token. */
+export type Target = { readonly boxId: string; readonly url: string }
 
 /** The box list as last read. Undefined until the first read. */
 let known: BoxList | undefined
 
 /**
- * The box each thread lives on, by thread id: a user box's id, or `null` for Kestrel's relayed box. Filled by the
- * thread lists and by `createTask`. A thread missing from it is found by reading every box's thread list again.
+ * The box each thread lives on, by thread id. Filled by the thread lists and by `createTask`. A thread missing
+ * from it is found by reading every box's thread list again.
  */
-const taskBoxes = new Map<string, string | null>()
+const taskBoxes = new Map<string, string>()
 
 /** The control plane's box list that takes longer than this is replaced by the last one read. */
 const CONTROL_LIST_TIMEOUT_MS = 5_000
@@ -233,33 +223,21 @@ async function loadBoxes(): Promise<BoxList> {
 }
 
 /**
- * The target of a box id in the last box list read; undefined when that list has no such box. `null` is Kestrel's box,
- * which is the managed box while one is assigned (see `kestrelTarget`).
+ * The target of a box id in the last box list read; undefined when that list has no such box (or there is none).
  */
 function routeOf(boxId: string | null): Target | undefined {
-  if (boxId === null) return kestrelTarget()
-  if (known?.managedBox?.id === boxId) return { boxId, url: known.managedBox.url }
+  if (boxId === null) return undefined
   const box = known?.boxes.find((b) => b.id === boxId)
   return box === undefined ? undefined : { boxId, url: box.url }
 }
 
 /**
- * Kestrel's box as the last box list read has it: the managed box the user is assigned to, reached directly, or `null`
- * (the legacy relay) while there is none.
+ * The target of calls that are not about one thread: the active box. Undefined when the user has no box yet — the
+ * control plane may still be provisioning one, or the user has boxes but none selected.
  */
-function kestrelTarget(): Target {
-  const managed = known?.managedBox
-  return managed ? { boxId: managed.id, url: managed.url } : null
-}
-
-/**
- * The target of calls that are not about one thread: the active box. When the box list cannot be read, calls go to
- * Kestrel's box (the default for everyone who has not picked their own) and the list is read again on the next call,
- * so a control-plane error never stops the app.
- */
-async function activeTarget(): Promise<Target> {
+async function activeTarget(): Promise<Target | undefined> {
   if (known === undefined) await loadBoxes().catch(() => undefined)
-  return routeOf(known?.activeBoxId ?? null) ?? null
+  return routeOf(known?.activeBoxId ?? null)
 }
 
 /** A box token for `boxId`: cached until shortly before it expires, with one mint in flight per box. */
@@ -301,19 +279,18 @@ async function nestAction(id: string, path: string): Promise<BoxList> {
 }
 
 /**
- * A call the box serves. Kestrel's box is called through the Worker like any control call. A user box is called
- * straight at its URL with a box token; a 401 means the token was refused, so it is minted again and the call is
- * retried once.
+ * A call the box serves, straight at its URL with a box token; a 401 means the token was refused, so it is minted
+ * again and the call is retried once. An undefined target (no box yet) fails the call as offline.
  */
 const boxCall = <A, I>(
-  target: Target,
+  target: Target | undefined,
   schema: Schema.Schema<A, I>,
   method: Method,
   path: string,
   body?: unknown,
   retried = false,
 ): Effect.Effect<A, ApiError> => {
-  if (target === null) return request(schema, method, path, body)
+  if (target === undefined) return Effect.fail(new ApiError(503, "No agent box is selected", "NoBox"))
   return Effect.flatMap(
     Effect.tryPromise({
       try: () => boxToken(target.boxId),
@@ -358,11 +335,10 @@ function onActive<A, I>(schema: Schema.Schema<A, I>, method: Method, path: strin
 }
 
 /**
- * A box call pinned to a box from the last box list read, so a later active-box switch cannot retarget it. `null` is
- * the legacy relay (no managed box); callers with a managed box pass its id instead.
+ * A box call pinned to a box from the last box list read, so a later active-box switch cannot retarget it.
  */
 function onBox<A, I>(
-  boxId: string | null,
+  boxId: string,
   schema: Schema.Schema<A, I>,
   method: Method,
   path: string,
@@ -387,7 +363,7 @@ type BoxConnectionSource = {
  * no harness is offered. Any other failure marks the whole box unavailable, so a network error can never expose a
  * harness the box did not confirm.
  */
-async function boxConnectionSource(target: Target): Promise<BoxConnectionSource> {
+async function boxConnectionSource(target: Target | undefined): Promise<BoxConnectionSource> {
   let cliAuth: readonly CliAuthStatus[]
   try {
     cliAuth = await run(boxCall(target, Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)))
@@ -436,15 +412,12 @@ function listAllTasks(): Promise<Task[]> {
   return listing
 }
 
-/**
- * Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id, or `null` for the relay. The
- * id is what keeps a replaced managed box's threads from being shown for its successor.
- */
-type BoxKey = string | null
+/** Where a box's threads are cached, and the owner of a thread in `taskBoxes`: the box's id. */
+type BoxKey = string
 
-/** The key of a call's target: its box id, or `null` for the relay. */
+/** The key of a call's target: its box id. */
 function boxKeyOf(target: Target): BoxKey {
-  return target?.boxId ?? null
+  return target.boxId
 }
 
 /** One thread list read's outcome for one box. */
@@ -538,10 +511,11 @@ function threadsNow(keys: readonly BoxKey[]): Task[] {
  */
 async function readAllTasks(): Promise<Task[]> {
   await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time").catch(() => undefined)
-  const boxes: { readonly key: BoxKey; readonly target: Target }[] = [
-    { key: boxKeyOf(kestrelTarget()), target: kestrelTarget() },
-    ...(known?.boxes ?? []).map((box) => ({ key: box.id, target: { boxId: box.id, url: box.url } })),
-  ]
+  const boxes: { readonly key: BoxKey; readonly target: Target }[] = (known?.boxes ?? []).map((box) => ({
+    key: box.id,
+    target: { boxId: box.id, url: box.url },
+  }))
+  if (boxes.length === 0) return []
   const answers = await settleRound(boxes.map(({ key, target }) => ({ key, read: readBox(key, target) })))
   const failures = answers.flatMap((answer) => (answer?.ok === false ? [answer.error] : []))
   if (failures.length === answers.length) throw failures[0]
@@ -573,17 +547,15 @@ async function checkBox(url: string): Promise<BoxStatus> {
   }
 }
 
-/** A box's status: the relayed status for Kestrel's relayed box, else the box's own health. */
-function statusOf(target: Target): Promise<BoxStatus> {
-  return target === null ? run(request(BoxStatus, "GET", ControlPaths.box)) : checkBox(target.url)
+/** A box's status from its own `Paths.health`; a box that cannot answer reads offline. */
+function statusOf(target: Target | undefined): Promise<BoxStatus> {
+  return target === undefined ? Promise.resolve(OFFLINE) : checkBox(target.url)
 }
 
 /**
- * Absolute URL of a WebSocket path on `target`: through the Worker, or straight to a user box with its token in the
- * query.
+ * Absolute URL of a WebSocket path on `target`, with the box token in the query.
  */
 export async function socketUrl(path: string, target: Target): Promise<string> {
-  if (target === null) return WS_URL + path
   const url = new URL(path, target.url.replace(/^http/, "ws"))
   url.searchParams.set(BOX_TOKEN_QUERY, await boxToken(target.boxId))
   return url.toString()
@@ -591,12 +563,10 @@ export async function socketUrl(path: string, target: Target): Promise<string> {
 
 /**
  * Absolute URL of a file a thread's box serves (`Paths.taskAttachment`, `Paths.taskCheckoutIcon`). An `<img>` or link
- * loads it with the session cookie through the Worker, or with the box token in the query when the thread's box is a
- * user box.
+ * loads it with the box token in the query.
  */
 export async function taskFileUrl(taskId: string, path: string): Promise<string> {
   const target = await taskTarget(taskId)
-  if (target === null) return SERVER_URL + path
   const url = new URL(path, target.url)
   url.searchParams.set(BOX_TOKEN_QUERY, await boxToken(target.boxId))
   return url.toString()
@@ -715,24 +685,12 @@ export const api = {
   /** Approves a pairing: creates the box, made active when `activate`. Returns the box list, like `setActiveBox`. */
   approvePairing: async (code: string, body: ApprovePairingBody): Promise<BoxList> =>
     adoptChange(await run(request(BoxList, "POST", ControlPaths.pairingApprove(code), body))),
-  /** Operator-only: Kestrel's managed boxes, as the fleet page lists them. */
-  fleetBoxes: () => run(request(FleetBoxList, "GET", ControlPaths.fleetBoxes)),
-  fleetActivity: () => run(request(FleetActivity, "GET", ControlPaths.fleetActivity)),
-  createFleetBox: (body: CreateFleetBoxBody) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxes, body)),
-  updateFleetBox: (id: string, body: UpdateFleetBoxBody) =>
-    run(request(FleetBox, "PATCH", ControlPaths.fleetBox(id), body)),
-  deleteFleetBox: async (id: string): Promise<void> => {
-    await run(Effect.asVoid(request(Schema.Unknown, "DELETE", ControlPaths.fleetBox(id))))
-  },
-  rotateFleetBoxSecret: (id: string) => run(request(CreatedFleetBox, "POST", ControlPaths.fleetBoxSecret(id))),
   /** Operator-only: the most common failures of the server's default window, most common first. */
   fleetToolFailures: () => run(request(ToolFailureList, "GET", ControlPaths.fleetToolFailures)),
   checkBox,
   forgetBox,
-  /** Status of the box the apps talk to: Kestrel's box (its managed box's own health, or the relayed status), or the active user box's own health. */
+  /** Status of the box the apps talk to: the active box's own health, or offline when none is selected. */
   boxStatus: async (): Promise<BoxStatus> => statusOf(await activeTarget()),
-  /** Status of Kestrel's box, whichever box is active. */
-  kestrelBoxStatus: (): Promise<BoxStatus> => statusOf(kestrelTarget()),
 
   // Agent box: box-level state comes from the active box; everything about a thread comes from the thread's own box.
   cliAuth: () => onActive(Schema.Array(CliAuthStatus), "GET", ControlPaths.cliAuthFor(CliProvider.literals)),
@@ -746,7 +704,7 @@ export const api = {
    */
   models: (refresh = false, boxId?: string | null) => {
     const path = `${Paths.models}${refresh ? "?refresh=1" : ""}`
-    return boxId === undefined
+    return boxId == null
       ? onActive(ModelCatalog, "GET", path)
       : onBox(boxId, ModelCatalog, "GET", path)
   },
@@ -755,22 +713,22 @@ export const api = {
    * omitted, it reads the active box.
    */
   textGenerationSettings: (boxId?: string | null) =>
-    boxId === undefined
+    boxId == null
       ? onActive(TextGenerationSettings, "GET", Paths.textGenerationSettings)
       : onBox(boxId, TextGenerationSettings, "GET", Paths.textGenerationSettings),
   /** Replaces the signed-in user's generated-text preferences, on the same box `textGenerationSettings` read. */
   saveTextGenerationSettings: (settings: TextGenerationSettings, boxId?: string | null) =>
-    boxId === undefined
+    boxId == null
       ? onActive(TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings)
       : onBox(boxId, TextGenerationSettings, "PUT", Paths.textGenerationSettings, settings),
   /** The signed-in user's thread preferences, read from the active box or the one a settings form was pinned to. */
   threadSettings: (boxId?: string | null) =>
-    boxId === undefined
+    boxId == null
       ? onActive(ThreadSettings, "GET", Paths.threadSettings)
       : onBox(boxId, ThreadSettings, "GET", Paths.threadSettings),
   /** Replaces the signed-in user's thread preferences, on the same box `threadSettings` read. */
   saveThreadSettings: (settings: ThreadSettings, boxId?: string | null) =>
-    boxId === undefined
+    boxId == null
       ? onActive(ThreadSettings, "PUT", Paths.threadSettings, settings)
       : onBox(boxId, ThreadSettings, "PUT", Paths.threadSettings, settings),
   cliLoginStart: (provider: CliProvider) => onActive(CliLoginStart, "POST", ControlPaths.cliLogin(provider)),
@@ -796,7 +754,7 @@ export const api = {
   previewFrame: async (taskId: string): Promise<string> => {
     const target = await taskTarget(taskId)
     const session = await run(boxCall(target, PreviewSession, "POST", Paths.taskPreviewSession(taskId), {}))
-    return (target?.url ?? "") + Paths.taskPreviewFrame(session.token, taskId)
+    return target.url + Paths.taskPreviewFrame(session.token, taskId)
   },
 
   usage: () => onActive(Usage, "GET", Paths.usage),
@@ -809,8 +767,8 @@ export const api = {
     ),
   /** Every box's threads, merged; a box that does not answer is left out unless none does. */
   listTasks: listAllTasks,
-  /** Creates a thread on `boxId` (`null`: Kestrel's box), or on the active box when omitted. */
-  createTask: async (body: CreateTaskBody, boxId?: string | null): Promise<Task> => {
+  /** Creates a thread on `boxId`, or on the active box when omitted. */
+  createTask: async (body: CreateTaskBody, boxId?: string): Promise<Task> => {
     const target = boxId === undefined ? await activeTarget() : routeOf(boxId)
     if (target === undefined) throw new ApiError(404, "That box is no longer in your box list")
     const task = await run(boxCall(target, Task, "POST", Paths.tasks, body))
@@ -818,10 +776,10 @@ export const api = {
     return task
   },
   getTask: (taskId: string) => onTask(taskId, Task, "GET", Paths.task(taskId)),
-  /** The user box a thread lives on, or `null` for Kestrel's box (managed or relayed). */
-  taskBox: async (taskId: string): Promise<string | null> => {
+  /** The box a thread lives on. */
+  taskBox: async (taskId: string): Promise<string> => {
     const target = await taskTarget(taskId)
-    return target === null || target.boxId === known?.managedBox?.id ? null : target.boxId
+    return target.boxId
   },
   archiveTask: (taskId: string) => onTask(taskId, Task, "POST", Paths.taskArchive(taskId)),
   unarchiveTask: (taskId: string) => onTask(taskId, Task, "DELETE", Paths.taskArchive(taskId)),
@@ -874,18 +832,13 @@ export const api = {
   /**
    * Starts the browser's download of one of a thread's files. A HEAD request first finds out whether it would work:
    * handed straight to the browser, a failure would be saved as a file, or (cross-origin, on a user's own box) open as
-   * a page in place of the app. Through Kestrel's relayed box a file over `MAX_RELAY_RESPONSE_BYTES` cannot be sent;
-   * the relay answers that HEAD with 413 from the declared length alone.
+   * a page in place of the app.
    */
   downloadFile: async (taskId: string, root: FileRoot, path: string): Promise<void> => {
     const url = await taskFileUrl(taskId, Paths.taskFileDownload(taskId, root, path))
     const name = path.slice(path.lastIndexOf("/") + 1)
     const check = await fetch(url, { method: "HEAD" })
-    if (check.status === 413) {
-      throw new Error(
-        `${name} is over ${MAX_RELAY_RESPONSE_BYTES / 1024 / 1024} MB, the most Kestrel's shared box can send. Use your own or a managed box for larger files.`,
-      )
-    }
+    if (check.status === 413) throw new Error(`${name} is too large to download.`)
     if (check.status === 404) throw new Error(`${name} is no longer there; refresh the list.`)
     if (!check.ok) throw new Error(`Could not download ${name} (HTTP ${check.status}).`)
     // The response is an attachment, so following the link saves the file and leaves the page as it is.

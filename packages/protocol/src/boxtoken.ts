@@ -24,6 +24,32 @@ export const BOX_TOKEN_TTL_SECONDS = 60 * 60
 /** Query parameter carrying a box token where no header can be set (WebSockets, `<img>`). */
 export const BOX_TOKEN_QUERY = "access_token"
 
+/** Connection secrets a box holds for one user (never to the sandbox). */
+export interface BoxCredentials {
+  readonly user: string // GitHub login of the signed-in user
+  readonly github?: string // GitHub OAuth access token
+  /** Model API keys by `ModelProvider` id. The broker is the only reader. */
+  readonly providers?: Readonly<Record<string, string>>
+  /** Legacy Anthropic/OpenAI slots, still sent so boxes older than `providers` keep their keys. */
+  readonly anthropic?: string
+  readonly openai?: string
+  /** True only for sessions from `/auth/dev-login`; unlocks dev-only box features (fixture replay). */
+  readonly dev?: boolean
+}
+
+export const toBase64 = (bytes: Uint8Array): string => {
+  let s = ""
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(s)
+}
+
+export const fromBase64 = (b64: string): Uint8Array => {
+  const s = atob(b64)
+  const out = new Uint8Array(s.length)
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i)
+  return out
+}
+
 const encoder = new TextEncoder()
 /** base64url of `{"alg":"HS256","typ":"JWT"}`. */
 const HEADER = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"

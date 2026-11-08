@@ -160,18 +160,14 @@ export interface ServerConfig {
    */
   readonly agentRouteCommands: Record<RouteHarness, string>
   readonly fakeAgent: boolean
-  /** Control plane relay (outbound box connection). Null unless `CLOUDAGENTS_BOX_TOKEN` is set. */
-  readonly relay: { readonly controlUrl: string; readonly boxToken: string } | null
   /**
-   * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box without
-   * the relay. Null unless the box has an id and a secret (`CLOUDAGENTS_BOX_SECRET`, or the stored Nest secret). `managed`
-   * (`CLOUDAGENTS_BOX_MANAGED=1`) marks a Kestrel fleet box that serves many users; otherwise it is the user's own box.
+   * Direct mode: the box's own control-plane lookups and box-token verification, with apps reaching the box
+   * directly. Null unless the box has an id and a secret (`CLOUDAGENTS_BOX_SECRET`, or the stored Nest secret).
    */
   readonly direct: {
     readonly controlUrl: string
     readonly boxId: string
     readonly boxSecret: string
-    readonly managed: boolean
   } | null
   /**
    * The Nest VM's guest agent socket (`CLOUDAGENTS_GUEST_AGENT_SOCKET`). Null on a plain box. When set the box is a
@@ -320,7 +316,6 @@ export const loadConfig = (): ServerConfig => {
     port,
     host,
     sandboxPort,
-    relay: loadRelay(controlUrl, direct),
     direct,
     nest: loadNest(),
     mcpBaseUrl: `http://127.0.0.1:${sandboxPort}`,
@@ -343,7 +338,7 @@ export const loadConfig = (): ServerConfig => {
     systemd,
     maxConcurrentRuns: intEnv("CLOUDAGENTS_MAX_CONCURRENT_RUNS", 0, 0),
     taskDiskMax: diskMaxEnv(),
-    webrtc: webRtcEnv(direct?.managed === true),
+    webrtc: webRtcEnv(),
     githubApiUrl: loadGitHubApiUrl(),
     gitLegacyNoreplyUsers,
   }
@@ -391,9 +386,8 @@ const diskMaxEnv = (): number => {
 /**
  * WebRTC connectivity for desktop media. Always on. ICE servers default to one public STUN server;
  * CLOUDAGENTS_WEBRTC_ICE_SERVERS replaces it (`[]` for none). TURN is used only when the operator configures it.
- * A managed box takes the TURN REST secret instead of static credentials.
  */
-export const webRtcEnv = (managed: boolean, env: NodeJS.ProcessEnv = process.env): WebRtcSettings => {
+export const webRtcEnv = (env: NodeJS.ProcessEnv = process.env): WebRtcSettings => {
   const servers = env.CLOUDAGENTS_WEBRTC_ICE_SERVERS?.trim() || '[{"urls":["stun:stun.cloudflare.com:3478"]}]'
   let iceServers: ReadonlyArray<DesktopRtcIceServer>
   try {
@@ -403,9 +397,6 @@ export const webRtcEnv = (managed: boolean, env: NodeJS.ProcessEnv = process.env
   }
   if (iceServers.some((s) => s.urls.length === 0 || s.urls.some((u) => !/^(stun|stuns|turn|turns):/.test(u)))) {
     throw new Error("CLOUDAGENTS_WEBRTC_ICE_SERVERS urls must start with stun:, stuns:, turn: or turns:")
-  }
-  if (managed && iceServers.some((s) => s.credential !== undefined)) {
-    throw new Error("a managed box must not share static TURN credentials: use CLOUDAGENTS_WEBRTC_TURN_SECRET")
   }
   const turnUrls = (env.CLOUDAGENTS_WEBRTC_TURN_URLS ?? "").split(",").map((u) => u.trim()).filter((u) => u !== "")
   const turnSecret = env.CLOUDAGENTS_WEBRTC_TURN_SECRET?.trim() ?? ""
@@ -424,7 +415,7 @@ export const webRtcEnv = (managed: boolean, env: NodeJS.ProcessEnv = process.env
     policy,
     portRange: webRtcPortRange(env.CLOUDAGENTS_WEBRTC_PORT_RANGE?.trim() ?? ""),
     hostAddresses: (env.CLOUDAGENTS_WEBRTC_HOST_ADDRESSES ?? "").split(",").map((a) => a.trim()).filter((a) => a !== ""),
-    denyPrivate: managed,
+    denyPrivate: false,
   }
 }
 
@@ -469,37 +460,17 @@ const loadControlUrl = (): string | null => {
 }
 
 /**
- * Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL. A managed box
- * (`CLOUDAGENTS_BOX_MANAGED=1`) must have all three.
+ * Direct mode needs both `CLOUDAGENTS_BOX_ID` and `CLOUDAGENTS_BOX_SECRET`, and the control plane's URL.
  */
 const loadDirect = (controlUrl: string | null, dataDir: string): ServerConfig["direct"] => {
   const boxId = process.env.CLOUDAGENTS_BOX_ID?.trim() ?? ""
   const boxSecret = process.env.CLOUDAGENTS_BOX_SECRET?.trim() || readStoredSecret(dataDir) || ""
-  const managed = process.env.CLOUDAGENTS_BOX_MANAGED === "1"
-  if (managed && (boxId === "" || boxSecret === "" || controlUrl === null)) {
-    throw new Error(
-      "CLOUDAGENTS_BOX_MANAGED=1 requires CLOUDAGENTS_BOX_ID, CLOUDAGENTS_BOX_SECRET and CLOUDAGENTS_CONTROL_URL",
-    )
-  }
   if (boxId === "" && boxSecret === "") return null
   if (boxId === "" || boxSecret === "") {
     throw new Error("CLOUDAGENTS_BOX_ID and CLOUDAGENTS_BOX_SECRET must be set together")
   }
   if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_ID is set")
-  return { controlUrl, boxId, boxSecret, managed }
-}
-
-/** The relay runs only with `CLOUDAGENTS_BOX_TOKEN`; CONTROL_URL alone is valid only alongside direct mode. */
-const loadRelay = (controlUrl: string | null, direct: ServerConfig["direct"]): ServerConfig["relay"] => {
-  const boxToken = process.env.CLOUDAGENTS_BOX_TOKEN?.trim() ?? ""
-  if (boxToken === "") {
-    if (controlUrl !== null && direct === null) {
-      throw new Error("CLOUDAGENTS_BOX_TOKEN is required when CLOUDAGENTS_CONTROL_URL is set without CLOUDAGENTS_BOX_ID")
-    }
-    return null
-  }
-  if (controlUrl === null) throw new Error("CLOUDAGENTS_CONTROL_URL is required when CLOUDAGENTS_BOX_TOKEN is set")
-  return { controlUrl, boxToken }
+  return { controlUrl, boxId, boxSecret }
 }
 
 /** `NEST_BOX_ENV.guestAgentSocket`: present only on a Nest VM. */

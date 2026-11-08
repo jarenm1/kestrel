@@ -106,29 +106,3 @@ test("a settings response with an unsupported thinking level is rejected instead
   }
 });
 
-test("relayed settings use the session cookie and keep the control plane path", async () => {
-  const seen: string[] = [];
-  const control = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      const url = new URL(request.url);
-      seen.push(`${request.method} ${url.pathname} cookie=${request.headers.get("cookie")} bearer=${request.headers.get("authorization")}`);
-      if (url.pathname === "/api/settings/text-generation") {
-        return Response.json(request.method === "PUT" ? await request.json() : textGeneration);
-      }
-      return new Response(null, { status: 404 });
-    },
-  });
-  try {
-    const client = createApiClient(control.url.origin, "session", null);
-    expect(await client.textGenerationSettings()).toEqual(textGeneration);
-    await client.saveTextGenerationSettings(textGeneration);
-    expect(seen).toEqual([
-      "GET /api/settings/text-generation cookie=session=session bearer=null",
-      "PUT /api/settings/text-generation cookie=session=session bearer=null",
-    ]);
-  } finally {
-    control.stop(true);
-  }
-});

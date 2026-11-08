@@ -3,7 +3,7 @@ import { Effect, Exit, Fiber, Layer, Runtime } from "effect"
 import { decodeFrame, type ServerEvent } from "@cloudagents/protocol"
 import { EventHub, EventHubLive } from "../core/events"
 import { ActivityTracker, ActivityTrackerLive } from "../platform/tracker"
-import { RelayStream } from "../relay/stream"
+import { RelayStream } from "../direct/stream"
 import { serveStream, type WsServices } from "./streams"
 
 const deleted: ServerEvent = { _tag: "task.deleted", taskId: "task", owner: "alice" }

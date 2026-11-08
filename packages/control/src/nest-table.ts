@@ -5,7 +5,7 @@
  */
 import { Schema } from "effect"
 import { NestHostCapacity, NestHostCommand, NestLimits, NestVmState } from "@cloudagents/protocol"
-import type { FleetSql } from "./fleet-table"
+import type { FleetSql } from "./sql"
 
 /** Creates `nest_hosts` and `nest_boxes` when missing. */
 export const ensureNestTables = (sql: FleetSql): void => {
