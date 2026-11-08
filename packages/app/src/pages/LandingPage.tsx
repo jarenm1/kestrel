@@ -20,7 +20,6 @@ import { KestrelMark } from "@/components/KestrelMark"
 import { APP_URL, GITHUB_URL } from "@/components/PublicShell"
 import { StatusIcon } from "@/components/StatusIcon"
 import { Button } from "@cloudagents/ui/button"
-import { APP_ORIGIN } from "@/routes"
 import { cn } from "@/lib/utils"
 
 /** What a box keeps from working locally. */
@@ -246,28 +245,6 @@ export function LandingPage() {
               </motion.div>
             ))}
           </div>
-        </motion.div>
-      </section>
-
-      <section className="relative z-10 px-8 pt-16">
-        <motion.div
-          initial="hidden"
-          whileInView="visible"
-          viewport={{ once: true }}
-          variants={fadeInUp}
-          className="mx-auto flex max-w-4xl flex-col items-center justify-between gap-6 rounded-3xl bg-card/60 px-8 py-8 text-center shadow-soft sm:flex-row sm:text-left"
-        >
-          <div className="space-y-2">
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">Kestrel on your desktop</h2>
-            <p className="text-sm text-muted-foreground">
-              The same app in its own window. Installers for Debian, macOS and Windows.
-            </p>
-          </div>
-          <Button asChild size="lg">
-            <a href={`${APP_ORIGIN}/download`}>
-              Download <ArrowRight />
-            </a>
-          </Button>
         </motion.div>
       </section>
 
