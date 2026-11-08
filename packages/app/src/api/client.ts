@@ -186,8 +186,15 @@ let known: BoxList | undefined
  */
 const taskBoxes = new Map<string, string | null>()
 
-/** A box's thread list that takes longer than this is left out, so one slow box cannot hold up the others. */
-const BOX_LIST_TIMEOUT_MS = 10_000
+/** The control plane's box list that takes longer than this is replaced by the last one read. */
+const CONTROL_LIST_TIMEOUT_MS = 5_000
+
+/**
+ * A box's thread list that takes longer than this is left out, so one slow box cannot hold up the others. It must exceed
+ * the box's own 15 s wait for the control plane (`CONTROL_TIMEOUT_MS` in `direct/auth.ts`), or an offline box's
+ * fallback answer arrives after it has been dropped.
+ */
+const BOX_LIST_TIMEOUT_MS = 25_000
 
 /** Box tokens are re-minted this long before they expire, so a call never leaves with a token about to lapse. */
 const TOKEN_REFRESH_MS = 60_000
@@ -403,7 +410,8 @@ function listAllTasks(): Promise<Task[]> {
  * that fails or times out is left out; the read fails only when no box answers.
  */
 async function readAllTasks(): Promise<Task[]> {
-  const boxes = (await loadBoxes().catch(() => known))?.boxes ?? []
+  const boxes = (await withTimeout(loadBoxes(), CONTROL_LIST_TIMEOUT_MS, "The control plane did not answer in time")
+    .catch(() => known))?.boxes ?? []
   const targets: Target[] = [kestrelTarget(), ...boxes.map((box) => ({ boxId: box.id, url: box.url }))]
   const results = await Promise.allSettled(
     targets.map((target) =>
@@ -427,10 +435,10 @@ async function readAllTasks(): Promise<Task[]> {
   return merged
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, message = "The box did not answer in time"): Promise<T> {
   let timer: number | undefined
   const expired = new Promise<never>((_, reject) => {
-    timer = window.setTimeout(() => reject(new ApiError(0, "The box did not answer in time")), ms)
+    timer = window.setTimeout(() => reject(new ApiError(0, message)), ms)
   })
   return Promise.race([promise, expired]).finally(() => window.clearTimeout(timer))
 }

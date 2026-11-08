@@ -145,9 +145,18 @@ flowchart LR
   line when the credentials return. Nothing is stored or written for the fallback. A control plane refusal (401/403), a
   malformed answer, an invalid, expired or wrong-audience token, and a managed box never fall back; they fail as before.
   Limitation: the control plane cannot be asked about revocation while offline, so a token minted before a logout or
-  revocation stays readable on that box until its `exp`, at most one hour. Clients cannot mint new tokens offline, so
-  the window is only the remaining life of a token they already hold. While the control plane is down, each request
-  first waits up to 15 s for it before the fallback answers.
+  revocation stays readable on that box until its `exp`, at most one hour. Owner: while offline the box has no record of
+  its owner, so it does not compare the token's subject with one. It trusts the subject because the token is signed with
+  this box's secret and control mints a token only for the box's owner; the core then returns only threads whose owner
+  is that subject (`listTasks`, `ownedTask`). Clients cannot mint new tokens offline, so the window is only the
+  remaining life of a token they already hold.
+  Scope: the fallback helps only a tab that was already open and holds a box list and a box token. A page loaded
+  during the outage cannot reach a user box, because the box list and every box token come from the control plane.
+  The box's `/api/health` needs no token, so the app shows the box as online during the outage, but writes stay
+  refused: online does not mean writes are available.
+  Timing: while the control plane is down, the box waits up to 15 s for it before it answers offline. The app reads the
+  control plane's box list for at most 5 s (then uses the last list it read) and gives each box's thread list 25 s; a box
+  that has not answered by then is left out of the list.
 - Previews: the box mints preview sessions itself and serves the sandboxed frame at `<box url>/_preview/...`.
 - Automations fire only on Kestrel's own boxes for now (managed or relayed); the apps show them as unavailable while a user box is active.
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
