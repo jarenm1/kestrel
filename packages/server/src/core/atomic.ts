@@ -1,18 +1,24 @@
 import { randomUUID } from "node:crypto"
-import { open, rename } from "node:fs/promises"
+import { open, rename, rm } from "node:fs/promises"
 import { dirname } from "node:path"
 
 /** Replaces `file` with `data` via a synced temp file and rename, then syncs the directory entry. */
 export const writeAtomic = async (file: string, data: string): Promise<void> => {
   const tmp = `${file}.${randomUUID()}.tmp`
-  const handle = await open(tmp, "w")
   try {
-    await handle.writeFile(data, "utf8")
-    await handle.sync()
-  } finally {
-    await handle.close()
+    const handle = await open(tmp, "w")
+    try {
+      await handle.writeFile(data, "utf8")
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await rename(tmp, file)
+  } catch (e) {
+    // A failed write leaves no temp file behind; the original error is what the caller needs.
+    await rm(tmp, { force: true }).catch(() => undefined)
+    throw e
   }
-  await rename(tmp, file)
   // Persist the rename itself; without this a crash can roll the directory entry back. Windows cannot fsync a
   // directory (EPERM), and a failure here would report a write that already landed as failed.
   if (process.platform === "win32") return

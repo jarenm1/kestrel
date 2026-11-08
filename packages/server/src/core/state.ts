@@ -258,6 +258,32 @@ const reconcile = (state: StoreState): void => {
   }
 }
 
+/**
+ * Each top-level list of the state, its entries' original references and a deep copy of every entry's contents, taken
+ * before an update runs. Restoring writes the copies back into the same objects, so references callers hold stay valid.
+ */
+type StateSnapshot = ReadonlyArray<{ readonly list: unknown[]; readonly entries: unknown[]; readonly copies: unknown[] }>
+
+const snapshotState = (state: StoreState): StateSnapshot =>
+  (Object.values(state) as unknown[][]).map((list) => ({
+    list,
+    entries: [...list],
+    copies: list.map((entry) => (isObject(entry) ? structuredClone(entry) : entry)),
+  }))
+
+const restoreState = (snapshot: StateSnapshot): void => {
+  for (const { list, entries, copies } of snapshot) {
+    list.length = 0
+    entries.forEach((entry, i) => {
+      if (isObject(entry)) {
+        for (const key of Object.keys(entry)) delete entry[key]
+        Object.assign(entry, copies[i])
+      }
+      list.push(entry)
+    })
+  }
+}
+
 export const StateLive = Layer.effect(
   StateStore,
   Effect.gen(function* () {
@@ -276,27 +302,44 @@ export const StateLive = Layer.effect(
     const state = yield* loadFile(config.stateFile)
     reconcile(state)
 
-    // Writes are serialized; a failed write does not poison later ones.
-    let queue: Promise<void> = Promise.resolve()
-    const persist = (data: string) => {
-      const write = queue.then(() => writeAtomic(config.stateFile, data))
-      queue = write.catch(() => undefined)
-      return write
+    // Updates run one at a time, each against the state the previous one committed. A rejected or unwritten update is
+    // rolled back before the next one runs, so its mutations can never ride along in a later write.
+    let lane: Promise<void> = Promise.resolve()
+    const commit = <A, E>(f: (s: StoreState) => Either.Either<A, E>): Promise<Either.Either<A, E | InternalError>> => {
+      const run = lane.then(async (): Promise<Either.Either<A, E | InternalError>> => {
+        const snapshot = snapshotState(state)
+        let result: Either.Either<A, E>
+        try {
+          result = f(state)
+        } catch (e) {
+          restoreState(snapshot)
+          throw e
+        }
+        if (Either.isLeft(result)) {
+          restoreState(snapshot)
+          return Either.left(result.left)
+        }
+        try {
+          await writeAtomic(config.stateFile, JSON.stringify(state))
+        } catch (e) {
+          restoreState(snapshot)
+          return Either.left(new InternalError({ message: `state write failed: ${String(e)}` }))
+        }
+        return Either.right(result.right)
+      })
+      lane = run.then(() => undefined, () => undefined)
+      return run
     }
 
     const shape: StoreShape = {
       read: Effect.sync(() => state),
       update: <A, E>(f: (s: StoreState) => Either.Either<A, E>): Effect.Effect<A, E | InternalError> =>
-        Effect.suspend((): Effect.Effect<A, E | InternalError> => {
-          const result = f(state)
-          if (Either.isLeft(result)) return Effect.fail(result.left)
-          const data = JSON.stringify(state)
-          return Effect.tryPromise({
-            try: () => persist(data),
-            catch: (e) => new InternalError({ message: `state write failed: ${String(e)}` }),
-          }).pipe(Effect.as(result.right))
-        }),
-      flush: Effect.promise(() => queue),
+        Effect.flatMap(
+          Effect.promise(() => commit(f)),
+          (result): Effect.Effect<A, E | InternalError> =>
+            Either.isLeft(result) ? Effect.fail(result.left) : Effect.succeed(result.right),
+        ),
+      flush: Effect.promise(() => lane),
     }
     return shape
   }),
