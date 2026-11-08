@@ -40,9 +40,11 @@ export const ensureNestTables = (sql: FleetSql): void => {
     pending_deadline INTEGER,
     create_failed INTEGER NOT NULL DEFAULT 0,
     retry_kind TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    stale_since INTEGER
   )`)
-  // Tables created before `create_failed` or the retry columns get them here; existing boxes have nothing owed.
+  // Tables created before `create_failed`, the retry columns or `stale_since` get them here; existing boxes
+  // have nothing owed and nothing observed stale.
   const boxColumns = sql.exec<{ name: string }>("PRAGMA table_info(nest_boxes)").toArray()
   if (!boxColumns.some((c) => c.name === "create_failed")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN create_failed INTEGER NOT NULL DEFAULT 0")
@@ -51,6 +53,7 @@ export const ensureNestTables = (sql: FleetSql): void => {
   if (!boxColumns.some((c) => c.name === "retry_count")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
   }
+  if (!boxColumns.some((c) => c.name === "stale_since")) sql.exec("ALTER TABLE nest_boxes ADD COLUMN stale_since INTEGER")
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_host ON nest_boxes (host_id)`)
   sql.exec(`CREATE INDEX IF NOT EXISTS nest_boxes_deadline ON nest_boxes (pending_deadline)`)
 }
@@ -83,6 +86,11 @@ export type NestBoxRow = {
   retryKind: "create" | "park" | "destroy" | null
   /** Lapse refusals in a row for the owed command; reset by a command that ran. */
   retryCount: number
+  /**
+   * When the drain first saw the box's image differ from its host's (ms); null while they match or the box is not
+   * running or suspended. A running box gets this long as grace before it is parked; a suspended one is parked at once.
+   */
+  staleSince: number | null
 }
 
 /** A `nest_hosts` row; `capacity` is what the host last reported. */
@@ -119,14 +127,18 @@ type NestBoxSqlRow = {
   createFailed: number
   retryKind: string | null
   retryCount: number
+  staleSince: number | null
 }
 
-const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vmId, owner_epoch AS ownerEpoch,
-  state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
-  memory_bytes AS memoryBytes, gpus, wake_wanted AS wakeWanted, enroll_hash AS enrollHash,
-  enroll_expires_at AS enrollExpiresAt, pending_id AS pendingId, pending_kind AS pendingKind,
-  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed,
-  retry_kind AS retryKind, retry_count AS retryCount`
+const NEST_BOX_COLUMNS = `nest_boxes.box_id AS boxId, nest_boxes.login, nest_boxes.host_id AS hostId,
+  nest_boxes.vm_id AS vmId, nest_boxes.owner_epoch AS ownerEpoch,
+  nest_boxes.state, nest_boxes.limits, nest_boxes.volume_ref AS volumeRef, nest_boxes.backed_up_at AS backedUpAt,
+  nest_boxes.image_id AS imageId, nest_boxes.vcpus, nest_boxes.memory_bytes AS memoryBytes, nest_boxes.gpus,
+  nest_boxes.wake_wanted AS wakeWanted, nest_boxes.enroll_hash AS enrollHash,
+  nest_boxes.enroll_expires_at AS enrollExpiresAt, nest_boxes.pending_id AS pendingId,
+  nest_boxes.pending_kind AS pendingKind, nest_boxes.pending_command AS pendingCommand,
+  nest_boxes.pending_deadline AS pendingDeadline, nest_boxes.create_failed AS createFailed,
+  nest_boxes.retry_kind AS retryKind, nest_boxes.retry_count AS retryCount, nest_boxes.stale_since AS staleSince`
 
 const decodeLimits = Schema.decodeUnknownSync(NestLimits)
 /**
@@ -163,14 +175,15 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
   createFailed: row.createFailed !== 0,
   retryKind: row.retryKind as NestBoxRow["retryKind"],
   retryCount: row.retryCount,
+  staleSince: row.staleSince,
 })
 
 export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
     `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, state, limits, volume_ref, backed_up_at,
       image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id, pending_kind,
-      pending_command, pending_deadline, create_failed, retry_kind, retry_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      pending_command, pending_deadline, create_failed, retry_kind, retry_count, stale_since)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ...nestBoxBindings(row),
   )
 }
@@ -181,7 +194,7 @@ export const saveNestBox = (sql: FleetSql, row: NestBoxRow): void => {
     `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, state = ?, limits = ?, volume_ref = ?,
       backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?, enroll_hash = ?,
       enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?,
-      create_failed = ?, retry_kind = ?, retry_count = ?
+      create_failed = ?, retry_kind = ?, retry_count = ?, stale_since = ?
      WHERE box_id = ?`,
     ...nestBoxBindings(row).slice(1),
     row.boxId,
@@ -212,6 +225,7 @@ const nestBoxBindings = (row: NestBoxRow): (string | number | null)[] => [
   row.createFailed ? 1 : 0,
   row.retryKind,
   row.retryCount,
+  row.staleSince,
 ]
 
 export const deleteNestBox = (sql: FleetSql, boxId: string): void => {
@@ -256,6 +270,44 @@ export const nestBoxesDue = (sql: FleetSql, now: number): NestBoxRow[] =>
 /** The earliest command deadline (ms), or null when no command is in flight with one. */
 export const nextNestDeadline = (sql: FleetSql): number | null =>
   sql.exec<{ at: number | null }>("SELECT MIN(pending_deadline) AS at FROM nest_boxes").toArray()[0]?.at ?? null
+
+/**
+ * Running or suspended boxes on a host whose reported image is not the box's, with no command in flight: the rows the
+ * image drain acts on. A parked box is absent — its host is already released and it adopts the new image on resume.
+ */
+export const nestStaleBoxes = (sql: FleetSql): NestBoxRow[] =>
+  sql
+    .exec<NestBoxSqlRow>(
+      `SELECT ${NEST_BOX_COLUMNS} FROM nest_boxes JOIN nest_hosts ON nest_hosts.id = nest_boxes.host_id
+       WHERE nest_boxes.state IN ('running', 'suspended') AND nest_boxes.pending_id IS NULL
+         AND nest_boxes.image_id IS NOT NULL AND nest_boxes.image_id <> nest_hosts.image_id`,
+    )
+    .toArray()
+    .map(toBoxRow)
+
+/**
+ * Drops `stale_since` on rows no longer stale: not running or suspended, without a reported image, or matching their
+ * host's image (a missing host row counts as matching, so a box re-placed elsewhere starts a fresh observation).
+ */
+export const clearStaleSince = (sql: FleetSql): void => {
+  sql.exec(
+    `UPDATE nest_boxes SET stale_since = NULL WHERE stale_since IS NOT NULL AND (
+       state NOT IN ('running', 'suspended') OR image_id IS NULL
+       OR NOT EXISTS (SELECT 1 FROM nest_hosts WHERE nest_hosts.id = nest_boxes.host_id
+                      AND nest_hosts.image_id <> nest_boxes.image_id))`,
+  )
+}
+
+/** The earliest moment a running stale box's grace ends (ms), or null when none is being observed. */
+export const nextStaleDeadline = (sql: FleetSql, graceMs: number): number | null =>
+  sql
+    .exec<{ at: number | null }>(
+      `SELECT MIN(nest_boxes.stale_since + ?) AS at FROM nest_boxes JOIN nest_hosts ON nest_hosts.id = nest_boxes.host_id
+       WHERE nest_boxes.state = 'running' AND nest_boxes.stale_since IS NOT NULL
+         AND nest_boxes.image_id <> nest_hosts.image_id`,
+      graceMs,
+    )
+    .toArray()[0]?.at ?? null
 
 export const nestBoxesOfUser = (sql: FleetSql, login: string): NestBoxRow[] =>
   sql

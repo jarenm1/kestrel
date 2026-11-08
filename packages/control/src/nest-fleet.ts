@@ -22,6 +22,8 @@ import type { FleetSql } from "./sql"
 import { listMeterHosts } from "./meter-table"
 import {
   MAX_LAPSE_RETRIES,
+  NEST_STALE_GRACE_MS,
+  NEST_STALE_RECHECK_MS,
   commandTimeoutMs,
   decideVm,
   enrollTokenHash,
@@ -33,6 +35,7 @@ import {
   withPlannedBoots,
 } from "./nest-control"
 import {
+  clearStaleSince,
   deleteNestBox,
   insertNestBox,
   nestBox,
@@ -44,7 +47,9 @@ import {
   nestBootsOnHost,
   nestHostRow,
   nestHostRows,
+  nestStaleBoxes,
   nextNestDeadline,
+  nextStaleDeadline,
   saveNestBox,
   touchNestHost,
   upsertNestHost,
@@ -127,6 +132,7 @@ export class NestFleet {
     const inFlight = nestBoxesOnHost(this.sql, frame.hostId).filter((row) => row.pendingId !== null)
     for (const row of inFlight) await this.resend(row.boxId)
     await this.redispatchOwed(frame.hostId)
+    this.drainStale(this.clock())
     await this.wakeWanted()
   }
 
@@ -191,6 +197,7 @@ export class NestFleet {
     // stays until that command's result settles, since the two frames may arrive in either order.
     if (report.state === "parked" && row.pendingId === null) row.hostId = null
     saveNestBox(this.sql, row)
+    this.drainStale(this.clock())
   }
 
   /** The outcome of a command. `vm` is the VM after it, absent once destroyed. */
@@ -213,6 +220,7 @@ export class NestFleet {
     if (vm === undefined && row.state === "parked") row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
+    this.drainStale(this.clock())
   }
 
   /** A request reached ingress for a box. A parked box is woken only by the host its URL names; a suspended one by its host. */
@@ -240,6 +248,7 @@ export class NestFleet {
    * box failed, so the owner can delete it; an expired `resume` is retried on the same host while that host holds the
    * box's claim; a parked report releases the claim after a park or destroy expires; other
    * commands are the owner's to retry. A late `result` for an expired command finds no marker and is ignored.
+   * The same sweep drains boxes on an image older than their host's.
    */
   async expire(now: number): Promise<void> {
     for (const row of nestBoxesDue(this.sql, now)) {
@@ -251,11 +260,17 @@ export class NestFleet {
       if ((kind === "park" || kind === "destroy") && row.state === "parked") row.hostId = null
       saveNestBox(this.sql, row)
     }
+    this.drainStale(now)
     await this.wakeWanted()
   }
 
   nextDeadline(): number | null {
-    return nextNestDeadline(this.sql)
+    // A stale deadline already past is pushed out by a recheck: a drain that could not reach the box's host retries
+    // then instead of spinning the alarm on a deadline that stays in the past.
+    const stale = nextStaleDeadline(this.sql, NEST_STALE_GRACE_MS)
+    const staleAt = stale !== null && stale <= this.clock() ? this.clock() + NEST_STALE_RECHECK_MS : stale
+    const deadlines = [nextNestDeadline(this.sql), staleAt].filter((at): at is number => at !== null)
+    return deadlines.length === 0 ? null : Math.min(...deadlines)
   }
 
   // ---------------------------------------------------------------------------
@@ -338,6 +353,7 @@ export class NestFleet {
       createFailed: false,
       retryKind: null,
       retryCount: 0,
+      staleSince: null,
     }
     insertNestBox(this.sql, row)
     const command: NestHostCommand = {
@@ -701,6 +717,28 @@ export class NestFleet {
 
   private async wakeWanted(): Promise<void> {
     for (const row of nestBoxesWanted(this.sql)) await this.wake(row.boxId)
+  }
+
+  /**
+   * Parks boxes running an image older than the one their host reports, so the next wake re-places them and boots the
+   * current image — the rollout `cloudagents-box-auto` gave managed boxes. A suspended stale box is parked at once:
+   * it is idle and its memory image holds host RAM. A running stale box is parked once it has been seen stale for
+   * `NEST_STALE_GRACE_MS`; `staleSince` stamps that first sighting and clears when the images match again or the box
+   * leaves a drainable state. Parked boxes adopt on resume and boxes with a command in flight or a failed create are
+   * left alone — the query selects only placed running or suspended boxes with nothing pending. Sending the park is
+   * the whole action: the in-flight marker makes the next sweep a no-op for the box.
+   */
+  private drainStale(now: number): void {
+    for (const row of nestStaleBoxes(this.sql)) {
+      if (row.staleSince === null) {
+        row.staleSince = now
+        saveNestBox(this.sql, row)
+      }
+      if (row.state !== "suspended" && now - row.staleSince < NEST_STALE_GRACE_MS) continue
+      console.warn(`nest: parking ${row.boxId}: its image is older than ${row.hostId}'s`)
+      this.dispatch(row, { _tag: "park", boxId: row.boxId, ownerEpoch: row.ownerEpoch })
+    }
+    clearStaleSince(this.sql)
   }
 
   /** The URL a box is served at now. */

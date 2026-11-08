@@ -125,6 +125,19 @@ export const enrollTokenHash = async (token: string): Promise<string> => {
  */
 export const MAX_LAPSE_RETRIES = 3
 
+/**
+ * How long a running box may keep an image older than the one its host reports before the drain parks it, so its next
+ * wake boots the current image — the bound `cloudagents-box-auto` gave restarts deferred for activity. A suspended
+ * stale box is parked at once: it is idle, and parking frees the host memory its stale image holds.
+ */
+export const NEST_STALE_GRACE_MS = 6 * 60 * 60 * 1000
+
+/**
+ * The soonest a stale box's drain deadline may come after one already passed: an alarm tick retries a park the host
+ * could not take at this interval instead of spinning on a deadline that stays in the past.
+ */
+export const NEST_STALE_RECHECK_MS = 5 * 60_000
+
 /** The owner's view of a box's VM. A `create` in flight is not shown as pending: the box is already `provisioning`. */
 export const nestStatusOf = (row: NestBoxRow): NestBoxStatus => ({
   state: row.state,

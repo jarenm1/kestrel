@@ -10,7 +10,7 @@ import {
   type NestVmReport,
 } from "@cloudagents/protocol"
 import type { FleetSql } from "./sql"
-import { MAX_LAPSE_RETRIES, NEST_STANDARD_LIMITS } from "./nest-control"
+import { MAX_LAPSE_RETRIES, NEST_STANDARD_LIMITS, NEST_STALE_GRACE_MS } from "./nest-control"
 import { NestFleet, type NestLink } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 
@@ -54,9 +54,9 @@ const capacityOf = (freeGiB: number): NestHostCapacity => ({
   suspended: 0,
 })
 
-const hello = async (hostId: string, vms: NestVmReport[] = [], freeGiB = 8) => {
+const hello = async (hostId: string, vms: NestVmReport[] = [], freeGiB = 8, imageId = "image-1") => {
   connected.add(hostId)
-  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId: "image-1", capacity: capacityOf(freeGiB) })
+  await fleet.hello({ hostId, slug: `slug-${hostId}`, agentVersion: "test", imageId, capacity: capacityOf(freeGiB) })
   if (vms.length > 0) fleet.inventory(hostId, vms, true)
 }
 
@@ -806,6 +806,82 @@ describe("a create the host refused for a lapse", () => {
     const before = sent.length
     await fleet.capacity("host-a", capacityOf(8))
     expect(creates(before)).toHaveLength(0)
+  })
+})
+
+describe("stale image drain", () => {
+  const staleSince = (boxId: string) =>
+    db.query<{ stale_since: number | null }, [string]>("SELECT stale_since FROM nest_boxes WHERE box_id = ?").get(boxId)
+      ?.stale_since
+  const parks = () => commandsTo("host-a").filter((entry) => entry.command._tag === "park").length
+  const suspendedBox = async () => {
+    const vmId = await runningBox()
+    fleet.suspend("alice", "box-1")
+    fleet.result("host-a", lastCommand("host-a", "suspend").commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    return vmId
+  }
+
+  test("a suspended box on an old image is parked when its host reports the new one", async () => {
+    await suspendedBox()
+    await hello("host-a", [], 8, "image-2")
+    expect(lastCommand("host-a", "park").command).toMatchObject({ boxId: "box-1", ownerEpoch: 1 })
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "suspended", pending: "park" })
+  })
+
+  test("the drain does not send a second park while one is in flight", async () => {
+    await suspendedBox()
+    await hello("host-a", [], 8, "image-2")
+    expect(parks()).toBe(1)
+    await fleet.expire(now + MINUTE)
+    await fleet.expire(now + 2 * MINUTE)
+    expect(parks()).toBe(1)
+  })
+
+  test("a running box on an old image is parked once its grace ends, at the deadline the drain schedules", async () => {
+    await runningBox()
+    await hello("host-a", [], 8, "image-2")
+    expect(staleSince("box-1")).toBe(now)
+    expect(fleet.nextDeadline()).toBe(now + NEST_STALE_GRACE_MS)
+    expect(parks()).toBe(0)
+
+    now += NEST_STALE_GRACE_MS - 1
+    await fleet.expire(now)
+    expect(parks()).toBe(0)
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", pending: null })
+
+    now += 1
+    await fleet.expire(now)
+    expect(parks()).toBe(1)
+    expect(lastCommand("host-a", "park").command).toMatchObject({ boxId: "box-1" })
+  })
+
+  test("a box on its host's image is left alone", async () => {
+    await runningBox()
+    await hello("host-a")
+    await fleet.expire(now + NEST_STALE_GRACE_MS)
+    expect(parks()).toBe(0)
+    expect(staleSince("box-1")).toBeNull()
+  })
+
+  test("a parked box is left alone: its next wake already adopts the new image", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))
+    await hello("host-a", [], 8, "image-2")
+    await fleet.expire(now + NEST_STALE_GRACE_MS)
+    expect(parks()).toBe(0)
+    expect(staleSince("box-1")).toBeNull()
+  })
+
+  test("a box with a command in flight is left alone until the command settles", async () => {
+    const vmId = await runningBox()
+    fleet.suspend("alice", "box-1")
+    await hello("host-a", [], 8, "image-2")
+    expect(parks()).toBe(0)
+    expect(staleSince("box-1")).toBeNull()
+
+    // The suspend landing leaves the box suspended on the old image: the sweep applying the result parks it.
+    fleet.result("host-a", lastCommand("host-a", "suspend").commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    expect(lastCommand("host-a", "park").command).toMatchObject({ boxId: "box-1" })
   })
 })
 
