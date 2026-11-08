@@ -581,6 +581,37 @@ describe("reconnect", () => {
   })
 })
 
+describe("a park or destroy the host refused for a lapse", () => {
+  const LAPSE = "control lease lapsed before the command ran"
+
+  test("is answered with a failure: the box's command clears, nothing is resent, and the owner can ask again", async () => {
+    const vmId = await runningBox()
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    const first = lastCommand("host-a", "park")
+    const before = sent.length
+
+    fleet.result("host-a", first.commandId, false, LAPSE, vmReport("box-1", vmId, 1, "running"))
+
+    expect(sent.slice(before).filter((entry) => entry.frame._tag === "command")).toHaveLength(0)
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-a", "park").commandId).not.toBe(first.commandId)
+  })
+
+  test("a refused destroy clears the same way, and the box is still there to be deleted again", async () => {
+    const vmId = await runningBox()
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    const first = lastCommand("host-a", "destroy")
+    const before = sent.length
+
+    fleet.result("host-a", first.commandId, false, LAPSE, vmReport("box-1", vmId, 1, "running"))
+
+    expect(sent.slice(before).filter((entry) => entry.frame._tag === "command")).toHaveLength(0)
+    expect(userBoxUrl("box-1")).toBeDefined()
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(lastCommand("host-a", "destroy").commandId).not.toBe(first.commandId)
+  })
+})
+
 describe("leases", () => {
   test("a hello and a capacity report each renew the host's lease", async () => {
     await hello("host-a")

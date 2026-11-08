@@ -136,6 +136,19 @@ describe("commands received before the lease lapsed or the connection dropped", 
     expect(applied).toEqual(["resume"])
   })
 
+  test.each([
+    ["park", { _tag: "park" as const, boxId: "box-1", ownerEpoch: 1 }],
+    ["destroy", { _tag: "destroy" as const, boxId: "box-1", ownerEpoch: 1 }],
+  ])("a %s that reaches execution during a lapse is refused with a failure, not run and not recorded", async (_action, command) => {
+    const { manager, applied } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    const refused = await manager.execute(`cmd-${command._tag}`, command)
+    expect(refused?.outcome).toMatchObject({ commandId: `cmd-${command._tag}`, ok: false, error: "control lease lapsed before the command ran" })
+    expect(applied).toEqual([])
+    expect(manager.pendingResults()).toEqual([])
+  })
+
   test("an operator command runs after a connection drop and a lapse: it is a request made on the host, not from control", async () => {
     const { manager, applied, open } = fixture()
     open()
