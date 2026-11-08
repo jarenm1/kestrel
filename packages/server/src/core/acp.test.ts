@@ -331,21 +331,41 @@ describe("ACP transcript", () => {
       jsonrpc: "2.0",
       id: 5,
       emittedAtMs: at,
-      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000 } },
+      result: { stopReason: "end_turn", usage: { inputTokens: 100, outputTokens: 7, cachedReadTokens: 9000, cachedWriteTokens: 50 } },
     })
     expect(end).toEqual([
       { _tag: "tool", id: "c2", parentToolId: null, name: "write", input: { path: "a.txt" }, status: "error", output: null },
+      // Cache writes count as input and cache reads are their own bucket, as with Claude's per-response usage.
+      {
+        _tag: "usage",
+        id: expect.any(String),
+        parentToolId: null,
+        timestamp: new Date(at).toISOString(),
+        durationMs: null,
+        inputTokens: 150,
+        outputTokens: 7,
+        cachedTokens: 9000,
+      },
       {
         _tag: "turn",
         id: expect.any(String),
         timestamp: new Date(at).toISOString(),
         durationMs: null,
-        inputTokens: 9100,
+        inputTokens: 9150,
         outputTokens: 7,
         costUsd: null,
         isError: false,
       },
     ])
     expect(t.finalText()).toBe("Done")
+  })
+
+  test("a turn's usage without cache buckets reports zero cached tokens; a turn without usage reports none", () => {
+    const t = makeTranscript()
+    // OpenCode omits a cache bucket that is zero.
+    const first = t.push({ jsonrpc: "2.0", id: 3, result: { stopReason: "end_turn", usage: { inputTokens: 9908, outputTokens: 12, totalTokens: 9942 } } })
+    expect(first.find((item) => item._tag === "usage")).toMatchObject({ inputTokens: 9908, outputTokens: 12, cachedTokens: 0 })
+    const second = t.push({ jsonrpc: "2.0", id: 4, result: { stopReason: "end_turn" } })
+    expect(second.map((item) => item._tag)).toEqual(["turn"])
   })
 })

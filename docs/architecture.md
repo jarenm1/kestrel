@@ -202,9 +202,11 @@ Expanding the disclosure lists input, output and cached tokens plus average outp
 same wall-clock span. The collapsed row already carries elapsed time, so the details do not repeat it. Input
 excludes cache reads, which appear as cached tokens separately; cache writes count as input. Input and cached
 tokens come from main-agent response usage, never added to turn aggregates, so they are not double-counted;
-subagent rows are excluded. Output remains the completed turn aggregate. A harness that reports only turn
-aggregates therefore still contributes its output, but its cache-free input cannot be recovered from the
-cache-inclusive aggregate, so input and cached tokens say “Not reported” instead of guessing. This average
+subagent rows are excluded. Output remains the completed turn aggregate. ACP harnesses (OpenCode, Antigravity,
+Devin) report usage only per turn, already split into input and cache buckets, so the transcript emits that split
+as the turn's one usage item; a bucket an agent omits next to a reported input counts as zero (OpenCode omits zero
+buckets). A harness that reports only a cache-inclusive turn aggregate still contributes its output, but its
+cache-free input cannot be recovered, so input and cached tokens say “Not reported” instead of guessing. This average
 includes tools and waiting; it is not model-generation speed. Incomplete, failed or stopped invocations do not
 present partial token totals as complete; unreported values say “Not reported” rather than showing `? tok/s`.
 Counts are compact with exact values on hover. Per-response metadata remains stored but no longer creates rows
