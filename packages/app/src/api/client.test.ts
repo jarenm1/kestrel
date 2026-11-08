@@ -303,6 +303,23 @@ describe("thread reads across Kestrel's managed box and a user's own boxes", () 
     expect((await api.listTasks()).map((t) => t.id)).toEqual(["user-thread"])
   })
 
+  test("a managed box that answers after a user box is listed by that same read", async () => {
+    const healthy = entryFor("healthy-box-5", "https://healthy-5.test")
+    const managed = { id: "managed-late", url: "https://managed-late.test" }
+    routes((url) => {
+      if (url === `${CONTROL}${ControlPaths.boxes}`) return json({ boxes: [healthy], activeBoxId: healthy.id, managedBox: managed })
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(healthy.id)}`) return tokenFor(healthy.url)
+      if (url === `${CONTROL}${ControlPaths.userBoxToken(managed.id)}`) return tokenFor(managed.url)
+      if (url === `${healthy.url}${Paths.tasks}`) return json([taskFor("user-thread")])
+      if (url === `${managed.url}${Paths.tasks}`) {
+        return new Promise<Response>((resolve) => setTimeout(() => resolve(json([taskFor("managed-thread")])), 300))
+      }
+      return undefined
+    })
+
+    expect((await api.listTasks()).map((t) => t.id).sort()).toEqual(["managed-thread", "user-thread"])
+  })
+
   test("the managed box is waited for when no user box answers", async () => {
     const failing = entryFor("failing-box", "https://failing.test")
     const managed = { id: "managed-answers", url: "https://managed-answers.test" }
