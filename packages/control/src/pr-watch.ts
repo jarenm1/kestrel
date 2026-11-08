@@ -16,15 +16,15 @@ const BoxError = Schema.Struct({ message: Schema.String })
 
 /**
  * A failed box call. A box error body with a `message` passes through with its status, so the caller keeps the box's
- * detail. Anything else, such as a proxy's HTML error page, is labelled as JSON only after being rewritten. Only the
- * hub's own `BoxOffline` bodies carry that tag: a bare gateway status does not establish that the box is unreachable.
+ * detail, including a structured `NotFound`. Anything else, such as a proxy's HTML error page, keeps its status but is
+ * labelled `BadGateway` (a bare 404 from a proxy does not mean the thread is missing). Only the hub's own `BoxOffline`
+ * bodies carry that tag: a bare gateway status does not establish that the box is unreachable.
  */
 const boxFailure = (result: { status: number; body: string }): Response => {
   let value: unknown
   try { value = JSON.parse(result.body) } catch { value = undefined }
   if (Schema.is(BoxError)(value)) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
-  const tag = result.status === 404 ? "NotFound" : "BadGateway"
-  return errorResponse(result.status, tag, "agent box request failed")
+  return errorResponse(result.status, "BadGateway", "agent box request failed")
 }
 
 /**

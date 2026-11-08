@@ -78,11 +78,19 @@ describe("POST /box/automations/pr-watch: box failures", () => {
     expect(await response.json()).toEqual({ message: "no such box" })
   })
 
-  test("a non-JSON box 404 is still a 404", async () => {
-    boxAnswer = { ok: false, status: 404, body: "not found" }
+  test("a non-JSON box 404 keeps its status but is not labelled NotFound", async () => {
+    boxAnswer = { ok: false, status: 404, body: "<html>proxy 404</html>" }
     const response = await watch()
     expect(response.status).toBe(404)
-    expect(await response.json()).toEqual({ _tag: "NotFound", message: "agent box request failed" })
+    expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8")
+    expect(await response.json()).toEqual({ _tag: "BadGateway", message: "agent box request failed" })
+  })
+
+  test("a JSON box 404 without a message is not labelled NotFound", async () => {
+    boxAnswer = { ok: false, status: 404, body: JSON.stringify({ _tag: "NotFound" }) }
+    const response = await watch()
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ _tag: "BadGateway", message: "agent box request failed" })
   })
 
   test("a thread the box does not have is still a 404", async () => {
