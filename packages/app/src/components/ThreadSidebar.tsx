@@ -128,7 +128,7 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   const { archive } = useThreadArchive()
   const animated = useSidebarAnimation()
   // The list and the rail swap through `SidebarMotion`'s `AnimatePresence`; on narrow screens they swap at once.
-  const swap = animated ? FADE : { ...FADE, transition: INSTANT }
+  const swap = { ...FADE, transition: animated ? SLIDE : INSTANT }
   const [dockCollapsed, setDockCollapsed] = useState(() => localStorage.getItem(DOCK_COLLAPSED_KEY) === "1")
   useEffect(() => {
     if (dockCollapsed) localStorage.setItem(DOCK_COLLAPSED_KEY, "1")
@@ -387,6 +387,8 @@ const REVEAL = {
 } as const
 const SPRING = { type: "spring", bounce: 0, duration: 0.3 } as const
 const INSTANT = { duration: 0 } as const
+/** Collapsing and expanding: the same curve and length as the thread sidebar's slide in `ThreadView`. */
+const SLIDE = { duration: 0.3, ease: [0.22, 1, 0.36, 1] } as const
 /** Widths of the collapsed rail (`w-12`) and the expanded list (`w-64`). */
 const RAIL_WIDTH = 48
 const LIST_WIDTH = 256
@@ -409,7 +411,7 @@ function SidebarMotion({ collapsed, children }: { collapsed: boolean; children: 
         <motion.div
           initial={false}
           animate={{ width: collapsed ? RAIL_WIDTH : LIST_WIDTH }}
-          transition={animated ? undefined : INSTANT}
+          transition={animated ? SLIDE : INSTANT}
           className="relative shrink-0 overflow-hidden"
         >
           <AnimatePresence initial={false}>{children}</AnimatePresence>
