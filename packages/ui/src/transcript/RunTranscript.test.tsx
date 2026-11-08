@@ -56,6 +56,23 @@ test("subagent usage stays out of the main agent's input and cache totals", () =
   expect(html).not.toContain(`title="6,000"`)
 })
 
+test("multi-turn responses stay grouped with the turn that closed them", () => {
+  const first: AgentItem = { _tag: "usage", id: "first", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: 1000 }
+  const second: AgentItem = { _tag: "usage", id: "second", parentToolId: null, timestamp, durationMs: 400, inputTokens: 200, outputTokens: 60, cachedTokens: 2000 }
+  const html = summary([first, turn("one"), second, turn("two")])
+  expect(html).toContain(`title="300"`)
+  expect(html).toContain(`title="3,000"`)
+  expect(html).toContain("2 tok/s")
+})
+
+test("a reported input survives an unknown cache bucket", () => {
+  const uncached: AgentItem = { _tag: "usage", id: "uncached", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: 60, cachedTokens: null }
+  const html = summary([uncached, turn("end")])
+  expect(html).toContain(`title="100"`)
+  expect(html).toContain("Cached tokens</dt><dd>Not reported</dd>")
+  expect(html).toContain("1 tok/s")
+})
+
 test("metadata no longer creates rows or splits consecutive tools", () => {
   const tool = (id: string): AgentItem => ({ _tag: "tool", id, parentToolId: null, name: "Bash", input: { command: "echo hello" }, status: "ok", output: null })
   const html = renderToStaticMarkup(<RunTranscript taskId="task" runId="run" items={[tool("a"), usage, tool("b"), turn("end")]} running={false} from={0} to={null} />)

@@ -86,7 +86,7 @@ export function RunSummary({ run, items }: { run: Run; items: readonly AgentItem
         <dt>Input tokens</dt><dd title={input === null ? undefined : EXACT.format(input)}>{count(input)}</dd>
         <dt>Output tokens</dt><dd title={output === null ? undefined : EXACT.format(output)}>{count(output)}</dd>
         <dt>Cached tokens</dt><dd title={cached === null ? undefined : EXACT.format(cached)}>{count(cached)}</dd>
-        <dt>Avg TPS</dt><dd>{rate !== null && Number.isFinite(rate) ? `${rate.toLocaleString("en-US", { maximumFractionDigits: 1 })} tok/s` : "Not reported"}</dd>
+        <dt>Avg TPS</dt><dd title="Output tokens per second over the run's wall-clock time, including tools and waiting">{rate !== null && Number.isFinite(rate) ? `${rate.toLocaleString("en-US", { maximumFractionDigits: 1 })} tok/s` : "Not reported"}</dd>
       </dl>
     </details>
   )
