@@ -292,12 +292,12 @@ export function ToolRow({ item, view, source, running, nested }: {
  * coming in, folded once the agent moves on, like a thought. A lone call renders without the summary but through the
  * same elements, so its row (and whatever the user opened in it) survives the next call turning it into a group.
  */
-export function ToolGroup({ single, summary, kinds, live, failed, children }: {
+export function ToolGroup({ single, summary, kinds, live, failedCount, children }: {
   single: boolean
   summary: string
   kinds: ReadonlySet<ToolKind>
   live: boolean
-  failed: boolean
+  failedCount: number
   children: ReactNode
 }) {
   const [open, toggle] = useAutoOpen(live)
@@ -309,7 +309,12 @@ export function ToolGroup({ single, summary, kinds, live, failed, children }: {
         <button type="button" aria-expanded={open} onClick={toggle} className={ROW_CLASS}>
           <Icon className="size-4 shrink-0" />
           <span className={cn("min-w-0 truncate", live && SHIMMER_CLASS)}>{summary}</span>
-          {failed && <X className="size-3.5 shrink-0 text-destructive" aria-label="a call failed" />}
+          {failedCount > 0 && (
+            <span className="flex shrink-0 items-center gap-1 text-destructive">
+              <X className="size-3.5" aria-hidden="true" />
+              {failedCount} failed
+            </span>
+          )}
           <Chevron open={open} />
         </button>
       )}

@@ -71,7 +71,7 @@ function Tools({ items, ctx }: { items: readonly ToolItem[]; ctx: Ctx }) {
       summary={summarizeTools(views)}
       kinds={new Set(views.map((view) => view.kind))}
       live={live}
-      failed={items.some((item) => item.status === "error")}
+      failedCount={items.reduce((count, item) => count + (item.status === "error" ? 1 : 0), 0)}
     >
       {rows}
     </ToolGroup>

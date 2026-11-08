@@ -29,6 +29,19 @@ test("metadata no longer creates rows or splits consecutive tools", () => {
   expect(html).not.toContain("<time")
 })
 
+test("a collapsed tool group counts the calls that failed", () => {
+  const tool = (id: string, status: "ok" | "error"): AgentItem => ({
+    _tag: "tool", id, parentToolId: null, name: "Bash", input: { command: "echo hello" }, status, output: null,
+  })
+  const render = (items: AgentItem[]) => renderToStaticMarkup(<RunTranscript taskId="task" runId="run" items={items} running={false} from={0} to={null} />)
+  const html = render([tool("a", "error"), tool("b", "error"), tool("c", "error"), tool("d", "ok")])
+  expect(html).toContain("Ran 4 commands")
+  expect(html).toContain("3 failed")
+  expect(html).not.toContain("4 failed")
+  expect(render([tool("a", "ok"), tool("b", "ok")])).not.toContain("failed")
+  expect(render([tool("a", "error"), tool("b", "ok")])).toContain("1 failed")
+})
+
 test("steering splits content but leaves exactly one final run summary", () => {
   const messages: Message[] = [
     { id: "prompt", taskId: "task", role: "user", text: "Go", runId: "run", createdAt: timestamp },
