@@ -1,5 +1,5 @@
 /*
- * Frontend-only styles for the marketing and download pages.
+ * Frontend-only styles for the public routes (`/`, `/pricing`, `/waitlist`) and the download page.
  *
  * This file is intentionally separate from `styles.css`: the authenticated app keeps main's
  * theme and utilities untouched. These rules only affect those page shells.

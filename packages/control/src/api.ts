@@ -20,6 +20,7 @@ import {
   Task,
   UpdateBoxBody,
   UpdateFleetBoxBody,
+  WaitlistSignupBody,
   type Connection,
   type GithubRepo,
   type Me,
@@ -33,7 +34,7 @@ import {
   type OAuthProvider,
   type Provider,
 } from "./providers"
-import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
+import { UpstreamError, cappedRequest, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
 import { FILE_TOKEN_HEADER, SESSION_HEADER, hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { desktopStreamTask } from "./desktop-tokens"
@@ -495,6 +496,25 @@ const handleNest = async (request: Request, env: Env, url: URL): Promise<Respons
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 
+/** Public waitlist signups carry one small JSON object; anything larger is not a signup form. */
+const MAX_WAITLIST_BODY_BYTES = 4096
+
+/** The client IP the Hub rate-limits on; local requests without Cloudflare's header share one bucket. */
+const waitlistClientIp = (request: Request): string => request.headers.get("cf-connecting-ip") ?? "unknown"
+
+/** Unauthenticated waitlist signup for the public site; the Hub stores it and applies the per-IP limit. */
+const handleWaitlist = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const capped = await cappedRequest(request, MAX_WAITLIST_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const body = await decodeBody(capped, WaitlistSignupBody)
+  if (body instanceof Response) return body
+  const signup = await hub(env).addWaitlistSignup(body.email, waitlistClientIp(request))
+  return signup === null
+    ? errorResponse(429, "TooManyRequests", "too many waitlist signups; try again later")
+    : json(signup, signup.created ? 201 : 200)
+}
+
 /**
  * Routes every `/api/*` request: control routes in the Worker, everything else (the box API, its WebSockets and
  * `GET /api/box`) in one request to the Hub.
@@ -508,6 +528,7 @@ export const handleApi = async (request: Request, env: Env, url: URL): Promise<R
   if (fileToken !== null && (isBoxFilePath(path) || desktopStreamTask(path) !== null)) {
     return forwardFileToken(request, env, url, fileToken)
   }
+  if (path === ControlPaths.waitlist) return handleWaitlist(request, env)
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.fleetBoxes || path.startsWith(`${ControlPaths.fleetBoxes}/`)) {
     return handleFleetBoxes(request, env, url)

@@ -27,6 +27,7 @@ import {
   ThreadsSettings,
 } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
+import { WaitlistPage } from "@/pages/WaitlistPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
 import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
 import { errorText } from "@/util"
@@ -35,10 +36,11 @@ export function App() {
   if (IS_SITE_HOST) {
     return (
       <Routes>
-        {/* The public site only exposes landing and pricing; everything else belongs to the app host. */}
+        {/* The public site only exposes landing, pricing and the waitlist; everything else belongs to the app host. */}
         <Route element={<PublicShell />}>
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
+          <Route path="/waitlist" element={<WaitlistPage />} />
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>

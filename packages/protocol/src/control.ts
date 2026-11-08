@@ -33,6 +33,8 @@ export const ControlPaths = {
   desktopToken: (taskId: string) => `/api/tasks/${encodeURIComponent(taskId)}/desktop/token`,
   /** GET -> Me, 401 when signed out. */
   me: "/api/me",
+  /** POST WaitlistSignupBody -> WaitlistSignup: public waitlist signup; no session. */
+  waitlist: "/api/waitlist",
   /** GET -> Connection[] with legacy managed/relay-box status; updated clients replace box state with `connectionsForBox`. */
   connections: "/api/connections",
   /** PUT { apiKey } for api-key providers -> Connection; DELETE -> 204. */
@@ -221,6 +223,23 @@ export const Me = Schema.Struct({
   nestEnabled: Schema.Boolean,
 })
 export type Me = typeof Me.Type
+
+const WAITLIST_EMAIL_PATTERN =
+  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/
+
+/** POST body for the public waitlist signup. */
+export const WaitlistSignupBody = Schema.Struct({
+  email: Schema.String.pipe(Schema.minLength(3), Schema.maxLength(254), Schema.pattern(WAITLIST_EMAIL_PATTERN)),
+})
+export type WaitlistSignupBody = typeof WaitlistSignupBody.Type
+
+/** The stored waitlist entry; `created` is false when the email was already on the list. */
+export const WaitlistSignup = Schema.Struct({
+  email: Schema.String,
+  createdAt: Schema.String,
+  created: Schema.Boolean,
+})
+export type WaitlistSignup = typeof WaitlistSignup.Type
 
 export const ConnectionKind = Schema.Literal("oauth", "apikey", "cli")
 export type ConnectionKind = typeof ConnectionKind.Type

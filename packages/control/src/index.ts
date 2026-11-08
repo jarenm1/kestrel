@@ -244,7 +244,10 @@ export default {
         return await managedBoxAutomations(request, env, url)
       }
       if (url.pathname === ControlPaths.githubWebhook) return await handleGithubWebhook(request, env, ctx)
-      if (SITE_HOSTS[url.hostname] && (url.pathname.startsWith("/auth/") || url.pathname.startsWith("/api/"))) {
+      if (
+        SITE_HOSTS[url.hostname] &&
+        (url.pathname.startsWith("/auth/") || (url.pathname.startsWith("/api/") && url.pathname !== ControlPaths.waitlist))
+      ) {
         return Response.redirect(`${APP_ORIGIN}${url.pathname}${url.search}`, 302)
       }
       if (url.pathname.startsWith("/auth/")) return await handleAuth(request, env, url)

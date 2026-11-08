@@ -64,6 +64,8 @@ import {
   UserBox,
   Usage,
   UsageActivity,
+  WaitlistSignup,
+  type WaitlistSignupBody,
   type UseBankedResetBody,
   UseBankedResetResult,
 } from "@cloudagents/protocol"
@@ -644,6 +646,8 @@ export const api = {
   // Control plane (served by the Worker).
   me: () => run(request(Me, "GET", ControlPaths.me)),
   logout: () => run(Effect.asVoid(request(Schema.Unknown, "POST", ControlPaths.logout))),
+  /** Public waitlist signup on the marketing site; no session is required. */
+  joinWaitlist: (body: WaitlistSignupBody) => run(request(WaitlistSignup, "POST", ControlPaths.waitlist, body)),
   /**
    * Stored accounts and keys from the Worker, with the CLI logins and harness availability of the active box. The box
    * is captured once, so rows always describe one box; a box that cannot answer leaves the stored accounts manageable
