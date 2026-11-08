@@ -42,13 +42,13 @@ const terminalCommand = (argv: ReadonlyArray<string>): ReadonlyArray<string> | n
 }
 
 /*
- * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). The first login — the layout every box had
- * before multiple accounts — is written by the unmodified CLI into `<dataDir>/users/<login>/<provider dir>` and keeps
- * the id `default`. Every additional page login gets a fresh, isolated home at
- * `<dataDir>/users/<login>/accounts/<account id>/` with its own `<provider dir>` and HOME; the CLI itself reads and
- * refreshes each one. The selected account per provider lives in `<dataDir>/users/<login>/.kestrel-cli-auth.json`.
- * Only a login flag, an account label and the provider's own sign-in link or device code leave this module: never
- * tokens, key fragments or file contents.
+ * Per-user subscription logins of the agent CLIs (Claude Pro/Max, ChatGPT). A login made outside Kestrel, and the one
+ * every box had before multiple accounts, lives in `<dataDir>/users/<login>/<provider dir>` and is shown as `default`;
+ * it is read as-is and never moved. Every sign-in started from Connections — including a user's first — fills a fresh,
+ * isolated home at `<dataDir>/users/<login>/accounts/<account id>/` with its own `<provider dir>` and HOME; the CLI
+ * itself reads and refreshes each one. The selected account per provider lives in
+ * `<dataDir>/users/<login>/.kestrel-cli-auth.json`. Only a login flag, an account label and the provider's own sign-in
+ * link or device code leave this module: never tokens, key fragments or file contents.
  */
 
 const USER_PATTERN = /^[A-Za-z0-9-]{1,39}$/
@@ -804,10 +804,19 @@ export const CliAuthLive = Layer.effect(
       })
 
     /**
+     * Status probes are CLI launches, and a status read probes every login of the provider. A successful answer this
+     * fresh is reused so a pending sign-in's 3-second poll does not launch one child per account every time; a failed
+     * probe is not cached, so **Check again** still retries immediately.
+     */
+    const probeCache = new Map<string, { readonly at: number; readonly probe: AccountProbe }>()
+    const PROBE_CACHE_MS = 10_000
+    const PROBE_CACHE_MAX = 128
+
+    /**
      * One login of one provider as the box sees it. A CLI the box cannot run (not installed where the sandbox looks, or
      * failing) reports why in `error` rather than failing the whole status, so the other CLI still shows.
      */
-    const probeAccount = (
+    const probeAccountUncached = (
       user: string,
       provider: CliProvider,
       accountId: string,
@@ -876,6 +885,27 @@ export const CliAuthLive = Layer.effect(
           ),
         )
         return { id: accountId, home, dir, present, status }
+      })
+
+    /** A probe as the cache remembers it, or a fresh one; failed probes are retried rather than reused. */
+    const probeAccount = (
+      user: string,
+      provider: CliProvider,
+      accountId: string,
+    ): Effect.Effect<AccountProbe, BadRequest> =>
+      Effect.gen(function* () {
+        const key = accountKey(user, provider, accountId)
+        const cached = probeCache.get(key)
+        if (cached !== undefined && Date.now() - cached.at < PROBE_CACHE_MS) return cached.probe
+        const probe = yield* probeAccountUncached(user, provider, accountId)
+        if (probe.status.error !== undefined) return probe
+        probeCache.set(key, { at: Date.now(), probe })
+        while (probeCache.size > PROBE_CACHE_MAX) {
+          const oldest = probeCache.keys().next().value
+          if (oldest === undefined) break
+          probeCache.delete(oldest)
+        }
+        return probe
       })
 
     /**
@@ -1240,6 +1270,7 @@ export const CliAuthLive = Layer.effect(
           return yield* Effect.fail(new BadRequest({ message: detail === "" ? "the code was rejected" : detail }))
         }
         // The new login is listed now; if nothing else is active, it becomes the provider's active login.
+        probeCache.delete(accountKey(user, provider, entry.accountId))
         return yield* readProviderStatus(user, provider)
       })
 
@@ -1266,6 +1297,7 @@ export const CliAuthLive = Layer.effect(
         usageCache.delete(key)
         usageRuns.delete(key)
         usageEpochs.delete(key)
+        probeCache.delete(key)
         if (provider === "opencode-go") goKeyCache.delete(accountKey(user, provider, target))
         // Only this account's pending sign-in is cancelled; the provider's other logins are untouched.
         const current = pending.get(pendingKey(user, provider, target))
@@ -1342,6 +1374,7 @@ export const CliAuthLive = Layer.effect(
         const cacheKey = accountKey(user, provider, accountId)
         usageCache.delete(cacheKey)
         goKeyCache.delete(cacheKey)
+        probeCache.delete(cacheKey)
         usageEpochs.set(cacheKey, (usageEpochs.get(cacheKey) ?? 0) + 1)
         const result = yield* readProviderStatus(user, provider)
         if (!result.loggedIn) return yield* Effect.fail(new InternalError({ message: `${spec.bin} did not store the key` }))
