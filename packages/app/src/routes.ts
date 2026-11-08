@@ -1,6 +1,6 @@
 /**
  * One build serves two hosts:
- * - the public site (`kestrel-agent.com`, `www.`; locally `site.localhost:<port>`): landing at `/`, pricing at `/pricing`;
+ * - the public site (`kestrel-agent.com`, `www.`; locally `site.localhost:<port>`): landing at `/`, pricing at `/pricing`, waitlist at `/waitlist`;
  * - the app (`app.kestrel-agent.com`, workers.dev Previews, `localhost:<port>`): new chat at `/`, threads at `/c/:id`.
  */
 const { hostname, protocol, port } = window.location

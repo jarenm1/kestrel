@@ -79,6 +79,9 @@ export function PublicShell() {
           <NavLink to="/download" className={navLinkClass}>
             Download
           </NavLink>
+          <NavLink to="/waitlist" className={navLinkClass}>
+            Waitlist
+          </NavLink>
           <a
             href={GITHUB_URL}
             target="_blank"

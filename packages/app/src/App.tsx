@@ -27,6 +27,7 @@ import {
   ThreadsSettings,
 } from "@/pages/SettingsPage"
 import { ThreadPage } from "@/pages/ThreadPage"
+import { WaitlistPage } from "@/pages/WaitlistPage"
 import { WorkspaceLayout } from "@/pages/WorkspaceLayout"
 import { APP_HOME, APP_ORIGIN, IS_SITE_HOST, threadPath } from "@/routes"
 import { errorText } from "@/util"
@@ -40,6 +41,7 @@ export function App() {
           <Route path="/" element={<LandingPage />} />
           <Route path="/pricing" element={<PricingPage />} />
           <Route path="/download" element={<DownloadPage />} />
+          <Route path="/waitlist" element={<WaitlistPage />} />
         </Route>
         <Route path="*" element={<AppHostRedirect />} />
       </Routes>
