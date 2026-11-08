@@ -146,8 +146,10 @@ describe("cliBwrapArgs", () => {
       mkdirSync(join(accounts, "other"), { recursive: true })
       writeFileSync(join(accounts, "other", "token"), "SECRET")
       writeFileSync(join(home, "own-login"), "")
+      // Builtins only: the sandbox env is empty, so hosts without coreutils in the default PATH still run this.
+      const inspect = "for entry in *; do echo \"$entry\"; done; test -w accounts; read secret < accounts/other/token 2>/dev/null && echo \"$secret\"; true"
       const run = (mask: ReadonlyArray<string>) =>
-        spawnSync("bwrap", cliBwrapArgs(home, {}, ["sh", "-c", "ls -A; test -w accounts; cat accounts/other/token 2>&1"], {
+        spawnSync("bwrap", cliBwrapArgs(home, {}, ["sh", "-c", inspect], {
           level: "basic",
           homeToolArgs: [],
           network: "none",
