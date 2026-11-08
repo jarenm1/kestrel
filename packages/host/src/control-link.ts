@@ -143,16 +143,30 @@ export class ControlLink {
     const frame = decoded.right
     switch (frame._tag) {
       case "command":
-        void this.runCommand(frame.commandId, frame.command)
+        this.runCommand(frame.commandId, frame.command).catch((error: unknown) =>
+          this.opts.log(`command ${frame.commandId} failed: ${errorMessage(error)}`),
+        )
         return
       case "lease":
-        this.opts.manager.setLease(frame.validUntil)
+        this.renewLease(frame.validUntil)
         return
       case "refused":
         this.opts.log(`control plane refused the connection: ${frame.reason}`)
         this.refused = true
         socket.close()
         return
+    }
+  }
+
+  /**
+   * A renewal that cannot be persisted is not applied: the lease stays as it was, so its lapse is still fenced, and the
+   * next renewal tries again. Nothing is thrown into the socket's message handler.
+   */
+  private renewLease(validUntil: number): void {
+    try {
+      this.opts.manager.setLease(validUntil)
+    } catch (error) {
+      this.opts.log(`cannot persist the control lease: ${errorMessage(error)}`)
     }
   }
 

@@ -60,15 +60,38 @@ describe("commands received before the lease lapsed or the connection dropped", 
     expect(manager.pendingResults().filter((outcome) => outcome.commandId === "cmd-resume")).toHaveLength(1)
   })
 
-  test("a lapse the policy tick already fenced does not refuse a resend that arrives with the renewal", async () => {
+  test("a command received during a lapse the tick fenced is refused even when renewal arrives before it runs", async () => {
     const { manager, applied, open } = fixture()
     manager.setLease(Date.now() + 60_000)
     manager.setLease(Date.now() - 1)
     ;(manager as unknown as { tick: () => void }).tick()
-    const resent = manager.execute("cmd-resend", resumeCommand(1))
+    const received = manager.execute("cmd-resend", resumeCommand(1))
     manager.setLease(Date.now() + 60_000)
     open()
-    expect((await resent)?.outcome).toMatchObject({ commandId: "cmd-resend", ok: true })
+    expect((await received)?.outcome).toMatchObject({ commandId: "cmd-resend", ok: false })
+    expect(manager.pendingResults()).toEqual([])
+    expect(applied).toEqual([])
+  })
+
+  test("a command received during a lapse the tick did not see is refused the same way, even when renewal arrives before it runs", async () => {
+    const { manager, applied, open } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    const received = manager.execute("cmd-resend", resumeCommand(1))
+    manager.setLease(Date.now() + 60_000)
+    open()
+    expect((await received)?.outcome).toMatchObject({ commandId: "cmd-resend", ok: false })
+    expect(manager.pendingResults()).toEqual([])
+    expect(applied).toEqual([])
+  })
+
+  test("a command received after renewal runs, and a resend of the refused command then runs too", async () => {
+    const { manager, applied } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    expect((await manager.execute("cmd-resend", resumeCommand(1)))?.outcome).toMatchObject({ ok: false })
+    manager.setLease(Date.now() + 60_000)
+    expect((await manager.execute("cmd-resend", resumeCommand(1)))?.outcome).toMatchObject({ ok: true })
     expect(applied).toEqual(["resume"])
   })
 

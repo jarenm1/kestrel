@@ -34,6 +34,8 @@ export interface TestManager {
   readonly open: () => void
   /** Where the lease is persisted, for a test that makes the write fail. */
   readonly leasePath: string
+  /** Where command outcomes are stored, for a test that makes the write fail. */
+  readonly commandsPath: string
   readonly dispose: () => void
 }
 
@@ -86,6 +88,7 @@ export const newTestManager = (): TestManager => {
     started,
     open,
     leasePath: layout.leasePath,
+    commandsPath: layout.commandsPath,
     dispose: () => rmSync(root, { recursive: true, force: true }),
   }
 }

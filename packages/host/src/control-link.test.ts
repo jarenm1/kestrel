@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, rmSync } from "node:fs"
 import { WebSocketServer, type WebSocket } from "ws"
 import { ControlLink } from "./control-link"
 import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
@@ -46,6 +47,12 @@ const connect = async (manager: VmManager) => {
     executed.push(commandId)
     return execute(commandId, command)
   }
+  const leaseCalls: number[] = []
+  const setLease = manager.setLease.bind(manager)
+  manager.setLease = (validUntil) => {
+    leaseCalls.push(validUntil)
+    return setLease(validUntil)
+  }
   const link = new ControlLink({
     controlUrl: `ws://127.0.0.1:${port}`,
     hostId: "host-1",
@@ -59,7 +66,7 @@ const connect = async (manager: VmManager) => {
   link.start()
   cleanup.push(() => link.stop())
   await waitFor(() => peers.length === 1 && hasFrame(peers[0] as Peer, "hello"), "hello")
-  return { peers, peer: peers[0] as Peer, executed }
+  return { peers, peer: peers[0] as Peer, executed, leaseCalls }
 }
 
 const hasFrame = (peer: Peer, tag: string): boolean => peer.frames.some((frame) => frame._tag === tag)
@@ -153,6 +160,44 @@ describe("control link with the real manager", () => {
     expect(resultFor(peer, "cmd-busy")).toMatchObject({ ok: true })
     expect(fixture.applied).toEqual(["destroy"])
     expect(fixture.manager.pendingResults().map((outcome) => outcome.commandId)).toEqual([])
+  })
+
+  test("a lease frame whose write fails does not take the link down, and later frames still apply", async () => {
+    const fixture: TestManager = newTestManager()
+    cleanup.push(fixture.dispose)
+    fixture.open()
+    fixture.manager.setLease(Date.now() + 60_000)
+    const { peer, executed, leaseCalls } = await connect(fixture.manager)
+
+    rmSync(fixture.leasePath)
+    mkdirSync(fixture.leasePath)
+    const renewal = Date.now() + 60_000
+    sendLease(peer, renewal)
+    await waitFor(() => leaseCalls.includes(renewal), "the failed renewal to reach the manager")
+
+    rmSync(fixture.leasePath, { recursive: true })
+    sendCommand(peer, "cmd-after", destroyCommand(1))
+    await waitFor(() => resultFor(peer, "cmd-after") !== undefined, "a result after the failed renewal")
+    expect(resultFor(peer, "cmd-after")).toMatchObject({ ok: true })
+    expect(executed).toContain("cmd-after")
+  })
+
+  test("a command whose outcome cannot be stored does not take the link down", async () => {
+    const fixture: TestManager = newTestManager()
+    cleanup.push(fixture.dispose)
+    fixture.open()
+    fixture.manager.setLease(Date.now() + 60_000)
+    const { peer } = await connect(fixture.manager)
+
+    rmSync(fixture.commandsPath, { force: true })
+    mkdirSync(fixture.commandsPath)
+    sendCommand(peer, "cmd-unstored", destroyCommand(1))
+    await sleep(100)
+
+    rmSync(fixture.commandsPath, { recursive: true })
+    sendCommand(peer, "cmd-after-store", destroyCommand(1))
+    await waitFor(() => resultFor(peer, "cmd-after-store") !== undefined, "a result after the failed store")
+    expect(resultFor(peer, "cmd-after-store")).toMatchObject({ ok: true })
   })
 
   test("a command resent after reconnect, once its result was reported, is answered from the store and does not run again", async () => {
