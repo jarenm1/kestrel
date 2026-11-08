@@ -14,7 +14,7 @@ const fakeManager = (refuse = false) => {
     route: (boxId: string) => ({ state: "running", upstream: `http://10.77.0.2:8787#${boxId}` }),
     wake: async (boxId: string) => `http://10.77.0.2:8787#${boxId}`,
     reportActivity: () => undefined,
-    execute: async (commandId: string, command: NestHostCommand) => {
+    executeOperator: async (commandId: string, command: NestHostCommand) => {
       commands.push(command)
       const outcome = refuse
         ? { commandId, boxId: command.boxId, ok: false, error: "refused", reported: false }

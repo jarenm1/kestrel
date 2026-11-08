@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite"
 import { beforeEach, describe, expect, test } from "bun:test"
 import {
   NEST_ENROLL_TOKEN_TTL_MS,
+  NEST_LAPSE_REFUSAL,
   NEST_LEASE_MS,
   type NestControlFrame,
   type NestHostCapacity,
@@ -9,7 +10,7 @@ import {
   type NestVmReport,
 } from "@cloudagents/protocol"
 import type { FleetSql } from "./fleet-table"
-import { NEST_STANDARD_LIMITS } from "./nest-control"
+import { MAX_LAPSE_RETRIES, NEST_STANDARD_LIMITS } from "./nest-control"
 import { NestFleet, type NestLink } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 
@@ -665,6 +666,213 @@ describe("park and GPU", () => {
     expect(fleet.gpu("alice", "box-1", true)).toMatchObject({ ok: false, status: 409, tag: "GpuAttached" })
     expect(fleet.gpu("alice", "box-1", false)).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "gpuDetach").command).toMatchObject({ boxId: "box-1" })
+  })
+})
+
+describe("reconnect", () => {
+  test("a hello sends the lease before it resends in-flight commands, so a resend reaches a host with a valid lease", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    expect(lastCommand("host-a", "create").command._tag).toBe("create")
+    disconnect("host-a")
+
+    const before = sent.length
+    await hello("host-a")
+    const reconnect = sent.slice(before).filter((entry) => entry.hostId === "host-a")
+    const leaseAt = reconnect.findIndex((entry) => entry.frame._tag === "lease")
+    const resendAt = reconnect.findIndex((entry) => entry.frame._tag === "command")
+    expect(resendAt).toBeGreaterThanOrEqual(0)
+    expect(leaseAt).toBeGreaterThanOrEqual(0)
+    expect(leaseAt).toBeLessThan(resendAt)
+  })
+})
+
+describe("a park or destroy the host refused for a lapse", () => {
+  const commandsSince = (before: number, hostId = "host-a") =>
+    sent.slice(before).filter((entry) => entry.hostId === hostId && entry.frame._tag === "command")
+
+  test.each(["park", "destroy"] as const)(
+    "a refused %s is sent again on the host's next lease renewal, not before",
+    async (action) => {
+      const vmId = await runningBox()
+      const request = action === "park" ? () => fleet.park("alice", "box-1") : () => fleet.destroy("alice", "box-1")
+      expect(request()).toEqual({ ok: true, value: null })
+      const first = lastCommand("host-a", action)
+      const before = sent.length
+
+      fleet.result("host-a", first.commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+      expect(commandsSince(before)).toHaveLength(0)
+
+      await fleet.capacity("host-a", capacityOf(8))
+      const resend = commandsSince(before)
+      expect(resend).toHaveLength(1)
+      expect(resend[0]?.frame).toMatchObject({ _tag: "command", command: { _tag: action, boxId: "box-1", ownerEpoch: 1 } })
+      expect((resend[0]?.frame as { commandId: string }).commandId).not.toBe(first.commandId)
+    },
+  )
+
+  test("a refused park is sent again at most MAX_LAPSE_RETRIES times in a row, then dropped", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    let id = lastCommand("host-a", "park").commandId
+    for (let attempt = 1; attempt <= MAX_LAPSE_RETRIES; attempt++) {
+      fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+      const before = sent.length
+      await fleet.capacity("host-a", capacityOf(8))
+      expect(commandsSince(before)).toHaveLength(1)
+      id = lastCommand("host-a", "park").commandId
+    }
+
+    fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before)).toHaveLength(0)
+
+    // The owner's next request starts a fresh run.
+    expect(fleet.park("alice", "box-1")).toEqual({ ok: true, value: null })
+    expect(commandsSince(before)).toHaveLength(1)
+  })
+
+  test("a park refused for another reason is not sent again", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    const first = lastCommand("host-a", "park")
+    const before = sent.length
+
+    fleet.result("host-a", first.commandId, false, "backup failed", vmReport("box-1", vmId, 1, "running"))
+    await fleet.capacity("host-a", capacityOf(8))
+
+    expect(commandsSince(before)).toHaveLength(0)
+  })
+
+  test("a command that runs clears the run's count and any owed resend", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    const first = lastCommand("host-a", "park")
+    fleet.result("host-a", first.commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    await fleet.capacity("host-a", capacityOf(8))
+    const second = lastCommand("host-a", "park")
+    fleet.result("host-a", second.commandId, true, null, vmReport("box-1", vmId, 1, "parked"))
+
+    const stored = db
+      .query<{ retry_kind: string | null; retry_count: number }, []>("SELECT retry_kind, retry_count FROM nest_boxes WHERE box_id = 'box-1'")
+      .get()
+    expect(stored).toEqual({ retry_kind: null, retry_count: 0 })
+  })
+
+  test("an owner's newer request starts its own run: a destroy after an owed park gets the full bound of resends", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    fleet.result("host-a", lastCommand("host-a", "park").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    let id = lastCommand("host-a", "destroy").commandId
+    for (let attempt = 1; attempt <= MAX_LAPSE_RETRIES; attempt++) {
+      fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+      const before = sent.length
+      await fleet.capacity("host-a", capacityOf(8))
+      expect(commandsSince(before)).toHaveLength(1)
+      id = lastCommand("host-a", "destroy").commandId
+    }
+    fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before)).toHaveLength(0)
+  })
+
+  test("an ingress wake does not drop an owed destroy: the destroy goes out on the next renewal after the wake", async () => {
+    const vmId = await runningBox()
+    expect(fleet.suspend("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "suspend").commandId, true, null, vmReport("box-1", vmId, 1, "suspended"))
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "destroy").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "suspended"))
+
+    await fleet.wakeRequest("host-a", "box-1")
+    const resume = lastCommand("host-a", "resume")
+    fleet.result("host-a", resume.commandId, true, null, vmReport("box-1", vmId, 1, "running"))
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before).map((entry) => (entry.frame as { command: NestHostCommand }).command._tag)).toEqual(["destroy"])
+  })
+
+  test("an owner's limits change does not withdraw an owed destroy: it goes out on the next renewal after the change lands", async () => {
+    const vmId = await runningBox()
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "destroy").commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+
+    expect(fleet.setLimits("alice", "box-1", NEST_STANDARD_LIMITS)).toEqual({ ok: true, value: null })
+    fleet.result("host-a", lastCommand("host-a", "setLimits").commandId, true, null, vmReport("box-1", vmId, 1, "running"))
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(commandsSince(before).map((entry) => (entry.frame as { command: NestHostCommand }).command._tag)).toEqual(["destroy"])
+  })
+
+  test("an owner's newer request replaces an owed resend, which is not sent later", async () => {
+    const vmId = await runningBox()
+    fleet.park("alice", "box-1")
+    const first = lastCommand("host-a", "park")
+    fleet.result("host-a", first.commandId, false, NEST_LAPSE_REFUSAL, vmReport("box-1", vmId, 1, "running"))
+    expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
+    const destroy = lastCommand("host-a", "destroy")
+    const before = sent.length
+
+    fleet.result("host-a", destroy.commandId, false, "boom", vmReport("box-1", vmId, 1, "running"))
+    await fleet.capacity("host-a", capacityOf(8))
+
+    expect(commandsSince(before)).toHaveLength(0)
+  })
+})
+
+describe("a create the host refused for a lapse", () => {
+  const creates = (before: number) =>
+    sent
+      .slice(before)
+      .filter((entry) => entry.hostId === "host-a" && entry.frame._tag === "command")
+      .map((entry) => (entry.frame as { command: NestHostCommand }).command)
+      .filter((command) => command._tag === "create")
+
+  test("is sent again on the next lease renewal, and the box is not failed", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const first = lastCommand("host-a", "create")
+    fleet.result("host-a", first.commandId, false, NEST_LAPSE_REFUSAL, undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(false)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    const resend = creates(before)
+    expect(resend).toHaveLength(1)
+    expect(resend[0]).toMatchObject({ _tag: "create", boxId: "box-1", ownerEpoch: 1 })
+    expect(lastCommand("host-a", "create").commandId).not.toBe(first.commandId)
+  })
+
+  test("fails the box once the bound is reached", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    let id = lastCommand("host-a", "create").commandId
+    for (let attempt = 1; attempt <= MAX_LAPSE_RETRIES; attempt++) {
+      fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, undefined)
+      await fleet.capacity("host-a", capacityOf(8))
+      id = lastCommand("host-a", "create").commandId
+    }
+    fleet.result("host-a", id, false, NEST_LAPSE_REFUSAL, undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(true)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(creates(before)).toHaveLength(0)
+  })
+
+  test("a create refused for another reason fails the box at once, and is not sent again", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    fleet.result("host-a", lastCommand("host-a", "create").commandId, false, "disk full", undefined)
+    expect(fleet.statusesOf("alice").get("box-1")?.failed).toBe(true)
+
+    const before = sent.length
+    await fleet.capacity("host-a", capacityOf(8))
+    expect(creates(before)).toHaveLength(0)
   })
 })
 

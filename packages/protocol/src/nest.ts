@@ -39,6 +39,11 @@ export const NEST_MAX_GPUS = 16
 export const NEST_INVENTORY_CHUNK_VMS = 50
 /** Intended slack after a host's last lease before control moves that host's boxes (covers clock skew). Not enforced yet: no placement code reads it (see docs/nest.md). */
 export const NEST_FENCE_MARGIN_MS = 60_000
+/**
+ * The `error` of a command a host refused because its lease had lapsed: it did not run, so the control plane may send it
+ * again once the lease is renewed.
+ */
+export const NEST_LAPSE_REFUSAL = "control lease lapsed before the command ran"
 /** An enrollment token: 32 random bytes, base64url (the same form as every box secret). */
 export const NestEnrollToken = Schema.String.pipe(Schema.pattern(/^[A-Za-z0-9_-]{43}$/))
 /** A PCI address, e.g. `0000:01:00.0`. */

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import {
   GUEST_REPLY_TIMEOUT_MS,
   GUEST_STATUS_INTERVAL_MS,
+  NEST_LAPSE_REFUSAL,
   NEST_SWAP_SERIAL,
   NEST_VOLUME_SERIAL,
   type BoxActivity,
@@ -212,6 +213,12 @@ const createNewRecord = (fields: {
   lastError: null,
 })
 
+/** A command that ran (or was answered from the store), with the box's report after it. */
+export interface ExecutedCommand {
+  readonly outcome: CommandOutcome
+  readonly vm: NestVmReport | null
+}
+
 export class VmManager {
   readonly outbox: Outbox
   private readonly meter: Meter
@@ -224,6 +231,17 @@ export class VmManager {
   private readonly gpuReservations = new Map<string, string>()
   private readonly timers: ReturnType<typeof setInterval>[] = []
   private leaseUntil = 0
+  /** Bumped when the control socket closes. A command received under an older value may be resent by the control plane. */
+  private connectionGeneration = 0
+  /** Bumped when a lapse is first seen. A command received under an older value did not run under a valid lease. */
+  private leaseGeneration = 0
+  /** Whether the current lapse has already bumped `leaseGeneration`. The next lease clears it. */
+  private lapseFenced = false
+  /**
+   * Outcomes the command store could not write. A command that already ran is answered from here on a resend, so it
+   * does not run twice. Held in memory only: a restart loses them.
+   */
+  private readonly unrecorded = new Map<string, CommandOutcome>()
 
   constructor(
     private readonly config: HostConfig,
@@ -319,35 +337,97 @@ export class VmManager {
   /**
    * Runs one control command for a box. A command already answered (same `commandId`) returns the stored outcome.
    * The outcome is stored until the control plane confirms it (`markReported`).
+   *
+   * A command received before the control connection dropped is refused with null: it did not run and has no outcome,
+   * because the control plane resends it on the new connection. A command that was received while the lease was lapsed,
+   * that was received before a lapse on a connection that stayed up, or that reaches execution while the lease is
+   * lapsed, is refused with a failure and is not recorded, so the control plane learns of it at once and can re-place the
+   * box. Whether the policy tick had already seen the lapse makes no difference. Neither refusal runs the command or stores
+   * an outcome, so a later resend received under a valid lease runs fresh.
    */
-  execute(commandId: string, command: NestHostCommand): Promise<{ outcome: CommandOutcome; vm: NestVmReport | null }> {
+  execute(commandId: string, command: NestHostCommand): Promise<ExecutedCommand | null> {
+    const connection = this.connectionGeneration
+    const lease = this.leaseGeneration
+    const lapsedOnReceipt = Date.now() >= this.leaseUntil
     return this.serial(command.boxId, async () => {
-      const stored = findCommand(this.layout, commandId)
+      const stored = this.unrecorded.get(commandId) ?? findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
-      if (!isBoxId(command.boxId)) {
-        const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
-        recordCommand(this.layout, outcome)
-        return { outcome, vm: null }
+      if (connection !== this.connectionGeneration) return null
+      if (lapsedOnReceipt || lease !== this.leaseGeneration || Date.now() >= this.leaseUntil) {
+        const outcome: CommandOutcome = {
+          commandId,
+          boxId: command.boxId,
+          ok: false,
+          error: NEST_LAPSE_REFUSAL,
+          reported: false,
+        }
+        return { outcome, vm: this.reportOf(command.boxId) }
       }
-      let outcome: CommandOutcome
-      try {
-        await this.apply(command)
-        outcome = { commandId, boxId: command.boxId, ok: true, reported: false }
-      } catch (error) {
-        await this.failOperation(command.boxId, error)
-        outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
-      }
-      recordCommand(this.layout, outcome)
-      return { outcome, vm: this.reportOf(command.boxId) }
+      return this.applyCommand(commandId, command)
     })
   }
 
-  pendingResults(): CommandOutcome[] {
-    return pendingCommands(this.layout)
+  /** Runs one command from the local operator socket. A dropped control link does not refuse it: the operator asked here. */
+  executeOperator(commandId: string, command: NestHostCommand): Promise<ExecutedCommand> {
+    return this.serial(command.boxId, () => this.applyCommand(commandId, command))
   }
 
+  private async applyCommand(commandId: string, command: NestHostCommand): Promise<ExecutedCommand> {
+    if (!isBoxId(command.boxId)) {
+      const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
+      this.recordOutcome(outcome)
+      return { outcome, vm: null }
+    }
+    let outcome: CommandOutcome
+    try {
+      await this.apply(command)
+      outcome = { commandId, boxId: command.boxId, ok: true, reported: false }
+    } catch (error) {
+      await this.failOperation(command.boxId, error)
+      outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
+    }
+    this.recordOutcome(outcome)
+    return { outcome, vm: this.reportOf(command.boxId) }
+  }
+
+  /** Stores an outcome. When the store cannot be written, the outcome is kept in memory and the failure is reported. */
+  private recordOutcome(outcome: CommandOutcome): void {
+    try {
+      recordCommand(this.layout, outcome)
+    } catch (error) {
+      this.unrecorded.set(outcome.commandId, outcome)
+      this.events.error(`cannot record command ${outcome.commandId}; kept in memory: ${errorMessage(error)}`)
+    }
+  }
+
+  pendingResults(): CommandOutcome[] {
+    return [...this.storedPending(), ...[...this.unrecorded.values()].filter((outcome) => !outcome.reported)]
+  }
+
+  /** The unreported outcomes on disk. A store that cannot be read reports none, and says so. */
+  private storedPending(): CommandOutcome[] {
+    try {
+      return pendingCommands(this.layout)
+    } catch (error) {
+      this.events.error(`cannot read the command store: ${errorMessage(error)}`)
+      return []
+    }
+  }
+
+  /**
+   * The control plane has the outcome. An unrecorded outcome stays in memory for dedupe, since a resend must still find
+   * it; it only stops being pending.
+   */
   markReported(commandIds: readonly string[]): void {
-    markCommandsReported(this.layout, commandIds)
+    for (const id of commandIds) {
+      const held = this.unrecorded.get(id)
+      if (held !== undefined) this.unrecorded.set(id, { ...held, reported: true })
+    }
+    try {
+      markCommandsReported(this.layout, commandIds)
+    } catch (error) {
+      this.events.error(`cannot mark commands reported: ${errorMessage(error)}`)
+    }
   }
 
   /** Every VM this host holds, except destroyed or evicted ones. */
@@ -379,8 +459,17 @@ export class VmManager {
   }
 
   setLease(validUntil: number): void {
+    // Written first: a lease that fails to persist changes nothing here, so a failed renewal leaves the lapse state alone.
     writeLeaseUntil(this.layout.leasePath, validUntil)
+    // A lease that lapsed while no policy tick ran still ends its window here, before the renewal can let old commands run.
+    if (!this.lapseFenced && Date.now() >= this.leaseUntil) this.leaseGeneration += 1
+    this.lapseFenced = false
     this.leaseUntil = validUntil
+  }
+
+  /** The control socket closed: queued commands are refused at execution, since the control plane resends them on reconnect. */
+  connectionLost(): void {
+    this.connectionGeneration += 1
   }
 
   reportActivity(boxes: readonly IngressActivity[]): void {
@@ -1302,6 +1391,10 @@ export class VmManager {
   private tick(): void {
     const now = Date.now()
     const lapsed = now >= this.leaseUntil
+    if (lapsed && !this.lapseFenced) {
+      this.lapseFenced = true
+      this.leaseGeneration += 1
+    }
     const tight = this.isDiskTight()
     if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
     for (const vm of this.records.values()) {

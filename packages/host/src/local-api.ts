@@ -77,7 +77,7 @@ export const handleOperatorRequest = async (manager: VmManager, request: Request
       if (operator !== undefined && request.method === "POST") {
         const ownerEpoch = manager.epochOf(boxId)
         if (ownerEpoch === null) return json({ error: `unknown box ${boxId}` }, 404)
-        const { outcome, vm } = await manager.execute(randomUUID(), { _tag: operator, boxId, ownerEpoch })
+        const { outcome, vm } = await manager.executeOperator(randomUUID(), { _tag: operator, boxId, ownerEpoch })
         return json({ ok: outcome.ok, error: outcome.error ?? null, vm }, outcome.ok ? 200 : 409)
       }
     }

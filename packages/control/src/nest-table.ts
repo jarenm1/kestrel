@@ -38,12 +38,20 @@ export const ensureNestTables = (sql: FleetSql): void => {
     pending_kind TEXT,
     pending_command TEXT,
     pending_deadline INTEGER,
-    create_failed INTEGER NOT NULL DEFAULT 0
+    create_failed INTEGER NOT NULL DEFAULT 0,
+    retry_kind TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    boot_reserved INTEGER NOT NULL DEFAULT 0
   )`)
-  // Tables created before `create_failed` get it here; existing boxes did not fail a create.
+  // Tables created before `create_failed`, the retry columns or `boot_reserved` get them here; existing boxes have
+  // nothing owed.
   const boxColumns = sql.exec<{ name: string }>("PRAGMA table_info(nest_boxes)").toArray()
   if (!boxColumns.some((c) => c.name === "create_failed")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN create_failed INTEGER NOT NULL DEFAULT 0")
+  }
+  if (!boxColumns.some((c) => c.name === "retry_kind")) sql.exec("ALTER TABLE nest_boxes ADD COLUMN retry_kind TEXT")
+  if (!boxColumns.some((c) => c.name === "retry_count")) {
+    sql.exec("ALTER TABLE nest_boxes ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
   }
   if (!boxColumns.some((c) => c.name === "boot_reserved")) {
     sql.exec("ALTER TABLE nest_boxes ADD COLUMN boot_reserved INTEGER NOT NULL DEFAULT 0")
@@ -77,6 +85,10 @@ export type NestBoxRow = {
   pendingDeadline: number | null
   /** The create command failed or timed out: the box has no VM and needs the owner to delete it. */
   createFailed: boolean
+  /** A create, park or destroy the host refused for a lapse, owed a resend at the next lease renewal; null when none is owed. */
+  retryKind: "create" | "park" | "destroy" | null
+  /** Lapse refusals in a row for the owed command; reset by a command that ran. */
+  retryCount: number
   bootReserved: boolean
 }
 
@@ -112,6 +124,8 @@ type NestBoxSqlRow = {
   pendingCommand: string | null
   pendingDeadline: number | null
   createFailed: number
+  retryKind: string | null
+  retryCount: number
   bootReserved: number
 }
 
@@ -119,7 +133,8 @@ const NEST_BOX_COLUMNS = `box_id AS boxId, login, host_id AS hostId, vm_id AS vm
   state, limits, volume_ref AS volumeRef, backed_up_at AS backedUpAt, image_id AS imageId, vcpus,
   memory_bytes AS memoryBytes, gpus, wake_wanted AS wakeWanted, enroll_hash AS enrollHash,
   enroll_expires_at AS enrollExpiresAt, pending_id AS pendingId, pending_kind AS pendingKind,
-  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed, boot_reserved AS bootReserved`
+  pending_command AS pendingCommand, pending_deadline AS pendingDeadline, create_failed AS createFailed,
+  retry_kind AS retryKind, retry_count AS retryCount, boot_reserved AS bootReserved`
 
 const decodeLimits = Schema.decodeUnknownSync(NestLimits)
 /**
@@ -154,6 +169,8 @@ const toBoxRow = (row: NestBoxSqlRow): NestBoxRow => ({
   pendingCommand: row.pendingCommand === null ? null : decodeCommand(row.pendingCommand),
   pendingDeadline: row.pendingDeadline,
   createFailed: row.createFailed !== 0,
+  retryKind: row.retryKind as NestBoxRow["retryKind"],
+  retryCount: row.retryCount,
   bootReserved: row.bootReserved !== 0,
 })
 
@@ -161,8 +178,8 @@ export const insertNestBox = (sql: FleetSql, row: NestBoxRow): void => {
   sql.exec(
     `INSERT INTO nest_boxes (box_id, login, host_id, vm_id, owner_epoch, state, limits, volume_ref, backed_up_at,
       image_id, vcpus, memory_bytes, gpus, wake_wanted, enroll_hash, enroll_expires_at, pending_id, pending_kind,
-      pending_command, pending_deadline, create_failed, boot_reserved)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      pending_command, pending_deadline, create_failed, retry_kind, retry_count, boot_reserved)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ...nestBoxBindings(row),
   )
 }
@@ -173,7 +190,7 @@ export const saveNestBox = (sql: FleetSql, row: NestBoxRow): void => {
     `UPDATE nest_boxes SET login = ?, host_id = ?, vm_id = ?, owner_epoch = ?, state = ?, limits = ?, volume_ref = ?,
       backed_up_at = ?, image_id = ?, vcpus = ?, memory_bytes = ?, gpus = ?, wake_wanted = ?, enroll_hash = ?,
       enroll_expires_at = ?, pending_id = ?, pending_kind = ?, pending_command = ?, pending_deadline = ?,
-      create_failed = ?, boot_reserved = ?
+      create_failed = ?, retry_kind = ?, retry_count = ?, boot_reserved = ?
      WHERE box_id = ?`,
     ...nestBoxBindings(row).slice(1),
     row.boxId,
@@ -202,6 +219,8 @@ const nestBoxBindings = (row: NestBoxRow): (string | number | null)[] => [
   row.pendingCommand === null ? null : JSON.stringify(row.pendingCommand),
   row.pendingDeadline,
   row.createFailed ? 1 : 0,
+  row.retryKind,
+  row.retryCount,
   row.bootReserved ? 1 : 0,
 ]
 
