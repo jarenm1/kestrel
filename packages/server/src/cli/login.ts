@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { hostname } from "node:os"
 import { configPath, DEFAULT_CONFIG, loadConfig, writeConfig } from "./config"
 import type { BoxConfig } from "./config"
+import { resolveBoxUrl } from "./network"
 import { CliError, openBrowser, sleep } from "./system"
 
 const POLL_INTERVAL_MS = 3_000
@@ -66,9 +67,11 @@ export const login = async (options: LoginOptions): Promise<void> => {
 
   const base: BoxConfig = existing ?? DEFAULT_CONFIG
   const controlUrl = (options.controlUrl ?? base.controlUrl).replace(/\/+$/, "")
+  const resolved = resolveBoxUrl(options.url, base.port)
+  if (resolved.source === "tailscale-serve") console.log(`Tailscale Serve publishes this box at ${resolved.url}; using it as the box URL.`)
   const body = decodeAs(
     PairingStartBody,
-    { name: (options.name ?? hostname()).trim(), url: options.url ?? `http://localhost:${base.port}` },
+    { name: (options.name ?? hostname()).trim(), url: resolved.url },
     "invalid --name or --url",
   )
 

@@ -145,7 +145,7 @@ export const macosInstall = async (options: MacInstallOptions): Promise<void> =>
 }
 
 /** Host-side checks, then the Linux doctor inside the VM when it is running. */
-export const macosDoctor = (): boolean => {
+export const macosDoctor = (network = false): boolean => {
   const limactl = onPath("limactl")
   const checks: Check[] = [
     { name: "limactl", required: true, ok: limactl !== null, detail: limactl ?? "missing (brew install lima)" },
@@ -174,7 +174,7 @@ export const macosDoctor = (): boolean => {
   })
   const hostOk = printChecks(checks)
   if (status !== "Running") return false
-  const inner = execInherit("limactl", ["shell", "--tty=false", VM, "--", "sh", "-lc", '"$HOME/.local/bin/kestrel-box" doctor'])
+  const inner = execInherit("limactl", ["shell", "--tty=false", VM, "--", "sh", "-lc", `"$HOME/.local/bin/kestrel-box" doctor${network ? " --network" : ""}`])
   return hostOk && inner === 0
 }
 

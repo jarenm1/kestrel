@@ -32,7 +32,7 @@ natively, inside WSL2 on Windows, or inside a Lima VM the CLI manages on macOS.
    needs a C compiler and the X11/Xdamage/Xfixes headers, otherwise the desktop is off), writes and starts the systemd
    user unit `kestrel-box.service`, and enables linger so it outlives logout. On macOS it does the same inside the VM.
 3. The box listens on `127.0.0.1:8787` and is used from the same machine at `http://localhost:8787`. To use it from
-   elsewhere (the mobile app, another computer), make that port reachable over HTTPS: a Cloudflare Tunnel, a reverse proxy on your own domain, or [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve). Those forward every path they are given, so do not point them at the box port directly. Point them at a local proxy that answers `/mcp` and `/broker` with 404 (the rules in `deploy/box-ingress.nix`; Caddy does this in a few lines). Then set that proxy's URL on the box in Settings › Boxes.
+   elsewhere (the mobile app, another computer), make that port reachable over HTTPS: a Cloudflare Tunnel, a reverse proxy on your own domain, or [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve). Point them at the box port directly: the agent-only paths (`/mcp`, `/broker`, `/gh/`) live on a separate listener bound to loopback (`CLOUDAGENTS_SANDBOX_PORT`), so no tunnel pointed at the box port can reach them. Then set that URL on the box in Settings › Boxes.
 
 Other commands: `status`, `logs`, `doctor`, `config` (secret redacted), `run` (what the service executes),
 `uninstall [--purge]` (macOS: `--delete-vm --yes`). The box needs `bwrap`, `git` and the agent CLIs (`claude`,
@@ -168,7 +168,7 @@ flowchart LR
 - Endpoints must be HTTPS (the app is HTTPS). Supported setups: Tailscale (`*.ts.net`, tailnet or Funnel), Cloudflare
   Tunnel, or the user's own domain. A tailnet-only address is a private-network target; Chrome asks before a public site
   reaches it. Public tunnels avoid that prompt; the mobile app is not affected.
-- `/mcp`, `/broker` and `/gh/` are never public. The box serves them only to its own sandboxes, so the HTTPS front must answer them with 404.
+- `/mcp`, `/broker` and `/gh/` are never public. The box serves them on a separate listener bound to `127.0.0.1` (`CLOUDAGENTS_SANDBOX_PORT`), reachable only from its own sandboxes; the public box port answers them with 404 on its own.
 - The web app shows the threads of every box at once. It opens one event stream per box (Kestrel's box through the
   Worker, each user box directly) and merges the lists; thread ids are globally unique UUIDs. Each thread's requests go
   to the box it lives on, found from the boxes' own listings. The control plane does not store the thread→box record
