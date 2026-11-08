@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { createHmac } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
 import { createSocket } from "node:dgram"
-import { classes, Message, methods, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
+import type { Socket } from "node:net"
+import { createServer as createTlsServer, createSecureContext } from "node:tls"
+import { classes, createSelfSignedCertificate, Message, methods, parseMessage, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
 import type { DesktopRtcServerMessage } from "@cloudagents/protocol"
 import { MediaTap } from "./rtp"
 import {
@@ -213,6 +215,100 @@ const remoteOffer = async (codec = "video/H264", profiles: readonly string[] = [
 /** The session's live peer is private; tests read the werift connection it built. */
 const peerOf = (session: DesktopRtcSession) => (session as unknown as { peer: { pc: RTCPeerConnection } }).peer
 
+/**
+ * In-process TURN allocation endpoints: UDP and TLS return different relay addresses after authenticated Allocate.
+ * No privileged ports, coturn, fixed certificate or outbound network. Media delivery is exercised by the coturn runner.
+ */
+const allocationServers = async (handshakeDelayMs = 0) => {
+  const { certPem, keyPem } = await createSelfSignedCertificate({ hash: 4, signature: 3 })
+  const realm = "turn-regression"
+  const nonce = Buffer.from("fixture-nonce")
+  const tlsAddress = ["203.0.113.71", 41001] as [string, number]
+  const udpAddress = ["203.0.113.72", 41002] as [string, number]
+  const response = (data: Buffer, username: string, password: string, address: [string, number]): Buffer | null => {
+    const request = parseMessage(data)
+    if (!request || request.messageClass !== classes.REQUEST) return null
+    if (!request.getAttributeValue("USERNAME")) {
+      return new Message(request.messageMethod, classes.ERROR, request.transactionId)
+        .setAttribute("ERROR-CODE", [401, "Unauthorized"]).setAttribute("REALM", realm).setAttribute("NONCE", nonce).bytes
+    }
+    const key = createHash("md5").update(`${username}:${realm}:${password}`).digest()
+    if (request.getAttributeValue("USERNAME") !== username || !parseMessage(data, key)) return null
+    return new Message(request.messageMethod, classes.RESPONSE, request.transactionId)
+      .setAttribute("XOR-RELAYED-ADDRESS", address).setAttribute("XOR-MAPPED-ADDRESS", ["127.0.0.1", 41000])
+      .setAttribute("LIFETIME", request.getAttributeValue("LIFETIME") === 0 ? 0 : 600).addMessageIntegrity(key).bytes
+  }
+  const udp = createSocket("udp4")
+  udp.on("message", (data, remote) => {
+    const answer = response(data, "udp-user", "udp-password", udpAddress)
+    if (answer) udp.send(answer, remote.port, remote.address)
+  })
+  const sockets = new Set<Socket>()
+  const timers = new Set<NodeJS.Timeout>()
+  const tls = createTlsServer({
+    key: keyPem, cert: certPem,
+    SNICallback(_name, done) {
+      const timer = setTimeout(() => { timers.delete(timer); done(null, createSecureContext({ key: keyPem, cert: certPem })) }, handshakeDelayMs)
+      timers.add(timer)
+    },
+  }, (socket) => {
+    let pending = Buffer.alloc(0)
+    socket.on("data", (data) => {
+      pending = Buffer.concat([pending, data])
+      while (pending.length >= 20 && pending.length >= pending.readUInt16BE(2) + 20) {
+        const size = pending.readUInt16BE(2) + 20
+        const answer = response(pending.subarray(0, size), "tls-user", "tls-password", tlsAddress)
+        pending = pending.subarray(size)
+        if (answer) socket.write(answer)
+      }
+    })
+  })
+  // Include sockets whose TLS handshake has not completed, so timeout tests also clean up completely.
+  tls.on("connection", (socket) => {
+    sockets.add(socket)
+    socket.on("close", () => sockets.delete(socket))
+    socket.on("error", () => {})
+  })
+  const udpReady = Promise.withResolvers<void>()
+  udp.once("listening", udpReady.resolve)
+  udp.once("error", udpReady.reject)
+  udp.bind(0, "127.0.0.1")
+  const tlsReady = Promise.withResolvers<void>()
+  tls.once("listening", tlsReady.resolve)
+  tls.once("error", tlsReady.reject)
+  tls.listen(0, "127.0.0.1")
+  await Promise.all([udpReady.promise, tlsReady.promise])
+  const tlsPort = tls.address()
+  if (!tlsPort || typeof tlsPort === "string") throw new Error("missing TLS listener")
+  const udpServer = { urls: [`turn:127.0.0.1:${udp.address().port}?transport=udp`], username: "udp-user", credential: "udp-password" }
+  const tlsServer = { urls: ["turns:fixture.invalid:443?transport=tcp"], username: "tls-user", credential: "tls-password" }
+  const original = RTCPeerConnection.prototype.setLocalDescription
+  // Route only the fixture's canonical TLS/443 endpoint to an ephemeral local TLS port. Preserve werift's selected
+  // transport, credentials and timeout: the test must authenticate and allocate over that transport to publish a relay.
+  RTCPeerConnection.prototype.setLocalDescription = new Proxy(original, {
+    apply(target, pc: RTCPeerConnection, args: unknown[]) {
+      for (const { connection } of pc.iceTransports) {
+        if (connection.turnServer?.[0] !== "fixture.invalid") continue
+        connection.turnServer = ["127.0.0.1", tlsPort.port]
+        connection.options.turnTlsOptions = { ca: certPem, servername: "fixture.invalid", checkServerIdentity: () => undefined }
+      }
+      return Reflect.apply(target, pc, args)
+    },
+  })
+  return {
+    udpServer, tlsServer, tlsAddress, udpAddress,
+    close: async () => {
+      RTCPeerConnection.prototype.setLocalDescription = original
+      for (const timer of timers) clearTimeout(timer)
+      for (const socket of sockets) socket.destroy()
+      udp.close()
+      const closed = Promise.withResolvers<void>()
+      tls.close(() => closed.resolve())
+      await closed.promise
+    },
+  }
+}
+
 describe("withoutDefaultStun", () => {
   const answerer = async () => {
     const browser = await remoteOffer()
@@ -336,6 +432,61 @@ describe("DesktopRtcSession", () => {
       expect(filter?.({ remoteCandidate: { host: "fe80::1" } })).toBe(false)
     }
   })
+
+  test("managed TURN allocates the later TLS/443 endpoint with its own credentials", async () => {
+    const relay = await allocationServers()
+    const { s, sent } = session()
+    const browser = await remoteOffer()
+    closing.push(() => browser.close(), () => relay.close())
+    s.setIceServers([relay.udpServer, relay.tlsServer], true)
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const answer = sent.find((message) => message._tag === "rtc.answer")
+    if (!answer) throw new Error("no desktop answer")
+    expect(answer.sdp).toContain(` ${relay.tlsAddress[0]} ${relay.tlsAddress[1]} typ relay `)
+    expect(answer.sdp).not.toContain(` ${relay.udpAddress[0]} ${relay.udpAddress[1]} typ relay `)
+  })
+
+  test("operator TURN retains UDP-first allocation even when TLS/443 is listed later", async () => {
+    const relay = await allocationServers()
+    const { s, sent } = session()
+    const browser = await remoteOffer()
+    closing.push(() => browser.close(), () => relay.close())
+    s.setIceServers([relay.udpServer, relay.tlsServer], false)
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const answer = sent.find((message) => message._tag === "rtc.answer")
+    if (!answer) throw new Error("no desktop answer")
+    expect(answer.sdp).toContain(` ${relay.udpAddress[0]} ${relay.udpAddress[1]} typ relay `)
+    expect(answer.sdp).not.toContain(` ${relay.tlsAddress[0]} ${relay.tlsAddress[1]} typ relay `)
+  })
+
+  test("a managed list without TLS/443 still allocates its available UDP relay", async () => {
+    const relay = await allocationServers()
+    const { s, sent } = session()
+    const browser = await remoteOffer()
+    closing.push(() => browser.close(), () => relay.close())
+    s.setIceServers([relay.udpServer], true)
+    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
+    const answer = sent.find((message) => message._tag === "rtc.answer")
+    if (!answer) throw new Error("no desktop answer")
+    expect(answer.sdp).toContain(` ${relay.udpAddress[0]} ${relay.udpAddress[1]} typ relay `)
+  })
+
+  test("managed TLS gives up before a three-second handshake; operator TLS can still allocate", async () => {
+    // This integration case tests werift's real TLS socket deadline. Fake JS time cannot drive the platform handshake.
+    const relay = await allocationServers(3_000)
+    const managed = session()
+    const operator = session()
+    const browser = await remoteOffer()
+    closing.push(() => browser.close(), () => relay.close())
+    managed.s.setIceServers([relay.tlsServer], true)
+    operator.s.setIceServers([relay.tlsServer], false)
+    await Promise.all([managed, operator].map(({ s }) => s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })))
+    const managedAnswer = managed.sent.find((message) => message._tag === "rtc.answer")
+    const operatorAnswer = operator.sent.find((message) => message._tag === "rtc.answer")
+    if (!managedAnswer || !operatorAnswer) throw new Error("no desktop answer")
+    expect(managedAnswer.sdp).not.toContain("typ relay")
+    expect(operatorAnswer.sdp).toContain(` ${relay.tlsAddress[0]} ${relay.tlsAddress[1]} typ relay `)
+  }, 10_000)
 
   test("the viewer limit holds when every offer is answered at once", async () => {
     const before = activeRtcPeers()
