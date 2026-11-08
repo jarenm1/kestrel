@@ -9,6 +9,7 @@ import { externalClick, isPlainClick, threadHref, useTranscriptHost } from "./ho
 import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
 import { RunTranscript } from "./RunTranscript"
+import { RunSummary } from "./RunSummary"
 import { formatMessageTime } from "./time"
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
@@ -174,6 +175,21 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
   // After each user message a run took comes what the run showed until its next one, so a message that steered the run
   // (or waited in its inbox) reads at the point of the transcript where it was sent.
   const segments = transcriptSegments(sortedMessages)
+  const lastReplies = new Map<string, string>()
+  const finalSegments = new Map<string, string>()
+  for (const message of sortedMessages) {
+    if (message.runId !== null && message.role === "agent") lastReplies.set(message.runId, message.id)
+    const segment = segments.get(message.id)
+    if (segment?.to === null) finalSegments.set(segment.runId, message.id)
+  }
+  const summaries = new Map<string, Run>()
+  for (const run of runs) {
+    // Without items, the saved reply is still the visible answer; its footer belongs after it.
+    const anchor = (runItems[run.id]?.length ?? 0) > 0
+      ? finalSegments.get(run.id)
+      : lastReplies.get(run.id) ?? finalSegments.get(run.id)
+    if (anchor !== undefined) summaries.set(anchor, run)
+  }
 
   useLayoutEffect(() => {
     const el = threadRef.current
@@ -211,12 +227,13 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
           const duplicate =
             m.role === "agent" && m.options === undefined && m.runId !== null && (runItems[m.runId]?.length ?? 0) > 0
           const attachments = pending ? [] : (m.attachments ?? [])
+          const summaryRun = summaries.get(m.id)
           return (
             <Fragment key={m.id}>
               <ThreadItem
                 message={m}
                 hideText={duplicate || pending}
-                hideTime={pending || (duplicate && (runItems[m.runId!]?.some((item) => item._tag === "usage" || item._tag === "turn") ?? false))}
+                hideTime={pending || summaryRun !== undefined || (duplicate && runs.some((run) => run.id === m.runId))}
               >
                 {attachments.length > 0 ? (
                   <MessageAttachments
@@ -227,16 +244,18 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
                 ) : null}
               </ThreadItem>
               {segment !== undefined && (
-                <RunTranscript
-                  taskId={taskId}
-                  runId={segment.runId}
-                  items={runItems[segment.runId] ?? NO_ITEMS}
-                  running={runs.some((run) => run.id === segment.runId && run.status === "running")}
-                  from={segment.from}
-                  to={segment.to}
-                  fallbackTimestamp={m.createdAt}
-                />
+                <>
+                  <RunTranscript
+                    taskId={taskId}
+                    runId={segment.runId}
+                    items={runItems[segment.runId] ?? NO_ITEMS}
+                    running={runs.some((run) => run.id === segment.runId && run.status === "running")}
+                    from={segment.from}
+                    to={segment.to}
+                  />
+                </>
               )}
+              {summaryRun && <RunSummary run={summaryRun} items={runItems[summaryRun.id] ?? NO_ITEMS} />}
             </Fragment>
           )
         })}

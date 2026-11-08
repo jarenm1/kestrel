@@ -182,23 +182,23 @@ session, the run starts fresh with bounded conversation history. Prompts travel 
 never become portable conversation history. Catalog routes and validated provider-qualified runtime identities
 live in `packages/protocol`; discovery results remain scoped to the signed-in user and selected box.
 
-Claude Code and Codex responses carry a shared transcript usage strip: local completion time as a 12-hour
-clock with minutes, `in`, `out`, `cached`, and the response's output rate in `tok/s`. Each strip describes
-one model response, including intermediate tool-calling responses, not the whole agent turn. Input includes
-fresh and cache-write tokens but excludes cache reads; `cached` shows cache reads separately. Counts are
-compact, with exact values on hover; unreported buckets display `?`. Repeated Claude content blocks and Codex
-usage notifications do not create duplicate response strips.
-The rate divides output tokens by the response's own elapsed time, measured from its start to its latest
-completion report, so tool execution between responses is excluded; without both boundaries it shows `?`.
-The context meter remains a separate current-context measurement. Historical runs without response usage and
-ACP agents reporting only prompt/session totals retain a compact input/output footer with the same clock and
-rate, labelled `turn … tok/s` because it divides by the whole turn's reported duration, tool execution
-included; no per-response timing exists for them. Its input includes cached tokens, and no cache split is
-guessed. Each turn with main-agent response strips suppresses its aggregate footer, without suppressing totals
-for other turns in the same run. Subagent strips do not suppress the main turn's footer. Cost is not displayed;
-failures remain visible with either usage format. An agent reply always shows its message time, on the same
-clock, unless the run transcript directly below it already dates the response; old turns recorded without
-their own timestamp fall back to the reply's message time.
+Every harness uses one compact completed-run disclosure in the shared desktop/phone transcript, inspired by
+[T3 Code's timing presentation](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/chat/MessagesTimeline.logic.ts).
+Its “Worked for …” duration uses Kestrel's persisted `Run.startedAt` and `endedAt`, not provider-reported
+response or turn durations. This wall-clock span includes queueing, startup, tools and waiting. Durations use
+milliseconds below one second, tenths below ten seconds, then seconds/minutes/hours, rounding before choosing
+the unit. Failed and stopped runs retain their status and measured elapsed time. Restart-reconciled runs show
+“Interrupted by restart” without counting downtime as work; missing or invalid boundaries never invent a duration.
+The completion clock stays on the collapsed row. Steering splits the content but not the run summary.
+Saved replies without loaded transcript items keep the summary after their answer.
+
+Expanding the disclosure reveals elapsed time, total input (including cache), cached input where reported,
+output, and average output tokens divided by the same wall-clock span. This average includes tools and waiting;
+it is not model-generation speed. Tokens come from completed turn aggregates, never added to response counts.
+Incomplete, failed or stopped invocations do not present partial token totals as complete; unreported values
+say “Not reported” rather than showing `? tok/s`. Cached input uses only main-agent response usage, excluding
+subagent rows. Counts are compact with exact values on hover. Per-response metadata remains stored but no longer
+creates rows or splits consecutive tool groups. The context meter remains a separate current-context measurement.
 
 OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
 providers through the model picker rather than introducing a separate per-thread harness control.
