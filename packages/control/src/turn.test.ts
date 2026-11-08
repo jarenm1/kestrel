@@ -77,7 +77,9 @@ const byobHeaders = { authorization: "Bearer byob-secret", [BOX_ID_HEADER]: "byo
 
 describe("POST /box/turn", () => {
   test("refuses a caller that proves no box, before any provider call", async () => {
-    expect((await send()).status).toBe(401)
+    const unauthorized = await send()
+    expect(unauthorized.status).toBe(401)
+    expect(await unauthorized.json()).toMatchObject({ issue: "control-rejected" })
     expect((await send({ authorization: "Bearer wrong" })).status).toBe(401)
     // An id without a secret, or a secret for a box in neither registry.
     expect((await send({ authorization: "Bearer managed-secret" })).status).toBe(401)
@@ -130,8 +132,9 @@ describe("POST /box/turn", () => {
     const missingToken = envWith({ KESTREL_TURN_API_TOKEN: undefined })
     const halfConfigured = await send({ authorization: "Bearer m-secret", [BOX_ID_HEADER]: "m-half" }, missingToken)
     expect(halfConfigured.status).toBe(502)
-    const body = (await halfConfigured.json()) as { _tag: string; message: string }
+    const body = (await halfConfigured.json()) as { _tag: string; message: string; issue?: string }
     expect(body._tag).toBe("BadGateway")
+    expect(body.issue).toBe("configuration-incomplete")
     expect(body.message).toContain("KESTREL_TURN_KEY_ID")
     expect(body.message).toContain("KESTREL_TURN_API_TOKEN")
     expect(body.message).not.toContain("provider-token")
@@ -214,9 +217,10 @@ describe("POST /box/turn", () => {
       expect(text).not.toContain("provider-token")
       expect(text).not.toContain("http://example.com")
       expect(text).not.toContain("not json")
-      const body = JSON.parse(text) as { _tag: string; message: string }
+      const body = JSON.parse(text) as { _tag: string; message: string; issue?: string }
       expect(body._tag).toBe("BadGateway")
       expect(body.message).toContain(testCase.message)
+      expect(body.issue).toBe(testCase.message === "provider is unavailable" ? "provider-unavailable" : "provider-unusable")
     }
     // Failures are not cached: every retry asked the provider again.
     expect(calls).toHaveLength(cases.length)

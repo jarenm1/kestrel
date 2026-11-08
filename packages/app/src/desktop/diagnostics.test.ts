@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test"
-import { serializeDiagnostics, type RtcDiagnostics } from "./diagnostics"
+import { diagnosticSummary, serializeDiagnostics, type RtcDiagnostics } from "./diagnostics"
 
 test("copied diagnostics cannot acquire credentials, addresses or raw reports through extra metadata", () => {
   const secret = "private-do-not-copy"
   // Structural extra fields model metadata accidentally attached by a future stats or signaling implementation.
   const box = {
-    turnSource: "managed", turnStatus: "configured", gathering: "complete", relayCandidates: 1, connection: "connected", failure: null,
+    turnSource: "managed", turnStatus: "unavailable", turnIssue: "provider-unavailable", gathering: "complete", relayCandidates: 0, connection: "connecting", failure: "turn-credentials",
     iceServers: [{ urls: [`turns://${secret}:443`], username: secret, credential: secret }],
   } as const
   const selectedPair = { local: "host", remote: "relay", protocol: "udp", relayProtocol: "tls", address: secret, url: secret } as const
@@ -18,7 +18,22 @@ test("copied diagnostics cannot acquire credentials, addresses or raw reports th
   } satisfies RtcDiagnostics & { sdp: string; token: string; rawStats: { credential: string } }
   const copied = serializeDiagnostics(report)
   expect(copied).not.toContain(secret)
+  expect(JSON.parse(copied).box.turnIssue).toBe("provider-unavailable")
   for (const field of ["iceServers", "username", "credential", "address", "url", "errorText", "sdp", "token", "rawStats"]) {
     expect(copied).not.toContain(`"${field}"`)
   }
+})
+
+test("a safe TURN issue identifies an operator fix before generic evidence", () => {
+  const report: RtcDiagnostics = {
+    attempt: 1, config: "ready", turnServers: 0, viewerRelayCandidates: 0, viewerGathering: "complete",
+    connection: "connecting", selectedPair: null, videoBytes: null, videoPackets: null, framesDecoded: null,
+    lastFailure: null, iceErrors: [],
+    box: {
+      turnSource: "managed", turnStatus: "unavailable", turnIssue: "configuration-incomplete",
+      gathering: "complete", relayCandidates: 0, connection: "connecting", failure: "turn-credentials",
+    },
+  }
+  expect(diagnosticSummary(report)).toContain("key id and API token")
+  expect(diagnosticSummary({ ...report, box: { ...report.box!, turnIssue: "expired" } })).toContain("box clock")
 })

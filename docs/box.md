@@ -214,6 +214,24 @@ The report distinguishes:
 - **Video:** received bytes/packets and decoded frames. Connected ICE with no packets differs from packets arriving without decoded frames. Decoded frames alone do not prove that the browser has painted them.
 - **Failures:** the current attempt's failure category, the box's failure category and bounded numeric browser ICE error codes by transport. The failure remains visible during retry backoff and is cleared when the next attempt begins. These are observations, not a diagnosis that a particular network blocks UDP.
 
+When the box could not get TURN credentials, `TURN issue` gives the safe cause:
+
+| Issue | Meaning |
+|---|---|
+| `control-timeout` | The box's HTTP request to the control plane timed out |
+| `control-unreachable` | The box could not reach the control plane |
+| `control-rejected` | The control plane rejected the box identity |
+| `configuration-incomplete` | Only one of the Worker's TURN settings is present |
+| `provider-unavailable` | Cloudflare TURN is unavailable to the Worker |
+| `provider-unusable` | Cloudflare returned an unusable TURN configuration |
+| `invalid-answer` | The control plane's answer was not valid TURN credentials |
+| `expired` | Credentials were already expired; check the box clock |
+| `no-usable-turn` | The answer contained no usable relay |
+| `local-incomplete` | Operator-configured TURN lacks usable credentials |
+| `control-error` | An unknown control-plane error, such as an older Worker without an issue code |
+
+An older box that does not send the field reports `None reported`; the rest of the box evidence still works.
+
 Reports contain only allowlisted states, counts, candidate/transport types and numeric error codes. They exclude credentials, tokens, addresses, URLs, SDP and raw provider/browser errors. Do not paste raw `rtc.config` messages: those carry short-lived TURN credentials. Diagnostics use the existing authenticated desktop socket; they do not add a telemetry upload or a media fallback.
 
 ##### TURN configuration

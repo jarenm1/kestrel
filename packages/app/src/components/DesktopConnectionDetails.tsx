@@ -10,6 +10,7 @@ export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnos
     ["Attempt / settings", `${d.attempt} / ${d.config}`],
     ["Authenticated TURN entries", String(d.turnServers)],
     ["Box TURN", d.box ? `${d.box.turnSource} / ${d.box.turnStatus}` : "Not reported by box"],
+    ["TURN issue", d.box?.turnIssue ?? "None reported"],
     ["Relay candidates", `Viewer ${d.viewerRelayCandidates} / box ${d.box?.relayCandidates ?? "unknown"}`],
     ["Gathering", `Viewer ${d.viewerGathering} / box ${d.box?.gathering ?? "unknown"}`],
     ["Connection", `Viewer ${d.connection} / box ${d.box?.connection ?? "unknown"}`],

@@ -423,12 +423,13 @@ describe("DesktopRtcSession", () => {
 
   test("reports a failed credential outcome before and after a real offer", async () => {
     const { s, sent } = session()
-    s.setIceServers([], false, { source: "managed", status: "unavailable", failure: "turn-credentials" })
+    s.setIceServers([], false, { source: "managed", status: "unavailable", failure: "turn-credentials", issue: "provider-unavailable" })
     expect(sent.at(-1)).toEqual({
       _tag: "rtc.diagnostics",
       diagnostics: {
         turnSource: "managed",
         turnStatus: "unavailable",
+        turnIssue: "provider-unavailable",
         gathering: "idle",
         relayCandidates: 0,
         connection: "new",
@@ -456,7 +457,7 @@ describe("DesktopRtcSession", () => {
       () => browser.close(),
       () => relay.close(),
     )
-    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null })
+    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null, issue: null })
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
     const diagnostics = lastDiagnostics(sent)
     expect(diagnostics).toMatchObject({
@@ -565,7 +566,7 @@ describe("DesktopRtcSession", () => {
     const { s, sent } = session()
     const browser = await remoteOffer()
     closing.push(() => browser.close(), () => relay.close())
-    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null })
+    s.setIceServers([relay.tlsServer], true, { source: "managed", status: "configured", failure: null, issue: null })
     await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
     const answer = sent.find((message) => message._tag === "rtc.answer")
     if (!answer) throw new Error("no desktop answer")

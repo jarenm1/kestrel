@@ -1,4 +1,4 @@
-import type { DesktopRtcBoxDiagnostics } from "@cloudagents/protocol"
+import type { DesktopRtcBoxDiagnostics, DesktopTurnIssue } from "@cloudagents/protocol"
 
 export type CandidateKind = "host" | "srflx" | "prflx" | "relay" | "unknown"
 export type IceTransport = "udp" | "tcp" | "tls" | "unknown"
@@ -27,6 +27,26 @@ export interface RtcDiagnostics {
   box: DesktopRtcBoxDiagnostics | null
 }
 
+/** What the box's safe TURN issue means for an operator; null when no issue was reported. */
+export function turnIssueText(issue: DesktopTurnIssue | null | undefined): string | null {
+  switch (issue) {
+    case "control-timeout": return "The box timed out asking the control plane for TURN credentials."
+    case "control-unreachable": return "The box could not reach the control plane for TURN credentials."
+    case "control-rejected": return "The control plane rejected the box's TURN request identity."
+    case "configuration-incomplete": return "The control plane's TURN settings are incomplete: key id and API token must be set together."
+    case "provider-unavailable": return "Cloudflare TURN is unavailable to the control plane."
+    case "provider-unusable": return "Cloudflare returned an unusable TURN configuration."
+    case "invalid-answer": return "The control plane returned an invalid TURN answer."
+    case "expired": return "TURN credentials were already expired; check the box clock."
+    case "no-usable-turn": return "TURN credentials contained no usable relay."
+    case "local-incomplete": return "The box's local TURN settings lack usable credentials."
+    case "control-error": return "The control plane returned an unknown TURN error."
+    case null:
+    case undefined:
+      return null
+  }
+}
+
 /** Evidence, not a claim about the network: candidates and ICE connection do not prove video decoding. */
 export function diagnosticSummary(d: RtcDiagnostics): string {
   if (d.config === "waiting") return "Waiting for connection settings from the box."
@@ -46,6 +66,7 @@ export function diagnosticSummary(d: RtcDiagnostics): string {
   if (d.lastFailure === "negotiation") return "WebRTC negotiation failed."
   if (d.lastFailure === "refused") return "The box declined this stream attempt."
   if (d.lastFailure === "unsupported") return "This browser or box cannot serve this WebRTC stream."
+  if (d.box?.turnIssue) return turnIssueText(d.box.turnIssue) ?? "The box reported a TURN problem."
   if (d.box?.turnStatus === "unavailable") return "The box could not obtain usable TURN credentials."
   if (d.turnServers === 0) return "No authenticated TURN relay is available; only direct WebRTC can connect."
   if (d.box?.turnStatus === "configured" && d.box.relayCandidates === 0 &&
@@ -85,6 +106,7 @@ export function serializeDiagnostics(d: RtcDiagnostics): string {
     box: d.box === null ? null : {
       turnSource: d.box.turnSource,
       turnStatus: d.box.turnStatus,
+      turnIssue: d.box.turnIssue ?? null,
       gathering: d.box.gathering,
       relayCandidates: d.box.relayCandidates,
       connection: d.box.connection,

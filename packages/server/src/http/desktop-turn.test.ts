@@ -87,6 +87,7 @@ test("slow TURN configuration precedes queued status changes and cannot write af
       diagnostics: {
         turnSource: "managed",
         turnStatus: "configured",
+        turnIssue: null,
         gathering: "idle",
         relayCandidates: 0,
         connection: "new",

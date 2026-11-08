@@ -73,6 +73,7 @@ export interface TurnConfigDiagnostics {
   readonly source: DesktopRtcBoxDiagnostics["turnSource"]
   readonly status: DesktopRtcBoxDiagnostics["turnStatus"]
   readonly failure: "turn-credentials" | null
+  readonly issue: DesktopRtcBoxDiagnostics["turnIssue"]
 }
 
 /**
@@ -84,7 +85,7 @@ const inferTurnDiagnostics = (
   managed: boolean,
 ): TurnConfigDiagnostics => {
   const turn = servers.filter((server) => server.urls.some((url) => /^turns?:/i.test(url)))
-  if (turn.length === 0) return { source: "none", status: "not-configured", failure: null }
+  if (turn.length === 0) return { source: "none", status: "not-configured", failure: null, issue: null }
   const usable = turn.some(
     (server) =>
       server.urls.some((url) => /^turns?:/i.test(url)) &&
@@ -92,8 +93,8 @@ const inferTurnDiagnostics = (
       (server.credential?.trim() ?? "") !== "",
   )
   return usable
-    ? { source: managed ? "managed" : "local", status: "configured", failure: null }
-    : { source: managed ? "managed" : "local", status: "unavailable", failure: "turn-credentials" }
+    ? { source: managed ? "managed" : "local", status: "configured", failure: null, issue: null }
+    : { source: managed ? "managed" : "local", status: "unavailable", failure: "turn-credentials", issue: "local-incomplete" }
 }
 
 let peers = 0
@@ -296,7 +297,7 @@ export class DesktopRtcSession {
   private managedRelay = false
 
   /** The last redacted config outcome, and the negotiation state currently published with it. */
-  private turn: TurnConfigDiagnostics = { source: "none", status: "not-configured", failure: null }
+  private turn: TurnConfigDiagnostics = { source: "none", status: "not-configured", failure: null, issue: null }
   private view: BoxView = { gathering: "idle", relayCandidates: 0, connection: "new", failure: null }
   /** Invalidates gathering/connection events from a peer that has been replaced or closed. */
   private viewToken = 0
@@ -351,6 +352,7 @@ export class DesktopRtcSession {
     const diagnostics: DesktopRtcBoxDiagnostics = {
       turnSource: this.turn.source,
       turnStatus: this.turn.status,
+      turnIssue: this.turn.issue ?? null,
       gathering: this.view.gathering,
       relayCandidates: this.view.relayCandidates,
       connection: this.view.connection,
