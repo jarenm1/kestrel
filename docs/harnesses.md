@@ -70,6 +70,12 @@ single-key connections. This follows [T3 Code's explicit account-switching appro
 without automatic quota rotation. **Cancel** stops the pending sign-in on the box as well as clearing the form, so an
 approval completed on the provider's page afterwards cannot silently add an account.
 
+The sign-in panel closes when its pending account appears in status, not just because the provider is already
+connected. On older boxes that omit the pending account id, polling requires a newly connected provider or a changed
+signed-in identity; a successful pasted-code submission also closes the panel. An unchanged legacy identity cannot
+prove that a device-code attempt finished, so its panel stays open until canceled or expired. Older boxes retain
+their single-account sign-in behavior; the client cannot provide account isolation on their behalf.
+
 Each new page sign-in has its own HOME at `<dataDir>/users/<login>/accounts/<accountId>` and its provider's
 credential/session directory beneath it. Existing logins stay in the legacy paths below as account `default`;
 credentials are never copied between accounts. The owner-only `.kestrel-cli-auth.json` in the user's root persists

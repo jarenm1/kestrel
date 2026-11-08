@@ -32,6 +32,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   const { api } = useApiClient();
   const queryClient = useQueryClient();
   const [login, setLogin] = useState<CliLoginStart | null>(null);
+  const [loginOrigin, setLoginOrigin] = useState({ connected: false, account: null as string | null });
   const [expired, setExpired] = useState(false);
   const [code, setCode] = useState("");
   const [accountMenu, setAccountMenu] = useState(false);
@@ -54,7 +55,7 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   // The account a sign-in is adding; another login may already keep the connection connected.
   const pendingAccountId = login?.accountId;
   const completed = login !== null && (pendingAccountId === undefined
-    ? connection.connected
+    ? connection.connected && (!loginOrigin.connected || connection.account !== loginOrigin.account)
     : connection.accounts?.some((account) => account.id === pendingAccountId) === true);
 
   const openPage = useMutation({
@@ -91,6 +92,8 @@ export function ConnectionsCliRow({ connection, provider }: Props) {
   });
   const start = useMutation({
     mutationFn: () => api.cliLoginStart(provider),
+    // Older boxes have no attempt id: an unchanged existing login is not completion of this attempt.
+    onMutate: () => setLoginOrigin({ connected: connection.connected, account: connection.account }),
     onSuccess: (next) => {
       submitCode.reset();
       logout.reset();
