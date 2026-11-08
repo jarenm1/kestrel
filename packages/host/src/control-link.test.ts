@@ -25,7 +25,10 @@ afterEach(() => {
   for (const run of cleanup.splice(0)) run()
 })
 
-/** A loopback control plane and a ControlLink dialing it with `manager`. */
+/**
+ * A loopback control plane and a ControlLink dialing it with `manager`. `executed` lists every command id the link has
+ * handed to `manager.execute`, in order, so a test waits for the host to have queued a command rather than sleeping.
+ */
 const connect = async (manager: VmManager) => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 })
   cleanup.push(() => server.close())
@@ -37,6 +40,12 @@ const connect = async (manager: VmManager) => {
     socket.on("message", (data) => peer.frames.push(JSON.parse(data.toString())))
     peers.push(peer)
   })
+  const executed: string[] = []
+  const execute = manager.execute.bind(manager)
+  manager.execute = (commandId, command) => {
+    executed.push(commandId)
+    return execute(commandId, command)
+  }
   const link = new ControlLink({
     controlUrl: `ws://127.0.0.1:${port}`,
     hostId: "host-1",
@@ -50,7 +59,7 @@ const connect = async (manager: VmManager) => {
   link.start()
   cleanup.push(() => link.stop())
   await waitFor(() => peers.length === 1 && hasFrame(peers[0] as Peer, "hello"), "hello")
-  return { peers, peer: peers[0] as Peer }
+  return { peers, peer: peers[0] as Peer, executed }
 }
 
 const hasFrame = (peer: Peer, tag: string): boolean => peer.frames.some((frame) => frame._tag === tag)
@@ -58,19 +67,31 @@ const hasFrame = (peer: Peer, tag: string): boolean => peer.frames.some((frame) 
 const sendCommand = (peer: Peer, commandId: string, command: unknown) =>
   peer.socket.send(JSON.stringify({ _tag: "command", commandId, command }))
 
-const resultFor = (peer: Peer, commandId: string) =>
-  peer.frames.find((frame) => frame._tag === "result" && frame.commandId === commandId)
+const sendLease = (peer: Peer, validUntil: number) => peer.socket.send(JSON.stringify({ _tag: "lease", validUntil }))
+
+const resultsFor = (peer: Peer, commandId: string) =>
+  peer.frames.filter((frame) => frame._tag === "result" && frame.commandId === commandId)
+
+const resultFor = (peer: Peer, commandId: string) => resultsFor(peer, commandId)[0]
+
+/** A manager stand-in for tests that only need the link's own behavior. */
+const fakeManager = (overrides: Partial<Record<keyof VmManager, unknown>>): VmManager =>
+  ({
+    capacity: () => ({}),
+    reports: () => [],
+    pendingResults: () => [],
+    markReported: () => {},
+    setLease: () => {},
+    connectionLost: () => {},
+    ...overrides,
+  }) as unknown as VmManager
 
 describe("control link with a fake manager", () => {
-  test("a drop invalidates queued commands, and a command refused after the drop sends no result", async () => {
+  test("a drop invalidates the connection, and a command refused after the drop sends no result", async () => {
     let release!: (value: ExecutedCommand | null) => void
     let drops = 0
     const leases: number[] = []
-    const fake = {
-      capacity: () => ({}),
-      reports: () => [],
-      pendingResults: () => [],
-      markReported: () => {},
+    const manager = fakeManager({
       setLease: (validUntil: number) => leases.push(validUntil),
       connectionLost: () => {
         drops += 1
@@ -79,37 +100,31 @@ describe("control link with a fake manager", () => {
         new Promise<ExecutedCommand | null>((resolve) => {
           release = resolve
         }),
-    } as unknown as VmManager
-    const { peers, peer } = await connect(fake)
+    })
+    const { peers, peer, executed } = await connect(manager)
     sendCommand(peer, "cmd-1", destroyCommand(1))
-    await sleep(20)
+    await waitFor(() => executed.includes("cmd-1"), "cmd-1 to be queued")
 
     peer.socket.close()
     await waitFor(() => drops === 1, "connectionLost on drop")
     await waitFor(() => peers.length === 2 && hasFrame(peers[1] as Peer, "hello"), "second hello")
-    ;(peers[1] as Peer).socket.send(JSON.stringify({ _tag: "lease", validUntil: Date.now() + 60_000 }))
+    sendLease(peers[1] as Peer, Date.now() + 60_000)
     await waitFor(() => leases.length === 1, "lease on reconnect")
 
     release(null)
     await sleep(50)
-    expect(resultFor(peer, "cmd-1")).toBeUndefined()
-    expect(resultFor(peers[1] as Peer, "cmd-1")).toBeUndefined()
+    expect(resultsFor(peer, "cmd-1")).toHaveLength(0)
+    expect(resultsFor(peers[1] as Peer, "cmd-1")).toHaveLength(0)
   })
 
   test("a command that ran reports its result on the live socket", async () => {
-    const fake = {
-      capacity: () => ({}),
-      reports: () => [],
-      pendingResults: () => [],
-      markReported: () => {},
-      setLease: () => {},
-      connectionLost: () => {},
+    const manager = fakeManager({
       execute: async (commandId: string) => ({
         outcome: { commandId, boxId: "box-1", ok: true, reported: false },
         vm: null,
       }),
-    } as unknown as VmManager
-    const { peer } = await connect(fake)
+    })
+    const { peer } = await connect(manager)
     sendCommand(peer, "cmd-2", destroyCommand(1))
     await waitFor(() => resultFor(peer, "cmd-2") !== undefined, "result frame")
     expect(resultFor(peer, "cmd-2")).toMatchObject({ ok: true })
@@ -121,17 +136,16 @@ describe("control link with the real manager", () => {
     const fixture: TestManager = newTestManager()
     cleanup.push(fixture.dispose)
     fixture.manager.setLease(Date.now() + 60_000)
-    const { peer } = await connect(fixture.manager)
+    const { peer, executed } = await connect(fixture.manager)
 
     sendCommand(peer, "cmd-busy", destroyCommand(1))
     await fixture.started
     sendCommand(peer, "cmd-stale", resumeCommand(1))
-    await sleep(20)
+    await waitFor(() => executed.includes("cmd-stale"), "cmd-stale to be queued")
 
     // The lease lapses while the socket stays up; the control plane's next lease frame renews it.
     fixture.manager.setLease(Date.now() - 1)
-    peer.socket.send(JSON.stringify({ _tag: "lease", validUntil: Date.now() + 60_000 }))
-    await sleep(20)
+    sendLease(peer, Date.now() + 60_000)
     fixture.open()
 
     await waitFor(() => resultFor(peer, "cmd-stale") !== undefined, "failure result for the refused command")
@@ -139,5 +153,27 @@ describe("control link with the real manager", () => {
     expect(resultFor(peer, "cmd-busy")).toMatchObject({ ok: true })
     expect(fixture.applied).toEqual(["destroy"])
     expect(fixture.manager.pendingResults().map((outcome) => outcome.commandId)).toEqual([])
+  })
+
+  test("a command resent after reconnect, once its result was reported, is answered from the store and does not run again", async () => {
+    const fixture: TestManager = newTestManager()
+    cleanup.push(fixture.dispose)
+    fixture.open()
+    fixture.manager.setLease(Date.now() + 60_000)
+    const { peers, peer, executed } = await connect(fixture.manager)
+
+    sendCommand(peer, "cmd-once", destroyCommand(1))
+    await waitFor(() => resultFor(peer, "cmd-once") !== undefined, "first result")
+
+    // The link drops and comes back; the control plane, having lost track of the result, resends the command.
+    peer.socket.close()
+    await waitFor(() => peers.length === 2 && hasFrame(peers[1] as Peer, "hello"), "second hello")
+    sendLease(peers[1] as Peer, Date.now() + 60_000)
+    sendCommand(peers[1] as Peer, "cmd-once", destroyCommand(1))
+    await waitFor(() => resultFor(peers[1] as Peer, "cmd-once") !== undefined, "late duplicate result")
+
+    expect(executed.filter((id) => id === "cmd-once")).toHaveLength(2)
+    expect(resultFor(peers[1] as Peer, "cmd-once")).toEqual(resultFor(peer, "cmd-once"))
+    expect(fixture.applied).toEqual(["destroy"])
   })
 })

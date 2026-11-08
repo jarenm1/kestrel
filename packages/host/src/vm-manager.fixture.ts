@@ -32,6 +32,8 @@ export interface TestManager {
   readonly started: Promise<void>
   /** Lets the blocked `destroy` finish. */
   readonly open: () => void
+  /** Where the lease is persisted, for a test that makes the write fail. */
+  readonly leasePath: string
   readonly dispose: () => void
 }
 
@@ -78,5 +80,12 @@ export const newTestManager = (): TestManager => {
     markStarted()
     await gate
   }
-  return { manager, applied, started, open, dispose: () => rmSync(root, { recursive: true, force: true }) }
+  return {
+    manager,
+    applied,
+    started,
+    open,
+    leasePath: layout.leasePath,
+    dispose: () => rmSync(root, { recursive: true, force: true }),
+  }
 }

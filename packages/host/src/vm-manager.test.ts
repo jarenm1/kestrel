@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, rmSync } from "node:fs"
 import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
 
 let fixtures: TestManager[] = []
@@ -94,6 +95,22 @@ describe("commands received before the lease lapsed or the connection dropped", 
     expect(during?.outcome).toMatchObject({ commandId: "cmd-resume", ok: false })
     expect(manager.pendingResults()).toEqual([])
     expect(applied).toEqual([])
+  })
+
+  test("a renewal that fails to persist leaves the lapse as it was, and the next renewal lets a resend run", async () => {
+    const { manager, applied, leasePath } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    manager.setLease(Date.now() - 1)
+    rmSync(leasePath)
+    mkdirSync(leasePath)
+    expect(() => manager.setLease(Date.now() + 60_000)).toThrow()
+    const during = await manager.execute("cmd-resume", resumeCommand(1))
+    expect(during?.outcome).toMatchObject({ commandId: "cmd-resume", ok: false })
+    rmSync(leasePath, { recursive: true })
+    manager.setLease(Date.now() + 60_000)
+    const after = await manager.execute("cmd-resume", resumeCommand(1))
+    expect(after?.outcome).toMatchObject({ commandId: "cmd-resume", ok: true })
+    expect(applied).toEqual(["resume"])
   })
 
   test("a command already answered returns its stored outcome across a reconnect, without running again", async () => {

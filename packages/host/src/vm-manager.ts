@@ -418,10 +418,11 @@ export class VmManager {
   }
 
   setLease(validUntil: number): void {
+    // Written first: a lease that fails to persist changes nothing here, so a failed renewal leaves the lapse state alone.
+    writeLeaseUntil(this.layout.leasePath, validUntil)
     // A lease that lapsed while no policy tick ran still ends its window here, before the renewal can let old commands run.
     if (!this.lapseFenced && Date.now() >= this.leaseUntil) this.leaseGeneration += 1
     this.lapseFenced = false
-    writeLeaseUntil(this.layout.leasePath, validUntil)
     this.leaseUntil = validUntil
   }
 
