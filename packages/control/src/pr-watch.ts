@@ -12,6 +12,20 @@ const Unwatch = Schema.Struct({
   number: Schema.optional(Schema.Number.pipe(Schema.int(), Schema.positive())),
 })
 
+const BoxError = Schema.Struct({ _tag: Schema.String, message: Schema.String })
+
+/**
+ * A failed box call. The box's own `{ _tag, message }` error passes through with its status. Anything else, such as a
+ * proxy's HTML error page, is labelled as JSON only after being rewritten into that shape.
+ */
+const boxFailure = (result: { status: number; body: string }): Response => {
+  let value: unknown
+  try { value = JSON.parse(result.body) } catch { value = undefined }
+  if (Schema.is(BoxError)(value)) return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
+  const tag = result.status === 404 ? "NotFound" : [502, 503, 504].includes(result.status) ? "BoxOffline" : "BadGateway"
+  return errorResponse(result.status, tag, "agent box request failed")
+}
+
 /**
  * Authenticated box calls only. A thread may watch any number of pull requests, each in any repository its owner can
  * see; the caller must own the thread and the thread must not be archived.
@@ -42,10 +56,7 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
   const repo = await fetchRepository(token, body.repo)
   if (repo === null || await fetchPullRequest(token, repo, body.number) === null) return errorResponse(404, "NotFound", "pull request not found")
   const result = await hub(env).boxCall(login, "GET", `/api/tasks/${encodeURIComponent(body.taskId)}`)
-  if (!result.ok) {
-    try { JSON.parse(result.body) } catch { return errorResponse(result.status, "BoxOffline", "agent box request failed") }
-    return new Response(result.body, { status: result.status, headers: { "content-type": "application/json" } })
-  }
+  if (!result.ok) return boxFailure(result)
   let value: unknown
   try { value = JSON.parse(result.body) } catch { return errorResponse(502, "BadGateway", "invalid thread response") }
   const task = Schema.decodeUnknownEither(Task)(value)
