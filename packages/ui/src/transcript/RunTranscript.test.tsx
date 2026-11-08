@@ -33,9 +33,10 @@ test("input excludes cache reads, cached tokens stay separate, and details do no
   expect(html.indexOf("Cached tokens")).toBeLessThan(html.indexOf("Avg TPS"))
 })
 
-test("turn-only totals keep input and output but never invent a cache split", () => {
+test("turn-only totals report output without inventing cache-free input or a cache split", () => {
   const html = summary([turn("end")])
-  expect(html).toContain(`title="1,234"`)
+  expect(html).toContain(`title="60"`)
+  expect(html).toContain("Input tokens</dt><dd>Not reported</dd>")
   expect(html).toContain("Cached tokens</dt><dd>Not reported</dd>")
 })
 

@@ -37,7 +37,8 @@ function sum(values: readonly (number | null)[]): number | null {
 
 /**
  * Token totals from each completed turn: main-agent response usage when the harness reported it, so input excludes
- * cache reads and they stay a separate bucket; otherwise the turn's own aggregate, whose cache split is unknown.
+ * cache reads and they stay a separate bucket. A turn aggregate folds cache reads into its input and carries no
+ * cache split, so only its output is usable; its cache-free input stays unknown.
  */
 function tokenTotals(items: readonly AgentItem[]): Totals {
   const turns: Totals[] = []
@@ -49,7 +50,7 @@ function tokenTotals(items: readonly AgentItem[]): Totals {
     }
     if (item._tag !== "turn") continue
     turns.push(responses.length === 0
-      ? { input: item.inputTokens, output: item.outputTokens, cached: null }
+      ? { input: null, output: item.outputTokens, cached: null }
       : {
           input: sum(responses.map((response) => response.inputTokens)),
           output: sum(responses.map((response) => response.outputTokens)),

@@ -202,12 +202,13 @@ Expanding the disclosure lists input, output and cached tokens plus average outp
 same wall-clock span. The collapsed row already carries elapsed time, so the details do not repeat it. Input
 excludes cache reads, which appear as cached tokens separately; cache writes count as input. Totals come from
 main-agent response usage and are never added to turn aggregates, so they are not double-counted; subagent rows
-are excluded. A harness that reports only turn aggregates still contributes its input and output, but its cache
-split is unknown, so cached tokens say “Not reported” instead of guessing. This average includes tools and
-waiting; it is not model-generation speed. Incomplete, failed or stopped invocations do not present partial
-token totals as complete; unreported values say “Not reported” rather than showing `? tok/s`. Counts are
-compact with exact values on hover. Per-response metadata remains stored but no longer creates rows or splits
-consecutive tool groups. The context meter remains a separate current-context measurement.
+are excluded. A harness that reports only turn aggregates still contributes its output, but its cache-free input
+cannot be recovered from the cache-inclusive aggregate, so input and cached tokens say “Not reported” instead
+of guessing. This average includes tools and waiting; it is not model-generation speed. Incomplete, failed or
+stopped invocations do not present partial token totals as complete; unreported values say “Not reported” rather
+than showing `? tok/s`. Counts are compact with exact values on hover. Per-response metadata remains stored but
+no longer creates rows or splits consecutive tool groups. The context meter remains a separate current-context
+measurement.
 
 OMP, Pi and Hermes remain outside the current product scope. Existing harnesses share compatible API-key
 providers through the model picker rather than introducing a separate per-thread harness control.
