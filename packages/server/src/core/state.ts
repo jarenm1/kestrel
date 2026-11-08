@@ -93,7 +93,10 @@ export interface StoreShape {
   /**
    * Runs `f` synchronously against the state. If `f` returns Right, the state is
    * persisted atomically before the effect succeeds. If it returns Left, nothing is
-   * persisted, so `f` MUST validate before mutating.
+   * persisted, so `f` MUST validate before mutating. If the write renames the new state
+   * into place but its directory sync fails, the effect fails with an InternalError
+   * saying durability is unconfirmed: the new state stays in memory and in the file,
+   * so the caller must treat the outcome as uncertain, not as rolled back.
    */
   readonly update: <A, E>(f: (s: StoreState) => Either.Either<A, E>) => Effect.Effect<A, E | InternalError>
   /** Resolves once every write made so far is on disk. */
@@ -259,29 +262,35 @@ const reconcile = (state: StoreState): void => {
 }
 
 /**
- * Each top-level list of the state, its entries' original references and a deep copy of every entry's contents, taken
- * before an update runs. Restoring writes the copies back into the same top-level entry objects, so those references stay
- * valid. Nested values (a task's checkouts, say) are replaced by their copies.
+ * Every object and array reachable from the state before an update runs, with a shallow copy of its own contents.
+ * Restoring resets each one to its copy, so every object keeps its identity, nested ones included, and whatever an
+ * update attached is dropped along with the object that held it. Shallow copies make this one pass over the state,
+ * the same order as the serialization the write does anyway.
  */
-type StateSnapshot = ReadonlyArray<{ readonly list: unknown[]; readonly entries: unknown[]; readonly copies: unknown[] }>
+type Container = Record<string, unknown> | unknown[]
+type StateSnapshot = ReadonlyArray<readonly [Container, Container]>
 
-const snapshotState = (state: StoreState): StateSnapshot =>
-  (Object.values(state) as unknown[][]).map((list) => ({
-    list,
-    entries: [...list],
-    copies: list.map((entry) => (isObject(entry) ? structuredClone(entry) : entry)),
-  }))
+const snapshotState = (state: StoreState): StateSnapshot => {
+  const copies = new Map<Container, Container>()
+  const visit = (value: unknown): void => {
+    if (typeof value !== "object" || value === null || copies.has(value as Container)) return
+    const container = value as Container
+    copies.set(container, Array.isArray(container) ? [...container] : { ...container })
+    for (const child of Object.values(container)) visit(child)
+  }
+  visit(state)
+  return [...copies]
+}
 
 const restoreState = (snapshot: StateSnapshot): void => {
-  for (const { list, entries, copies } of snapshot) {
-    list.length = 0
-    entries.forEach((entry, i) => {
-      if (isObject(entry)) {
-        for (const key of Object.keys(entry)) delete entry[key]
-        Object.assign(entry, copies[i])
-      }
-      list.push(entry)
-    })
+  for (const [container, copy] of snapshot) {
+    if (Array.isArray(container)) {
+      container.length = 0
+      for (const item of copy as unknown[]) container.push(item)
+    } else {
+      for (const key of Object.keys(container)) delete container[key]
+      Object.assign(container, copy)
+    }
   }
 }
 
@@ -326,9 +335,15 @@ export const StateLive = Layer.effect(
           restoreState(snapshot)
           return Either.left(new InternalError({ message: `state write failed: ${String(e)}` }))
         }
-        // The rename already published the new state, so memory keeps it even if the directory sync fails. That failure
-        // only weakens crash durability, the same trade-off `syncDir` makes on Windows.
-        await syncDir(config.stateFile).catch(() => undefined)
+        // The rename succeeded, so the file and memory both hold the new state and nothing is rolled back. Until the
+        // directory sync succeeds, a crash may still roll the rename back, so that outcome is reported as uncertain.
+        try {
+          await syncDir(config.stateFile)
+        } catch (e) {
+          return Either.left(
+            new InternalError({ message: `state written but directory sync failed, durability unconfirmed: ${String(e)}` }),
+          )
+        }
         return Either.right(result.right)
       })
       lane = run.then(() => undefined, () => undefined)
