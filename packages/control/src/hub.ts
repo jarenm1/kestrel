@@ -32,6 +32,7 @@ import {
   type UpdateAutomationBody,
   type UpdateBoxBody,
   type UserBox,
+  type WaitlistSignup,
   type CreateMeterHostBody,
   type CreatedMeterHost,
   type MeterBatch,
@@ -67,6 +68,7 @@ import {
 } from "./meter-table"
 import { reconcileMeter } from "./meter-reconcile"
 import { commonToolFailures, ensureToolFailuresTable, recordToolFailures } from "./tool-failures-table"
+import { ensureWaitlistTable, storeWaitlistSignup } from "./waitlist-table"
 import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
@@ -120,6 +122,10 @@ const NEST_WAKE_POLL_MS = 1_000
 type NestAttachment = { hostId: string; hello: boolean; retired?: boolean }
 const nestAttachment = (ws: WebSocket): NestAttachment | null => ws.deserializeAttachment() as NestAttachment | null
 const HTTP_TIMEOUT_MS = 30_000
+/** Public waitlist submissions per client IP in this window; in-memory, so it resets with the object. */
+const WAITLIST_WINDOW_MS = 60 * 60 * 1000
+const WAITLIST_MAX_PER_IP = 20
+const WAITLIST_MAX_TRACKED_IPS = 10_000
 /** Lifetime of a token the Hub signs for one call to a box. */
 const BOX_CALL_TTL_SECONDS = 5 * 60
 
@@ -227,6 +233,7 @@ const closeQuietly = (ws: WebSocket, code: number, reason: string): void => {
 }
 
 export class Hub extends DurableObject<Env> {
+  private readonly waitlistAttempts = new Map<string, number[]>()
   private readonly nest: NestFleet
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -327,6 +334,7 @@ export class Hub extends DurableObject<Env> {
         delivery_id TEXT PRIMARY KEY,
         received_at INTEGER NOT NULL
       )`)
+      ensureWaitlistTable(sql)
     })
   }
 
@@ -372,6 +380,31 @@ export class Hub extends DurableObject<Env> {
   /** Ends a session (sign-out). */
   deleteSession(id: string): void {
     this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
+  }
+
+  /**
+   * Public waitlist signup. Rate-limited per client IP in memory; null means the caller should answer 429. The email
+   * is stored once, lowercased, and its first timestamp is kept on repeats.
+   */
+  addWaitlistSignup(email: string, ip: string): WaitlistSignup | null {
+    const now = Date.now()
+    const stored = this.waitlistAttempts.get(ip)
+    const recent = (stored ?? []).filter((at) => now - at < WAITLIST_WINDOW_MS)
+    if (recent.length >= WAITLIST_MAX_PER_IP) return null
+    if (stored === undefined && this.waitlistAttempts.size >= WAITLIST_MAX_TRACKED_IPS) {
+      for (const [key, times] of this.waitlistAttempts) {
+        if (times.every((at) => now - at >= WAITLIST_WINDOW_MS)) this.waitlistAttempts.delete(key)
+        if (this.waitlistAttempts.size < WAITLIST_MAX_TRACKED_IPS) break
+      }
+      while (this.waitlistAttempts.size >= WAITLIST_MAX_TRACKED_IPS) {
+        const oldest = this.waitlistAttempts.keys().next().value
+        if (oldest === undefined) break
+        this.waitlistAttempts.delete(oldest)
+      }
+    }
+    recent.push(now)
+    this.waitlistAttempts.set(ip, recent)
+    return storeWaitlistSignup(this.ctx.storage.sql, email, new Date(now))
   }
 
   // -------------------------------------------------------------------------

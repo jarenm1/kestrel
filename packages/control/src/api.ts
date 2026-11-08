@@ -13,6 +13,7 @@ import {
   PutApiKeyBody,
   SetActiveBoxBody,
   UpdateBoxBody,
+  WaitlistSignupBody,
   type Connection,
   type GithubRepo,
   type Me,
@@ -26,7 +27,7 @@ import {
   type OAuthProvider,
   type Provider,
 } from "./providers"
-import { UpstreamError, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
+import { UpstreamError, cappedRequest, decodeBody, errorResponse, json, maskKey, readCookie } from "./http"
 import { hub, isOperator, type Env } from "./env"
 import { SESSION_COOKIE, currentSession } from "./auth"
 import { handleAutomations } from "./automations"
@@ -380,6 +381,25 @@ const handleNest = async (request: Request, env: Env, url: URL): Promise<Respons
   return errorResponse(405, "MethodNotAllowed", `${method} not allowed`)
 }
 
+/** Public waitlist signups carry one small JSON object; anything larger is not a signup form. */
+const MAX_WAITLIST_BODY_BYTES = 4096
+
+/** The client IP the Hub rate-limits on; local requests without Cloudflare's header share one bucket. */
+const waitlistClientIp = (request: Request): string => request.headers.get("cf-connecting-ip") ?? "unknown"
+
+/** Unauthenticated waitlist signup for the public site; the Hub stores it and applies the per-IP limit. */
+const handleWaitlist = async (request: Request, env: Env): Promise<Response> => {
+  if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", `${request.method} not allowed`)
+  const capped = await cappedRequest(request, MAX_WAITLIST_BODY_BYTES)
+  if (capped instanceof Response) return capped
+  const body = await decodeBody(capped, WaitlistSignupBody)
+  if (body instanceof Response) return body
+  const signup = await hub(env).addWaitlistSignup(body.email, waitlistClientIp(request))
+  return signup === null
+    ? errorResponse(429, "TooManyRequests", "too many waitlist signups; try again later")
+    : json(signup, signup.created ? 201 : 200)
+}
+
 /**
  * Routes every `/api/*` request: control routes in the Worker; anything else is the box's API, which apps
  * reach directly on the box's own URL, and gets a 404 here.
@@ -387,6 +407,7 @@ const handleNest = async (request: Request, env: Env, url: URL): Promise<Respons
 export const handleApi = async (request: Request, env: Env, url: URL): Promise<Response> => {
   const path = url.pathname
   const method = request.method
+  if (path === ControlPaths.waitlist) return handleWaitlist(request, env)
   if (path === ControlPaths.boxes || path.startsWith(`${ControlPaths.boxes}/`)) return handleUserBoxes(request, env, url)
   if (path === ControlPaths.meterHosts || path === ControlPaths.meterReport) return handleMeter(request, env, url)
   if (path === ControlPaths.nestHosts || path === ControlPaths.nestBoxes || path.startsWith(`${ControlPaths.nestBoxes}/`)) {
