@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, rmSync } from "node:fs"
 import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
 
 let fixtures: TestManager[] = []
@@ -144,6 +144,29 @@ describe("commands received before the lease lapsed or the connection dropped", 
     manager.setLease(Date.now() - 1)
     const operator = await manager.executeOperator("cmd-operator", destroyCommand(1))
     expect(operator.outcome).toMatchObject({ commandId: "cmd-operator", ok: true })
+    expect(applied).toEqual(["destroy"])
+  })
+
+  test("an outcome the store cannot write is answered from memory on a resend, so the command runs once", async () => {
+    const { manager, applied, open, stateDir } = fixture()
+    open()
+    manager.setLease(Date.now() + 60_000)
+    chmodSync(stateDir, 0o500)
+    let first: Awaited<ReturnType<typeof manager.execute>>
+    let resent: Awaited<ReturnType<typeof manager.execute>>
+    try {
+      first = await manager.execute("cmd-unstored", destroyCommand(1))
+      resent = await manager.execute("cmd-unstored", destroyCommand(1))
+    } finally {
+      chmodSync(stateDir, 0o700)
+    }
+    expect(first?.outcome).toMatchObject({ commandId: "cmd-unstored", ok: true })
+    expect(resent?.outcome).toEqual(first?.outcome)
+    expect(applied).toEqual(["destroy"])
+    expect(manager.pendingResults().map((outcome) => outcome.commandId)).toEqual(["cmd-unstored"])
+    manager.markReported(["cmd-unstored"])
+    expect(manager.pendingResults()).toEqual([])
+    expect((await manager.execute("cmd-unstored", destroyCommand(1)))?.outcome).toMatchObject({ ok: true })
     expect(applied).toEqual(["destroy"])
   })
 

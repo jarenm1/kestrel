@@ -236,6 +236,11 @@ export class VmManager {
   private leaseGeneration = 0
   /** Whether the current lapse has already bumped `leaseGeneration`. The next lease clears it. */
   private lapseFenced = false
+  /**
+   * Outcomes the command store could not write. A command that already ran is answered from here on a resend, so it
+   * does not run twice. Held in memory only: a restart loses them.
+   */
+  private readonly unrecorded = new Map<string, CommandOutcome>()
 
   constructor(
     private readonly config: HostConfig,
@@ -344,7 +349,7 @@ export class VmManager {
     const lease = this.leaseGeneration
     const lapsedOnReceipt = Date.now() >= this.leaseUntil
     return this.serial(command.boxId, async () => {
-      const stored = findCommand(this.layout, commandId)
+      const stored = this.unrecorded.get(commandId) ?? findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
       if (connection !== this.connectionGeneration) return null
       if (lapsedOnReceipt || lease !== this.leaseGeneration || Date.now() >= this.leaseUntil) {
@@ -369,7 +374,7 @@ export class VmManager {
   private async applyCommand(commandId: string, command: NestHostCommand): Promise<ExecutedCommand> {
     if (!isBoxId(command.boxId)) {
       const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
-      recordCommand(this.layout, outcome)
+      this.recordOutcome(outcome)
       return { outcome, vm: null }
     }
     let outcome: CommandOutcome
@@ -380,16 +385,48 @@ export class VmManager {
       await this.failOperation(command.boxId, error)
       outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
     }
-    recordCommand(this.layout, outcome)
+    this.recordOutcome(outcome)
     return { outcome, vm: this.reportOf(command.boxId) }
   }
 
-  pendingResults(): CommandOutcome[] {
-    return pendingCommands(this.layout)
+  /** Stores an outcome. When the store cannot be written, the outcome is kept in memory and the failure is reported. */
+  private recordOutcome(outcome: CommandOutcome): void {
+    try {
+      recordCommand(this.layout, outcome)
+    } catch (error) {
+      this.unrecorded.set(outcome.commandId, outcome)
+      this.events.error(`cannot record command ${outcome.commandId}; kept in memory: ${errorMessage(error)}`)
+    }
   }
 
+  pendingResults(): CommandOutcome[] {
+    return [...this.storedPending(), ...[...this.unrecorded.values()].filter((outcome) => !outcome.reported)]
+  }
+
+  /** The unreported outcomes on disk. A store that cannot be read reports none, and says so. */
+  private storedPending(): CommandOutcome[] {
+    try {
+      return pendingCommands(this.layout)
+    } catch (error) {
+      this.events.error(`cannot read the command store: ${errorMessage(error)}`)
+      return []
+    }
+  }
+
+  /**
+   * The control plane has the outcome. An unrecorded outcome stays in memory for dedupe, since a resend must still find
+   * it; it only stops being pending.
+   */
   markReported(commandIds: readonly string[]): void {
-    markCommandsReported(this.layout, commandIds)
+    for (const id of commandIds) {
+      const held = this.unrecorded.get(id)
+      if (held !== undefined) this.unrecorded.set(id, { ...held, reported: true })
+    }
+    try {
+      markCommandsReported(this.layout, commandIds)
+    } catch (error) {
+      this.events.error(`cannot mark commands reported: ${errorMessage(error)}`)
+    }
   }
 
   /** Every VM this host holds, except destroyed or evicted ones. */

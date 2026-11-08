@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, rmSync } from "node:fs"
 import { WebSocketServer, type WebSocket } from "ws"
 import { ControlLink } from "./control-link"
 import { destroyCommand, newTestManager, resumeCommand, type TestManager } from "./vm-manager.fixture"
@@ -182,22 +182,55 @@ describe("control link with the real manager", () => {
     expect(executed).toContain("cmd-after")
   })
 
-  test("a command whose outcome cannot be stored does not take the link down", async () => {
+  test("a command whose outcome cannot be stored still answers, and its resend is not run again", async () => {
     const fixture: TestManager = newTestManager()
     cleanup.push(fixture.dispose)
     fixture.open()
     fixture.manager.setLease(Date.now() + 60_000)
     const { peer } = await connect(fixture.manager)
 
-    rmSync(fixture.commandsPath, { force: true })
-    mkdirSync(fixture.commandsPath)
+    chmodSync(fixture.stateDir, 0o500)
     sendCommand(peer, "cmd-unstored", destroyCommand(1))
-    await sleep(100)
+    await waitFor(() => resultFor(peer, "cmd-unstored") !== undefined, "the result of the unstored command")
+    chmodSync(fixture.stateDir, 0o700)
 
-    rmSync(fixture.commandsPath, { recursive: true })
-    sendCommand(peer, "cmd-after-store", destroyCommand(1))
-    await waitFor(() => resultFor(peer, "cmd-after-store") !== undefined, "a result after the failed store")
-    expect(resultFor(peer, "cmd-after-store")).toMatchObject({ ok: true })
+    // The control plane never saw the result and resends the command on the same connection.
+    sendCommand(peer, "cmd-unstored", destroyCommand(1))
+    await waitFor(() => resultsFor(peer, "cmd-unstored").length === 2, "the answer to the resend")
+    expect(resultsFor(peer, "cmd-unstored").map((frame) => frame.ok)).toEqual([true, true])
+    expect(fixture.applied).toEqual(["destroy"])
+  })
+
+  test("after a lapse and reconnect, a resend that arrives behind the renewed lease runs", async () => {
+    const fixture: TestManager = newTestManager()
+    cleanup.push(fixture.dispose)
+    fixture.manager.setLease(Date.now() + 60_000)
+    const { peers, peer } = await connect(fixture.manager)
+
+    // The lease lapses while the link is down; control's hello renews it before it resends.
+    fixture.manager.setLease(Date.now() - 1)
+    peer.socket.close()
+    await waitFor(() => peers.length === 2 && hasFrame(peers[1] as Peer, "hello"), "second hello")
+    sendLease(peers[1] as Peer, Date.now() + 60_000)
+    sendCommand(peers[1] as Peer, "cmd-resend", resumeCommand(1))
+    await waitFor(() => resultFor(peers[1] as Peer, "cmd-resend") !== undefined, "the resend's result")
+    expect(resultFor(peers[1] as Peer, "cmd-resend")).toMatchObject({ ok: true })
+    expect(fixture.applied).toEqual(["resume"])
+  })
+
+  test("after a lapse and reconnect, a resend that arrives ahead of the renewal is refused with a failure", async () => {
+    const fixture: TestManager = newTestManager()
+    cleanup.push(fixture.dispose)
+    fixture.manager.setLease(Date.now() + 60_000)
+    const { peers, peer } = await connect(fixture.manager)
+
+    fixture.manager.setLease(Date.now() - 1)
+    peer.socket.close()
+    await waitFor(() => peers.length === 2 && hasFrame(peers[1] as Peer, "hello"), "second hello")
+    sendCommand(peers[1] as Peer, "cmd-resend", resumeCommand(1))
+    await waitFor(() => resultFor(peers[1] as Peer, "cmd-resend") !== undefined, "the refusal's result")
+    expect(resultFor(peers[1] as Peer, "cmd-resend")).toMatchObject({ ok: false })
+    expect(fixture.applied).toEqual([])
   })
 
   test("a command resent after reconnect, once its result was reported, is answered from the store and does not run again", async () => {

@@ -34,8 +34,11 @@ export interface TestManager {
   readonly open: () => void
   /** Where the lease is persisted, for a test that makes the write fail. */
   readonly leasePath: string
-  /** Where command outcomes are stored, for a test that makes the write fail. */
-  readonly commandsPath: string
+  /**
+   * The state directory. A test makes writes fail by making it read-only, which leaves the command store readable.
+   * This needs a non-root user: root writes through a read-only directory.
+   */
+  readonly stateDir: string
   readonly dispose: () => void
 }
 
@@ -88,7 +91,7 @@ export const newTestManager = (): TestManager => {
     started,
     open,
     leasePath: layout.leasePath,
-    commandsPath: layout.commandsPath,
+    stateDir,
     dispose: () => rmSync(root, { recursive: true, force: true }),
   }
 }
