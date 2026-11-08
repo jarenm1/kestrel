@@ -42,12 +42,12 @@ const MAX_PEERS = 16
 /** A peer that has not connected by now is closed. Above the client's own timeout, so the client gives up first. */
 const CONNECT_TIMEOUT_MS = 30_000
 /**
- * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. The UDP attempt is not
- * covered: it fails under STUN retransmissions (50ms doubling over seven sends, about 6.3s) before that fallback starts,
- * so an unreachable managed relay can hold the answer for roughly eight seconds. Operator-configured TURN keeps the
- * default, since its server may be far away or reached over TLS.
+ * Seconds the TCP/TLS connect of the control plane's relay may take; werift's default is eight. Managed allocations use
+ * TLS/443 directly, without waiting for a failed UDP allocation first. Operator-configured TURN keeps the default.
  */
 const TURN_TCP_CONNECT_TIMEOUT_S = 2
+/** The control plane requires this endpoint in managed credentials; werift only uses the first TURN URL. */
+const MANAGED_TURN_TLS = /^turns:(?:\[[^\]]+\]|[^:/?#]+):443\?transport=tcp$/i
 const MAX_OFFER_CHARS = 64 * 1024
 const INPUT_CHANNEL = "input"
 const POINTER_CHANNEL = "pointer"
@@ -368,13 +368,21 @@ export class DesktopRtcSession {
       return
     }
     const servers = this.relayServers ?? mintIceServers(this.settings, this.taskId)
+    // Unlike browsers, werift 0.26 only uses the first TURN URL; its UDP fallback retries TCP on the same port,
+    // not later URLs. Select the managed TLS/443 endpoint so blocked UDP/3478 cannot silently remove the box's relay.
+    const tlsRelay = this.managedRelay
+      ? servers.find((server) => server.urls.some((url) => MANAGED_TURN_TLS.test(url)))
+      : undefined
+    const peerServers = tlsRelay === undefined
+      ? servers
+      : [{ ...tlsRelay, urls: tlsRelay.urls.filter((url) => MANAGED_TURN_TLS.test(url)) }, ...servers]
     const playoutId = playoutDelayId(offer)
     // The track's source codec is the offered format. werift matches a remote H.264 codec by its exact profile-level-id,
     // so a browser's payload is only selected when the source names the same format.
     const encoded = new RTCRtpCodecParameters({ mimeType: "video/H264", clockRate: 90_000, parameters: fmtp })
     const opusCodec = new RTCRtpCodecParameters({ mimeType: "audio/opus", clockRate: 48_000, channels: 2 })
     const pc = new RTCPeerConnection({
-      iceServers: servers.map((s) => ({ ...s, urls: [...s.urls] })),
+      iceServers: peerServers.map((s) => ({ ...s, urls: [...s.urls] })),
       icePortRange: this.settings.portRange === null ? undefined : [this.settings.portRange[0], this.settings.portRange[1]],
       // The cap belongs to the control plane's relay, whose nearest location answers in milliseconds. An operator's own
       // TURN server may be far away or reached over TLS, so it keeps werift's default wait.

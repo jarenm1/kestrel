@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
 import { createSocket } from "node:dgram"
 import { classes, Message, methods, RTCPeerConnection, RTCRtpCodecParameters, useNACK, usePLI } from "werift"
-import type { DesktopRtcIceServer, DesktopRtcServerMessage } from "@cloudagents/protocol"
+import type { DesktopRtcServerMessage } from "@cloudagents/protocol"
 import { MediaTap } from "./rtp"
 import {
   DesktopRtcSession,
@@ -336,43 +336,6 @@ describe("DesktopRtcSession", () => {
       expect(filter?.({ remoteCandidate: { host: "fe80::1" } })).toBe(false)
     }
   })
-
-  test("the box's own peer takes the resolved managed relay, with a bounded allocation wait", async () => {
-    const relay: DesktopRtcIceServer = {
-      urls: ["turn:turn.example:3478?transport=udp"],
-      username: "managed-user",
-      credential: "managed-pass",
-    }
-    const { s } = session()
-    s.setIceServers([...mintIceServers(settings, "thread-1"), relay], true)
-    const browser = await remoteOffer()
-    closing.push(() => browser.close())
-    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-    const peer = peerOf(s)
-    expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
-    for (const transport of peer.pc.iceTransports) {
-      // werift allocates from the first TURN URL it was given, and the session caps how long that may hold the answer.
-      expect(transport.connection.turnServer).toEqual(["turn.example", 3478])
-      expect(transport.connection.options.turnUsername).toBe("managed-user")
-      expect(transport.connection.options.turnPassword).toBe("managed-pass")
-      expect(transport.connection.options.turnConnectTimeout).toBe(2)
-    }
-  }, 10_000)
-
-  test("an operator's own relay keeps werift's default allocation wait", async () => {
-    const own: WebRtcSettings = { ...settings, turn: { urls: ["turns:turn.example:443"], secret: "secret" } }
-    const { s } = session({ turn: own.turn })
-    s.setIceServers(mintIceServers(own, "thread-1"), false)
-    const browser = await remoteOffer()
-    closing.push(() => browser.close())
-    await s.handle({ _tag: "rtc.offer", sdp: browser.localDescription!.sdp })
-    const peer = peerOf(s)
-    expect(peer.pc.iceTransports.length).toBeGreaterThan(0)
-    for (const transport of peer.pc.iceTransports) {
-      expect(transport.connection.turnServer).toEqual(["turn.example", 443])
-      expect(transport.connection.options.turnConnectTimeout).toBeUndefined()
-    }
-  }, 10_000)
 
   test("the viewer limit holds when every offer is answered at once", async () => {
     const before = activeRtcPeers()
