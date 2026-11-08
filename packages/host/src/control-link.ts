@@ -157,7 +157,10 @@ export class ControlLink {
   }
 
   private async runCommand(commandId: string, command: NestHostCommand): Promise<void> {
-    const { outcome, vm } = await this.opts.manager.execute(commandId, command)
+    // A refused command never ran: no result, so a resend under the same commandId is the only answer the control plane gets.
+    const executed = await this.opts.manager.execute(commandId, command)
+    if (executed === null) return
+    const { outcome, vm } = executed
     const sent = this.send({
       _tag: "result",
       commandId,
@@ -173,6 +176,7 @@ export class ControlLink {
     this.socket = null
     clearInterval(this.capacityTimer)
     this.capacityTimer = undefined
+    this.opts.manager.invalidateQueuedCommands()
     if (this.stopped) return
     this.retryLater()
   }

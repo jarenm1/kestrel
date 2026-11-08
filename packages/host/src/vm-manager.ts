@@ -212,6 +212,12 @@ const createNewRecord = (fields: {
   lastError: null,
 })
 
+/** A command that ran (or was answered from the store), with the box's report after it. */
+export interface ExecutedCommand {
+  readonly outcome: CommandOutcome
+  readonly vm: NestVmReport | null
+}
+
 export class VmManager {
   readonly outbox: Outbox
   private readonly meter: Meter
@@ -224,6 +230,10 @@ export class VmManager {
   private readonly gpuReservations = new Map<string, string>()
   private readonly timers: ReturnType<typeof setInterval>[] = []
   private leaseUntil = 0
+  /** Bumped when the control link drops or the lease lapses: a command received under an older value is refused. */
+  private commandGeneration = 0
+  /** Whether the current lapse has already bumped `commandGeneration`. The next lease clears it. */
+  private lapseFenced = false
 
   constructor(
     private readonly config: HostConfig,
@@ -318,28 +328,40 @@ export class VmManager {
 
   /**
    * Runs one control command for a box. A command already answered (same `commandId`) returns the stored outcome.
-   * The outcome is stored until the control plane confirms it (`markReported`).
+   * The outcome is stored until the control plane confirms it (`markReported`). Null when it is refused: it was received
+   * before a disconnect or lease lapse, did not run, and has no outcome, so a resend under the same commandId runs fresh.
    */
-  execute(commandId: string, command: NestHostCommand): Promise<{ outcome: CommandOutcome; vm: NestVmReport | null }> {
+  execute(commandId: string, command: NestHostCommand): Promise<ExecutedCommand | null> {
+    const generation = this.commandGeneration
     return this.serial(command.boxId, async () => {
       const stored = findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
-      if (!isBoxId(command.boxId)) {
-        const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
-        recordCommand(this.layout, outcome)
-        return { outcome, vm: null }
-      }
-      let outcome: CommandOutcome
-      try {
-        await this.apply(command)
-        outcome = { commandId, boxId: command.boxId, ok: true, reported: false }
-      } catch (error) {
-        await this.failOperation(command.boxId, error)
-        outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
-      }
-      recordCommand(this.layout, outcome)
-      return { outcome, vm: this.reportOf(command.boxId) }
+      if (generation !== this.commandGeneration) return null
+      return this.applyCommand(commandId, command)
     })
+  }
+
+  /** Runs one command from the local operator socket. A dropped control link does not refuse it: the operator asked here. */
+  executeOperator(commandId: string, command: NestHostCommand): Promise<ExecutedCommand> {
+    return this.serial(command.boxId, () => this.applyCommand(commandId, command))
+  }
+
+  private async applyCommand(commandId: string, command: NestHostCommand): Promise<ExecutedCommand> {
+    if (!isBoxId(command.boxId)) {
+      const outcome: CommandOutcome = { commandId, boxId: command.boxId, ok: false, error: "invalid box id", reported: false }
+      recordCommand(this.layout, outcome)
+      return { outcome, vm: null }
+    }
+    let outcome: CommandOutcome
+    try {
+      await this.apply(command)
+      outcome = { commandId, boxId: command.boxId, ok: true, reported: false }
+    } catch (error) {
+      await this.failOperation(command.boxId, error)
+      outcome = { commandId, boxId: command.boxId, ok: false, error: errorMessage(error), reported: false }
+    }
+    recordCommand(this.layout, outcome)
+    return { outcome, vm: this.reportOf(command.boxId) }
   }
 
   pendingResults(): CommandOutcome[] {
@@ -378,8 +400,20 @@ export class VmManager {
   }
 
   setLease(validUntil: number): void {
+    // A lease that lapsed while no policy tick ran still ends its window here, before the renewal can let old commands run.
+    if (!this.lapseFenced && Date.now() >= this.leaseUntil) this.invalidateQueuedCommands()
+    this.lapseFenced = false
     writeLeaseUntil(this.layout.leasePath, validUntil)
     this.leaseUntil = validUntil
+  }
+
+  /**
+   * Refuses, at execution, every command received before this call. The control link calls it when its socket closes,
+   * since the control plane may have re-decided those commands. A refused command is not recorded, so a resend under the
+   * same commandId runs.
+   */
+  invalidateQueuedCommands(): void {
+    this.commandGeneration += 1
   }
 
   reportActivity(boxes: readonly IngressActivity[]): void {
@@ -1301,6 +1335,10 @@ export class VmManager {
   private tick(): void {
     const now = Date.now()
     const lapsed = now >= this.leaseUntil
+    if (lapsed && !this.lapseFenced) {
+      this.lapseFenced = true
+      this.invalidateQueuedCommands()
+    }
     const tight = this.isDiskTight()
     if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
     for (const vm of this.records.values()) {
