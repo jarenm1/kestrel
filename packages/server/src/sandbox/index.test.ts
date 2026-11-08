@@ -137,4 +137,32 @@ describe("cliBwrapArgs", () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test.skipIf(Bun.which("bwrap") === null)("a masked subtree is empty and writable inside the login home", () => {
+    const root = mkdtempSync(join(tmpdir(), "kestrel-accounts-sandbox-"))
+    try {
+      const home = join(root, "user")
+      const accounts = join(home, "accounts")
+      mkdirSync(join(accounts, "other"), { recursive: true })
+      writeFileSync(join(accounts, "other", "token"), "SECRET")
+      writeFileSync(join(home, "own-login"), "")
+      const run = (mask: ReadonlyArray<string>) =>
+        spawnSync("bwrap", cliBwrapArgs(home, {}, ["sh", "-c", "ls -A; test -w accounts; cat accounts/other/token 2>&1"], {
+          level: "basic",
+          homeToolArgs: [],
+          network: "none",
+          mask,
+        }), { encoding: "utf8" })
+      // Without the mask the default login's home exposes every other account's credentials.
+      expect(run([]).stdout).toContain("SECRET")
+      // With it the subtree exists, is writable, and holds none of the other logins.
+      const masked = run([accounts])
+      expect(masked.status).toBe(0)
+      expect(masked.stdout).toContain("own-login")
+      expect(masked.stdout).toContain("accounts")
+      expect(`${masked.stdout}${masked.stderr}`).not.toContain("SECRET")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

@@ -75,7 +75,9 @@ credentials are never copied between accounts. The owner-only `.kestrel-cli-auth
 the selected account per provider. A different login directory starts a fresh native session with the thread's
 saved conversation rather than attempting to resume another account's session. An unfinished attempt is marked and
 never listed as a login; a canceled, expired or failed attempt is removed with its home, and a box restart sweeps any
-left behind so later status reads do not probe them.
+left behind so later status reads do not probe them. Sandboxed CLI runs for `default` bind the user root but replace
+its `accounts` subtree with an empty writable directory, so one login's processes can never read or write another
+login; an isolated account's run binds only that account's home.
 
 
 ## Third-party model coverage

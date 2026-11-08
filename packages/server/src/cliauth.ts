@@ -565,12 +565,17 @@ export const CliAuthLive = Layer.effect(
                 cwd: discovery.cwd,
               }
         const level = config.sandbox === "strict" ? "strict" : "basic"
+        // The `default` login's home is the user's root, which also holds `accounts/<id>` for every other login: a CLI
+        // run for `default` must not see, let alone write, another account's credentials. An account's own home has no
+        // such subtree, so this only ever masks the user root.
+        const accounts = join(home, CLI_ACCOUNTS_DIR)
         return {
           file: bwrap,
           args: cliBwrapArgs(home, env, command, {
             ...sandbox,
             level,
             homeToolArgs: level === "basic" ? boxHomeToolArgs() : [],
+            mask: (yield* isDirectory(accounts)) ? [accounts] : [],
           }),
           env: {},
         }

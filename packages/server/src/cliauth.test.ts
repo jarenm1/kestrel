@@ -483,6 +483,7 @@ if [ "$1 $2" = "auth login" ]; then
   echo "Visit https://app.devin.ai/auth/cli/continue?state=abc&cli_pkce_marker=1 to sign in, then copy the code and paste it below."
   read code
   if [ "$code" = "good-code" ]; then
+    mkdir -p "$XDG_DATA_HOME/devin"
     printf 'valid\\n' > "$XDG_DATA_HOME/devin/credentials.toml"
     exit 0
   fi
@@ -526,7 +527,6 @@ describe.skipIf(!hasScript)("Devin sign-in", () => {
 
   test("runs the CLI in a terminal, takes the pasted code and reads the stored credentials", async () => {
     const root = rootFor()
-    mkdirSync(join(root, "users", "alice", "devin", "devin"), { recursive: true })
     const run = devinAuth(root)
     const start = await run((auth) => auth.startLogin("alice", "devin-cli"))
     expect(start).toMatchObject({
