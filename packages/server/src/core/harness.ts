@@ -66,8 +66,9 @@ export interface AgentHarnessShape {
     choice: AgentChoice,
   ) => Effect.Effect<void, InternalError>
   /**
-   * Stops a running run and marks it cancelled (at shutdown, failed and interrupted by restart); a cancelled run's question is dropped. The turn is interrupted
-   * first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
+   * Stops a running run and marks it cancelled; a cancelled run's question is dropped. At shutdown, a run that has
+   * started is marked failed and interrupted by restart instead, and a run still queued or launching is cancelled.
+   * The turn is interrupted first (Codex `turn/interrupt`, Claude's `interrupt` control request), so it ends cleanly in its session; the
    * process is killed when it does not exit in time.
    */
   readonly cancel: (runId: string) => Effect.Effect<void, InternalError>
@@ -514,8 +515,9 @@ export const AgentHarnessLive = Layer.effect(
 
     /**
      * Kills a running run and marks it cancelled. A cancel also drops the run's question. At shutdown (`shutdown`),
-     * the run is marked failed and interrupted by restart, as a crash leaves it; its question and task stay as they
-     * were, for the next start to reconcile.
+     * a run that has started is marked failed and interrupted by restart, as a crash leaves it; its question and task
+     * stay as they were, for the next start to reconcile. A run still queued or launching never started, so it is
+     * cancelled as on a cancel.
      */
     const stopRun = (runId: string, shutdown: boolean): Effect.Effect<void, InternalError> =>
       Effect.gen(function* () {
