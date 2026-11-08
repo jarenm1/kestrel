@@ -36,8 +36,16 @@ test("input excludes cache reads, cached tokens stay separate, and details do no
 test("turn-only totals report output without inventing cache-free input or a cache split", () => {
   const html = summary([turn("end")])
   expect(html).toContain(`title="60"`)
+  expect(html).toContain("1 tok/s")
   expect(html).toContain("Input tokens</dt><dd>Not reported</dd>")
   expect(html).toContain("Cached tokens</dt><dd>Not reported</dd>")
+})
+
+test("a response with missing output usage does not blank the turn's output total", () => {
+  const partial: AgentItem = { _tag: "usage", id: "partial", parentToolId: null, timestamp, durationMs: 400, inputTokens: 100, outputTokens: null, cachedTokens: 1000 }
+  const html = summary([partial, turn("end")])
+  expect(html).toContain(`title="60"`)
+  expect(html).toContain("1 tok/s")
 })
 
 test("metadata no longer creates rows or splits consecutive tools", () => {
