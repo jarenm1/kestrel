@@ -157,7 +157,7 @@ export class ControlLink {
   }
 
   private async runCommand(commandId: string, command: NestHostCommand): Promise<void> {
-    // A refused command never ran: no result, so a resend under the same commandId is the only answer the control plane gets.
+    // Refused for a dropped connection: no result, the control plane's resend on reconnect is the answer.
     const executed = await this.opts.manager.execute(commandId, command)
     if (executed === null) return
     const { outcome, vm } = executed
@@ -176,7 +176,7 @@ export class ControlLink {
     this.socket = null
     clearInterval(this.capacityTimer)
     this.capacityTimer = undefined
-    this.opts.manager.invalidateQueuedCommands()
+    this.opts.manager.connectionLost()
     if (this.stopped) return
     this.retryLater()
   }

@@ -230,9 +230,11 @@ export class VmManager {
   private readonly gpuReservations = new Map<string, string>()
   private readonly timers: ReturnType<typeof setInterval>[] = []
   private leaseUntil = 0
-  /** Bumped when the control link drops or the lease lapses: a command received under an older value is refused. */
-  private commandGeneration = 0
-  /** Whether the current lapse has already bumped `commandGeneration`. The next lease clears it. */
+  /** Bumped when the control socket closes. A command received under an older value may be resent by the control plane. */
+  private connectionGeneration = 0
+  /** Bumped when a lapse is first seen. A command received under an older value did not run under a valid lease. */
+  private leaseGeneration = 0
+  /** Whether the current lapse has already bumped `leaseGeneration`. The next lease clears it. */
   private lapseFenced = false
 
   constructor(
@@ -328,15 +330,30 @@ export class VmManager {
 
   /**
    * Runs one control command for a box. A command already answered (same `commandId`) returns the stored outcome.
-   * The outcome is stored until the control plane confirms it (`markReported`). Null when it is refused: it was received
-   * before a disconnect or lease lapse, did not run, and has no outcome, so a resend under the same commandId runs fresh.
+   * The outcome is stored until the control plane confirms it (`markReported`).
+   *
+   * A command received before the control connection dropped is refused with null: it did not run and has no outcome,
+   * because the control plane resends it on the new connection. A command received before a lease lapse, on a connection
+   * that stayed up, is refused with a failure and is not recorded, so the control plane learns of it at once and can
+   * re-place the box. Neither refusal runs the command or stores an outcome, so a later resend runs fresh.
    */
   execute(commandId: string, command: NestHostCommand): Promise<ExecutedCommand | null> {
-    const generation = this.commandGeneration
+    const connection = this.connectionGeneration
+    const lease = this.leaseGeneration
     return this.serial(command.boxId, async () => {
       const stored = findCommand(this.layout, commandId)
       if (stored !== null) return { outcome: stored, vm: this.reportOf(command.boxId) }
-      if (generation !== this.commandGeneration) return null
+      if (connection !== this.connectionGeneration) return null
+      if (lease !== this.leaseGeneration) {
+        const outcome: CommandOutcome = {
+          commandId,
+          boxId: command.boxId,
+          ok: false,
+          error: "control lease lapsed before the command ran",
+          reported: false,
+        }
+        return { outcome, vm: this.reportOf(command.boxId) }
+      }
       return this.applyCommand(commandId, command)
     })
   }
@@ -401,19 +418,15 @@ export class VmManager {
 
   setLease(validUntil: number): void {
     // A lease that lapsed while no policy tick ran still ends its window here, before the renewal can let old commands run.
-    if (!this.lapseFenced && Date.now() >= this.leaseUntil) this.invalidateQueuedCommands()
+    if (!this.lapseFenced && Date.now() >= this.leaseUntil) this.leaseGeneration += 1
     this.lapseFenced = false
     writeLeaseUntil(this.layout.leasePath, validUntil)
     this.leaseUntil = validUntil
   }
 
-  /**
-   * Refuses, at execution, every command received before this call. The control link calls it when its socket closes,
-   * since the control plane may have re-decided those commands. A refused command is not recorded, so a resend under the
-   * same commandId runs.
-   */
-  invalidateQueuedCommands(): void {
-    this.commandGeneration += 1
+  /** The control socket closed: queued commands are refused at execution, since the control plane resends them on reconnect. */
+  connectionLost(): void {
+    this.connectionGeneration += 1
   }
 
   reportActivity(boxes: readonly IngressActivity[]): void {
@@ -1337,7 +1350,7 @@ export class VmManager {
     const lapsed = now >= this.leaseUntil
     if (lapsed && !this.lapseFenced) {
       this.lapseFenced = true
-      this.invalidateQueuedCommands()
+      this.leaseGeneration += 1
     }
     const tight = this.isDiskTight()
     if (readMemoryPressureAvg10() > HOST_MEMORY_PRESSURE_AVG10) this.suspendLeastActive()
