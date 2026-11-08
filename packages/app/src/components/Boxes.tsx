@@ -225,12 +225,12 @@ export function AddressHelp() {
       <li>
         Other devices: an HTTPS address. Easiest, if you use Tailscale: Tailscale Serve gives the machine an{" "}
         <code className="font-mono">https://….ts.net</code> address for devices signed in to the same tailnet. A
-        Cloudflare Tunnel or your own domain works too. Keep <code className="font-mono">/mcp</code> and{" "}
-        <code className="font-mono">/broker</code> private, as the{" "}
+        Cloudflare Tunnel or your own domain works too. Point it straight at the box port; the box keeps its private
+        endpoints on loopback, so no filtering proxy is needed. The{" "}
         <a href={BOX_GUIDE_URL} target="_blank" rel="noreferrer" className="text-foreground underline underline-offset-4">
           box guide
         </a>{" "}
-        shows.
+        has the details.
       </li>
       <li>Plain http:// to another machine, even on the same Wi-Fi, cannot be reached from the app.</li>
     </ul>
