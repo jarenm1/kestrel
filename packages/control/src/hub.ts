@@ -390,6 +390,10 @@ export class Hub extends DurableObject<Env> {
         task_id TEXT,
         error TEXT
       )`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS automation_jobs (
+        id TEXT PRIMARY KEY, automation_json TEXT NOT NULL, reason TEXT NOT NULL,
+        pr_json TEXT, due_at INTEGER NOT NULL
+      )`)
       sql.exec(`CREATE TABLE IF NOT EXISTS github_hooks (
         repo TEXT PRIMARY KEY,
         hook_id INTEGER NOT NULL,
@@ -1323,7 +1327,8 @@ export class Hub extends DurableObject<Env> {
       model: changes.model === undefined ? current.model : changes.model,
       enabled: enabled ? 1 : 0,
       triggerJson: JSON.stringify(trigger),
-      nextRunAt: nextRunMs(trigger, enabled, now),
+      nextRunAt: enabled === (current.enabled === 1) && JSON.stringify(trigger) === current.triggerJson
+        ? current.nextRunAt : nextRunMs(trigger, enabled, now),
       updatedAt: new Date(now).toISOString(),
     }
     this.ctx.storage.sql.exec(
@@ -1377,29 +1382,36 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * Records one pull request webhook delivery and starts a task for every enabled GitHub automation on the
-   * repository whose trigger matches. Runs happen after the response (`waitUntil`), so GitHub gets a fast 202.
+   * repository whose trigger matches. The alarm dispatches jobs after the response.
    */
-  githubDelivery(deliveryId: string, event: PullRequestEvent): { duplicate: boolean; matched: number } {
+  async githubDelivery(deliveryId: string, event: PullRequestEvent): Promise<{ duplicate: boolean; matched: number }> {
     const sql = this.ctx.storage.sql
     const now = Date.now()
     if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) {
       return { duplicate: true, matched: 0 }
     }
-    sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
-    sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
-    const rows = sql
-      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, event.repo)
-      .toArray()
-    let matched = 0
-    for (const row of rows) {
-      const trigger = decodeTrigger(row.triggerJson)
-      if (trigger._tag !== "github") continue
-      const reason = matchGithubTrigger(trigger, event)
-      if (reason === null) continue
-      matched++
-      this.ctx.waitUntil(this.fire(row, reason, event.pr))
-    }
-    return { duplicate: false, matched }
+    // Arm before committing: a restart between the commit and a later rearm must not strand jobs.
+    await this.ctx.storage.setAlarm(now)
+    const matched = this.ctx.storage.transactionSync(() => {
+      if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) return null
+      sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
+      sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
+      const rows = sql
+        .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, event.repo)
+        .toArray()
+      let count = 0
+      for (const row of rows) {
+        const trigger = decodeTrigger(row.triggerJson)
+        if (trigger._tag !== "github") continue
+        const reason = matchGithubTrigger(trigger, event)
+        if (reason === null) continue
+        count++
+        this.enqueueAutomation(row, reason, event.pr, now)
+      }
+      return count
+    })
+    await this.rearm()
+    return { duplicate: matched === null, matched: matched ?? 0 }
   }
 
   /** Watch one pull request of a thread. Watching the same one again is a no-op; others stay watched. */
@@ -1497,17 +1509,41 @@ export class Hub extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now()
+    // Alarms are consumed when invoked. Restore a recovery deadline before any
+    // asynchronous work, including Nest expiry and task dispatch.
+    await this.ctx.storage.setAlarm(now + 60000)
+    try {
     await this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
       .toArray()
     for (const row of due) {
-      this.ctx.storage.sql.exec(
-        "UPDATE automations SET next_run_at = ? WHERE id = ?",
-        nextRunMs(decodeTrigger(row.triggerJson), true, now),
-        row.id,
-      )
-      await this.fire(row, "schedule", null)
+      this.ctx.storage.transactionSync(() => {
+        // Missed occurrences coalesce into one job; the next fire is after now.
+        this.enqueueAutomation(row, "schedule", null, now)
+        this.ctx.storage.sql.exec(
+          "UPDATE automations SET next_run_at = ? WHERE id = ?",
+          nextRunMs(decodeTrigger(row.triggerJson), true, now),
+          row.id,
+        )
+      })
+    }
+    // Keep a recovery alarm armed while calls are in flight. A stop after the box
+    // accepts a request can cause a retry and duplicate tasks or messages.
+    await this.rearm()
+    const jobs = this.ctx.storage.sql.exec<{ id: string; automationJson: string; reason: string; prJson: string | null }>(
+      "SELECT id, automation_json AS automationJson, reason, pr_json AS prJson FROM automation_jobs WHERE due_at <= ? ORDER BY due_at, rowid", now,
+    ).toArray()
+    for (const job of jobs) {
+      // Delay the next attempt before dispatch so an exception or restart does not
+      // repeatedly invoke the alarm for the same job without a pause.
+      this.ctx.storage.sql.exec("UPDATE automation_jobs SET due_at = ? WHERE id = ?", Date.now() + 60000, job.id)
+      try {
+        await this.fire(JSON.parse(job.automationJson) as AutomationRow, job.reason, job.prJson === null ? null : JSON.parse(job.prJson) as PullRequestInfo)
+        this.ctx.storage.sql.exec("DELETE FROM automation_jobs WHERE id = ?", job.id)
+      } catch (error) {
+        console.error("Automation job dispatch failed", job.id, error)
+      }
     }
     const pending = this.ctx.storage.sql.exec<{ login: string; taskId: string; repo: string; number: number; kind: string; deliveryId: string }>(
       "SELECT login, task_id AS taskId, repo, pr_number AS number, kind, delivery_id AS deliveryId FROM pr_activity_queue WHERE due_at <= ?", now,
@@ -1524,7 +1560,14 @@ export class Hub extends DurableObject<Env> {
       }
       else this.ctx.storage.sql.exec(`UPDATE pr_activity_queue SET due_at = ? WHERE ${key} AND delivery_id = ?`, Date.now() + 60000, ...keyArgs, row.deliveryId)
     }
-    await this.rearm()
+    } finally {
+      await this.rearm()
+    }
+  }
+
+  private enqueueAutomation(row: AutomationRow, reason: string, pr: PullRequestInfo | null, now: number): void {
+    this.ctx.storage.sql.exec("INSERT INTO automation_jobs (id, automation_json, reason, pr_json, due_at) VALUES (?, ?, ?, ?, ?)",
+      crypto.randomUUID(), JSON.stringify(row), reason, pr === null ? null : JSON.stringify(pr), now)
   }
 
   private automationRow(login: string, id: string): AutomationRow | null {
@@ -1541,8 +1584,9 @@ export class Hub extends DurableObject<Env> {
       .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
       .toArray()[0]
     const activityAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
+    const jobAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM automation_jobs").toArray()[0]?.at ?? null
     const scheduleAt = row?.at ?? null
-    const deadlines = [scheduleAt, activityAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
+    const deadlines = [scheduleAt, jobAt, activityAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
     if (deadlines.length === 0) await this.ctx.storage.deleteAlarm()
     else await this.ctx.storage.setAlarm(Math.min(...deadlines))
   }
