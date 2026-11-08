@@ -544,9 +544,10 @@ export const AgentHarnessLive = Layer.effect(
           if (run.status !== "running") return
           run.exitCode = null
           run.endedAt = nowIso()
-          // The box is going down, not the user: the run is left as a crash leaves it, and the next start's
-          // reconciliation marks it interrupted by restart and its task failed.
-          if (shutdown) {
+          // The box is going down, not the user: a run that had started is left as a crash leaves it, and the next
+          // start's reconciliation marks it interrupted by restart and its task failed. A run still queued or launching
+          // never started an agent, so there is no work to resume and it is cancelled as before.
+          if (shutdown && entry !== undefined) {
             run.status = "failed"
             run.interruptedByRestart = true
             return
