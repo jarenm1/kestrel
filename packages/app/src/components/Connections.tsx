@@ -178,7 +178,8 @@ function HarnessRow({ connection, children }: { connection: Connection; children
   return (
     <div className="flex items-start gap-3 px-5 py-4">
       {harness && <HarnessLogo harness={harness} className="mt-0.5 size-6" />}
-      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+      {/* The model picker makes the header taller than its label, so its extra height already reads as gap above the body. */}
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex flex-wrap items-center gap-3">
           <ConnectionHeader
             label={connection.label}
@@ -330,7 +331,6 @@ function ConnectionRow({ connection, onRemove }: { connection: Connection; onRem
         account={connection.account}
         expired={connection.expired === true}
       />
-      {keyProvider && <p className="text-xs text-muted-foreground">{CLI_INTRO[keyProvider]}</p>}
       {keyProvider && !connection.available ? (
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-muted-foreground">{connection.error ?? "Agent box is offline."}</p>
@@ -581,7 +581,7 @@ function CliConnectionRow({ connection, provider }: { connection: Connection; pr
 
   return (
     <HarnessRow connection={connection}>
-      <div className="flex flex-col gap-2">{body()}</div>
+      <div className="flex flex-col gap-3">{body()}</div>
       {error && <Alert>{errorText(error)}</Alert>}
     </HarnessRow>
   )
