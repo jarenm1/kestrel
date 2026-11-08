@@ -212,7 +212,7 @@ The report distinguishes:
 - **Allocation:** viewer and box relay candidate counts alongside gathering state. Zero relays while gathering is incomplete is not yet an allocation failure; zero after gathering completes is useful evidence. Direct ICE may still succeed without a relay.
 - **Connectivity:** both endpoints' candidate types for the selected pair and the reported transport. A relay on either endpoint makes the path relayed. Unreported candidate or box metadata stays unknown.
 - **Video:** received bytes/packets and decoded frames. Connected ICE with no packets differs from packets arriving without decoded frames. Decoded frames alone do not prove that the browser has painted them.
-- **Failures:** the last viewer failure category, box failure category and bounded numeric browser ICE error codes by transport. These are observations, not a diagnosis that a particular network blocks UDP.
+- **Failures:** the current attempt's failure category, the box's failure category and bounded numeric browser ICE error codes by transport. The failure remains visible during retry backoff and is cleared when the next attempt begins. These are observations, not a diagnosis that a particular network blocks UDP.
 
 Reports contain only allowlisted states, counts, candidate/transport types and numeric error codes. They exclude credentials, tokens, addresses, URLs, SDP and raw provider/browser errors. Do not paste raw `rtc.config` messages: those carry short-lived TURN credentials. Diagnostics use the existing authenticated desktop socket; they do not add a telemetry upload or a media fallback.
 

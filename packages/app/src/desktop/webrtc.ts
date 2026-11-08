@@ -554,6 +554,8 @@ export class DesktopRtc {
   /** The next attempt, after fetching fresh credentials when this one failed or the config aged out. */
   private retry(refresh: boolean): void {
     if (this.closed) return
+    // The backoff already published the previous failure; it must not describe the attempt now starting.
+    this.lastFailure = null
     if (!refresh && !this.configStale) {
       this.negotiate()
       return
@@ -600,6 +602,7 @@ export class DesktopRtc {
 
   /** Evidence belongs to one attempt; a new peer connection starts clean but keeps the attempt number. */
   private resetAttempt(): void {
+    this.lastFailure = null
     this.relayCandidates = 0
     this.gathering = "unknown"
     this.connectionState = "unknown"

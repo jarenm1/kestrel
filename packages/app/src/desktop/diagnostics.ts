@@ -30,6 +30,7 @@ export interface RtcDiagnostics {
 /** Evidence, not a claim about the network: candidates and ICE connection do not prove video decoding. */
 export function diagnosticSummary(d: RtcDiagnostics): string {
   if (d.config === "waiting") return "Waiting for connection settings from the box."
+  if (d.config === "refreshing") return "Refreshing connection settings before retrying."
   if (d.connection === "connected") {
     if ((d.framesDecoded ?? 0) > 0) return "Desktop video frames have decoded."
     if ((d.videoBytes ?? 0) > 0 || (d.videoPackets ?? 0) > 0) {
@@ -57,7 +58,6 @@ export function diagnosticSummary(d: RtcDiagnostics): string {
   if (d.lastFailure === "timeout" || d.lastFailure === "connection") {
     return "WebRTC did not connect. Candidate gathering alone does not prove a working path."
   }
-  if (d.config === "refreshing") return "Refreshing connection settings before retrying."
   return "Gathering candidates and negotiating the connection."
 }
 

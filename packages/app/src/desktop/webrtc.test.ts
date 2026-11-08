@@ -17,7 +17,7 @@ import {
   type RtcState,
   type RtcStats,
 } from "./webrtc"
-import type { RtcDiagnostics } from "./diagnostics"
+import { diagnosticSummary, type RtcDiagnostics } from "./diagnostics"
 
 interface Timer {
   id: number
@@ -581,6 +581,24 @@ describe("diagnostics", () => {
     expect(h.diagnostics.at(-1)!.attempt).toBe(2)
   })
 
+  test("a retry shows its previous failure during backoff, then clears it for the new attempt", async () => {
+    const h = harness()
+    h.rtc.handle(turnConfig)
+    await settle()
+    FakePeer.all[0]!.set("failed")
+    // scheduleRetry publishes before the timer: the cause stays visible while waiting.
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("WebRTC did not connect. Candidate gathering alone does not prove a working path.")
+    clock.advance(retryDelay(0))
+    await settle()
+    expect(h.diagnostics.at(-1)!.lastFailure).toBeNull()
+    expect(h.diagnostics.at(-1)!.config).toBe("refreshing")
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("Refreshing connection settings before retrying.")
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(h.diagnostics.at(-1)!.config).toBe("ready")
+    expect(diagnosticSummary(h.diagnostics.at(-1)!)).toBe("Gathering candidates and negotiating the connection.")
+  })
+
   test("inbound video and the selected pair are monitored during negotiation", async () => {
     const h = harness()
     h.rtc.handle(config)
@@ -669,6 +687,7 @@ describe("diagnostics", () => {
     expect(h.diagnostics.at(-1)!.box).not.toBe(box)
     peer.set("failed")
     expect(h.diagnostics.at(-1)!.box).toEqual(box)
+    expect(h.diagnostics.at(-1)!.lastFailure).toBe("connection")
     // A late snapshot cannot overwrite the failed attempt's evidence: no peer connection owns it.
     h.rtc.handle({
       _tag: "rtc.diagnostics",
@@ -681,7 +700,7 @@ describe("diagnostics", () => {
     const next = h.diagnostics.at(-1)!
     expect(next.attempt).toBe(2)
     expect(next.box).toBeNull()
-    expect(next.lastFailure).toBe("connection")
+    expect(next.lastFailure).toBeNull()
   })
 
   test("a box summary sent just before a config belongs to the new attempt", async () => {
@@ -787,8 +806,8 @@ describe("diagnostics", () => {
     await settle()
     expect(h.states.at(-1)).toBe("live")
     expect(h.diagnostics.at(-1)!.videoBytes).toBe(2_048)
-    // The failed attempt's evidence is preserved next to the recovered connection.
-    expect(h.diagnostics.at(-1)!.lastFailure).toBe("connection")
+    // The new attempt is described by its own evidence; the earlier failure was visible during its backoff.
+    expect(h.diagnostics.at(-1)!.lastFailure).toBeNull()
   })
 
   test("repeated failures keep the exponential backoff", async () => {

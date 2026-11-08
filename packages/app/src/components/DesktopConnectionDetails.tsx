@@ -17,7 +17,7 @@ export function DesktopConnectionDetails({ diagnostics: d, embedded }: { diagnos
     ["Selected transport", pair ? `${pair.protocol} / relay ${pair.relayProtocol}` : "Unknown"],
     ["Video received", `${d.videoBytes?.toLocaleString() ?? "unknown"} bytes / ${d.videoPackets?.toLocaleString() ?? "unknown"} packets`],
     ["Frames decoded", d.framesDecoded?.toLocaleString() ?? "Unknown"],
-    ["Last viewer failure", d.lastFailure ?? "None recorded"],
+    ["Attempt failure", d.lastFailure ?? "None recorded"],
     ["Box failure", d.box?.failure ?? "None reported"],
     ["ICE error codes", d.iceErrors.length ? d.iceErrors.map((error) => `${error.transport}: ${error.code}`).join(", ") : "None recorded"],
   ]
