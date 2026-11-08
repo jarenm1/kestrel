@@ -473,15 +473,42 @@ export const CliAuthLive = Layer.effect(
         )
       })
 
-    /** Use a surviving selection; otherwise resolve a completed login, never a half-written sign-in directory. */
+    /**
+     * The login a provider's launches, command reads and usage should use: the persisted selection while it is still a
+     * signed-in login, otherwise the first completed login (`default` first, as status prefers). Probing the selected
+     * login first keeps a run from spawning one CLI per account; only a stale selection costs extra probes. The result
+     * therefore agrees with `readProviderStatus`'s active account rather than trusting a directory that may be signed
+     * out.
+     */
     const effectiveAccount = (user: string, provider: CliProvider): Effect.Effect<string | null, BadRequest> =>
       Effect.gen(function* () {
-        // An API-key login is the single legacy row, with no accounts to switch.
-        if (AGENT_CLIS[provider].signIn.kind !== "page") return DEFAULT_CLI_ACCOUNT
+        // An API-key login is the single legacy row, with no accounts to switch, but it is still only a login while
+        // the CLI reports one.
+        if (AGENT_CLIS[provider].signIn.kind !== "page") {
+          const probe = yield* probeAccount(user, provider, DEFAULT_CLI_ACCOUNT)
+          return probe.status.loggedIn ? DEFAULT_CLI_ACCOUNT : null
+        }
         const [state, candidates] = yield* Effect.all([readState(user), listAccountIds(user, provider)] as const)
+        if (candidates.length === 0) return null
         const selected = state.active[provider]
-        if (selected !== undefined && candidates.includes(selected)) return selected
-        return (yield* readProviderStatus(user, provider)).activeAccountId ?? null
+        const order = selected !== undefined && candidates.includes(selected)
+          ? [selected, ...candidates.filter((accountId) => accountId !== selected)]
+          : candidates
+        for (const accountId of order) {
+          const probe = yield* probeAccount(user, provider, accountId)
+          if (probe.status.loggedIn) return accountId
+          // A selected login whose probe failed stays selected, as in `readProviderStatus`: a transient probe must not
+          // hand usage to another account behind the user's choice.
+          if (
+            accountId === selected &&
+            probe.present &&
+            probe.status.error !== undefined &&
+            probe.status.cannotSignIn !== true
+          ) {
+            return accountId
+          }
+        }
+        return null
       })
 
     /**
@@ -1309,14 +1336,14 @@ export const CliAuthLive = Layer.effect(
       Effect.map(
         Effect.all(
           CLI_PROVIDERS.map((provider) =>
-            Effect.flatMap(readProviderStatus(user, provider), (s) => {
-              if (!s.loggedIn) return Effect.succeed(null)
-              const accountId = s.activeAccountId ?? DEFAULT_CLI_ACCOUNT
-              return Effect.map(accountHome(user, accountId), (home): CliLoginDir => ({
-                provider,
-                dir: homeProviderDir(home, provider),
-              }))
-            }).pipe(
+            Effect.flatMap(effectiveAccount(user, provider), (accountId) =>
+              accountId === null
+                ? Effect.succeed(null)
+                : Effect.map(accountHome(user, accountId), (home): CliLoginDir => ({
+                    provider,
+                    dir: homeProviderDir(home, provider),
+                  })),
+            ).pipe(
               // A status check that fails must not block runs: the run falls back to the broker's keys.
               Effect.catchAll((e) =>
                 Effect.as(Effect.logWarning(`${provider} status for ${user} failed: ${e.message}`), null),

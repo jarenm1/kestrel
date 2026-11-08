@@ -378,6 +378,22 @@ console.log(JSON.stringify({ loggedIn: true, email: home.includes("accttwo") ? "
     expect(restarted).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: "accttwo" })
   })
 
+  test("a selected but signed-out login is not handed to runs over a connected one", async () => {
+    const root = rootFor()
+    // The selection names a login whose credentials never completed, while another account is connected.
+    mkdirSync(join(root, "users", "alice", "accounts", "signedout", "antigravity"), { recursive: true })
+    writeAccountCredential(root, "accttwo", "second@example.com")
+    writeFileSync(
+      join(root, "users", "alice", ".kestrel-cli-auth.json"),
+      JSON.stringify({ version: 1, active: { "antigravity-cli": "signedout" } }),
+    )
+    const run = authRuntime(root)
+    expect(await run((auth) => auth.loggedInDirs("alice"))).toContainEqual({
+      provider: "antigravity-cli",
+      dir: antigravityAccountDir(root, "accttwo"),
+    })
+  })
+
   test("keeps the active login untouched while another sign-in is pending and completes it into an isolated account", async () => {
     const root = rootFor()
     fakeAntigravity(root, "second@example.com")
