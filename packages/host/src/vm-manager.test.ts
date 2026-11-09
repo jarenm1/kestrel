@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { NEST_LAPSE_REFUSAL, type NestHostCommand } from "@cloudagents/protocol"
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import type { VmRecord } from "./schema"
 import { stateLayout, vmPaths } from "./state-store"
 import { destroyCommand, newTestManager, resumeCommand, testLimits, type TestManager } from "./vm-manager.fixture"
 import type { VmManager } from "./vm-manager"
+import type { VolumeTool } from "./volume"
 
 let fixtures: TestManager[] = []
 const fixture = (): TestManager => {
@@ -227,15 +229,20 @@ const recordOf = (overrides: Partial<VmRecord>): VmRecord => ({
   volumeProcess: null,
   snapshotGen: null,
   cloneId: null,
+  tombstone: null,
   operation: null,
   lastError: null,
   ...overrides,
 })
 
+/** `VolumeTool` with mutable fields, so a test can point the manager at a fake executable. */
+type TestVolumeTool = { -readonly [K in keyof VolumeTool]: VolumeTool[K] }
+
 /** The manager's private record map and transition functions, as the tests exercise them directly. */
 const internals = (manager: VmManager) =>
   manager as unknown as {
     records: Map<string, VmRecord>
+    volume: TestVolumeTool
     recover: (record: VmRecord) => Promise<void>
     resumeCommand: (command: NestHostCommand) => Promise<void>
     destroy: (command: NestHostCommand) => Promise<void>
@@ -272,14 +279,49 @@ describe("recovery and volume safety", () => {
     expect(internalsOf.records.get(parked.boxId)).toMatchObject({ ownerEpoch: 1, localDirty: true })
   })
 
-  test("a destroy at a newer epoch keeps an evicted tombstone's backup", async () => {
+  test("a destroy at either epoch keeps an evicted tombstone's backup", async () => {
     const { manager } = fixture()
     const internalsOf = internals(manager)
-    const tombstone = recordOf({ state: "deleted", ownerEpoch: 1, volumeRef: "vol-1", localDirty: false })
+    const tombstone = recordOf({
+      state: "deleted",
+      ownerEpoch: 1,
+      volumeRef: "vol-1",
+      localDirty: false,
+      tombstone: "evict",
+    })
     internalsOf.records.set(tombstone.boxId, tombstone)
 
+    // A duplicate destroy from the old epoch matches the tombstone's own epoch, and the new owner's epoch must not
+    // wipe it either. The fixture's `kestrel-volume` is not installed, so any delete call would reject this test.
+    await internalsOf.destroy(destroyCommand(1))
     await internalsOf.destroy(destroyCommand(2))
 
-    expect(internalsOf.records.get(tombstone.boxId)).toMatchObject({ state: "deleted", ownerEpoch: 1, volumeRef: "vol-1" })
+    expect(internalsOf.records.get(tombstone.boxId)).toMatchObject({
+      state: "deleted",
+      ownerEpoch: 1,
+      volumeRef: "vol-1",
+      tombstone: "evict",
+    })
+  })
+
+  test("a missing backup keeps the local volume when the lazy restore cannot open it", async () => {
+    const { manager, stateDir } = fixture()
+    manager.setLease(Date.now() + 60_000)
+    const internalsOf = internals(manager)
+    const parked = recordOf({ state: "parked", ownerEpoch: 1, localDirty: false, volumeRef: "vol-missing" })
+    internalsOf.records.set(parked.boxId, parked)
+    const p = vmPaths(stateLayout(stateDir), parked.boxId)
+    mkdirSync(p.dir, { recursive: true })
+    writeFileSync(p.volume, "the only copy")
+    // A tool that opens nothing and exits before printing a device: the manifest it was asked for could not be read.
+    const tool = join(dirname(stateDir), "volume-tool-that-cannot-restore")
+    writeFileSync(tool, "#!/bin/sh\nexit 0\n", { mode: 0o755 })
+    internalsOf.volume.tool = tool
+
+    await expect(internalsOf.resumeCommand(resumeCommand(2, "vol-missing"))).rejects.toThrow()
+
+    expect(readFileSync(p.volume, "utf8")).toBe("the only copy")
+    expect(existsSync(`${p.volume}.previous`)).toBe(false)
+    expect(internalsOf.records.get(parked.boxId)).toMatchObject({ state: "parked", ownerEpoch: 2 })
   })
 })

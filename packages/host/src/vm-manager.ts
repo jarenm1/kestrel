@@ -209,6 +209,7 @@ const createNewRecord = (fields: {
   volumeProcess: null,
   snapshotGen: null,
   cloneId: null,
+  tombstone: null,
   operation: null,
   lastError: null,
 })
@@ -787,6 +788,7 @@ export class VmManager {
         backedUpAt: null,
         localRef: null,
         localDirty: false,
+        tombstone: "destroy",
         lastError: errorMessage(error),
       })
       return
@@ -890,7 +892,6 @@ export class VmManager {
         throw new HostError(`cannot resume box ${cmd.boxId} at epoch ${cmd.ownerEpoch}: no volume backup to restore`)
       }
       const released = await this.releaseVm(current)
-      rmSync(this.paths(cmd.boxId).volume, { force: true })
       vm = this.commit({
         ...released,
         state: "parked",
@@ -936,12 +937,28 @@ export class VmManager {
     const usableLocal = existsSync(p.volume) && (cur.localDirty || (cur.volumeRef !== null && cur.localRef === cur.volumeRef))
     if (!usableLocal) {
       if (cur.volumeRef === null) throw new HostError("no local volume and no backup to restore it from")
-      rmSync(p.volume, { force: true })
+      // Keep the only local copy until the lazy restore has opened its source: a manifest can be missing or unreadable,
+      // and the restore fails before it serves a byte. Only a successful open makes the backup authoritative.
+      const previous = `${p.volume}.previous`
+      const hadLocal = existsSync(p.volume)
+      rmSync(previous, { recursive: true, force: true })
+      rmSync(`${p.volume}.bitmap`, { force: true })
+      rmSync(`${p.volume}.lock`, { force: true })
+      if (hadLocal) renameSync(p.volume, previous)
       const lazy = await startLazyVolume(
         this.volume,
         { ref: cur.volumeRef, boxId: cur.boxId, dest: p.volume, logPath: join(p.dir, "volume.log") },
         LAZY_VOLUME_TIMEOUT_MS,
-      )
+      ).catch((error: unknown) => {
+        // The restore never opened the backup (for example its manifest is gone). Revert the destination and put the
+        // local copy back: it is still the only data.
+        rmSync(p.volume, { force: true })
+        rmSync(`${p.volume}.bitmap`, { force: true })
+        rmSync(`${p.volume}.lock`, { force: true })
+        if (hadLocal) renameSync(previous, p.volume)
+        throw error
+      })
+      rmSync(previous, { recursive: true, force: true })
       cur = this.commit({ ...cur, volumeProcess: lazy })
     } else if (cur.volumeProcess !== null) {
       cur = this.commit({ ...cur, volumeProcess: null })
@@ -1165,11 +1182,12 @@ export class VmManager {
     const vm = this.records.get(cmd.boxId)
     if (vm === undefined) return
     // A tombstone that still holds its backup ref was either interrupted mid-destroy (finish the wipe) or left by
-    // `evict`, which keeps the backup for the box's new owner. Only the owner at the tombstone's epoch may wipe it.
+    // `evict`, which keeps the backup for the box's new owner. A tombstone from `evict` is never wiped by a destroy,
+    // whatever epoch the command carries: a late duplicate from the old epoch matches the tombstone's own epoch.
     if (vm.state === "deleted") {
-      if (vm.volumeRef !== null && vm.ownerEpoch === cmd.ownerEpoch) {
+      if (vm.volumeRef !== null && vm.tombstone !== "evict" && vm.ownerEpoch === cmd.ownerEpoch) {
         await deleteVolumeStore(this.volume, cmd.boxId)
-        this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null })
+        this.finish(vm, "deleted", { volumeRef: null, backedUpAt: null, tombstone: "destroy" })
       }
       return
     }
@@ -1180,7 +1198,13 @@ export class VmManager {
     cur = await this.releaseVm(cur)
     if (cur.volumeRef !== null) await deleteVolumeStore(this.volume, cmd.boxId)
     clearArtifacts(this.paths(cmd.boxId).dir)
-    this.finish(cur, "deleted", { volumeRef: null, backedUpAt: null, localRef: null, localDirty: false })
+    this.finish(cur, "deleted", {
+      volumeRef: null,
+      backedUpAt: null,
+      localRef: null,
+      localDirty: false,
+      tombstone: "destroy",
+    })
   }
 
   /** The box lives elsewhere now: drop local state, keep backups, and stop reporting it. */
@@ -1193,7 +1217,7 @@ export class VmManager {
     let cur = this.begin(vm, "destroy", null)
     cur = await this.releaseVm(cur)
     clearArtifacts(this.paths(cmd.boxId).dir)
-    this.finish(cur, "deleted", { localRef: null, localDirty: false })
+    this.finish(cur, "deleted", { localRef: null, localDirty: false, tombstone: "evict" })
   }
 
   /** The VM this host holds for a box at exactly the command's owner epoch; a command for any other epoch is refused. */
