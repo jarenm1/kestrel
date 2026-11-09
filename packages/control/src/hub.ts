@@ -77,6 +77,7 @@ import {
   ensureAutomationFiresTable,
   type AutomationFireRow,
 } from "./automation-fires-table"
+import { applyDeliveryEvent, firePhaseOf } from "./delivery-state"
 import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, isAllowedLogin, type Env } from "./env"
@@ -1851,11 +1852,27 @@ export class Hub extends DurableObject<Env> {
     error: string | null,
   ): AutomationRun {
     const sql = this.ctx.storage.sql
+    const transition = applyDeliveryEvent(firePhaseOf(fire), { _tag: "settle", status })
+    if (transition._tag === "illegal") {
+      console.warn(`automation fire ${fire.id}: ${transition.reason}`)
+      // Keep the stored terminal phase; do not create a second, conflicting run.
+      return (
+        this.runRow(fire.id) ?? {
+          id: fire.id,
+          automationId: fire.automationId,
+          firedAt: new Date(fire.claimedAt).toISOString(),
+          reason: fire.reason,
+          status: fire.outcome ?? status,
+          taskId: fire.taskId,
+          error: fire.error,
+        }
+      )
+    }
     const existing = this.runRow(fire.id)
     if (existing !== null) {
       sql.exec(
         "UPDATE automation_fires SET outcome = ?, task_id = ?, error = ? WHERE id = ? AND outcome IS NULL",
-        existing.status,
+        transition.phase.outcome,
         existing.taskId,
         existing.error,
         fire.id,
