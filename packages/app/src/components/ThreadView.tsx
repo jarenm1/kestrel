@@ -200,6 +200,7 @@ export function ThreadView({ taskId }: { taskId: string }) {
                   onSelect={setTab}
                   onClose={closeTab}
                   onOpen={openTab}
+                  onReorder={setTabs}
                 />
                 <div className="ml-auto" />
                 <ThreadRepoButton checkouts={checkouts} />

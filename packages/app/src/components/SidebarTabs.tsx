@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react"
+import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
 import { AppWindow, FolderTree, GitCompare, GitPullRequest, Monitor, Plus, X, type LucideIcon } from "lucide-react"
 import { Button } from "@cloudagents/ui/button"
 import {
@@ -28,7 +28,13 @@ export interface PullRequestTab {
   label: string
 }
 
-/** The open sidebar's header: its open tabs, each closable, then a + menu that opens another (or focuses it). */
+/** A press on a tab turns into a drag once the pointer has moved this far, so plain clicks still select. */
+const DRAG_THRESHOLD_PX = 4
+
+/**
+ * The open sidebar's header: its open tabs, each closable and draggable to reorder, then a + menu that opens another
+ * (or focuses it).
+ */
 export function SidebarTabStrip({
   tabs,
   active,
@@ -36,6 +42,7 @@ export function SidebarTabStrip({
   onSelect,
   onClose,
   onOpen,
+  onReorder,
 }: {
   tabs: readonly SidebarTabId[]
   active: SidebarTabId | undefined
@@ -43,9 +50,46 @@ export function SidebarTabStrip({
   onSelect: (id: SidebarTabId) => void
   onClose: (id: SidebarTabId) => void
   onOpen: (id: SidebarTabId) => void
+  onReorder: (tabs: readonly SidebarTabId[]) => void
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const available = (id: SidebarTabId) => id !== "pull-requests" || pullRequests.count > 0
+  const listRef = useRef<HTMLDivElement>(null)
+  const press = useRef<{ id: SidebarTabId; pointerId: number; startX: number } | null>(null)
+  const [dragging, setDragging] = useState<SidebarTabId | null>(null)
+
+  function onTabPointerDown(e: PointerEvent<HTMLDivElement>, id: SidebarTabId) {
+    if (e.button !== 0) return
+    press.current = { id, pointerId: e.pointerId, startX: e.clientX }
+  }
+
+  // Capture starts only once the press becomes a drag: capturing earlier would retarget the click away from the tab.
+  // While dragging, the tab moves live to the slot under the pointer, judged by the other tabs' midpoints.
+  function onTabPointerMove(e: PointerEvent<HTMLDivElement>) {
+    const current = press.current
+    if (current === null || current.pointerId !== e.pointerId) return
+    if (dragging === null) {
+      if (Math.abs(e.clientX - current.startX) < DRAG_THRESHOLD_PX) return
+      e.currentTarget.setPointerCapture(e.pointerId)
+      setDragging(current.id)
+      onSelect(current.id)
+    }
+    const list = listRef.current
+    if (list === null) return
+    const others = tabs.filter((t) => t !== current.id)
+    const slot = tabs.reduce((count, t, i) => {
+      if (t === current.id) return count
+      const rect = list.children[i]?.getBoundingClientRect()
+      return rect !== undefined && e.clientX > rect.left + rect.width / 2 ? count + 1 : count
+    }, 0)
+    const next = [...others.slice(0, slot), current.id, ...others.slice(slot)]
+    if (next.some((t, i) => t !== tabs[i])) onReorder(next)
+  }
+
+  function onTabPointerEnd() {
+    press.current = null
+    setDragging(null)
+  }
 
   // A tab's letter picks it while the menu is open; this runs before Radix's typeahead, which it replaces.
   function onMenuKey(e: KeyboardEvent<HTMLDivElement>) {
@@ -59,7 +103,7 @@ export function SidebarTabStrip({
 
   return (
     <div className="flex min-w-0 items-center gap-1">
-      <div role="tablist" className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+      <div ref={listRef} role="tablist" className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
         {tabs.map((id) => {
           const t = tabOf(id)
           const selected = id === active
@@ -68,11 +112,16 @@ export function SidebarTabStrip({
             <div
               key={id}
               className={cn(
-                "group/tab flex h-7 shrink-0 items-center rounded-full text-xs font-medium transition-[color,background-color,box-shadow] duration-200",
+                "group/tab flex h-7 shrink-0 items-center rounded-full text-xs font-medium transition-[color,background-color,box-shadow] duration-200 select-none",
                 selected
                   ? "bg-white/[0.06] text-foreground shadow-soft"
                   : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground",
+                dragging === id && "cursor-grabbing bg-white/10 shadow-glow",
               )}
+              onPointerDown={(e) => onTabPointerDown(e, id)}
+              onPointerMove={onTabPointerMove}
+              onPointerUp={onTabPointerEnd}
+              onPointerCancel={onTabPointerEnd}
             >
               <button
                 type="button"
