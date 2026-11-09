@@ -1,7 +1,8 @@
 import { expect, mock, test } from "bun:test"
 import { QueryClient } from "@tanstack/react-query"
 import type { DesktopStatus, Task } from "@cloudagents/protocol"
-import { applyDesktopStatus, setDesktopStreamActive } from "@/desktop/status"
+import { applyDesktopStatus } from "@cloudagents/protocol"
+import { setDesktopStreamActive } from "@/desktop/status"
 
 // The app's config reads the page origin and Vite's env, neither of which exists under bun.
 mock.module("@/config", () => ({ SERVER_URL: "https://control.test", WS_URL: "wss://control.test" }))

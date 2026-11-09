@@ -1,6 +1,3 @@
-export { applyDesktopStatus } from "@cloudagents/protocol"
-export type { DesktopStatusSource, DesktopStatusValue } from "@cloudagents/protocol"
-
 /**
  * Tasks whose desktop stream is mounted in this tab. It is viewer connection state, not lifecycle state, so it lives
  * here rather than in the cache: while a stream is mounted, its status frames are the only lifecycle writer, because a
