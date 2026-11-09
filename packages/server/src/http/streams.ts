@@ -173,9 +173,13 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
     const sendStatus = (status: DesktopStatus) => {
       if (!socketClosed) socket.sendText(JSON.stringify(status))
     }
-    // Sent once per running desktop on this socket, ahead of its status: the viewer holds the ICE servers before it
-    // offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
+    // Sent once per running desktop session on this socket, ahead of its status: the viewer holds the ICE servers
+    // before it offers. A viewer retrying on an old one asks again, for TURN credentials that have not expired.
     let configSent = false
+    // A request that arrives before the first config is answered when the desktop is running, not dropped.
+    let configRequested = false
+    // A stop, a failure or a restart starts a new desktop session, whose ICE config must not be reused.
+    let lastState: DesktopStatus["state"] | null = null
     const sendConfig = async (): Promise<void> => {
       const resolved = await sessionIceServers(config.webrtc, managed, taskId)
       if (socketClosed) return
@@ -202,36 +206,54 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
         const signal = message.right
         if (signal._tag === "rtc.config.request") {
           if (configSent) enqueue(sendConfig)
+          else configRequested = true
           return
         }
         yield* Effect.promise(() => rtc.handle(signal))
       })
 
+    // A failed or stopped desktop has no stream to attach to. Refuse with a retryable reason and close, so the viewer
+    // retries later instead of parking on a config that will never come.
+    const subscribed = yield* desktop.subscribe(taskId, {
+      get baselineOnly(): boolean {
+        return rtc.baselineOnly
+      },
+      onStatus: (status) => {
+        // Entering running after anything else (a restart's starting, a stop, a failure) is a new session.
+        if (status.state !== "running" || lastState !== "running") configSent = false
+        lastState = status.state
+        if (status.state !== "running") {
+          enqueue(async () => sendStatus(status))
+          return
+        }
+        if (!configSent) {
+          configSent = true
+          configRequested = false
+          enqueue(async () => {
+            await sendConfig()
+            sendStatus(status)
+          })
+          return
+        }
+        if (configRequested) {
+          configRequested = false
+          enqueue(sendConfig)
+        }
+        enqueue(async () => sendStatus(status))
+      },
+      onMedia: (unit) => {
+        tap.push(unit)
+        rtc.push(unit)
+      },
+      onAudio: (opus, timestamp) => rtc.pushAudio(opus, timestamp),
+    }).pipe(Effect.either)
+    if (subscribed._tag === "Left") {
+      sendSignal({ _tag: "rtc.unavailable", reason: subscribed.left.message, retryable: true })
+      rtc.close()
+      return yield* closeWith(socket, CLOSE_INTERNAL, subscribed.left.message)
+    }
     yield* Effect.acquireUseRelease(
-      desktop.subscribe(taskId, {
-        get baselineOnly(): boolean {
-          return rtc.baselineOnly
-        },
-        onStatus: (status) => {
-          if (status.state !== "running") {
-            configSent = false
-            enqueue(async () => sendStatus(status))
-          } else if (configSent) {
-            enqueue(async () => sendStatus(status))
-          } else {
-            configSent = true
-            enqueue(async () => {
-              await sendConfig()
-              sendStatus(status)
-            })
-          }
-        },
-        onMedia: (unit) => {
-          tap.push(unit)
-          rtc.push(unit)
-        },
-        onAudio: (opus, timestamp) => rtc.pushAudio(opus, timestamp),
-      }),
+      Effect.succeed(subscribed.right),
       () =>
         Effect.gen(function* () {
           socket.onText((data) => fork(handleMessage(data)))
@@ -244,9 +266,8 @@ const serveDesktop = (socket: StreamSocket, user: string, taskId: string): Effec
           }),
           Effect.zipRight(unsubscribe, Effect.sync(() => rtc.close())),
         ),
-    ).pipe(Effect.catchAll((e) => closeWith(socket, CLOSE_INTERNAL, e.message)))
+    )
   })
-
 
 const servePreview = (
   route: Extract<StreamRoute, { kind: "preview" }>,
