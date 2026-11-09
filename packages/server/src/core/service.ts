@@ -69,6 +69,7 @@ import { pickedRepoNote, withUserContext } from "./user-context"
 import { automaticDelegationText, delegatedAssignmentText, peerMessageText, type FromThread } from "./peer"
 import { commandProvider } from "./command-provider"
 import { newId, nowIso, StateStore, applyTaskEvent, type RunSession, type StoreState } from "./state"
+import { applyDelegationEvent } from "./delegation-state"
 import { agentText, attachmentPath, sanitizeUploadName, uploadOperationId } from "./uploads"
 import { parseRepoRef, type RepoRef } from "./repo-ref"
 import { runImageFile } from "./run-images"
@@ -2240,9 +2241,8 @@ export const CoreLive = Layer.effect(
       yield* delegatedStatus(parentTaskId, childTaskId)
       const acknowledged = yield* store.update((s) => {
         const child = s.tasks.find((t) => t.id === childTaskId)!
-        if (child.delegation!.resultAcknowledged) return Either.right(null)
-        child.delegation = { ...child.delegation!, resultAcknowledged: true }
-        return Either.right({ ...child })
+        const transition = applyDelegationEvent(child, { _tag: "acknowledged" })
+        return transition._tag === "transitioned" && transition.changed ? Either.right({ ...child }) : Either.right(null)
       })
       if (acknowledged === null) return false
       hub.publish({ _tag: "task.updated", task: acknowledged })
