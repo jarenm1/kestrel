@@ -132,8 +132,9 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a watcher sees str
   const pidFile = join(dir, "encoder-pid")
   const wrapper = join(dir, "ffmpeg")
   const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`
-  // Record the software encoder's pid so the test can kill it; every invocation still runs the real ffmpeg.
-  writeFileSync(wrapper, `#!${shell}\ncase " $* " in\n  *" libx264 "*) echo $$ > ${quote(pidFile)} ;;\nesac\nexec ${quote(ffmpeg)} "$@"\n`)
+  // Record the live encoder's pid so the test can kill it: NVENC where it works, libx264 otherwise (a failed NVENC
+  // attempt is overwritten by the libx264 fallback). The wrapper `exec`s the real ffmpeg, so the pid is the encoder's.
+  writeFileSync(wrapper, `#!${shell}\ncase " $* " in\n  *" libx264 "*|*" h264_nvenc "*) echo $$ > ${quote(pidFile)} ;;\nesac\nexec ${quote(ffmpeg)} "$@"\n`)
   chmodSync(wrapper, 0o755)
   const originalPath = process.env.PATH
   process.env.PATH = `${dir}:${originalPath ?? ""}`
