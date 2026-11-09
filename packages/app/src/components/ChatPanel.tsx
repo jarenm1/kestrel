@@ -6,7 +6,7 @@ import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type 
 import { Transcript } from "@cloudagents/ui/transcript"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
-import { isTaskAwaitingUser, isTaskWorking } from "@/lib/taskStatus"
+import { isTaskAwaitingUser, isTaskWorking } from "@cloudagents/protocol"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatElapsed } from "@/util"

@@ -1,4 +1,4 @@
-import type { Task } from "@cloudagents/protocol";
+import { isTaskWorking, type Task } from "@cloudagents/protocol";
 
 export interface ThreadGroups<E> {
   /** Active threads waiting on the user, newest first: the sidebar's list. */
@@ -20,8 +20,8 @@ export function groupThreads<E extends { task: Task }>(entries: readonly E[]): T
   const byRecent = [...entries].sort((a, b) => b.task.updatedAt.localeCompare(a.task.updatedAt));
   const active = byRecent.filter(({ task }) => task.archivedAt === undefined);
   return {
-    threads: active.filter(({ task }) => task.status !== "running"),
-    working: active.filter(({ task }) => task.status === "running"),
+    threads: active.filter(({ task }) => !isTaskWorking(task)),
+    working: active.filter(({ task }) => isTaskWorking(task)),
     archivedCount: byRecent.length - active.length,
   };
 }
