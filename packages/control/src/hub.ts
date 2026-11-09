@@ -72,6 +72,11 @@ import { fetchPullRequest, matchGithubTrigger, type PullRequestEvent, type PullR
 import { localDate, nextFireTime } from "./cron"
 import { claimHookRow, type HookRow } from "./hooks"
 import { ensureAutomationsTable } from "./automations-table"
+import {
+  AUTOMATION_FIRE_COLUMNS,
+  ensureAutomationFiresTable,
+  type AutomationFireRow,
+} from "./automation-fires-table"
 import { ensurePrWatchTables } from "./pr-watches-table"
 import { composePrompt } from "./prompt"
 import { SESSION_HEADER, FILE_TOKEN_HEADER, isAllowedLogin, type Env } from "./env"
@@ -120,6 +125,7 @@ import { deleteBoxActivity, ensureBoxActivityTable, fleetActivity, recordBoxActi
 import { NestFleet, type NestOutcome } from "./nest-fleet"
 import { ensureNestTables } from "./nest-table"
 import { NEST_STANDARD_LIMITS, newSecret, nestLimitsError, publicUrlFor } from "./nest-control"
+import { bumpTurnGeneration, ensureTurnGenerationsTable, turnGeneration } from "./turn-generations"
 
 /** A failed box call: the HTTP status and error body the Worker answers with. */
 export type BoxFailure = { ok: false; status: number; tag: string; message: string }
@@ -159,6 +165,14 @@ const newPairingCode = (): string =>
  */
 
 const BOX_TAG = "box"
+
+/** Highest relay id allocated before a fresh random range starts. Keeps ids positive and below 2^31. */
+const RELAY_ID_MAX = 0x7ffffffe
+
+/** Maps a 32-bit random value into `[1, RELAY_ID_MAX]`; the random start makes a hibernated Hub miss old ids. */
+export const initialRelayId = (value: number): number => (value % RELAY_ID_MAX) + 1
+
+const relayIdStart = (): number => initialRelayId(crypto.getRandomValues(new Uint32Array(1))[0]!)
 const NEST_HOST_TAG = "nest-host"
 
 /** Longest an automation call waits for a Nest box to report `running`, and how often it checks. */
@@ -181,6 +195,23 @@ const BOX_GONE_CLOSE_CODE = 4001
 const RUNS_KEPT = 50
 /** How long webhook delivery ids are remembered for deduplication. */
 const DELIVERY_RETENTION_MS = 24 * 60 * 60 * 1000
+
+/** Recovery after the first pairing collection: a CLI that lost the answer may poll again for this long. */
+const PAIRING_GRACE_MS = 60 * 1000
+/** A fire whose box call is still marked running after this long is failed rather than retried forever. */
+const FIRE_START_LEASE_MS = 5 * 60 * 1000
+/** A claim that never started is reclaimed this many times before it is recorded as a terminal failure. */
+const FIRE_START_ATTEMPTS = 5
+
+/** PR activity deliveries are retried with capped backoff, then dropped instead of staying queued forever. */
+const PR_ACTIVITY_ATTEMPTS = 5
+const PR_ACTIVITY_RETRY_BASE_MS = 60 * 1000
+const PR_ACTIVITY_RETRY_MAX_MS = 10 * 60 * 1000
+/** A box's 4xx answer that cannot succeed on a retry ends the queued activity. */
+const PR_ACTIVITY_PERMANENT = new Set([400, 401, 403])
+
+const prActivityRetryMs = (attempts: number): number =>
+  Math.min(PR_ACTIVITY_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1), PR_ACTIVITY_RETRY_MAX_MS)
 
 /** Response of `POST /api/repos/:id/tasks`. */
 const CreatedTask = Schema.Struct({ id: Schema.String })
@@ -220,9 +251,10 @@ type PairingRow = {
   url: string | null
   expiresAt: number
   boxId: string | null
+  usedAt: number | null
 }
 
-const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS boxId"
+const PAIRING_COLUMNS = "id, code, name, url, expires_at AS expiresAt, box_id AS boxId, used_at AS usedAt"
 
 /** Pairings in flight at once, across all users; starting another answers 429. The start route needs no sign-in. */
 const MAX_LIVE_PAIRINGS = 500
@@ -280,7 +312,7 @@ export type UserRecord = { login: string; name: string | null; avatarUrl: string
 /** `dev`: the session came from `/auth/dev-login`. */
 export type SessionRecord = { login: string; dev: boolean }
 
-export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string }
+export type OAuthStateRecord = { kind: OAuthKind; provider: string; returnTo: string; revision: string }
 
 type PendingHttp = { resolve: (res: Response) => void; timer: number }
 
@@ -304,7 +336,11 @@ export class Hub extends DurableObject<Env> {
   private readonly pending = new Map<number, PendingHttp>()
   private readonly streams = new Map<number, WebSocket>()
   private readonly waitlistAttempts = new Map<string, number[]>()
-  private nextId = 1
+  /**
+   * A fresh Hub instance starts in a random 31-bit id range. Box sockets survive hibernation and keep their recent-id
+   * state, so restarting at 1 would make a new request look like a retry to the box on the other side.
+   */
+  private nextId = relayIdStart()
 
   private readonly nest: NestFleet
 
@@ -331,6 +367,7 @@ export class Hub extends DurableObject<Env> {
         sql.exec("ALTER TABLE users ADD COLUMN active_box_id TEXT")
       }
       ensureFleetTable(sql)
+      ensureTurnGenerationsTable(sql)
       ensureMeterTables(sql)
       ensureNestTables(sql)
       ensureToolFailuresTable(sql)
@@ -371,16 +408,29 @@ export class Hub extends DurableObject<Env> {
         name TEXT,
         url TEXT,
         expires_at INTEGER NOT NULL,
-        box_id TEXT
+        box_id TEXT,
+        used_at INTEGER
       )`)
+      // Pairings created before the single-use claim get the column here; existing approved rows stay uncollected.
+      const pairingColumns = sql.exec<{ name: string }>("PRAGMA table_info(box_pairings)").toArray()
+      if (!pairingColumns.some((c) => c.name === "used_at")) {
+        sql.exec("ALTER TABLE box_pairings ADD COLUMN used_at INTEGER")
+      }
       sql.exec(`CREATE TABLE IF NOT EXISTS oauth_states (
         state TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
         provider TEXT NOT NULL,
         return_to TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL,
+        revision TEXT NOT NULL
       )`)
+      // States created before the revision get one here; a consume with an older revision then reads as already used.
+      const stateColumns = sql.exec<{ name: string }>("PRAGMA table_info(oauth_states)").toArray()
+      if (!stateColumns.some((c) => c.name === "revision")) {
+        sql.exec("ALTER TABLE oauth_states ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+      }
       ctx.storage.transactionSync(() => ensureAutomationsTable(sql))
+      ensureAutomationFiresTable(sql)
       sql.exec(`CREATE TABLE IF NOT EXISTS automation_runs (
         id TEXT PRIMARY KEY,
         automation_id TEXT NOT NULL,
@@ -408,6 +458,8 @@ export class Hub extends DurableObject<Env> {
       ensureWaitlistTable(sql)
       ensureFileTokensTable(sql)
       ensureDesktopTokensTable(sql)
+      // A cold start must schedule any fire leases left by a restart before a request or alarm arrives.
+      await this.rearmStorage(ctx.storage)
     })
   }
 
@@ -450,11 +502,17 @@ export class Hub extends DurableObject<Env> {
     return row && isAllowedLogin(this.env, row.login, row.dev === 1) ? { login: row.login, dev: row.dev === 1 } : null
   }
 
-  /** Ends a session (sign-out); the file and desktop tokens it minted end with it. */
+  /**
+   * Ends a session (sign-out); every capability minted from it ends with it. Preview sessions are keyed by login
+   * rather than session, so they are revoked for the session's user.
+   */
   deleteSession(id: string): void {
-    this.ctx.storage.sql.exec("DELETE FROM sessions WHERE id = ?", id)
-    deleteSessionFileTokens(this.ctx.storage.sql, id)
-    deleteSessionDesktopTokens(this.ctx.storage.sql, id)
+    const sql = this.ctx.storage.sql
+    const row = sql.exec<{ login: string }>("SELECT login FROM sessions WHERE id = ?", id).toArray()[0]
+    sql.exec("DELETE FROM sessions WHERE id = ?", id)
+    deleteSessionFileTokens(sql, id)
+    deleteSessionDesktopTokens(sql, id)
+    if (row !== undefined) sql.exec("DELETE FROM preview_sessions WHERE login = ?", row.login)
   }
 
   /** Short-lived preview-only capability; the browser never receives the app session cookie. */
@@ -682,6 +740,8 @@ export class Hub extends DurableObject<Env> {
     const sql = this.ctx.storage.sql
     sql.exec("UPDATE users SET active_box_id = NULL WHERE login = ? AND active_box_id = ?", session.login, id)
     sql.exec("DELETE FROM user_boxes WHERE id = ? AND login = ?", id, session.login)
+    // A warm Worker must not keep serving TURN credentials for the deleted identity.
+    bumpTurnGeneration(sql, `box:${id}`)
     return { ok: true, value: null }
   }
 
@@ -692,6 +752,7 @@ export class Hub extends DurableObject<Env> {
     if (!owned) return NO_SUCH_BOX
     const secret = newSecret()
     this.ctx.storage.sql.exec("UPDATE user_boxes SET secret = ? WHERE id = ? AND login = ?", secret, id, session.login)
+    bumpTurnGeneration(this.ctx.storage.sql, `box:${id}`)
     return { ok: true, value: { box: owned.box, secret } }
   }
 
@@ -838,6 +899,15 @@ export class Hub extends DurableObject<Env> {
     return row !== undefined && (await safeEqual(secret, row.secret))
   }
 
+  /**
+   * The user box's TURN identity, including its durable generation, or null when the secret is wrong. The Worker uses
+   * the generation in its cache key, so a rot ation or deletion misses credentials cached in another isolate.
+   */
+  async boxTurnIdentity(boxId: string, secret: string): Promise<string | null> {
+    if (!(await this.boxVerify(boxId, secret))) return null
+    return `box:${boxId}:${turnGeneration(this.ctx.storage.sql, `box:${boxId}`)}`
+  }
+
   private boxList(login: string): BoxList {
     const sql = this.ctx.storage.sql
     const boxes = sql
@@ -920,8 +990,11 @@ export class Hub extends DurableObject<Env> {
   /** Removes a box, its activity snapshot, and its users' assignments; false when it does not exist. */
   removeFleetBox(id: string): boolean {
     const removed = deleteFleetBox(this.ctx.storage.sql, id)
-    if (removed) deleteBoxActivity(this.ctx.storage.sql, id)
-    return removed
+    if (!removed) return false
+    deleteBoxActivity(this.ctx.storage.sql, id)
+    // The identity is gone; a tombstoned generation keeps a warm Worker from serving its cached credentials.
+    bumpTurnGeneration(this.ctx.storage.sql, `managed:${id}`)
+    return true
   }
 
   /** Replaces a box's secret and returns the new one; null when the box does not exist. */
@@ -929,6 +1002,8 @@ export class Hub extends DurableObject<Env> {
     const sql = this.ctx.storage.sql
     const secret = newSecret()
     if (!rotateFleetBoxSecret(sql, id, secret)) return null
+    // Credentials issued under the old secret must not be served for the new identity.
+    bumpTurnGeneration(sql, `managed:${id}`)
     const box = fleetBox(sql, id)
     return box === null ? null : { box, secret }
   }
@@ -936,6 +1011,15 @@ export class Hub extends DurableObject<Env> {
   /** Whether `secret` is the managed box's own, for calls that act for no user. */
   async managedBoxVerify(boxId: string, secret: string): Promise<boolean> {
     return managedBoxSecretValid(this.ctx.storage.sql, boxId, secret)
+  }
+
+  /**
+   * The managed box's TURN identity, including its durable generation, or null when the secret is wrong. Rotation and
+   * deletion bump the generation, so the Worker's cache key misses in every isolate.
+   */
+  async managedBoxTurnIdentity(boxId: string, secret: string): Promise<string | null> {
+    if (!(await this.managedBoxVerify(boxId, secret))) return null
+    return `managed:${boxId}:${turnGeneration(this.ctx.storage.sql, `managed:${boxId}`)}`
   }
 
   // -------------------------------------------------------------------------
@@ -1041,13 +1125,29 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * Pending, or the approved box with its current secret, on every poll until the pairing expires: a CLI that lost the
-   * answer polls again. Null when unknown or expired, or when the box was deleted since.
+   * Pending, or the approved box with its current secret. D3: the first approved poll claims the pairing (`used_at`)
+   * and returns the box; the same `pairingId` may repeat that answer during a 60 s grace for a CLI that lost the
+   * response. Approval does not extend the original expiry. After the grace, or after expiry, the answer is null; null
+   * too when the pairing is unknown or its box was deleted since.
    */
   pollPairing(pairingId: string): PairingPoll | null {
+    const now = Date.now()
     const row = this.livePairing("id", pairingId)
     if (!row) return null
-    if (row.boxId === null) return { status: "pending", expiresAt: new Date(row.expiresAt).toISOString() }
+    if (row.boxId === null) {
+      return now <= row.expiresAt ? { status: "pending", expiresAt: new Date(row.expiresAt).toISOString() } : null
+    }
+    if (row.usedAt === null) {
+      // Approval does not extend the documented TTL; a code that expired before collection is not collectable.
+      if (now > row.expiresAt) return null
+      this.ctx.storage.sql.exec(
+        "UPDATE box_pairings SET used_at = ? WHERE id = ? AND used_at IS NULL",
+        now,
+        row.id,
+      )
+    } else if (now > row.usedAt + PAIRING_GRACE_MS) {
+      return null
+    }
     const found = this.ctx.storage.sql
       .exec<UserBoxRow & { secret: string }>(
         "SELECT id, name, url, created_at AS createdAt, secret FROM user_boxes WHERE id = ?",
@@ -1062,7 +1162,11 @@ export class Hub extends DurableObject<Env> {
   pendingPairing(sessionId: string, code: string): BoxOutcome<PendingPairing> {
     if (!this.session(sessionId)) return UNAUTHENTICATED
     const row = this.livePairing("code", code)
-    if (!row) return NO_SUCH_PAIRING
+    if (!row || row.expiresAt <= Date.now()) return NO_SUCH_PAIRING
+    // The app's approval poll treats 409 as the terminal "approved elsewhere" answer.
+    if (row.boxId !== null) {
+      return { ok: false, status: 409, tag: "Conflict", message: "pairing code already approved" }
+    }
     return {
       ok: true,
       value: {
@@ -1075,24 +1179,19 @@ export class Hub extends DurableObject<Env> {
   }
 
   /**
-   * Creates the box the pairing asks for (same limit as `createBox`) for the CLI's next polls, which get a fresh TTL to
-   * collect it, so a code approved just before it expires still completes.
+   * Creates the box the pairing asks for (same limit as `createBox`). Approval keeps the pairing's original expiry:
+   * the collectable window is the documented TTL plus the short collection grace, never an extension at approval.
    */
   approvePairing(sessionId: string, code: string, body: ApprovePairingBody): BoxOutcome<BoxList> {
     const session = this.session(sessionId)
     if (!session) return UNAUTHENTICATED
     const row = this.livePairing("code", code)
-    if (!row) return NO_SUCH_PAIRING
+    if (!row || row.expiresAt <= Date.now()) return NO_SUCH_PAIRING
     if (row.boxId !== null) return { ok: false, status: 409, tag: "Conflict", message: "pairing code already approved" }
     const created = this.insertBox(session.login, body)
     if (!created.ok) return created
     const sql = this.ctx.storage.sql
-    sql.exec(
-      "UPDATE box_pairings SET box_id = ?, expires_at = ? WHERE id = ?",
-      created.value.box.id,
-      Date.now() + PAIRING_TTL_SECONDS * 1000,
-      row.id,
-    )
+    sql.exec("UPDATE box_pairings SET box_id = ? WHERE id = ?", created.value.box.id, row.id)
     if (body.activate) {
       sql.exec("UPDATE users SET active_box_id = ? WHERE login = ?", created.value.box.id, session.login)
     }
@@ -1100,10 +1199,15 @@ export class Hub extends DurableObject<Env> {
   }
 
   private purgePairings(): void {
-    this.ctx.storage.sql.exec("DELETE FROM box_pairings WHERE expires_at <= ?", Date.now())
+    // A collected pairing stays readable through its grace window, so rows are kept until expiry plus that grace.
+    this.ctx.storage.sql.exec(
+      "DELETE FROM box_pairings WHERE expires_at + ? <= ?",
+      PAIRING_GRACE_MS,
+      Date.now(),
+    )
   }
 
-  /** The pairing whose `column` equals `value`, if it has not expired (expired rows are purged first). */
+  /** The pairing whose `column` equals `value`; callers check `expiresAt`, expired rows are purged first. */
   private livePairing(column: "id" | "code", value: string): PairingRow | null {
     this.purgePairings()
     return (
@@ -1117,31 +1221,60 @@ export class Hub extends DurableObject<Env> {
   // OAuth state (single use, 10 minutes)
   // -------------------------------------------------------------------------
 
-  createOAuthState(state: string, kind: OAuthKind, provider: string, returnTo: string, expiresAt: number): void {
+  /** Stores the state; false when a live row already has it, so a caller-supplied state cannot overwrite another. */
+  createOAuthState(state: string, kind: OAuthKind, provider: string, returnTo: string, expiresAt: number): boolean {
     const sql = this.ctx.storage.sql
     sql.exec("DELETE FROM oauth_states WHERE expires_at <= ?", Date.now())
+    if (sql.exec("SELECT 1 FROM oauth_states WHERE state = ?", state).toArray().length > 0) return false
     sql.exec(
-      "INSERT INTO oauth_states (state, kind, provider, return_to, expires_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO oauth_states (state, kind, provider, return_to, expires_at, revision) VALUES (?, ?, ?, ?, ?, ?)",
       state,
       kind,
       provider,
       returnTo,
       expiresAt,
+      crypto.randomUUID(),
     )
+    return true
   }
 
-  /** Deletes the state row and returns it if it existed and has not expired. */
-  consumeOAuthState(state: string): OAuthStateRecord | null {
-    const sql = this.ctx.storage.sql
-    const row = sql
-      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number }>(
-        "SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt FROM oauth_states WHERE state = ?",
+  /**
+   * The state row if it exists and has not expired; reading does not consume it. `revision` identifies this particular
+   * issuance, so a consume cannot delete a newer row that reuses the same caller-supplied state.
+   */
+  readOAuthState(state: string): OAuthStateRecord | null {
+    const row = this.ctx.storage.sql
+      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number; revision: string }>(
+        "SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt, revision FROM oauth_states WHERE state = ?",
         state,
       )
       .toArray()[0]
-    sql.exec("DELETE FROM oauth_states WHERE state = ?", state)
-    if (!row || row.expiresAt <= Date.now()) return null
-    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo }
+    if (!row) return null
+    if (row.expiresAt <= Date.now()) {
+      this.ctx.storage.sql.exec("DELETE FROM oauth_states WHERE state = ? AND revision = ?", state, row.revision)
+      return null
+    }
+    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo, revision: row.revision }
+  }
+
+  /**
+   * Deletes exactly the issuance the caller validated and returns it. A newer row reusing the same state has a different
+   * revision, so this reads as already used instead of consuming the new row (ABA). Null when gone, expired or stale.
+   */
+  consumeOAuthState(state: string, revision: string): OAuthStateRecord | null {
+    const sql = this.ctx.storage.sql
+    const row = sql
+      .exec<{ kind: OAuthKind; provider: string; returnTo: string; expiresAt: number; revision: string }>(
+        `SELECT kind, provider, return_to AS returnTo, expires_at AS expiresAt, revision
+         FROM oauth_states WHERE state = ? AND revision = ?`,
+        state,
+        revision,
+      )
+      .toArray()[0]
+    if (!row) return null
+    sql.exec("DELETE FROM oauth_states WHERE state = ? AND revision = ?", state, revision)
+    if (row.expiresAt <= Date.now()) return null
+    return { kind: row.kind, provider: row.provider, returnTo: row.returnTo, revision: row.revision }
   }
 
   // -------------------------------------------------------------------------
@@ -1345,6 +1478,7 @@ export class Hub extends DurableObject<Env> {
   async deleteAutomation(login: string, id: string): Promise<boolean> {
     if (this.automationRow(login, id) === null) return false
     const sql = this.ctx.storage.sql
+    sql.exec("DELETE FROM automation_fires WHERE automation_id = ?", id)
     sql.exec("DELETE FROM automation_runs WHERE automation_id = ?", id)
     sql.exec("DELETE FROM automations WHERE id = ? AND login = ?", id, login)
     await this.rearm()
@@ -1364,7 +1498,10 @@ export class Hub extends DurableObject<Env> {
       .toArray()
   }
 
-  /** Manual "run now" (or any caller-supplied reason); null when the automation is not `login`'s. */
+  /**
+   * Manual "run now" (or any caller-supplied reason); null when the automation is not `login`'s. The fire is claimed
+   * under a fresh key before the box is called, so a restart either finishes it or leaves a visible intent.
+   */
   async fireAutomation(
     login: string,
     id: string,
@@ -1372,34 +1509,46 @@ export class Hub extends DurableObject<Env> {
     pr: PullRequestInfo | null,
   ): Promise<AutomationRun | null> {
     const row = this.automationRow(login, id)
-    return row === null ? null : this.fire(row, reason, pr)
+    if (row === null) return null
+    const fireId = this.claimFire(row, `manual:${crypto.randomUUID()}`, reason, pr)
+    // Durable claim first, then its lease alarm, then the external effect.
+    await this.rearm()
+    const run = await this.runFire(fireId)
+    await this.rearm()
+    return run
   }
 
   /**
-   * Records one pull request webhook delivery and starts a task for every enabled GitHub automation on the
-   * repository whose trigger matches. Runs happen after the response (`waitUntil`), so GitHub gets a fast 202.
+   * Records one pull request webhook delivery and every matching fire intent in one transaction. A crash can then
+   * leave both or neither: a deduped delivery always has the fires it promised. The alarm drains them, so GitHub gets
+   * a fast 202 and `next_run_at` is untouched for GitHub automations.
    */
-  githubDelivery(deliveryId: string, event: PullRequestEvent): { duplicate: boolean; matched: number } {
+  async githubDelivery(deliveryId: string, event: PullRequestEvent): Promise<{ duplicate: boolean; matched: number }> {
     const sql = this.ctx.storage.sql
     const now = Date.now()
-    if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) {
-      return { duplicate: true, matched: 0 }
-    }
-    sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
-    sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
-    const rows = sql
-      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, event.repo)
-      .toArray()
-    let matched = 0
-    for (const row of rows) {
-      const trigger = decodeTrigger(row.triggerJson)
-      if (trigger._tag !== "github") continue
-      const reason = matchGithubTrigger(trigger, event)
-      if (reason === null) continue
-      matched++
-      this.ctx.waitUntil(this.fire(row, reason, event.pr))
-    }
-    return { duplicate: false, matched }
+    const claimed = this.ctx.storage.transactionSync(() => {
+      if (sql.exec("SELECT 1 FROM webhook_deliveries WHERE delivery_id = ?", deliveryId).toArray().length > 0) {
+        return null
+      }
+      sql.exec("INSERT INTO webhook_deliveries (delivery_id, received_at) VALUES (?, ?)", deliveryId, now)
+      sql.exec("DELETE FROM webhook_deliveries WHERE received_at < ?", now - DELIVERY_RETENTION_MS)
+      const rows = sql
+        .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND repo COLLATE NOCASE = ?`, event.repo)
+        .toArray()
+      let matched = 0
+      for (const row of rows) {
+        const trigger = decodeTrigger(row.triggerJson)
+        if (trigger._tag !== "github") continue
+        const reason = matchGithubTrigger(trigger, event)
+        if (reason === null) continue
+        matched++
+        this.claimFire(row, `delivery:${deliveryId}`, reason, event.pr)
+      }
+      return matched
+    })
+    if (claimed === null) return { duplicate: true, matched: 0 }
+    await this.rearm()
+    return { duplicate: false, matched: claimed }
   }
 
   /** Watch one pull request of a thread. Watching the same one again is a no-op; others stay watched. */
@@ -1410,17 +1559,22 @@ export class Hub extends DurableObject<Env> {
     )
   }
 
-  /** Stops watching one pull request, or every one of the thread when no repository and number are named. Returns the repositories involved. */
-  unwatchPullRequests(login: string, taskId: string, repo?: string, number?: number): string[] {
+  /**
+   * Stops watching one pull request, or every one of the thread when no repository and number are named. Returns the
+   * watches removed so the caller can clear the box's own marks.
+   */
+  unwatchPullRequests(login: string, taskId: string, repo?: string, number?: number): Array<{ repo: string; number: number }> {
     const sql = this.ctx.storage.sql
     const where = repo === undefined || number === undefined
       ? "login = ? AND task_id = ?"
       : "login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?"
     const args = repo === undefined || number === undefined ? [login, taskId] : [login, taskId, repo, number]
-    const repos = sql.exec<{ repo: string }>(`SELECT DISTINCT repo FROM pr_watches WHERE ${where}`, ...args).toArray().map((row) => row.repo)
+    const watches = sql
+      .exec<{ repo: string; number: number }>(`SELECT DISTINCT repo, pr_number AS number FROM pr_watches WHERE ${where}`, ...args)
+      .toArray()
     sql.exec(`DELETE FROM pr_activity_queue WHERE ${where}`, ...args)
     sql.exec(`DELETE FROM pr_watches WHERE ${where}`, ...args)
-    return repos
+    return watches
   }
 
   closePullRequestWatches(repo: string, number: number): Array<{ readonly login: string; readonly taskId: string }> {
@@ -1457,7 +1611,8 @@ export class Hub extends DurableObject<Env> {
         if (!stillWatching) continue
         sql.exec(
         `INSERT INTO pr_activity_queue (login, task_id, repo, pr_number, kind, delivery_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET delivery_id = excluded.delivery_id, due_at = excluded.due_at`,
+         ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET
+           delivery_id = excluded.delivery_id, due_at = excluded.due_at, attempts = 0`,
         row.login, row.taskId, activity.repo, row.number, activity.kind, deliveryId, now + 3000,
         )
       }
@@ -1497,20 +1652,37 @@ export class Hub extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     const now = Date.now()
+    this.pruneFires(now)
     await this.nest.expire(now)
     const due = this.ctx.storage.sql
       .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 1 AND next_run_at <= ?`, now)
       .toArray()
     for (const row of due) {
-      this.ctx.storage.sql.exec(
-        "UPDATE automations SET next_run_at = ? WHERE id = ?",
-        nextRunMs(decodeTrigger(row.triggerJson), true, now),
-        row.id,
-      )
-      await this.fire(row, "schedule", null)
+      // Claim, then advance: the intent is durable before the box is called, and a crash cannot lose the occurrence.
+      const fireId = this.ctx.storage.transactionSync(() => {
+        const id = this.claimFire(row, `schedule:${row.nextRunAt ?? now}`, "schedule", null)
+        this.ctx.storage.sql.exec(
+          "UPDATE automations SET next_run_at = ? WHERE id = ?",
+          nextRunMs(decodeTrigger(row.triggerJson), true, now),
+          row.id,
+        )
+        return id
+      })
+      // Schedule the claim's lease before the box call: a restart inside `runFire` must still find the deadline.
+      await this.rearm()
+      await this.runFire(fireId)
     }
-    const pending = this.ctx.storage.sql.exec<{ login: string; taskId: string; repo: string; number: number; kind: string; deliveryId: string }>(
-      "SELECT login, task_id AS taskId, repo, pr_number AS number, kind, delivery_id AS deliveryId FROM pr_activity_queue WHERE due_at <= ?", now,
+    await this.drainFires(now)
+    const pending = this.ctx.storage.sql.exec<{
+      login: string
+      taskId: string
+      repo: string
+      number: number
+      kind: string
+      deliveryId: string
+      attempts: number
+    }>(
+      "SELECT login, task_id AS taskId, repo, pr_number AS number, kind, delivery_id AS deliveryId, attempts FROM pr_activity_queue WHERE due_at <= ?", now,
     ).toArray()
     for (const row of pending) {
       const result = await this.boxCall(row.login, "POST", `/api/tasks/${encodeURIComponent(row.taskId)}/github-activity`, row)
@@ -1521,8 +1693,28 @@ export class Hub extends DurableObject<Env> {
       else if (result.status === 404 || result.status === 409) {
         this.ctx.storage.sql.exec("DELETE FROM pr_watches WHERE login = ? AND task_id = ? AND repo = ? COLLATE NOCASE AND pr_number = ?", row.login, row.taskId, row.repo, row.number)
         this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
+      } else if (PR_ACTIVITY_PERMANENT.has(result.status)) {
+        this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
+        console.error(
+          `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number}: box answered ${result.status}`,
+        )
+      } else {
+        const attempts = row.attempts + 1
+        if (attempts >= PR_ACTIVITY_ATTEMPTS) {
+          this.ctx.storage.sql.exec(`DELETE FROM pr_activity_queue WHERE ${key} AND delivery_id = ?`, ...keyArgs, row.deliveryId)
+          console.error(
+            `dropping PR activity for ${row.login}/${row.taskId} ${row.repo}#${row.number} after ${attempts} attempts`,
+          )
+        } else {
+          this.ctx.storage.sql.exec(
+            `UPDATE pr_activity_queue SET due_at = ?, attempts = ? WHERE ${key} AND delivery_id = ?`,
+            Date.now() + prActivityRetryMs(attempts),
+            attempts,
+            ...keyArgs,
+            row.deliveryId,
+          )
+        }
       }
-      else this.ctx.storage.sql.exec(`UPDATE pr_activity_queue SET due_at = ? WHERE ${key} AND delivery_id = ?`, Date.now() + 60000, ...keyArgs, row.deliveryId)
     }
     await this.rearm()
   }
@@ -1535,24 +1727,112 @@ export class Hub extends DurableObject<Env> {
     )
   }
 
-  /** Points the alarm at the earliest pending schedule, activity, or Nest deadline; clears it when none is pending. */
+  /**
+   * Points the alarm at the earliest pending schedule, activity, fire, or Nest deadline; clears it when none is
+   * pending. A fire that is already running is revisited at its lease deadline, so a crashed start is bounded.
+   */
   private async rearm(): Promise<void> {
-    const row = this.ctx.storage.sql
-      .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
-      .toArray()[0]
-    const activityAt = this.ctx.storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
-    const scheduleAt = row?.at ?? null
-    const deadlines = [scheduleAt, activityAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
-    if (deadlines.length === 0) await this.ctx.storage.deleteAlarm()
-    else await this.ctx.storage.setAlarm(Math.min(...deadlines))
+    await this.rearmStorage(this.ctx.storage)
   }
 
-  private async fire(row: AutomationRow, reason: string, pr: PullRequestInfo | null): Promise<AutomationRun> {
+  /**
+   * The constructor runs before `this.ctx` exists in tests, so the cold-start pass receives storage explicitly. A
+   * missing alarm API (a bare fake storage) opts out rather than failing the constructor.
+   */
+  private async rearmStorage(storage: DurableObjectState["storage"]): Promise<void> {
+    if (typeof storage.setAlarm !== "function") return
+    const row = storage.sql
+      .exec<{ at: number | null }>("SELECT MIN(next_run_at) AS at FROM automations WHERE enabled = 1")
+      .toArray()[0]
+    const activityAt =
+      storage.sql.exec<{ at: number | null }>("SELECT MIN(due_at) AS at FROM pr_activity_queue").toArray()[0]?.at ?? null
+    const fireAt =
+      storage.sql
+        .exec<{ at: number | null }>(
+          `SELECT MIN(CASE WHEN started_at IS NULL THEN claimed_at ELSE started_at + ? END) AS at
+           FROM automation_fires WHERE outcome IS NULL`,
+          FIRE_START_LEASE_MS,
+        )
+        .toArray()[0]?.at ?? null
+    const scheduleAt = row?.at ?? null
+    const deadlines = [scheduleAt, activityAt, fireAt, this.nest.nextDeadline()].filter((at): at is number => at !== null)
+    if (deadlines.length === 0) await storage.deleteAlarm()
+    else await storage.setAlarm(Math.min(...deadlines))
+  }
+
+  /** Writes a fire intent under its stable key, or returns the existing intent's id when it was already claimed. */
+  private claimFire(row: AutomationRow, fireKey: string, reason: string, pr: PullRequestInfo | null): string {
+    const sql = this.ctx.storage.sql
+    sql.exec(
+      `INSERT INTO automation_fires (id, automation_id, fire_key, reason, pr_json, claimed_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(automation_id, fire_key) DO NOTHING`,
+      crypto.randomUUID(),
+      row.id,
+      fireKey,
+      reason,
+      pr === null ? null : JSON.stringify(pr),
+      Date.now(),
+    )
+    const stored = sql
+      .exec<{ id: string }>(
+        "SELECT id FROM automation_fires WHERE automation_id = ? AND fire_key = ?",
+        row.id,
+        fireKey,
+      )
+      .toArray()[0]
+    if (stored === undefined) throw new Error("automation fire was not stored")
+    return stored.id
+  }
+
+  private fireRow(id: string): AutomationFireRow | null {
+    return (
+      this.ctx.storage.sql
+        .exec<AutomationFireRow>(`SELECT ${AUTOMATION_FIRE_COLUMNS} FROM automation_fires WHERE id = ?`, id)
+        .toArray()[0] ?? null
+    )
+  }
+
+  private runRow(id: string): AutomationRun | null {
+    return (
+      this.ctx.storage.sql
+        .exec<AutomationRun>(
+          `SELECT id, automation_id AS automationId, fired_at AS firedAt, reason, status, task_id AS taskId, error
+           FROM automation_runs WHERE id = ?`,
+          id,
+        )
+        .toArray()[0] ?? null
+    )
+  }
+
+  /**
+   * Runs one claimed fire. The outcome is recorded against the fire's own id, so repeating the call returns the same
+   * `automation_runs` row instead of starting the task again.
+   */
+  private async runFire(id: string): Promise<AutomationRun> {
+    const recorded = this.runRow(id)
+    if (recorded !== null) return recorded
+    let fire = this.fireRow(id)
+    if (fire === null) throw new Error(`no automation fire ${id}`)
+    if (fire.attempts >= FIRE_START_ATTEMPTS) {
+      return this.finishFire(fire, "failed", null, `fire did not start after ${FIRE_START_ATTEMPTS} attempts`)
+    }
+    this.ctx.storage.sql.exec(
+      "UPDATE automation_fires SET started_at = ?, attempts = attempts + 1 WHERE id = ? AND outcome IS NULL",
+      Date.now(),
+      id,
+    )
+    fire = this.fireRow(id) ?? fire
+    const row = this.ctx.storage.sql
+      .exec<AutomationRow>(`SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE id = ?`, fire.automationId)
+      .toArray()[0]
+    if (row === undefined) return this.finishFire(fire, "failed", null, "automation no longer exists")
+    const pr = fire.prJson === null ? null : (JSON.parse(fire.prJson) as PullRequestInfo)
     const now = Date.now()
     const trigger = decodeTrigger(row.triggerJson)
     const timeZone = trigger._tag === "schedule" ? trigger.timezone : "UTC"
     const title = pr === null ? `${row.name} · ${localDate(now, timeZone)}` : `${row.name} · PR #${pr.number}`
-    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason, repo: row.repo, pr })
+    const prompt = composePrompt({ name: row.name, prompt: row.prompt, reason: fire.reason, repo: row.repo, pr })
     // A PR run checks the repository out at the PR head; the base branch stays the diff base. It stays detached: a push
     // to the PR's branch would fire the automation again.
     const checkout =
@@ -1560,7 +1840,96 @@ export class Hub extends DurableObject<Env> {
         ? {}
         : { checkout: { repo: row.repo, ...(pr === null ? {} : { baseBranch: pr.baseRef, pullRequest: pr.number, detached: true }) } }
     const outcome = await this.startTask(row.login, { title, ...checkout }, prompt, row.model)
-    return this.recordRun(row.id, reason, now, outcome)
+    return this.finishFire(fire, outcome.error === null ? "started" : "failed", outcome.taskId, outcome.error)
+  }
+
+  /** Records the fire's outcome and its `automation_runs` row exactly once; a later call returns the recorded run. */
+  private finishFire(
+    fire: AutomationFireRow,
+    status: "started" | "failed",
+    taskId: string | null,
+    error: string | null,
+  ): AutomationRun {
+    const sql = this.ctx.storage.sql
+    const existing = this.runRow(fire.id)
+    if (existing !== null) {
+      sql.exec(
+        "UPDATE automation_fires SET outcome = ?, task_id = ?, error = ? WHERE id = ? AND outcome IS NULL",
+        existing.status,
+        existing.taskId,
+        existing.error,
+        fire.id,
+      )
+      return existing
+    }
+    const run: AutomationRun = {
+      id: fire.id,
+      automationId: fire.automationId,
+      firedAt: new Date(fire.claimedAt).toISOString(),
+      reason: fire.reason,
+      status,
+      taskId,
+      error,
+    }
+    sql.exec(
+      "INSERT INTO automation_runs (id, automation_id, fired_at, reason, status, task_id, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      run.id,
+      run.automationId,
+      run.firedAt,
+      run.reason,
+      run.status,
+      run.taskId,
+      run.error,
+    )
+    sql.exec(
+      "UPDATE automation_fires SET outcome = ?, task_id = ?, error = ? WHERE id = ? AND outcome IS NULL",
+      status,
+      taskId,
+      error,
+      fire.id,
+    )
+    sql.exec(
+      `DELETE FROM automation_runs WHERE automation_id = ? AND id NOT IN (
+         SELECT id FROM automation_runs WHERE automation_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT ?)`,
+      fire.automationId,
+      fire.automationId,
+      RUNS_KEPT,
+    )
+    this.pruneFires(Date.now())
+    return run
+  }
+
+  /**
+   * Drops settled fire intents after the webhook-dedupe window. Queued or in-flight intents are never touched, and the
+   * window is at least as long as `webhook_deliveries` remembers a delivery, so an early prune cannot re-fire one.
+   */
+  private pruneFires(now: number): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM automation_fires WHERE outcome IS NOT NULL AND claimed_at < ?",
+      now - DELIVERY_RETENTION_MS,
+    )
+  }
+
+  /**
+   * Runs every fire intent that has not settled: queued webhook/manual/schedule claims and claims recovered after a
+   * crash. A fire that was claimed but never started is retried; after the attempt bound it becomes a terminal
+   * failure. A fire that started and never settled is failed at its lease, since its external effect may have run.
+   */
+  private async drainFires(now: number): Promise<void> {
+    const fires = this.ctx.storage.sql
+      .exec<AutomationFireRow>(
+        `SELECT ${AUTOMATION_FIRE_COLUMNS} FROM automation_fires WHERE outcome IS NULL ORDER BY claimed_at, rowid`,
+      )
+      .toArray()
+    for (const fire of fires) {
+      if (fire.startedAt !== null) {
+        if (now - fire.startedAt >= FIRE_START_LEASE_MS) {
+          this.finishFire(fire, "failed", null, "fire did not finish before its lease expired")
+        }
+        continue
+      }
+      await this.runFire(fire.id)
+    }
   }
 
   /** Creates the task (with its repository checked out, if any) and sends the prompt to start its run. */
@@ -1574,37 +1943,6 @@ export class Hub extends DurableObject<Env> {
       ...(model === null ? {} : { model }),
     })
     return sent.ok ? { taskId: task.id, error: null } : { taskId: task.id, error: boxError(sent) }
-  }
-
-  private recordRun(automationId: string, reason: string, firedAt: number, outcome: RunOutcome): AutomationRun {
-    const run: AutomationRun = {
-      id: crypto.randomUUID(),
-      automationId,
-      firedAt: new Date(firedAt).toISOString(),
-      reason,
-      status: outcome.error === null ? "started" : "failed",
-      taskId: outcome.taskId,
-      error: outcome.error,
-    }
-    const sql = this.ctx.storage.sql
-    sql.exec(
-      "INSERT INTO automation_runs (id, automation_id, fired_at, reason, status, task_id, error) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      run.id,
-      run.automationId,
-      run.firedAt,
-      run.reason,
-      run.status,
-      run.taskId,
-      run.error,
-    )
-    sql.exec(
-      `DELETE FROM automation_runs WHERE automation_id = ? AND id NOT IN (
-         SELECT id FROM automation_runs WHERE automation_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT ?)`,
-      automationId,
-      automationId,
-      RUNS_KEPT,
-    )
-    return run
   }
 
   // -------------------------------------------------------------------------
@@ -2050,7 +2388,7 @@ export class Hub extends DurableObject<Env> {
 
   private allocId(): number {
     const id = this.nextId
-    this.nextId = id >= 0xffffffff ? 1 : id + 1
+    this.nextId = id >= RELAY_ID_MAX ? relayIdStart() : id + 1
     return id
   }
 }

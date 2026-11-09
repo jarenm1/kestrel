@@ -67,10 +67,12 @@ const boxIdentity = async (request: Request, env: Env): Promise<string | null> =
   if (env.BOX_TOKEN !== undefined && env.BOX_TOKEN !== "" && (await safeEqual(secret, env.BOX_TOKEN))) return "relay"
   const boxId = request.headers.get(BOX_ID_HEADER) ?? ""
   if (boxId === "") return null
-  if (await hub(env).managedBoxVerify(boxId, secret)) return `managed:${boxId}`
+  // The identity includes the Hub's durable generation, so rotating a secret or deleting the box misses the Worker's
+  // cache. It is read from the Hub per request rather than inferred from an in-isolate map.
+  const managed = await hub(env).managedBoxTurnIdentity(boxId, secret)
+  if (managed !== null) return managed
   // A user's own box proves itself the way `/box/self` does, but gets no owner credentials from this check.
-  if (await hub(env).boxVerify(boxId, secret)) return `box:${boxId}`
-  return null
+  return hub(env).boxTurnIdentity(boxId, secret)
 }
 
 /** Accept only usable provider ICE lists containing authenticated TURN over TLS on port 443. */
@@ -143,7 +145,8 @@ const credentialsFor = (
   config: TurnProviderConfig,
   now: number,
 ): Promise<BoxTurnCredentials> => {
-  // The key id is in the key, so rotating the provider key does not serve credentials minted under the old one.
+  // The key id is in the key, so rotating the provider key does not serve credentials minted under the old one. The
+  // identity itself carries the Hub's durable TURN generation, so rotation/deletion misses in every isolate.
   const key = `${identity}\u0000${config.keyId}`
   const cached = credentialsCache.get(key)
   if (cached !== undefined && cached.expiresAt - now > TURN_CREDENTIAL_REFRESH_MS) return Promise.resolve(cached)

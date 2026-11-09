@@ -27,6 +27,7 @@ const QUEUE = `
   kind TEXT NOT NULL,
   delivery_id TEXT NOT NULL,
   due_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (login, task_id, repo, pr_number, kind)`
 
 /** The table's stored `CREATE TABLE` statement, or null when it does not exist yet. */
@@ -62,4 +63,11 @@ export const ensurePrWatchTables = (sql: PrWatchesSql): void => {
     sql.exec("DROP TABLE pr_activity_queue_legacy")
   }
   sql.exec(`CREATE TABLE IF NOT EXISTS pr_activity_queue (${QUEUE})`)
+  // Queues created before the retry bound get the counter; existing rows start at zero attempts.
+  const attempts = sql
+    .exec<{ name: string }>("SELECT name FROM pragma_table_info('pr_activity_queue') WHERE name = 'attempts'")
+    .toArray()
+  if (attempts.length === 0) {
+    sql.exec("ALTER TABLE pr_activity_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+  }
 }

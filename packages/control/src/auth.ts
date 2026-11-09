@@ -57,9 +57,12 @@ const beginOAuth = async (
 ): Promise<Response> => {
   const creds = oauthCredentials(env, provider)
   if (!creds) return errorResponse(503, "NotConfigured", `${provider.label} OAuth is not configured`)
-  // A native client passes its own one-time nonce to bind the callback to its sign-in.
+  // A native client passes its own one-time nonce to bind the callback to its sign-in. Never overwrite a live state:
+  // a colliding caller-supplied nonce is a conflict, not an internal error.
   const state = url.searchParams.get("state") || randomToken(24)
-  await hub(env).createOAuthState(state, kind, provider.id, returnTo, Date.now() + STATE_TTL_MS)
+  if (!(await hub(env).createOAuthState(state, kind, provider.id, returnTo, Date.now() + STATE_TTL_MS))) {
+    return errorResponse(409, "Conflict", "this sign-in state is already in use")
+  }
   const authorize = new URL(provider.authorizeUrl)
   authorize.searchParams.set("client_id", creds.clientId)
   authorize.searchParams.set("redirect_uri", `${url.origin}${provider.callbackPath}`)
@@ -107,7 +110,8 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   if (!code || !state || url.searchParams.get("error")) {
     return htmlPage(400, "Authorization was cancelled or incomplete. Please try again.")
   }
-  const row = await hub(env).consumeOAuthState(state)
+  // Read and validate before consuming: an expired state or one issued for another provider must not burn the row.
+  const row = await hub(env).readOAuthState(state)
   if (!row || row.provider !== provider.id) {
     return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
   }
@@ -117,6 +121,10 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
 
   if (row.kind === "login") {
     if (!isAllowedLogin(env, account.login)) return htmlPage(403, "Forbidden: this account is not allowed to use Kestrel.")
+    // A second callback that raced this one finds the state already consumed and creates nothing.
+    if ((await hub(env).consumeOAuthState(state, row.revision)) === null) {
+      return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
+    }
     const stub = hub(env)
     await stub.upsertUser({ login: account.login, name: account.name, avatarUrl: account.avatarUrl })
     await stub.putConnection(account.login, provider.id, token, account.login)
@@ -130,6 +138,9 @@ const finishOAuth = async (request: Request, env: Env, url: URL, providerId: str
   if (!login) return htmlPage(401, "Sign in to kestrel before connecting accounts.")
   if (account.login.toLowerCase() !== login.toLowerCase()) {
     return htmlPage(403, "Connect the GitHub account you are signed in with.")
+  }
+  if ((await hub(env).consumeOAuthState(state, row.revision)) === null) {
+    return htmlPage(400, "This sign-in link has expired or was already used. Please try again.")
   }
   await hub(env).putConnection(login, provider.id, token, account.login)
   return redirect(row.returnTo)

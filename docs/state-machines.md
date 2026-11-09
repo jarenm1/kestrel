@@ -49,7 +49,7 @@ different answers. Change one here first, then in the code.
 |---|---|---|
 | D1 | A thread's phase has one authority | A live run's outcome wins. `task_report` is advisory until the run settles; a terminal report mid-run does not move the status. |
 | D2 | `needs_input` always has a question | Only `task_ask` enters it. `report("needs_input")` without a pending ask is illegal; the MCP `working` word maps to `running`. |
-| D3 | Pairing is single-use | The approved box secret is collected once, with `used_at` or an equivalent claim. Recovery after a lost response uses an idempotent collect token with a short grace, not a replay of the secret. |
+| D3 | Pairing is single-use with a bounded same-id replay | The approved box secret is collected once and the row marked `used_at`. A poll with the same `pairingId` may repeat the same box and secret for a 60 s grace after the first collection (the CLI sends no separate collect token); the grace never extends the pairing's original `expires_at`, so the collectable window is the documented TTL plus that grace. Later polls, other ids and expiry return nothing. |
 | D4 | Automation fires are idempotent | Persist the fire intent with a stable key (`automation_id` + scheduled instant, or the webhook delivery id). Repeating it returns the existing run. `next_run_at` advances only after the intent is durable. |
 | D5 | Desktop `running` means lifecycle alive | Encoder presence is a separate `streaming` fact. `failed` means no live processes and no display users may attach to. |
 | D6 | GPU state is level-triggered | The box stores the last host `GpuState`, reconciles it on reconnect, and gives `attaching` a deadline. A wish is intent; `GpuState` is truth. |
@@ -207,9 +207,9 @@ direct box auth (`online | offline read-only`).
 once (D3). Logout revokes every capability minted from the session (D7). Preview tokens are revoked with their task or
 session, not left to a 24 h TTL. Offline auth (D9) is own-box, read-only, and ends the moment credentials return.
 
-**Remaining gaps:** session expiry is enforced only on read; pairing returns the secret on every poll and extends
-expiry on approval; OAuth consumes before checking provider/expiry; preview tokens survive logout; the `cv` version is
-derived from count + max(updated_at).
+**Remaining gaps:** session expiry is enforced when a request reads the session, with no background sweep; the `cv`
+version is derived from count + max(updated_at). Pairing now marks `used_at` before returning the secret, OAuth is
+validated before its revision-keyed consume, and logout revokes preview tokens (Wave 1).
 
 ### 7. Automation and PR delivery
 
@@ -221,9 +221,13 @@ box, records the outcome, and advances `nextRunAt` only after the claim is durab
 one unit. The PR queue has a retry bound and a terminal state; the box's `watching` mark is cleared by the same
 operation that removes the control-plane row.
 
-**Remaining gaps:** `next_run_at` advances before `fire` (lost occurrence on crash); webhook delivery is recorded before
-`waitUntil(fire)`; three fire paths share no key; PR queue retries forever on 400/401/5xx; control unwatch does not clear
-the box mark.
+**Wave 1 status:** a fire is claimed with a stable key in the same transaction that advances `next_run_at`, the claim's
+lease alarm is armed before the external call and rearmed on cold start, and a webhook delivery is written with its
+fires. The PR queue has capped backoff and a terminal drop after five failures, and unwatch clears the box mark.
+
+**Remaining gaps:** a crash between the box call and the recorded outcome can duplicate an external task start; the fire
+is then failed after its lease instead of re-fired. Closing that fully needs an idempotency key on the box's
+task-creation route.
 
 ### 8. Client sync and desktop connection
 
@@ -264,17 +268,17 @@ current branch already fixed it; the row stays as the record of what was checked
 | Machine | Encoding | Risk |
 |---|---|---|
 | Session + dev flag | row + `expires_at` + `dev` | H |
-| OAuth state | row, delete-then-validate | M |
-| Pairing | nullable `box_id` + `expires_at` | H |
-| Automation schedule | `enabled` × trigger × `next_run_at` | H |
+| OAuth state | row with revision; read, validate, consume | M |
+| Pairing | `box_id` + `used_at` + `expires_at`; same-id 60 s grace | H |
+| Automation schedule | `enabled` × trigger × `next_run_at` + durable `automation_fires` | H |
 | Automation run | `started/failed` + nullable task/error | M |
 | PR watch registry | `pr_watches` rows | M |
-| PR activity queue + webhook dedupe | `due_at` + `delivery_id` | H |
+| PR activity queue + webhook dedupe | `due_at` + `delivery_id` + capped `attempts` | H |
 | Meter ingest | `(host_id,event_id)` + owner pin | H |
 | Meter reconciliation | inferred segments + derived status | M |
 | File/desktop/preview tokens | TTL rows/Maps | M |
-| TURN cache | per-isolate Map + single-flight | M |
-| Box relay socket | attachment + pending/streams Maps | H |
+| TURN cache | durable per-identity generation + Worker cache | M |
+| Box relay socket | random 31-bit id range + in-flight ids + path-keyed streams | H |
 | Nest host socket | `{hello, retired}` attachment | M |
 | Fleet placement | `pending/active/draining` + read-side assignment | M |
 | Active-box routing | `active_box_id` + precedence | M |

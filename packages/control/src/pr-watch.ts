@@ -1,5 +1,5 @@
 import { Schema } from "effect"
-import { BOX_USER_HEADER, ControlPaths, Task } from "@cloudagents/protocol"
+import { BOX_USER_HEADER, ControlPaths, Paths, Task } from "@cloudagents/protocol"
 import { ensureHook, releaseHook } from "./automations"
 import { hub, type Env } from "./env"
 import { enablePullRequestActivity, fetchPullRequest, fetchRepository } from "./github"
@@ -45,8 +45,21 @@ export const handlePrWatch = async (request: Request, env: Env, url: URL): Promi
     if ((body.repo === undefined) !== (body.number === undefined)) {
       return errorResponse(400, "BadRequest", "name both repo and number, or neither to unwatch every pull request")
     }
-    const repos = await hub(env).unwatchPullRequests(login, body.taskId, body.repo, body.number)
-    for (const repo of repos) await releaseHook(env, login, repo)
+    const watches = await hub(env).unwatchPullRequests(login, body.taskId, body.repo, body.number)
+    // The control row is already gone; clearing the box's mark is best-effort and must not fail the unwatch.
+    for (const watch of watches) {
+      try {
+        const result = await hub(env).boxCall(login, "POST", Paths.taskPullRequestWatching(body.taskId), {
+          repo: watch.repo,
+          number: watch.number,
+          watching: false,
+        })
+        if (!result.ok) console.warn(`clearing the watch mark of ${body.taskId} ${watch.repo}#${watch.number} failed: box answered ${result.status}`)
+      } catch (err) {
+        console.warn(`clearing the watch mark of ${body.taskId} ${watch.repo}#${watch.number} failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
+    for (const repo of new Set(watches.map((watch) => watch.repo))) await releaseHook(env, login, repo)
     return new Response(null, { status: 204 })
   }
   if (request.method !== "POST") return errorResponse(405, "MethodNotAllowed", "POST or DELETE required")

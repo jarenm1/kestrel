@@ -16,7 +16,14 @@ const managedBoxVerify = async (id: string, secret: string): Promise<boolean> =>
 const boxVerify = async (id: string, secret: string): Promise<boolean> =>
   (id === "byob-1" && secret === "byob-secret") || (id.startsWith("b-") && secret === "b-secret")
 
-const stub = { managedBoxVerify, boxVerify }
+const stub = {
+  managedBoxVerify,
+  boxVerify,
+  managedBoxTurnIdentity: async (id: string, secret: string): Promise<string | null> =>
+    (await stub.managedBoxVerify(id, secret)) ? `managed:${id}:0` : null,
+  boxTurnIdentity: async (id: string, secret: string): Promise<string | null> =>
+    (await stub.boxVerify(id, secret)) ? `box:${id}:0` : null,
+}
 const HUB = { idFromName: () => "main", get: () => stub }
 
 const envWith = (vars: Partial<Env> = {}): Env =>
