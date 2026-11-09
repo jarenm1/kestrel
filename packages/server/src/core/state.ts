@@ -17,6 +17,7 @@ import {
 import { Config } from "../config"
 import { replaceFile, syncDir, writeAtomic } from "./atomic"
 import { migrateLegacyState } from "./migrate"
+import { applyRunEvent } from "./run-state"
 
 export const newId = (): string => randomUUID()
 export const nowIso = (): string => new Date().toISOString()
@@ -109,6 +110,8 @@ export const taskPhaseOf = (state: Readonly<StoreState>, task: Task): TaskPhase 
   pendingAsk: state.pendingAsks.some((ask) => ask.taskId === task.id),
   runLive: state.runs.some((run) => run.taskId === task.id && run.status === "running"),
   delegationCancelled: task.delegation?.cancelledAt !== undefined,
+  delegationPresent: task.delegation !== undefined,
+  delegationDispatched: task.delegation?.runId !== undefined,
 })
 
 /**
@@ -301,29 +304,20 @@ const loadFile = (file: string): Effect.Effect<StoreState, InternalError> =>
  * Mark them failed so the UI does not show work that cannot finish.
  */
 const reconcile = (state: StoreState): void => {
-  const now = new Date().toISOString()
+  const now = nowIso()
   // The task's phase is read while its run still counts as live: the transition is what turns the lost run into a
-  // failed thread, keeping a question that survived the restart.
+  // failed thread, keeping a question that survived the restart. The repair events keep the order the old fallbacks
+  // used: restart, askless, orphan, then an undispatched delegation.
   for (const task of state.tasks) {
     applyTaskEvent(state, task, { _tag: "restartReconcile" })
-    // `needs_input` without a question is not a real phase (D2). A live run was already turned into a failed thread
-    // by the transition above; with no run left the thread has nothing to wait for.
-    if (task.status === "needs_input" && !state.pendingAsks.some((ask) => ask.taskId === task.id)) {
-      task.status = "idle"
-    }
-    // A thread persisted `running` with no live run behind it has nothing left to finish, even when the transition
-    // had nothing to change.
-    if (task.status === "running" && !state.runs.some((run) => run.taskId === task.id && run.status === "running")) {
-      task.status = "failed"
-    }
-    // A delegation persisted before dispatch lost its launching process during restart.
-    if (task.delegation !== undefined && task.delegation.runId === undefined) task.status = "failed"
+    applyTaskEvent(state, task, { _tag: "reconcileAskless" })
+    applyTaskEvent(state, task, { _tag: "reconcileOrphan" })
+    applyTaskEvent(state, task, { _tag: "reconcileUndispatchedDelegation" })
   }
+  // A run loop after the task loop: `taskPhaseOf` must still see each run as live when the task is reconciled.
   for (const run of state.runs) {
     if (run.status !== "running") continue
-    run.status = "failed"
-    run.endedAt = now
-    run.interruptedByRestart = true
+    applyRunEvent(run, { _tag: "interrupted" }, now)
   }
 }
 

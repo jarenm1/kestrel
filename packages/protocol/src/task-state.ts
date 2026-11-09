@@ -14,6 +14,10 @@ export interface TaskPhase {
   readonly pendingAsk: boolean
   readonly runLive: boolean
   readonly delegationCancelled: boolean
+  /** The thread has a delegation record. */
+  readonly delegationPresent: boolean
+  /** That record has reserved its run. A delegated thread persisted before dispatch has no run. */
+  readonly delegationDispatched: boolean
 }
 
 export type TaskEvent =
@@ -40,6 +44,12 @@ export type TaskEvent =
   | { readonly _tag: "unarchive" }
   /** The box restarted: a run that was live is gone, as a crash leaves it. A retained question stays retained. */
   | { readonly _tag: "restartReconcile" }
+  /** Persisted `needs_input` with no question is not a real phase (D2); it has nothing left to wait for. */
+  | { readonly _tag: "reconcileAskless" }
+  /** A thread persisted `running` with no live run behind it has nothing left to finish. */
+  | { readonly _tag: "reconcileOrphan" }
+  /** A delegation persisted before dispatch lost its launching process during the restart. */
+  | { readonly _tag: "reconcileUndispatchedDelegation" }
 
 export type TaskIllegalReason =
   | "archived"
@@ -62,6 +72,8 @@ export const initialTaskPhase = (): TaskPhase => ({
   pendingAsk: false,
   runLive: false,
   delegationCancelled: false,
+  delegationPresent: false,
+  delegationDispatched: false,
 })
 
 const same = (a: TaskPhase, b: TaskPhase): boolean =>
@@ -69,7 +81,9 @@ const same = (a: TaskPhase, b: TaskPhase): boolean =>
   a.archived === b.archived &&
   a.pendingAsk === b.pendingAsk &&
   a.runLive === b.runLive &&
-  a.delegationCancelled === b.delegationCancelled
+  a.delegationCancelled === b.delegationCancelled &&
+  a.delegationPresent === b.delegationPresent &&
+  a.delegationDispatched === b.delegationDispatched
 
 const next = (phase: TaskPhase, patch: Partial<TaskPhase>): TaskTransition => {
   const result = { ...phase, ...patch }
@@ -147,6 +161,17 @@ export const transitionTask = (phase: TaskPhase, event: TaskEvent): TaskTransiti
       if (phase.pendingAsk) return next(phase, { status: "needs_input", runLive: false })
       if (!phase.runLive) return next(phase, {})
       return next(phase, { status: "failed", runLive: false })
+
+    case "reconcileAskless":
+      return phase.status === "needs_input" && !phase.pendingAsk ? next(phase, { status: "idle" }) : next(phase, {})
+
+    case "reconcileOrphan":
+      return phase.status === "running" && !phase.runLive ? next(phase, { status: "failed" }) : next(phase, {})
+
+    case "reconcileUndispatchedDelegation":
+      return phase.delegationPresent && !phase.delegationDispatched
+        ? next(phase, { status: "failed" })
+        : next(phase, {})
 
     default: {
       const exhaustive: never = event
