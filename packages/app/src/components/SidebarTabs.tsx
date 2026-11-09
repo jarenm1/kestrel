@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
+import { useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react"
 import { AppWindow, FolderTree, GitCompare, GitPullRequest, Monitor, Plus, X, type LucideIcon } from "lucide-react"
 import { Button } from "@cloudagents/ui/button"
 import {
@@ -55,38 +55,97 @@ export function SidebarTabStrip({
   const [menuOpen, setMenuOpen] = useState(false)
   const available = (id: SidebarTabId) => id !== "pull-requests" || pullRequests.count > 0
   const listRef = useRef<HTMLDivElement>(null)
-  const press = useRef<{ id: SidebarTabId; pointerId: number; startX: number } | null>(null)
+  const tabEls = useRef(new Map<SidebarTabId, HTMLDivElement>())
+  /** The press on a tab: where it started, where in the tab it grabbed, and where the pointer is now. */
+  const press = useRef<{ id: SidebarTabId; pointerId: number; startX: number; grabX: number; x: number } | null>(
+    null,
+  )
   const [dragging, setDragging] = useState<SidebarTabId | null>(null)
+  /** The other tabs' on-screen positions just before a reorder, so they can slide from there to their new slots. */
+  const slideFrom = useRef<Map<SidebarTabId, number> | null>(null)
+
+  /** A position in the tab list's scrolled content, the space `offsetLeft` measures in. */
+  const contentX = (list: HTMLElement, clientX: number) => clientX - list.getBoundingClientRect().left + list.scrollLeft
+
+  /** Where the dragged tab's left edge belongs: under the pointer as grabbed, kept inside the tab list. */
+  function draggedLeft(list: HTMLElement, el: HTMLElement): number {
+    const current = press.current!
+    return Math.min(Math.max(contentX(list, current.x) - current.grabX, 0), list.scrollWidth - el.offsetWidth)
+  }
+
+  /** Moves the dragged tab off its slot to follow the pointer; inline, so it does not wait for a render. */
+  function placeDragged() {
+    const list = listRef.current
+    const el = press.current && tabEls.current.get(press.current.id)
+    if (!list || !el) return
+    el.style.transition = "none"
+    el.style.transform = `translateX(${draggedLeft(list, el) - el.offsetLeft}px)`
+  }
+
+  // After a reorder: the other tabs jump to their new slots, are moved back to where they were, and transition home.
+  // Then the dragged tab, whose slot moved too, is placed back under the pointer.
+  useLayoutEffect(() => {
+    const from = slideFrom.current
+    slideFrom.current = null
+    for (const [id, left] of from ?? []) {
+      const el = tabEls.current.get(id)
+      if (!el || left === el.offsetLeft) continue
+      el.style.transition = "none"
+      el.style.transform = `translateX(${left - el.offsetLeft}px)`
+      void el.offsetWidth
+      el.style.transition = ""
+      el.style.transform = ""
+    }
+    if (dragging !== null) placeDragged()
+  }, [tabs])
 
   function onTabPointerDown(e: PointerEvent<HTMLDivElement>, id: SidebarTabId) {
     if (e.button !== 0) return
-    press.current = { id, pointerId: e.pointerId, startX: e.clientX }
+    const grabX = e.clientX - e.currentTarget.getBoundingClientRect().left
+    press.current = { id, pointerId: e.pointerId, startX: e.clientX, grabX, x: e.clientX }
   }
 
   // Capture starts only once the press becomes a drag: capturing earlier would retarget the click away from the tab.
-  // While dragging, the tab moves live to the slot under the pointer, judged by the other tabs' midpoints.
+  // While dragging, the tab follows the pointer and takes the slot its centre is over, judged by the other tabs'
+  // midpoints in layout (`offsetLeft`), which ignores their slide transforms.
   function onTabPointerMove(e: PointerEvent<HTMLDivElement>) {
     const current = press.current
     if (current === null || current.pointerId !== e.pointerId) return
+    current.x = e.clientX
     if (dragging === null) {
       if (Math.abs(e.clientX - current.startX) < DRAG_THRESHOLD_PX) return
       e.currentTarget.setPointerCapture(e.pointerId)
       setDragging(current.id)
       onSelect(current.id)
     }
+    placeDragged()
     const list = listRef.current
-    if (list === null) return
+    const el = tabEls.current.get(current.id)
+    if (!list || !el) return
+    const centre = draggedLeft(list, el) + el.offsetWidth / 2
     const others = tabs.filter((t) => t !== current.id)
-    const slot = tabs.reduce((count, t, i) => {
-      if (t === current.id) return count
-      const rect = list.children[i]?.getBoundingClientRect()
-      return rect !== undefined && e.clientX > rect.left + rect.width / 2 ? count + 1 : count
-    }, 0)
+    const slot = others.filter((t) => {
+      const other = tabEls.current.get(t)
+      return other !== undefined && other.offsetLeft + other.offsetWidth / 2 < centre
+    }).length
     const next = [...others.slice(0, slot), current.id, ...others.slice(slot)]
-    if (next.some((t, i) => t !== tabs[i])) onReorder(next)
+    if (next.every((t, i) => t === tabs[i])) return
+    slideFrom.current = new Map(
+      others.flatMap((t) => {
+        const other = tabEls.current.get(t)
+        return other ? [[t, contentX(list, other.getBoundingClientRect().left)] as const] : []
+      }),
+    )
+    onReorder(next)
   }
 
+  // On release the dragged tab transitions from under the pointer into its slot.
   function onTabPointerEnd() {
+    const el = press.current && tabEls.current.get(press.current.id)
+    if (el) {
+      el.style.transition = ""
+      el.style.transform = ""
+    }
     press.current = null
     setDragging(null)
   }
@@ -103,7 +162,12 @@ export function SidebarTabStrip({
 
   return (
     <div className="flex min-w-0 items-center gap-1">
-      <div ref={listRef} role="tablist" className="flex min-w-0 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+      {/* Positioned so it is the tabs' offsetParent; the padding gives a lifted tab's shadow room inside the scroller. */}
+      <div
+        ref={listRef}
+        role="tablist"
+        className="relative -m-1 flex min-w-0 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none]"
+      >
         {tabs.map((id) => {
           const t = tabOf(id)
           const selected = id === active
@@ -111,12 +175,17 @@ export function SidebarTabStrip({
           return (
             <div
               key={id}
+              ref={(el) => {
+                if (el) tabEls.current.set(id, el)
+                else tabEls.current.delete(id)
+              }}
               className={cn(
-                "group/tab flex h-7 shrink-0 items-center rounded-full text-xs font-medium transition-[color,background-color,box-shadow] duration-200 select-none",
+                "group/tab flex h-7 shrink-0 items-center rounded-full text-xs font-medium transition-[color,background-color,box-shadow,transform] duration-200 ease-out select-none motion-reduce:transition-none",
                 selected
                   ? "bg-white/[0.06] text-foreground shadow-soft"
                   : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground",
-                dragging === id && "cursor-grabbing bg-white/10 shadow-glow",
+                dragging === id &&
+                  "relative z-10 cursor-grabbing bg-secondary shadow-[0_8px_24px_-6px_rgb(0_0_0/0.8),inset_0_1px_0_0_rgb(255_255_255/0.08)]",
               )}
               onPointerDown={(e) => onTabPointerDown(e, id)}
               onPointerMove={onTabPointerMove}
