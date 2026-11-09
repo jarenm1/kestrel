@@ -307,6 +307,19 @@ describe("PR activity retry bound", () => {
     }
   })
 
+  test("a newer activity event restarts the retry budget", async () => {
+    setSystemTime(new Date(START))
+    const { hub, db } = newHub()
+    queue(db, "old-delivery")
+    db.run("UPDATE pr_activity_queue SET attempts = 4")
+    expect(
+      await hub.githubActivity("new-delivery", { repo: "acme/app", numbers: [7], kind: "review" }),
+    ).toEqual({ duplicate: false, queued: 1 })
+    expect(
+      db.query("SELECT delivery_id AS deliveryId, attempts FROM pr_activity_queue").get(),
+    ).toEqual({ deliveryId: "new-delivery", attempts: 0 })
+  })
+
   test.each([400, 401, 403])("a permanent %i answer ends the queued activity immediately", async (status) => {
     setSystemTime(new Date(START))
     const { hub, db } = newHub()

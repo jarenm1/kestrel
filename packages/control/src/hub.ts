@@ -1554,7 +1554,8 @@ export class Hub extends DurableObject<Env> {
         if (!stillWatching) continue
         sql.exec(
         `INSERT INTO pr_activity_queue (login, task_id, repo, pr_number, kind, delivery_id, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET delivery_id = excluded.delivery_id, due_at = excluded.due_at`,
+         ON CONFLICT(login, task_id, repo, pr_number, kind) DO UPDATE SET
+           delivery_id = excluded.delivery_id, due_at = excluded.due_at, attempts = 0`,
         row.login, row.taskId, activity.repo, row.number, activity.kind, deliveryId, now + 3000,
         )
       }
