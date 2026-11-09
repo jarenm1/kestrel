@@ -262,6 +262,29 @@ describe("creating a box", () => {
     expect(fleet.destroy("alice", "box-1")).toEqual({ ok: true, value: null })
     expect(lastCommand("host-a", "destroy").command).toMatchObject({ boxId: "box-1" })
   })
+
+  test("a create timeout keeps the claim so a late running report lands", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    await fleet.expire(now + 15 * MINUTE)
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "provisioning", failed: true, pending: null })
+
+    fleet.vm("host-a", vmReport("box-1", create.command.vmId, 1, "running"))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", failed: false })
+  })
+
+  test("a late create failure on a running VM clears the marker without failing the box", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const create = lastCommand("host-a", "create")
+    fleet.vm("host-a", vmReport("box-1", create.command.vmId, 1, "running"))
+
+    fleet.result("host-a", create.commandId, false, "late failure", undefined)
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", failed: false, pending: null })
+    await fleet.expire(now + 15 * MINUTE)
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", failed: false })
+  })
 })
 
 describe("VM reports and epochs", () => {

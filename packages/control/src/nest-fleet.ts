@@ -32,7 +32,7 @@ import {
   type PlacementCandidate,
   withPlannedBoots,
 } from "./nest-control"
-import { applyNestBoxEvent } from "./nest-transition"
+import { applyNestBoxEvent, nestBoxPhaseOf, transitionNestBox } from "./nest-transition"
 import {
   deleteNestBox,
   insertNestBox,
@@ -206,24 +206,17 @@ export class NestFleet {
       // pendingId and pendingKind are written and cleared together; this row was found by pendingId, so this is an
       // invariant violation. Clear the marker and still apply any VM report the result carried.
       console.warn(`nest: pending command ${commandId} for ${row.boxId} has no kind`)
-      this.clearPending(row)
+      applyNestBoxEvent(row, { _tag: "commandResult", ok: true, owed: false, vmPresent: vm !== undefined })
       saveNestBox(this.sql, row)
       if (vm !== undefined) this.vm(hostId, vm)
       return
     }
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
     const owed = kind === "create" || kind === "park" || kind === "destroy" ? this.noteRetry(row, kind, ok, error) : false
-    const transition = applyNestBoxEvent(row, {
-      _tag: "commandResult",
-      kind,
-      ok,
-      owed,
-      vmPresent: vm !== undefined,
-    })
+    const transition = applyNestBoxEvent(row, { _tag: "commandResult", ok, owed, vmPresent: vm !== undefined })
     if (transition._tag === "illegal") {
       console.warn(`nest: ${transition.reason} result for ${row.boxId} (${kind}) from ${hostId}`)
     }
-    this.clearPending(row)
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
@@ -238,7 +231,7 @@ export class NestFleet {
     if (row === null || row.pendingId !== null) return
     if (row.state === "parked") {
       if (!this.namedOn(hostId, row)) return
-      row.wakeWanted = true
+      applyNestBoxEvent(row, { _tag: "wakeRequested" })
       saveNestBox(this.sql, row)
       await this.wake(boxId)
       return
@@ -261,11 +254,7 @@ export class NestFleet {
   async expire(now: number): Promise<void> {
     for (const row of nestBoxesDue(this.sql, now)) {
       console.warn(`nest: ${row.pendingKind} for ${row.boxId} timed out`)
-      const kind = row.pendingKind
-      this.clearPending(row)
-      if (kind === "create") row.createFailed = true
-      if (kind === "resume") row.wakeWanted = true
-      if ((kind === "park" || kind === "destroy") && row.state === "parked") row.hostId = null
+      applyNestBoxEvent(row, { _tag: "deadlineElapsed" })
       saveNestBox(this.sql, row)
     }
     await this.wakeWanted()
@@ -369,7 +358,7 @@ export class NestFleet {
       enrollToken: enroll.token,
     }
     if (!this.dispatch(row, command)) {
-      row.createFailed = true
+      applyNestBoxEvent(row, { _tag: "commandSendRefused", kind: "create" })
       saveNestBox(this.sql, row)
     }
   }
@@ -379,7 +368,7 @@ export class NestFleet {
     if (row === null) return NO_SUCH_BOX
     if (row.pendingId !== null) return DONE
     if (row.state !== "suspended" && row.state !== "parked") return DONE
-    row.wakeWanted = true
+    applyNestBoxEvent(row, { _tag: "wakeRequested" })
     // The owner's resume is a newer request: it replaces a park or destroy owed a resend.
     row.retryKind = null
     row.retryCount = 0
@@ -444,7 +433,7 @@ export class NestFleet {
     if (row.hostId === null) {
       const host = nestHostRows(this.sql).find((candidate) => this.link.connected(candidate.id))
       if (host === undefined) return failure(409, "NoHost", "no Nest host is connected to delete this box")
-      row.hostId = host.id
+      applyNestBoxEvent(row, { _tag: "claimMoved", hostId: host.id })
     }
     return this.ownerDispatch(row, { _tag: "destroy", boxId, ownerEpoch: row.ownerEpoch }) ? DONE : HOST_OFFLINE
   }
@@ -512,13 +501,21 @@ export class NestFleet {
   private dispatch(row: NestBoxRow, command: NestHostCommand): boolean {
     if (row.hostId === null) return false
     const commandId = crypto.randomUUID()
-    if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
     const timeout = commandTimeoutMs(command._tag)
-    row.pendingId = commandId
-    row.pendingKind = command._tag
-    row.pendingCommand = storedFormOf(command)
-    row.pendingDeadline = timeout === null ? null : this.clock() + timeout
-    row.wakeWanted = false
+    const event = {
+      _tag: "commandDispatched" as const,
+      commandId,
+      command: storedFormOf(command),
+      deadline: timeout === null ? null : this.clock() + timeout,
+    }
+    // Check legality before the host sees the command; an illegal dispatch must never run.
+    const check = transitionNestBox(nestBoxPhaseOf(row), event)
+    if (check._tag === "illegal") {
+      console.warn(`nest: ${check.reason} dispatch for ${row.boxId}`)
+      return false
+    }
+    if (!this.link.send(row.hostId, { _tag: "command", commandId, command })) return false
+    applyNestBoxEvent(row, event)
     saveNestBox(this.sql, row)
     return true
   }
@@ -630,13 +627,6 @@ export class NestFleet {
     }
   }
 
-  private clearPending(row: NestBoxRow): void {
-    row.pendingId = null
-    row.pendingKind = null
-    row.pendingCommand = null
-    row.pendingDeadline = null
-  }
-
   /** Whether the box's URL names `hostId`, so a request for the box reached that host's ingress. */
   private namedOn(hostId: string, row: NestBoxRow): boolean {
     const host = nestHostRow(this.sql, hostId)
@@ -683,12 +673,12 @@ export class NestFleet {
       ...this.enrollFields(row),
     }
     const url = publicUrlFor(row.boxId, target.slug, this.domain)
-    row.hostId = target.hostId
-    row.ownerEpoch += 1
-    row.vmId = crypto.randomUUID()
-    // `since` comes from the reporting host's clock and is only comparable within one VM incarnation. The new host
-    // sets a fresh baseline with its first report.
-    row.vmSince = null
+    applyNestBoxEvent(row, {
+      _tag: "placementChosen",
+      hostId: target.hostId,
+      ownerEpoch: row.ownerEpoch + 1,
+      vmId: crypto.randomUUID(),
+    })
     const enrollToken = this.adoptToken(row, minted)
     if (!this.dispatch(row, this.resumeCommand(row, enrollToken, url))) {
       Object.assign(row, previous)
@@ -739,7 +729,7 @@ export class NestFleet {
 
   /** The box stays waiting; the wake loop tries it again on the next capacity report, hello, or expiry. */
   private holdWake(row: NestBoxRow): void {
-    row.wakeWanted = true
+    applyNestBoxEvent(row, { _tag: "wakeHeld" })
     saveNestBox(this.sql, row)
   }
 

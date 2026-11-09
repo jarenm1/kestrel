@@ -169,10 +169,13 @@ control epoch, so a crash in that window recovers without wiping the backup; an 
 rolled back from `.previous` on recovery; a stale freeze is cleared on recovery; and a refused enrollment send keeps
 its token.
 
-**Remaining gaps:** `vm()` accepts any state → any state; a failed create keeps a host claim with no pending command; a
-parked box with a resume claim cannot move after its host is lost (the claim release is deliberately deferred until
-the backup can be proven clean); `wakeWanted` and `pendingId` are separate retry mechanisms. PR #284 fixed the
-hello/lease ordering, inventory/live-report ordering and park timeout; do not re-fix those.
+**Wave 2 status:** `applyNestBoxEvent` owns placement, the command/pending marker, `wakeWanted`, deadlines, result
+cleanup and the failed-create claim. A create refused or failed with no VM releases `hostId`; a timeout keeps the claim
+so a late running report still lands, and a VM report still provisioning also keeps it.
+
+**Remaining gaps:** `vm()` accepts an edge outside the table as log-and-continue; a parked box with a resume claim
+cannot move after its host is lost (the claim release is deliberately deferred until the backup can be proven clean).
+PR #284 fixed the hello/lease ordering, inventory/live-report ordering and park timeout; do not re-fix those.
 
 ### 3. Desktop session and encoder
 
