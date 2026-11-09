@@ -1,6 +1,7 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import { Either, Schema } from "effect"
 import type { AgentModel, BoxList, Message, ModelProvider, Run, RunItems, Task, ThreadPullRequestAction } from "@cloudagents/protocol"
+import { applyDesktopStatus, isDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 
@@ -122,11 +123,26 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
 
 /**
  * Writes a task into the cache: its own entry, and the thread list if that is loaded. A list that is not loaded
- * stays unloaded; its query fetches it, so no partial list is ever cached.
+ * stays unloaded; its query fetches it, so no partial list is ever cached. Writes are monotonic in `updatedAt`:
+ * an event older than either cached copy (an out-of-order frame after a reconnect) is ignored; equal timestamps land.
  */
 export function storeTask(client: QueryClient, task: Task): void {
+  const cached = client.getQueryData<Task>(keys.task(task.id))
+  const listed = client.getQueryData<readonly Task[]>(keys.tasks)?.find((candidate) => candidate.id === task.id)
+  const newest =
+    cached === undefined || (listed !== undefined && listed.updatedAt > cached.updatedAt) ? listed : cached
+  if (newest !== undefined && task.updatedAt < newest.updatedAt) return
   client.setQueryData(keys.task(task.id), task)
-  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => list && upsert(list, task))
+  client.setQueryData(keys.tasks, (list: readonly Task[] | undefined) => (list === undefined ? list : upsert(list, task)))
+}
+
+/**
+ * Invalidates the cached run item lists on (re)connect. `keys.runItems(runId)` is `["runs", runId, "items"]`,
+ * outside the `keys.task(taskId)` prefix, so a reconnect that only invalidates the task prefix never refetches the
+ * items an `agent.item` event missed while disconnected.
+ */
+export function invalidateRunItems(client: QueryClient, runIds: readonly string[]): void {
+  for (const runId of runIds) void client.invalidateQueries({ queryKey: keys.runItems(runId), exact: true })
 }
 
 /** Removes a deleted task from the cache: the thread list drops it and its own entry goes away. */
@@ -359,7 +375,17 @@ export const queries = {
   files: (taskId: string, hidden: boolean) =>
     queryOptions({ queryKey: [...keys.files(taskId), hidden] as const, queryFn: () => api.getFiles(taskId, hidden) }),
   desktop: (taskId: string) =>
-    queryOptions({ queryKey: keys.desktop(taskId), queryFn: () => api.getDesktop(taskId) }),
+    queryOptions({
+      queryKey: keys.desktop(taskId),
+      queryFn: async (): Promise<DesktopStatusValue> =>
+        applyDesktopStatus(
+          queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId)),
+          await api.getDesktop(taskId),
+          "event",
+          undefined,
+          isDesktopStreamActive(taskId),
+        ),
+    }),
   taskFileUrl: (taskId: string, path: string) =>
     queryOptions({ queryKey: keys.taskFile(taskId, path), queryFn: () => api.taskFileUrl(taskId, path) }),
 }

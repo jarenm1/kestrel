@@ -322,6 +322,38 @@ describe("refusal and retry", () => {
     expect(FakePeer.all.length).toBe(1)
   })
 
+  test("a retryable refusal does not immediately re-offer, and a lost signalling socket keeps its backoff", async () => {
+    const h = harness()
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(h.sent.filter((m) => m._tag === "rtc.offer").length).toBe(1)
+
+    h.rtc.handle(unavailable(true))
+    // The refusal is the WebRTC layer's retry: nothing offers now, and nothing offers before its backoff expires.
+    expect(FakePeer.all.length).toBe(1)
+    clock.advance(retryDelay(0) - 1)
+    expect(FakePeer.all.length).toBe(1)
+    expect(h.sent.filter((m) => m._tag === "rtc.offer").length).toBe(1)
+
+    // The signalling socket closes before that retry. The stream layer reconnects it, and the box's new config is
+    // what starts the next negotiation; the closed socket's pending retry must not fire into the fresh session.
+    h.rtc.disconnect()
+    clock.advance(retryDelay(0))
+    expect(FakePeer.all.length).toBe(1)
+
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+    expect(h.states.at(-1)).toBe("retrying")
+
+    // The attempt count survived, so the next failure waits retryDelay(1), not retryDelay(0).
+    FakePeer.all[1]!.set("failed")
+    clock.advance(retryDelay(1) - 1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(0)
+    clock.advance(1)
+    expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(1)
+  })
+
   test("a non-retryable refusal is unsupported and does not retry", async () => {
     const h = harness()
     h.rtc.handle(config)

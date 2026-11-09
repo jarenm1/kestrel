@@ -6,6 +6,7 @@ import { DEFAULT_DESKTOP_QUALITY, DESKTOP_QUALITIES, DesktopQuality, type Deskto
 import { api } from "@/api/client"
 import type { DesktopSource } from "@/api/events"
 import { keys, queries } from "@/api/queries"
+import { applyDesktopStatus, setDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import {
@@ -108,7 +109,7 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient()
   const frameRef = useRef<HTMLDivElement>(null)
   const desktop = useQuery(queries.desktop(taskId))
-  const status = desktop.data ?? null
+  const status = desktop.data?.status ?? null
   const [streamError, setStreamError] = useState<string | null>(null)
   const [stats, setStats] = useState<RtcStats | null>(null)
   const wanted = useStreamWanted(frameRef)
@@ -120,6 +121,12 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   // reconnect interval. The thread's event stream moves `status` to "starting" when the desktop comes up.
   const source = useMemo<DesktopSource | null>(() => (wanted && active ? { taskId } : null), [taskId, wanted, active])
 
+  // While this viewer streams, its status frames are the only lifecycle writer: `desktop.updated` may be a backlog.
+  useEffect(() => {
+    setDesktopStreamActive(taskId, source !== null)
+    return () => setDesktopStreamActive(taskId, false)
+  }, [taskId, source])
+
   // The state word shown while there is no stream; "loading" and "starting" show the boot bar.
   const idle = running ? (wanted ? null : "paused") : (status?.state ?? "loading")
 
@@ -129,11 +136,19 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
       await api.stopDesktop(taskId)
       return api.getDesktop(taskId)
     },
-    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+    onMutate: () => queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId)),
+    onSuccess: (next, _variables, base) => {
+      const current = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId))
+      queryClient.setQueryData(keys.desktop(taskId), applyDesktopStatus(current, next, "mutation", base))
+    },
   })
   const setQuality = useMutation({
     mutationFn: (quality: DesktopQuality) => api.setDesktopQuality(taskId, { quality }),
-    onSuccess: (next) => queryClient.setQueryData(keys.desktop(taskId), next),
+    onMutate: () => queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId)),
+    onSuccess: (next, _variables, base) => {
+      const current = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId))
+      queryClient.setQueryData(keys.desktop(taskId), applyDesktopStatus(current, next, "mutation", base))
+    },
   })
 
   const actionError = toggle.error ?? setQuality.error ?? desktop.error
@@ -174,7 +189,8 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
           idle={idle}
           frameRef={frameRef}
           onStatus={(next) => {
-            queryClient.setQueryData(keys.desktop(taskId), next)
+            const current = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId))
+            queryClient.setQueryData(keys.desktop(taskId), applyDesktopStatus(current, next, "stream"))
             if (next.state === "running") setStreamError(null)
           }}
           onClose={() => setStreamError("Desktop connection lost; reconnecting…")}

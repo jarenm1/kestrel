@@ -26,7 +26,8 @@ export async function fetchSnapshot<T extends { readonly id: string }>(
  * Fetches one task, keeping the task live events wrote while the fetch was in flight: it is newer than the snapshot.
  * The identity check matters more than for lists: every event writes a whole task object, and a thread opened while a
  * run is reporting context (or a socket reconnecting after the tab was hidden) would otherwise take the snapshot read
- * before that report and show it until the run's next one.
+ * before that report and show it until the run's next one. A snapshot older than an event that landed before the
+ * fetch started is ignored for the same reason; equal timestamps are the same write.
  */
 export async function fetchTaskSnapshot(
   client: QueryClient,
@@ -36,5 +37,7 @@ export async function fetchTaskSnapshot(
   const before = client.getQueryData<Task>(key)
   const task = await fetch()
   const current = client.getQueryData<Task>(key)
-  return current !== undefined && current !== before ? current : task
+  if (current !== undefined && current !== before) return current
+  if (current !== undefined && task.updatedAt < current.updatedAt) return current
+  return task
 }

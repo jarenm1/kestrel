@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react"
 import { useQueries, useQueryClient } from "@tanstack/react-query"
-import type { DesktopStatus, Message, Run, RunItems, Task } from "@cloudagents/protocol"
+import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
-import { keys, queries, storeTask, upsert } from "@/api/queries"
+import { invalidateRunItems, keys, queries, storeTask, upsert } from "@/api/queries"
+import { applyDesktopStatus, isDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
 import { threadErrors } from "./threadErrors"
 
 const MAX_LOG_LINES = 2000
@@ -64,6 +65,12 @@ export function useTaskState(taskId: string) {
         setDisconnected(false)
         // Prefix invalidation refreshes task, messages and runs, including events missed while disconnected.
         void queryClient.invalidateQueries({ queryKey: keys.task(taskId) })
+        // Run items live under ["runs", runId, "items"], outside the task prefix.
+        const cachedRuns = queryClient.getQueryData<readonly Run[]>(keys.runs(taskId)) ?? []
+        invalidateRunItems(
+          queryClient,
+          cachedRuns.map((run) => run.id),
+        )
       },
       onEvent: (event) => {
         switch (event._tag) {
@@ -105,10 +112,19 @@ export function useTaskState(taskId: string) {
             invalidateWorktreeThrottled()
             break
           case "desktop.updated": {
-            // Only a move into "running" counts as the agent opening it.
-            const previous = queryClient.getQueryData<DesktopStatus>(keys.desktop(taskId))
-            queryClient.setQueryData(keys.desktop(taskId), event.desktop)
-            if (previous && previous.state !== "running" && event.desktop.state === "running") {
+            // Only a move into "running" counts as the agent opening it. While a viewer streams, its frames win.
+            const previous = queryClient.getQueryData<DesktopStatusValue>(keys.desktop(taskId))
+            const next = applyDesktopStatus(
+              previous,
+              event.desktop,
+              "event",
+              undefined,
+              isDesktopStreamActive(taskId),
+            )
+            if (next === previous) break
+            queryClient.setQueryData(keys.desktop(taskId), next)
+            // A first load of an already-running desktop is not the agent opening it.
+            if (previous !== undefined && previous.status.state !== "running" && next.status.state === "running") {
               setDesktopOpens((n) => n + 1)
             }
             break

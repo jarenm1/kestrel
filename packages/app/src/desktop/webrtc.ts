@@ -314,6 +314,21 @@ export class DesktopRtc {
     this.setState("idle")
   }
 
+  /**
+   * The signalling socket was lost, not the viewer's intent: drop the peer (the box's side of it is gone with the
+   * socket) but keep the attempt count and config, so the config the reopened socket sends resumes the same retry
+   * backoff. The stream layer owns reconnecting the socket; this class owns negotiation retries.
+   */
+  disconnect(): void {
+    if (this.closed) return
+    this.clear("retry")
+    this.drop(false)
+    this.refreshing = false
+    this.pendingBox = null
+    this.setState(this.attempts > 0 ? "retrying" : "connecting")
+    this.emitDiagnostics()
+  }
+
   private setState(state: RtcState): void {
     if (state === this.state) return
     this.state = state
