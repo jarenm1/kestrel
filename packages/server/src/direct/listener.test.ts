@@ -160,6 +160,11 @@ describe("a user's own box after a restart, with the control plane down", () => 
       ["GET", "/api/models"],
       ["GET", "/api/usage"],
       ["POST", "/api/webrtc/offer"],
+      // Credential reads and capability surfaces never run offline.
+      ["GET", "/api/cli-auth"],
+      ["GET", "/api/tasks/t1/desktop"],
+      ["GET", "/api/tasks/t1/preview/"],
+      ["POST", "/api/tasks/t1/preview/session"],
     ]
     try {
       for (const [method, path] of denied) {
@@ -197,6 +202,25 @@ describe("a user's own box after a restart, with the control plane down", () => 
     try {
       for (const token of [await tokenFor(OWNER, { iat: now - 1000, exp: now - 400 }), forged, await tokenFor(OWNER, { aud: "box_other" })]) {
         expect((await box.listener.handle(request("GET", "/api/tasks/t1", token)))).toMatchObject({ status: 401 })
+      }
+      expect(box.served).toEqual([])
+    } finally {
+      box.listener.close()
+    }
+  })
+
+  test("preview, desktop and credential routes are refused offline even for reads", async () => {
+    const box = restartedBox()
+    const token = await tokenFor(OWNER)
+    try {
+      for (const [method, path] of [
+        ["GET", "/api/cli-auth"],
+        ["GET", "/api/tasks/t1/desktop"],
+        ["GET", "/api/tasks/t1/preview/"],
+        ["POST", "/api/tasks/t1/preview/session"],
+      ] as const) {
+        const response = await box.listener.handle(request(method, path, token))
+        expect({ method, path, status: response.status }).toEqual({ method, path, status: 503 })
       }
       expect(box.served).toEqual([])
     } finally {

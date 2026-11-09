@@ -323,11 +323,11 @@ current branch already fixed it; the row stays as the record of what was checked
 
 | Machine | Encoding | Risk |
 |---|---|---|
-| MCP session/auth | `sessions` Map + per-request check | M |
-| Broker grant | `grantByToken` + `tokenByRun` Maps | H |
-| CLI page-login | pending Map + `preparing` Set + marker | H |
+| MCP session/auth | one session per run; distinct-run per-user/global ceilings | M |
+| Broker grant | `grantByToken` + `tokenByRun` Maps; live-run liveness on expiry | H |
+| CLI page-login | per-user+provider semaphore + pending Map + `preparing` Set + marker | H |
 | CLI account/caches | selection file + probes + TTL caches | M |
-| Relay control link | socket/opened/backoff + streams | H |
+| Relay control link | socket/opened/backoff + in-flight HTTP ids + path-keyed streams | H |
 | Stream adapter | open + pre-listener buffer | M |
 | Desktop viewer config | `configSent` + signal queue | M |
 | Stats sampler | `watched` + `sampling` + idle eviction | L |

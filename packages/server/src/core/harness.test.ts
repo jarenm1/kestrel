@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Checkout, Message, ModelProvider, Run, Task } from "@cloudagents/protocol"
-import { CredentialBroker, CredentialBrokerLive } from "../broker"
+import { BROKER_GRANT_TTL_MS, CredentialBroker, CredentialBrokerLive } from "../broker"
 import { handleBroker } from "../broker/handler"
 import { CliAuth, type CliLoginDir } from "../cliauth"
 import { Config, type ServerConfig } from "../config"
@@ -83,21 +83,22 @@ const harnessLayer = (
     githubApiUrl: "https://api.github.com",
   }
   const configLayer = Layer.succeed(Config, config)
+  const stateLayer = StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive)))
   const credentialLayer = Layer.succeed(CredentialStore, {
     get: () => Effect.succeed({ user: "test", dev: true, anthropic: "test-anthropic", openai: "test-openai" }),
   } as never)
   const dependencies = Layer.mergeAll(
     configLayer,
-    StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))),
+    stateLayer,
     EventHubLive,
     // A run fails before it spawns without a model credential (a vendor key or its CLI login), so the fixture is
     // signed in: these tests exercise spawn, resume and items, not the Connections setup path.
     credentialLayer,
     Layer.succeed(GitHub, {} as never),
     options.realBroker
-      ? CredentialBrokerLive.pipe(Layer.provide(Layer.merge(configLayer, credentialLayer)))
+      ? CredentialBrokerLive.pipe(Layer.provide(Layer.mergeAll(configLayer, credentialLayer, stateLayer)))
       : Layer.succeed(CredentialBroker, {
-          issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }),
+          issue: () => Effect.succeed({ token: "test-only", expiresAt: Date.now() + BROKER_GRANT_TTL_MS, base: "", env: {} }),
           revoke: () => Effect.void,
           grantForToken: () => Effect.succeed(null),
           onRevoke: () => () => undefined,

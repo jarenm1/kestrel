@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 import { DEFAULT_MODEL_HARNESS, type ModelHarness, type ModelProvider, type RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
+import { StateStore } from "../core/state"
 
 /**
  * Providers Kestrel brokers model calls for. Free OpenCode, Antigravity and Devin are not broker providers: they reach their
@@ -191,10 +192,18 @@ export const credentialFor = (creds: RelayCredentials | null, provider: BrokerPr
   return null
 }
 
+/**
+ * A grant's default horizon. A finite TTL cannot be the authority while `task_ask` may wait indefinitely, so expiry is
+ * checked against the run's liveness: a live run keeps (and renews) its grant, and only an abandoned grant is revoked.
+ */
+export const BROKER_GRANT_TTL_MS = 24 * 60 * 60_000
+
 /** A live broker token: the run it was minted for and the user who started that run. */
 export interface BrokerGrant {
   readonly runId: string
   readonly user: string
+  /** Epoch milliseconds; checked against the run's liveness, so a live run never loses its grant to the clock. */
+  readonly expiresAt: number
   /** Native vendor runs retain both vendor APIs; every alternate-harness route is scoped to its selected provider. */
   readonly providers: readonly BrokerProvider[]
   /**
@@ -213,6 +222,8 @@ export interface BrokerGrant {
 /** What a run gets for its token: the token itself, its provider base, and the env that points the CLI at it. */
 export interface BrokerLease {
   readonly token: string
+  /** Epoch milliseconds; the grant is renewed past it while its run is live and revoked once the run is abandoned. */
+  readonly expiresAt: number
   /** `http://127.0.0.1:<sandboxPort>/broker/<token>`; routes append `/<provider>/<api>/...`. */
   readonly base: string
   readonly env: Readonly<Record<string, string>>
@@ -263,6 +274,7 @@ export const CredentialBrokerLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config
     const store = yield* CredentialStore
+    const state = yield* StateStore
     const grantByToken = new Map<string, BrokerGrant>()
     const tokenByRun = new Map<string, string>()
     const revokeListeners = new Set<(runId: string) => void>()
@@ -302,6 +314,7 @@ export const CredentialBrokerLive = Layer.effect(
         Effect.sync(() => {
           revokeSync(runId)
           const token = randomBytes(24).toString("base64url")
+          const expiresAt = Date.now() + BROKER_GRANT_TTL_MS
           const harness = options?.harness ?? (provider === null ? null : DEFAULT_BROKER_HARNESS[provider])
           const nativeVendor =
             (provider === "anthropic" && harness === "claude") || (provider === "openai" && harness === "codex")
@@ -310,6 +323,7 @@ export const CredentialBrokerLive = Layer.effect(
           grantByToken.set(token, {
             runId,
             user,
+            expiresAt,
             providers,
             opencodeSession: sessionFor(options?.sessionId),
             // Only a Go route needs it, and only for the run it was minted for.
@@ -317,10 +331,26 @@ export const CredentialBrokerLive = Layer.effect(
           })
           tokenByRun.set(runId, token)
           const base = `http://127.0.0.1:${config.sandboxPort}/broker/${token}`
-          return { token, base, env: brokerEnv(provider, base, token, harness) }
+          return { token, expiresAt, base, env: brokerEnv(provider, base, token, harness) }
         }),
       revoke: (runId) => Effect.sync(() => revokeSync(runId)),
-      grantForToken: (token) => Effect.sync(() => grantFor(token)),
+      grantForToken: (token) =>
+        Effect.gen(function* () {
+          const grant = grantFor(token)
+          if (grant === null) return null
+          if (grant.expiresAt > Date.now()) return grant
+          // The horizon passed. A run can be waiting in `task_ask` for as long as the user takes, so only an abandoned
+          // (settled or missing) run loses its token; a live one keeps the same token with a fresh horizon.
+          const live = (yield* state.read).runs.some((run) => run.id === grant.runId && run.status === "running")
+          if (!live) {
+            revokeSync(grant.runId)
+            return null
+          }
+          const renewed: BrokerGrant = { ...grant, expiresAt: Date.now() + BROKER_GRANT_TTL_MS }
+          const liveToken = tokenByRun.get(grant.runId)
+          if (liveToken !== undefined) grantByToken.set(liveToken, renewed)
+          return renewed
+        }),
       onRevoke: (listener) => {
         revokeListeners.add(listener)
         return () => {

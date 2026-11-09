@@ -1,11 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test"
 import { createServer, request } from "node:http"
 import type { AddressInfo } from "node:net"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, ManagedRuntime } from "effect"
 import type { RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
+import { StateStore } from "../core/state"
 import {
+  BROKER_GRANT_TTL_MS,
   BROKER_PROVIDERS,
   BROKER_UPSTREAMS,
   brokerApiFor,
@@ -26,6 +28,7 @@ const BASE = "http://127.0.0.1:8787/broker/run-token"
 const grant = (providers: readonly BrokerProvider[], extra: Partial<BrokerGrant> = {}): BrokerGrant => ({
   runId: "run",
   user: "octocat",
+  expiresAt: Date.now() + BROKER_GRANT_TTL_MS,
   providers,
   opencodeSession: "ses_kestrelrun",
   opencodeGoKey: null,
@@ -42,14 +45,23 @@ const brokerOf = (overrides: Partial<CredentialBrokerShape> = {}): CredentialBro
 })
 
 /** The real broker with a fixed sandbox port and no control-plane credentials. */
-const brokerLayer = CredentialBrokerLive.pipe(
-  Layer.provide(
-    Layer.merge(
-      Layer.succeed(Config, { sandboxPort: 8787 } as never),
-      Layer.succeed(CredentialStore, { get: () => Effect.succeed(null), set: () => Effect.void }),
+const stateLayer = (runs: ReadonlyArray<{ readonly id: string; readonly status: string }> = []) =>
+  Layer.succeed(StateStore, { read: Effect.succeed({ runs } as never) } as never)
+
+const brokerLayerWith = (runs: ReadonlyArray<{ readonly id: string; readonly status: string }> = []) =>
+  CredentialBrokerLive.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(Config, { sandboxPort: 8787 } as never),
+        Layer.succeed(CredentialStore, { get: () => Effect.succeed(null), set: () => Effect.void }),
+        stateLayer(runs),
+      ),
     ),
-  ),
-)
+  )
+
+const brokerLayer = brokerLayerWith()
+
+afterEach(() => setSystemTime())
 
 /** A local stand-in for one upstream: records what the broker forwarded and answers OK. */
 const capture = () => {
@@ -186,6 +198,57 @@ describe("broker issuance", () => {
     )
     expect(lease.env).toEqual({ KESTREL_BROKER_TOKEN: lease.token })
     expect(grant?.providers).toEqual([provider])
+  })
+
+  test("issuing again rotates the run's token and leaves the previous one dead", async () => {
+    const runtime = ManagedRuntime.make(brokerLayer)
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const broker = yield* CredentialBroker
+          const first = yield* broker.issue("run-rotate", "octocat", "openrouter", { harness: "codex" })
+          const second = yield* broker.issue("run-rotate", "octocat", "openrouter", { harness: "codex" })
+          return {
+            firstGrant: yield* broker.grantForToken(first.token),
+            secondGrant: yield* broker.grantForToken(second.token),
+          }
+        }),
+      )
+      expect(result.firstGrant).toBeNull()
+      expect(result.secondGrant).toMatchObject({ runId: "run-rotate" })
+    } finally {
+      await runtime.dispose()
+    }
+  })
+
+  test("a grant outlives its TTL while the run is live and dies once the run is abandoned", async () => {
+    const runtime = ManagedRuntime.make(
+      brokerLayerWith([
+        { id: "run-live", status: "running" },
+        { id: "run-abandoned", status: "succeeded" },
+      ]),
+    )
+    try {
+      const result = await runtime.runPromise(
+        Effect.gen(function* () {
+          const broker = yield* CredentialBroker
+          const live = yield* broker.issue("run-live", "octocat", "openrouter", { harness: "codex" })
+          const abandoned = yield* broker.issue("run-abandoned", "octocat", "openrouter", { harness: "codex" })
+          setSystemTime(new Date(live.expiresAt))
+          const liveGrant = yield* broker.grantForToken(live.token)
+          const abandonedGrant = yield* broker.grantForToken(abandoned.token)
+          // The same token is still valid after the horizon is pushed out.
+          return { live, liveGrant, abandonedGrant, again: yield* broker.grantForToken(live.token) }
+        }),
+      )
+      expect(result.liveGrant).toMatchObject({ runId: "run-live" })
+      expect(result.liveGrant?.expiresAt).toBeGreaterThan(result.live.expiresAt)
+      expect(result.abandonedGrant).toBeNull()
+      expect(result.again).toMatchObject({ runId: "run-live" })
+    } finally {
+      setSystemTime()
+      await runtime.dispose()
+    }
   })
 })
 
@@ -453,6 +516,83 @@ describe("broker requests", () => {
       const closed = Promise.withResolvers<void>()
       box.close(() => closed.resolve())
       await closed.promise
+    }
+  })
+
+  test("a revoke mid-stream lets the response finish but refuses the next request", async () => {
+    const gate = Promise.withResolvers<void>()
+    const streamed = Bun.serve({
+      port: 0,
+      fetch() {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("first-"))
+            void gate.promise.then(() => {
+              controller.enqueue(new TextEncoder().encode("second"))
+              controller.close()
+            })
+          },
+        })
+        return new Response(body, { headers: { "content-type": "text/plain" } })
+      },
+    })
+    const previous = BROKER_UPSTREAMS.openrouter
+    BROKER_UPSTREAMS.openrouter = {
+      ...previous,
+      anthropic: { ...previous.anthropic!, base: `http://127.0.0.1:${streamed.port}/api` },
+    }
+    const runtime = ManagedRuntime.make(
+      CredentialBrokerLive.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Config, { sandboxPort: 8787 } as never),
+            Layer.succeed(CredentialStore, {
+              get: () => Effect.succeed({ user: "octocat", providers: { openrouter: "real-key" } }),
+              set: () => Effect.void,
+            }),
+            stateLayer([{ id: "run-stream", status: "running" }]),
+          ),
+        ),
+      ),
+    )
+    const broker = await runtime.runPromise(CredentialBroker)
+    const lease = await runtime.runPromise(
+      Effect.flatMap(CredentialBroker, (issued) => issued.issue("run-stream", "octocat", "openrouter", { harness: "claude" })),
+    )
+    const box = createServer((req, res) => void handleBroker(broker, req, res))
+    const listening = Promise.withResolvers<void>()
+    box.listen(0, "127.0.0.1", listening.resolve)
+    await listening.promise
+    try {
+      const port = (box.address() as AddressInfo).port
+      const url = `http://127.0.0.1:${port}/broker/${lease.token}/openrouter/anthropic/v1/messages`
+      const response = await fetch(url, { method: "POST", body: "{}" })
+      expect(response.status).toBe(200)
+      const reader = response.body!.getReader()
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("first-")
+
+      // The grant dies now; the response already authenticated may still finish.
+      await runtime.runPromise(broker.revoke("run-stream"))
+      gate.resolve()
+      let rest = ""
+      for (;;) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        rest += new TextDecoder().decode(chunk.value)
+      }
+      expect(rest).toBe("second")
+
+      // A new request with the same token is refused.
+      const after = await fetch(url, { method: "POST", body: "{}" })
+      expect(after.status).toBe(401)
+    } finally {
+      gate.resolve()
+      const closed = Promise.withResolvers<void>()
+      box.close(() => closed.resolve())
+      await closed.promise
+      streamed.stop(true)
+      BROKER_UPSTREAMS.openrouter = previous
+      await runtime.dispose()
     }
   })
 })

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { Config, type ServerConfig } from "../config"
-import { CredentialBroker } from "../broker"
+import { BROKER_GRANT_TTL_MS, CredentialBroker } from "../broker"
 import { CredentialStore } from "../credentials"
 import { CliAuth } from "../cliauth"
 import { DesktopManager } from "../desktop"
@@ -47,7 +47,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const deps = Layer.mergeAll(
     configLayer, WorkspaceLive, StateLive.pipe(Layer.provide(Layer.merge(configLayer, WorkspaceLive))), EventHubLive,
     Layer.succeed(CredentialBroker, {
-      issue: () => Effect.succeed({ token: "test-only", base: "", env: {} }), revoke: () => Effect.void,
+      issue: () => Effect.succeed({ token: "test-only", expiresAt: Date.now() + BROKER_GRANT_TTL_MS, base: "", env: {} }), revoke: () => Effect.void,
       grantForToken: () => Effect.succeed(null), onRevoke: () => () => undefined, upstreamKey: () => Effect.succeed(null),
     }),
     Layer.succeed(CliAuth, { loggedInDirs: () => Effect.succeed([]), opencodeGoKey: () => Effect.succeed(null), status: () => Effect.succeed([]), startLogin: () => Effect.die("unused"), cancelLogin: () => Effect.void, submitCode: () => Effect.die("unused"), submitKey: () => Effect.die("unused"), logout: () => Effect.void, selectAccount: () => Effect.die("unused"), discoverCommands: () => Effect.succeed([]), discoverModels: () => Effect.succeed({ models: [], sources: [] }), providerUsage: () => Effect.succeed([]), useBankedReset: () => Effect.die("unused"), shutdown: () => Effect.void }),

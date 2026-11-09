@@ -101,7 +101,44 @@ const bearerToken = (req: IncomingMessage): string | null => {
 
 interface Session {
   readonly runId: string
+  readonly user: string
   readonly transport: StreamableHTTPServerTransport
+}
+
+/**
+ * A run's harness opens one MCP session; a duplicate initialize replaces it. The per-user and global ceilings stop a
+ * buggy or hostile client from growing the session map without bound. A new session beyond them is refused rather
+ * than evicting one a live client may still be using.
+ */
+export const MCP_SESSION_LIMITS = {
+  perRun: 1,
+  perUser: 8,
+  global: 64,
+} as const
+
+export interface McpRunOwner {
+  readonly runId: string
+  readonly user: string
+}
+
+/**
+ * The sessions that would remain after replacing `currentRunId`. A finishing initialize can be in both `sessions` and
+ * `initializing`; the ceilings count runs, so each id contributes once.
+ */
+export const mcpRunCounts = (
+  sessions: Iterable<McpRunOwner>,
+  initializing: Iterable<McpRunOwner>,
+  currentRunId: string,
+  user: string,
+): { readonly userRuns: number; readonly totalRuns: number } => {
+  const total = new Set<string>()
+  const users = new Set<string>()
+  for (const entry of [...sessions, ...initializing]) {
+    if (entry.runId === currentRunId) continue
+    total.add(entry.runId)
+    if (entry.user === user) users.add(entry.runId)
+  }
+  return { totalRuns: total.size, userRuns: users.size }
 }
 
 /**
@@ -112,28 +149,46 @@ interface Session {
  */
 export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const sessions = new Map<string, Session>()
+  /** Initialize requests whose transport has not answered yet, so a concurrent duplicate cannot register a second. */
+  const initializing = new Map<string, { readonly user: string; readonly transport: StreamableHTTPServerTransport }>()
+  /** The initialize that may still open a session for a run; an older completion is discarded instead of registered. */
+  const activeInitialize = new Map<string, number>()
+  let initializeTicket = 0
 
   const closeSession = (id: string): void => {
     const session = sessions.get(id)
     if (session === undefined) return
     sessions.delete(id)
-    void session.transport.close()
+    void session.transport.close().catch(() => undefined)
+  }
+
+  const closeRunSessions = (runId: string): void => {
+    for (const [id, session] of [...sessions]) {
+      if (session.runId === runId) closeSession(id)
+    }
   }
 
   deps.auth.onRevoke((runId) => {
-    for (const [id, session] of sessions) {
-      if (session.runId === runId) closeSession(id)
+    activeInitialize.delete(runId)
+    closeRunSessions(runId)
+    const pending = initializing.get(runId)
+    if (pending !== undefined) {
+      initializing.delete(runId)
+      void pending.transport.close().catch(() => undefined)
     }
   })
 
   /** The run a request speaks for: the token is live, the run belongs to `taskId`, and the run is still running. */
-  const authorize = async (token: string | null, taskId: string): Promise<string | null> => {
+  const authorize = async (
+    token: string | null,
+    taskId: string,
+  ): Promise<{ readonly runId: string; readonly user: string } | null> => {
     if (token === null) return null
     const grant = await Effect.runPromise(deps.auth.grantFor(token))
     if (grant === null) return null
     const run = await Effect.runPromise(deps.auth.runFor(grant.runId))
     if (run === null || run.taskId !== taskId || run.status !== "running") return null
-    return run.id
+    return { runId: run.id, user: grant.user }
   }
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -152,12 +207,13 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     }
 
     const token = bearerToken(req)
-    const runId = await authorize(token, taskId)
-    if (runId === null) {
+    const auth = await authorize(token, taskId)
+    if (auth === null) {
       res.setHeader("www-authenticate", "Bearer")
       sendJsonRpcError(res, 401, -32001, "Unauthorized")
       return
     }
+    const { runId, user } = auth
 
     const header = req.headers["mcp-session-id"]
     const sessionId = Array.isArray(header) ? header[0] : header
@@ -195,21 +251,64 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
       return
     }
 
+    // Check the ceilings against the sessions that would remain: a retried initialize always replaces its own run's
+    // session (that is how MCP_SESSION_LIMITS.perRun is kept) without being counted against the user twice.
+    const { userRuns, totalRuns } = mcpRunCounts(
+      sessions.values(),
+      [...initializing].map(([id, entry]) => ({ runId: id, user: entry.user })),
+      runId,
+      user,
+    )
+    if (userRuns >= MCP_SESSION_LIMITS.perUser || totalRuns >= MCP_SESSION_LIMITS.global) {
+      sendJsonRpcError(res, 503, -32000, "too many MCP sessions")
+      return
+    }
+
+    // A retried initialize replaces the run's previous session instead of leaving it to orphan the display.
+    const ticket = ++initializeTicket
+    activeInitialize.set(runId, ticket)
+    closeRunSessions(runId)
+    const inFlight = initializing.get(runId)
+    if (inFlight !== undefined) {
+      initializing.delete(runId)
+      void inFlight.transport.close().catch(() => undefined)
+    }
+
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { runId, transport })
+        // A duplicate initialize or a revoke superseded this attempt while it was connecting: never register it.
+        if (activeInitialize.get(runId) !== ticket) {
+          void transport.close().catch(() => undefined)
+          return
+        }
+        sessions.set(id, { runId, user, transport })
+        // The run is now counted through `sessions`; keep it out of the in-flight map so the ceilings count runs once.
+        const pending = initializing.get(runId)
+        if (pending !== undefined && pending.transport === transport) initializing.delete(runId)
       },
     })
     transport.onclose = () => {
       const id = transport.sessionId
       if (id !== undefined && sessions.get(id)?.transport === transport) sessions.delete(id)
     }
-    await buildServer({ taskId, runId }, deps).connect(transport)
-    await transport.handleRequest(req, res, body.value)
+    const registration = { user, transport }
+    initializing.set(runId, registration)
+    try {
+      await buildServer({ taskId, runId }, deps).connect(transport)
+      await transport.handleRequest(req, res, body.value)
+    } catch (error) {
+      const id = transport.sessionId
+      if (id !== undefined) closeSession(id)
+      else void transport.close().catch(() => undefined)
+      throw error
+    } finally {
+      if (initializing.get(runId) === registration) initializing.delete(runId)
+      if (activeInitialize.get(runId) === ticket) activeInitialize.delete(runId)
+    }
     // A revoke that landed while this session was being set up could not see it; close it now.
     const id = transport.sessionId
-    if (id !== undefined && (await authorize(token, taskId)) !== runId) closeSession(id)
+    if (id !== undefined && (await authorize(token, taskId))?.runId !== runId) closeSession(id)
   }
 
   return async (req, res) => {
