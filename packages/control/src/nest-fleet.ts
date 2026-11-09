@@ -202,19 +202,32 @@ export class NestFleet {
     const row = nestBoxByPendingId(this.sql, commandId)
     if (row === null || row.hostId !== hostId) return
     const kind = row.pendingKind
-    this.clearPending(row)
+    if (kind === null) {
+      // pendingId and pendingKind are written and cleared together; this row was found by pendingId, so this is an
+      // invariant violation. Clear the marker and still apply any VM report the result carried.
+      console.warn(`nest: pending command ${commandId} for ${row.boxId} has no kind`)
+      this.clearPending(row)
+      saveNestBox(this.sql, row)
+      if (vm !== undefined) this.vm(hostId, vm)
+      return
+    }
     if (!ok) console.warn(`nest: ${kind} for ${row.boxId} failed on ${hostId}: ${error ?? "no reason given"}`)
     const owed = kind === "create" || kind === "park" || kind === "destroy" ? this.noteRetry(row, kind, ok, error) : false
-    // A create refused for a lapse ran nothing, so it is owed a resend and the box is not failed yet.
-    if (kind === "create" && !owed) row.createFailed = !ok
+    const transition = applyNestBoxEvent(row, {
+      _tag: "commandResult",
+      kind,
+      ok,
+      owed,
+      vmPresent: vm !== undefined,
+    })
+    if (transition._tag === "illegal") {
+      console.warn(`nest: ${transition.reason} result for ${row.boxId} (${kind}) from ${hostId}`)
+    }
+    this.clearPending(row)
     if (kind === "destroy" && ok) {
       this.forget(row)
       return
     }
-    // A parked box with nothing in flight is held by no host. A park result that arrives after the parked report, and a
-    // refused resume (never started there), release the claim here. A result that carries a VM report is applied by
-    // `vm`, which releases the claim on a parked report and keeps it on a running one.
-    if (vm === undefined && row.state === "parked") row.hostId = null
     saveNestBox(this.sql, row)
     if (vm !== undefined) this.vm(hostId, vm)
   }
