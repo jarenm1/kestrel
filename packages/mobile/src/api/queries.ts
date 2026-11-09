@@ -94,7 +94,7 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
  * is `mergeSnapshot` from `@cloudagents/protocol`, shared with the web client so the two cannot drift apart, including
  * the rule that an id removed from the cache during the fetch is not resurrected.
  */
-async function mergeSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
+async function fetchMergedSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
   const before = queryClient.getQueryData<readonly T[]>(key) ?? [];
   const snapshot = await fetch();
   const cached = queryClient.getQueryData<readonly T[]>(key) ?? [];
@@ -175,7 +175,7 @@ export function createQueries(api: ApiClient) {
     tasks: () =>
       queryOptions({
         queryKey: scoped.tasks,
-        queryFn: () => mergeSnapshot(scoped.tasks, () => api.listTasks()),
+        queryFn: () => fetchMergedSnapshot(scoped.tasks, () => api.listTasks()),
         refetchInterval: TASK_POLL_MS,
       }),
     task: (taskId: string) =>
@@ -186,17 +186,17 @@ export function createQueries(api: ApiClient) {
     messages: (taskId: string) =>
       queryOptions({
         queryKey: scoped.messages(taskId),
-        queryFn: () => mergeSnapshot(scoped.messages(taskId), () => api.listMessages(taskId)),
+        queryFn: () => fetchMergedSnapshot(scoped.messages(taskId), () => api.listMessages(taskId)),
       }),
     runs: (taskId: string) =>
       queryOptions({
         queryKey: scoped.runs(taskId),
-        queryFn: () => mergeSnapshot(scoped.runs(taskId), () => api.listRuns(taskId)),
+        queryFn: () => fetchMergedSnapshot(scoped.runs(taskId), () => api.listRuns(taskId)),
       }),
     runItems: (runId: string) =>
       queryOptions({
         queryKey: scoped.runItems(runId),
-        queryFn: () => mergeSnapshot(scoped.runItems(runId), () => api.runItems(runId)),
+        queryFn: () => fetchMergedSnapshot(scoped.runItems(runId), () => api.runItems(runId)),
       }),
     diff: (taskId: string, running = false) =>
       queryOptions({
