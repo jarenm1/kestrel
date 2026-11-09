@@ -246,6 +246,8 @@ const internals = (manager: VmManager) =>
     recover: (record: VmRecord) => Promise<void>
     resumeCommand: (command: NestHostCommand) => Promise<void>
     destroy: (command: NestHostCommand) => Promise<void>
+    evict: (command: NestHostCommand) => Promise<void>
+    releaseVm: (vm: VmRecord) => Promise<VmRecord>
   }
 
 describe("recovery and volume safety", () => {
@@ -302,6 +304,38 @@ describe("recovery and volume safety", () => {
       volumeRef: "vol-1",
       tombstone: "evict",
     })
+  })
+
+  test("an evict interrupted before release recovers as an evict tombstone and keeps its backup", async () => {
+    const { manager } = fixture()
+    const internalsOf = internals(manager)
+    const running = recordOf({ state: "running", ownerEpoch: 1, volumeRef: "vol-1", localDirty: false })
+    internalsOf.records.set(running.boxId, running)
+    // The host dies after the evict intent is committed and before the VM is released.
+    internalsOf.releaseVm = async () => {
+      throw new Error("simulated crash")
+    }
+
+    await expect(internalsOf.evict({ _tag: "evict", boxId: running.boxId, ownerEpoch: 2 })).rejects.toThrow(
+      /simulated crash/,
+    )
+
+    const interrupted = internalsOf.records.get(running.boxId)
+    expect(interrupted).toMatchObject({ tombstone: "evict", operation: { kind: "destroy" }, volumeRef: "vol-1" })
+    if (interrupted === undefined) throw new Error("the evict intent was not committed")
+
+    await internalsOf.recover(interrupted)
+
+    expect(internalsOf.records.get(running.boxId)).toMatchObject({
+      state: "deleted",
+      tombstone: "evict",
+      volumeRef: "vol-1",
+      operation: null,
+    })
+    // A late duplicate destroy at the evicted epoch and one at the new owner's epoch both keep the backup.
+    await internalsOf.destroy(destroyCommand(1))
+    await internalsOf.destroy(destroyCommand(2))
+    expect(internalsOf.records.get(running.boxId)).toMatchObject({ volumeRef: "vol-1" })
   })
 
   test("a missing backup keeps the local volume when the lazy restore cannot open it", async () => {

@@ -1231,7 +1231,9 @@ export class VmManager {
     if (vm.ownerEpoch >= cmd.ownerEpoch) {
       throw new HostError(`evict epoch ${cmd.ownerEpoch} is not newer than this host's copy (${vm.ownerEpoch})`)
     }
-    let cur = this.begin(vm, "destroy", null)
+    // The cause is recorded before anything is released: a crash mid-evict must recover as an evict tombstone, whose
+    // backup belongs to the box's new owner, not as a destroy whose late resend may wipe it.
+    let cur = this.begin({ ...vm, tombstone: "evict" }, "destroy", null)
     cur = await this.releaseVm(cur)
     clearArtifacts(this.paths(cmd.boxId).dir)
     this.finish(cur, "deleted", { localRef: null, localDirty: false, tombstone: "evict" })
