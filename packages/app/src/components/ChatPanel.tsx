@@ -6,7 +6,7 @@ import { describeTool, threadChoiceRun, type AgentItem, type ContextUsage, type 
 import { Transcript } from "@cloudagents/ui/transcript"
 import { api } from "@/api/client"
 import { keys, queries, upsert } from "@/api/queries"
-import { isTaskWorking } from "@/lib/taskStatus"
+import { isTaskAwaitingUser, isTaskWorking } from "@/lib/taskStatus"
 import { cn } from "@/lib/utils"
 import { threadPath } from "@/routes"
 import { formatElapsed } from "@/util"
@@ -128,13 +128,13 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
   const tasks = useQuery(queries.tasks()).data ?? []
   const children = tasks.filter((task) => task.delegation?.parentTaskId === taskId)
   const runs = useQueries({
-    queries: children.map((task) => ({ ...queries.runs(task.id), refetchInterval: isTaskWorking(task) ? DELEGATION_POLL_MS : false })),
+    queries: children.map((task) => ({ ...queries.runs(task.id), refetchInterval: (isTaskWorking(task) || isTaskAwaitingUser(task)) ? DELEGATION_POLL_MS : false })),
   })
   const latestRuns = runs.map((query) => query.data?.reduce<Run | undefined>((latest, r) => (latest === undefined || r.startedAt > latest.startedAt ? r : latest), undefined))
   const items = useQueries({
     queries: children.map((task, index) => {
       const run = latestRuns[index]
-      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: isTaskWorking(task, runs[index]?.data) && run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
+      return { ...queries.runItems(task.id, run?.id ?? ""), enabled: (isTaskWorking(task, runs[index]?.data) || isTaskAwaitingUser(task)) && run?.status === "running", refetchInterval: DELEGATION_POLL_MS }
     }),
   })
   const queryClient = useQueryClient()
@@ -160,11 +160,11 @@ function DelegatedTasks({ taskId }: { taskId: string }) {
     const delegated = runs[index]?.data?.find((r) => r.id === runId)
     const latest = latestRuns[index]
     const cancelled = child.delegation?.cancelledAt !== undefined
-    const working = isTaskWorking(child, runs[index]?.data)
+    const working = isTaskWorking(child, runs[index]?.data) || isTaskAwaitingUser(child)
     // A child stopped by a usage limit is not done while the box will resume it at the provider's reset.
     const arm = working ? undefined : child.usageLimitResume
     const resuming = arm?.autoResume === true
-    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && (isTaskWorking(task) || task.usageLimitResume?.autoResume === true))
+    const nestedActive = runId !== undefined && tasks.some((task) => task.delegation?.parentRunId === runId && task.delegation?.cancelledAt === undefined && (isTaskWorking(task) || isTaskAwaitingUser(task) || task.usageLimitResume?.autoResume === true))
     const starting = runId === undefined && child.status !== "failed"
     const active = !cancelled && (working || resuming || nestedActive || starting)
     // A finished child whose polled runs still say "running" is labelled from its live status until the refetch lands.

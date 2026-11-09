@@ -22,7 +22,7 @@ import { Button } from "@cloudagents/ui/button"
 import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
-import { isTaskWorking } from "@/lib/taskStatus"
+import { isTaskAwaitingUser, isTaskWorking } from "@/lib/taskStatus"
 import { cn } from "@/lib/utils"
 import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
@@ -142,7 +142,8 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
   const { roots, children } = groupSubThreads(active)
-  const threads = roots.filter((task) => !isTaskWorking(task))
+  const awaiting = roots.filter((task) => isTaskAwaitingUser(task))
+  const threads = roots.filter((task) => !isTaskWorking(task) && !isTaskAwaitingUser(task))
   const working = roots.filter((task) => isTaskWorking(task))
 
   function archiveThread(task: Task) {
@@ -234,6 +235,21 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
             </AnimatePresence>
           </motion.nav>
           <AnimatePresence initial={false}>
+            {awaiting.length > 0 && (
+              <motion.nav
+                key="awaiting"
+                layoutScroll
+                aria-label="Threads needing input"
+                {...REVEAL}
+                className="relative mr-1 flex max-h-[30%] shrink-0 flex-col items-stretch gap-1 overflow-auto border-t border-border/60 pt-1"
+              >
+                <AnimatePresence initial={false} mode="popLayout">
+                  {awaiting.map(railTab)}
+                </AnimatePresence>
+              </motion.nav>
+            )}
+          </AnimatePresence>
+          <AnimatePresence initial={false}>
             {working.length > 0 && (
               <motion.nav
                 key="working"
@@ -280,6 +296,18 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
           </NavLink>
           {Boolean(error) && <Alert className="mt-2 mr-3 w-auto">{errorText(error)}</Alert>}
           {archive.error && <Alert className="mr-3 w-auto">{errorText(archive.error)}</Alert>}
+          {awaiting.length > 0 && (
+            <>
+              <h2 className="flex items-center gap-1.5 px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">
+                <StatusIcon status="needs_input" className="[&>svg]:size-3.5" />
+                Needs input
+                <span className="tabular-nums">{awaiting.length}</span>
+              </h2>
+              <AnimatePresence initial={false} mode="popLayout">
+                {awaiting.map(threadTab)}
+              </AnimatePresence>
+            </>
+          )}
           {threads.length > 0 && (
             <h2 className="px-2.5 pt-4 pb-1 text-xs font-medium text-muted-foreground/80">Threads</h2>
           )}
