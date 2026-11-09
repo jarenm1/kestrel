@@ -226,6 +226,18 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
       return
     }
 
+    // Check the ceilings against the sessions that would remain: a retried initialize always replaces its own run's
+    // session (that is how MCP_SESSION_LIMITS.perRun is kept) without being counted against the user twice.
+    const otherSessions = [...sessions.values()].filter((session) => session.runId !== runId)
+    const otherInitializing = [...initializing].filter(([id]) => id !== runId).map(([, entry]) => entry)
+    const userSessions = otherSessions.filter((session) => session.user === user).length +
+      otherInitializing.filter((entry) => entry.user === user).length
+    const total = otherSessions.length + otherInitializing.length
+    if (userSessions >= MCP_SESSION_LIMITS.perUser || total >= MCP_SESSION_LIMITS.global) {
+      sendJsonRpcError(res, 503, -32000, "too many MCP sessions")
+      return
+    }
+
     // A retried initialize replaces the run's previous session instead of leaving it to orphan the display.
     const ticket = ++initializeTicket
     activeInitialize.set(runId, ticket)
@@ -234,18 +246,6 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
     if (inFlight !== undefined) {
       initializing.delete(runId)
       void inFlight.transport.close().catch(() => undefined)
-    }
-    const runSessions = [...sessions.values()].filter((session) => session.runId === runId).length
-    const userSessions = [...sessions.values()].filter((session) => session.user === user).length +
-      [...initializing.values()].filter((entry) => entry.user === user).length
-    const total = sessions.size + initializing.size
-    if (
-      runSessions >= MCP_SESSION_LIMITS.perRun ||
-      userSessions >= MCP_SESSION_LIMITS.perUser ||
-      total >= MCP_SESSION_LIMITS.global
-    ) {
-      sendJsonRpcError(res, 503, -32000, "too many MCP sessions")
-      return
     }
 
     const transport = new StreamableHTTPServerTransport({
