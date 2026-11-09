@@ -6,6 +6,7 @@ import { join } from "node:path"
 import WebSocket, { WebSocketServer } from "ws"
 import { callbackPath, loginUrl, parseCallback, safeLocalPath, type CallbackPath } from "./auth"
 import { acceptCallback, type HandoffPorts } from "./handoff"
+import { createSerialQueue } from "./queue"
 import { startDesktopServer, type DesktopServer } from "./server"
 
 const cleanups: Array<() => Promise<void> | void> = []
@@ -366,5 +367,84 @@ describe("desktop logout reconciliation", () => {
     // The file still holds a session, so the proxy must not claim the user is signed out.
     await fetch(`${desktop.origin}/api/me`, { headers: { cookie } })
     expect(seen.at(-1)?.cookie).toBe("session=session-id")
+  })
+
+  test("a sign-in during a failed logout clear is not overwritten by the old session", async () => {
+    const refused = Promise.withResolvers<void>()
+    const { desktop, seen } = await start(undefined, { clearSession: () => refused.promise })
+    const token = desktop.bootstrapPath.split("/").pop() ?? ""
+    const cookie = `kestrel_desktop=${token}`
+
+    const logout = await fetch(`${desktop.origin}/auth/logout`, { method: "POST", headers: { cookie } })
+    expect(logout.status).toBe(204)
+
+    // A sign-in callback lands while the clear is still pending, then the clear fails.
+    desktop.setSession("session-b")
+    refused.reject(new Error("disk is read-only"))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    await fetch(`${desktop.origin}/api/me`, { headers: { cookie } })
+    expect(seen.at(-1)?.cookie).toBe("session=session-b")
+  })
+})
+
+describe("desktop auth queue", () => {
+  test("tasks run one at a time in submission order", async () => {
+    const queue = createSerialQueue(() => undefined)
+    const order: string[] = []
+    const gate = Promise.withResolvers<void>()
+    const first = queue(async () => {
+      order.push("first:start")
+      await gate.promise
+      order.push("first:end")
+    })
+    const second = queue(async () => {
+      order.push("second")
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(order).toEqual(["first:start"])
+
+    gate.resolve()
+    await Promise.all([first, second])
+    expect(order).toEqual(["first:start", "first:end", "second"])
+  })
+
+  test("a failing task is reported and does not block the next one", async () => {
+    const errors: unknown[] = []
+    const queue = createSerialQueue((error) => {
+      errors.push(error)
+    })
+    const order: string[] = []
+    const first = queue(async () => {
+      order.push("first")
+      throw new Error("boom")
+    })
+    const second = queue(async () => {
+      order.push("second")
+    })
+    await Promise.all([first, second])
+    expect(order).toEqual(["first", "second"])
+    expect(errors).toHaveLength(1)
+  })
+
+  test("a sign-in callback queued behind a logout does not overlap it", async () => {
+    const queue = createSerialQueue(() => undefined)
+    const events: string[] = []
+    const logoutDone = Promise.withResolvers<void>()
+    const logout = queue(async () => {
+      events.push("logout:start")
+      await logoutDone.promise
+      events.push("logout:end")
+    })
+    const callback = queue(async () => {
+      events.push("callback")
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // The callback waits: the logout's clear and the callback's store cannot interleave.
+    expect(events).toEqual(["logout:start"])
+
+    logoutDone.resolve()
+    await Promise.all([logout, callback])
+    expect(events).toEqual(["logout:start", "logout:end", "callback"])
   })
 })

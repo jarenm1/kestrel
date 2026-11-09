@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto"
 import { join, resolve } from "node:path"
 import { CALLBACK_SCHEME, callbackPath, loginUrl, safeLocalPath, type CallbackPath } from "./auth"
 import { acceptCallback } from "./handoff"
+import { createSerialQueue } from "./queue"
 import { startDesktopServer, type DesktopServer } from "./server"
 import { SessionStore } from "./session"
 
@@ -87,21 +88,15 @@ const createWindow = async (): Promise<void> => {
   await window.loadURL(`${server.origin}${server.bootstrapPath}`)
 }
 
-let callbackQueue: Promise<void> = Promise.resolve()
-
 /**
- * Sign-in callbacks are serialized: the nonce is single-use, and two deliveries of the same URL must not both store
- * a session before either consumes the nonce.
+ * Sign-in callbacks and sign-out share one queue: the nonce is single-use, and both write the session file and the
+ * proxy's in-memory copy, so overlapping them could roll one back with the other.
  */
-const handleCallback = (value: string): Promise<void> => {
-  callbackQueue = callbackQueue.then(() => processCallback(value)).catch((error: unknown) => {
-    console.error(
-      "desktop sign-in callback failed:",
-      error instanceof Error ? error.message : String(error),
-    )
-  })
-  return callbackQueue
-}
+const enqueue = createSerialQueue((error: unknown) => {
+  console.error("desktop auth task failed:", error instanceof Error ? error.message : String(error))
+})
+
+const handleCallback = (value: string): Promise<void> => enqueue(() => processCallback(value))
 
 const processCallback = async (value: string): Promise<void> => {
   if (server === null || store === null) {
@@ -126,7 +121,7 @@ const processCallback = async (value: string): Promise<void> => {
   await window?.loadURL(`${desktop.origin}${path}`)
 }
 
-const signOut = async (): Promise<void> => {
+const processSignOut = async (): Promise<void> => {
   const id = await store?.get()
   if (id !== null && id !== undefined) {
     await fetch(`${CONTROL_URL}/auth/logout`, { method: "POST", headers: { cookie: `session=${id}` } }).catch(
@@ -137,6 +132,8 @@ const signOut = async (): Promise<void> => {
   server?.setSession(null)
   window?.reload()
 }
+
+const signOut = (): Promise<void> => enqueue(processSignOut)
 
 const checkForUpdates = async (manual: boolean): Promise<void> => {
   if (!app.isPackaged) {

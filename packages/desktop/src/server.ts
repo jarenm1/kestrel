@@ -114,7 +114,9 @@ export const startDesktopServer = async (options: DesktopServerOptions): Promise
       // Keep the in-memory copy and the file in step: if the file cannot be cleared it still holds a session, so
       // memory must not claim the user is signed out (and a restart must not silently disagree with this run).
       void options.clearSession().catch((error: unknown) => {
-        session = previous
+        // A sign-in that completed while the clear was pending owns the session now; a failed older logout must not
+        // overwrite it. Only a still-signed-out proxy may roll back to the session the file still holds.
+        if (session === null) session = previous
         console.error(
           "desktop session could not be cleared:",
           error instanceof Error ? error.message : String(error),
