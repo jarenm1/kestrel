@@ -122,6 +122,22 @@ const fetchProviderCredentials = async (config: TurnProviderConfig, now: number)
 
 const credentialsCache = new Map<string, BoxTurnCredentials>()
 const pendingCalls = new Map<string, Promise<BoxTurnCredentials>>()
+/**
+ * A generation per box identity. Forgetting a box bumps its generation, so credentials minted under an older
+ * generation are neither served nor stored once an in-flight provider call finishes.
+ */
+const cacheGenerations = new Map<string, number>()
+
+/**
+ * Forgets a box's cached credentials. Called when its secret rotates or the box goes away: the next request asks the
+ * provider again instead of handing out credentials issued for the old identity.
+ */
+export const invalidateTurnCredentials = (identity: string): void => {
+  cacheGenerations.set(identity, (cacheGenerations.get(identity) ?? 0) + 1)
+  const prefix = `${identity}\u0000`
+  for (const key of [...credentialsCache.keys()]) if (key.startsWith(prefix)) credentialsCache.delete(key)
+  for (const key of [...pendingCalls.keys()]) if (key.startsWith(prefix)) pendingCalls.delete(key)
+}
 
 /** Stores `credentials`, dropping expired entries and then the oldest, so the cache stays bounded. */
 const remember = (key: string, credentials: BoxTurnCredentials, now: number): void => {
@@ -144,14 +160,16 @@ const credentialsFor = (
   now: number,
 ): Promise<BoxTurnCredentials> => {
   // The key id is in the key, so rotating the provider key does not serve credentials minted under the old one.
-  const key = `${identity}\u0000${config.keyId}`
+  // The generation makes an invalidation (secret rotation or deletion) miss the cache and an in-flight call.
+  const key = `${identity}\u0000${cacheGenerations.get(identity) ?? 0}\u0000${config.keyId}`
   const cached = credentialsCache.get(key)
   if (cached !== undefined && cached.expiresAt - now > TURN_CREDENTIAL_REFRESH_MS) return Promise.resolve(cached)
   const pending = pendingCalls.get(key)
   if (pending !== undefined) return pending
   const call = fetchProviderCredentials(config, now)
     .then((credentials) => {
-      remember(key, credentials, now)
+      // An invalidation while the provider answered must not re-populate the entry it removed.
+      if (key === `${identity}\u0000${cacheGenerations.get(identity) ?? 0}\u0000${config.keyId}`) remember(key, credentials, now)
       return credentials
     })
     .finally(() => pendingCalls.delete(key))
