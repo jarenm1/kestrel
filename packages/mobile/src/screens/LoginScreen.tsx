@@ -23,7 +23,7 @@ const CALLBACK_PREFIX = "kestrel://auth-callback";
 const ORIGIN_WHITELIST = ["http://*", "https://*", "kestrel://*"];
 
 export function LoginScreen() {
-  const { serverUrl, setServerUrl, setSessionCookie, loading, error } = useAuth();
+  const { serverUrl, setServerUrl, setSessionCookie, loading, error, expired } = useAuth();
   const [url, setUrl] = useState(serverUrl ?? "https://app.kestrel-agent.com");
   const [showWebView, setShowWebView] = useState(false);
   const [showTokenInput, setShowTokenInput] = useState(false);
@@ -95,7 +95,7 @@ export function LoginScreen() {
               />
             </>
           ) : null}
-          {error ? <Alert>{error}</Alert> : null}
+          {error ? <Alert>{error}</Alert> : expired ? <Alert>Your session expired. Sign in again.</Alert> : null}
 
           <Button
             size="lg"

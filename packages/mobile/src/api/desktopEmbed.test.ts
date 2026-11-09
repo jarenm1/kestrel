@@ -34,6 +34,8 @@ test("desktopSocketUrl on the relayed box carries a desktop token for that task,
     expect(new URL(await client.desktopSocketUrl("t1")).searchParams.get("access_token")).toBe("token-1");
     expect(new URL(await client.desktopSocketUrl("t1", { fresh: true })).searchParams.get("access_token")).toBe("token-2");
     expect(new URL(await client.desktopSocketUrl("t2")).searchParams.get("access_token")).toBe("token-3");
+    // Two viewers coexist: minting for t2 did not evict t1's fresh token.
+    expect(new URL(await client.desktopSocketUrl("t1")).searchParams.get("access_token")).toBe("token-2");
     expect(paths).toEqual(["/api/tasks/t1/desktop/token", "/api/tasks/t1/desktop/token", "/api/tasks/t2/desktop/token"]);
   } finally {
     await server.stop(true);
