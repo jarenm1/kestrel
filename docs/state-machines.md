@@ -216,14 +216,15 @@ the box mark.
 **Machines:** snapshot merge (pure helper `mergeSnapshot`), task event cache, stream reconnect, desktop `RtcState`
 (`idle | connecting | live | retrying | unsupported`), viewer intent (`wanted | paused`), token cache.
 
-**Contract:** every cache write that can lose a race carries a monotonic guard (`Task.updatedAt` for a task; server order
-for items). Reconnect re-snapshots every collection the stream can have missed, including `runItems`. One owner writes
-`keys.desktop(taskId)`; the WebSocket status path is the only writer of `DesktopStatus`, and the RTC state is derived
-from its own events. There is one retry loop per viewer, not a 2 s outer loop wrapping a 1→30 s backoff.
+**Contract:** every cache write that can lose a race carries a monotonic guard: `Task.updatedAt` is wall-clock (equal
+timestamps land, and a delete leaves no tombstone), while item lists follow server order. Reconnect re-snapshots every
+collection the stream can have missed, including `runItems`. One owner writes `keys.desktop(taskId)`: status frames
+while a viewer's socket is delivering them, `desktop.updated` and REST snapshots otherwise, and a mutation response
+only when nothing wrote after its `onMutate`. The RTC state is derived from its own events. There is one retry loop per
+viewer: the stream layer reconnects a closed signalling socket at the negotiation layer's deadline, not a flat 2 s
+loop resetting a 1→30 s backoff.
 
-**Remaining gaps:** `task.updated` is written without an `updatedAt` guard; reconnect does not recover `runItems`; three
-writers share the desktop cache; the two retry layers reset each other; mobile has no 401 listener and reimplements the
-merge helpers.
+**Remaining gaps:** mobile has no 401 listener and reimplements the merge helpers.
 
 ## Machine register
 

@@ -225,6 +225,8 @@ export class DesktopRtc {
   private pointer: RTCDataChannel | null = null
   private state: RtcState = "idle"
   private attempts = 0
+  /** When the scheduled negotiation retry may run; survives a lost signalling socket so a reconnect cannot reset it. */
+  private retryAt: number | null = null
   private closed = false
   private offered = false
   private remoteSet = false
@@ -278,7 +280,18 @@ export class DesktopRtc {
           this.configStale = true
         })
         this.refreshing = false
-        this.negotiate()
+        // A config that arrives after a lost socket waits for the negotiation deadline; an early reconnect must not
+        // turn the 1→30 s backoff into a fresh offer.
+        const wait = this.retryAt === null ? 0 : Math.max(0, this.retryAt - Date.now())
+        if (wait === 0) {
+          this.retryAt = null
+          this.negotiate()
+        } else {
+          this.arm("retry", wait, () => {
+            this.retryAt = null
+            this.negotiate()
+          })
+        }
         return
       }
       case "rtc.answer":
@@ -311,7 +324,13 @@ export class DesktopRtc {
     this.closed = true
     this.clear("retry")
     this.clear("config")
+    this.retryAt = null
     this.setState("idle")
+  }
+
+  /** Milliseconds until a scheduled negotiation retry, or `fallback` when none is pending. */
+  reconnectDelay(fallback: number): number {
+    return this.retryAt === null ? fallback : Math.max(0, this.retryAt - Date.now())
   }
 
   /**
@@ -481,6 +500,7 @@ export class DesktopRtc {
         this.clear("connect")
         this.clear("grace")
         this.attempts = 0
+        this.retryAt = null
         this.setState("live")
         this.arm("stats", STATS_EVERY_MS, () => void this.sample(), true)
         break
@@ -561,7 +581,9 @@ export class DesktopRtc {
 
   private scheduleRetry(refresh: boolean): void {
     this.setState("retrying")
-    this.arm("retry", retryDelay(this.attempts), () => this.retry(refresh))
+    const delay = retryDelay(this.attempts)
+    this.retryAt = Date.now() + delay
+    this.arm("retry", delay, () => this.retry(refresh))
     this.attempts++
     this.emitDiagnostics()
   }
@@ -569,6 +591,7 @@ export class DesktopRtc {
   /** The next attempt, after fetching fresh credentials when this one failed or the config aged out. */
   private retry(refresh: boolean): void {
     if (this.closed) return
+    this.retryAt = null
     // The backoff already published the previous failure; it must not describe the attempt now starting.
     this.lastFailure = null
     if (!refresh && !this.configStale) {

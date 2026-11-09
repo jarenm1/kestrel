@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import type { DesktopStatus } from "@cloudagents/protocol"
-import { applyDesktopStatus } from "./status"
+import { applyDesktopStatus, DesktopStreamAuthority, isDesktopStreamActive } from "./status"
 
 const status = (state: DesktopStatus["state"]): DesktopStatus => ({
   taskId: "task-1",
@@ -44,4 +44,16 @@ test("while a viewer streams, a backlogged desktop.updated event does not overwr
   // Without a mounted stream the event is the only writer.
   const fallback = applyDesktopStatus(frame, status("stopped"), "event")
   expect(fallback.status.state).toBe("stopped")
+})
+
+test("stream authority is claimed by a frame and released when the socket closes", () => {
+  const authority = new DesktopStreamAuthority()
+  authority.frame("authority-a")
+  expect(isDesktopStreamActive("authority-a")).toBe(true)
+  // Moving to another task releases the previous one: only the open socket's task is authoritative.
+  authority.frame("authority-b")
+  expect(isDesktopStreamActive("authority-a")).toBe(false)
+  expect(isDesktopStreamActive("authority-b")).toBe(true)
+  authority.close()
+  expect(isDesktopStreamActive("authority-b")).toBe(false)
 })

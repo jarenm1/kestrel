@@ -1,5 +1,5 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query"
-import type { Task } from "@cloudagents/protocol"
+import { mergeSnapshot, type Task } from "@cloudagents/protocol"
 
 /**
  * Fetches a list snapshot, keeping entries live events wrote while it was in flight: those are newer than the snapshot.
@@ -14,12 +14,7 @@ export async function fetchSnapshot<T extends { readonly id: string }>(
   // Event writes replace an entry's object and structural sharing keeps untouched ones, so identity tells what changed.
   const before = new Set(client.getQueryData<readonly T[]>(key) ?? [])
   const snapshot = await fetch()
-  const byId = new Map<string, T>()
-  for (const item of snapshot) byId.set(item.id, item)
-  for (const item of client.getQueryData<readonly T[]>(key) ?? []) {
-    if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item)
-  }
-  return [...byId.values()]
+  return mergeSnapshot(snapshot, client.getQueryData<readonly T[]>(key) ?? [], before)
 }
 
 /**

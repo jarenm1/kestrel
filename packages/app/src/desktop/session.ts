@@ -2,6 +2,7 @@ import type { DesktopInput, DesktopStatus } from "@cloudagents/protocol"
 import { type DesktopConnection, type DesktopSource, openDesktopStream } from "@/api/events"
 import type { RtcDiagnostics } from "@/desktop/diagnostics"
 import { DesktopRtc, type RtcStats, type RtcState } from "@/desktop/webrtc"
+import { DesktopStreamAuthority } from "@/desktop/status"
 
 /** How the WebSocket ended. `opened` false means the handshake was refused or failed (auth, or no box). */
 export interface DesktopClose {
@@ -45,6 +46,8 @@ export function startDesktopSession(
   let stream: DesktopConnection | undefined
   let retry: number | undefined
   let closed = false
+  // Authority follows the socket, not the viewer's intent: it is claimed by the first frame and released on close.
+  const authority = new DesktopStreamAuthority()
   const rtc = new DesktopRtc(video, {
     send: (message) => stream?.send(message),
     onState: listeners.onRtc,
@@ -56,13 +59,17 @@ export function startDesktopSession(
   const connect = () => {
     if (closed) return
     stream = openDesktopStream(source, {
-      onStatus: listeners.onStatus,
+      onStatus: (status) => {
+        authority.frame(status.taskId)
+        listeners.onStatus(status)
+      },
       onSignal: (message) => rtc.handle(message),
       onClose: (close) => {
         if (closed) return
+        authority.close()
         rtc.disconnect()
         listeners.onClose(close)
-        retry = window.setTimeout(connect, RECONNECT_MS)
+        retry = window.setTimeout(connect, rtc.reconnectDelay(RECONNECT_MS))
       },
     })
   }
@@ -73,6 +80,7 @@ export function startDesktopSession(
     close: () => {
       closed = true
       window.clearTimeout(retry)
+      authority.close()
       rtc.close()
       stream?.close()
     },

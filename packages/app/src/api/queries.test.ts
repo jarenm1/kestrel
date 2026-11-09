@@ -1,6 +1,7 @@
 import { expect, mock, test } from "bun:test"
 import { QueryClient } from "@tanstack/react-query"
-import type { Task } from "@cloudagents/protocol"
+import type { DesktopStatus, Task } from "@cloudagents/protocol"
+import { applyDesktopStatus, setDesktopStreamActive } from "@/desktop/status"
 
 // The app's config reads the page origin and Vite's env, neither of which exists under bun.
 mock.module("@/config", () => ({ SERVER_URL: "https://control.test", WS_URL: "wss://control.test" }))
@@ -9,7 +10,7 @@ Object.assign(globalThis, {
   location: { hostname: "app.test", protocol: "https:", port: "", origin: "https://app.test" },
 })
 // Dynamic on purpose: a static import would load `queries` (and its `@/config` import) before the mock registers.
-const { invalidateRunItems, keys, storeTask } = await import("./queries")
+const { applyDesktopSnapshot, invalidateRunItems, keys, storeTask } = await import("./queries")
 
 
 const task = (updatedAt: string, status: Task["status"] = "running"): Task => ({
@@ -63,4 +64,36 @@ test("run item invalidation is scoped to the runs a reconnect covers", () => {
 
   expect(client.getQueryState(keys.runItems("run-1"))?.isInvalidated).toBe(true)
   expect(client.getQueryState(keys.runItems("run-2"))?.isInvalidated).toBe(false)
+})
+
+const desktop = (state: DesktopStatus["state"]): DesktopStatus => ({
+  taskId: "desktop-task",
+  state,
+  display: state === "stopped" ? null : ":101",
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  quality: "1080p30",
+  error: null,
+})
+
+test("a desktop snapshot reads the cache after its fetch resolves", async () => {
+  const client = new QueryClient()
+  const key = keys.desktop("desktop-task")
+  const initial = applyDesktopStatus(undefined, desktop("stopped"), "event")
+  client.setQueryData(key, initial)
+  setDesktopStreamActive("desktop-task", true)
+  try {
+    const { promise, resolve } = Promise.withResolvers<DesktopStatus>()
+    const applying = applyDesktopSnapshot(client, "desktop-task", () => promise)
+    // A status frame lands while the REST read is in flight: reading the cache before the await would overwrite it.
+    const frame = applyDesktopStatus(initial, desktop("running"), "stream")
+    client.setQueryData(key, frame)
+    resolve(desktop("failed"))
+    const applied = await applying
+    expect(applied.source).toBe("stream")
+    expect(applied.status.state).toBe("running")
+  } finally {
+    setDesktopStreamActive("desktop-task", false)
+  }
 })

@@ -34,6 +34,7 @@ interface FakeClock {
     clearInterval: (id: number) => void
   }
   advance(ms: number): void
+  now(): number
 }
 
 /** Replaces `window`'s timers with a clock that only moves when `advance` is called. */
@@ -68,6 +69,9 @@ function fakeWindow(): FakeClock {
         next.fn()
       }
       now = end
+    },
+    now() {
+      return now
     },
   }
 }
@@ -190,10 +194,13 @@ class FakeStream {
 const g = globalThis as unknown as Record<string, unknown>
 let clock: FakeClock
 let video: HTMLVideoElement
+let realDateNow: typeof Date.now
 
 beforeEach(() => {
   FakePeer.all = []
   clock = fakeWindow()
+  realDateNow = Date.now
+  Date.now = () => clock.now()
   g.window = clock.api
   g.RTCPeerConnection = FakePeer
   g.MediaStream = FakeStream
@@ -201,6 +208,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  Date.now = realDateNow
   delete g.window
   delete g.RTCPeerConnection
   delete g.MediaStream
@@ -352,6 +360,31 @@ describe("refusal and retry", () => {
     expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(0)
     clock.advance(1)
     expect(h.sent.filter((m) => m._tag === "rtc.config.request").length).toBe(1)
+  })
+
+  test("a config after a lost socket waits for the negotiation deadline", async () => {
+    const h = harness()
+    h.rtc.handle(turnConfig)
+    await settle()
+    h.rtc.handle(unavailable(true))
+    clock.advance(retryDelay(0))
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+
+    h.rtc.handle(unavailable(true))
+    h.rtc.disconnect()
+    // The socket reconnect may be early (the session uses this same deadline for its timer): the config must wait.
+    expect(h.rtc.reconnectDelay(2000)).toBe(retryDelay(1))
+    h.rtc.handle(turnConfig)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+
+    clock.advance(retryDelay(1) - 1)
+    await settle()
+    expect(FakePeer.all.length).toBe(2)
+    clock.advance(1)
+    await settle()
+    expect(FakePeer.all.length).toBe(3)
   })
 
   test("a non-retryable refusal is unsupported and does not retry", async () => {
@@ -864,9 +897,13 @@ describe("diagnostics", () => {
     clock.advance(CONNECT_TIMEOUT_MS)
     await settle()
     FakePeer.all.at(-1)!.set("failed")
-    // The earlier refresh finally arrives while a later failed attempt is backing off.
+    // The earlier refresh finally arrives while a later failed attempt is backing off: it waits for that deadline.
     h.rtc.handle(turnConfig)
     await settle()
+    expect(FakePeer.all.length).toBe(2)
+    clock.advance(retryDelay(1))
+    await settle()
+    expect(FakePeer.all.length).toBe(3)
     FakePeer.all.at(-1)!.set("failed")
     const requested = h.sent.filter((message) => message._tag === "rtc.config.request").length
     clock.advance(retryDelay(2) - 1)

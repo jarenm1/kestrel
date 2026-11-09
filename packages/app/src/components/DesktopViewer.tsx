@@ -6,7 +6,7 @@ import { DEFAULT_DESKTOP_QUALITY, DESKTOP_QUALITIES, DesktopQuality, type Deskto
 import { api } from "@/api/client"
 import type { DesktopSource } from "@/api/events"
 import { keys, queries } from "@/api/queries"
-import { applyDesktopStatus, setDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
+import { applyDesktopStatus, type DesktopStatusValue } from "@/desktop/status"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import {
@@ -120,12 +120,6 @@ export function DesktopViewer({ taskId }: { taskId: string }) {
   // relay request, and the box refuses a stream for a stopped desktop, so connecting anyway would retry every
   // reconnect interval. The thread's event stream moves `status` to "starting" when the desktop comes up.
   const source = useMemo<DesktopSource | null>(() => (wanted && active ? { taskId } : null), [taskId, wanted, active])
-
-  // While this viewer streams, its status frames are the only lifecycle writer: `desktop.updated` may be a backlog.
-  useEffect(() => {
-    setDesktopStreamActive(taskId, source !== null)
-    return () => setDesktopStreamActive(taskId, false)
-  }, [taskId, source])
 
   // The state word shown while there is no stream; "loading" and "starting" show the boot bar.
   const idle = running ? (wanted ? null : "paused") : (status?.state ?? "loading")
