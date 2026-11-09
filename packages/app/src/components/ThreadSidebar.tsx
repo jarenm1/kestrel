@@ -22,6 +22,7 @@ import { Button } from "@cloudagents/ui/button"
 import { useSidebarAnimation } from "@/hooks/useSidebarAnimation"
 import { useThreadArchive } from "@/hooks/useThreadArchive"
 import { groupSubThreads } from "@/lib/subThreads"
+import { isTaskWorking } from "@/lib/taskStatus"
 import { cn } from "@/lib/utils"
 import { APP_HOME, threadPath } from "@/routes"
 import { errorText, formatAgo, repoShortName } from "@/util"
@@ -116,10 +117,10 @@ interface Props {
 }
 
 /**
- * The user's threads (tasks) as vertical tabs, most recent first. Working threads need nothing from the user, so
- * they leave the list for a foldable dock at the bottom, above the account menu, and return to the list when the run
- * ends. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and expands it. On wide
- * screens the strip slides between the two widths while the list and the rail crossfade.
+ * The user's threads (tasks) as vertical tabs, most recent first. Working threads (running, or waiting on an
+ * unanswered question) leave the list for a foldable dock at the bottom, above the account menu, and return to the
+ * list when they finish. Collapsed, it is an icon rail; the Kestrel mark doubles as the toggle that collapses and
+ * expands it. On wide screens the strip slides between the two widths while the list and the rail crossfade.
  */
 export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }: Props) {
   const now = useNow(CLOCK_TICK_MS)
@@ -141,8 +142,8 @@ export function ThreadSidebar({ tasks, error, collapsed, onCollapse, onExpand }:
   const active = byRecent.filter((task) => task.archivedAt === undefined)
   const archivedCount = byRecent.length - active.length
   const { roots, children } = groupSubThreads(active)
-  const threads = roots.filter((task) => task.status !== "running")
-  const working = roots.filter((task) => task.status === "running")
+  const threads = roots.filter((task) => !isTaskWorking(task))
+  const working = roots.filter((task) => isTaskWorking(task))
 
   function archiveThread(task: Task) {
     archive.mutate(task.id, {
@@ -467,7 +468,7 @@ function ThreadTab({ ref, task, now, isOpen, archiving, onArchive, hasChildren }
             {formatAgo(task.updatedAt, now)}
           </span>
         </span>
-        <FadingTitle text={task.title} working={task.status === "running"} />
+        <FadingTitle text={task.title} working={isTaskWorking(task)} />
         <span className={cn("flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground", hasChildren && "pl-6")}>
           {checkout ? (
             <>
