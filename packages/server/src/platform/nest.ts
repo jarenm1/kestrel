@@ -1,6 +1,6 @@
 import { readdir, readlink } from "node:fs/promises"
 import { Effect, Layer } from "effect"
-import type { BoxActivity, GpuState } from "@cloudagents/protocol"
+import type { BoxActivity } from "@cloudagents/protocol"
 import { VERSION } from "../config"
 import { StateStore } from "../core/state"
 import { EventHub } from "../core/events"
@@ -8,6 +8,7 @@ import { AgentHarness } from "../core/harness"
 import { DesktopManager } from "../desktop"
 import { startGuestLink, type GuestLink } from "./guest-link"
 import { GpuWishes, withdrawWishesOnRunEnd } from "./gpu-wish"
+import { GpuReconciler } from "./gpu-state"
 import { ActivityTracker } from "./tracker"
 import { BoxPlatform, PlatformError, type PlatformHardware, type PlatformHooks } from "./service"
 import { readStoredSecret } from "./secret"
@@ -83,11 +84,17 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
         }
       }
 
-      const gpuChanged = (state: GpuState) =>
-        Effect.gen(function* () {
-          if (state === "attached") yield* desktop.attachHardwareRender
-          else if (state === "none" || state === "detaching") yield* desktop.releaseHardwareRender
-        })
+      // Level-triggered truth: store every host report, reconcile renderers from it, and replay it on reconnect.
+      const gpu = new GpuReconciler({
+        attachHardware: desktop.attachHardwareRender,
+        releaseHardware: desktop.releaseHardwareRender,
+        warn: (message) => Effect.runSync(Effect.logWarning(message)),
+        onSnapshot: (snapshot) => {
+          if (snapshot.attaching) {
+            Effect.runSync(Effect.logInfo(`guest GPU attaching since ${snapshot.attachingSince}; desktops wait on software`))
+          }
+        },
+      })
 
       const releaseGpu = Effect.gen(function* () {
         yield* desktop.releaseHardwareRender
@@ -122,6 +129,7 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
         gpuOnDemand: {
           request,
           release: drop,
+          state: Effect.sync(() => gpu.snapshot()),
         },
         run: (hooks: PlatformHooks) =>
           Effect.async<void>(() => {
@@ -137,14 +145,16 @@ export const NestPlatformLive = (socketPath: string, dataDir: string) =>
                   await Effect.runPromise(hooks.resumed)
                 },
                 releaseGpu: () => Effect.runPromise(releaseGpu),
-                gpuState: (state) => Effect.runPromise(gpuChanged(state)),
+                gpuState: (state) => Effect.runPromise(gpu.observe(state)),
               },
+              onConnect: () => Effect.runFork(gpu.replay()),
             })
             link = current
             if (enrolled) current.markEnrolled()
             if (wishes.wanted()) current.setWanted(true)
             return Effect.sync(() => {
               current.close()
+              gpu.close()
               link = null
             })
           }),
