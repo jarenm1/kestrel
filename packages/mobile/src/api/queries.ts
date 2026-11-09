@@ -102,6 +102,22 @@ async function fetchMergedSnapshot<T extends Keyed>(key: QueryKey, fetch: () => 
 }
 
 /**
+ * `fetchMergedSnapshot` for an endpoint that returns the complete list (the thread list). The snapshot is then
+ * authoritative for every entry cached before the fetch: one it lacks was deleted elsewhere, and the phone has no live
+ * event for that, so it is dropped instead of kept forever. An entry a live event wrote during the fetch is newer than
+ * the snapshot and stays.
+ */
+async function fetchCompleteSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
+  const before = new Set(queryClient.getQueryData<readonly T[]>(key) ?? []);
+  const snapshot = await fetch();
+  const listed = new Set(snapshot.map((item) => item.id));
+  const cached = (queryClient.getQueryData<readonly T[]>(key) ?? []).filter(
+    (item) => listed.has(item.id) || !before.has(item),
+  );
+  return mergeLiveSnapshot(snapshot, cached, before);
+}
+
+/**
  * Fetches one task, keeping the task live events wrote while the fetch was in flight: it is newer than the snapshot.
  * A task always has a cache entry from an earlier visit, so identity, not presence, is what says an event landed
  * during the fetch: a thread opened while its run reports context would otherwise show the snapshot read before it.
@@ -175,7 +191,7 @@ export function createQueries(api: ApiClient) {
     tasks: () =>
       queryOptions({
         queryKey: scoped.tasks,
-        queryFn: () => fetchMergedSnapshot(scoped.tasks, () => api.listTasks()),
+        queryFn: () => fetchCompleteSnapshot(scoped.tasks, () => api.listTasks()),
         refetchInterval: TASK_POLL_MS,
       }),
     task: (taskId: string) =>

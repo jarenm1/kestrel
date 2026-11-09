@@ -105,6 +105,28 @@ test("a stale snapshot cannot resurrect an entry deleted while it was in flight"
   expect((await fetching).map(({ id }) => id)).toEqual(["kept", "new"]);
 });
 
+test("the thread list poll drops a thread deleted elsewhere but keeps one an event wrote during the fetch", async () => {
+  const response = Promise.withResolvers<Task[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listTasks: () => {
+      started.resolve();
+      return response.promise;
+    },
+  };
+  const query = createQueries(api).tasks();
+  const named = (id: string): Task => ({ ...task(id), id });
+  const kept = named("kept");
+  queryClient.setQueryData(query.queryKey, [named("deleted-elsewhere"), kept]);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  // A thread created while the poll was travelling: the server read its list before the thread existed.
+  queryClient.setQueryData(query.queryKey, [named("deleted-elsewhere"), kept, named("created")]);
+  response.resolve([kept]);
+  expect((await fetching).map(({ id }) => id)).toEqual(["kept", "created"]);
+});
+
 test("box clients isolate caches even for identical task and run IDs", () => {
   const first = createApiClient("https://control.example", "session", { id: "first", url: "https://first.example" });
   const second = createApiClient("https://control.example", "session", { id: "second", url: "https://second.example" });
