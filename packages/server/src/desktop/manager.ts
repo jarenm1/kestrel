@@ -855,8 +855,13 @@ export const DesktopManagerLive: Layer.Layer<DesktopManager> = Layer.effect(
         failSession(s, why)
         return
       }
-      // Nobody is watching: the next subscribe starts the encoder again.
-      if (s.sinks.size === 0) return
+      // Nobody is watching: the next subscribe starts the encoder again. `detachEncoder` cancelled the linger, so do
+      // what it would have: stop the audio capture and tell watchers the encoder is gone (`streaming: false`).
+      if (s.sinks.size === 0) {
+        stopListeningToAudio(s)
+        publish(s)
+        return
+      }
       const restart = encoderRestart(s.restartBudget)
       s.restartBudget = restart.budget
       if (!restart.allowed) {

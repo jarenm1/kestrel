@@ -124,6 +124,55 @@ test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a watcher sees str
   await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
 }, 45_000)
 
+test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a watcher sees streaming turn off when a viewerless encoder exits", async () => {
+  const ffmpeg = Bun.which("ffmpeg")
+  const shell = Bun.which("sh")
+  if (!ffmpeg || !shell) throw new Error("ffmpeg and sh must be on PATH")
+  const dir = mkdtempSync(join(tmpdir(), "kestrel-encoder-exit-"))
+  const pidFile = join(dir, "encoder-pid")
+  const wrapper = join(dir, "ffmpeg")
+  const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`
+  // Record the software encoder's pid so the test can kill it; every invocation still runs the real ffmpeg.
+  writeFileSync(wrapper, `#!${shell}\ncase " $* " in\n  *" libx264 "*) echo $$ > ${quote(pidFile)} ;;\nesac\nexec ${quote(ffmpeg)} "$@"\n`)
+  chmodSync(wrapper, 0o755)
+  const originalPath = process.env.PATH
+  process.env.PATH = `${dir}:${originalPath ?? ""}`
+  const taskId = "encoder-exit-streaming-test"
+  try {
+    const program = Effect.gen(function* () {
+      const desktop = yield* DesktopManager
+      const seen: DesktopStatus[] = []
+      const unwatch = yield* desktop.watchStatus((status) => seen.push(status))
+      yield* Effect.gen(function* () {
+        const status = yield* desktop.start(taskId, {
+          ipcNamespace: desktopNamespace(holderSettings, taskId).pipe(
+            Effect.mapError((e) => new DesktopError({ message: e.message })),
+          ),
+          terminal: (display) => Effect.succeed({ file: "xterm", args: [], env: { ...process.env, DISPLAY: display } as Record<string, string>, cwd: process.cwd() }),
+        })
+        expect(status.streaming).toBe(true)
+        // The encoder dies inside the 15 s linger, with no viewer attached: nothing restarts it.
+        const pid = Number(readFileSync(pidFile, "utf8"))
+        seen.length = 0
+        process.kill(pid, "SIGKILL")
+        const deadline = Date.now() + 5_000
+        while (!seen.some((s) => s.state === "running" && s.streaming === false)) {
+          if (Date.now() > deadline) {
+            throw new Error(`streaming stayed on after the encoder exited: ${JSON.stringify(seen.map((s) => [s.state, s.streaming]))}`)
+          }
+          yield* Effect.sleep(100)
+        }
+        expect((yield* desktop.status(taskId)).streaming).toBe(false)
+      }).pipe(Effect.ensuring(desktop.stopAll()), Effect.ensuring(Effect.sync(() => stopTaskHolder(taskId))))
+      yield* unwatch
+    })
+    await Effect.runPromise(program.pipe(Effect.provide(DesktopManagerLive)))
+  } finally {
+    process.env.PATH = originalPath
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test.skipIf(process.env.KESTREL_DESKTOP_INTEGRATION !== "1")("a failed session refuses a viewer instead of parking it", async () => {
   const taskId = "failed-attach-test"
   const originalPath = process.env.PATH
