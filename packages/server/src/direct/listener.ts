@@ -208,12 +208,14 @@ export const makeDirectListener = (deps: DirectListenerDeps): DirectListener => 
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     const routed = await route(deps, url, request.headers.get("referer"), request.headers.get("authorization"))
+    // A rejection carries CORS like every other answer, so the app can read why (a refused token, an offline box)
+    // instead of seeing a network error.
     const reject = (rejection: Rejection, offline: boolean): Response => {
       const rejected = new Response(JSON.stringify({ _tag: rejection.tag, message: rejection.message }), {
         status: rejection.status,
         headers: { "content-type": "application/json" },
       })
-      const cors = url.pathname === Paths.webrtcOffer ? withAllowOrigin(rejected, request.headers.get("origin")) : rejected
+      const cors = withAllowOrigin(rejected, request.headers.get("origin"))
       return offline ? withOfflineMark(cors) : cors
     }
     if ("status" in routed) return reject(routed, false)

@@ -974,7 +974,18 @@ export const BoxCapabilities = Schema.Struct({
 })
 export type BoxCapabilities = typeof BoxCapabilities.Type
 
-export const Health = Schema.Struct({ ok: Schema.Literal(true), version: Schema.String })
+/**
+ * The box API this code serves and expects. Bump it when the app starts relying on a box route or behavior that older
+ * boxes lack: an app talking to a user box that reports a lower level tells the user to update that box.
+ */
+export const BOX_API = 1
+
+export const Health = Schema.Struct({
+  ok: Schema.Literal(true),
+  version: Schema.String,
+  /** The box's `BOX_API`. Absent on boxes from before it was reported (level 0). */
+  api: Schema.optional(Schema.Int),
+})
 export type Health = typeof Health.Type
 
 /**

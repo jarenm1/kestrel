@@ -273,3 +273,24 @@ describe("a user's own box after a restart, with the control plane down", () => 
     }
   })
 })
+
+describe("rejections", () => {
+  test("a token signed with another secret is refused with CORS, so the app can read why", async () => {
+    // What the app holds after the box's secret was regenerated while the box still runs with the old one.
+    const now = Math.floor(Date.now() / 1000)
+    const rotated = await signBoxToken("regenerated-secret", { sub: OWNER, aud: BOX_ID, iat: now, exp: now + 600, cv: "2" })
+    const box = restartedBox()
+    try {
+      const response = await box.listener.handle(
+        new Request("http://box.local/api/tasks", {
+          headers: { authorization: `Bearer ${rotated}`, origin: "https://app.example" },
+        }),
+      )
+      expect(response.status).toBe(401)
+      expect(response.headers.get("access-control-allow-origin")).toBe("https://app.example")
+      expect(((await response.json()) as { _tag: string })._tag).toBe("Unauthorized")
+    } finally {
+      box.listener.close()
+    }
+  })
+})
