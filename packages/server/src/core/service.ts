@@ -2164,7 +2164,7 @@ export const CoreLive = Layer.effect(
           Effect.tapError(() => store.update((s) => {
             const child = s.tasks.find((t) => t.id === task.id)
             if (child === undefined || child.delegation?.runId !== undefined) return Either.right(null)
-            child.status = "failed"
+            applyTaskEvent(s, child, { _tag: "delegationDispatchFailed" })
             child.updatedAt = nowIso()
             return Either.right({ ...child })
           }).pipe(

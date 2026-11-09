@@ -50,6 +50,8 @@ export type TaskEvent =
   | { readonly _tag: "reconcileOrphan" }
   /** A delegation persisted before dispatch lost its launching process during the restart. */
   | { readonly _tag: "reconcileUndispatchedDelegation" }
+  /** The delegated thread's assignment could not be delivered, so it never reserved a run. */
+  | { readonly _tag: "delegationDispatchFailed" }
 
 export type TaskIllegalReason =
   | "archived"
@@ -169,6 +171,7 @@ export const transitionTask = (phase: TaskPhase, event: TaskEvent): TaskTransiti
       return phase.status === "running" && !phase.runLive ? next(phase, { status: "failed" }) : next(phase, {})
 
     case "reconcileUndispatchedDelegation":
+    case "delegationDispatchFailed":
       return phase.delegationPresent && !phase.delegationDispatched
         ? next(phase, { status: "failed" })
         : next(phase, {})

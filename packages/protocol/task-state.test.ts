@@ -142,6 +142,9 @@ describe("task phase", () => {
         phase({ delegationPresent: true, delegationDispatched: true }),
       ),
     ).toMatchObject({ _tag: "transitioned", changed: false })
+    expect(
+      run({ _tag: "delegationDispatchFailed" }, phase({ delegationPresent: true })),
+    ).toMatchObject({ _tag: "transitioned", phase: { status: "failed" } })
   })
 
   test("archive gates user work and reports without changing status", () => {
