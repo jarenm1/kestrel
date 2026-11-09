@@ -38,7 +38,9 @@
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
   "vars": {
-    "ALLOWED_GITHUB_LOGINS": "jarenm1,caayd,StinkyCat0,anishrajpandey"
+    "ALLOWED_GITHUB_LOGINS": "jarenm1,caayd,StinkyCat0,anishrajpandey",
+    // Cloudflare Realtime TURN key id. Not a credential: the API token that goes with it stays a Worker secret.
+    "KESTREL_TURN_KEY_ID": "fda45fcca926fbdf282e6a1d3ea9d98b"
   },
   // PR/branch Previews (`wrangler preview`). Each Preview gets its own Hub Durable Object
   // namespace, so it never shares sessions, connections or the box slot with production.
