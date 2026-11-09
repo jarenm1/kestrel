@@ -35,6 +35,11 @@ describe("mergeSnapshot", () => {
     ])
   })
 
+  test("an id removed from the cache during the fetch is not resurrected", () => {
+    const removed = item("a", "old")
+    expect(values(mergeSnapshot([item("a", "snapshot")], [], new Set([removed])))).toEqual([])
+  })
+
   test("an empty cache returns the snapshot in order", () => {
     expect(values(mergeSnapshot([item("a", "1"), item("b", "2")], [], new Set()))).toEqual(["a:1", "b:2"])
   })
