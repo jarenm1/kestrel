@@ -11,6 +11,8 @@ import { Markdown } from "./Markdown"
 import { MessageAttachments } from "./MessageAttachments"
 import { RunTranscript } from "./RunTranscript"
 import { RunSummary } from "./RunSummary"
+import { TranscriptMinimap } from "./TranscriptMinimap"
+import { deriveMinimapItems } from "./minimap"
 import { formatMessageTime } from "./time"
 
 const ENTER_CLASS = "animate-in duration-300 fade-in slide-in-from-bottom-1"
@@ -110,7 +112,7 @@ function ThreadItem({
   switch (message.role) {
     case "user":
       return (
-        <div className={cn("flex flex-col items-end", ENTER_CLASS)}>
+        <div className={cn("flex flex-col items-end", ENTER_CLASS)} data-message-id={message.id}>
           {/* Sent by the agent of another of the user's threads (thread_send), not typed by the user. */}
           {message.fromThread && (
             <div className="mb-1 max-w-[85%] truncate text-[11px] text-muted-foreground">
@@ -176,6 +178,7 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
   // After each user message a run took comes what the run showed until its next one, so a message that steered the run
   // (or waited in its inbox) reads at the point of the transcript where it was sent.
   const segments = transcriptSegments(sortedMessages)
+  const minimapItems = deriveMinimapItems(sortedMessages)
   const lastReplies = new Map<string, string>()
   const finalSegments = new Map<string, string>()
   for (const message of sortedMessages) {
@@ -216,51 +219,54 @@ export function Transcript({ taskId, messages, runs, runItems, pendingAskId, cla
   }
 
   return (
-    <div className={cn("min-h-0 flex-1 overflow-auto", className ?? "p-4")} ref={threadRef} onScroll={onThreadScroll}>
-      <div ref={contentRef} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
-        {sortedMessages.length === 0 && (
-          <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
-        )}
-        {sortedMessages.map((m) => {
-          const segment = segments.get(m.id)
-          const pending = m.id === pendingAskId
-          // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
-          const duplicate =
-            m.role === "agent" && m.options === undefined && m.runId !== null && (runItems[m.runId]?.length ?? 0) > 0
-          const attachments = pending ? [] : (m.attachments ?? [])
-          const summaryRun = summaries.get(m.id)
-          return (
-            <Fragment key={m.id}>
-              <ThreadItem
-                message={m}
-                hideText={duplicate || pending}
-                hideTime={pending || summaryRun !== undefined || (duplicate && runs.some((run) => run.id === m.runId))}
-              >
-                {attachments.length > 0 ? (
-                  <MessageAttachments
-                    taskId={taskId}
-                    attachments={attachments}
-                    className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
-                  />
-                ) : null}
-              </ThreadItem>
-              {segment !== undefined && (
-                <>
-                  <RunTranscript
-                    taskId={taskId}
-                    runId={segment.runId}
-                    items={runItems[segment.runId] ?? NO_ITEMS}
-                    running={runs.some((run) => run.id === segment.runId && run.status === "running")}
-                    from={segment.from}
-                    to={segment.to}
-                  />
-                </>
-              )}
-              {summaryRun && <RunSummary run={summaryRun} items={runItems[summaryRun.id] ?? NO_ITEMS} />}
-            </Fragment>
-          )
-        })}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className={cn("min-h-0 flex-1 overflow-auto", className ?? "p-4")} ref={threadRef} onScroll={onThreadScroll}>
+        <div ref={contentRef} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-5">
+          {sortedMessages.length === 0 && (
+            <div className="m-auto text-muted-foreground">No messages yet. Describe what to do.</div>
+          )}
+          {sortedMessages.map((m) => {
+            const segment = segments.get(m.id)
+            const pending = m.id === pendingAskId
+            // A question's text is not in the transcript (only its collapsed tool call), so it is never a duplicate.
+            const duplicate =
+              m.role === "agent" && m.options === undefined && m.runId !== null && (runItems[m.runId]?.length ?? 0) > 0
+            const attachments = pending ? [] : (m.attachments ?? [])
+            const summaryRun = summaries.get(m.id)
+            return (
+              <Fragment key={m.id}>
+                <ThreadItem
+                  message={m}
+                  hideText={duplicate || pending}
+                  hideTime={pending || summaryRun !== undefined || (duplicate && runs.some((run) => run.id === m.runId))}
+                >
+                  {attachments.length > 0 ? (
+                    <MessageAttachments
+                      taskId={taskId}
+                      attachments={attachments}
+                      className={m.role === "user" ? "max-w-[85%] justify-end" : undefined}
+                    />
+                  ) : null}
+                </ThreadItem>
+                {segment !== undefined && (
+                  <>
+                    <RunTranscript
+                      taskId={taskId}
+                      runId={segment.runId}
+                      items={runItems[segment.runId] ?? NO_ITEMS}
+                      running={runs.some((run) => run.id === segment.runId && run.status === "running")}
+                      from={segment.from}
+                      to={segment.to}
+                    />
+                  </>
+                )}
+                {summaryRun && <RunSummary run={summaryRun} items={runItems[summaryRun.id] ?? NO_ITEMS} />}
+              </Fragment>
+            )
+          })}
+        </div>
       </div>
+      <TranscriptMinimap items={minimapItems} scrollRef={threadRef} contentRef={contentRef} />
     </div>
   )
 }
