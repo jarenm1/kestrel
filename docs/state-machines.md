@@ -78,9 +78,12 @@ or the hunk is supplied by the core owner.
 
 ## Wave 2
 
-**Status:** Wave 1 is merged. Wave 2 extracts the remaining transition modules and migrates one writer per PR. It does
-not change a call site's behaviour; when a migration exposes an illegal edge, the PR names the edge and either handles
-it explicitly or leaves it as a documented log-and-continue until Wave 3.
+**Status:** Wave 1 and Wave 2 are merged. The task, run, delegation, desktop, Nest and delivery phase writers are
+centralized in their transition modules; the remaining gaps below are product/architectural decisions (session-expiry
+sweeps, NVENC policy, box-side fire idempotency, client ordering), not unmigrated phase writes.
+
+Wave 2 did not change a call site's behaviour; when a migration exposed an illegal edge, the PR named the edge and
+either handled it explicitly or left it as a documented log-and-continue.
 
 **Pattern.** A pure `transitionX(phase, event)` lives in `packages/protocol/src` when the record is shared by the web
 and phone clients; otherwise it lives in the owning package. It returns
