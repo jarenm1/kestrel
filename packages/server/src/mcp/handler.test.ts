@@ -184,4 +184,21 @@ describe("MCP session lifecycle", () => {
     expect(await refused.text()).toContain("too many MCP sessions")
     expect((await withSession(box, "task-0", token("run-0"), sessions[0]!)).status).not.toBe(404)
   })
+
+  test("initializing runs are counted once, so exactly the per-user ceiling is accepted", async () => {
+    const box = await startBox()
+    const initialized = await Promise.all(
+      Array.from({ length: MCP_SESSION_LIMITS.perUser }, (_, index) => {
+        const runId = `init-${index}`
+        box.issue(token(runId), { id: runId, taskId: `init-task-${index}` })
+        return initialize(box, `init-task-${index}`, token(runId))
+      }),
+    )
+    expect(initialized.map((response) => response.status)).toEqual(
+      Array.from({ length: MCP_SESSION_LIMITS.perUser }, () => 200),
+    )
+
+    box.issue(token("init-over"), { id: "init-over", taskId: "init-over-task" })
+    expect((await initialize(box, "init-over-task", token("init-over"))).status).toBe(503)
+  })
 })

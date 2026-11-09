@@ -264,6 +264,9 @@ export function createMcpHandler(deps: McpDeps): (req: IncomingMessage, res: Ser
           return
         }
         sessions.set(id, { runId, user, transport })
+        // The run is now counted through `sessions`; keep it out of the in-flight map so the ceilings count runs once.
+        const pending = initializing.get(runId)
+        if (pending !== undefined && pending.transport === transport) initializing.delete(runId)
       },
     })
     transport.onclose = () => {
