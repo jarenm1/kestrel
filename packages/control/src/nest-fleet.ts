@@ -166,7 +166,9 @@ export class NestFleet {
     const row = nestBox(this.sql, report.boxId)
     const decision = decideVm(row, hostId, report)
     if (decision._tag === "evict") {
-      this.send(hostId, { _tag: "evict", boxId: report.boxId, ownerEpoch: report.ownerEpoch })
+      // The host refuses an epoch that is not strictly newer than its copy, so send the control plane's epoch, not the
+      // stale one the host reported. `decideVm` evicts only when the report's epoch lags the row, so this is newer.
+      if (row !== null) this.send(hostId, { _tag: "evict", boxId: report.boxId, ownerEpoch: row.ownerEpoch })
       return
     }
     if (decision._tag === "ignore") {
@@ -521,13 +523,19 @@ export class NestFleet {
     const minted = await this.tokenFor(boxId)
     const current = nestBox(this.sql, boxId)
     if (current === null || current.pendingId !== pendingId || current.hostId !== hostId) return
+    const previous = this.enrollFields(current)
     const enrollToken = this.adoptToken(current, minted)
+    // Persisted before the send because the guest may enroll the moment it receives the command. A refused send puts
+    // the previous hash back, or the token just minted would be lost without ever reaching a host.
     saveNestBox(this.sql, current)
     const command: NestHostCommand =
       stored._tag === "create"
         ? { ...stored, enrollToken: enrollToken ?? newSecret() }
         : { ...stored, enrollToken }
-    this.link.send(hostId, { _tag: "command", commandId: pendingId, command })
+    if (!this.link.send(hostId, { _tag: "command", commandId: pendingId, command })) {
+      Object.assign(current, previous)
+      saveNestBox(this.sql, current)
+    }
   }
 
   /**
@@ -586,6 +594,7 @@ export class NestFleet {
     const minted = await this.tokenFor(boxId)
     const row = nestBox(this.sql, boxId)
     if (row === null || row.retryKind !== "create" || row.pendingId !== null || row.hostId === null) return
+    const previous = this.enrollFields(row)
     const enrollToken = this.adoptToken(row, minted)
     const command: NestHostCommand = {
       _tag: "create",
@@ -599,6 +608,7 @@ export class NestFleet {
     }
     row.retryKind = null
     if (!this.dispatch(row, command)) {
+      Object.assign(row, previous)
       row.retryKind = "create"
       saveNestBox(this.sql, row)
     }
@@ -649,7 +659,7 @@ export class NestFleet {
     }
     // A new placement: a higher epoch and a new VM incarnation, so the old host's copy is evicted on its next report. The
     // claim is kept only once the resume is sent; if it is not, the box stays unplaced for the next wake.
-    const previous = { hostId: row.hostId, ownerEpoch: row.ownerEpoch, vmId: row.vmId }
+    const previous = { hostId: row.hostId, ownerEpoch: row.ownerEpoch, vmId: row.vmId, ...this.enrollFields(row) }
     const url = publicUrlFor(row.boxId, target.slug, this.domain)
     row.hostId = target.hostId
     row.ownerEpoch += 1
@@ -668,6 +678,11 @@ export class NestFleet {
     const row = nestBox(this.sql, boxId)
     if (row === null || row.enrollHash === null) return null
     return this.mintEnrollToken()
+  }
+
+  /** The enrollment fields an adopt replaces, so a send the link refuses can put the previous hash back. */
+  private enrollFields(row: NestBoxRow): Pick<NestBoxRow, "enrollHash" | "enrollExpiresAt"> {
+    return { enrollHash: row.enrollHash, enrollExpiresAt: row.enrollExpiresAt }
   }
 
   /** Stores a minted token's hash on a box that has not enrolled, and returns the token to send; null once it has enrolled. */
@@ -689,8 +704,12 @@ export class NestFleet {
       this.holdWake(row)
       return
     }
+    const previous = this.enrollFields(row)
     const enrollToken = this.adoptToken(row, minted)
-    if (!this.dispatch(row, this.resumeCommand(row, enrollToken, this.boxUrl(row.boxId)))) this.holdWake(row)
+    if (!this.dispatch(row, this.resumeCommand(row, enrollToken, this.boxUrl(row.boxId)))) {
+      Object.assign(row, previous)
+      this.holdWake(row)
+    }
   }
 
   /** The box stays waiting; the wake loop tries it again on the next capacity report, hello, or expiry. */

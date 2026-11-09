@@ -201,6 +201,32 @@ describe("creating a box", () => {
     expect(await fleet.enroll({ boxId: "box-1", token: resent.command.enrollToken })).toBeNull()
   })
 
+  test("a resend the link refuses keeps the previous enrollment token usable", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const first = lastCommand("host-a", "create")
+    const before = commandsTo("host-a").length
+    closing.add("host-a")
+    await hello("host-a")
+    closing.delete("host-a")
+    expect(commandsTo("host-a")).toHaveLength(before)
+    expect(await fleet.enroll({ boxId: "box-1", token: first.command.enrollToken })).toEqual({ secret: "box-1-secret" })
+  })
+
+  test("a resume the link refuses keeps the previous enrollment token usable", async () => {
+    await hello("host-a")
+    await placeBox("alice", "box-1")
+    const first = lastCommand("host-a", "create")
+    fleet.result("host-a", first.commandId, true, null, vmReport("box-1", first.command.vmId, 1, "running"))
+    fleet.park("alice", "box-1")
+    const park = lastCommand("host-a", "park")
+    fleet.result("host-a", park.commandId, true, null, vmReport("box-1", first.command.vmId, 1, "parked", { volumeRef: "vol-1" }))
+    closing.add("host-a")
+    expect(await fleet.resume("alice", "box-1")).toEqual({ ok: true, value: null })
+    closing.delete("host-a")
+    expect(await fleet.enroll({ boxId: "box-1", token: first.command.enrollToken })).toEqual({ secret: "box-1-secret" })
+  })
+
   test("a host with room for one boot has none left once a create is on its way", async () => {
     await hello("host-a", [], 2)
     await placeBox("alice", "box-1")
@@ -256,8 +282,13 @@ describe("VM reports and epochs", () => {
     expect(resume.command.vmId).not.toBe(firstVm)
     expect(userBoxUrl("box-1")).toBe("https://box-1.slug-host-b.nest.example.com")
 
-    await hello("host-a", [vmReport("box-1", firstVm, 1, "running")])
-    expect(lastCommand("host-a", "evict").command).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 1 })
+    const stale = vmReport("box-1", firstVm, 1, "running")
+    await hello("host-a", [stale])
+    const evict = lastCommand("host-a", "evict").command
+    expect(evict).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 2 })
+    // The host's `evict` refuses an epoch that is not strictly newer than the copy it holds; the control plane's
+    // epoch is newer than the stale report's, so the host accepts it.
+    expect(evict.ownerEpoch).toBeGreaterThan(stale.ownerEpoch)
   })
 
   test("inventory evicts a stale copy only once the host's last chunk arrives", async () => {
@@ -267,10 +298,13 @@ describe("VM reports and epochs", () => {
     await hello("host-b", [], 9)
     await fleet.wakeRequest("host-a", "box-1")
 
-    fleet.inventory("host-a", [vmReport("box-1", firstVm, 1, "running")], false)
+    const stale = vmReport("box-1", firstVm, 1, "running")
+    fleet.inventory("host-a", [stale], false)
     expect(commandsTo("host-a").some((entry) => entry.command._tag === "evict")).toBe(false)
     fleet.inventory("host-a", [], true)
-    expect(lastCommand("host-a", "evict").command).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 1 })
+    const evict = lastCommand("host-a", "evict").command
+    expect(evict).toEqual({ _tag: "evict", boxId: "box-1", ownerEpoch: 2 })
+    expect(evict.ownerEpoch).toBeGreaterThan(stale.ownerEpoch)
   })
 
   test("a live report after hello is not overwritten by an older inventory chunk", async () => {
