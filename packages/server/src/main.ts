@@ -33,21 +33,20 @@ import { ensureNestSecret } from "./platform/enroll"
 import { BoxPlatform, BoxPlatformLive } from "./platform"
 import { ActivityTracker, ActivityTrackerLive } from "./platform/tracker"
 
-const BaseLive = Layer.provideMerge(
-  CredentialBrokerLive,
-  Layer.mergeAll(
-    ConfigLive,
-    WorkspaceLive,
-    EventHubLive,
-    DesktopManagerLive,
-    CredentialStoreLive,
-    ActivityTrackerLive,
-    Layer.provide(GitHubLive, ConfigLive),
-  ),
+const ServicesLive = Layer.mergeAll(
+  ConfigLive,
+  WorkspaceLive,
+  EventHubLive,
+  DesktopManagerLive,
+  CredentialStoreLive,
+  ActivityTrackerLive,
+  Layer.provide(GitHubLive, ConfigLive),
 )
+// The broker checks a grant's liveness against the same StateStore core reads, so state is built before it.
+const StateWithServices = Layer.provideMerge(StateLive, ServicesLive)
+const BaseLive = Layer.provideMerge(CredentialBrokerLive, StateWithServices)
 const CliAuthWithBase = Layer.provideMerge(CliAuthLive, BaseLive)
-const StateWithBase = Layer.provideMerge(StateLive, CliAuthWithBase)
-const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, StateWithBase)
+const HarnessWithBase = Layer.provideMerge(AgentHarnessLive, CliAuthWithBase)
 const PlatformWithBase = Layer.provideMerge(BoxPlatformLive, HarnessWithBase)
 const CoreWithBase = Layer.provideMerge(CoreLive, PlatformWithBase)
 const AppLive = Layer.provideMerge(TaskStatsLive, CoreWithBase)

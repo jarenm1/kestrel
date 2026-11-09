@@ -5,6 +5,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import type { RelayCredentials } from "@cloudagents/protocol"
 import { Config } from "../config"
 import { CredentialStore } from "../credentials"
+import { StateStore } from "../core/state"
 import {
   BROKER_GRANT_TTL_MS,
   BROKER_PROVIDERS,
@@ -44,14 +45,21 @@ const brokerOf = (overrides: Partial<CredentialBrokerShape> = {}): CredentialBro
 })
 
 /** The real broker with a fixed sandbox port and no control-plane credentials. */
-const brokerLayer = CredentialBrokerLive.pipe(
-  Layer.provide(
-    Layer.merge(
-      Layer.succeed(Config, { sandboxPort: 8787 } as never),
-      Layer.succeed(CredentialStore, { get: () => Effect.succeed(null), set: () => Effect.void }),
+const stateLayer = (runs: ReadonlyArray<{ readonly id: string; readonly status: string }> = []) =>
+  Layer.succeed(StateStore, { read: Effect.succeed({ runs } as never) } as never)
+
+const brokerLayerWith = (runs: ReadonlyArray<{ readonly id: string; readonly status: string }> = []) =>
+  CredentialBrokerLive.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(Config, { sandboxPort: 8787 } as never),
+        Layer.succeed(CredentialStore, { get: () => Effect.succeed(null), set: () => Effect.void }),
+        stateLayer(runs),
+      ),
     ),
-  ),
-)
+  )
+
+const brokerLayer = brokerLayerWith()
 
 afterEach(() => setSystemTime())
 
@@ -213,22 +221,30 @@ describe("broker issuance", () => {
     }
   })
 
-  test("a grant stays usable past its diagnostic horizon until it is revoked", async () => {
-    const runtime = ManagedRuntime.make(brokerLayer)
+  test("a grant outlives its TTL while the run is live and dies once the run is abandoned", async () => {
+    const runtime = ManagedRuntime.make(
+      brokerLayerWith([
+        { id: "run-live", status: "running" },
+        { id: "run-abandoned", status: "succeeded" },
+      ]),
+    )
     try {
       const result = await runtime.runPromise(
         Effect.gen(function* () {
           const broker = yield* CredentialBroker
-          const lease = yield* broker.issue("run-expire", "octocat", "openrouter", { harness: "codex" })
-          // `task_ask` can run past any finite TTL, so the stamp is diagnostic; only revoke ends the grant.
-          setSystemTime(new Date(lease.expiresAt))
-          const live = yield* broker.grantForToken(lease.token)
-          yield* broker.revoke("run-expire")
-          return { expiresAt: lease.expiresAt, live, afterRevoke: yield* broker.grantForToken(lease.token) }
+          const live = yield* broker.issue("run-live", "octocat", "openrouter", { harness: "codex" })
+          const abandoned = yield* broker.issue("run-abandoned", "octocat", "openrouter", { harness: "codex" })
+          setSystemTime(new Date(live.expiresAt))
+          const liveGrant = yield* broker.grantForToken(live.token)
+          const abandonedGrant = yield* broker.grantForToken(abandoned.token)
+          // The same token is still valid after the horizon is pushed out.
+          return { live, liveGrant, abandonedGrant, again: yield* broker.grantForToken(live.token) }
         }),
       )
-      expect(result.live).toMatchObject({ runId: "run-expire" })
-      expect(result.afterRevoke).toBeNull()
+      expect(result.liveGrant).toMatchObject({ runId: "run-live" })
+      expect(result.liveGrant?.expiresAt).toBeGreaterThan(result.live.expiresAt)
+      expect(result.abandonedGrant).toBeNull()
+      expect(result.again).toMatchObject({ runId: "run-live" })
     } finally {
       setSystemTime()
       await runtime.dispose()
@@ -528,12 +544,13 @@ describe("broker requests", () => {
     const runtime = ManagedRuntime.make(
       CredentialBrokerLive.pipe(
         Layer.provide(
-          Layer.merge(
+          Layer.mergeAll(
             Layer.succeed(Config, { sandboxPort: 8787 } as never),
             Layer.succeed(CredentialStore, {
               get: () => Effect.succeed({ user: "octocat", providers: { openrouter: "real-key" } }),
               set: () => Effect.void,
             }),
+            stateLayer([{ id: "run-stream", status: "running" }]),
           ),
         ),
       ),
