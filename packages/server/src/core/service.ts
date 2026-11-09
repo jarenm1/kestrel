@@ -2196,7 +2196,7 @@ export const CoreLive = Layer.effect(
           const changed: Task[] = []
           for (const task of s.tasks) {
             if (task.delegation?.runId && ids.includes(task.delegation.runId)) {
-              task.delegation = { ...task.delegation, cancelledAt: task.delegation.cancelledAt ?? nowIso() }
+              applyDelegationEvent(task, { _tag: "cancelled", at: nowIso() })
               // A cancelled delegated thread must not wake at a usage-limit reset or retry for a parent that stopped it.
               delete task.usageLimitResume
               delete task.autoRetry
