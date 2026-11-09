@@ -193,9 +193,9 @@ direct box auth (`online | offline read-only`).
 once (D3). Logout revokes every capability minted from the session (D7). Preview tokens are revoked with their task or
 session, not left to a 24 h TTL. Offline auth (D9) is own-box, read-only, and ends the moment credentials return.
 
-**Remaining gaps:** session expiry is enforced only on read; pairing returns the secret on every poll and extends
-expiry on approval; OAuth consumes before checking provider/expiry; preview tokens survive logout; the `cv` version is
-derived from count + max(updated_at).
+**Remaining gaps:** session expiry is enforced when a request reads the session, with no background sweep; the `cv`
+version is derived from count + max(updated_at). Pairing now marks `used_at` before returning the secret, OAuth is
+validated before its revision-keyed consume, and logout revokes preview tokens (Wave 1).
 
 ### 7. Automation and PR delivery
 
@@ -207,9 +207,13 @@ box, records the outcome, and advances `nextRunAt` only after the claim is durab
 one unit. The PR queue has a retry bound and a terminal state; the box's `watching` mark is cleared by the same
 operation that removes the control-plane row.
 
-**Remaining gaps:** `next_run_at` advances before `fire` (lost occurrence on crash); webhook delivery is recorded before
-`waitUntil(fire)`; three fire paths share no key; PR queue retries forever on 400/401/5xx; control unwatch does not clear
-the box mark.
+**Wave 1 status:** a fire is claimed with a stable key in the same transaction that advances `next_run_at`, the claim's
+lease alarm is armed before the external call and rearmed on cold start, and a webhook delivery is written with its
+fires. The PR queue has capped backoff and a terminal drop after five failures, and unwatch clears the box mark.
+
+**Remaining gaps:** a crash between the box call and the recorded outcome can duplicate an external task start; the fire
+is then failed after its lease instead of re-fired. Closing that fully needs an idempotency key on the box's
+task-creation route.
 
 ### 8. Client sync and desktop connection
 
@@ -244,17 +248,17 @@ current branch already fixed it; the row stays as the record of what was checked
 | Machine | Encoding | Risk |
 |---|---|---|
 | Session + dev flag | row + `expires_at` + `dev` | H |
-| OAuth state | row, delete-then-validate | M |
-| Pairing | nullable `box_id` + `expires_at` | H |
-| Automation schedule | `enabled` × trigger × `next_run_at` | H |
+| OAuth state | row with revision; read, validate, consume | M |
+| Pairing | `box_id` + `used_at` + `expires_at`; same-id 60 s grace | H |
+| Automation schedule | `enabled` × trigger × `next_run_at` + durable `automation_fires` | H |
 | Automation run | `started/failed` + nullable task/error | M |
 | PR watch registry | `pr_watches` rows | M |
-| PR activity queue + webhook dedupe | `due_at` + `delivery_id` | H |
+| PR activity queue + webhook dedupe | `due_at` + `delivery_id` + capped `attempts` | H |
 | Meter ingest | `(host_id,event_id)` + owner pin | H |
 | Meter reconciliation | inferred segments + derived status | M |
 | File/desktop/preview tokens | TTL rows/Maps | M |
-| TURN cache | per-isolate Map + single-flight | M |
-| Box relay socket | attachment + pending/streams Maps | H |
+| TURN cache | durable per-identity generation + Worker cache | M |
+| Box relay socket | random 31-bit id range + in-flight ids + path-keyed streams | H |
 | Nest host socket | `{hello, retired}` attachment | M |
 | Fleet placement | `pending/active/draining` + read-side assignment | M |
 | Active-box routing | `active_box_id` + precedence | M |
