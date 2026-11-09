@@ -118,7 +118,13 @@ export const taskPhaseOf = (state: Readonly<StoreState>, task: Task): TaskPhase 
  */
 export const applyTaskEvent = (state: Readonly<StoreState>, task: Mutable<Task>, event: TaskEvent): TaskTransition => {
   const transition = transitionTask(taskPhaseOf(state, task), event)
-  if (transition._tag === "transitioned") task.status = transition.phase.status
+  if (transition._tag === "transitioned") {
+    task.status = transition.phase.status
+    // The archive timestamp is the phase's other persisted field. It is preserved across events that keep the phase
+    // archived, and removed only by the transition that unarchives.
+    if (transition.phase.archived) task.archivedAt ??= nowIso()
+    else delete task.archivedAt
+  }
   return transition
 }
 
