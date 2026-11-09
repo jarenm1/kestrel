@@ -300,6 +300,20 @@ export const CliAuthLive = Layer.effect(
       stateLocks.set(user, created)
       return created
     }
+    /**
+     * One registration at a time per user and provider. Replacing a pending sign-in kills the old process and waits
+     * for it before spawning the replacement; without the lock two concurrent starts both finish that wait and both
+     * register an attempt, leaving two live pending entries and one orphaned home.
+     */
+    const loginLocks = new Map<string, Effect.Semaphore>()
+    const loginLock = (user: string, provider: CliProvider): Effect.Semaphore => {
+      const key = `${user}\0${provider}`
+      const existing = loginLocks.get(key)
+      if (existing !== undefined) return existing
+      const created = Effect.unsafeMakeSemaphore(1)
+      loginLocks.set(key, created)
+      return created
+    }
 
     const killEntry = (entry: Pending) => {
       clearTimeout(entry.timer)
@@ -1102,94 +1116,112 @@ export const CliAuthLive = Layer.effect(
         if (signIn.kind !== "page") return yield* Effect.fail(new BadRequest({ message: `${provider} signs in with an API key` }))
         // Every page sign-in fills a fresh, isolated home; an existing login is never replaced or written into.
         const root = yield* rootOf(user)
-        let accountId = randomUUID()
-        while (yield* isDirectory(cliAccountHome(root, accountId))) accountId = randomUUID()
-        const home = yield* accountHome(user, accountId)
-        yield* ensureUserDirs(user, provider, accountId)
-        // Reserve the home before its marker exists: a concurrent status read must not sweep a live attempt.
-        preparing.add(home)
-        // An unfinished attempt is visibly not a login until its CLI exits successfully and the marker goes.
-        yield* Effect.promise(() =>
-          writeFile(join(home, CLI_PENDING_LOGIN_MARKER), "", { mode: 0o600 }).catch(() => undefined),
-        )
-        // At most one sign-in per provider is pending: a retry cancels it, never the active login or its files.
-        for (const previous of [...pending.values()]) {
-          if (previous.user !== user || previous.provider !== provider) continue
-          killEntry(previous)
-          yield* Effect.promise(() => previous.done)
-        }
-        const discard = Effect.promise(() => {
-          preparing.delete(home)
-          return rm(home, { recursive: true, force: true }).catch(() => undefined)
-        })
-        const inv = yield* invokeAt(home, provider, signIn.args(homeProviderDir(home, provider)), undefined, signIn.terminal).pipe(
-          Effect.tapError(() => discard),
-        )
-        const child = yield* Effect.try({
-          try: () =>
-            ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
-          catch: () => new InternalError({ message: `${spec.bin} could not be started` }),
-        }).pipe(
-          Effect.tapError(() => discard),
-        )
-        child.stdin?.on("error", () => {})
-        const { promise: done, resolve: settle } = Promise.withResolvers<number | null>()
-        child.once("error", () => settle(null))
-        child.once("close", (code) => settle(code))
-        const expiresAt = Date.now() + PENDING_TTL_MS
-        const key = pendingKey(user, provider, accountId)
-        const entry: Pending = {
-          key,
-          user,
-          provider,
-          accountId,
-          home,
-          child,
-          output: "",
-          done,
-          listeners: new Set(),
-          timer: setTimeout(() => killEntry(entry), PENDING_TTL_MS),
-        }
-        const onChunk = (chunk: Buffer) => {
-          entry.output += chunk.toString("utf8")
-          for (const listener of entry.listeners) listener()
-        }
-        child.stdout?.on("data", onChunk)
-        child.stderr?.on("data", onChunk)
-        child.on("close", (code) => {
-          clearTimeout(entry.timer)
-          if (pending.get(key) === entry) pending.delete(key)
-          preparing.delete(home)
-          // The isolated home belongs to this attempt: a completed login keeps it, and an abandoned (TTL or replacement),
-          // failed or killed one is removed. Synchronous so no later read finds a half-written login to list or probe.
-          try {
-            if (code === 0) rmSync(join(home, CLI_PENDING_LOGIN_MARKER), { force: true })
-            else rmSync(home, { recursive: true, force: true })
-          } catch {
-            // The sweep in listAccountIds removes a marked home whose process died before this cleanup.
-          }
-          for (const listener of entry.listeners) listener()
-        })
-        pending.set(key, entry)
-        preparing.delete(home)
 
-        const link = yield* Effect.promise(() => waitFor(entry, (text) => signIn.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS))
+        // Registration is serialized per user+provider: a retry must see (and replace) the attempt it supersedes.
+        const registered = yield* loginLock(user, provider).withPermits(1)(
+          Effect.gen(function* () {
+            let accountId = randomUUID()
+            while (yield* isDirectory(cliAccountHome(root, accountId))) accountId = randomUUID()
+            const home = yield* accountHome(user, accountId)
+            const discard = Effect.promise(() => {
+              preparing.delete(home)
+              return rm(home, { recursive: true, force: true }).catch(() => undefined)
+            })
+            const register = Effect.gen(function* () {
+              yield* ensureUserDirs(user, provider, accountId)
+              // Reserve the home before its marker exists: a concurrent status read must not sweep a live attempt.
+              preparing.add(home)
+              // An unfinished attempt is visibly not a login until its CLI exits successfully and the marker goes.
+              yield* Effect.tryPromise({
+                try: () => writeFile(join(home, CLI_PENDING_LOGIN_MARKER), "", { mode: 0o600 }),
+                catch: () => new InternalError({ message: "cannot mark the sign-in attempt" }),
+              })
+              // At most one sign-in per provider is pending: a retry cancels it, never the active login or its files.
+              for (const previous of [...pending.values()]) {
+                if (previous.user !== user || previous.provider !== provider) continue
+                killEntry(previous)
+                yield* Effect.promise(() => previous.done)
+              }
+              const inv = yield* invokeAt(
+                home,
+                provider,
+                signIn.args(homeProviderDir(home, provider)),
+                undefined,
+                signIn.terminal,
+              )
+              const child = yield* Effect.try({
+                try: () =>
+                  ownGroup(spawn(inv.file, [...inv.args], { env: { ...inv.env }, stdio: ["pipe", "pipe", "pipe"], detached: NEW_PROCESS_GROUP })),
+                catch: () => new InternalError({ message: `${spec.bin} could not be started` }),
+              })
+              child.stdin?.on("error", () => {})
+              const { promise: done, resolve: settle } = Promise.withResolvers<number | null>()
+              child.once("error", () => settle(null))
+              child.once("close", (code) => settle(code))
+              const expiresAt = Date.now() + PENDING_TTL_MS
+              const key = pendingKey(user, provider, accountId)
+              const entry: Pending = {
+                key,
+                user,
+                provider,
+                accountId,
+                home,
+                child,
+                output: "",
+                done,
+                listeners: new Set(),
+                timer: setTimeout(() => killEntry(entry), PENDING_TTL_MS),
+              }
+              const onChunk = (chunk: Buffer) => {
+                entry.output += chunk.toString("utf8")
+                for (const listener of entry.listeners) listener()
+              }
+              child.stdout?.on("data", onChunk)
+              child.stderr?.on("data", onChunk)
+              child.on("close", (code) => {
+                clearTimeout(entry.timer)
+                if (pending.get(key) === entry) pending.delete(key)
+                preparing.delete(home)
+                // The isolated home belongs to this attempt: a completed login keeps it, and an abandoned (TTL or
+                // replacement), failed or killed one is removed. Synchronous so no later read finds a half-written
+                // login to list or probe.
+                try {
+                  if (code === 0) rmSync(join(home, CLI_PENDING_LOGIN_MARKER), { force: true })
+                  else rmSync(home, { recursive: true, force: true })
+                } catch {
+                  // The sweep in listAccountIds removes a marked home whose process died before this cleanup.
+                }
+                for (const listener of entry.listeners) listener()
+              })
+              pending.set(key, entry)
+              preparing.delete(home)
+              return { entry, expiresAt, home }
+            })
+            // Any failure while preparing or spawning removes the half-created home instead of leaving a marker for
+            // the sweep of a later status read to find and remove.
+            return yield* register.pipe(Effect.tapError(() => discard))
+          }),
+        )
+
+        const link = yield* Effect.promise(() =>
+          waitFor(registered.entry, (text) => signIn.parseLoginLink(stripAnsi(text)), LINK_TIMEOUT_MS),
+        )
         if (link === null) {
-          killEntry(entry)
+          killEntry(registered.entry)
           // Nothing signed in to: this isolated home was created for the failed attempt alone.
-          yield* Effect.promise(() => rm(home, { recursive: true, force: true }).catch(() => undefined))
-          const detail = lastLine(entry.output, [])
+          yield* Effect.promise(() => rm(registered.home, { recursive: true, force: true }).catch(() => undefined))
+          const detail = lastLine(registered.entry.output, [])
           return yield* Effect.fail(
             new InternalError({ message: `${spec.bin} did not print a sign-in link${detail === "" ? "" : `: ${detail}`}` }),
           )
         }
         return {
           provider,
-          accountId,
+          accountId: registered.entry.accountId,
           url: link.url,
           userCode: link.userCode,
           needsCode: signIn.needsCode,
-          expiresAt: new Date(expiresAt).toISOString(),
+          expiresAt: new Date(registered.expiresAt).toISOString(),
         }
       })
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, watch, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Effect, Layer, ManagedRuntime } from "effect"
@@ -442,6 +442,36 @@ console.log(JSON.stringify({ loggedIn: true, email: home.includes("accttwo") ? "
     expect(afterRetry).toMatchObject({ loggedIn: true, account: "second@example.com", activeAccountId: start.accountId })
     expect(afterRetry.accounts?.map((account) => account.id)).toEqual(["default", start.accountId])
     await run((auth) => auth.shutdown())
+  })
+
+  test("concurrent sign-ins for one provider serialize to a single pending attempt", async () => {
+    const root = rootFor()
+    fakeAntigravity(root, "second@example.com")
+    const run = authRuntime(root)
+    const first = await run((auth) => auth.startLogin("alice", "antigravity-cli"))
+    if (first.accountId === undefined) throw new Error("sign-in did not identify its isolated account")
+
+    // Both retries replace the first attempt; without the per-provider lock they would both also replace it in their
+    // own view and register a second live attempt after the shared wait.
+    await run((auth) =>
+      Effect.all(
+        [auth.startLogin("alice", "antigravity-cli"), auth.startLogin("alice", "antigravity-cli")].map((login) =>
+          Effect.either(login),
+        ),
+        { concurrency: "unbounded" },
+      ),
+    )
+
+    const accounts = join(root, "users", "alice", "accounts")
+    const pending = readdirSync(accounts).filter((name) =>
+      existsSync(join(accounts, name, CLI_PENDING_LOGIN_MARKER)),
+    )
+    expect(pending).toHaveLength(1)
+    // The replaced attempts' homes are gone, including the one from before the concurrent pair.
+    expect(existsSync(join(accounts, first.accountId))).toBe(false)
+    // The one live pending sign-in is the one cancellation stops.
+    await run((auth) => auth.cancelLogin("alice", "antigravity-cli"))
+    expect(existsSync(join(accounts, pending[0]!))).toBe(false)
   })
 
   test("an abandoned or replaced sign-in leaves no directory to probe", async () => {
