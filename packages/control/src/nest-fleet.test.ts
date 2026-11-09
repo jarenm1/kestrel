@@ -270,6 +270,12 @@ describe("VM reports and epochs", () => {
     expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running", vcpus: 4, pending: null })
   })
 
+  test("an older report does not move a newer VM", async () => {
+    const vmId = await runningBox()
+    fleet.vm("host-a", vmReport("box-1", vmId, 1, "parked", { since: now - 1000 }))
+    expect(fleet.statusesOf("alice").get("box-1")).toMatchObject({ state: "running" })
+  })
+
   test("a copy left at an older epoch on another host is evicted when it reports", async () => {
     const firstVm = await runningBox()
     fleet.vm("host-a", vmReport("box-1", firstVm, 1, "parked", { volumeRef: "vol-1", backedUpAt: now }))

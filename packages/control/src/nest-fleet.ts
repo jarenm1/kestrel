@@ -32,6 +32,7 @@ import {
   type PlacementCandidate,
   withPlannedBoots,
 } from "./nest-control"
+import { applyNestBoxEvent } from "./nest-transition"
 import {
   deleteNestBox,
   insertNestBox,
@@ -180,18 +181,19 @@ export class NestFleet {
       this.forget(row)
       return
     }
-    // A failed create keeps its flag while its VM is still provisioning; a VM that is up clears it.
-    if (report.state !== "provisioning") row.createFailed = false
-    row.state = report.state
+    const transition = applyNestBoxEvent(row, { _tag: "vmReported", report })
+    if (transition._tag === "illegal") {
+      console.warn(`nest: ${transition.reason} VM report for ${report.boxId} from ${hostId}`)
+      // A stale report is dropped. An unreachable state edge still applies its phase, matching the old direct writer
+      // until the illegal edge itself is fixed.
+      if (transition.reason === "report-stale") return
+    }
     row.imageId = report.imageId
     row.vcpus = report.vcpus
     row.memoryBytes = report.memoryBytes
     row.gpus = report.gpus.length
     row.volumeRef = report.volumeRef
     row.backedUpAt = report.backedUpAt
-    // A parked report with nothing in flight releases the box from this host. While a command is in flight the claim
-    // stays until that command's result settles, since the two frames may arrive in either order.
-    if (report.state === "parked" && row.pendingId === null) row.hostId = null
     saveNestBox(this.sql, row)
   }
 
@@ -322,6 +324,7 @@ export class NestFleet {
       hostId: target.hostId,
       vmId: crypto.randomUUID(),
       ownerEpoch: 1,
+      vmSince: null,
       state: "provisioning",
       limits,
       volumeRef: null,
