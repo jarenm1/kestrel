@@ -9,14 +9,23 @@ export const applyDelegationEvent = (task: Mutable<Task>, event: DelegationEvent
   const delegation = task.delegation
   if (delegation === undefined) return { _tag: "illegal", reason: "not-delegated" }
   const transition = transitionDelegation(
-    { cancelledAt: delegation.cancelledAt, resultAcknowledged: delegation.resultAcknowledged === true },
+    {
+      runId: delegation.runId,
+      parentRunId: delegation.parentRunId,
+      cancelledAt: delegation.cancelledAt,
+      resultAcknowledged: delegation.resultAcknowledged === true,
+    },
     event,
   )
   if (transition._tag === "transitioned") {
+    const { runId: _runId, parentRunId: _parentRunId, cancelledAt: _cancelledAt, ...rest } = delegation
+    const phase = transition.phase
     task.delegation = {
-      ...delegation,
-      resultAcknowledged: transition.phase.resultAcknowledged,
-      ...(transition.phase.cancelledAt === undefined ? {} : { cancelledAt: transition.phase.cancelledAt }),
+      ...rest,
+      parentRunId: phase.parentRunId ?? delegation.parentRunId,
+      resultAcknowledged: phase.resultAcknowledged,
+      ...(phase.runId === undefined ? {} : { runId: phase.runId }),
+      ...(phase.cancelledAt === undefined ? {} : { cancelledAt: phase.cancelledAt }),
     }
   }
   return transition
