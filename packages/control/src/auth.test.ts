@@ -19,8 +19,8 @@ describe("GitHub access", () => {
     const originalFetch = globalThis.fetch
     const writes: string[] = []
     const stub = {
-      readOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/" }),
-      consumeOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/" }),
+      readOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/", revision: "r1" }),
+      consumeOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/", revision: "r1" }),
       upsertUser: () => writes.push("user"),
       putConnection: () => writes.push("connection"),
       createSession: () => writes.push("session"),
@@ -55,7 +55,12 @@ describe("GitHub access", () => {
 
   test("validates expiry and provider before consuming a state", async () => {
     const writes: string[] = []
-    let state: { kind: "login"; provider: string; returnTo: string } | null = { kind: "login", provider: "google", returnTo: "/" }
+    let state: { kind: "login"; provider: string; returnTo: string; revision: string } | null = {
+      kind: "login",
+      provider: "google",
+      returnTo: "/",
+      revision: "r1",
+    }
     const stub = {
       readOAuthState: () => state,
       consumeOAuthState: () => {
@@ -86,7 +91,7 @@ describe("GitHub access", () => {
   test("a callback that loses the consume race creates no session", async () => {
     const writes: string[] = []
     const stub = {
-      readOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/" }),
+      readOAuthState: () => ({ kind: "login", provider: "github", returnTo: "/", revision: "r1" }),
       consumeOAuthState: () => null,
       upsertUser: () => writes.push("user"),
       putConnection: () => writes.push("connection"),

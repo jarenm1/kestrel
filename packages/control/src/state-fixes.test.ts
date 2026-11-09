@@ -15,8 +15,10 @@ const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 
 /** A Hub over in-memory SQLite, its database, and the env used by allowlist checks. */
-const newHub = (vars: Partial<Env> = {}) => {
-  const db = new Database(":memory:")
+const newHub = (vars: Partial<Env> = {}) => hubOver(new Database(":memory:"), vars)
+
+const hubOver = (db: Database, vars: Partial<Env> = {}) => {
+  const alarms: number[] = []
   const sql = {
     exec: (query: string, ...bindings: (string | number | null)[]) => {
       const rows = db.query(query).all(...bindings)
@@ -28,7 +30,9 @@ const newHub = (vars: Partial<Env> = {}) => {
     storage: {
       sql,
       transactionSync: <T>(work: () => T) => work(),
-      setAlarm: async () => {},
+      setAlarm: async (at: number) => {
+        alarms.push(at)
+      },
       deleteAlarm: async () => {},
     },
     getWebSockets: () => [],
@@ -41,7 +45,7 @@ const newHub = (vars: Partial<Env> = {}) => {
   } as unknown as Env
   const hub: HubClass = new Hub(ctx as unknown as DurableObjectState, env)
   Object.assign(hub, { ctx, env })
-  return { hub, db, env }
+  return { hub, db, env, alarms }
 }
 
 const signIn = (hub: HubClass, login = "octocat", dev = false): string => {
@@ -61,10 +65,25 @@ describe("OAuth state", () => {
     expect(hub.createOAuthState("state-1", "login", "github", "/", Date.now() + 60_000)).toBe(true)
     // A caller-supplied nonce that collides with a live state is refused, not silently replaced.
     expect(hub.createOAuthState("state-1", "login", "github", "/other", Date.now() + 60_000)).toBe(false)
-    expect(hub.readOAuthState("state-1")).toEqual({ kind: "login", provider: "github", returnTo: "/" })
-    expect(hub.consumeOAuthState("state-1")).toEqual({ kind: "login", provider: "github", returnTo: "/" })
+    const first = hub.readOAuthState("state-1")
+    expect(first).toMatchObject({ kind: "login", provider: "github", returnTo: "/" })
+    expect(hub.consumeOAuthState("state-1", first!.revision)).toEqual(first)
     expect(hub.readOAuthState("state-1")).toBeNull()
-    expect(hub.consumeOAuthState("state-1")).toBeNull()
+    expect(hub.consumeOAuthState("state-1", first!.revision)).toBeNull()
+  })
+
+  test("does not consume a newer row that reuses the same state (ABA)", () => {
+    setSystemTime(new Date(START))
+    const { hub, db } = newHub()
+    expect(hub.createOAuthState("state-aba", "login", "github", "/first", Date.now() + 60_000)).toBe(true)
+    const first = hub.readOAuthState("state-aba")!
+    // The first issuance is consumed, then a new sign-in reuses the caller-supplied nonce.
+    expect(hub.consumeOAuthState("state-aba", first.revision)).not.toBeNull()
+    expect(hub.createOAuthState("state-aba", "login", "github", "/second", Date.now() + 60_000)).toBe(true)
+    // A callback holding the old revision must not consume the new row.
+    expect(hub.consumeOAuthState("state-aba", first.revision)).toBeNull()
+    expect(hub.readOAuthState("state-aba")).toMatchObject({ returnTo: "/second" })
+    expect(db.query("SELECT count(*) AS n FROM oauth_states WHERE state = 'state-aba'").get()).toEqual({ n: 1 })
   })
 
   test("expires without being consumed by a read", () => {
@@ -91,6 +110,13 @@ describe("pairing collection", () => {
       activate: false,
     })
     expect(approved.ok).toBe(true)
+    // The approval poll sees a terminal 409 once another tab approved the code.
+    expect(hub.pendingPairing(session, started!.code.replace(/-/g, ""))).toEqual({
+      ok: false,
+      status: 409,
+      tag: "Conflict",
+      message: "pairing code already approved",
+    })
 
     const first = hub.pollPairing(started!.pairingId)
     expect(first).toMatchObject({ status: "approved", box: { id: expect.any(String) } })
@@ -222,6 +248,33 @@ describe("automation fire intents", () => {
     expect(box).toHaveBeenCalledTimes(2)
     expect(db.query("SELECT outcome FROM automation_fires").all()).toEqual([{ outcome: "started" }])
     expect(db.query("SELECT count(*) AS n FROM automation_runs").get()).toEqual({ n: 1 })
+  })
+
+  test("schedules the claim's lease before the box call", async () => {
+    setSystemTime(new Date(START))
+    const { hub, db, alarms } = newHub()
+    const automation = await scheduleAutomation(hub)
+    db.run("UPDATE automations SET next_run_at = ? WHERE id = ?", START - 1, automation.id)
+    let alarmsAtBoxCall = 0
+    spyOn(hub, "boxCall").mockImplementation(async () => {
+      alarmsAtBoxCall = alarms.length
+      return okBox
+    })
+    await hub.alarm()
+    expect(alarmsAtBoxCall).toBeGreaterThan(0)
+  })
+
+  test("a cold start schedules an outstanding fire lease without a request", () => {
+    setSystemTime(new Date(START))
+    const first = newHub()
+    first.db.run(
+      `INSERT INTO automation_fires (id, automation_id, fire_key, reason, claimed_at)
+       VALUES ('cold', 'gone', 'schedule:1', 'schedule', ?)`,
+      START - 1,
+    )
+    const cold = hubOver(first.db)
+    expect(cold.alarms.length).toBeGreaterThan(0)
+    expect(cold.alarms.at(-1)).toBeLessThanOrEqual(START)
   })
 
   test("a claim that never started is reclaimed, and a repeated claim is bounded", async () => {

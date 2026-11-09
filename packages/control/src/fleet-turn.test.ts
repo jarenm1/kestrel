@@ -39,6 +39,7 @@ const newHub = () => {
     waitUntil: () => {},
   }
   const vars = {
+    ALLOWED_GITHUB_LOGINS: "octocat",
     KESTREL_TURN_KEY_ID: "turn-key",
     KESTREL_TURN_API_TOKEN: "provider-token",
   } as unknown as Env
@@ -53,6 +54,7 @@ const realFetch = globalThis.fetch
 
 afterEach(() => {
   globalThis.fetch = realFetch
+  calls.length = 0
   setSystemTime()
 })
 
@@ -108,6 +110,46 @@ describe("TURN cache invalidation for the managed fleet", () => {
       createdAt: new Date().toISOString(),
     })
     expect((await send(created.box.id, rotated!.secret, env)).status).toBe(200)
+    expect(calls).toHaveLength(3)
+  })
+
+  test("rotating or deleting a user's own box also misses the Worker cache", async () => {
+    setSystemTime(new Date("2026-04-02T00:00:00.000Z"))
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return credentials()
+    }) as typeof fetch
+    const { hub, env, sql } = newHub()
+    const session = "session-own"
+    hub.createSession(session, "octocat", Date.now() + 60 * 60 * 1000, false)
+    const created = hub.createBox(session, { name: "own", url: "https://own.example" })
+    if (!created.ok) throw new Error("box was not created")
+
+    expect((await send(created.value.box.id, created.value.secret, env)).status).toBe(200)
+    expect((await send(created.value.box.id, created.value.secret, env)).status).toBe(200)
+    expect(calls).toHaveLength(1)
+
+    const rotated = hub.rotateBoxSecret(session, created.value.box.id)
+    if (!rotated.ok) throw new Error("secret was not rotated")
+    expect((await send(created.value.box.id, created.value.secret, env)).status).toBe(401)
+    expect((await send(created.value.box.id, rotated.value.secret, env)).status).toBe(200)
+    expect(calls).toHaveLength(2)
+
+    expect((await send(created.value.box.id, rotated.value.secret, env)).status).toBe(200)
+    expect(calls).toHaveLength(2)
+    expect((await hub.deleteBox(session, created.value.box.id)).ok).toBe(true)
+
+    // Reusing the id and secret must not read credentials cached for the deleted identity.
+    sql.exec(
+      "INSERT INTO user_boxes (id, login, name, url, secret, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      created.value.box.id,
+      "octocat",
+      "own",
+      "https://own.example",
+      rotated.value.secret,
+      new Date().toISOString(),
+    )
+    expect((await send(created.value.box.id, rotated.value.secret, env)).status).toBe(200)
     expect(calls).toHaveLength(3)
   })
 })
