@@ -3,7 +3,8 @@ import { useQueries, useQueryClient } from "@tanstack/react-query"
 import type { Message, Run, RunItems, Task } from "@cloudagents/protocol"
 import { openTaskEvents } from "@/api/events"
 import { invalidateRunItems, keys, queries, storeTask, upsert } from "@/api/queries"
-import { applyDesktopStatus, isDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
+import { isDesktopStreamActive } from "@/desktop/status"
 import { threadErrors } from "./threadErrors"
 
 const MAX_LOG_LINES = 2000

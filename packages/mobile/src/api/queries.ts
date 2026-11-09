@@ -9,7 +9,7 @@ import {
   type Task,
 } from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
-import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
 import { pendingSaves } from "@/lib/pendingSaves";
 
 /**

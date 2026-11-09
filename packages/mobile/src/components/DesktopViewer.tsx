@@ -9,7 +9,7 @@ import { HtmlView, type HtmlViewHandle } from "@/components/ui/HtmlView";
 import { StatusIcon } from "@/components/ui/StatusIcon";
 import { ThreadGraphs } from "@/components/ThreadGraphs";
 import { embedEvent, initialViewerView, reduceViewer } from "@/lib/desktopViewer";
-import { applyDesktopStatus, type DesktopStatusValue } from "@/lib/desktopStatus";
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol";
 import { colors, fonts, radius, spacing } from "@/theme";
 import type { DesktopStatus } from "@cloudagents/protocol";
 

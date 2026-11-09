@@ -1,7 +1,8 @@
 import { QueryClient, queryOptions } from "@tanstack/react-query"
 import { Either, Schema } from "effect"
 import type { AgentModel, BoxList, DesktopStatus, Message, ModelProvider, Run, RunItems, Task, ThreadPullRequestAction } from "@cloudagents/protocol"
-import { applyDesktopStatus, isDesktopStreamActive, type DesktopStatusValue } from "@/desktop/status"
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
+import { isDesktopStreamActive } from "@/desktop/status"
 import { api, signedInUser } from "./client"
 import { fetchSnapshot, fetchTaskSnapshot } from "./snapshot"
 

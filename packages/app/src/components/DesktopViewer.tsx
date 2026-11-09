@@ -6,7 +6,7 @@ import { DEFAULT_DESKTOP_QUALITY, DESKTOP_QUALITIES, DesktopQuality, type Deskto
 import { api } from "@/api/client"
 import type { DesktopSource } from "@/api/events"
 import { keys, queries } from "@/api/queries"
-import { applyDesktopStatus, type DesktopStatusValue } from "@/desktop/status"
+import { applyDesktopStatus, type DesktopStatusValue } from "@cloudagents/protocol"
 import { Alert } from "@cloudagents/ui/alert"
 import { Button } from "@cloudagents/ui/button"
 import {
