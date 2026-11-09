@@ -1,5 +1,13 @@
 import { QueryClient, queryOptions, type QueryKey } from "@tanstack/react-query";
-import type { AgentItem, AgentModel, Message, ModelProvider, Run, Task } from "@cloudagents/protocol";
+import {
+  mergeSnapshot as mergeLiveSnapshot,
+  type AgentItem,
+  type AgentModel,
+  type Message,
+  type ModelProvider,
+  type Run,
+  type Task,
+} from "@cloudagents/protocol";
 import type { ApiClient } from "@/api/client";
 import { pendingSaves } from "@/lib/pendingSaves";
 
@@ -80,16 +88,14 @@ export function upsert<T extends Keyed>(list: readonly T[] | undefined, item: T)
   return next;
 }
 
-/** Fresh snapshots replace stale cache entries; only events written during the fetch override them. */
+/**
+ * Fresh snapshots replace stale cache entries; only events written during the fetch override them. The merge itself
+ * is `mergeSnapshot` from `@cloudagents/protocol`, shared with the web client so the two cannot drift apart.
+ */
 async function mergeSnapshot<T extends Keyed>(key: QueryKey, fetch: () => Promise<readonly T[]>): Promise<T[]> {
   const before = new Set(queryClient.getQueryData<readonly T[]>(key) ?? []);
   const snapshot = await fetch();
-  const byId = new Map<string, T>();
-  for (const item of snapshot) byId.set(item.id, item);
-  for (const item of queryClient.getQueryData<readonly T[]>(key) ?? []) {
-    if (!byId.has(item.id) || !before.has(item)) byId.set(item.id, item);
-  }
-  return [...byId.values()];
+  return mergeLiveSnapshot(snapshot, queryClient.getQueryData<readonly T[]>(key) ?? [], before);
 }
 
 /**

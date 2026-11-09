@@ -1,6 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-import { connectedModelProviders, type Connection, type Run, type Task, type TextGenerationSettings } from "@cloudagents/protocol";
+import {
+  connectedModelProviders,
+  mergeSnapshot,
+  type Connection,
+  type Run,
+  type Task,
+  type TextGenerationSettings,
+} from "@cloudagents/protocol";
 import { createApiClient } from "./client";
 import { boxKeys, createQueries, fetchTaskSnapshot, queryClient, storeTask } from "./queries";
 import { trackSave, trackSaveQueue } from "@/lib/pendingSaves";
@@ -47,6 +54,48 @@ test("a live turn ending during a reconnect fetch wins over its older snapshot",
   expect((await fetching).map(({ id, status }) => [id, status])).toEqual([
     ["turn", "succeeded"], ["new", "running"],
   ]);
+});
+
+test("the mobile list merge is the protocol's mergeSnapshot, so the clients cannot diverge", async () => {
+  // The web client and the phone client must agree on which entries survive a snapshot. This pins the phone path to
+  // the shared helper rather than a second copy of the algorithm.
+  const response = Promise.withResolvers<Run[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: () => { started.resolve(); return response.promise; },
+  };
+  const query = createQueries(api).runs("same-id");
+  const before = [run("ended", "running"), run("missed", "running")];
+  queryClient.setQueryData(query.queryKey, before);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  const during = [run("ended", "succeeded"), run("new", "running")];
+  queryClient.setQueryData(query.queryKey, during);
+  const snapshot = [run("ended", "running"), run("snapshot-only", "succeeded")];
+  response.resolve(snapshot);
+  const merged = await fetching;
+  expect(merged).toEqual(mergeSnapshot(snapshot, during, new Set(before)));
+});
+
+test("an entry removed during the fetch is not resurrected from the snapshot's cache", async () => {
+  const response = Promise.withResolvers<Run[]>();
+  const started = Promise.withResolvers<void>();
+  const api = {
+    ...createApiClient("https://control.example", "session", null),
+    listRuns: () => {
+      started.resolve();
+      return response.promise;
+    },
+  };
+  const query = createQueries(api).runs("same-id");
+  queryClient.setQueryData(query.queryKey, [run("gone", "running")]);
+  const fetching = queryClient.fetchQuery(query);
+  await started.promise;
+  // A delete (an archive or a reset) landed while the snapshot was travelling; it must not come back.
+  queryClient.setQueryData(query.queryKey, []);
+  response.resolve([run("kept", "succeeded")]);
+  expect((await fetching).map(({ id }) => id)).toEqual(["kept"]);
 });
 
 test("box clients isolate caches even for identical task and run IDs", () => {
